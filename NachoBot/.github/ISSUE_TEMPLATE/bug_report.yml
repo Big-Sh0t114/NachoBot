@@ -1,0 +1,63 @@
+name: Bug Report
+description: 提交 Bug
+labels: ["BUG"]
+body:
+- type: checkboxes
+  attributes:
+    label: "检查项"
+    description: "请检查下列项目，并勾选确认。"
+    options:
+    - label: "我确认此问题在所有分支的最新版本中依旧存在"
+      required: true
+    - label: "我确认在 Issues 列表中并无其他人已经提出过与此问题相同或相似的问题"
+      required: true
+    - label: "我使用了 Docker"
+- type: dropdown
+  attributes:
+    label: "使用的分支"
+    description: "请选择您正在使用的版本分支"
+    options:
+      - main
+      - dev
+  validations:
+    required: true
+- type: input
+  attributes:
+    label: "具体版本号"
+    description: "请输入您使用的具体版本号"
+    placeholder: "例如：0.5.11、0.5.8、0.6.0"
+  validations:
+    required: true
+- type: textarea
+  attributes:
+    label: 遇到的问题
+  validations:
+    required: true
+- type: textarea
+  attributes:
+    label: 报错信息
+  validations:
+    required: true
+- type: textarea
+  attributes:
+    label: 如何重现此问题？
+    placeholder: "若不知道请略过此问题"
+- type: textarea
+  attributes:
+    label: 可能造成问题的原因
+    placeholder: "若不知道请略过此问题"
+- type: textarea
+  attributes:
+    label: 系统环境 
+    placeholder: "例如：Windows 11 专业版 64位 24H2 / Debian Bookworm"
+  validations:
+    required: true
+- type: textarea
+  attributes:
+    label: Python 版本 
+    placeholder: "例如：Python 3.11"
+  validations:
+    required: true
+- type: textarea
+  attributes:
+    label: 补充信息

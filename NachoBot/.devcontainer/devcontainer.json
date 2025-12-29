@@ -1,0 +1,31 @@
+{
+	"name": "MaiBot-DevContainer",
+	"image": "mcr.microsoft.com/devcontainers/python:1-3.12-bullseye",
+	"features": {
+		"ghcr.io/rocker-org/devcontainer-features/apt-packages:1": {
+			"packages": [
+				"tmux"
+			]
+		},
+		"ghcr.io/devcontainers/features/github-cli:1": {}
+	},
+	"forwardPorts": [
+		"8000:8000"
+	],
+	"postCreateCommand": "pip3 install --user -r requirements.txt",
+	"customizations": {
+		"jetbrains": {
+			"backend": "PyCharm"
+		},
+		"vscode": {
+			"extensions": [
+				"tamasfe.even-better-toml",
+				"njpwerner.autodocstring",
+				"ms-python.python",
+				"KevinRose.vsc-python-indent",
+				"ms-python.vscode-pylance",
+				"ms-python.autopep8"
+			]
+		}
+	}
+}

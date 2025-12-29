@@ -1,0 +1,54 @@
+name: Docker Image CI
+
+on:
+  push:
+    branches: [ "main", "dev" ]
+  workflow_dispatch: # 允许手动触发工作流
+
+jobs:
+
+  build:
+
+    runs-on: ubuntu-latest
+    env:
+      DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+      DATE_TAG: $(date -u +'%Y-%m-%dT%H-%M-%S')
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Login to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+    - name: Clone maim_message
+      run: git clone https://github.com/MaiM-with-u/maim_message maim_message
+
+    - name: Determine Image Tags
+      id: tags
+      run: |
+        if [ "${{ github.ref_name }}" == "main" ]; then
+          echo "tags=${{ secrets.DOCKERHUB_USERNAME }}/maimbot-adapter:latest,${{ secrets.DOCKERHUB_USERNAME }}/maimbot-adapter:main-$(date -u +'%Y%m%d%H%M%S')" >> $GITHUB_OUTPUT
+        elif [ "${{ github.ref_name }}" == "dev" ]; then
+          echo "tags=${{ secrets.DOCKERHUB_USERNAME }}/maimbot-adapter:dev,${{ secrets.DOCKERHUB_USERNAME }}/maimbot-adapter:dev-$(date -u +'%Y%m%d%H%M%S')" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Build and Push Docker Image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile
+        platforms: linux/amd64,linux/arm64
+        tags: ${{ steps.tags.outputs.tags }}
+        push: true
+        cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/maimbot-adapter:buildcache-${{ github.ref_name }}
+        cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/maimbot-adapter:buildcache-${{ github.ref_name }},mode=max
+        labels: |
+          org.opencontainers.image.created=${{ steps.tags.outputs.date_tag }}
+          org.opencontainers.image.revision=${{ github.sha }}

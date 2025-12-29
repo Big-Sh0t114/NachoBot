@@ -1,0 +1,51 @@
+[pipeline]
+# pipeline预设配置
+default_preset = "default" # 默认使用的预设名称
+# pipeline平台预设映射
+[pipeline.platform_presets]
+qq = "default" # QQ平台使用default预设
+
+[tts]
+# GPT-SoVITS API 配置
+host = "127.0.0.1"
+port = 9880
+
+# 语音合成基础配置
+media_type = "wav" # 音频格式: wav
+
+# GPT-SoVITS 模型参数
+top_k = 12                 # top k 采样
+top_p = 1.0                # top p 采样
+temperature = 1.0          # 温度系数
+batch_size = 1             # 批处理大小
+batch_threshold = 0.75     # 批处理阈值
+text_split_method = "cut5" # 文本分割方法
+repetition_penalty = 1.05  # 重复惩罚系数
+sample_steps = 32          # VITS采样步数
+super_sampling = false     # 是否启用超采样
+
+[tts.models]
+# 自定义角色预设
+[tts.models.presets]
+# 预设角色配置示例
+[tts.models.presets.default]
+name = "默认角色"
+gpt_model = ""
+sovits_model = ""
+ref_audio_path = "path to reference audio" # 参考音频路径
+aux_ref_audio_paths = []                   # 辅助参考音频路径列表
+prompt_text = "this is a ref audio"        # 提示文本
+text_language = "auto"                     # 文本语言
+prompt_language = "zh"                     # 提示语言
+speed_factor = 1.0                         # 语速控制
+
+[tts.models.presets.custom1]
+name = "kanami"
+gpt_model = "GPT_SoVITS/pretrained_models/XiangNaimei-e5.ckpt"
+sovits_model = "GPT_SoVITS/pretrained_models/XiangNaimei_e4_s248.pth"
+ref_audio_path = "GPT_SoVITS/pretrained_models/voices/平淡.WAV"
+aux_ref_audio_paths = []                                              # 辅助参考音频路径列表
+prompt_text = "嗨！我每天都会像这样做发声训练的。"                       # 提示文本
+text_language = "zh"                                                  # 文本语言
+prompt_language = "zh"                                                # 提示语言
+speed_factor = 1.0                                                    # 语速控制

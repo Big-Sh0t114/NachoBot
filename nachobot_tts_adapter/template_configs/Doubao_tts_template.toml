@@ -1,0 +1,18 @@
+# 注：所有标有 [*] 的都请参考官方文档 https://www.volcengine.com/docs/6561/1257584 进行配置与解读
+[app] # 豆包TTSapp配置
+base_url = "https://openspeech.bytedance.com/api/v1/tts" # API地址
+# 以下部分由官方文档，请参考 https://www.volcengine.com/docs/6561/196768 的Q1部分
+appid = ""
+token = ""
+cluster = ""
+[audio] # 音频配置
+voice_type = "" # [*]
+emotion = "" # 现阶段无效，请保留为空 [*]
+enable_emotion = false # 现阶段无效，请保留为false [*]
+emotion_scale = 0 # 现阶段无效，请保留为0 [*]
+speed_ratio = 1.0 # 语速，范围0.8-2.0，默认1.0
+explicit_language = "" # 明确语种 [*]
+context_language = "" # 参考语种 [*]
+loudness_ratio = 1.0 # 音量，范围0.5-2.0，默认1.0 [*]
+[request]
+silence_duration = 0 # 句尾静音时长，单位ms，默认0，最大300000 [*]

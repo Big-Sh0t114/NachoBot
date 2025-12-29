@@ -1,0 +1,92 @@
+services:
+  adapters:
+    container_name: maim-bot-adapters
+    #### prod ####
+    image: unclas/maimbot-adapter:latest
+    # image: infinitycat/maimbot-adapter:latest
+    #### dev ####
+    # image: unclas/maimbot-adapter:dev
+    # image: infinitycat/maimbot-adapter:dev
+    environment:
+      - TZ=Asia/Shanghai
+#    ports:
+#      - "8095:8095"
+    volumes:
+      - ./docker-config/adapters/config.toml:/adapters/config.toml # 持久化adapters配置文件
+      - ./data/adapters:/adapters/data # adapters 数据持久化
+    restart: always
+    networks:
+      - maim_bot
+  core:
+    container_name: maim-bot-core
+    #### prod ####
+    image: sengokucola/maibot:latest
+    # image: infinitycat/maibot:latest
+    #### dev ####
+    # image: sengokucola/maibot:dev
+    # image: infinitycat/maibot:dev
+    environment:
+      - TZ=Asia/Shanghai
+#      - EULA_AGREE=99f08e0cab0190de853cb6af7d64d4de # 同意EULA
+#      - PRIVACY_AGREE=9943b855e72199d0f5016ea39052f1b6 # 同意EULA
+#    ports:
+#      - "8000:8000"
+    volumes:
+      - ./docker-config/mmc/.env:/MaiMBot/.env # 持久化env配置文件
+      - ./docker-config/mmc:/MaiMBot/config # 持久化bot配置文件
+      - ./data/MaiMBot/nachobot_statistics.html:/MaiMBot/nachobot_statistics.html #统计数据输出
+      - ./data/MaiMBot:/MaiMBot/data # 共享目录
+      - ./data/MaiMBot/plugins:/MaiMBot/plugins # 插件目录
+      - ./data/MaiMBot/logs:/MaiMBot/logs # 日志目录
+      - site-packages:/usr/local/lib/python3.13/site-packages # 持久化Python包
+    restart: always
+    networks:
+      - maim_bot
+  napcat:
+    environment:
+      - NAPCAT_UID=1000
+      - NAPCAT_GID=1000
+      - TZ=Asia/Shanghai
+    ports:
+      - "6099:6099"
+    volumes:
+      - ./docker-config/napcat:/app/napcat/config # 持久化napcat配置文件
+      - ./data/qq:/app/.config/QQ # 持久化QQ本体
+      - ./data/MaiMBot:/MaiMBot/data # 共享目录
+    container_name: maim-bot-napcat
+    restart: always
+    image: mlikiowa/napcat-docker:latest
+    networks:
+      - maim_bot
+  sqlite-web:
+    # 注意：coleifer/sqlite-web 镜像不支持arm64
+    image: coleifer/sqlite-web
+    container_name: sqlite-web
+    restart: always
+    ports:
+      - "8120:8080"
+    volumes:
+      - ./data/MaiMBot:/data/MaiMBot
+    environment:
+      - SQLITE_DATABASE=MaiMBot/MaiBot.db  # 你的数据库文件
+    networks:
+      - maim_bot
+
+  # chat2db占用相对较高但是功能强大
+  # 内存占用约600m，内存充足推荐选此
+  # chat2db:
+  #   image: chat2db/chat2db:latest
+  #   container_name: maim-bot-chat2db
+  #   restart: always
+  #   ports:
+  #     - "10824:10824"
+  #   volumes:
+  #     - ./data/MaiMBot:/data/MaiMBot
+  #   networks:
+  #     - maim_bot
+  
+volumes:
+  site-packages:
+networks:
+  maim_bot:
+    driver: bridge

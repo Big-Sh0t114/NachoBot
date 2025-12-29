@@ -1,0 +1,10 @@
+.git
+__pycache__
+*.pyo
+*.pyd
+.DS_Store
+mongodb
+napcat
+docs/
+.github/
+# test

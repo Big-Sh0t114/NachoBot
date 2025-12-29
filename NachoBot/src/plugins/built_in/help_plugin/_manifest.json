@@ -1,0 +1,29 @@
+{
+  "manifest_version": 1,
+  "name": "帮助指令插件",
+  "version": "0.1.0",
+  "description": "提供 #help 指令，列出当前可用的命令及其作用。",
+  "author": {
+    "name": "Big_Sh0t"
+  },
+  "license": "",
+  "host_application": {
+    "min_version": "0.8.0"
+  },
+  "keywords": ["help", "commands", "assistant"],
+  "categories": ["Utility", "Productivity"],
+  "plugin_info": {
+    "is_built_in": true,
+    "components": [
+      {
+        "type": "command",
+        "name": "#help",
+        "description": "输出当前可用指令列表"
+      }
+    ],
+    "features": [
+      "一键查看当前可用指令",
+      "自动过滤禁用指令"
+    ]
+  }
+}

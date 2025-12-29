@@ -1,0 +1,23 @@
+{
+  "manifest_version": 1,
+  "name": "Artwork Sender",
+  "version": "0.1.0",
+  "description": "当用户想看画时，随机发送本地artwork目录中的图片",
+  "author": {
+    "name": "BigSh0t"
+  },
+  "host_application": {
+    "min_version": "0.10.0"
+  },
+  "plugin_info": {
+    "is_built_in": true,
+    "plugin_type": "action_provider",
+    "components": [
+      {
+        "type": "action",
+        "name": "send_artwork",
+        "description": "随机从本地画夹发送一张图片"
+      }
+    ]
+  }
+}

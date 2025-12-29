@@ -1,0 +1,5 @@
+api_key = "your_api_key" # API密钥
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1" # API地址
+model_name = "qwen-omni-turbo" # 模型名称
+voice_character = "Chelsie" # 音色
+media_format = "wav" # 音频格式，请使用wav格式
