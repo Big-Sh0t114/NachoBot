@@ -1,0 +1,34 @@
+{
+  "manifest_version": 1,
+  "name": "Memory Build组件",
+  "version": "1.0.0",
+  "description": "可以构建和管理记忆",
+  "author": {
+    "name": "Mai",
+    "url": "https://github.com/MaiM-with-u"
+  },
+  "license": "GPL-v3.0-or-later",
+  
+  "host_application": {
+    "min_version": "0.10.1"
+  },
+  "homepage_url": "https://github.com/MaiM-with-u/maibot",
+  "repository_url": "https://github.com/MaiM-with-u/maibot",
+  "keywords": ["memory", "build", "built-in"],
+  "categories": ["Memory"],
+  
+  "default_locale": "zh-CN",
+  "locales_path": "_locales",
+  
+  "plugin_info": {
+    "is_built_in": true,
+    "plugin_type": "action_provider",
+    "components": [
+      {
+        "type": "build_memory",
+        "name": "build_memory", 
+        "description": "构建记忆"
+      }
+    ]
+  }
+}

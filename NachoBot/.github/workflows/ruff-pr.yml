@@ -1,0 +1,21 @@
+name: Ruff PR Check
+on: [ pull_request ]
+jobs:
+  ruff:
+    runs-on: [self-hosted, Windows, X64]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install Ruff and Run Checks
+        uses: astral-sh/ruff-action@v3
+        with:
+          args: "--version"
+          version: "latest"
+      - name: Run Ruff Check (No Fix)
+        run: ruff check --output-format=github
+        shell: pwsh
+      - name: Run Ruff Format Check
+        run: ruff format --check --diff
+        shell: pwsh
+

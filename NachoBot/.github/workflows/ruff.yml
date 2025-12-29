@@ -1,0 +1,53 @@
+name: Ruff
+
+on:
+  # push:
+  #   branches:
+  #     - main
+  #     - dev
+  #     - dev-refactor # 例如：匹配所有以 feature/ 开头的分支
+  #     # 添加你希望触发此 workflow 的其他分支
+  workflow_dispatch: # 允许手动触发工作流
+    branches:
+      - main
+      - dev
+      - dev-refactor
+
+permissions:
+  contents: write
+
+jobs:
+  ruff:
+    runs-on: [self-hosted, Windows, X64]
+    # 关键修改：添加条件判断
+    # 确保只有在 event_name 是 'push' 且不是由 Pull Request 引起的 push 时才运行
+    if: github.event_name == 'push' && !startsWith(github.ref, 'refs/pull/')
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.head_ref || github.ref_name }}
+      - name: Install Ruff and Run Checks
+        uses: astral-sh/ruff-action@v3
+        with:
+          args: "--version"
+          version: "latest"
+      - name: Run Ruff Fix
+        run: ruff check --fix --unsafe-fixes; if ($LASTEXITCODE -ne 0) { Write-Host "Ruff check completed with warnings" }
+        shell: pwsh
+      - name: Run Ruff Format
+        run: ruff format; if ($LASTEXITCODE -ne 0) { Write-Host "Ruff format completed with warnings" }
+        shell: pwsh
+      - name: 提交更改
+        if: success()
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add -A
+          $changes = git diff --quiet; $staged = git diff --staged --quiet
+          if (-not ($changes -and $staged)) {
+            git commit -m "🤖 自动格式化代码 [skip ci]"
+            git push
+          }
+        shell: pwsh

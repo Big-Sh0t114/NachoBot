@@ -1,0 +1,8 @@
+tts/
+__pycache__
+roadmap.txt
+*.wav
+.vscode
+/configs
+backup_files
+.ruff_cache

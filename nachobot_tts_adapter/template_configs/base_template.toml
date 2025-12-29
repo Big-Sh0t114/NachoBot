@@ -1,0 +1,20 @@
+[server]
+host = "127.0.0.1"
+port = 8070
+
+[routes]
+qq = "http://127.0.0.1:8000/ws" # 或者nonebot-qq
+# nonebot-qq = "default"
+
+[probability]
+voice_probability = 0 # 使用语音的概率
+
+[enabled_tts] # 启用的TTS模块，请与各插件的目录名称一致
+enabled = ["GPT_Sovits"]
+
+[tts_base_config]
+stream_mode = false  # 是否启用流式输出
+post_process = false # 是否启用后处理（现阶段无效）
+
+[debug]
+logging_level = "INFO" # 日志级别

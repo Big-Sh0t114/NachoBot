@@ -1,0 +1,42 @@
+{
+  "manifest_version": 1,
+  "name": "文本转语音插件 (Text-to-Speech)",
+  "version": "0.1.0",
+  "description": "将文本转换为语音进行播放的插件，支持多种语音模式和智能语音输出场景判断。",
+  "author": {
+    "name": "MaiBot团队/Modified by Big_Sh0t", 
+    "url": "https://github.com/MaiM-with-u"
+  },
+  "license": "GPL-v3.0-or-later",
+  
+  "host_application": {
+    "min_version": "0.8.0"
+  },
+  "homepage_url": "https://github.com/MaiM-with-u/maibot",
+  "repository_url": "https://github.com/MaiM-with-u/maibot",
+  "keywords": ["tts", "voice", "audio", "speech", "accessibility"],
+  "categories": ["Audio Tools", "Accessibility", "Voice Assistant"],
+  
+  "default_locale": "zh-CN",
+  "locales_path": "_locales",
+  
+  "plugin_info": {
+    "is_built_in": true,
+    "plugin_type": "audio_processor",
+    "components": [
+      {
+        "type": "action",
+        "name": "tts_action", 
+        "description": "将文本转换为语音进行播放",
+        "activation_modes": ["llm_judge", "keyword"],
+        "keywords": ["语音", "tts", "播报", "读出来", "语音播放", "听", "朗读"]
+      }
+    ],
+    "features": [
+      "文本转语音播放",
+      "智能场景判断", 
+      "关键词触发",
+      "支持多种语音模式"
+    ]
+  }
+}

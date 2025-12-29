@@ -1,0 +1,21 @@
+name: Feature Request
+description: 新功能请求
+labels: ["Feature"]
+body:
+- type: checkboxes
+  attributes:
+    label: "检查项"
+    description: "请检查下列项目，并勾选确认。"
+    options:
+    - label: "我确认在Issues列表中并无其他人已经建议过相似的功能"
+      required: true
+    - label: "这个新功能可以解决目前存在的某个问题或BUG"
+    - label: "你已经更新了最新的dev分支，但是你的问题依然没有被解决"
+- type: textarea
+  attributes:
+    label: 期望的功能描述
+  validations:
+    required: true
+- type: textarea
+  attributes:
+    label: 补充信息
