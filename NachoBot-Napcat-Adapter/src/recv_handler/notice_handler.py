@@ -203,7 +203,7 @@ class NoticeHandler:
             target_name = self_info.get("nickname")
 
         elif self_id == user_id:
-            # 让ada不发送麦麦戳别人的消息
+            # 让ada不发戳别人的消息
             return None, None
 
         else:

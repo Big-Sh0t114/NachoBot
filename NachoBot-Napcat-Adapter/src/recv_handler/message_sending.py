@@ -5,7 +5,7 @@ from maim_message import MessageBase, Router
 
 class MessageSending:
     """
-    负责把消息发送到麦麦
+    负责把消息发送到bot
     """
 
     maibot_router: Router = None

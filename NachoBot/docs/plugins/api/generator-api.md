@@ -89,7 +89,7 @@ async def generate_reply(
 success, reply_set, prompt = await generator_api.generate_reply(
     chat_stream=chat_stream,
     action_data=action_data,
-    reply_to="麦麦:你好",
+    reply_to="Nacho:你好",
     available_actions=action_info,
     enable_tool=True,
     return_prompt=True
@@ -140,7 +140,7 @@ success, reply_set, prompt = await generator_api.rewrite_reply(
     chat_stream=chat_stream,
     raw_reply="原始回复内容",
     reason="重写原因",
-    reply_to="麦麦:你好",
+    reply_to="Nacho:你好",
     return_prompt=True
 )
 if success:
