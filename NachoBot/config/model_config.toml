@@ -1,0 +1,340 @@
+[inner]
+version = "1.7.0"
+
+# 配置文件版本号迭代规则同bot_config.toml
+
+
+[[api_providers]] # 阿里 百炼 API服务商配置
+name = "Qhaigc"
+base_url = "https://api-hk.qhaigc.net/v1"
+api_key = ""                        # 请填写您的 API Key
+client_type = "openai"
+max_retry = 2
+timeout = 15
+retry_interval = 5
+
+[[api_providers]]
+name = "LocalShim"
+base_url = "http://127.0.0.1:11435/v1"
+api_key = "fuck"                        # 垫片默认不验 key
+client_type = "openai"
+max_retry = 2
+timeout = 30
+retry_interval = 5
+
+[[api_providers]] # SiliconFlow的API服务商配置
+name = "SiliconFlow"
+base_url = "https://api.siliconflow.cn/v1"
+api_key = ""                        # 请填写您的 API Key
+client_type = "openai"
+max_retry = 2
+timeout = 60
+retry_interval = 10
+
+
+[[api_providers]]
+name = "Google"
+base_url = "https://api.google.com/v1"
+api_key = ""                        # 请填写您的 API Key
+client_type = "gemini"
+max_retry = 2
+timeout = 30
+retry_interval = 10
+
+[[models]]
+model_identifier = "gemini-2.5-pro"
+name = "gemini-2.5-pro"
+api_provider = "LocalShim"
+price_in = 3.0
+price_out = 24.0
+[models.extra_params]
+enable_thinking = false
+thinking_budget_token_limit=100
+
+[[models]]
+model_identifier = "gpt-5"
+name = "gpt-5"
+api_provider = "Qhaigc"
+price_in = 1.25
+price_out = 10
+
+[[models]]
+model_identifier = "gpt-5.1"
+name = "gpt-5.1"
+api_provider = "Qhaigc"
+price_in = 1.25
+price_out = 10
+
+[[models]]
+model_identifier = "Qwen/Qwen3-8B"
+name = "Qwen/Qwen3-8B"
+api_provider = "SiliconFlow"
+price_in = 0
+price_out = 0
+
+[[models]]
+model_identifier = "deepseek-ai/DeepSeek-V3"
+name = "siliconflow-deepseek-v3"
+api_provider = "SiliconFlow"
+price_in = 2.0
+price_out = 8.0
+
+[[models]]
+model_identifier = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+name = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+api_provider = "SiliconFlow"
+price_in = 0
+price_out = 0
+
+[[models]]
+model_identifier = "gpt-5-chat"
+name = "gpt-5-chat"
+api_provider = "Qhaigc"
+price_in = 1.25
+price_out = 10
+
+[[models]]
+model_identifier = "grok-4"
+name = "grok-4"
+api_provider = "Qhaigc"
+price_in = 3.6
+price_out = 18
+
+[[models]]
+model_identifier = "grok-3"
+name = "grok-3"
+api_provider = "Qhaigc"
+price_in = 3.6
+price_out = 18
+
+[[models]]
+model_identifier = "deepseek-chat"
+name = "deepseek-chat"
+api_provider = "Qhaigc"
+price_in = 2.4
+price_out = 9.6
+
+[[models]]
+model_identifier = "deepseek-v3"
+name = "deepseek-v3"
+api_provider = "Qhaigc"
+price_in = 2.4
+price_out = 9.6
+
+[[models]]
+model_identifier = "deepseek-r1"
+name = "deepseek-r1"
+api_provider = "Qhaigc"
+price_in = 4
+price_out = 16
+
+[[models]]
+model_identifier = "glm-4.6"
+name = "glm-4.6"
+api_provider = "Qhaigc"
+price_in = 2
+price_out = 8
+
+[[models]]
+model_identifier = "gpt-4.1-nano"
+name = "gpt-4.1-nano"
+api_provider = "Qhaigc"
+price_in = 0.12
+price_out = 0.48
+
+[[models]]
+model_identifier = "gpt-5-nano"
+name = "gpt-5-nano"
+api_provider = "Qhaigc"
+price_in = 0.05
+price_out = 0.4
+
+[[models]]
+model_identifier = "gemini-2.5-flash"
+name = "gemini-2.5-flash"
+api_provider = "LocalShim"
+price_in = 0.6
+price_out = 5
+
+[[models]]
+model_identifier = "claude-sonnet-4-5-20250929"
+name = "claude-sonnet-4-5-20250929"
+api_provider = "Qhaigc"
+price_in = 3.6
+price_out = 18
+[models.extra_params]
+frequency_penalty = 0.2
+
+[[models]]
+model_identifier = "claude-sonnet-4-20250514"
+name = "claude-sonnet-4-20250514"
+api_provider = "Qhaigc"
+price_in = 3.6
+price_out = 18
+[models.extra_params]
+frequency_penalty = 0.2
+
+[[models]]
+model_identifier = "gpt-4.1-mini"
+name = "gpt-4.1-mini"
+api_provider = "Qhaigc"
+price_in = 0.48
+price_out = 1.92
+
+[[models]]
+model_identifier = "gpt-5-mini"
+name = "gpt-5-mini"
+api_provider = "Qhaigc"
+price_in = 0.25
+price_out = 2
+
+[[models]]
+model_identifier = "gpt-4.1"
+name = "gpt-4.1"
+api_provider = "Qhaigc"
+price_in = 2.4
+price_out = 9.6
+
+[[models]]
+model_identifier = "BAAI/bge-m3"
+name = "bge-m3"
+api_provider = "SiliconFlow"
+price_in = 0
+price_out = 0
+
+[[models]]
+model_identifier = "BAAI/bge-large-zh-v1.5"
+name = "BAAI/bge-large-zh-v1.5"
+api_provider = "SiliconFlow"
+price_in = 0
+price_out = 0
+
+[[models]]
+model_identifier = "FunAudioLLM/SenseVoiceSmall"
+name = "FunAudioLLM/SenseVoiceSmall"
+api_provider = "SiliconFlow"
+price_in = 0
+price_out = 0
+
+[[models]]
+model_identifier = "TeleAI/TeleSpeechASR"
+name = "TeleAI/TeleSpeechASR"
+api_provider = "SiliconFlow"
+price_in = 0
+price_out = 0
+
+[[models]]
+model_identifier = "THUDM/GLM-4.1V-9B-Thinking"
+name = "THUDM/GLM-4.1V-9B-Thinking"
+api_provider = "SiliconFlow"
+price_in = 0
+price_out = 0
+
+[[models]]
+model_identifier = "THUDM/GLM-Z1-9B-0414"
+name = "THUDM/GLM-Z1-9B-0414"
+api_provider = "SiliconFlow"
+price_in = 0
+price_out = 0
+
+[[models]]
+model_identifier = "THUDM/GLM-4-9B-0414"
+name = "THUDM/GLM-4-9B-0414"
+api_provider = "SiliconFlow"
+price_in = 0
+price_out = 0
+
+[[models]]
+model_identifier = "THUDM/glm-4-9b-chat"
+name = "THUDM/glm-4-9b-chat"
+api_provider = "SiliconFlow"
+price_in = 0
+price_out = 0
+
+[[models]]
+model_identifier = "Qwen/Qwen2.5-7B-Instruct"
+name = "Qwen/Qwen2.5-7B-Instruct"
+api_provider = "SiliconFlow"
+price_in = 0
+price_out = 0
+
+[[models]]
+model_identifier = "deepseek-ai/DeepSeek-OCR"
+name = "deepseek-ai/DeepSeek-OCR"
+api_provider = "SiliconFlow"
+price_in = 0
+price_out = 0
+
+[[models]]
+model_identifier = "chatgpt-4o"
+name = "chatgpt-4o"
+api_provider = "Qhaigc"
+price_in = 6
+price_out = 24
+
+[[models]]
+model_identifier = "chatgpt-4o-latest"
+name = "chatgpt-4o-latest"
+api_provider = "Qhaigc"
+price_in = 6
+price_out = 18
+
+
+[model_task_config.utils] # 在麦麦的一些组件中使用的模型，例如表情包模块，取名模块，关系模块，麦麦的情绪变化等，是麦麦必须的模型
+model_list = ["gemini-2.5-flash","gpt-4.1-mini"] # 使用的模型列表，每个子项对应上面的模型名称(name)
+temperature = 0.7                        # 模型温度，新V3建议0.1-0.3
+max_tokens = 800                         # 最大输出token数
+
+[model_task_config.utils_small] # 在麦麦的一些组件中使用的小模型，消耗量较大，建议使用速度较快的小模型
+model_list = ["Qwen/Qwen3-8B","THUDM/glm-4-9b-chat","Qwen/Qwen2.5-7B-Instruct"]
+temperature = 0.2
+max_tokens = 800
+
+[model_task_config.tool_use] #工具调用模型，需要使用支持工具调用的模型
+model_list = ["gpt-4.1-mini","Qwen/Qwen3-8B","THUDM/glm-4-9b-chat","Qwen/Qwen2.5-7B-Instruct"]
+temperature = 0.7
+max_tokens = 800
+
+[model_task_config.replyer] # 首要回复模型，还用于表达器和表达方式学习
+model_list = ["claude-sonnet-4-5-20250929","claude-sonnet-4-20250514"]
+temperature = 0.7                        
+max_tokens = 800
+
+[model_task_config.advanced_replyer] # 高级模式回复模型组（可选，未配置则回退replyer）
+# 在此填写高级模式使用的模型名称列表
+model_list = ["grok-4","grok-3"]
+temperature = 0.5
+max_tokens = 800
+
+[model_task_config.planner] #决策：负责决定麦麦该什么时候回复的模型
+model_list = ["Qwen/Qwen3-8B","Qwen/Qwen2.5-7B-Instruct","THUDM/glm-4-9b-chat"]
+temperature = 0.2
+max_tokens = 800
+
+[model_task_config.vlm] # 图像识别模型
+model_list = ["gpt-5","gpt-5.1","gpt-4.1"]
+max_tokens = 800
+
+[model_task_config.voice] # 语音识别模型
+model_list = ["FunAudioLLM/SenseVoiceSmall","TeleAI/TeleSpeechASR"]
+
+#嵌入模型
+[model_task_config.embedding]
+model_list = ["bge-m3","BAAI/bge-large-zh-v1.5"]
+
+#------------LPMM知识库模型------------
+
+[model_task_config.lpmm_entity_extract] # 实体提取模型
+model_list = ["siliconflow-deepseek-v3"]
+temperature = 0.2
+max_tokens = 800
+
+[model_task_config.lpmm_rdf_build] # RDF构建模型
+model_list = ["siliconflow-deepseek-v3"]
+temperature = 0.2
+max_tokens = 800
+
+[model_task_config.lpmm_qa] # 问答模型
+model_list = ["qwen3-30b"]
+temperature = 0.7
+max_tokens = 800
