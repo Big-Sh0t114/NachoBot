@@ -1,1 +1,1 @@
-(async () => {await import("file:///C:/Users/BigSh0t/NapCat.Shell/napcat.mjs")})() 
+(async () => {await import("file:///C:/Path/To/NapCat.Shell/napcat.mjs")})() 

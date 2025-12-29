@@ -29,8 +29,8 @@ async def load_model(request: Request):
     动态加载新的 GPT 和 SoVITS 模型权重
     JSON 示例：
     {
-        "gpt_path": "C:/Users/BigSh0t/MaiM-with-u/maimbot_tts_adapter/configs/ncnk1-e15.ckpt",
-        "sovits_path": "C:/Users/BigSh0t/MaiM-with-u/maimbot_tts_adapter/configs/ncnk1_e10_s370.pth"
+        "gpt_path": "configs/ncnk1-e15.ckpt",
+        "sovits_path": "configs/ncnk1_e10_s370.pth"
     }
     """
     global tts_model, gpt_weights, sovits_weights

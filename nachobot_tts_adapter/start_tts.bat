@@ -4,10 +4,10 @@ title TTS Launch
 setlocal ENABLEDELAYEDEXPANSION
 
 REM ===== 基本路径（如你改过目录，只需改这里）=====
-set "BASE_DIR=C:\Users\BigSh0t\Nacho-with-u"
-set "ADAPTER_DIR=%BASE_DIR%\nachobot_tts_adapter"
-set "NAPCAT_SRC=%BASE_DIR%\NachoBot-Napcat-Adapter\src"
-set "SOVITS_DIR=C:\Users\BigSh0t\GPT-SoVITS\GPT-SoVITS-v2pro-20250604"
+set "BASE_DIR=%~dp0.."                                   REM 项目根目录（脚本所在目录的上一级）
+set "ADAPTER_DIR=%BASE_DIR%\nachobot_tts_adapter"        REM 本适配器目录
+set "NAPCAT_SRC=%BASE_DIR%\NachoBot-Napcat-Adapter\src"  REM Napcat Adapter 源码目录
+set "SOVITS_DIR=C:\Path\to\GPT-SoVITS"                   REM 请填写实际 GPT-SoVITS 目录
 
 REM ===== 端口（如你改过 SoVITS 端口，这里也要改）=====
 set "PORT_SOVITS=9880"

@@ -5,8 +5,9 @@ title 🚀 一键启动 MaiM TTS 全链路 (GPT-SoVITS API + TTS适配器 + 控�
 REM =========================
 REM 可配置区域（按需修改）
 REM =========================
-set "GPT_SOVITS_DIR=C:\Users\BigSh0t\GPT-SoVITS\GPT-SoVITS-v2pro-20250604"
-set "ADAPTER_DIR=C:\Users\BigSh0t\MaiM-with-u\maimbot_tts_adapter"
+set "BASE_DIR=%~dp0.."                                           REM 项目根目录
+set "GPT_SOVITS_DIR=C:\Path\to\GPT-SoVITS"                       REM 请填写实际 GPT-SoVITS 目录
+set "ADAPTER_DIR=%BASE_DIR%\nachobot_tts_adapter"                REM TTS 适配器目录
 
 REM 选择后端脚本：优先 api_v2.py；若不存在，则用 api.py
 set "API_V2_FILE=%GPT_SOVITS_DIR%\api_v2.py"

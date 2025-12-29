@@ -1,6 +1,9 @@
-# Maimbot TTS 适配器
+# NachoBot TTS 适配器（基于 MaiBot 适配器定制）
 
-基于多个服务商的文本转语音(TTS)适配器，支持流式和非流式语音合成。
+基于多个服务商的文本转语音(TTS)适配器，支持流式和非流式语音合成。  
+本仓库在原 `maimbot_tts_adapter` 基础上，已针对 **NachoBot 核心改动** 做了路由/接口适配，与 NachoBot 核心服务约定对齐；教程与用法保持与上游一致，按下文步骤配置即可。
+
+本仓库已经预配置好了端口与文件，只需进入configs文件夹修改base.toml中模型路径至你的绝对路径并自行修改ttslaunch.bat路径，以及按照预设的端口配置Napcat即可，以下是上游Maibot项目的原版文件 **注意原版README文件中配置教程有误！！**
 
 ## 功能特性
 
@@ -49,7 +52,7 @@ host = "127.0.0.1"
 port = 8070
 ```
 ### Route 配置
-这个配置标识的是给下游的MaiBot主体的连接
+这个配置标识的是给下游的 NachoBot 主体的连接
 ```toml
 [routes]
 qq = "http://127.0.0.1:8090/ws" # 或者nonebot-qq
@@ -105,6 +108,12 @@ platform1 = "preset1"
 platform2 = "preset2"
 ```
 
+## 路径与文件请自行填写
+- `configs/base.toml`：`api_base` 如有变更请改；`gpt_weights` / `sovits_weights` 请填写你本地的权重路径（可用相对路径，如 `configs/xxx.pth`）。
+- `configs/gpt-sovits.toml`：各 `presets` 下的 `ref_audio_path` / 模型名需与你的实际文件一致。
+- `start_tts.bat`：更新 `SOVITS_DIR` 到你的 GPT-SoVITS 目录；如目录结构不同，调整 `BASE_DIR`/`ADAPTER_DIR`/`NAPCAT_SRC`。
+- 如果你使用其他启动脚本（如仓库外部的 ttslaunch），同样需要把 GPT-SoVITS 与适配器目录、权重路径指向你本地的位置。
+
 ## 内置其他服务商配置
 请参考[官方文档](https://docs.mai-mai.org/manual/adapters/tts/)使用。
 
@@ -116,7 +125,7 @@ platform2 = "preset2"
 python maimbot_pipeline.py
 ```
 
-2. 将adapter的目标路由填写为本项目服务器配置，将本项目的路由配置填写为maimbot core的服务器配置
+2. 将 adapter 的目标路由填写为本项目服务器配置，将本项目的路由配置填写为 NachoBot core 的服务器配置
 
 ## 注意事项
 

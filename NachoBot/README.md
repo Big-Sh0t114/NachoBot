@@ -1,135 +1,49 @@
-<img src="depends-data/maimai.png" alt="MaiBot" title="作者:略nd" width="300">
+# NachoBot (基于 MaiBot 0.10.3 Beta)
 
-# 麦麦！MaiCore-MaiBot
+NachoBot 是在上游 **MaiBot 0.10.3 Beta** 基础上定制的角色扮演聊天机器人，保留了上游插件体系与架构，同时调整了人设、对话风格，并新增针对特定角色扮演场景的内容。本文档帮助你快速了解本项目、配置要点，以及如何溯源到上游项目。
 
-![Python Version](https://img.shields.io/badge/Python-3.10+-blue)
-![License](https://img.shields.io/github/license/SengokuCola/MaiMBot?label=协议)
-![Status](https://img.shields.io/badge/状态-开发中-yellow)
-![Contributors](https://img.shields.io/github/contributors/MaiM-with-u/MaiBot.svg?style=flat&label=贡献者)
-![forks](https://img.shields.io/github/forks/MaiM-with-u/MaiBot.svg?style=flat&label=分支数)
-![stars](https://img.shields.io/github/stars/MaiM-with-u/MaiBot?style=flat&label=星标数)
-![issues](https://img.shields.io/github/issues/MaiM-with-u/MaiBot)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/DrSmoothl/MaiBot)
+## 项目背景与溯源
+- 上游项目：MaiBot（https://github.com/MaiM-with-u/MaiBot），版本基线 0.10.3 Beta。
+- 许可证：沿用 MaiBot 的 GPLv3；请遵守本仓库的 `LICENSE` 以及各插件/第三方组件的许可证。
+- 主要差异：定制的人设与回复风格，简化的配置示例，清理了用户私有数据与密钥。
 
-<div style="text-align: center">
-<strong>
-<a href="https://www.bilibili.com/video/BV1amAneGE3P">🌟 演示视频</a> | 
-<a href="#-更新和安装">🚀 快速入门</a> | 
-<a href="#-文档">📃 教程</a> | 
-<a href="#-讨论">💬 讨论</a> | 
-<a href="#-贡献和致谢">🙋 贡献指南</a>
-</strong>
-</div>
+## bot核心变动
+- 截止至0.10.3 Beta的大部分原版内容。
+- 精选插件的整合/兼容性修复。
+- 角色扮演向的多轮对话与记忆管理。
+- 防注入系统，为角色设定保驾护航。
+- #help菜单帮助你理清所有的指令。
+- tts菜单支持双语种指令无缝切换。
+- 更智能的情景注入系统，给角色人设释放空间。
+- 誓约系统让笨蛋bot记住你们的单独会话中每一个约定。
+- Napcat适配器的定时心跳检测，异常自动断线促进重连。
+- 原版插件体系兼容（麦麦插件商店[https://plugins.maibot.chat/]）。
+- 可选的高级模式（独立模型组回复，默认为Grok4/3）。
+- 大量原创插件/预设内容，为了更好的角色扮演而生。
+- 更多小细节等你发现。
 
-## 🎉 介绍
+## 快速开始
+1) 拉取代码后，先复制/编辑配置：
+   - `config/bot_config.toml`：填写 `qq_account`、按需设置人设、表达学习、权限白名单等。
+   - `config/model_config.toml`：为各 `api_providers` 填入你的 `api_key`，按需调整模型映射。
+   - 插件配置：
+     - `plugins/diary_plugin/config.toml`：填入 Napcat `napcat_token` / 自定义模型 `api_key`，配置目标聊天列表。
+     - `plugins/poke_plugin/config.toml`：Napcat 连接与鉴权。
+     - `plugins/Maizone/config.toml`：Napcat token、权限列表、图片生成 `api_key`。
+     - `plugins/bilibili_video_sender_plugin/config.toml`：如需高画质/登录，填写 `sessdata`/`buvid3`。
+   所有密钥/账号均已清空占位，请使用你自己的值。
+   默认第三方模型拉取启航API以及硅基流动，直接使用需自行注册充值。
 
-**🍔MaiCore 是一个基于大语言模型的可交互智能体**
+2) 依赖安装/运行：与上游 MaiBot 流程一致（参考上游文档或本仓库脚本），确保 Python 环境、依赖和 Napcat/OneBot 相关服务就绪。
 
-- 💭 **智能对话系统**：基于 LLM 的自然语言交互，聊天时机控制。
-- 🤔 **实时思维系统**：模拟人类思考过程。
-- 🧠 **表达学习功能**：学习群友的说话风格和表达方式
-- 💝 **情感表达系统**：情绪系统和表情包系统。
-- 🔌 **强大插件系统**：提供API和事件系统，可编写强大插件。
+3) launchbot.bat一键启动依赖tts_adapter文件夹中的ttslaunch.bat需自行进入正确配置两者路径才可使用
 
-<div style="text-align: center">
-<a href="https://www.bilibili.com/video/BV1amAneGE3P" target="_blank">
-    <picture>
-      <source media="(max-width: 600px)" srcset="depends-data/video.png" width="100%">
-      <img src="depends-data/video.png" width="30%" alt="麦麦演示视频">
-    </picture>
-    <br />
-  👆 点击观看麦麦演示视频 👆
-</a>
-</div>
+## 安全与隐私提示
+- 请勿将真实密钥、Cookie、个人账号信息提交到仓库；部署前在本地/环境变量中填充。
+- 本项目会调用第三方模型/服务；使用时需遵守各自的服务条款与隐私政策。
+- 如启用日志、统计或持久化存储，请确认符合你的合规要求。
 
-## 🔥 更新和安装
-
-**最新版本: v0.10.3** ([更新日志](changelogs/changelog.md))
-
-可前往 [Release](https://github.com/MaiM-with-u/MaiBot/releases/) 页面下载最新版本
-可前往 [启动器发布页面](https://github.com/MaiM-with-u/mailauncher/releases/)下载最新启动器
-**GitHub 分支说明：**
-- `main`: 稳定发布版本(推荐)
-- `dev`: 开发测试版本(不稳定)
-- `classical`: 旧版本(停止维护)
-
-### 最新版本部署教程
-- [🚀 最新版本部署教程](https://docs.mai-mai.org/manual/deployment/mmc_deploy_windows.html) - 基于 MaiCore 的新版本部署方式(与旧版本不兼容)
-
-> [!WARNING]
-> - 项目处于活跃开发阶段，功能和 API 可能随时调整。
-> - 有问题可以提交 Issue 或者 Discussion。
-> - QQ 机器人存在被限制风险，请自行了解，谨慎使用。
-> - 由于程序处于开发中，可能消耗较多 token。
-
-## 麦麦MC项目MaiCraft（早期开发）
-[让麦麦玩MC](https://github.com/MaiM-with-u/Maicraft)
-
-交流群：1058573197
-
-## 💬 讨论
-
-**技术交流群：**
-  [麦麦脑电图](https://qm.qq.com/q/RzmCiRtHEW) | 
-  [麦麦脑磁图](https://qm.qq.com/q/wlH5eT8OmQ) |
-  [麦麦大脑磁共振](https://qm.qq.com/q/VQ3XZrWgMs) | 
-  [麦麦要当VTB](https://qm.qq.com/q/wGePTl1UyY)
-
-**聊天吹水群：**
-- [麦麦之闲聊群](https://qm.qq.com/q/JxvHZnxyec)
-
-**插件开发测试版群：**
-- [插件开发群](https://qm.qq.com/q/1036092828)
-
-## 📚 文档
-
-**部分内容可能更新不够及时，请注意版本对应**
-
-- [📚 核心 Wiki 文档](https://docs.mai-mai.org) - 项目最全面的文档中心，你可以了解麦麦有关的一切。
-
-### 设计理念(原始时代的火花)
-
-> **千石可乐说：**
-> - 这个项目最初只是为了给牛牛 bot 添加一点额外的功能，但是功能越写越多，最后决定重写。其目的是为了创造一个活跃在 QQ 群聊的"生命体"。目的并不是为了写一个功能齐全的机器人，而是一个尽可能让人感知到真实的类人存在。
-> - 程序的功能设计理念基于一个核心的原则："最像而不是好"。
-> - 如果人类真的需要一个 AI 来陪伴自己，并不是所有人都需要一个完美的，能解决所有问题的"helpful assistant"，而是一个会犯错的，拥有自己感知和想法的"生命形式"。
-> - 代码会保持开源和开放，但个人希望 MaiMbot 的运行时数据保持封闭，尽量避免以显式命令来对其进行控制和调试。我认为一个你无法完全掌控的个体才更能让你感觉到它的自主性，而视其成为一个对话机器。
-> - SengokuCola~~纯编程外行，面向 cursor 编程，很多代码写得不好多多包涵~~已得到大脑升级。
-
-## 🙋 贡献和致谢
-你可以阅读[开发文档](https://docs.mai-mai.org/develop/)来更好的了解麦麦!  
-MaiCore 是一个开源项目，我们非常欢迎你的参与。你的贡献，无论是提交 bug 报告、功能需求还是代码 pr，都对项目非常宝贵。我们非常感谢你的支持！🎉  
-但无序的讨论会降低沟通效率，进而影响问题的解决速度，因此在提交任何贡献前，请务必先阅读本项目的[贡献指南](docs/CONTRIBUTE.md)。(待补完)  
-
-### 贡献者
-
-感谢各位大佬！  
-
-<a href="https://github.com/MaiM-with-u/MaiBot/graphs/contributors">
-  <img alt="contributors" src="https://contrib.rocks/image?repo=MaiM-with-u/MaiBot" />
-</a>
-
-### 致谢
-
-- [略nd](https://space.bilibili.com/1344099355): 为麦麦绘制人设。
-- [NapCat](https://github.com/NapNeko/NapCatQQ): 现代化的基于 NTQQ 的 Bot 协议端实现。
-
-**也感谢每一位给麦麦发展提出宝贵意见与建议的用户，感谢陪伴麦麦走到现在的你们！**
-
-## 📌 注意事项
-
-> [!WARNING]
-> 使用本项目前必须阅读和同意[用户协议](EULA.md)和[隐私协议](PRIVACY.md)。  
-> 本应用生成内容来自人工智能模型，由 AI 生成，请仔细甄别，请勿用于违反法律的用途，AI 生成内容不代表本项目团队的观点和立场。
-
-## 麦麦仓库状态
-
-![Alt](https://repobeats.axiom.co/api/embed/9faca9fccfc467931b87dd357b60c6362b5cfae0.svg "麦麦仓库状态")
-
-### Star 趋势
-
-[![Star 趋势](https://starchart.cc/MaiM-with-u/MaiBot.svg?variant=adaptive)](https://starchart.cc/MaiM-with-u/MaiBot)
-
-## License
-
-GPL-3.0
+## 贡献与致谢
+- 上游：MaiBot 项目团队与贡献者。
+- 定制与维护：BigSh0t（本仓库）。
+- 贡献方式：遵循 GPLv3；提交 PR 前请先清理私密信息，并保持对上游的致谢与链接。 ***!
