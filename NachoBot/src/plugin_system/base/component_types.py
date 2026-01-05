@@ -408,3 +408,6 @@ class CustomEventHandlerResult:
     message: str = ""
     timestamp: float = 0.0
     extra_info: Optional[Dict] = None
+
+# Backward compatibility: keep old name available for existing plugins
+MaiMessages = NachoMessages
