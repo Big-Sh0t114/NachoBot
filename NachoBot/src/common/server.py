@@ -9,7 +9,7 @@ install(extra_lines=3)
 
 
 class Server:
-    def __init__(self, host: Optional[str] = None, port: Optional[int] = None, app_name: str = "MaiMCore"):
+    def __init__(self, host: Optional[str] = None, port: Optional[int] = None, app_name: str = "NachoCore"):
         self.app = FastAPI(title=app_name)
         self._host: str = "127.0.0.1"
         self._port: int = 8080

@@ -3,7 +3,7 @@ import os
 import re
 
 from typing import Dict, Any, Optional
-from maim_message import UserInfo, Seg
+from ncnk_message import UserInfo, Seg
 
 from src.common.logger import get_logger
 from src.config.config import global_config
@@ -178,6 +178,17 @@ class ChatBot:
 
                     # 命令出错时，根据命令的拦截设置决定是否继续处理消息
                     return True, str(e), False  # 出错时继续处理消息
+
+            # 近似匹配提示：以 # 开头但未匹配到命令
+            if text and text.strip().startswith("#"):
+                suggestions = component_registry.suggest_command(text, max_suggestions=2, cutoff=0.75)
+                if suggestions:
+                    message.is_command = True
+                    stream_id = message.chat_stream.stream_id if message.chat_stream else None
+                    suggestion_text = "笨蛋，错误的指令是执行不了的哦(´-ω-`) 你是不是想输入：" + " 或 ".join(f"#{cmd}" for cmd in suggestions)
+                    if stream_id:
+                        await send_api.text_to_stream(suggestion_text, stream_id)
+                    return True, suggestion_text, False
 
             # 没有找到命令，继续处理消息
             return False, None, True

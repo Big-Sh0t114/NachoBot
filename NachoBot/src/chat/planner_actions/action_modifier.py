@@ -66,15 +66,23 @@ class ActionModifier:
         self.action_manager.restore_actions()
         all_actions = self.action_manager.get_using_actions()
 
+        # 高级模式仅允许 reply，其他动作直接移除（包含插件动作）
+        if advanced_manager.is_on(self.chat_stream):
+            for action_name in list(all_actions.keys()):
+                if action_name != "reply":
+                    self.action_manager.remove_action_from_using(action_name)
+            all_actions = self.action_manager.get_using_actions()
+
         # 高级模式：在规划阶段直接移除 TTS，避免被选中
         if advanced_manager.should_block_tts(self.chat_stream) and "tts_action" in all_actions:
             self.action_manager.remove_action_from_using("tts_action")
             all_actions = self.action_manager.get_using_actions()
 
+        context_size = global_config.chat.get_max_context_size(is_group_chat=bool(self.chat_stream.group_info))
         message_list_before_now_half = get_raw_msg_before_timestamp_with_chat(
             chat_id=self.chat_stream.stream_id,
             timestamp=time.time(),
-            limit=min(int(global_config.chat.max_context_size * 0.33), 10),
+            limit=min(int(context_size * 0.33), 10),
         )
 
         chat_content = build_readable_messages(

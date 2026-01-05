@@ -43,11 +43,12 @@ class PromiseCacheManager:
 
         hits: List[str] = []
         for kw in matched_keywords:
-            existing = self._load_latest_cache(chat_id, kw)
-            if existing:
-                formatted = self._format_cache(kw, existing)
+            caches = self._load_caches(chat_id, kw)
+            for cache in caches:
+                formatted = self._format_cache(kw, cache)
                 if formatted:
                     hits.append(formatted)
+                    self._logger.info(f"[promise_cache] 注入片段 chat={chat_id} kw={kw} file={cache.get('file_path', '')}")
             self._start_new_capture(chat_id, kw, message)
         return hits
 
@@ -68,11 +69,12 @@ class PromiseCacheManager:
 
         snippets: List[str] = []
         for kw in keywords_to_fetch:
-            cache = self._load_latest_cache(chat_id, kw)
-            if cache:
+            caches = self._load_caches(chat_id, kw)
+            for cache in caches:
                 formatted = self._format_cache(kw, cache)
                 if formatted:
                     snippets.append(formatted)
+                    self._logger.info(f"[promise_cache] 注入片段 chat={chat_id} kw={kw} file={cache.get('file_path', '')}")
         return snippets
 
     def _append_to_active_captures(self, chat_id: str, record: dict) -> None:
@@ -264,22 +266,35 @@ class PromiseCacheManager:
             self._logger.debug(f"清理旧约定缓存失败: {exc}", exc_info=True)
 
     def _load_latest_cache(self, chat_id: str, keyword: str) -> Optional[dict]:
+        caches = self._load_caches(chat_id, keyword, limit=1)
+        return caches[0] if caches else None
+
+    def _load_caches(self, chat_id: str, keyword: str, limit: Optional[int] = None) -> List[dict]:
         cache_dir = self._get_keyword_dir(chat_id, keyword)
         if not os.path.isdir(cache_dir):
-            return None
+            return []
         try:
             files = [f for f in os.listdir(cache_dir) if f.endswith(".json")]
             if not files:
-                return None
+                return []
             files = sorted(files, key=lambda name: os.path.getmtime(os.path.join(cache_dir, name)), reverse=True)
-            cache_path = os.path.join(cache_dir, files[0])
-            with open(cache_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                data["file_path"] = cache_path
-                return data
+            if limit and limit > 0:
+                files = files[:limit]
+
+            caches: List[dict] = []
+            for name in files:
+                cache_path = os.path.join(cache_dir, name)
+                try:
+                    with open(cache_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        data["file_path"] = cache_path
+                        caches.append(data)
+                except Exception as exc:
+                    self._logger.warning(f"读取约定缓存失败: {exc}", exc_info=True)
+            return caches
         except Exception as exc:
             self._logger.warning(f"读取约定缓存失败: {exc}", exc_info=True)
-            return None
+            return []
 
     def _format_cache(self, keyword: str, cache: dict) -> str:
         records = cache.get("records") or []

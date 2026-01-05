@@ -1,7 +1,7 @@
 [project]
-name = "MaiBotNapcatAdapter"
+name = "NachoBotNapcatAdapter"
 version = "0.5.5"
-description = "A MaiBot adapter for Napcat"
+description = "A NachoBot adapter for Napcat"
 
 [tool.ruff]
 

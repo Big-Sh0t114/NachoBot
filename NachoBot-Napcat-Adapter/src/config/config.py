@@ -14,7 +14,7 @@ from src.config.config_base import ConfigBase
 from src.config.official_configs import (
     ChatConfig,
     DebugConfig,
-    MaiBotServerConfig,
+    NachobotServerConfig,
     NapcatServerConfig,
     NicknameConfig,
     VoiceConfig,
@@ -114,7 +114,7 @@ class Config(ConfigBase):
 
     nickname: NicknameConfig
     napcat_server: NapcatServerConfig
-    maibot_server: MaiBotServerConfig
+    nachobot_server: NachobotServerConfig
     chat: ChatConfig
     voice: VoiceConfig
     debug: DebugConfig

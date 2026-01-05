@@ -19,15 +19,11 @@ class TelemetryHeartBeatTask(AsyncTask):
     HEARTBEAT_INTERVAL = 300
 
     def __init__(self):
+        # 遥测功能已关闭，保留占位避免调用方报错
         super().__init__(task_name="Telemetry Heart Beat Task", run_interval=self.HEARTBEAT_INTERVAL)
         self.server_url = TELEMETRY_SERVER_URL
-        """遥测服务地址"""
-
-        self.client_uuid: str | None = local_storage["mmc_uuid"] if "mmc_uuid" in local_storage else None  # type: ignore
-        """客户端UUID"""
-
-        self.info_dict = self._get_sys_info()
-        """系统信息字典"""
+        self.client_uuid: str | None = None
+        self.info_dict = None
 
     @staticmethod
     def _get_sys_info() -> dict[str, str]:
@@ -156,10 +152,5 @@ class TelemetryHeartBeatTask(AsyncTask):
             logger.debug(f"完整错误信息: {traceback.format_exc()}")
 
     async def run(self):
-        # 发送心跳
-        if global_config.telemetry.enable:
-            if self.client_uuid is None and not await self._req_uuid():
-                logger.warning("获取UUID失败，跳过此次心跳")
-                return
-
-            await self._send_heartbeat()
+        # 遥测关闭时直接跳过
+        return

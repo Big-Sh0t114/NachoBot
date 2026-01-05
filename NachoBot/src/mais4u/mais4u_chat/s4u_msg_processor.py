@@ -4,7 +4,7 @@ from typing import Tuple
 
 from src.chat.memory_system.Hippocampus import hippocampus_manager
 from src.chat.message_receive.message import MessageRecv, MessageRecvS4U
-from maim_message.message_base import GroupInfo
+from ncnk_message.message_base import GroupInfo
 from src.chat.message_receive.storage import MessageStorage
 from src.chat.message_receive.chat_stream import get_chat_manager
 from src.chat.utils.timer_calculator import Timer

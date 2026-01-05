@@ -5,7 +5,7 @@ from abc import abstractmethod
 from dataclasses import dataclass
 from rich.traceback import install
 from typing import Optional, Any, List
-from maim_message import Seg, UserInfo, BaseMessageInfo, MessageBase
+from ncnk_message import Seg, UserInfo, BaseMessageInfo, MessageBase
 
 from src.common.logger import get_logger
 from src.config.config import global_config

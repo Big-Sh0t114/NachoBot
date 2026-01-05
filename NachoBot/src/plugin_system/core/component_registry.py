@@ -1,4 +1,5 @@
 import re
+from difflib import SequenceMatcher
 
 from typing import Dict, List, Optional, Any, Pattern, Tuple, Union, Type
 
@@ -492,6 +493,75 @@ class ComponentRegistry:
     def get_command_patterns(self) -> Dict[Pattern, str]:
         """获取Command模式注册表"""
         return self._command_patterns.copy()
+
+    @staticmethod
+    def _normalize_command_text(text: str) -> str:
+        """归一化命令字符串，便于近似匹配"""
+        return re.sub(r"[^a-z0-9]", "", text.lower())
+
+    def suggest_command(self, text: str, max_suggestions: int = 2, cutoff: float = 0.6) -> List[str]:
+        """
+        根据用户输入的文本给出最接近的命令建议（适用于以#开头但未匹配到命令的情况）
+        """
+        if not text:
+            return []
+
+        raw = text.strip()
+        if not raw.startswith("#"):
+            return []
+
+        body = raw.lstrip("#").strip()
+        if not body:
+            return []
+
+        # 构造候选：首词，以及首词+第二个词的组合（处理“#diary generate”）
+        tokens = re.split(r"\s+", body)
+        candidate_tokens: List[str] = []
+        if tokens:
+            candidate_tokens.append(tokens[0])
+            candidate_tokens.append(tokens[0].replace("_", ""))
+        if len(tokens) >= 2:
+            candidate_tokens.append(f"{tokens[0]}_{tokens[1]}")
+            candidate_tokens.append(f"{tokens[0]}{tokens[1]}")
+
+        normalized_candidates = []
+        seen = set()
+        for token in candidate_tokens:
+            norm = self._normalize_command_text(token)
+            if norm and norm not in seen:
+                normalized_candidates.append(norm)
+                seen.add(norm)
+
+        if not normalized_candidates:
+            return []
+
+        command_names = list(self._command_registry.keys())
+        normalized_commands = [(name, self._normalize_command_text(name)) for name in command_names]
+
+        scored: List[Tuple[float, str]] = []
+        for cand in normalized_candidates:
+            for cmd_name, norm_cmd in normalized_commands:
+                if not norm_cmd:
+                    continue
+                ratio = SequenceMatcher(None, cand, norm_cmd).ratio()
+                if ratio >= cutoff:
+                    scored.append((ratio, cmd_name))
+
+        if not scored:
+            return []
+
+        # 去重并按相似度排序
+        scored.sort(key=lambda x: x[0], reverse=True)
+        suggestions = []
+        seen_cmd = set()
+        for _, name in scored:
+            if name not in seen_cmd:
+                suggestions.append(name)
+                seen_cmd.add(name)
+            if len(suggestions) >= max_suggestions:
+                break
+
+        return suggestions
 
     def find_command_by_text(self, text: str) -> Optional[Tuple[Type[BaseCommand], dict, CommandInfo]]:
         # sourcery skip: use-named-expression, use-next

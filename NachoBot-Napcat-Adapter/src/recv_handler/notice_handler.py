@@ -10,7 +10,7 @@ from src.database import BanUser, db_manager, is_identical
 from . import NoticeType, ACCEPT_FORMAT
 from .message_sending import message_send_instance
 from .message_handler import message_handler
-from maim_message import FormatInfo, UserInfo, GroupInfo, Seg, BaseMessageInfo, MessageBase
+from ncnk_message import FormatInfo, UserInfo, GroupInfo, Seg, BaseMessageInfo, MessageBase
 
 from src.utils import (
     get_group_info,
@@ -139,13 +139,13 @@ class NoticeHandler:
             else:
                 logger.warning("无法获取notice消息所在群的名称")
             group_info = GroupInfo(
-                platform=global_config.maibot_server.platform_name,
+                platform=global_config.nachobot_server.platform_name,
                 group_id=group_id,
                 group_name=group_name,
             )
 
         message_info: BaseMessageInfo = BaseMessageInfo(
-            platform=global_config.maibot_server.platform_name,
+            platform=global_config.nachobot_server.platform_name,
             message_id="notice",
             time=message_time,
             user_info=user_info,
@@ -167,7 +167,7 @@ class NoticeHandler:
         if system_notice:
             await self.put_notice(message_base)
         else:
-            logger.info("发送到Maibot处理通知信息")
+            logger.info("发送到Nachobot处理通知信息")
             await message_send_instance.message_send(message_base)
 
     async def handle_poke_notify(
@@ -228,7 +228,7 @@ class NoticeHandler:
             logger.warning(f"解析戳一戳消息失败: {str(e)}，将使用默认文本")
 
         user_info: UserInfo = UserInfo(
-            platform=global_config.maibot_server.platform_name,
+            platform=global_config.nachobot_server.platform_name,
             user_id=user_id,
             user_nickname=user_name,
             user_cardname=user_cardname,
@@ -259,7 +259,7 @@ class NoticeHandler:
             operator_nickname = "QQ用户"
 
         operator_info: UserInfo = UserInfo(
-            platform=global_config.maibot_server.platform_name,
+            platform=global_config.nachobot_server.platform_name,
             user_id=operator_id,
             user_nickname=operator_nickname,
             user_cardname=operator_cardname,
@@ -288,7 +288,7 @@ class NoticeHandler:
                 user_nickname = fetched_member_info.get("nickname")
                 user_cardname = fetched_member_info.get("card")
             banned_user_info: UserInfo = UserInfo(
-                platform=global_config.maibot_server.platform_name,
+                platform=global_config.nachobot_server.platform_name,
                 user_id=user_id,
                 user_nickname=user_nickname,
                 user_cardname=user_cardname,
@@ -327,7 +327,7 @@ class NoticeHandler:
             operator_nickname = "QQ用户"
 
         operator_info: UserInfo = UserInfo(
-            platform=global_config.maibot_server.platform_name,
+            platform=global_config.nachobot_server.platform_name,
             user_id=operator_id,
             user_nickname=operator_nickname,
             user_cardname=operator_cardname,
@@ -353,7 +353,7 @@ class NoticeHandler:
             else:
                 logger.warning("无法获取解除禁言消息发送者的昵称，消息可能会无效")
             lifted_user_info: UserInfo = UserInfo(
-                platform=global_config.maibot_server.platform_name,
+                platform=global_config.nachobot_server.platform_name,
                 user_id=user_id,
                 user_nickname=user_nickname,
                 user_cardname=user_cardname,
@@ -396,13 +396,13 @@ class NoticeHandler:
                 else:
                     logger.warning("无法获取notice消息所在群的名称")
                 group_info = GroupInfo(
-                    platform=global_config.maibot_server.platform_name,
+                    platform=global_config.nachobot_server.platform_name,
                     group_id=group_id,
                     group_name=group_name,
                 )
 
                 message_info: BaseMessageInfo = BaseMessageInfo(
-                    platform=global_config.maibot_server.platform_name,
+                    platform=global_config.nachobot_server.platform_name,
                     message_id="notice",
                     time=time.time(),
                     user_info=None,  # 自然解除禁言没有操作者
@@ -453,7 +453,7 @@ class NoticeHandler:
             user_cardname = fetched_member_info.get("card")
 
         lifted_user_info: UserInfo = UserInfo(
-            platform=global_config.maibot_server.platform_name,
+            platform=global_config.nachobot_server.platform_name,
             user_id=user_id,
             user_nickname=user_nickname,
             user_cardname=user_cardname,

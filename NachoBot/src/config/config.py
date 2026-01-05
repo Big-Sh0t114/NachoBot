@@ -24,10 +24,9 @@ from src.config.official_configs import (
     ChineseTypoConfig,
     ResponsePostProcessConfig,
     ResponseSplitterConfig,
-    TelemetryConfig,
     ExperimentalConfig,
     MessageReceiveConfig,
-    MaimMessageConfig,
+    NcnkMessageConfig,
     LPMMKnowledgeConfig,
     RelationshipConfig,
     ToolConfig,
@@ -50,7 +49,7 @@ install(extra_lines=3)
 # 配置主程序日志格式
 logger = get_logger("config")
 
-# 获取当前文件所在目录的父目录的父目录（即MaiBot项目根目录）
+# 获取当前文件所在目录的父目录的父目录（即NachoBot项目根目录）
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 CONFIG_DIR = os.path.join(PROJECT_ROOT, "config")
 TEMPLATE_DIR = os.path.join(PROJECT_ROOT, "template")
@@ -360,9 +359,8 @@ class Config(ConfigBase):
     chinese_typo: ChineseTypoConfig
     response_post_process: ResponsePostProcessConfig
     response_splitter: ResponseSplitterConfig
-    telemetry: TelemetryConfig
     experimental: ExperimentalConfig
-    maim_message: MaimMessageConfig
+    ncnk_message: NcnkMessageConfig
     lpmm_knowledge: LPMMKnowledgeConfig
     tool: ToolConfig
     debug: DebugConfig
@@ -467,7 +465,7 @@ def api_ada_load_config(config_path: str) -> APIAdapterConfig:
 
 
 # 获取配置文件路径
-logger.info(f"MaiCore当前版本: {MMC_VERSION}")
+logger.info(f"NachoCore当前版本: {MMC_VERSION}")
 update_config()
 update_model_config()
 

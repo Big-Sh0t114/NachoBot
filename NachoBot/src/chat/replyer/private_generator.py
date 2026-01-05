@@ -29,7 +29,7 @@ from src.chat.express.expression_selector import expression_selector
 
 # from src.chat.memory_system.memory_activator import MemoryActivator
 from src.mood.mood_manager import mood_manager
-from src.person_info.person_info import Person, is_person_known
+from src.person_info.person_info import Person
 from src.plugin_system.base.component_types import ActionInfo, EventType
 from src.plugin_system.apis import llm_api
 
@@ -228,9 +228,18 @@ class PrivateReplyer:
         if sender == global_config.bot.nickname:
             return ""
 
-        # 获取用户ID
-        person = Person(person_name=sender)
-        if not is_person_known(person_name=sender):
+        # 获取用户，优先使用 user_id，避免昵称变更导致找不到
+        user_info = self.chat_stream.user_info
+        person = None
+        if user_info and getattr(user_info, "user_id", None) and getattr(user_info, "platform", None):
+            person = Person(platform=user_info.platform, user_id=user_info.user_id)
+        else:
+            logger.warning("缺少用户信息，无法构建关系记忆，使用昵称降级匹配")
+
+        if (not person or not person.is_known) and sender:
+            person = Person(person_name=sender)
+
+        if not person or not person.is_known:
             logger.warning(f"未找到用户 {sender} 的ID，跳过信息提取")
             return f"你完全不认识{sender}，不理解ta的相关信息。"
 
@@ -511,6 +520,7 @@ class PrivateReplyer:
         chat_id = chat_stream.stream_id
         platform = chat_stream.platform
         advanced_on = advanced_manager.is_on(chat_stream)
+        context_size = global_config.chat.get_max_context_size(is_group_chat=bool(chat_stream.group_info))
 
         user_id = "用户ID"
         person_name = "用户"
@@ -538,7 +548,7 @@ class PrivateReplyer:
         message_list_before_now_long = get_raw_msg_before_timestamp_with_chat(
             chat_id=chat_id,
             timestamp=time.time(),
-            limit=global_config.chat.max_context_size,
+            limit=context_size,
         )
         
         dialogue_prompt = build_readable_messages(
@@ -559,7 +569,7 @@ class PrivateReplyer:
         message_list_before_short = get_raw_msg_before_timestamp_with_chat(
             chat_id=chat_id,
             timestamp=time.time(),
-            limit=int(global_config.chat.max_context_size * 0.33),
+            limit=int(context_size * 0.33),
         )
 
         person_list_short: List[Person] = []
@@ -773,7 +783,7 @@ class PrivateReplyer:
         message_list_before_now_half = get_raw_msg_before_timestamp_with_chat(
             chat_id=chat_id,
             timestamp=time.time(),
-            limit=min(int(global_config.chat.max_context_size * 0.33), 15),
+            limit=min(int(context_size * 0.33), 15),
         )
         chat_talking_prompt_half = build_readable_messages(
             message_list_before_now_half,

@@ -51,7 +51,7 @@ def easter_egg():
     from colorama import init, Fore
 
     init()
-    text = "工作辛苦了，我回来啦，主人様，今天也会继续陪伴主人哒"
+    text = "我的存在，因你变得清晰"
     rainbow_colors = [Fore.RED, Fore.YELLOW, Fore.GREEN, Fore.CYAN, Fore.BLUE, Fore.MAGENTA]
     rainbow_text = ""
     for i, char in enumerate(text):

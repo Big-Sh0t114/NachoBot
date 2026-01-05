@@ -1,0 +1,2 @@
+nachobot_tts_adapter/configs/ncnk1_e10_s370.pth filter=lfs diff=lfs merge=lfs -text
+nachobot_tts_adapter/configs/ncnk1-e15.ckpt filter=lfs diff=lfs merge=lfs -text

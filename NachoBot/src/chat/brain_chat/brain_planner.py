@@ -223,11 +223,15 @@ class BrainPlanner:
         """
         target_message: Optional["DatabaseMessages"] = None
 
+        # 获取必要信息
+        is_group_chat, chat_target_info, current_available_actions = self.get_necessary_info()
+        context_size = global_config.chat.get_max_context_size(is_group_chat=is_group_chat)
+
         # 获取聊天上下文
         message_list_before_now = get_raw_msg_before_timestamp_with_chat(
             chat_id=self.chat_id,
             timestamp=time.time(),
-            limit=int(global_config.chat.max_context_size * 0.6),
+            limit=int(context_size * 0.6),
         )
         message_id_list: list[Tuple[str, "DatabaseMessages"]] = []
         chat_content_block, message_id_list = build_readable_messages_with_id(
@@ -238,7 +242,7 @@ class BrainPlanner:
             show_actions=True,
         )
 
-        message_list_before_now_short = message_list_before_now[-int(global_config.chat.max_context_size * 0.3) :]
+        message_list_before_now_short = message_list_before_now[-int(context_size * 0.3) :]
         chat_content_block_short, message_id_list_short = build_readable_messages_with_id(
             messages=message_list_before_now_short,
             timestamp_mode="normal_no_YMD",
@@ -247,9 +251,6 @@ class BrainPlanner:
         )
 
         self.last_obs_time_mark = time.time()
-
-        # 获取必要信息
-        is_group_chat, chat_target_info, current_available_actions = self.get_necessary_info()
 
         # 应用激活类型过滤
         filtered_actions = self._filter_actions_by_activation_type(available_actions, chat_content_block_short)

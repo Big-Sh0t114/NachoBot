@@ -1,6 +1,6 @@
 # 模型配置指南
 
-本文档将指导您如何配置 `model_config.toml` 文件，该文件用于配置 MaiBot 的各种AI模型和API服务提供商。
+本文档将指导您如何配置 `model_config.toml` 文件，该文件用于配置 NachoBot 的各种AI模型和API服务提供商。
 
 ## 配置文件结构
 
@@ -176,7 +176,7 @@ max_tokens = 800
 ```
 
 ### planner - 决策模型
-负责决定MaiBot该做什么：
+负责决定NachoBot该做什么：
 ```toml
 [model_task_config.planner]
 model_list = ["siliconflow-deepseek-v3"]
@@ -185,7 +185,7 @@ max_tokens = 800
 ```
 
 ### emotion - 情绪模型
-负责MaiBot的情绪变化：
+负责NachoBot的情绪变化：
 ```toml
 [model_task_config.emotion]
 model_list = ["siliconflow-deepseek-v3"]

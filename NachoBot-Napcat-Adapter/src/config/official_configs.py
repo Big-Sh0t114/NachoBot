@@ -36,16 +36,15 @@ class NapcatServerConfig(ConfigBase):
 
 
 @dataclass
-class MaiBotServerConfig(ConfigBase):
+class NachobotServerConfig(ConfigBase):
     platform_name: str = field(default=ADAPTER_PLATFORM, init=False)
     """平台名称，“qq”"""
 
     host: str = "localhost"
-    """MaiMCore的主机地址"""
+    """NachoCore的主机地址"""
 
     port: int = 8000
-    """MaiMCore的端口号"""
-
+    """NachoCore的端口号"""
 
 @dataclass
 class ChatConfig(ConfigBase):
@@ -65,7 +64,7 @@ class ChatConfig(ConfigBase):
     """被封禁的用户ID列表，封禁后将无法与其进行交互"""
 
     ban_qq_bot: bool = False
-    """是否屏蔽QQ官方机器人，若为True，则所有QQ官方机器人将无法与MaiMCore进行交互"""
+    """是否屏蔽QQ官方机器人，若为True，则所有QQ官方机器人将无法与NachoCore进行交互"""
 
     enable_poke: bool = True
     """是否启用戳一戳功能"""

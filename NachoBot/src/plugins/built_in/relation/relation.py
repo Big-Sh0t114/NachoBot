@@ -102,11 +102,23 @@ class BuildRelationAction(BaseAction):
             impression = self.action_data.get("impression", "")
             logger.info(f"{self.log_prefix} 添加关系印象原因: {self.reasoning}")
             person_name = self.action_data.get("person_name", "")
-            # 2. 获取目标用户信息
-            person = Person(person_name=person_name)
+            # 2. 获取目标用户信息，优先使用 user_id，避免昵称不一致导致找不到人
+            person = None
+            if self.platform and self.user_id:
+                person = Person(platform=str(self.platform), user_id=str(self.user_id))
+                if not person.is_known and person_name:
+                    # 回退到昵称匹配，兼容未注册或历史数据
+                    person = Person(person_name=person_name)
+            elif person_name:
+                person = Person(person_name=person_name)
+            else:
+                logger.warning(f"{self.log_prefix} 缺少用户标识，跳过添加记忆")
+                return False, "缺少用户标识，跳过添加记忆"
+
             if not person.is_known:
-                logger.warning(f"{self.log_prefix} 用户 {person_name} 不存在，跳过添加记忆")
-                return False, f"用户 {person_name} 不存在，跳过添加记忆"
+                user_label = person_name or self.user_id or "未知用户"
+                logger.warning(f"{self.log_prefix} 用户 {user_label} 不存在，跳过添加记忆")
+                return False, f"用户 {user_label} 不存在，跳过添加记忆"
 
             person.last_know = time.time()
             person.know_times += 1

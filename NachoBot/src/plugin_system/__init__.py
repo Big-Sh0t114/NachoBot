@@ -23,7 +23,7 @@ from .base import (
     BaseEventHandler,
     EventHandlerInfo,
     EventType,
-    MaiMessages,
+    NachoMessages,
     ToolParamType,
     CustomEventHandlerResult,
     ReplyContentType,
@@ -109,7 +109,7 @@ __all__ = [
     "ReplyContent",
     "ForwardNode",
     "ReplySetModel",
-    "MaiMessages",
+    "NachoMessages",
     "CustomEventHandlerResult",
     # 装饰器
     "register_plugin",

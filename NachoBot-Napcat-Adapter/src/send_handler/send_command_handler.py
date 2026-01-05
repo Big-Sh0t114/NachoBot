@@ -1,4 +1,4 @@
-from maim_message import GroupInfo
+from ncnk_message import GroupInfo
 from typing import Any, Dict, Tuple
 
 from src import CommandType

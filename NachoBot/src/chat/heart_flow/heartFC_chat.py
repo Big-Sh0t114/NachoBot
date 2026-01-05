@@ -100,7 +100,7 @@ class HeartFChatting:
 
         self.last_read_time = time.time() - 2
 
-        self.talk_threshold = global_config.chat.talk_value
+        self.talk_threshold = global_config.chat.get_talk_value_for_chat(self.stream_id)
 
         self.no_reply_until_call = False
 
@@ -204,7 +204,7 @@ class HeartFChatting:
             # *控制频率用
             if mentioned_message:
                 await self._observe(recent_messages_list=recent_messages_list, force_reply_message=mentioned_message)
-            elif random.random() < global_config.chat.talk_value * frequency_control_manager.get_or_create_frequency_control(self.stream_id).get_talk_frequency_adjust():
+            elif random.random() < self.talk_threshold * frequency_control_manager.get_or_create_frequency_control(self.stream_id).get_talk_frequency_adjust():
                 await self._observe(recent_messages_list=recent_messages_list)
             else:
                 # 没有提到，继续保持沉默，等待5秒防止频繁触发
@@ -293,11 +293,12 @@ class HeartFChatting:
 
             # 执行planner
             is_group_chat, chat_target_info, _ = self.action_planner.get_necessary_info()
+            context_size = global_config.chat.get_max_context_size(is_group_chat=is_group_chat)
 
             message_list_before_now = get_raw_msg_before_timestamp_with_chat(
                 chat_id=self.stream_id,
                 timestamp=time.time(),
-                limit=int(global_config.chat.max_context_size * 0.6),
+                limit=int(context_size * 0.6),
             )
             promise_snippets = []
             if not self.chat_stream.group_info:  # 群聊不启用誓言缓存

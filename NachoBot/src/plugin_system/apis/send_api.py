@@ -29,7 +29,7 @@ from src.config.config import global_config
 from src.chat.message_receive.chat_stream import get_chat_manager
 from src.chat.message_receive.uni_message_sender import UniversalMessageSender
 from src.chat.message_receive.message import MessageSending, MessageRecv
-from maim_message import Seg, UserInfo, MessageBase, BaseMessageInfo
+from ncnk_message import Seg, UserInfo, MessageBase, BaseMessageInfo
 
 if TYPE_CHECKING:
     from src.common.data_models.database_data_model import DatabaseMessages

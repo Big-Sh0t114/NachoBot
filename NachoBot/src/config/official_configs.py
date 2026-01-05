@@ -72,6 +72,22 @@ class ChatConfig(ConfigBase):
     max_context_size: int = 18
     """上下文长度"""
 
+    max_context_size_group: Optional[int] = None
+    """群聊上下文长度，未设置时使用 max_context_size"""
+
+    max_context_size_private: Optional[int] = None
+    """私聊上下文长度，未设置时使用 max_context_size"""
+
+    def get_max_context_size(self, is_group_chat: Optional[bool] = None) -> int:
+        """
+        获取当前聊天的上下文长度；若未设置专项值则回落到全局默认
+        """
+        if is_group_chat is True and self.max_context_size_group is not None:
+            return self.max_context_size_group
+        if is_group_chat is False and self.max_context_size_private is not None:
+            return self.max_context_size_private
+        return self.max_context_size
+
     interest_rate_mode: Literal["fast", "accurate"] = "fast"
     """兴趣值计算模式，fast为快速计算，accurate为精确计算"""
 
@@ -87,6 +103,86 @@ class ChatConfig(ConfigBase):
     
     talk_value: float = 1
     """思考频率"""
+
+    talk_value_list: list[list] = field(default_factory=list)
+    """
+    按聊天流配置思考频率
+    格式: [["chat_stream_id", talk_value], ...]
+    chat_stream_id 形如 "platform:id:type"，空字符串表示全局配置
+    talk_value 为浮点数，表示该会话的思考频率
+    """
+
+    def _parse_stream_config_to_chat_id(self, stream_config_str: str) -> Optional[str]:
+        """解析流配置字符串并生成对应的 chat_id"""
+        try:
+            parts = stream_config_str.split(":")
+            if len(parts) != 3:
+                return None
+
+            platform = parts[0]
+            id_str = parts[1]
+            stream_type = parts[2]
+
+            is_group = stream_type == "group"
+
+            import hashlib
+
+            components = [platform, str(id_str)] if is_group else [platform, str(id_str), "private"]
+            key = "_".join(components)
+            return hashlib.md5(key.encode()).hexdigest()
+        except (ValueError, IndexError):
+            return None
+
+    def get_talk_value_for_chat(self, chat_stream_id: Optional[str] = None) -> float:
+        """
+        根据聊天流ID获取思考频率；若未配置则返回全局默认值
+        """
+        if self.talk_value_list:
+            if chat_stream_id:
+                specific_talk_value = self._get_stream_specific_talk_value(chat_stream_id)
+                if specific_talk_value is not None:
+                    return specific_talk_value
+
+            global_talk_value = self._get_global_talk_value()
+            if global_talk_value is not None:
+                return global_talk_value
+
+        return self.talk_value
+
+    def _get_stream_specific_talk_value(self, chat_stream_id: str) -> Optional[float]:
+        """获取特定聊天流的思考频率"""
+        for config_item in self.talk_value_list:
+            if not config_item or len(config_item) < 2:
+                continue
+
+            stream_config_str = config_item[0]
+            if stream_config_str == "":
+                continue
+
+            config_chat_id = self._parse_stream_config_to_chat_id(stream_config_str)
+            if config_chat_id is None or config_chat_id != chat_stream_id:
+                continue
+
+            try:
+                return float(config_item[1])
+            except (ValueError, IndexError):
+                continue
+
+        return None
+
+    def _get_global_talk_value(self) -> Optional[float]:
+        """获取全局配置的思考频率"""
+        for config_item in self.talk_value_list:
+            if not config_item or len(config_item) < 2:
+                continue
+
+            if config_item[0] == "":
+                try:
+                    return float(config_item[1])
+                except (ValueError, IndexError):
+                    continue
+
+        return None
 
 
 @dataclass
@@ -519,11 +615,11 @@ class ExperimentalConfig(ConfigBase):
 
 
 @dataclass
-class MaimMessageConfig(ConfigBase):
-    """maim_message配置类"""
+class NcnkMessageConfig(ConfigBase):
+    """ncnk_message配置类"""
 
     use_custom: bool = False
-    """是否使用自定义的maim_message配置"""
+    """是否使用自定义的ncnk_message配置"""
 
     host: str = "127.0.0.1"
     """主机地址"""

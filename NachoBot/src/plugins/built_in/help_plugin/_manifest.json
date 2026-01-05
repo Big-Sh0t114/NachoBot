@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "description": "提供 #help 指令，列出当前可用的命令及其作用。",
   "author": {
-    "name": "Big_Sh0t"
+    "name": "BigSh0t"
   },
-  "license": "",
+ "license": "GPL-v3.0-or-later",
   "host_application": {
     "min_version": "0.8.0"
   },

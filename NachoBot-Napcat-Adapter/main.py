@@ -63,7 +63,7 @@ async def message_process():
 
 
 async def main():
-    message_send_instance.maibot_router = router
+    message_send_instance.nachobot_router = router
     _ = await asyncio.gather(napcat_server(), mmc_start_com(), message_process(), check_timeout_response())
 
 

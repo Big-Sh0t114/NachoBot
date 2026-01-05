@@ -1,7 +1,7 @@
 import json
 import uuid
 import websockets as Server
-from maim_message import MessageBase
+from ncnk_message import MessageBase
 
 from src.response_pool import get_response
 from src.logger import logger

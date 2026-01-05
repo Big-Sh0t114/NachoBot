@@ -185,9 +185,9 @@ title Launch Process
 chcp 65001 >nul
 
 REM ===== 路径/端口 =====
-set "BOT_DIR=C:\Users\BigSh0t\Nacho-with-u\NachoBot"
-set "BOT_MAIN=bot.py"
-set "MAIBOT_PORT=8000"
+set "NACHOBOT_DIR=C:\Users\BigSh0t\Nacho-with-u\NachoBot"
+set "NACHOBOT_MAIN=bot.py"
+set "NACHOBOT_PORT=8000"
 
 set "SHIM_DIR=C:\Users\BigSh0t\Nacho-with-u\NachoBot"
 set "SHIM_EXE=shim.exe"
@@ -209,20 +209,20 @@ REM =====================
 REM ---- 0) 预清理（防端口占用） ----
 echo [CLEAN] 清理可能残留的进程…
 taskkill /im shim.exe /f >nul 2>&1
-for /f "tokens=2" %%i in ('tasklist /v /fi "windowtitle eq MaiBot-Napcat" ^| find /i "python.exe"') do taskkill /PID %%i /f >nul 2>&1
+for /f "tokens=2" %%i in ('tasklist /v /fi "windowtitle eq NachoBot-Napcat" ^| find /i "python.exe"') do taskkill /PID %%i /f >nul 2>&1
 for /f "tokens=2 delims=," %%p in ('tasklist /fo csv /nh ^| findstr /i "launcher-user.bat"') do taskkill /PID %%p /f >nul 2>&1
 
-REM ---- 1) 启动 MaiBot（新窗口）并等待 8000 ----
-if not exist "%BOT_DIR%\%BOT_MAIN%" (
-  echo  未找到 NachoBot 主程序： "%BOT_DIR%\%BOT_MAIN%"
+REM ---- 1) 启动 NachoBot（新窗口）并等待 8000 ----
+if not exist "%NACHOBOT_DIR%\%NACHOBOT_MAIN%" (
+  echo  未找到 NachoBot 主程序： "%NACHOBOT_DIR%\%NACHOBOT_MAIN%"
 ) else (
   echo.
-  echo ▶ 启动 NachoBot 窗口（HOST=127.0.0.1 PORT=%MAIBOT_PORT%）…
-  start "NachoBot" /D "%BOT_DIR%" cmd /k "set HOST=127.0.0.1 && set PORT=%MAIBOT_PORT% && %PYTHON_CMD% %BOT_MAIN%"
-  echo [WAIT] 等待 NachoBot 端口 %MAIBOT_PORT% 就绪（最多 %MAX_WAIT% 秒）…
+  echo ▶ 启动 NachoBot 窗口（HOST=127.0.0.1 PORT=%NACHOBOT_PORT%）…
+  start "NachoBot" /D "%NACHOBOT_DIR%" cmd /k "set HOST=127.0.0.1 && set PORT=%NACHOBOT_PORT% && %PYTHON_CMD% %NACHOBOT_MAIN%"
+  echo [WAIT] 等待 NachoBot 端口 %NACHOBOT_PORT% 就绪（最多 %MAX_WAIT% 秒）…
   powershell -NoLogo -NoProfile -Command ^
-    "for($i=0;$i -lt %MAX_WAIT%;$i++){if((Test-NetConnection 127.0.0.1 -Port %MAIBOT_PORT%).TcpTestSucceeded){exit 0}; Start-Sleep -s 1}; exit 1"
-  if errorlevel 1 ( echo NachoBot 端口 %MAIBOT_PORT% 未就绪，请切到“NachoBot”窗口查错（脚本继续）。 ) else ( echo  NachoBot 就绪。 )
+    "for($i=0;$i -lt %MAX_WAIT%;$i++){if((Test-NetConnection 127.0.0.1 -Port %NACHOBOT_PORT%).TcpTestSucceeded){exit 0}; Start-Sleep -s 1}; exit 1"
+  if errorlevel 1 ( echo NachoBot 端口 %NACHOBOT_PORT% 未就绪，请切到“NachoBot”窗口查错（脚本继续）。 ) else ( echo  NachoBot 就绪。 )
   timeout /t %ALIGN_WAIT% /nobreak >nul
 )
 

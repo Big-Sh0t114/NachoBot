@@ -21,10 +21,20 @@ class InjectionManager:
         self._active: Dict[str, Dict[str, InjectionDecision]] = {}
         self._cooldowns: Dict[str, Dict[str, int]] = {}
         self._mus_random_count: int = 3
-        self._mus_lib_path: Path = (
-            Path(__file__).resolve().parents[4] / "plugins" / "mus_library" / "music_library.json"
-        )
+        self._mus_lib_path: Path = self._resolve_mus_lib_path()
         self._load_from_config()
+
+    def _resolve_mus_lib_path(self) -> Path:
+        """优先使用内置 mus_library 路径，若不存在则回退旧的外置路径。"""
+        root = Path(__file__).resolve().parents[4]
+        built_in = root / "src" / "plugins" / "built_in" / "mus_library" / "music_library.json"
+        external = root / "plugins" / "mus_library" / "music_library.json"
+
+        if built_in.exists():
+            return built_in
+        if external.exists():
+            return external
+        return built_in
 
     def _load_from_config(self):
         cfg = getattr(global_config, "injections", None)
@@ -204,4 +214,3 @@ class InjectionManager:
 
 
 injection_manager = InjectionManager()
-

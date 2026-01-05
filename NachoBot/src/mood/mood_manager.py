@@ -92,12 +92,13 @@ class ChatMood:
             f"{self.log_prefix} 更新情绪状态，更新概率: {update_probability:.2f}"
         )
 
+        context_size = global_config.chat.get_max_context_size(is_group_chat=bool(self.chat_stream.group_info))
         message_time: float = message.message_info.time  # type: ignore
         message_list_before_now = get_raw_msg_by_timestamp_with_chat_inclusive(
             chat_id=self.chat_id,
             timestamp_start=self.last_change_time,
             timestamp_end=message_time,
-            limit=int(global_config.chat.max_context_size / 3),
+            limit=int(context_size / 3),
             limit_mode="last",
         )
 

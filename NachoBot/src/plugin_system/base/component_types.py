@@ -3,7 +3,7 @@ import warnings
 from enum import Enum
 from typing import Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass, field
-from maim_message import Seg
+from ncnk_message import Seg
 
 from src.llm_models.payload_content.tool_option import ToolParamType as ToolParamType
 from src.llm_models.payload_content.tool_option import ToolCall as ToolCall
@@ -253,8 +253,8 @@ class ModifyFlag:
 
 
 @dataclass
-class MaiMessages:
-    """MaiM插件消息"""
+class NachoMessages:
+    """NachoBot插件消息"""
 
     message_segments: List[Seg] = field(default_factory=list)
     """消息段列表，支持多段消息"""
