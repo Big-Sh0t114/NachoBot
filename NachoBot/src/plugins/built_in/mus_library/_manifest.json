@@ -1,0 +1,30 @@
+{
+  "manifest_version": 1,
+  "name": "Mus Library (内置点歌播放器)",
+  "version": "0.1.0",
+  "description": "内置音乐库点歌并以语音播放，支持随机播放。",
+  "author": { "name": "Big_Sh0t" },
+  "keywords": ["music", "audio", "silk", "onebot", "command"],
+  "categories": ["Audio", "Entertainment"],
+  "plugin_info": {
+    "is_built_in": true,
+    "plugin_type": "audio_player",
+    "components": [
+      {
+        "type": "command",
+        "name": "play_music_command",
+        "description": "点歌/播放/来首 + 关键词，匹配内置曲库语音播放"
+      },
+      {
+        "type": "command",
+        "name": "mus_rand_command",
+        "description": "随机播放曲库中的一首歌曲 (#mus_rand)"
+      }
+    ],
+    "features": [
+      "内置曲库点歌与随机播放",
+      "OneBot 语音/文件发送",
+      "可选 SILK 编码与磁盘缓存"
+    ]
+  }
+}

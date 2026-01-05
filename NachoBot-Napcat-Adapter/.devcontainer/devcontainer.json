@@ -1,5 +1,5 @@
 {
-	"name": "MaiBot-Napcat-Adapter-DevContainer",
+	"name": "NachoBot-Napcat-Adapter-DevContainer",
 	"image": "mcr.microsoft.com/devcontainers/python:1-3.12-bullseye",
 	"features": {
 		"ghcr.io/rocker-org/devcontainer-features/apt-packages:1": {

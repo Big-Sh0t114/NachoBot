@@ -1,4 +1,4 @@
-from maim_message import Seg, MessageBase
+from ncnk_message import Seg, MessageBase
 from typing import List, Dict
 
 from src.logger import logger

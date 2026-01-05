@@ -1,5 +1,5 @@
 from typing import Any, Dict
-from maim_message import (
+from ncnk_message import (
     UserInfo,
     GroupInfo,
     Seg,
@@ -19,7 +19,7 @@ class SendHandler:
     async def handle_message(self, raw_message_base_dict: dict) -> None:
         raw_message_base: MessageBase = MessageBase.from_dict(raw_message_base_dict)
         message_segment: Seg = raw_message_base.message_segment
-        logger.info("接收到来自MaiBot的消息，处理中")
+        logger.info("接收到来自NachoBot的消息，处理中")
         if message_segment.type == "command":
             return await self.send_command(raw_message_base)
         else:

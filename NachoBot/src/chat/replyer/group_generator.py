@@ -454,6 +454,7 @@ class DefaultReplyer:
         """
         core_dialogue_list: List[DatabaseMessages] = []
         bot_id = str(global_config.bot.qq_account)
+        context_size = global_config.chat.get_max_context_size(is_group_chat=True)
 
         # 过滤消息：分离bot和目标用户的对话 vs 其他用户的对话
         for msg in message_list_before_now:
@@ -482,7 +483,7 @@ class DefaultReplyer:
                 core_dialogue_prompt = ""
             else:
                 core_dialogue_list = core_dialogue_list[
-                    -int(global_config.chat.max_context_size * 0.6) :
+                    -int(context_size * 0.6) :
                 ]  # 限制消息数量
 
                 core_dialogue_prompt_str = build_readable_messages(
@@ -503,7 +504,7 @@ class DefaultReplyer:
         # 构建背景对话 prompt
         all_dialogue_prompt = ""
         if message_list_before_now:
-            latest_25_msgs = message_list_before_now[-int(global_config.chat.max_context_size) :]
+            latest_25_msgs = message_list_before_now[-int(context_size) :]
             all_dialogue_prompt_str = build_readable_messages(
                 latest_25_msgs,
                 replace_bot_name=True,
@@ -636,6 +637,7 @@ class DefaultReplyer:
         chat_stream = self.chat_stream
         chat_id = chat_stream.stream_id
         is_group_chat = bool(chat_stream.group_info)
+        context_size = global_config.chat.get_max_context_size(is_group_chat=is_group_chat)
         platform = chat_stream.platform
 
         user_id = "用户ID"
@@ -664,13 +666,13 @@ class DefaultReplyer:
         message_list_before_now_long = get_raw_msg_before_timestamp_with_chat(
             chat_id=chat_id,
             timestamp=time.time(),
-            limit=global_config.chat.max_context_size * 1,
+            limit=context_size * 1,
         )
 
         message_list_before_short = get_raw_msg_before_timestamp_with_chat(
             chat_id=chat_id,
             timestamp=time.time(),
-            limit=int(global_config.chat.max_context_size * 0.33),
+            limit=int(context_size * 0.33),
         )
 
         person_list_short: List[Person] = []
@@ -874,6 +876,7 @@ class DefaultReplyer:
         chat_stream = self.chat_stream
         chat_id = chat_stream.stream_id
         is_group_chat = bool(chat_stream.group_info)
+        context_size = global_config.chat.get_max_context_size(is_group_chat=is_group_chat)
         injection_detected = False
 
         sender, target = self._parse_reply_target(reply_to)
@@ -892,7 +895,7 @@ class DefaultReplyer:
         message_list_before_now_half = get_raw_msg_before_timestamp_with_chat(
             chat_id=chat_id,
             timestamp=time.time(),
-            limit=min(int(global_config.chat.max_context_size * 0.33), 15),
+            limit=min(int(context_size * 0.33), 15),
         )
         chat_talking_prompt_half = build_readable_messages(
             message_list_before_now_half,

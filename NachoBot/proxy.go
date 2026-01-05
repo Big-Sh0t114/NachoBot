@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"bufio"
 	"encoding/json"
 	"io"
 	"log"
@@ -15,7 +16,7 @@ import (
 
 // 上游 QHAI 配置（可通过环境变量覆盖）
 var (
-	qhaiBase = envOr("QHAI_BASE", "https://api.qhaigc.net/v1")
+	qhaiBase = envOr("QHAI_BASE", "")
 	qhaiKey  = envOr("QHAI_KEY", "")
 )
 
@@ -40,11 +41,89 @@ func backoff(attempt int) time.Duration {
 }
 
 func main() {
+	// 如果未设置环境变量，尝试从 config/model_config.toml 中读取 Qhaigc 提供商配置
+	if qhaiBase == "" || qhaiKey == "" {
+		if base, key, err := loadQhaigcFromModelConfig("config/model_config.toml"); err == nil {
+			if qhaiBase == "" && base != "" {
+				qhaiBase = base
+			}
+			if qhaiKey == "" && key != "" {
+				qhaiKey = key
+			}
+		} else {
+			log.Printf("warning: failed to load Qhaigc config from model_config.toml: %v", err)
+		}
+	}
+	if qhaiBase == "" {
+		qhaiBase = "https://api.qhaigc.net/v1"
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", handleChat)
 	srv := &http.Server{Addr: ":11435", Handler: mux}
 	log.Println("Shim listening on http://127.0.0.1:11435/v1/chat/completions")
 	log.Fatal(srv.ListenAndServe())
+}
+
+// 从 model_config.toml 中读取名称为 Qhaigc 的 api_provider 的 base_url / api_key
+func loadQhaigcFromModelConfig(path string) (baseURL, apiKey string, err error) {
+	f, e := os.Open(path)
+	if e != nil {
+		return "", "", e
+	}
+	defer f.Close()
+
+	sc := bufio.NewScanner(f)
+	inProvider := false
+	currentName, currentBase, currentKey := "", "", ""
+
+	flush := func() {
+		if currentName == "Qhaigc" {
+			baseURL = currentBase
+			apiKey = currentKey
+		}
+		currentName, currentBase, currentKey = "", "", ""
+	}
+
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "[[") {
+			// 进入下一个 provider，检查上一段
+			if currentName != "" {
+				flush()
+				if baseURL != "" || apiKey != "" {
+					return
+				}
+			}
+			inProvider = line == "[[api_providers]]"
+			continue
+		}
+		if !inProvider {
+			continue
+		}
+		kv := strings.SplitN(line, "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(kv[0])
+		val := strings.Trim(strings.TrimSpace(kv[1]), "\"")
+		switch key {
+		case "name":
+			currentName = val
+		case "base_url":
+			currentBase = val
+		case "api_key":
+			currentKey = val
+		}
+	}
+	// 检查最后一段
+	if currentName != "" && baseURL == "" && apiKey == "" {
+		flush()
+	}
+	return
 }
 
 func handleChat(w http.ResponseWriter, r *http.Request) {

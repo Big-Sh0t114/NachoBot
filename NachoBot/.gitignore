@@ -6,19 +6,19 @@ log/
 logs/
 out/
 tool_call_benchmark.py
-run_maibot_core.bat
+run_nachobot_core.bat
 run_voice.bat
 run_napcat_adapter.bat
 run_ad.bat
 s4u.s4u
 llm_tool_benchmark_results.json
-MaiBot-Napcat-Adapter-main
-MaiBot-Napcat-Adapter
+NachoBot-Napcat-Adapter-main
+NachoBot-Napcat-Adapter
 /test
 /log_debug
 /src/test
-nonebot-maibot-adapter/
-MaiMBot-LPMM
+nonebot-nachobot-adapter/
+NachoBot-LPMM
 *.zip
 run.bat
 log_debug/
@@ -314,7 +314,7 @@ $RECYCLE.BIN/
 *.lnk
 src/chat/focus_chat/working_memory/test/test1.txt
 src/chat/focus_chat/working_memory/test/test4.txt
-run_maiserver.bat
+run_ncnserver.bat
 src/plugins/test_plugin_pic/actions/pic_action_config.toml
 run_pet.bat
 
@@ -326,4 +326,5 @@ run_pet.bat
 config.toml
 
 interested_rates.txt
-MaiBot.code-workspace
+NachoBot.code-workspace
+shim.exe

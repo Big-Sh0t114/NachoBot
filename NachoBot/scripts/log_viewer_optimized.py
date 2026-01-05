@@ -459,7 +459,7 @@ class AsyncLogLoader:
 class LogViewer:
     def __init__(self, root):
         self.root = root
-        self.root.title("MaiBot日志查看器 (优化版)")
+        self.root.title("NachoBot日志查看器 (优化版)")
         self.root.geometry("1200x800")
 
         # 加载配置
@@ -508,7 +508,7 @@ class LogViewer:
             "heartflow": "心流",
             "local_storage": "本地存储",
             "lpmm": "LPMM",
-            "nachobot_statistic": "MaiBot统计",
+            "nachobot_statistic": "NachoBot统计",
             "main_message": "主消息",
             "main": "主程序",
             "memory": "内存",

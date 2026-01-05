@@ -413,7 +413,7 @@ MODULE_COLORS = {
     "base_action": "\033[38;5;250m",  # 浅灰色
     # 数据库和消息
     "database_model": "\033[38;5;94m",  # 橙褐色
-    "maim_message": "\033[38;5;140m",  # 紫褐色
+    "ncnk_message": "\033[38;5;140m",  # 紫褐色
     # 日志系统
     "logger": "\033[38;5;8m",  # 深灰色
     "confirm": "\033[1;93m",  # 黄色+粗体
@@ -462,10 +462,10 @@ RESET_COLOR = "\033[0m"
 def convert_pathname_to_module(logger, method_name, event_dict):
     # sourcery skip: extract-method, use-string-remove-affix
     """将 pathname 转换为模块风格的路径"""
-    if "logger_name" in event_dict and event_dict["logger_name"] == "maim_message":
+    if "logger_name" in event_dict and event_dict["logger_name"] == "ncnk_message":
         if "pathname" in event_dict:
             del event_dict["pathname"]
-            event_dict["module"] = "maim_message"
+            event_dict["module"] = "ncnk_message"
         return event_dict
     if "pathname" in event_dict:
         pathname = event_dict["pathname"]

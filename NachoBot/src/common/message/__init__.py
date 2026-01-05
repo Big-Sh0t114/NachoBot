@@ -1,4 +1,4 @@
-"""Maim Message - A message handling library"""
+"""Ncnk Message - A message handling library"""
 
 __version__ = "0.1.0"
 

@@ -2,7 +2,7 @@ import asyncio
 import traceback
 
 from rich.traceback import install
-from maim_message import Seg
+from ncnk_message import Seg
 
 from src.common.message.api import get_global_api
 from src.common.logger import get_logger

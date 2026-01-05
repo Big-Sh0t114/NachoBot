@@ -6,7 +6,6 @@ aiohttp==3.12.14
     # via
     #   -r requirements.txt
     #   aiohttp-cors
-    #   maim-message
 aiohttp-cors==0.8.1
     # via -r requirements.txt
 aiosignal==1.4.0
@@ -42,7 +41,6 @@ colorama==0.4.6
     #   click
     #   tqdm
 cryptography==45.0.5
-    # via maim-message
 distro==1.9.0
     # via openai
 dnspython==2.7.0
@@ -54,7 +52,6 @@ faiss-cpu==1.11.0
 fastapi==0.116.0
     # via
     #   -r requirements.txt
-    #   maim-message
     #   strawberry-graphql
 frozenlist==1.7.0
     # via
@@ -90,7 +87,6 @@ json-repair==0.47.6
     # via -r requirements.txt
 jsonlines==4.0.0
     # via -r requirements.txt
-maim-message==0.5.1
     # via -r requirements.txt
 markdown-it-py==3.0.0
     # via rich
@@ -140,7 +136,6 @@ pydantic==2.11.7
     #   -r requirements.txt
     #   fastapi
     #   google-genai
-    #   maim-message
     #   openai
 pydantic-core==2.33.2
     # via pydantic
@@ -222,11 +217,9 @@ urllib3==2.5.0
 uvicorn==0.35.0
     # via
     #   -r requirements.txt
-    #   maim-message
 websockets==15.0.1
     # via
     #   -r requirements.txt
     #   google-genai
-    #   maim-message
 yarl==1.20.1
     # via aiohttp

@@ -129,12 +129,13 @@ class PromptBuilder:
 
     async def build_relation_info(self, chat_stream) -> str:
         is_group_chat = bool(chat_stream.group_info)
+        context_size = global_config.chat.get_max_context_size(is_group_chat=is_group_chat)
         who_chat_in_group = []
         if is_group_chat:
             who_chat_in_group = get_recent_group_speaker(
                 chat_stream.stream_id,
                 (chat_stream.user_info.platform, chat_stream.user_info.user_id) if chat_stream.user_info else None,
-                limit=global_config.chat.max_context_size,
+                limit=context_size,
             )
         elif chat_stream.user_info:
             who_chat_in_group.append(

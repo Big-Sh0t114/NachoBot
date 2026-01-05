@@ -3,7 +3,7 @@ import traceback
 import time
 import random
 from typing import Optional, Dict, Tuple, List  # 导入类型提示
-from maim_message import UserInfo, Seg
+from ncnk_message import UserInfo, Seg
 from src.common.logger import get_logger
 from src.chat.message_receive.chat_stream import ChatStream, get_chat_manager
 from .s4u_stream_generator import S4UStreamGenerator

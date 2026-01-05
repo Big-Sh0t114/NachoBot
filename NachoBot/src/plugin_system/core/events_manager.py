@@ -5,7 +5,7 @@ from typing import List, Dict, Optional, Type, Tuple, TYPE_CHECKING
 from src.chat.message_receive.message import MessageRecv, MessageSending
 from src.chat.message_receive.chat_stream import get_chat_manager
 from src.common.logger import get_logger
-from src.plugin_system.base.component_types import EventType, EventHandlerInfo, MaiMessages, CustomEventHandlerResult
+from src.plugin_system.base.component_types import EventType, EventHandlerInfo, NachoMessages, CustomEventHandlerResult
 from src.plugin_system.base.base_events_handler import BaseEventHandler
 from .global_announcement_manager import global_announcement_manager
 
@@ -71,7 +71,7 @@ class EventsManager:
         llm_response: Optional["LLMGenerationDataModel"] = None,
         stream_id: Optional[str] = None,
         action_usage: Optional[List[str]] = None,
-    ) -> Tuple[bool, Optional[MaiMessages]]:
+    ) -> Tuple[bool, Optional[NachoMessages]]:
         """
         处理所有事件，根据事件类型分发给订阅的处理器。
         """
@@ -92,7 +92,7 @@ class EventsManager:
             return True, None
 
         current_stream_id = transformed_message.stream_id if transformed_message else None
-        modified_message: Optional[MaiMessages] = None
+        modified_message: Optional[NachoMessages] = None
         for handler in handlers:
             # 3. 前置检查和配置加载
             if (
@@ -209,10 +209,10 @@ class EventsManager:
         message: MessageRecv | MessageSending,
         llm_prompt: Optional[str] = None,
         llm_response: Optional["LLMGenerationDataModel"] = None,
-    ) -> MaiMessages:
+    ) -> NachoMessages:
         """转换事件消息格式"""
         # 直接赋值部分内容
-        transformed_message = MaiMessages(
+        transformed_message = NachoMessages(
             llm_prompt=llm_prompt,
             llm_response_content=llm_response.content if llm_response else None,
             llm_response_reasoning=llm_response.reasoning if llm_response else None,
@@ -262,7 +262,7 @@ class EventsManager:
 
     def _build_message_from_stream(
         self, stream_id: str, llm_prompt: Optional[str] = None, llm_response: Optional["LLMGenerationDataModel"] = None
-    ) -> MaiMessages:
+    ) -> NachoMessages:
         """从流ID构建消息"""
         chat_stream = get_chat_manager().get_stream(stream_id)
         assert chat_stream, f"未找到流ID为 {stream_id} 的聊天流"
@@ -275,11 +275,11 @@ class EventsManager:
         llm_prompt: Optional[str] = None,
         llm_response: Optional["LLMGenerationDataModel"] = None,
         action_usage: Optional[List[str]] = None,
-    ) -> MaiMessages:
+    ) -> NachoMessages:
         """没有message对象时进行转换"""
         chat_stream = get_chat_manager().get_stream(stream_id)
         assert chat_stream, f"未找到流ID为 {stream_id} 的聊天流"
-        return MaiMessages(
+        return NachoMessages(
             stream_id=stream_id,
             llm_prompt=llm_prompt,
             llm_response_content=(llm_response.content if llm_response else None),
@@ -300,7 +300,7 @@ class EventsManager:
         llm_response: Optional["LLMGenerationDataModel"] = None,
         stream_id: Optional[str] = None,
         action_usage: Optional[List[str]] = None,
-    ) -> Optional[MaiMessages]:
+    ) -> Optional[NachoMessages]:
         """根据事件类型和输入，准备和转换消息对象。"""
         if message:
             return self._transform_event_message(message, llm_prompt, llm_response)
@@ -315,7 +315,7 @@ class EventsManager:
         return None  # ON_START, ON_STOP事件没有消息体
 
     def _dispatch_handler_task(
-        self, handler: BaseEventHandler, event_type: EventType | str, message: Optional[MaiMessages] = None
+        self, handler: BaseEventHandler, event_type: EventType | str, message: Optional[NachoMessages] = None
     ):
         """分发一个非阻塞（异步）的事件处理任务。"""
         if event_type == EventType.UNKNOWN:
@@ -332,8 +332,8 @@ class EventsManager:
             logger.error(f"创建事件处理器任务 {handler.handler_name} 时发生异常: {e}", exc_info=True)
 
     async def _dispatch_intercepting_handler_task(
-        self, handler: BaseEventHandler, event_type: EventType | str, message: Optional[MaiMessages] = None
-    ) -> Tuple[bool, Optional[MaiMessages]]:
+        self, handler: BaseEventHandler, event_type: EventType | str, message: Optional[NachoMessages] = None
+    ) -> Tuple[bool, Optional[NachoMessages]]:
         """分发并等待一个阻塞（同步）的事件处理器，返回是否应继续处理。"""
         if event_type == EventType.UNKNOWN:
             raise ValueError("未知事件类型")
@@ -361,7 +361,7 @@ class EventsManager:
 
     def _task_done_callback(
         self,
-        task: asyncio.Task[Tuple[bool, bool, str | None, CustomEventHandlerResult | None, MaiMessages | None]],
+        task: asyncio.Task[Tuple[bool, bool, str | None, CustomEventHandlerResult | None, NachoMessages | None]],
         event_type: EventType | str,
     ):
         """任务完成回调"""

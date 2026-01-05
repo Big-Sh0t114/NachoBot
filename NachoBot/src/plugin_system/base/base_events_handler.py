@@ -4,7 +4,7 @@ from typing import Tuple, Optional, Dict, List, TYPE_CHECKING
 from src.common.logger import get_logger
 from src.common.data_models.message_data_model import ReplyContentType, ReplySetModel, ReplyContent, ForwardNode
 from src.plugin_system.apis import send_api
-from .component_types import MaiMessages, EventType, EventHandlerInfo, ComponentType, CustomEventHandlerResult
+from .component_types import NachoMessages, EventType, EventHandlerInfo, ComponentType, CustomEventHandlerResult
 
 logger = get_logger("base_event_handler")
 
@@ -40,13 +40,13 @@ class BaseEventHandler(ABC):
 
     @abstractmethod
     async def execute(
-        self, message: MaiMessages | None
-    ) -> Tuple[bool, bool, Optional[str], Optional[CustomEventHandlerResult], Optional[MaiMessages]]:
+        self, message: NachoMessages | None
+    ) -> Tuple[bool, bool, Optional[str], Optional[CustomEventHandlerResult], Optional[NachoMessages]]:
         """执行事件处理的抽象方法，子类必须实现
         Args:
-            message (MaiMessages | None): 事件消息对象，当你注册的事件为ON_START和ON_STOP时message为None
+            message (NachoMessages | None): 事件消息对象，当你注册的事件为ON_START和ON_STOP时message为None
         Returns:
-            Tuple[bool, bool, Optional[str], Optional[CustomEventHandlerResult], Optional[MaiMessages]]: (是否执行成功, 是否需要继续处理, 可选的返回消息, 可选的自定义结果，可选的修改后消息)
+            Tuple[bool, bool, Optional[str], Optional[CustomEventHandlerResult], Optional[NachoMessages]]: (是否执行成功, 是否需要继续处理, 可选的返回消息, 可选的自定义结果，可选的修改后消息)
         """
         raise NotImplementedError("子类必须实现 execute 方法")
 

@@ -61,7 +61,7 @@ class BaseTool(ABC):
     @abstractmethod
     async def execute(self, function_args: dict[str, Any]) -> dict[str, Any]:
         """执行工具函数(供llm调用)
-           通过该方法，maicore会通过llm的tool call来调用工具
+           通过该方法，nachocore会通过llm的tool call来调用工具
            传入的是json格式的参数，符合parameters定义的格式
 
         Args:

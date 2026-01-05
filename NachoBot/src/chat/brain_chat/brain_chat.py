@@ -268,11 +268,12 @@ class BrainChatting:
 
             # 执行planner
             is_group_chat, chat_target_info, _ = self.action_planner.get_necessary_info()
+            context_size = global_config.chat.get_max_context_size(is_group_chat=is_group_chat)
 
             message_list_before_now = get_raw_msg_before_timestamp_with_chat(
                 chat_id=self.stream_id,
                 timestamp=time.time(),
-                limit=int(global_config.chat.max_context_size * 0.6),
+                limit=int(context_size * 0.6),
             )
             promise_snippets = promise_cache_manager.collect_snippets_for_messages(
                 self.stream_id, message_list_before_now

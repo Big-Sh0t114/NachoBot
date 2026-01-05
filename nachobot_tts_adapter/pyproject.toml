@@ -1,7 +1,7 @@
 [project]
-name = "MaiBotTTSAdapter"
+name = "NachoBotTTSAdapter"
 version = "0.3.1"
-description = "A TTS adapter for MaiBot"
+description = "A TTS adapter for NachoBot"
 
 [tool.ruff]
 

@@ -1,7 +1,7 @@
 [project]
-name = "MaiBot"
+name = "NachoBot"
 version = "0.8.1"
-description = "MaiCore 是一个基于大语言模型的可交互智能体"
+description = "NachoCore 是一个基于大语言模型的可交互智能体"
 requires-python = ">=3.10"
 dependencies = [
     "aiohttp>=3.12.14",
@@ -17,7 +17,7 @@ dependencies = [
     "jieba>=0.42.1",
     "json-repair>=0.47.6",
     "jsonlines>=4.0.0",
-    "maim-message>=0",
+    "ncnk-message>=0",
     "matplotlib>=3.10.3",
     "networkx>=3.4.2",
     "numpy>=2.2.6",

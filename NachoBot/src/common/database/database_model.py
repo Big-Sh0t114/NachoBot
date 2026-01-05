@@ -7,7 +7,7 @@ logger = get_logger("database_model")
 # 请在此处定义您的数据库实例。
 # 您需要取消注释并配置适合您的数据库的部分。
 # 例如，对于 SQLite:
-# db = SqliteDatabase('MaiBot.db')
+# db = SqliteDatabase('NachoBot.db')
 #
 # 对于 PostgreSQL:
 # db = PostgresqlDatabase('your_db_name', user='your_user', password='your_password',

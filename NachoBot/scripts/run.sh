@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# MaiCore & NapCat Adapter一键安装脚本 by Cookie_987
+# NachoCore & NapCat Adapter一键安装脚本 by Cookie_987
 # 适用于Arch/Ubuntu 24.10/Debian 12/CentOS 9
 # 请小心使用任何一键脚本！
 
@@ -26,12 +26,12 @@ declare -A REQUIRED_PACKAGES=(
 )
 
 # 默认项目目录
-DEFAULT_INSTALL_DIR="/opt/maicore"
+DEFAULT_INSTALL_DIR="/opt/NachoCore"
 
 # 服务名称
-SERVICE_NAME="maicore"
-SERVICE_NAME_WEB="maicore-web"
-SERVICE_NAME_NBADAPTER="maibot-napcat-adapter"
+SERVICE_NAME="NachoCore"
+SERVICE_NAME_WEB="NachoCore-web"
+SERVICE_NAME_NBADAPTER="nachobot-napcat-adapter"
 
 IS_INSTALL_NAPCAT=false
 IS_INSTALL_DEPENDENCIES=false
@@ -43,8 +43,8 @@ check_installed() {
 
 # 加载安装信息
 load_install_info() {
-    if [[ -f /etc/maicore_install.conf ]]; then
-        source /etc/maicore_install.conf
+    if [[ -f /etc/NachoCore_install.conf ]]; then
+        source /etc/NachoCore_install.conf
     else
         INSTALL_DIR="$DEFAULT_INSTALL_DIR"
         BRANCH="refactor"
@@ -54,14 +54,14 @@ load_install_info() {
 # 显示管理菜单
 show_menu() {
     while true; do
-        choice=$(whiptail --title "MaiCore管理菜单" --menu "请选择要执行的操作：" 15 60 7 \
-            "1" "启动MaiCore" \
-            "2" "停止MaiCore" \
-            "3" "重启MaiCore" \
+        choice=$(whiptail --title "NachoCore管理菜单" --menu "请选择要执行的操作：" 15 60 7 \
+            "1" "启动NachoCore" \
+            "2" "停止NachoCore" \
+            "3" "重启NachoCore" \
             "4" "启动NapCat Adapter" \
             "5" "停止NapCat Adapter" \
             "6" "重启NapCat Adapter" \
-            "7" "拉取最新MaiCore仓库" \
+            "7" "拉取最新NachoCore仓库" \
             "8" "切换分支" \
             "9" "退出" 3>&1 1>&2 2>&3)
 
@@ -70,15 +70,15 @@ show_menu() {
         case "$choice" in
             1)
                 systemctl start ${SERVICE_NAME}
-                whiptail --msgbox "✅MaiCore已启动" 10 60
+                whiptail --msgbox "✅NachoCore已启动" 10 60
                 ;;
             2)
                 systemctl stop ${SERVICE_NAME}
-                whiptail --msgbox "🛑MaiCore已停止" 10 60
+                whiptail --msgbox "🛑NachoCore已停止" 10 60
                 ;;
             3)
                 systemctl restart ${SERVICE_NAME}
-                whiptail --msgbox "🔄MaiCore已重启" 10 60
+                whiptail --msgbox "🔄NachoCore已重启" 10 60
                 ;;
             4)
                 systemctl start ${SERVICE_NAME_NBADAPTER}
@@ -112,7 +112,7 @@ show_menu() {
 update_dependencies() {
     whiptail --title "⚠" --msgbox "更新后请阅读教程" 10 60
     systemctl stop ${SERVICE_NAME}
-    cd "${INSTALL_DIR}/MaiBot" || {
+    cd "${INSTALL_DIR}/NachoBot" || {
         whiptail --msgbox "🚫 无法进入安装目录！" 10 60
         return 1
     }
@@ -138,7 +138,7 @@ switch_branch() {
         return 1
     }
 
-    cd "${INSTALL_DIR}/MaiBot" || {
+    cd "${INSTALL_DIR}/NachoBot" || {
         whiptail --msgbox "🚫 无法进入安装目录！" 10 60
         return 1
     }
@@ -162,7 +162,7 @@ switch_branch() {
     pip install -r requirements.txt
     deactivate
 
-    sed -i "s/^BRANCH=.*/BRANCH=${new_branch}/" /etc/maicore_install.conf
+    sed -i "s/^BRANCH=.*/BRANCH=${new_branch}/" /etc/NachoCore_install.conf
     BRANCH="${new_branch}"
     check_eula
     whiptail --msgbox "✅ 已停止服务并切换到分支 ${new_branch} ！" 10 60
@@ -170,10 +170,10 @@ switch_branch() {
 
 check_eula() {
     # 首先计算当前EULA的MD5值
-    current_md5=$(md5sum "${INSTALL_DIR}/MaiBot/EULA.md" | awk '{print $1}')
+    current_md5=$(md5sum "${INSTALL_DIR}/NachoBot/EULA.md" | awk '{print $1}')
 
     # 首先计算当前隐私条款文件的哈希值
-    current_md5_privacy=$(md5sum "${INSTALL_DIR}/MaiBot/PRIVACY.md" | awk '{print $1}')
+    current_md5_privacy=$(md5sum "${INSTALL_DIR}/NachoBot/PRIVACY.md" | awk '{print $1}')
 
     # 如果当前的md5值为空，则直接返回
     if [[ -z $current_md5 || -z $current_md5_privacy ]]; then
@@ -181,27 +181,27 @@ check_eula() {
     fi
 
     # 检查eula.confirmed文件是否存在
-    if [[ -f ${INSTALL_DIR}/MaiBot/eula.confirmed ]]; then
+    if [[ -f ${INSTALL_DIR}/NachoBot/eula.confirmed ]]; then
         # 如果存在则检查其中包含的md5与current_md5是否一致
-        confirmed_md5=$(cat ${INSTALL_DIR}/MaiBot/eula.confirmed)
+        confirmed_md5=$(cat ${INSTALL_DIR}/NachoBot/eula.confirmed)
     else
         confirmed_md5=""
     fi
 
     # 检查privacy.confirmed文件是否存在
-    if [[ -f ${INSTALL_DIR}/MaiBot/privacy.confirmed ]]; then
+    if [[ -f ${INSTALL_DIR}/NachoBot/privacy.confirmed ]]; then
         # 如果存在则检查其中包含的md5与current_md5是否一致
-        confirmed_md5_privacy=$(cat ${INSTALL_DIR}/MaiBot/privacy.confirmed)
+        confirmed_md5_privacy=$(cat ${INSTALL_DIR}/NachoBot/privacy.confirmed)
     else
         confirmed_md5_privacy=""
     fi
 
     # 如果EULA或隐私条款有更新，提示用户重新确认
     if [[ $current_md5 != $confirmed_md5 || $current_md5_privacy != $confirmed_md5_privacy ]]; then
-        whiptail --title "📜 使用协议更新" --yesno "检测到MaiCore EULA或隐私条款已更新。\nhttps://github.com/MaiM-with-u/MaiBot/blob/refactor/EULA.md\nhttps://github.com/MaiM-with-u/MaiBot/blob/refactor/PRIVACY.md\n\n您是否同意上述协议？ \n\n " 12 70
+        whiptail --title "📜 使用协议更新" --yesno "检测到NachoCore EULA或隐私条款已更新。\nhttps://github.com/Nacho-with-u/NachoBot/blob/refactor/EULA.md\nhttps://github.com/Nacho-with-u/NachoBot/blob/refactor/PRIVACY.md\n\n您是否同意上述协议？ \n\n " 12 70
         if [[ $? -eq 0 ]]; then
-            echo -n $current_md5 > ${INSTALL_DIR}/MaiBot/eula.confirmed
-            echo -n $current_md5_privacy > ${INSTALL_DIR}/MaiBot/privacy.confirmed
+            echo -n $current_md5 > ${INSTALL_DIR}/NachoBot/eula.confirmed
+            echo -n $current_md5_privacy > ${INSTALL_DIR}/NachoBot/privacy.confirmed
         else
             exit 1
         fi
@@ -230,12 +230,12 @@ run_installation() {
     whiptail --title "ℹ️ 提示" --msgbox "如果您没有特殊需求，请优先使用docker方式部署。" 10 60
 
     # 协议确认
-    if ! (whiptail --title "ℹ️ [1/6] 使用协议" --yes-button "我同意" --no-button "我拒绝" --yesno "使用MaiCore及此脚本前请先阅读EULA协议及隐私协议\nhttps://github.com/MaiM-with-u/MaiBot/blob/refactor/EULA.md\nhttps://github.com/MaiM-with-u/MaiBot/blob/refactor/PRIVACY.md\n\n您是否同意上述协议？" 12 70); then
+    if ! (whiptail --title "ℹ️ [1/6] 使用协议" --yes-button "我同意" --no-button "我拒绝" --yesno "使用NachoCore及此脚本前请先阅读EULA协议及隐私协议\nhttps://github.com/Nacho-with-u/NachoBot/blob/refactor/EULA.md\nhttps://github.com/Nacho-with-u/NachoBot/blob/refactor/PRIVACY.md\n\n您是否同意上述协议？" 12 70); then
         exit 1
     fi
 
     # 欢迎信息
-    whiptail --title "[2/6] 欢迎使用MaiCore一键安装脚本 by Cookie987" --msgbox "检测到您未安装MaiCore，将自动进入安装流程，安装完成后再次运行此脚本即可进入管理菜单。\n\n项目处于活跃开发阶段，代码可能随时更改\n文档未完善，有问题可以提交 Issue 或者 Discussion\nQQ机器人存在被限制风险，请自行了解，谨慎使用\n由于持续迭代，可能存在一些已知或未知的bug\n由于开发中，可能消耗较多token\n\n本脚本可能更新不及时，如遇到bug请优先尝试手动部署以确定是否为脚本问题" 17 60
+    whiptail --title "[2/6] 欢迎使用NachoCore一键安装脚本 by Cookie987" --msgbox "检测到您未安装NachoCore，将自动进入安装流程，安装完成后再次运行此脚本即可进入管理菜单。\n\n项目处于活跃开发阶段，代码可能随时更改\n文档未完善，有问题可以提交 Issue 或者 Discussion\nQQ机器人存在被限制风险，请自行了解，谨慎使用\n由于持续迭代，可能存在一些已知或未知的bug\n由于开发中，可能消耗较多token\n\n本脚本可能更新不及时，如遇到bug请优先尝试手动部署以确定是否为脚本问题" 17 60
 
     # 系统检查
     check_system() {
@@ -375,7 +375,7 @@ run_installation() {
 
     # 选择安装路径
     choose_install_dir() {
-        INSTALL_DIR=$(whiptail --title "📂 [6/6] 选择安装路径" --inputbox "请输入MaiCore的安装目录：" 10 60 "$DEFAULT_INSTALL_DIR" 3>&1 1>&2 2>&3)
+        INSTALL_DIR=$(whiptail --title "📂 [6/6] 选择安装路径" --inputbox "请输入NachoCore的安装目录：" 10 60 "$DEFAULT_INSTALL_DIR" 3>&1 1>&2 2>&3)
         [[ -z "$INSTALL_DIR" ]] && {
             whiptail --title "⚠️ 取消输入" --yesno "未输入安装路径，是否退出安装？" 10 60 && exit 1
             INSTALL_DIR="$DEFAULT_INSTALL_DIR"
@@ -386,7 +386,7 @@ run_installation() {
     # 确认安装
     confirm_install() {
         local confirm_msg="请确认以下更改：\n\n"
-        confirm_msg+="📂 安装MaiCore、NapCat Adapter到: $INSTALL_DIR\n"
+        confirm_msg+="📂 安装NachoCore、NapCat Adapter到: $INSTALL_DIR\n"
         confirm_msg+="🔀 分支: $BRANCH\n"
         [[ $IS_INSTALL_DEPENDENCIES == true ]] && confirm_msg+="📦 安装依赖：${missing_packages[@]}\n"
         [[ $IS_INSTALL_NAPCAT == true ]] && confirm_msg+="📦 安装额外组件：\n"
@@ -428,62 +428,62 @@ run_installation() {
     python3 -m venv venv
     source venv/bin/activate
 
-    echo -e "${GREEN}克隆MaiCore仓库...${RESET}"
-    git clone -b "$BRANCH" "$GITHUB_REPO/MaiM-with-u/MaiBot" MaiBot || {
-        echo -e "${RED}克隆MaiCore仓库失败！${RESET}"
+    echo -e "${GREEN}克隆NachoCore仓库...${RESET}"
+    git clone -b "$BRANCH" "$GITHUB_REPO/Nacho-with-u/NachoBot" NachoBot || {
+        echo -e "${RED}克隆NachoCore仓库失败！${RESET}"
         exit 1
     }
 
-    echo -e "${GREEN}克隆 maim_message 包仓库...${RESET}"
-    git clone $GITHUB_REPO/MaiM-with-u/maim_message.git || {
-        echo -e "${RED}克隆 maim_message 包仓库失败！${RESET}"
+    echo -e "${GREEN}克隆 ncnk_message 包仓库...${RESET}"
+    git clone $GITHUB_REPO/Nacho-with-u/ncnk_message.git || {
+        echo -e "${RED}克隆 ncnk_message 包仓库失败！${RESET}"
         exit 1
     }
 
-    echo -e "${GREEN}克隆 nonebot-plugin-maibot-adapters 仓库...${RESET}"
-    git clone $GITHUB_REPO/MaiM-with-u/MaiBot-Napcat-Adapter.git || {
-        echo -e "${RED}克隆 MaiBot-Napcat-Adapter.git 仓库失败！${RESET}"
+    echo -e "${GREEN}克隆 nonebot-plugin-nachobot-adapters 仓库...${RESET}"
+    git clone $GITHUB_REPO/Nacho-with-u/NachoBot-Napcat-Adapter.git || {
+        echo -e "${RED}克隆 NachoBot-Napcat-Adapter.git 仓库失败！${RESET}"
         exit 1
     }
 
 
     echo -e "${GREEN}安装Python依赖...${RESET}"
-    pip install -r MaiBot/requirements.txt
-    cd MaiBot
+    pip install -r NachoBot/requirements.txt
+    cd NachoBot
     pip install uv
     uv pip install -i https://mirrors.aliyun.com/pypi/simple -r requirements.txt   
     cd ..
 
-    echo -e "${GREEN}安装maim_message依赖...${RESET}"
-    cd maim_message
+    echo -e "${GREEN}安装ncnk_message依赖...${RESET}"
+    cd ncnk_message
     uv pip install -i https://mirrors.aliyun.com/pypi/simple -e .
     cd ..
 
-    echo -e "${GREEN}部署MaiBot Napcat Adapter...${RESET}"
-    cd MaiBot-Napcat-Adapter
+    echo -e "${GREEN}部署NachoBot Napcat Adapter...${RESET}"
+    cd NachoBot-Napcat-Adapter
     uv pip install -i https://mirrors.aliyun.com/pypi/simple -r requirements.txt
     cd ..
 
     echo -e "${GREEN}同意协议...${RESET}"
 
     # 首先计算当前EULA的MD5值
-    current_md5=$(md5sum "MaiBot/EULA.md" | awk '{print $1}')
+    current_md5=$(md5sum "NachoBot/EULA.md" | awk '{print $1}')
 
     # 首先计算当前隐私条款文件的哈希值
-    current_md5_privacy=$(md5sum "MaiBot/PRIVACY.md" | awk '{print $1}')
+    current_md5_privacy=$(md5sum "NachoBot/PRIVACY.md" | awk '{print $1}')
 
-    echo -n $current_md5 > MaiBot/eula.confirmed
-    echo -n $current_md5_privacy > MaiBot/privacy.confirmed
+    echo -n $current_md5 > NachoBot/eula.confirmed
+    echo -n $current_md5_privacy > NachoBot/privacy.confirmed
 
     echo -e "${GREEN}创建系统服务...${RESET}"
     cat > /etc/systemd/system/${SERVICE_NAME}.service <<EOF
 [Unit]
-Description=MaiCore
+Description=NachoCore
 After=network.target ${SERVICE_NAME_NBADAPTER}.service
 
 [Service]
 Type=simple
-WorkingDirectory=${INSTALL_DIR}/MaiBot
+WorkingDirectory=${INSTALL_DIR}/NachoBot
 ExecStart=$INSTALL_DIR/venv/bin/python3 bot.py
 Restart=always
 RestartSec=10s
@@ -494,12 +494,12 @@ EOF
 
 #     cat > /etc/systemd/system/${SERVICE_NAME_WEB}.service <<EOF
 # [Unit]
-# Description=MaiCore WebUI
+# Description=NachoCore WebUI
 # After=network.target ${SERVICE_NAME}.service
 
 # [Service]
 # Type=simple
-# WorkingDirectory=${INSTALL_DIR}/MaiBot
+# WorkingDirectory=${INSTALL_DIR}/NachoBot
 # ExecStart=$INSTALL_DIR/venv/bin/python3 webui.py
 # Restart=always
 # RestartSec=10s
@@ -510,12 +510,12 @@ EOF
 
     cat > /etc/systemd/system/${SERVICE_NAME_NBADAPTER}.service <<EOF
 [Unit]
-Description=MaiBot Napcat Adapter
+Description=NachoBot Napcat Adapter
 After=network.target mongod.service ${SERVICE_NAME}.service
 
 [Service]
 Type=simple
-WorkingDirectory=${INSTALL_DIR}/MaiBot-Napcat-Adapter
+WorkingDirectory=${INSTALL_DIR}/NachoBot-Napcat-Adapter
 ExecStart=$INSTALL_DIR/venv/bin/python3 main.py
 Restart=always
 RestartSec=10s
@@ -527,11 +527,11 @@ EOF
     systemctl daemon-reload
 
     # 保存安装信息
-    echo "INSTALLER_VERSION=${INSTALLER_VERSION}" > /etc/maicore_install.conf
-    echo "INSTALL_DIR=${INSTALL_DIR}" >> /etc/maicore_install.conf
-    echo "BRANCH=${BRANCH}" >> /etc/maicore_install.conf
+    echo "INSTALLER_VERSION=${INSTALLER_VERSION}" > /etc/NachoCore_install.conf
+    echo "INSTALL_DIR=${INSTALL_DIR}" >> /etc/NachoCore_install.conf
+    echo "BRANCH=${BRANCH}" >> /etc/NachoCore_install.conf
 
-    whiptail --title "🎉 安装完成" --msgbox "MaiCore安装完成！\n已创建系统服务：${SERVICE_NAME}、${SERVICE_NAME_WEB}、${SERVICE_NAME_NBADAPTER}\n\n使用以下命令管理服务：\n启动服务：systemctl start ${SERVICE_NAME}\n查看状态：systemctl status ${SERVICE_NAME}" 14 60
+    whiptail --title "🎉 安装完成" --msgbox "NachoCore安装完成！\n已创建系统服务：${SERVICE_NAME}、${SERVICE_NAME_WEB}、${SERVICE_NAME_NBADAPTER}\n\n使用以下命令管理服务：\n启动服务：systemctl start ${SERVICE_NAME}\n查看状态：systemctl status ${SERVICE_NAME}" 14 60
 }
 
 # ----------- 主执行流程 -----------
@@ -549,7 +549,7 @@ if check_installed; then
 else
     run_installation
     # 安装完成后询问是否启动
-    if whiptail --title "安装完成" --yesno "是否立即启动MaiCore服务？" 10 60; then
+    if whiptail --title "安装完成" --yesno "是否立即启动NachoCore服务？" 10 60; then
         systemctl start ${SERVICE_NAME}
         whiptail --msgbox "✅ 服务已启动！\n使用 systemctl status ${SERVICE_NAME} 查看状态" 10 60
     fi

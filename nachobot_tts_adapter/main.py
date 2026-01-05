@@ -1,4 +1,4 @@
-from maim_message import (
+from ncnk_message import (
     MessageServer,
     Router,
     RouteConfig,

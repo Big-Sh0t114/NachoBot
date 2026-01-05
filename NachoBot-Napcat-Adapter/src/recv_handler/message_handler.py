@@ -18,7 +18,7 @@ import websockets as Server
 from typing import List, Tuple, Optional, Dict, Any
 import uuid
 
-from maim_message import (
+from ncnk_message import (
     UserInfo,
     GroupInfo,
     Seg,
@@ -124,7 +124,7 @@ class MessageHandler:
 
                 # 发送者用户信息
                 user_info: UserInfo = UserInfo(
-                    platform=global_config.maibot_server.platform_name,
+                    platform=global_config.nachobot_server.platform_name,
                     user_id=sender_info.get("user_id"),
                     user_nickname=sender_info.get("nickname"),
                     user_cardname=sender_info.get("card"),
@@ -150,7 +150,7 @@ class MessageHandler:
                 nickname = fetched_member_info.get("nickname") if fetched_member_info else None
                 # 发送者用户信息
                 user_info: UserInfo = UserInfo(
-                    platform=global_config.maibot_server.platform_name,
+                    platform=global_config.nachobot_server.platform_name,
                     user_id=sender_info.get("user_id"),
                     user_nickname=nickname,
                     user_cardname=None,
@@ -165,7 +165,7 @@ class MessageHandler:
                     group_name = fetched_group_info.get("group_name")
 
                 group_info: GroupInfo = GroupInfo(
-                    platform=global_config.maibot_server.platform_name,
+                    platform=global_config.nachobot_server.platform_name,
                     group_id=raw_message.get("group_id"),
                     group_name=group_name,
                 )
@@ -183,7 +183,7 @@ class MessageHandler:
 
                 # 发送者用户信息
                 user_info: UserInfo = UserInfo(
-                    platform=global_config.maibot_server.platform_name,
+                    platform=global_config.nachobot_server.platform_name,
                     user_id=sender_info.get("user_id"),
                     user_nickname=sender_info.get("nickname"),
                     user_cardname=sender_info.get("card"),
@@ -196,7 +196,7 @@ class MessageHandler:
                     group_name = fetched_group_info.get("group_name")
 
                 group_info: GroupInfo = GroupInfo(
-                    platform=global_config.maibot_server.platform_name,
+                    platform=global_config.nachobot_server.platform_name,
                     group_id=raw_message.get("group_id"),
                     group_name=group_name,
                 )
@@ -225,7 +225,7 @@ class MessageHandler:
 
         # 消息信息
         message_info: BaseMessageInfo = BaseMessageInfo(
-            platform=global_config.maibot_server.platform_name,
+            platform=global_config.nachobot_server.platform_name,
             message_id=message_id,
             time=message_time,
             user_info=user_info,
@@ -242,7 +242,7 @@ class MessageHandler:
             raw_message=raw_message.get("raw_message"),
         )
 
-        logger.info("发送到Maibot处理信息")
+        logger.info("发送到NachoBot处理信息")
         await message_send_instance.message_send(message_base)
 
     async def handle_real_message(

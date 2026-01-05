@@ -5,7 +5,7 @@ from src.config.config import global_config
 from src.common.logger import get_logger
 from src.chat.message_receive.chat_stream import get_chat_manager
 from src.plugin_system.apis import send_api
-from maim_message.message_base import GroupInfo
+from ncnk_message.message_base import GroupInfo
 
 from src.common.message_repository import count_messages
 

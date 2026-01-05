@@ -22,6 +22,7 @@ from src.chat.utils.chat_message_builder import (
 from src.chat.utils.utils import get_chat_type_and_target_info
 from src.chat.planner_actions.action_manager import ActionManager
 from src.chat.message_receive.chat_stream import get_chat_manager
+from src.chat.advanced.advanced_manager import advanced_manager
 from src.plugin_system.base.component_types import ActionInfo, ComponentType, ActionActivationType
 from src.plugin_system.core.component_registry import component_registry
 
@@ -231,12 +232,13 @@ class ActionPlanner:
         规划器 (Planner): 使用LLM根据上下文决定做出什么动作。
         """
         target_message: Optional["DatabaseMessages"] = None
-
+        is_group_chat, chat_target_info, current_available_actions = self.get_necessary_info()
+        context_size = global_config.chat.get_max_context_size(is_group_chat=is_group_chat)
         # 获取聊天上下文
         message_list_before_now = get_raw_msg_before_timestamp_with_chat(
             chat_id=self.chat_id,
             timestamp=time.time(),
-            limit=int(global_config.chat.max_context_size * 0.6),
+            limit=int(context_size * 0.6),
         )
         message_id_list: list[Tuple[str, "DatabaseMessages"]] = []
         chat_content_block, message_id_list = build_readable_messages_with_id(
@@ -247,7 +249,7 @@ class ActionPlanner:
             show_actions=True,
         )
 
-        message_list_before_now_short = message_list_before_now[-int(global_config.chat.max_context_size * 0.3) :]
+        message_list_before_now_short = message_list_before_now[-int(context_size * 0.3) :]
         chat_content_block_short, message_id_list_short = build_readable_messages_with_id(
             messages=message_list_before_now_short,
             timestamp_mode="normal_no_YMD",
@@ -256,9 +258,6 @@ class ActionPlanner:
         )
 
         self.last_obs_time_mark = time.time()
-
-        # 获取必要信息
-        is_group_chat, chat_target_info, current_available_actions = self.get_necessary_info()
 
         # 应用激活类型过滤
         filtered_actions = self._filter_actions_by_activation_type(available_actions, chat_content_block_short)
@@ -320,15 +319,21 @@ class ActionPlanner:
 
             # 构建动作选项块（若动作有参数，这里展示）
             action_options_block = await self._build_action_options_block(current_available_actions)
+            advanced_on = advanced_manager.is_on(get_chat_manager().get_stream(self.chat_id))
 
             # 其他信息
             moderation_prompt_block = "请不要输出违法违规内容，不要输出色情，暴力，政治相关内容，如有敏感内容，请规避。"
+            if advanced_on:
+                moderation_prompt_block += "\n[高级模式] 仅允许使用 reply 动作，禁止使用 no_reply、no_reply_until_call 及任何其他动作。"
             time_block = f"当前时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             bot_name = global_config.bot.nickname
             bot_nickname = (
                 f",也有人叫你{','.join(global_config.bot.alias_names)}" if global_config.bot.alias_names else ""
             )
             name_block = f"你的名字是{bot_name}{bot_nickname}，请注意哪些是你自己的发言。"
+
+            if advanced_on:
+                action_options_block = ""  # 高级模式不展示其他动作，避免误选
 
             # TTS语种提示：若选择tts_action，voice_text必须使用当前TTS语种
             tts_lang_note = ""
@@ -471,6 +476,7 @@ class ActionPlanner:
         """执行主规划器"""
         llm_content = None
         actions: List[ActionPlannerInfo] = []
+        advanced_on = advanced_manager.is_on(get_chat_manager().get_stream(self.chat_id))
 
         try:
             # 调用LLM
@@ -530,6 +536,20 @@ class ActionPlanner:
         logger.info(
             f"{self.log_prefix}规划器决定执行{len(actions)}个动作: {' '.join([a.action_type for a in actions])}"
         )
+
+        if advanced_on:
+            actions = [a for a in actions if a.action_type == "reply"]
+            if not actions:
+                fallback_msg = message_id_list[-1][1] if message_id_list else None
+                actions = [
+                    ActionPlannerInfo(
+                        action_type="reply",
+                        reasoning="高级模式仅允许 reply，自动生成回复动作",
+                        action_data={},
+                        action_message=fallback_msg,
+                        available_actions=available_actions,
+                    )
+                ]
 
         return actions
 

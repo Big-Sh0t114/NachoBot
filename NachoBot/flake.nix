@@ -1,5 +1,5 @@
 {
-  description = "MaiMBot Nix Dev Env";
+  description = "NachoBot Nix Dev Env";
 
   inputs = {
     utils.url = "github:numtide/flake-utils";

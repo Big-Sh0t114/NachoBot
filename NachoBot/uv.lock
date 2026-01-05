@@ -1032,7 +1032,7 @@ wheels = [
 ]
 
 [[package]]
-name = "maibot"
+name = "nachobot"
 version = "0.8.1"
 source = { virtual = "." }
 dependencies = [
@@ -1049,7 +1049,7 @@ dependencies = [
     { name = "jieba" },
     { name = "json-repair" },
     { name = "jsonlines" },
-    { name = "maim-message" },
+    { name = "ncnk-message" },
     { name = "matplotlib" },
     { name = "networkx", version = "3.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "networkx", version = "3.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
@@ -1105,7 +1105,7 @@ requires-dist = [
     { name = "jieba", specifier = ">=0.42.1" },
     { name = "json-repair", specifier = ">=0.47.6" },
     { name = "jsonlines", specifier = ">=4.0.0" },
-    { name = "maim-message", specifier = ">=0" },
+    { name = "ncnk-message", specifier = ">=0" },
     { name = "matplotlib", specifier = ">=3.10.3" },
     { name = "networkx", specifier = ">=3.4.2" },
     { name = "numpy", specifier = ">=2.2.6" },
@@ -1144,7 +1144,7 @@ requires-dist = [
 ]
 
 [[package]]
-name = "maim-message"
+name = "ncnk-message"
 version = "0.5.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
@@ -1155,9 +1155,9 @@ dependencies = [
     { name = "uvicorn" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/3f/e9/da32052484e688b968503b692954f32b650f1c498cb3091a7f9fc3dbef66/maim_message-0.5.1.tar.gz", hash = "sha256:3fc96c218413aa558766b4a3283a774822b6dc2a0f387b11e6e50e4850749ddb", size = 610156, upload-time = "2025-09-05T11:09:01.61Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/3f/e9/da32052484e688b968503b692954f32b650f1c498cb3091a7f9fc3dbef66/ncnk_message-0.5.1.tar.gz", hash = "sha256:3fc96c218413aa558766b4a3283a774822b6dc2a0f387b11e6e50e4850749ddb", size = 610156, upload-time = "2025-09-05T11:09:01.61Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ae/f2/a2fe445c8fa465aeb2f388e78f4a22bd6b0a3747478183b545534a0c9eb3/maim_message-0.5.1-py3-none-any.whl", hash = "sha256:96b3d8997aa0337ca4c1d1feb1175d7e71fa694ca3879d888381b97b6f339a0c", size = 28013, upload-time = "2025-09-05T11:08:59.198Z" },
+    { url = "https://files.pythonhosted.org/packages/ae/f2/a2fe445c8fa465aeb2f388e78f4a22bd6b0a3747478183b545534a0c9eb3/ncnk_message-0.5.1-py3-none-any.whl", hash = "sha256:96b3d8997aa0337ca4c1d1feb1175d7e71fa694ca3879d888381b97b6f339a0c", size = 28013, upload-time = "2025-09-05T11:08:59.198Z" },
 ]
 
 [[package]]
