@@ -32,6 +32,9 @@ from .base import (
     ReplySetModel,
 )
 
+# Backward compatibility alias
+MaiMessages = NachoMessages
+
 # 导入工具模块
 from .utils import (
     ManifestValidator,
@@ -110,6 +113,7 @@ __all__ = [
     "ForwardNode",
     "ReplySetModel",
     "NachoMessages",
+    "MaiMessages",
     "CustomEventHandlerResult",
     # 装饰器
     "register_plugin",
