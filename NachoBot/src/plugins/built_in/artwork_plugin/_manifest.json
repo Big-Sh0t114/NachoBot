@@ -6,6 +6,9 @@
   "author": {
     "name": "BigSh0t"
   },
+  "keywords": ["art", "action", "command"],
+  "categories": ["Picture", "Entertainment"],
+  "license": "GPL-v3.0-or-later",
   "host_application": {
     "min_version": "0.10.0"
   },

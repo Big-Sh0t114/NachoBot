@@ -6,6 +6,7 @@
   "author": { "name": "Big_Sh0t" },
   "keywords": ["music", "audio", "silk", "onebot", "command"],
   "categories": ["Audio", "Entertainment"],
+  "license": "GPL-v3.0-or-later",
   "plugin_info": {
     "is_built_in": true,
     "plugin_type": "audio_player",
