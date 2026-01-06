@@ -6,6 +6,7 @@ setlocal ENABLEDELAYEDEXPANSION
 REM ===== 基本路径（如你改过目录，只需改这里）=====
 set "BASE_DIR=C:\Users\BigSh0t\Nacho-with-u"
 set "ADAPTER_DIR=%BASE_DIR%\nachobot_tts_adapter"
+set "NAPCAT_DIR=%BASE_DIR%\NachoBot-Napcat-Adapter"
 set "NAPCAT_SRC=%BASE_DIR%\NachoBot-Napcat-Adapter\src"
 set "SOVITS_DIR=C:\Users\BigSh0t\GPT-SoVITS\GPT-SoVITS-v2pro-20250604"
 
@@ -109,7 +110,7 @@ echo [OK] SoVITS 已就绪，启动 Adapter ...
 REM ===== 窗口 2：Adapter（可见，强制使用 venv；PYTHONPATH 指向 本项目+Napcat 源码）=====
 REM ★ 修改点：python 增加 -s；继承隔离环境与代理
 start "TTS Adapter (%PORT_ADAPTER%)" cmd /k ^
-  "chcp 65001>nul && set PYTHONPATH=%ADAPTER_DIR%;%ADAPTER_DIR%\src;%NAPCAT_SRC% && cd /d %ADAPTER_DIR% && echo [CMD] %PY_ADAPTER% -s main.py && %PY_ADAPTER% -s main.py"
+  "chcp 65001>nul && set PYTHONPATH=%ADAPTER_DIR%;%ADAPTER_DIR%\src;%NAPCAT_SRC%;%NAPCAT_DIR% && cd /d %ADAPTER_DIR% && echo [CMD] %PY_ADAPTER% -s main.py && %PY_ADAPTER% -s main.py"
 
 REM ===== 等待 Adapter 端口（最多 30 秒，不通过也继续）=====
 set "READY="
@@ -126,7 +127,7 @@ echo [OK] Adapter 阶段完成，启动 Control ...
 REM ===== 窗口 3：Control（可见，同样使用 venv + PYTHONPATH）=====
 REM ★ 修改点：python 增加 -s；继承隔离环境与代理
 start "Control API (%PORT_CONTROL%)" cmd /k ^
-  "chcp 65001>nul && set PYTHONPATH=%ADAPTER_DIR%;%ADAPTER_DIR%\src;%NAPCAT_SRC% && cd /d %ADAPTER_DIR% && echo [CMD] %PY_ADAPTER% -s -m plugins.GPT_Sovits.api_server && %PY_ADAPTER% -s -m plugins.GPT_Sovits.api_server"
+  "chcp 65001>nul && set PYTHONPATH=%ADAPTER_DIR%;%ADAPTER_DIR%\src;%NAPCAT_SRC%;%NAPCAT_DIR% && cd /d %ADAPTER_DIR% && echo [CMD] %PY_ADAPTER% -s -m plugins.GPT_Sovits.api_server && %PY_ADAPTER% -s -m plugins.GPT_Sovits.api_server"
 
 echo.
 echo ✅ 已打开三个实时日志窗口：

@@ -5,6 +5,7 @@ from ncnk_message import (
     TargetConfig,
     MessageBase,
     Seg,
+    FormatInfo,
 )
 from src.config import Config
 from src.logger import logger
@@ -24,6 +25,10 @@ class TTSPipeline:
 
     def __init__(self, config_path: str):  # sourcery skip: dict-comprehension
         self.config: Config = Config(config_path)
+        # 根据配置刷新日志级别
+        from src.logger import set_logging_level
+
+        set_logging_level(self.config.config_data["debug"].get("logging_level", "INFO"))
         self.server = MessageServer(
             host=self.config.server.host,
             port=self.config.server.port,
@@ -161,19 +166,35 @@ class TTSPipeline:
         if message.message_info.additional_config:
             text_lang = message.message_info.additional_config.get("tts_language") or message.message_info.additional_config.get("text_lang")
         new_seg = await self.get_voice_no_stream(text, message.message_info.platform, text_lang=text_lang)
-        if not new_seg:
-            logger.warning("语音消息为空，跳过发送")
-            await self.cleanup_task(group_id)
-            return
-        message.message_segment = new_seg
-        message.message_info.format_info.content_format = ["voice"]
-        if not message.message_info.additional_config:
-            message.message_info.additional_config = {}
-        message.message_info.additional_config["original_text"] = text
-        if text_lang:
-            message.message_info.additional_config["text_lang"] = text_lang
-            message.message_info.additional_config["tts_language"] = text_lang
-        await self.server.send_message(message)
+        try:
+            if not new_seg:
+                logger.warning("语音消息为空，跳过发送")
+                await self.cleanup_task(group_id)
+                return
+            if not message.message_info.format_info:
+                message.message_info.format_info = FormatInfo(
+                    content_format=[],
+                    accept_format=[],
+                )
+            message.message_segment = new_seg
+            message.message_info.format_info.content_format = ["voice"]
+            if not message.message_info.additional_config:
+                message.message_info.additional_config = {}
+            message.message_info.additional_config["original_text"] = text
+            if text_lang:
+                message.message_info.additional_config["text_lang"] = text_lang
+                message.message_info.additional_config["tts_language"] = text_lang
+            logger.debug(
+                f"TTS->Napcat 即将发送: platform={message.message_info.platform}, formats={message.message_info.format_info.content_format}"
+            )
+            ok = await self.server.send_message(message)
+            logger.info(
+                f"TTS->Napcat send: platform={message.message_info.platform}, ok={ok}, formats={message.message_info.format_info.content_format}"
+            )
+            if not ok:
+                logger.warning("send_message 返回 False，检查平台映射或连接状态")
+        except Exception as exc:
+            logger.exception(f"TTS->Napcat 发送异常: {exc}")
         await self.cleanup_task(group_id)
         return
 
@@ -196,6 +217,7 @@ class TTSPipeline:
                 audio_data = post_process.simulate_telephone_voice(audio_data)
             # 对整个音频数据进行base64编码
             encoded_audio = encode_audio(audio_data)
+            logger.debug(f"生成语音数据长度: {len(encoded_audio)} (base64)")
             # 创建语音消息
             return Seg(type="voice", data=encoded_audio)
         except Exception as e:
@@ -237,7 +259,17 @@ class TTSPipeline:
                             message.message_info.additional_config["text_lang"] = text_lang
 
                         # 发送到下游
-                        await self.server.send_message(message)
+                        try:
+                            ok = await self.server.send_message(message)
+                            logger.debug(
+                                f"流式分片发送: platform={message.message_info.platform}, ok={ok}"
+                            )
+                            if not ok:
+                                logger.warning(
+                                    f"流式语音发送失败 platform={message.message_info.platform}"
+                                )
+                        except Exception as exc:
+                            logger.exception(f"流式发送异常: {exc}")
                     except Exception as e:
                         logger.error(f"处理音频块时发生错误: {str(e)}")
                         continue
