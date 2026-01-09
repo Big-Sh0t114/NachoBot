@@ -7,7 +7,7 @@ version = "1.7.1_bs"
 [[api_providers]] # 阿里 百炼 API服务商配置
 name = "Qhaigc"
 base_url = "https://api-hk.qhaigc.net/v1"
-api_key = "sk-dBsOCpw8uRMf98kA4AuVEVRSXrTSn3iIEZbCvXqlDH4TgJoG"
+api_key = " "
 client_type = "openai"
 max_retry = 2
 timeout = 15
@@ -25,7 +25,7 @@ retry_interval = 5
 [[api_providers]] # SiliconFlow的API服务商配置
 name = "SiliconFlow"
 base_url = "https://api.siliconflow.cn/v1"
-api_key = "sk-brsdlupciqlxyketsrtitawduydwkukrplilewsccftlgqce"
+api_key = " "
 client_type = "openai"
 max_retry = 2
 timeout = 60
@@ -35,7 +35,7 @@ retry_interval = 10
 [[api_providers]]
 name = "Google"
 base_url = "https://api.google.com/v1"
-api_key = "AIzaSyAPR2K06A6ON_EqpifFDod-RY-Xr_GymKA"
+api_key = " "
 client_type = "gemini"
 max_retry = 2
 timeout = 30
