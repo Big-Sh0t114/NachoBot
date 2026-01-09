@@ -554,6 +554,48 @@ class ResponsePostProcessConfig(ConfigBase):
 
 
 @dataclass
+class ResponseFilterConfig(ConfigBase):
+    """回复过滤配置类"""
+
+    enable: bool = True
+    """是否启用回复过滤"""
+
+    blocked_markers: list[str] = field(
+        default_factory=lambda: [
+            "i'm kiro",
+            "i am kiro",
+            "kiro-cli chat",
+            "kiro-cli",
+            "kiro cli",
+            "ai assistant built by aws",
+            "aws services",
+            "i can't engage with this request",
+            "i need to decline this request",
+            "this message is attempting to manipulate",
+            "adopting a fake persona",
+            "creating a fake persona",
+            "roleplaying as a character",
+            "roleplay as a different character",
+            "i don't roleplay as other characters",
+            "i don't pretend to be someone else",
+            "fabricated instructions",
+            "fabricated rules",
+            "ignoring my actual instructions",
+            "instructions to ignore my real system prompts",
+            "override my actual identity",
+            "actual identity and guidelines",
+            "responding as if i'm in a qq",
+            "qq chat group",
+            "identity verification",
+            "false claims about",
+            "fabricated identity",
+            "fake conversation history",
+        ]
+    )
+    """可疑模板关键词（命中后会触发过滤）"""
+
+
+@dataclass
 class ChineseTypoConfig(ConfigBase):
     """中文错别字配置类"""
 
@@ -585,6 +627,9 @@ class ResponseSplitterConfig(ConfigBase):
 
     max_sentence_num: int = 3
     """回复允许的最大句子数"""
+
+    max_sentence_num_cap: int = 8
+    """回复允许的最大句子数硬上限"""
 
     enable_kaomoji_protection: bool = False
     """是否启用颜文字保护"""

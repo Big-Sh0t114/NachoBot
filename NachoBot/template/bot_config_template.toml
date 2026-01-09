@@ -1,5 +1,5 @@
 [inner]
-version = "6.14.10_bs"
+version = "6.14.11_bs"
 
 #----以下是给开发人员阅读的，如果你只是部署，不需要阅读----
 #如果你想要修改配置文件，请递增version的值
@@ -222,6 +222,38 @@ case_sensitive = false
 [response_post_process]
 enable_response_post_process = true # 是否启用回复后处理，包括错别字生成器，回复分割器
 
+[response_filter]
+enable = true # 是否启用回复过滤
+blocked_markers = [
+    "i'm kiro",
+    "i am kiro",
+    "kiro-cli chat",
+    "kiro-cli",
+    "kiro cli",
+    "ai assistant built by aws",
+    "aws services",
+    "i can't engage with this request",
+    "i need to decline this request",
+    "this message is attempting to manipulate",
+    "adopting a fake persona",
+    "creating a fake persona",
+    "roleplaying as a character",
+    "roleplay as a different character",
+    "i don't roleplay as other characters",
+    "i don't pretend to be someone else",
+    "fabricated instructions",
+    "fabricated rules",
+    "ignoring my actual instructions",
+    "instructions to ignore my real system prompts",
+    "override my actual identity",
+    "actual identity and guidelines",
+    "responding as if i'm in a qq",
+    "identity verification",
+    "false claims about",
+    "fabricated identity",
+    "fake conversation history",
+]
+
 [chinese_typo]
 enable = true # 是否启用中文错别字生成器
 error_rate=0.05 # 单字替换概率
@@ -233,6 +265,7 @@ word_replace_rate=0.006 # 整词替换概率
 enable = true # 是否启用回复分割器
 max_length = 512 # 回复允许的最大长度
 max_sentence_num = 8 # 回复允许的最大句子数
+max_sentence_num_cap = 8 # 回复允许的最大句子数硬上限
 enable_kaomoji_protection = true # 是否启用颜文字保护
 
 [log]

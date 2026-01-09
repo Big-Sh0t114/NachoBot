@@ -11,6 +11,7 @@ from src.llm_models.utils_model import LLMRequest
 import time
 from src.plugin_system.base.base_action import BaseAction, ActionActivationType
 from src.plugin_system.base.config_types import ConfigField
+from src.common.data_models.message_data_model import ReplyContentType
 from typing import Tuple, List, Type, Dict, Optional
 from src.chat.advanced.advanced_manager import advanced_manager
 
@@ -98,7 +99,7 @@ class TTSAction(BaseAction):
             return False, "高级模式禁用TTS"
 
         if not text:
-            logger.error(f"{self.log_prefix} 执行TTS动作时未提供文本内容")
+            logger.warning(f"{self.log_prefix} 执行TTS动作时未提供文本内容，尝试使用replyer生成")
             await self._ensure_language_loaded()
             current_language = self._get_current_language()
             # 尝试用回复器模型自动生成朗读文本
@@ -218,6 +219,29 @@ class TTSAction(BaseAction):
         """
         if not self.action_message:
             return None
+
+        # 先用replyer生成回复文本
+        try:
+            success, llm_response = await generator_api.generate_reply(
+                chat_stream=self.chat_stream,
+                reply_message=self.action_message,
+                reply_reason=self.reasoning or "",
+                available_actions=None,
+                chosen_actions=None,
+                enable_tool=False,
+                request_type="tts_replyer",
+                from_plugin=True,
+            )
+            if success and llm_response and llm_response.reply_set:
+                text_parts: List[str] = []
+                for reply_content in llm_response.reply_set.reply_data:
+                    if reply_content.content_type == ReplyContentType.TEXT:
+                        text_parts.append(str(reply_content.content))
+                reply_text = "".join(text_parts).strip()
+                if reply_text:
+                    return reply_text
+        except Exception as e:
+            logger.warning(f"{self.log_prefix} planner模型生成TTS文本失败: {e}")
 
         # 优先使用display_message，否则退回processed_plain_text
         target_text = (

@@ -311,16 +311,55 @@ class BrainChatting:
                     available_actions=available_actions,
                 )
 
-            # 3. 并行执行所有动作
-            action_tasks = [
-                asyncio.create_task(
-                    self._execute_action(action, action_to_use_info, thinking_id, available_actions, cycle_timers)
-                )
-                for action in action_to_use_info
-            ]
+            # 3. 按并行标记执行动作，避免非并行动作互相抢占
+            serial_actions = []
+            parallel_actions = []
+            for action in action_to_use_info:
+                if action.action_type == "reply":
+                    serial_actions.append(action)
+                    continue
+                action_info = available_actions.get(action.action_type)
+                if action_info and action_info.parallel_action:
+                    parallel_actions.append(action)
+                else:
+                    serial_actions.append(action)
 
-            # 并行执行所有任务
-            results = await asyncio.gather(*action_tasks, return_exceptions=True)
+            if serial_actions:
+                reply_actions = [action for action in serial_actions if action.action_type == "reply"]
+                other_serial_actions = [action for action in serial_actions if action.action_type != "reply"]
+                serial_actions = reply_actions + other_serial_actions
+
+            results = []
+            reply_text_for_tts = ""
+            for action in serial_actions:
+                if reply_text_for_tts and action.action_type == "tts_action":
+                    action_data = action.action_data or {}
+                    if not action_data.get("voice_text"):
+                        action_data["voice_text"] = reply_text_for_tts
+                        action.action_data = action_data
+                result = await self._execute_action(
+                    action, action_to_use_info, thinking_id, available_actions, cycle_timers
+                )
+                results.append(result)
+                if action.action_type == "reply" and isinstance(result, dict) and result.get("success"):
+                    reply_text_for_tts = (result.get("reply_text") or "").strip()
+
+            if reply_text_for_tts:
+                for action in parallel_actions:
+                    if action.action_type == "tts_action":
+                        action_data = action.action_data or {}
+                        if not action_data.get("voice_text"):
+                            action_data["voice_text"] = reply_text_for_tts
+                            action.action_data = action_data
+
+            if parallel_actions:
+                action_tasks = [
+                    asyncio.create_task(
+                        self._execute_action(action, action_to_use_info, thinking_id, available_actions, cycle_timers)
+                    )
+                    for action in parallel_actions
+                ]
+                results.extend(await asyncio.gather(*action_tasks, return_exceptions=True))
 
             # 处理执行结果
             reply_loop_info = None
@@ -464,6 +503,18 @@ class BrainChatting:
         if need_reply:
             logger.info(f"{self.log_prefix} 从思考到回复，共有{new_message_count}条新消息，使用引用回复")
 
+        if send_api._should_suppress_reply_set(reply_set):
+            logger.error(f"{self.log_prefix} 检测到可疑回复模板，已替换为 Filtered")
+            await send_api.text_to_stream(
+                text="Filtered",
+                stream_id=self.chat_stream.stream_id,
+                reply_message=message_data,
+                set_reply=need_reply,
+                typing=False,
+                selected_expressions=selected_expressions,
+            )
+            return "Filtered"
+
         reply_text = ""
         first_replied = False
         for reply_content in reply_set.reply_data:
@@ -602,6 +653,28 @@ class BrainChatting:
                             cycle_timers,
                             thinking_id,
                             action_planner_info.action_message,
+                        )
+                    if (
+                        not success
+                        and action_planner_info.action_type == "send_artwork"
+                        and "未检测到明确的看画请求" in (reply_text or "")
+                        and not any(action.action_type == "reply" for action in chosen_action_plan_infos)
+                        and action_planner_info.action_message
+                    ):
+                        logger.info(f"{self.log_prefix} 画作请求未明确，改为文本回复")
+                        fallback_action = ActionPlannerInfo(
+                            action_type="reply",
+                            reasoning="画作请求未明确，转为文本回复",
+                            action_data={},
+                            action_message=action_planner_info.action_message,
+                            available_actions=available_actions,
+                        )
+                        return await self._execute_action(
+                            fallback_action,
+                            chosen_action_plan_infos,
+                            thinking_id,
+                            available_actions,
+                            cycle_timers,
                         )
                     return {
                         "action_type": action_planner_info.action_type,

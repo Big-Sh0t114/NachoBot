@@ -102,7 +102,15 @@ class BuildRelationAction(BaseAction):
             impression = self.action_data.get("impression", "")
             logger.info(f"{self.log_prefix} 添加关系印象原因: {self.reasoning}")
             person_name = self.action_data.get("person_name", "")
-            # 2. 获取目标用户信息，优先使用 user_id，避免昵称不一致导致找不到人
+            # 2. 获取目标用户信息
+            if (
+                self.platform == global_config.bot.platform
+                and self.user_id == global_config.bot.qq_account
+            ) or person_name == global_config.bot.nickname:
+                logger.info(f"{self.log_prefix} 目标为 bot，跳过添加记忆")
+                return False, "目标为 bot，跳过添加记忆"
+
+            # 优先使用 user_id，避免昵称不一致导致找不到人
             person = None
             if self.platform and self.user_id:
                 person = Person(platform=str(self.platform), user_id=str(self.user_id))

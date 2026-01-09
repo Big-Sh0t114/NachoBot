@@ -1,6 +1,7 @@
 Pillow
 aiohttp
 aiohttp-cors
+playwright
 colorama
 dotenv
 faiss-cpu

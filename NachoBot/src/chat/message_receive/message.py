@@ -1,3 +1,4 @@
+import re
 import time
 import urllib3
 
@@ -19,6 +20,30 @@ logger = get_logger("chat_message")
 
 # 禁用SSL警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+_URL_PATTERN = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
+
+
+def _extract_urls_from_unknown_data(data: Any) -> str:
+    if data is None:
+        return ""
+    if isinstance(data, str):
+        raw_urls = _URL_PATTERN.findall(data)
+    else:
+        raw_urls = _URL_PATTERN.findall(str(data))
+
+    if not raw_urls:
+        return ""
+
+    cleaned = []
+    seen = set()
+    for url in raw_urls:
+        trimmed = url.rstrip(").,;\"'")
+        if not trimmed or trimmed in seen:
+            continue
+        seen.add(trimmed)
+        cleaned.append(trimmed)
+    return " ".join(cleaned)
 
 # 这个类是消息数据类，用于存储和管理消息数据。
 # 它定义了消息的属性，包括群组ID、用户ID、消息ID、原始消息内容、纯文本内容和时间戳。
@@ -202,6 +227,9 @@ class MessageRecv(Message):
                     """
                 return ""
             else:
+                extracted_urls = _extract_urls_from_unknown_data(segment.data)
+                if extracted_urls:
+                    return extracted_urls
                 return ""
         except Exception as e:
             logger.error(f"处理消息段失败: {str(e)}, 类型: {segment.type}, 数据: {segment.data}")
@@ -325,6 +353,9 @@ class MessageRecvS4U(MessageRecv):
                 self.screen_info = segment.data
                 return "屏幕信息"
             else:
+                extracted_urls = _extract_urls_from_unknown_data(segment.data)
+                if extracted_urls:
+                    return extracted_urls
                 return ""
         except Exception as e:
             logger.error(f"处理消息段失败: {str(e)}, 类型: {segment.type}, 数据: {segment.data}")

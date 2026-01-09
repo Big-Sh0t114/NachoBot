@@ -130,6 +130,9 @@ class ModelTaskConfig(ConfigBase):
     advanced_replyer: TaskConfig = field(default_factory=TaskConfig)
     """高级模式回复模型配置（可选，缺省回退到默认参数）"""
 
+    web_search: TaskConfig = field(default_factory=TaskConfig)
+    """联网搜索模型配置（可选，缺省回退到默认参数）"""
+
     def get_task(self, task_name: str) -> TaskConfig:
         """获取指定任务的配置"""
         if hasattr(self, task_name):

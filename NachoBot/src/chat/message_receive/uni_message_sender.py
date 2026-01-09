@@ -10,10 +10,63 @@ from src.chat.message_receive.message import MessageSending
 from src.chat.message_receive.storage import MessageStorage
 from src.chat.utils.utils import truncate_message
 from src.chat.utils.utils import calculate_typing_time
+from src.config.config import global_config
 
 install(extra_lines=3)
 
 logger = get_logger("sender")
+
+
+_DEFAULT_BLOCKED_MARKERS = (
+    "i'm kiro",
+    "i am kiro",
+    "kiro-cli chat",
+    "kiro-cli",
+    "kiro cli",
+    "ai assistant built by aws",
+    "aws services",
+    "i can't engage with this request",
+    "i need to decline this request",
+    "this message is attempting to manipulate",
+    "adopting a fake persona",
+    "creating a fake persona",
+    "roleplaying as a character",
+    "roleplay as a different character",
+    "i don't roleplay as other characters",
+    "i don't pretend to be someone else",
+    "fabricated instructions",
+    "fabricated rules",
+    "ignoring my actual instructions",
+    "instructions to ignore my real system prompts",
+    "override my actual identity",
+    "actual identity and guidelines",
+    "responding as if i'm in a qq",
+    "qq chat group",
+    "identity verification",
+    "false claims about",
+    "fabricated identity",
+    "fake conversation history",
+)
+
+
+def _get_response_filter_settings() -> tuple[bool, list[str]]:
+    filter_config = getattr(global_config, "response_filter", None)
+    if filter_config is None:
+        return True, [marker.lower() for marker in _DEFAULT_BLOCKED_MARKERS]
+    enabled = bool(getattr(filter_config, "enable", True))
+    markers = getattr(filter_config, "blocked_markers", [])
+    cleaned = [str(marker).lower() for marker in markers if str(marker).strip()]
+    return enabled, cleaned
+
+
+def _should_suppress_text_reply(text: str) -> bool:
+    if not text:
+        return False
+    enabled, markers = _get_response_filter_settings()
+    if not enabled or not markers:
+        return False
+    normalized = text.lower()
+    return any(marker in normalized for marker in markers)
 
 
 async def _send_message(message: MessageSending, show_log=True) -> bool:
@@ -96,6 +149,19 @@ class UniversalMessageSender:
                     message.message_segment = Seg(type="seglist", data=modified_message.message_segments)
                 if modified_message._modify_flags.modify_plain_text:
                     message.processed_plain_text = modified_message.plain_text
+
+            if _should_suppress_text_reply(message.processed_plain_text or ""):
+                logger.error(f"[{chat_id}] 检测到可疑回复模板，已替换为 Filtered")
+                filtered_segment = Seg(type="text", data="Filtered")
+                if message.reply and getattr(message.reply.message_info, "message_id", None):
+                    message.message_segment = Seg(
+                        type="seglist",
+                        data=[Seg(type="reply", data=message.reply.message_info.message_id), filtered_segment],  # type: ignore
+                    )
+                else:
+                    message.message_segment = filtered_segment
+                message.processed_plain_text = "Filtered"
+                message.display_message = "Filtered"
 
             if typing:
                 typing_time = calculate_typing_time(
