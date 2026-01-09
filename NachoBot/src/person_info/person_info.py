@@ -214,6 +214,11 @@ class Person:
             self.platform = platform
             self.nickname = global_config.bot.nickname
             self.person_name = global_config.bot.nickname
+            self.name_reason = "bot self"
+            self.know_times = 0
+            self.know_since = None
+            self.last_know = None
+            self.memory_points = []
             return
 
         self.user_id = ""

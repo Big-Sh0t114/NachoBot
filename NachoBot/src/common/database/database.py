@@ -1,8 +1,41 @@
 import os
+import sys
 from pymongo import MongoClient
-from peewee import SqliteDatabase
 from pymongo.database import Database
 from rich.traceback import install
+
+
+def _load_peewee():
+    try:
+        import peewee
+        return peewee
+    except ModuleNotFoundError:
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+        candidates = [
+            os.path.join(repo_root, ".venv", "Lib", "site-packages"),
+            os.path.join(
+                repo_root,
+                ".venv",
+                "lib",
+                f"python{sys.version_info.major}.{sys.version_info.minor}",
+                "site-packages",
+            ),
+        ]
+        for path in candidates:
+            if os.path.isdir(path) and path not in sys.path:
+                sys.path.insert(0, path)
+        import peewee
+        return peewee
+
+
+try:
+    _peewee = _load_peewee()
+except ModuleNotFoundError as exc:
+    raise ModuleNotFoundError(
+        "缺少 peewee 依赖，请先安装: pip install peewee 或使用项目 .venv 运行。"
+    ) from exc
+
+SqliteDatabase = _peewee.SqliteDatabase
 
 install(extra_lines=3)
 

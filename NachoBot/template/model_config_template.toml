@@ -1,10 +1,13 @@
 [inner]
-version = "1.7.0"
+version = "1.7.1_bs"
+
+# 配置文件版本号迭代规则同bot_config.toml
+
 
 [[api_providers]] # 阿里 百炼 API服务商配置
 name = "Qhaigc"
 base_url = "https://api-hk.qhaigc.net/v1"
-api_key = " "
+api_key = "sk-dBsOCpw8uRMf98kA4AuVEVRSXrTSn3iIEZbCvXqlDH4TgJoG"
 client_type = "openai"
 max_retry = 2
 timeout = 15
@@ -22,7 +25,7 @@ retry_interval = 5
 [[api_providers]] # SiliconFlow的API服务商配置
 name = "SiliconFlow"
 base_url = "https://api.siliconflow.cn/v1"
-api_key = " "
+api_key = "sk-brsdlupciqlxyketsrtitawduydwkukrplilewsccftlgqce"
 client_type = "openai"
 max_retry = 2
 timeout = 60
@@ -32,7 +35,7 @@ retry_interval = 10
 [[api_providers]]
 name = "Google"
 base_url = "https://api.google.com/v1"
-api_key = " "
+api_key = "AIzaSyAPR2K06A6ON_EqpifFDod-RY-Xr_GymKA"
 client_type = "gemini"
 max_retry = 2
 timeout = 30
@@ -256,11 +259,18 @@ price_in = 0
 price_out = 0
 
 [[models]]
-model_identifier = "deepseek-ai/DeepSeek-OCR"
-name = "deepseek-ai/DeepSeek-OCR"
-api_provider = "SiliconFlow"
-price_in = 0
-price_out = 0
+model_identifier = "waifubot-view"
+name = "waifubot-view"
+api_provider = "Qhaigc"
+price_in = 0.36
+price_out = 1.44
+
+[[models]]
+model_identifier = "waifubot-search"
+name = "waifubot-search"
+api_provider = "Qhaigc"
+price_in = 3.6
+price_out = 14.4
 
 [[models]]
 model_identifier = "chatgpt-4o"
@@ -270,15 +280,22 @@ price_in = 6
 price_out = 24
 
 [[models]]
-model_identifier = "chatgpt-4o-latest"
-name = "chatgpt-4o-latest"
+model_identifier = "gpt-5.2"
+name = "gpt-5.2"
 api_provider = "Qhaigc"
 price_in = 6
 price_out = 18
 
+[[models]]
+model_identifier = "gemini-2.5-flash#search"
+name = "gemini-2.5-flash#search"
+api_provider = "Qhaigc"
+price_in = 0.9
+price_out = 7.5
+
 
 [model_task_config.utils] # 在麦麦的一些组件中使用的模型，例如表情包模块，取名模块，关系模块，麦麦的情绪变化等，是麦麦必须的模型
-model_list = ["gemini-2.5-flash","gpt-4.1-mini"] # 使用的模型列表，每个子项对应上面的模型名称(name)
+model_list = ["gpt-4.1-mini","gpt-5-mini"] # 使用的模型列表，每个子项对应上面的模型名称(name)
 temperature = 0.7                        # 模型温度，新V3建议0.1-0.3
 max_tokens = 800                         # 最大输出token数
 
@@ -290,6 +307,11 @@ max_tokens = 800
 [model_task_config.tool_use] #工具调用模型，需要使用支持工具调用的模型
 model_list = ["gpt-4.1-mini","Qwen/Qwen3-8B","THUDM/glm-4-9b-chat","Qwen/Qwen2.5-7B-Instruct"]
 temperature = 0.7
+max_tokens = 800
+
+[model_task_config.web_search] # 联网搜索模型组
+model_list = ["waifubot-search","gemini-2.5-flash#search"]
+temperature = 0.2
 max_tokens = 800
 
 [model_task_config.replyer] # 首要回复模型，还用于表达器和表达方式学习
@@ -309,7 +331,7 @@ temperature = 0.2
 max_tokens = 800
 
 [model_task_config.vlm] # 图像识别模型
-model_list = ["gpt-5","gpt-5.1","gpt-4.1"]
+model_list = ["waifubot-view","gpt-5","gpt-5.1","gpt-5.2"]
 max_tokens = 800
 
 [model_task_config.voice] # 语音识别模型

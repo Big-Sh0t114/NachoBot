@@ -322,6 +322,10 @@ def process_llm_response(text: str, enable_splitter: bool = True, enable_chinese
     # 对清理后的文本进行进一步处理
     max_length = global_config.response_splitter.max_length * 2
     max_sentence_num = global_config.response_splitter.max_sentence_num
+    max_sentence_num_cap = global_config.response_splitter.max_sentence_num_cap
+    if max_sentence_num_cap <= 0:
+        max_sentence_num_cap = 1
+    max_sentence_num = min(max_sentence_num, max_sentence_num_cap)
     # 如果基本上是中文，则进行长度过滤
     if get_western_ratio(cleaned_text) < 0.1 and len(cleaned_text) > max_length:
         logger.warning(f"回复过长 ({len(cleaned_text)} 字符)，返回默认回复")
@@ -350,8 +354,15 @@ def process_llm_response(text: str, enable_splitter: bool = True, enable_chinese
             sentences.append(sentence)
 
     if len(sentences) > max_sentence_num:
-        logger.warning(f"分割后消息数量过多 ({len(sentences)} 条)，返回默认回复")
-        return [f"{global_config.bot.nickname}不知道哦"]
+        logger.warning(f"分割后消息数量过多 ({len(sentences)} 条)，执行合并限制为 {max_sentence_num} 条")
+        while len(sentences) > max_sentence_num:
+            tail = sentences.pop()
+            if not sentences:
+                sentences.append(tail)
+                break
+            head = sentences.pop()
+            joiner = " " if get_western_ratio(f"{head}{tail}") > 0.3 else "。"
+            sentences.append(f"{head}{joiner}{tail}".strip())
 
     # if extracted_contents:
     #     for content in extracted_contents:

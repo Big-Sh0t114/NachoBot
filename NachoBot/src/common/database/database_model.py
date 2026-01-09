@@ -1,7 +1,48 @@
-from peewee import Model, DoubleField, IntegerField, BooleanField, TextField, FloatField, DateTimeField
-from .database import db
 import datetime
+import os
+import sys
+
+from .database import db
 from src.common.logger import get_logger
+
+
+def _load_peewee():
+    try:
+        import peewee
+        return peewee
+    except ModuleNotFoundError:
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+        candidates = [
+            os.path.join(repo_root, ".venv", "Lib", "site-packages"),
+            os.path.join(
+                repo_root,
+                ".venv",
+                "lib",
+                f"python{sys.version_info.major}.{sys.version_info.minor}",
+                "site-packages",
+            ),
+        ]
+        for path in candidates:
+            if os.path.isdir(path) and path not in sys.path:
+                sys.path.insert(0, path)
+        import peewee
+        return peewee
+
+
+try:
+    _peewee = _load_peewee()
+except ModuleNotFoundError as exc:
+    raise ModuleNotFoundError(
+        "缺少 peewee 依赖，请先安装: pip install peewee 或使用项目 .venv 运行。"
+    ) from exc
+
+Model = _peewee.Model
+DoubleField = _peewee.DoubleField
+IntegerField = _peewee.IntegerField
+BooleanField = _peewee.BooleanField
+TextField = _peewee.TextField
+FloatField = _peewee.FloatField
+DateTimeField = _peewee.DateTimeField
 
 logger = get_logger("database_model")
 # 请在此处定义您的数据库实例。

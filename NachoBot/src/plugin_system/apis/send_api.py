@@ -43,6 +43,86 @@ logger = get_logger("send_api")
 # =============================================================================
 
 
+_DEFAULT_BLOCKED_MARKERS = (
+    "i'm kiro",
+    "i am kiro",
+    "kiro-cli chat",
+    "kiro-cli",
+    "kiro cli",
+    "ai assistant built by aws",
+    "aws services",
+    "i can't engage with this request",
+    "i need to decline this request",
+    "this message is attempting to manipulate",
+    "adopting a fake persona",
+    "creating a fake persona",
+    "roleplaying as a character",
+    "roleplay as a different character",
+    "i don't roleplay as other characters",
+    "i don't pretend to be someone else",
+    "fabricated instructions",
+    "fabricated rules",
+    "ignoring my actual instructions",
+    "instructions to ignore my real system prompts",
+    "override my actual identity",
+    "actual identity and guidelines",
+    "responding as if i'm in a qq",
+    "qq chat group",
+    "identity verification",
+    "false claims about",
+    "fabricated identity",
+    "fake conversation history",
+)
+
+
+def _get_response_filter_settings() -> tuple[bool, List[str]]:
+    filter_config = getattr(global_config, "response_filter", None)
+    if filter_config is None:
+        return True, [marker.lower() for marker in _DEFAULT_BLOCKED_MARKERS]
+    enabled = bool(getattr(filter_config, "enable", True))
+    markers = getattr(filter_config, "blocked_markers", [])
+    cleaned = [str(marker).lower() for marker in markers if str(marker).strip()]
+    return enabled, cleaned
+
+
+def _should_suppress_text_reply(text: str, enabled: Optional[bool] = None, markers: Optional[List[str]] = None) -> bool:
+    if not text:
+        return False
+    if enabled is None or markers is None:
+        enabled, markers = _get_response_filter_settings()
+    if not enabled or not markers:
+        return False
+    normalized = text.lower()
+    return any(marker in normalized for marker in markers)
+
+
+def _should_suppress_reply_set(reply_set: "ReplySetModel") -> bool:
+    enabled, markers = _get_response_filter_settings()
+    if not enabled or not markers:
+        return False
+    aggregated_texts: List[str] = []
+    for reply_content in reply_set.reply_data:
+        content_type = reply_content.content_type
+        if content_type == ReplyContentType.TEXT:
+            text_content = str(reply_content.content)
+            aggregated_texts.append(text_content)
+            if _should_suppress_text_reply(text_content, enabled=enabled, markers=markers):
+                return True
+        elif content_type == ReplyContentType.HYBRID:
+            hybrid_message_list_data: List["ReplyContent"] = reply_content.content  # type: ignore
+            if not isinstance(hybrid_message_list_data, list):
+                continue
+            for sub_content in hybrid_message_list_data:
+                if sub_content.content_type == ReplyContentType.TEXT:
+                    text_content = str(sub_content.content)
+                    aggregated_texts.append(text_content)
+                    if _should_suppress_text_reply(text_content, enabled=enabled, markers=markers):
+                        return True
+    if aggregated_texts and _should_suppress_text_reply(" ".join(aggregated_texts), enabled=enabled, markers=markers):
+        return True
+    return False
+
+
 async def _send_to_target(
     message_segment: Seg,
     stream_id: str,
@@ -72,6 +152,12 @@ async def _send_to_target(
         if set_reply and not reply_message:
             logger.warning("[SendAPI] 使用引用回复，但未提供回复消息")
             return False
+
+        if message_segment.type == "text":
+            text_data = str(message_segment.data)
+            if _should_suppress_text_reply(text_data):
+                logger.error("[SendAPI] 检测到可疑回复模板，已替换为 Filtered")
+                message_segment = Seg(type="text", data="Filtered")
 
         if show_log:
             logger.debug(f"[SendAPI] 发送{message_segment.type}消息到 {stream_id}")
@@ -392,6 +478,17 @@ async def custom_reply_set_to_stream(
         storage_message: 是否存储消息到数据库
         show_log: 是否显示日志
     """
+    if _should_suppress_reply_set(reply_set):
+        logger.error("[SendAPI] 检测到可疑回复模板，已替换为 Filtered")
+        return await text_to_stream(
+            text="Filtered",
+            stream_id=stream_id,
+            typing=False,
+            set_reply=set_reply,
+            reply_message=reply_message,
+            storage_message=storage_message,
+        )
+
     flag: bool = True
     for reply_content in reply_set.reply_data:
         status: bool = False

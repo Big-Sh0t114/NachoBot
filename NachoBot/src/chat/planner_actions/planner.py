@@ -34,6 +34,22 @@ logger = get_logger("planner")
 
 install(extra_lines=3)
 
+_URL_PATTERN = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
+
+
+def _has_url_message(text: Optional[str]) -> bool:
+    if not text:
+        return False
+    return bool(_URL_PATTERN.search(text))
+
+
+def _is_bot_message(message: Optional["DatabaseMessages"]) -> bool:
+    if not message or not getattr(message, "user_info", None):
+        return False
+    user_id = str(getattr(message.user_info, "user_id", ""))
+    platform = getattr(message.user_info, "platform", None)
+    return user_id == str(global_config.bot.qq_account) and platform == global_config.bot.platform
+
 
 def init_prompt():
     Prompt(
@@ -185,13 +201,15 @@ class ActionPlanner:
             internal_action_names = ["no_reply", "reply", "wait_time", "no_reply_until_call"]
 
             if action not in internal_action_names and action not in available_action_names:
+                invalid_action = action
                 logger.warning(
-                    f"{self.log_prefix}LLM 返回了当前不可用或无效的动作: '{action}' (可用: {available_action_names})，将强制使用 'no_reply'"
+                    f"{self.log_prefix}LLM 返回了当前不可用或无效的动作: '{invalid_action}' (可用: {available_action_names})，将强制使用 'reply'"
                 )
                 reasoning = (
-                    f"LLM 返回了当前不可用的动作 '{action}' (可用: {available_action_names})。原始理由: {reasoning}"
+                    f"LLM 返回了当前不可用的动作 '{invalid_action}' (可用: {available_action_names})，已改为回复。"
+                    f" 原始理由: {reasoning}"
                 )
-                action = "no_reply"
+                action = "reply"
 
             # 创建ActionPlannerInfo对象
             # 将列表转换为字典格式
@@ -240,6 +258,20 @@ class ActionPlanner:
             timestamp=time.time(),
             limit=int(context_size * 0.6),
         )
+        if message_list_before_now:
+            latest_message = message_list_before_now[-1]
+            if _has_url_message(getattr(latest_message, "processed_plain_text", "") or "") and not _is_bot_message(
+                latest_message
+            ):
+                reasoning = "检测到包含URL的消息，直接执行网页解析回复"
+                action = ActionPlannerInfo(
+                    action_type="reply",
+                    reasoning=reasoning,
+                    action_data={"loop_start_time": loop_start_time},
+                    action_message=latest_message,
+                    available_actions=available_actions,
+                )
+                return [action], latest_message
         message_id_list: list[Tuple[str, "DatabaseMessages"]] = []
         chat_content_block, message_id_list = build_readable_messages_with_id(
             messages=message_list_before_now,

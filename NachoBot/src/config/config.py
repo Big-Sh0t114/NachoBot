@@ -23,6 +23,7 @@ from src.config.official_configs import (
     PromiseCacheConfig,
     ChineseTypoConfig,
     ResponsePostProcessConfig,
+    ResponseFilterConfig,
     ResponseSplitterConfig,
     ExperimentalConfig,
     MessageReceiveConfig,
@@ -358,6 +359,7 @@ class Config(ConfigBase):
     promise_cache: PromiseCacheConfig
     chinese_typo: ChineseTypoConfig
     response_post_process: ResponsePostProcessConfig
+    response_filter: ResponseFilterConfig = field(default_factory=ResponseFilterConfig)
     response_splitter: ResponseSplitterConfig
     experimental: ExperimentalConfig
     ncnk_message: NcnkMessageConfig

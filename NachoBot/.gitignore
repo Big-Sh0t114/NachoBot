@@ -1,4 +1,5 @@
 data/
+src/plugins/built_in/mus_library/cache_silk/
 data1/
 mongodb/
 NapCat.Framework.Windows.Once/

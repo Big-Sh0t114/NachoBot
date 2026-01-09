@@ -20,6 +20,8 @@ from src.chat.utils.timer_calculator import Timer  # <--- Import Timer
 from src.chat.utils.utils import get_chat_type_and_target_info
 from src.chat.utils.prompt_builder import global_prompt_manager
 from src.chat.utils.prompt_injection_guard import build_guardrail_instruction, guard_user_content
+from src.chat.utils.url_fetcher import UrlContentFetcher, extract_urls
+from src.chat.utils.web_search import WebSearchManager
 from src.chat.utils.chat_message_builder import (
     build_readable_messages,
     get_raw_msg_before_timestamp_with_chat,
@@ -60,6 +62,8 @@ class PrivateReplyer:
         from src.plugin_system.core.tool_use import ToolExecutor  # 延迟导入ToolExecutor，不然会循环依赖
 
         self.tool_executor = ToolExecutor(chat_id=self.chat_stream.stream_id, enable_cache=True, cache_ttl=3)
+        self.web_search_manager = WebSearchManager(chat_id=self.chat_stream.stream_id, enable_cache=True, cache_ttl=2)
+        self.url_fetcher = UrlContentFetcher()
 
     async def generate_reply_with_context(
         self,
@@ -336,16 +340,72 @@ class PrivateReplyer:
         """
 
         if not enable_tool:
+            logger.info("工具信息跳过: enable_tool=False")
             return ""
 
         try:
-            # 使用工具执行器获取信息
-            tool_results, _, _ = await self.tool_executor.execute_from_chat_message(
-                sender=sender, target_message=target, chat_history=chat_history, return_details=False
-            )
+            url_info = ""
+            urls = extract_urls(target)
+            if urls:
+                url_preview = ", ".join(urls[:3])
+                if len(urls) > 3:
+                    url_preview += " ..."
+                logger.info(f"检测到URL，开始抓取: {url_preview}")
+                try:
+                    url_info = await self.url_fetcher.build_url_info(urls)
+                except Exception as e:
+                    logger.debug(f"URL解析失败: {e}")
 
-            if tool_results:
-                tool_info_str = "以下是你通过工具获取到的实时信息：\n"
+            search_info = ""
+            search_url_info = ""
+            if not urls:
+                logger.info("未检测到URL，尝试联网搜索判定")
+                try:
+                    search_info = await self.web_search_manager.build_search_info(
+                        chat_history=chat_history,
+                        sender=sender,
+                        target=target,
+                        bot_name=global_config.bot.nickname,
+                    )
+                except Exception as e:
+                    logger.debug(f"联网搜索信息获取失败: {e}")
+                if search_info:
+                    logger.info("联网搜索已返回结果")
+                    search_urls = []
+                    seen_urls = set()
+                    for url in extract_urls(search_info):
+                        if url in seen_urls:
+                            continue
+                        seen_urls.add(url)
+                        search_urls.append(url)
+                        if len(search_urls) >= 3:
+                            break
+                    if search_urls:
+                        logger.info("开始抓取搜索结果正文")
+                        try:
+                            search_url_info = await self.url_fetcher.build_url_info(search_urls)
+                        except Exception as e:
+                            logger.debug(f"搜索结果正文抓取失败: {e}")
+                else:
+                    logger.info("联网搜索未触发或无结果")
+
+            tool_results = []
+            try:
+                # 使用工具执行器获取信息
+                tool_results, _, _ = await self.tool_executor.execute_from_chat_message(
+                    sender=sender, target_message=target, chat_history=chat_history, return_details=False
+                )
+            except Exception as e:
+                logger.error(f"工具执行器失败，跳过工具结果: {e}")
+
+            if tool_results or search_info or url_info:
+                tool_info_str = "以下是你获取到的实时信息：\n"
+                if url_info:
+                    tool_info_str += f"【网页内容】\n{url_info}\n"
+                if search_info:
+                    tool_info_str += f"【联网搜索】\n{search_info}\n"
+                if search_url_info:
+                    tool_info_str += f"【搜索结果正文】\n{search_url_info}\n"
                 for tool_result in tool_results:
                     tool_name = tool_result.get("tool_name", "unknown")
                     content = tool_result.get("content", "")
@@ -354,7 +414,14 @@ class PrivateReplyer:
                     tool_info_str += f"- 【{tool_name}】{result_type}: {content}\n"
 
                 tool_info_str += "以上是你获取到的实时信息，请在回复时参考这些信息。"
-                logger.info(f"获取到 {len(tool_results)} 个工具结果")
+                if tool_results:
+                    logger.info(f"获取到 {len(tool_results)} 个工具结果")
+                if search_info:
+                    logger.info("获取到联网搜索结果")
+                if search_url_info:
+                    logger.info("获取到搜索结果正文")
+                if url_info:
+                    logger.info("获取到网页解析结果")
 
                 return tool_info_str
             else:
