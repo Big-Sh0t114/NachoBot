@@ -359,7 +359,6 @@ class Config(ConfigBase):
     promise_cache: PromiseCacheConfig
     chinese_typo: ChineseTypoConfig
     response_post_process: ResponsePostProcessConfig
-    response_filter: ResponseFilterConfig = field(default_factory=ResponseFilterConfig)
     response_splitter: ResponseSplitterConfig
     experimental: ExperimentalConfig
     ncnk_message: NcnkMessageConfig
@@ -368,6 +367,7 @@ class Config(ConfigBase):
     debug: DebugConfig
     voice: VoiceConfig
     advanced: AdvancedConfig
+    response_filter: ResponseFilterConfig = field(default_factory=ResponseFilterConfig)
     injections: InjectionConfig = field(default_factory=InjectionConfig)
 
 
