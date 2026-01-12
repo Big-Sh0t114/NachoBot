@@ -50,18 +50,26 @@ class WebSearchManager:
         self.max_results = max_results
         self._cache: Dict[str, Dict[str, Any]] = {}
         self._warned_disabled = False
+        self._warned_decider = False
 
-        model_set = getattr(model_config.model_task_config, "web_search", None)
-        self._enabled = bool(model_set and model_set.model_list)
-        self._decider = LLMRequest(model_set=model_set, request_type="web_search_decider") if self._enabled else None
-        self._searcher = LLMRequest(model_set=model_set, request_type="web_search") if self._enabled else None
+        model_set_search = getattr(model_config.model_task_config, "web_search", None)
+        model_set_decider = getattr(model_config.model_task_config, "tool_use", None)
+        self._search_enabled = bool(model_set_search and model_set_search.model_list)
+        self._decider_enabled = bool(model_set_decider and model_set_decider.model_list)
+        self._decider = LLMRequest(model_set=model_set_decider, request_type="web_search_decider") if self._decider_enabled else None
+        self._searcher = LLMRequest(model_set=model_set_search, request_type="web_search") if self._search_enabled else None
 
     async def build_search_info(self, chat_history: str, sender: str, target: str, bot_name: str) -> str:
-        if not self._enabled or not target:
-            if not self._warned_disabled and not self._enabled:
+        if not target:
+            return ""
+        if not self._search_enabled:
+            if not self._warned_disabled:
                 logger.warning("联网搜索未启用：model_task_config.web_search 为空或未配置")
                 self._warned_disabled = True
             return ""
+        if not self._decider_enabled and not self._warned_decider:
+            logger.warning("联网搜索判定未启用：model_task_config.tool_use 为空或未配置，将仅使用关键词触发")
+            self._warned_decider = True
 
         target_preview = target.replace("\n", " ")[:80]
         logger.info(f"联网搜索检查: target={target_preview}")
@@ -71,7 +79,10 @@ class WebSearchManager:
         decision = await decision_task
         if decision is None:
             decision = {"need_search": False, "query": "", "reason": ""}
-        need_search = bool(keyword_hit or decision.get("need_search"))
+        if self._decider_enabled:
+            need_search = bool(decision.get("need_search"))
+        else:
+            need_search = bool(keyword_hit)
         if not need_search:
             logger.info(
                 f"联网搜索跳过: keyword_hit={keyword_hit}, model_need={decision.get('need_search')}"

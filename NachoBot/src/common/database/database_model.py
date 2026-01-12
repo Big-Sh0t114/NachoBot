@@ -45,22 +45,6 @@ FloatField = _peewee.FloatField
 DateTimeField = _peewee.DateTimeField
 
 logger = get_logger("database_model")
-# 请在此处定义您的数据库实例。
-# 您需要取消注释并配置适合您的数据库的部分。
-# 例如，对于 SQLite:
-# db = SqliteDatabase('NachoBot.db')
-#
-# 对于 PostgreSQL:
-# db = PostgresqlDatabase('your_db_name', user='your_user', password='your_password',
-#                         host='localhost', port=5432)
-#
-# 对于 MySQL:
-# db = MySQLDatabase('your_db_name', user='your_user', password='your_password',
-#                    host='localhost', port=3306)
-
-
-# 定义一个基础模型是一个好习惯，所有其他模型都应继承自它。
-# 这允许您在一个地方为所有模型指定数据库。
 class BaseModel(Model):
     class Meta:
         # 将下面的 'db' 替换为您实际的数据库实例变量名。
@@ -97,8 +81,6 @@ class ChatStreams(BaseModel):
 
     # user_info 字段:
     #   platform: "qq"
-    #   user_id: "1787882683"
-    #   user_nickname: "墨梓柒(IceSakurary)"
     #   user_cardname: ""
     user_platform = TextField()
     user_id = TextField()

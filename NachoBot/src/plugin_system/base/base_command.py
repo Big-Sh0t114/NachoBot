@@ -88,6 +88,10 @@ class BaseCommand(ABC):
 
         return current
 
+    def is_force_command(self) -> bool:
+        """是否以 -force 后缀强制执行命令"""
+        return bool(getattr(self.message, "force_command", False))
+
     async def send_text(
         self,
         content: str,

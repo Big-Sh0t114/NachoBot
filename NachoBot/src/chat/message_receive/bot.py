@@ -94,44 +94,89 @@ class ChatBot:
         # sourcery skip: use-named-expression
         """使用新插件系统处理命令"""
         try:
-            text = message.processed_plain_text
+            text = message.processed_plain_text or ""
+            raw_text = message.raw_message if isinstance(message.raw_message, str) else None
+            message.force_command = False
 
-            if text:
-                stripped = text.strip().lower()
+            force_suffix_pattern = r"\s+-force\s*$"
+            force_requested = False
+            command_text = text
+            raw_command_text = raw_text
+            if text and re.search(force_suffix_pattern, text, re.IGNORECASE):
+                force_requested = True
+                command_text = re.sub(force_suffix_pattern, "", text, flags=re.IGNORECASE)
+                if raw_text is not None:
+                    raw_command_text = re.sub(force_suffix_pattern, "", raw_text, flags=re.IGNORECASE)
+
+            user_info = getattr(message.message_info, "user_info", None)
+            user_id = getattr(user_info, "user_id", None) if user_info else None
+            force_allowed = force_requested and advanced_manager.is_admin(user_id)
+
+            def _apply_command_text():
+                message.processed_plain_text = command_text
+                if raw_command_text is not None:
+                    message.raw_message = raw_command_text
+
+            def _apply_force_command():
+                message.force_command = True
+                _apply_command_text()
+
+            if command_text:
+                stripped = command_text.strip().lower()
                 if stripped in ["#adv_on", "#adv_off"]:
                     message.is_command = True
-                    user_info = getattr(message.message_info, "user_info", None)
-                    user_id = getattr(user_info, "user_id", None) if user_info else None
+                    if force_requested:
+                        _apply_command_text()
                     if not advanced_manager.is_allowed(user_id):
                         await send_api.text_to_stream("现在的关系还不能使用此指令哦~(´-ω-`)", message.chat_stream.stream_id)
                         return True, "not allowed", False
-                    if message.chat_stream and message.chat_stream.group_info:
+                    is_group = bool(message.chat_stream and message.chat_stream.group_info)
+                    if is_group and not force_allowed:
                         await send_api.text_to_stream("笨蛋，这里是群里喵~(´-ω-`)", message.chat_stream.stream_id)
                         return True, "group not allowed", False
 
                     enabled = stripped == "#adv_on"
-                    advanced_manager.set_state(str(user_id), enabled, stream_id=message.chat_stream.stream_id)
-                    reply_text = "高级模式已开启，请尽情使唤NachoBot哦~" if enabled else "高级模式已关闭，tts及工具调用等功能已恢复"
+                    if force_allowed:
+                        _apply_force_command()
+                    if is_group:
+                        group_id = message.chat_stream.group_info.group_id
+                        advanced_manager.set_group_state(message.chat_stream.platform, str(group_id), enabled)
+                        reply_text = (
+                            "高级模式已开启，请尽情使唤NachoBot哦~"
+                            if enabled
+                            else "高级模式已关闭，tts及工具调用等功能已恢复"
+                        )
+                    else:
+                        advanced_manager.set_state(str(user_id), enabled, stream_id=message.chat_stream.stream_id)
+                        reply_text = (
+                            "高级模式已开启，请尽情使唤NachoBot哦~"
+                            if enabled
+                            else "高级模式已关闭，tts及工具调用等功能已恢复"
+                        )
                     await send_api.text_to_stream(reply_text, message.chat_stream.stream_id)
                     return True, reply_text, False
 
                 if stripped == "#adv_check":
                     message.is_command = True
-                    user_info = getattr(message.message_info, "user_info", None)
-                    user_id = getattr(user_info, "user_id", None) if user_info else None
+                    if force_requested:
+                        _apply_command_text()
                     if not advanced_manager.is_admin(user_id):
                         await send_api.text_to_stream("这是只有给主人才能看的东西哦~(´-ω-`)", message.chat_stream.stream_id)
                         return True, "not admin", False
-                    if message.chat_stream and message.chat_stream.group_info:
+                    if message.chat_stream and message.chat_stream.group_info and not force_allowed:
                         await send_api.text_to_stream("注意隐私哦，主人~(´-ω-`)", message.chat_stream.stream_id)
                         return True, "group not allowed", False
                     enabled_users = advanced_manager.list_enabled_users()
-                    reply_text = "主人，当前开启高级模式的用户: " + (", ".join(enabled_users) if enabled_users else "无")
+                    enabled_groups = advanced_manager.list_enabled_groups()
+                    enabled_ids = enabled_users + enabled_groups
+                    reply_text = "主人，当前开启高级模式的用户: " + (", ".join(enabled_ids) if enabled_ids else "无")
+                    if force_allowed:
+                        _apply_force_command()
                     await send_api.text_to_stream(reply_text, message.chat_stream.stream_id)
                     return True, reply_text, False
 
             # 使用新的组件注册中心查找命令
-            command_result = component_registry.find_command_by_text(text)
+            command_result = component_registry.find_command_by_text(command_text)
             if command_result:
                 command_class, matched_groups, command_info = command_result
                 plugin_name = command_info.plugin_name
@@ -141,11 +186,16 @@ class ChatBot:
                     and message.chat_stream.stream_id
                     and command_name
                     in global_announcement_manager.get_disabled_chat_commands(message.chat_stream.stream_id)
+                    and not force_allowed
                 ):
                     logger.info("用户禁用的命令，跳过处理")
                     return False, None, True
 
                 message.is_command = True
+                if force_allowed:
+                    _apply_force_command()
+                elif force_requested:
+                    _apply_command_text()
 
                 # 获取插件配置
                 plugin_config = component_registry.get_plugin_config(plugin_name)
@@ -180,8 +230,8 @@ class ChatBot:
                     return True, str(e), False  # 出错时继续处理消息
 
             # 近似匹配提示：以 # 开头但未匹配到命令
-            if text and text.strip().startswith("#"):
-                suggestions = component_registry.suggest_command(text, max_suggestions=2, cutoff=0.75)
+            if command_text and command_text.strip().startswith("#"):
+                suggestions = component_registry.suggest_command(command_text, max_suggestions=2, cutoff=0.75)
                 if suggestions:
                     message.is_command = True
                     stream_id = message.chat_stream.stream_id if message.chat_stream else None

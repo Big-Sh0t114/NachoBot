@@ -147,6 +147,7 @@ class MessageRecv(Message):
         self.is_notify = False
 
         self.is_command = False
+        self.force_command = False
 
         self.priority_mode = "interest"
         self.priority_info = None

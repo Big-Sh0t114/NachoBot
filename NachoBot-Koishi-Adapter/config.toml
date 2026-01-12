@@ -1,0 +1,29 @@
+[inner]
+version = "0.1.0"
+
+[onebot_server]
+# If ws_url is empty, host/port/path will be used.
+ws_url = "ws://127.0.0.1:5140/onebot/v11/ws"
+host = "127.0.0.1"
+port = 5140
+path = "/onebot/v11/ws"
+token = ""
+reconnect_seconds = 5
+
+[nachobot_server]
+host = "127.0.0.1"
+port = 8070
+platform = "discord"
+
+[chat]
+group_list_type = "blacklist"
+group_list = []
+private_list_type = "blacklist"
+private_list = []
+ban_user_id = []
+
+[voice]
+use_tts = true
+
+[debug]
+level = "INFO"

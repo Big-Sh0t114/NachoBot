@@ -26,7 +26,11 @@ class ManagementCommand(BaseCommand):
             not self.message
             or not self.message.message_info
             or not self.message.message_info.user_info
-            or str(self.message.message_info.user_info.user_id) not in self.get_config("plugin.permission", [])  # type: ignore
+            or (
+                not self.is_force_command()
+                and str(self.message.message_info.user_info.user_id)
+                not in self.get_config("plugin.permission", [])  # type: ignore
+            )
         ):
             await self._send_message("你没有权限使用插件管理命令")
             return False, "没有权限", True

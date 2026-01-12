@@ -51,6 +51,15 @@ def _is_bot_message(message: Optional["DatabaseMessages"]) -> bool:
     return user_id == str(global_config.bot.qq_account) and platform == global_config.bot.platform
 
 
+def _pick_latest_user_message(
+    message_id_list: List[Tuple[str, "DatabaseMessages"]],
+) -> Optional["DatabaseMessages"]:
+    for _, message in reversed(message_id_list):
+        if not _is_bot_message(message):
+            return message
+    return message_id_list[-1][1] if message_id_list else None
+
+
 def init_prompt():
     Prompt(
         """
@@ -98,6 +107,7 @@ no_reply_until_call
 **动作选择要求**
 请你根据聊天内容,用户的最新消息和以下标准选择合适的动作:
 {plan_style}
+回复动作若未明确指定 target_message_id，请选择最新的非机器人消息。
 {moderation_prompt}
 
 请选择所有符合使用要求的action，动作用json格式输出，如果输出多个json，每个json都要单独用```json包裹，你可以重复使用同一个动作或不同动作:
@@ -183,18 +193,26 @@ class ActionPlanner:
             reasoning = action_json.get("reason", "未提供原因")
             action_data = {key: value for key, value in action_json.items() if key not in ["action", "reason"]}
             # 非no_action动作需要target_message_id
+            latest_user_message = _pick_latest_user_message(message_id_list)
             target_message = None
+            fallback_to_latest = False
 
             if target_message_id := action_json.get("target_message_id"):
                 # 根据target_message_id查找原始消息
                 target_message = self.find_message_by_id(target_message_id, message_id_list)
                 if target_message is None:
                     logger.warning(f"{self.log_prefix}无法找到target_message_id '{target_message_id}' 对应的消息")
-                    # 选择最新消息作为target_message
-                    target_message = message_id_list[-1][1]
+                    fallback_to_latest = True
             else:
-                target_message = message_id_list[-1][1]
+                fallback_to_latest = True
                 logger.debug(f"{self.log_prefix}动作'{action}'缺少target_message_id，使用最新消息作为target_message")
+
+            if fallback_to_latest:
+                target_message = latest_user_message or (message_id_list[-1][1] if message_id_list else None)
+
+            if _is_bot_message(target_message) and latest_user_message:
+                target_message = latest_user_message
+                logger.debug(f"{self.log_prefix}target_message为机器人消息，改为最新用户消息")
 
             # 验证action是否可用
             available_action_names = [action_name for action_name, _ in current_available_actions]
