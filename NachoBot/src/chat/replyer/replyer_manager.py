@@ -2,7 +2,7 @@ from typing import Dict, Optional
 
 from src.common.logger import get_logger
 from src.chat.message_receive.chat_stream import ChatStream, get_chat_manager
-from src.chat.replyer.group_generator import DefaultReplyer
+from src.chat.replyer.group_generator import DefaultReplyer, AdvancedGroupReplyer
 from src.chat.replyer.private_generator import PrivateReplyer
 from src.chat.replyer.advanced_generator import AdvancedPrivateReplyer
 from src.chat.advanced.advanced_manager import advanced_manager
@@ -40,11 +40,12 @@ class ReplyerManager:
             logger.warning(f"[ReplyerManager] 未找到 stream_id='{stream_id}' 的聊天流，无法创建回复器。")
             return None
 
-        # 根据是否开启高级模式选择生成器类型（私聊）
+        # 根据是否开启高级模式选择生成器类型
         advanced_on = advanced_manager.is_on(target_stream) if target_stream else False
-        desired_cls = DefaultReplyer if target_stream.group_info else (
-            AdvancedPrivateReplyer if advanced_on else PrivateReplyer
-        )
+        if target_stream.group_info:
+            desired_cls = AdvancedGroupReplyer if advanced_on else DefaultReplyer
+        else:
+            desired_cls = AdvancedPrivateReplyer if advanced_on else PrivateReplyer
 
         # 如果已有缓存但类型不匹配，替换；否则沿用缓存
         cached = self._repliers.get(stream_id)

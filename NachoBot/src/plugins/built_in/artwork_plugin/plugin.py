@@ -127,7 +127,7 @@ class SendArtworkAction(BaseAction):
         text = str(text).lower()
 
         # 需要同时包含动词和画作相关名词
-        view_verbs = ["看", "看看", "想看", "给", "发", "来", "给我", "来张", "求", "想要"]
+        view_verbs = ["看", "看看", "想看", "给", "发", "来", "给我", "来张", "求", "想要","发张"]
         art_nouns = ["画", "画作", "作品", "插画", "图片", "图", "图图", "画廊"]
 
         has_verb = any(v in text for v in view_verbs)
