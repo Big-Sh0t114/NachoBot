@@ -212,7 +212,7 @@ class BuildRelationAction(BaseAction):
             else:
                 logger.debug(f"{self.log_prefix} 生成的LLM Prompt: {prompt}")
 
-            chat_model_config = models.get("utils")
+            chat_model_config = models.get("replyer")
             success, update_memory, _, _ = await llm_api.generate_with_model(
                 prompt,
                 model_config=chat_model_config,  # type: ignore

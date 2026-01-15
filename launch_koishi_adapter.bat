@@ -5,7 +5,7 @@ set "BASE_DIR=%~dp0"
 
 rem ---- Start Koishi in a new window ----
 echo Starting Koishi...
-start "Koishi" cmd /k "cd /d ""%BASE_DIR%koishi-app"" && set HTTPS_PROXY=http://127.0.0.1:7897 && npm start"
+start "Koishi" cmd /k "cd /d ""%BASE_DIR%koishi-app"" && set HTTPS_PROXY=http://127.0.0.1:7897 && set HTTP_PROXY=http://127.0.0.1:7897 && npm start"
 
 rem ---- Wait for Koishi to bring up server-onebot ----
 timeout /t 5 /nobreak >nul

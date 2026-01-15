@@ -31,7 +31,7 @@ from src.chat.express.expression_selector import expression_selector
 
 # from src.chat.memory_system.memory_activator import MemoryActivator
 from src.mood.mood_manager import mood_manager
-from src.person_info.person_info import Person, is_person_known
+from src.person_info.person_info import Person
 from src.plugin_system.base.component_types import ActionInfo, EventType
 from src.plugin_system.apis import llm_api
 
@@ -231,9 +231,18 @@ class DefaultReplyer:
         if sender == global_config.bot.nickname:
             return ""
 
-        # 获取用户ID
-        person = Person(person_name=sender)
-        if not is_person_known(person_name=sender):
+        # 获取用户，优先使用 user_id，避免昵称变更导致找不到
+        person = None
+        user_info = self.chat_stream.user_info
+        if user_info and getattr(user_info, "user_id", None) and getattr(user_info, "platform", None):
+            person = Person(platform=user_info.platform, user_id=user_info.user_id)
+        else:
+            logger.warning("缺少用户信息，无法构建关系记忆，使用昵称降级匹配")
+
+        if (not person or not person.is_known) and sender:
+            person = Person(person_name=sender)
+
+        if not person or not person.is_known:
             logger.warning(f"未找到用户 {sender} 的ID，跳过信息提取")
             return f"你完全不认识{sender}，不理解ta的相关信息。"
 

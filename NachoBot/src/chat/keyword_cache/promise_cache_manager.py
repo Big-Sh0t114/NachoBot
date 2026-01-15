@@ -1,13 +1,15 @@
+import asyncio
 import json
 import os
 import re
 import time
 from typing import Dict, Iterable, List, Optional, Set, Tuple, TYPE_CHECKING
 
-from src.config.config import global_config
+from src.config.config import global_config, model_config
 from src.common.logger import get_logger
 from src.common.data_models.database_data_model import DatabaseMessages
 from src.chat.utils.chat_message_builder import get_raw_msg_before_timestamp_with_chat
+from src.llm_models.utils_model import LLMRequest
 
 if TYPE_CHECKING:
     from src.chat.message_receive.message import MessageRecv
@@ -18,6 +20,36 @@ class PromiseCacheManager:
         self._logger = get_logger("promise_cache")
         self._active_captures: Dict[Tuple[str, str], dict] = {}
         self._repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+        self._last_activity_ts = 0.0
+        self._idle_task: Optional[asyncio.Task] = None
+        self._idle_seconds = 180
+        self._scan_lock: Optional[asyncio.Lock] = None
+        self._summary_model = LLMRequest(
+            model_set=model_config.model_task_config.replyer,
+            request_type="promise_cache_summary",
+        )
+
+    def touch_activity(self) -> None:
+        cfg = global_config.promise_cache
+        if not (cfg.enable and cfg.keywords):
+            return
+        self._last_activity_ts = time.time()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if self._idle_task and not self._idle_task.done():
+            self._idle_task.cancel()
+        self._idle_task = loop.create_task(self._idle_wait_then_scan())
+
+    async def _idle_wait_then_scan(self) -> None:
+        try:
+            await asyncio.sleep(self._idle_seconds)
+            if time.time() - self._last_activity_ts < self._idle_seconds:
+                return
+            await self._scan_and_summarize_all()
+        except asyncio.CancelledError:
+            return
 
     def handle_message(self, message: "MessageRecv") -> List[str]:
         """处理单条消息：写入/更新缓存，并返回已命中的缓存片段（若存在历史约定）。"""
@@ -132,7 +164,7 @@ class PromiseCacheManager:
         if current_record:
             records.append(current_record)
 
-        cache_dir = self._get_keyword_dir(chat_id, keyword)
+        cache_dir = self._get_keyword_dir(chat_id, keyword, "raw")
         os.makedirs(cache_dir, exist_ok=True)
         date_str = time.strftime("%Y%m%d")
         session_code = self._get_session_identifier(message)
@@ -214,12 +246,20 @@ class PromiseCacheManager:
     def _extract_text(self, message: DatabaseMessages) -> str:
         return (getattr(message, "processed_plain_text", "") or getattr(message, "display_message", "") or "").strip()
 
-    def _get_keyword_dir(self, chat_id: str, keyword: str) -> str:
+    def _get_cache_root(self) -> str:
         cfg = global_config.promise_cache
         base_dir = cfg.cache_dir
-        cache_root = base_dir if os.path.isabs(base_dir) else os.path.abspath(os.path.join(self._repo_root, base_dir))
+        if os.path.isabs(base_dir):
+            return base_dir
+        return os.path.abspath(os.path.join(self._repo_root, base_dir))
+
+    def _get_keyword_dir(self, chat_id: str, keyword: str, bucket: Optional[str] = None) -> str:
+        cache_root = self._get_cache_root()
         safe_keyword = re.sub(r'[<>:"/\\|?*]+', "_", keyword).strip() or "keyword"
-        return os.path.join(cache_root, chat_id, safe_keyword)
+        base_dir = os.path.join(cache_root, chat_id, safe_keyword)
+        if bucket:
+            return os.path.join(base_dir, bucket)
+        return base_dir
 
     def _get_session_identifier(self, message: "MessageRecv") -> str:
         try:
@@ -251,6 +291,22 @@ class PromiseCacheManager:
         except Exception as exc:
             self._logger.warning(f"写入约定缓存失败: {exc}", exc_info=True)
 
+    def _persist_processed_cache(self, processed_path: str, raw_data: dict, summary: str, raw_path: str) -> None:
+        data = {
+            "chat_id": raw_data.get("chat_id", ""),
+            "keyword": raw_data.get("keyword", ""),
+            "created_at": raw_data.get("created_at", time.time()),
+            "processed_at": time.time(),
+            "summary": summary.strip(),
+            "raw_file": os.path.basename(raw_path),
+        }
+        try:
+            os.makedirs(os.path.dirname(processed_path), exist_ok=True)
+            with open(processed_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            self._logger.warning(f"写入约定缓存摘要失败: {exc}", exc_info=True)
+
     def _trim_old_caches(self, cache_dir: str, max_keep: int) -> None:
         try:
             files = [f for f in os.listdir(cache_dir) if f.endswith(".json")]
@@ -258,19 +314,35 @@ class PromiseCacheManager:
                 return
             files = sorted(files, key=lambda name: os.path.getmtime(os.path.join(cache_dir, name)))
             for old in files[:-max_keep]:
+                raw_path = os.path.join(cache_dir, old)
                 try:
-                    os.remove(os.path.join(cache_dir, old))
+                    os.remove(raw_path)
                 except Exception:
                     continue
+                processed_path = self._raw_to_processed_path(raw_path)
+                if processed_path and os.path.exists(processed_path):
+                    try:
+                        os.remove(processed_path)
+                    except Exception:
+                        continue
         except Exception as exc:
             self._logger.debug(f"清理旧约定缓存失败: {exc}", exc_info=True)
 
-    def _load_latest_cache(self, chat_id: str, keyword: str) -> Optional[dict]:
-        caches = self._load_caches(chat_id, keyword, limit=1)
+    def _raw_to_processed_path(self, raw_path: str) -> Optional[str]:
+        raw_dir = os.path.dirname(raw_path)
+        if os.path.basename(raw_dir) != "raw":
+            return None
+        base_dir = os.path.dirname(raw_dir)
+        return os.path.join(base_dir, "processed", os.path.basename(raw_path))
+
+    def _load_latest_cache(self, chat_id: str, keyword: str, cache_type: str = "processed") -> Optional[dict]:
+        caches = self._load_caches(chat_id, keyword, limit=1, cache_type=cache_type)
         return caches[0] if caches else None
 
-    def _load_caches(self, chat_id: str, keyword: str, limit: Optional[int] = None) -> List[dict]:
-        cache_dir = self._get_keyword_dir(chat_id, keyword)
+    def _load_caches(
+        self, chat_id: str, keyword: str, limit: Optional[int] = None, cache_type: str = "processed"
+    ) -> List[dict]:
+        cache_dir = self._get_keyword_dir(chat_id, keyword, cache_type)
         if not os.path.isdir(cache_dir):
             return []
         try:
@@ -296,12 +368,107 @@ class PromiseCacheManager:
             self._logger.warning(f"读取约定缓存失败: {exc}", exc_info=True)
             return []
 
+    def _iter_raw_cache_files(self) -> Iterable[str]:
+        cache_root = self._get_cache_root()
+        if not os.path.isdir(cache_root):
+            return
+        for root, _, files in os.walk(cache_root):
+            if os.path.basename(root) != "raw":
+                continue
+            for name in files:
+                if name.endswith(".json"):
+                    yield os.path.join(root, name)
+
+    def _load_raw_cache(self, raw_path: str) -> Optional[dict]:
+        try:
+            with open(raw_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                data["file_path"] = raw_path
+                return data
+        except Exception as exc:
+            self._logger.warning(f"读取约定缓存失败: {exc}", exc_info=True)
+            return None
+
+    def _build_transcript(self, records: List[dict]) -> str:
+        lines = []
+        for rec in records:
+            name = rec.get("user_nickname") or rec.get("user_id") or ""
+            content = rec.get("content") or ""
+            if not content:
+                continue
+            if name:
+                lines.append(f"{name}: {content}")
+            else:
+                lines.append(content)
+        return "\n".join(lines)
+
+    async def _summarize_raw_cache(self, keyword: str, raw_data: dict) -> str:
+        records = raw_data.get("records") or []
+        if not records:
+            return ""
+        transcript = self._build_transcript(records)
+        if not transcript:
+            return ""
+        prompt = (
+            "你是对话摘要助手。请根据以下对话记录，提炼与关键词相关的约定/承诺/共识/限制。\n"
+            f"关键词：{keyword}\n"
+            "输出要求：\n"
+            "1) 使用简洁中文，3-6条要点，逐行列出。\n"
+            "2) 只保留事实与约定，不要解释过程，不要加入臆测。\n"
+            "3) 不要包含说话人或时间戳。\n"
+            "对话记录：\n"
+            f"{transcript}\n"
+        )
+        try:
+            content, _ = await self._summary_model.generate_response_async(prompt)
+        except Exception as exc:
+            self._logger.warning(f"[promise_cache] 生成摘要失败: {exc}", exc_info=True)
+            return ""
+        return (content or "").strip()
+
+    async def _scan_and_summarize_all(self) -> None:
+        cfg = global_config.promise_cache
+        if not (cfg.enable and cfg.keywords):
+            return
+        if self._scan_lock is None:
+            self._scan_lock = asyncio.Lock()
+        async with self._scan_lock:
+            if time.time() - self._last_activity_ts < self._idle_seconds:
+                return
+            raw_files = list(self._iter_raw_cache_files())
+            if not raw_files:
+                return
+            raw_files.sort(key=lambda path: os.path.getmtime(path))
+            self._logger.info(f"[promise_cache] 空闲{self._idle_seconds}s，开始整理{len(raw_files)}条raw缓存")
+            for raw_path in raw_files:
+                if time.time() - self._last_activity_ts < self._idle_seconds:
+                    self._logger.info("[promise_cache] 收到新消息，停止整理")
+                    return
+                processed_path = self._raw_to_processed_path(raw_path)
+                if not processed_path:
+                    continue
+                if os.path.exists(processed_path):
+                    continue
+                raw_data = self._load_raw_cache(raw_path)
+                if not raw_data:
+                    continue
+                if not raw_data.get("completed", True):
+                    continue
+                summary = await self._summarize_raw_cache(raw_data.get("keyword", ""), raw_data)
+                if not summary:
+                    continue
+                self._persist_processed_cache(processed_path, raw_data, summary, raw_path)
+                self._logger.info(f"[promise_cache] 写入摘要 file={processed_path}")
+
     def _format_cache(self, keyword: str, cache: dict) -> str:
+        summary = (cache.get("summary") or "").strip()
+        created_at = cache.get("processed_at") or cache.get("created_at") or time.time()
+        header = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(created_at))
+        if summary:
+            return "\n".join([f"[关键词:{keyword}] 摘要于 {header}", summary]).strip()
         records = cache.get("records") or []
         if not records:
             return ""
-        created_at = cache.get("created_at") or time.time()
-        header = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(created_at))
         lines = [f"[关键词:{keyword}] 缓存于 {header}"]
         for rec in records:
             ts = rec.get("time") or 0
