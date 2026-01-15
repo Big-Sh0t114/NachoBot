@@ -27,3 +27,6 @@ use_tts = true
 
 [debug]
 level = "INFO"
+
+[ffmpeg]
+path = "C:/Users/BigSh0t/Nacho-with-u/NachoBot/plugins/bilibili_video_sender_plugin/ffmpeg/bin"

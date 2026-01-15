@@ -1,0 +1,8 @@
+{
+  "git.repositoryScanIgnoredFolders": [
+    "node_modules",
+    ".yarn",
+  ],
+  "git.repositoryScanMaxDepth": 10,
+  "git.autoRepositoryDetection": "subFolders",
+}

@@ -2,6 +2,8 @@ import asyncio
 import base64
 import json
 import logging
+import os
+import subprocess
 import sys
 import time
 import urllib.parse
@@ -55,6 +57,8 @@ ACCEPT_FORMAT = [
     "video",
 ]
 
+BUILD_TAG = "koishi-adapter-build-2026-01-15"
+
 
 @dataclass
 class AdapterConfig:
@@ -71,6 +75,7 @@ class AdapterConfig:
     ban_user_id: List[str]
     use_tts: bool
     log_level: str
+    ffmpeg_path: str
 
 
 def _load_toml(path: Path) -> Dict[str, Any]:
@@ -87,6 +92,7 @@ def load_config(path: Path) -> AdapterConfig:
     chat = data.get("chat", {})
     voice = data.get("voice", {})
     debug = data.get("debug", {})
+    ffmpeg = data.get("ffmpeg", {})
 
     ws_url = onebot.get("ws_url", "")
     if not ws_url:
@@ -109,6 +115,7 @@ def load_config(path: Path) -> AdapterConfig:
         ban_user_id=[str(x) for x in chat.get("ban_user_id", [])],
         use_tts=bool(voice.get("use_tts", True)),
         log_level=str(debug.get("level", "INFO")),
+        ffmpeg_path=str(ffmpeg.get("path", "") or ""),
     )
 
 
@@ -413,6 +420,9 @@ class KoishiOneBotAdapter:
             self.logger.info("Command segment ignored for OneBot")
             return
 
+        if not self._allow_reply() and self._contains_reply_segment(message_segment):
+            self.logger.info(f"Drop reply segment for platform={self.config.platform}")
+
         processed_message = self._seg_to_onebot(message_segment)
         if not processed_message:
             return
@@ -420,7 +430,6 @@ class KoishiOneBotAdapter:
         message_info = raw_message_base.message_info
         group_info = message_info.group_info
         user_info = message_info.user_info
-
         params: Dict[str, Any] = {"message": processed_message}
         if group_info and group_info.group_id:
             params["message_type"] = "group"
@@ -446,7 +455,18 @@ class KoishiOneBotAdapter:
             f"Forward NachoBot -> OneBot: message_type={params.get('message_type')} "
             f"group_id={params.get('group_id')} user_id={params.get('user_id')}"
         )
-        await self._onebot_send("send_msg", params)
+        self.logger.info(
+            f"OneBot outgoing segments: {[seg.get('type') for seg in processed_message]}"
+        )
+        try:
+            self.logger.info("OneBot send start")
+            await self._onebot_send("send_msg", params)
+            self.logger.info("OneBot send done")
+        except asyncio.CancelledError:
+            self.logger.warning("OneBot send cancelled")
+            raise
+        except Exception as exc:
+            self.logger.error(f"OneBot send raised: {exc}")
 
     def _seg_to_onebot(self, seg_data: Seg) -> List[Dict[str, Any]]:
         payload: List[Dict[str, Any]] = []
@@ -461,7 +481,7 @@ class KoishiOneBotAdapter:
                 payload.append({"type": "text", "data": {"text": text}})
         elif seg_data.type == "reply":
             target_id = seg_data.data
-            if target_id:
+            if target_id and self._allow_reply():
                 payload.append({"type": "reply", "data": {"id": target_id}})
         elif seg_data.type == "image":
             if seg_data.data:
@@ -475,7 +495,12 @@ class KoishiOneBotAdapter:
                 )
         elif seg_data.type in ("voice", "voice_stream"):
             if self.config.use_tts and seg_data.data:
-                payload.append({"type": "record", "data": {"file": f"base64://{seg_data.data}"}})
+                file_value = self._voice_to_record_file(
+                    str(seg_data.data),
+                    stream=(seg_data.type == "voice_stream"),
+                )
+                if file_value:
+                    payload.append({"type": "record", "data": self._build_record_data(file_value)})
         elif seg_data.type == "imageurl":
             if seg_data.data:
                 payload.append({"type": "image", "data": {"file": str(seg_data.data)}})
@@ -485,9 +510,132 @@ class KoishiOneBotAdapter:
 
         return payload
 
+    def _contains_reply_segment(self, seg_data: Seg) -> bool:
+        if seg_data.type == "reply":
+            return True
+        if seg_data.type == "seglist" and isinstance(seg_data.data, list):
+            return any(self._contains_reply_segment(seg) for seg in seg_data.data)
+        return False
+
+    def _allow_reply(self) -> bool:
+        return str(self.config.platform).lower() != "discord"
+
+    def _resolve_ffmpeg_exe(self) -> Optional[str]:
+        candidates = []
+        if self.config.ffmpeg_path:
+            candidates.append(self.config.ffmpeg_path)
+        env_path = os.environ.get("FFMPEG_PATH")
+        if env_path:
+            candidates.append(env_path)
+        candidates.append("ffmpeg")
+
+        for candidate in candidates:
+            if candidate == "ffmpeg":
+                return candidate
+            candidate_path = Path(candidate)
+            if candidate_path.exists():
+                if candidate_path.is_dir():
+                    bin_dir = candidate_path / "bin"
+                    if bin_dir.exists():
+                        for name in ("ffmpeg.exe", "ffmpeg"):
+                            exe_path = bin_dir / name
+                            if exe_path.exists():
+                                return str(exe_path)
+                    for name in ("ffmpeg.exe", "ffmpeg"):
+                        exe_path = candidate_path / name
+                        if exe_path.exists():
+                            return str(exe_path)
+                else:
+                    return str(candidate_path)
+        if self.config.ffmpeg_path:
+            self.logger.warning(f"ffmpeg path not found: {self.config.ffmpeg_path}")
+        return "ffmpeg"
+
+    def _voice_to_record_file(self, audio_b64: str, stream: bool = False) -> str:
+        if not audio_b64:
+            return ""
+        if str(self.config.platform).lower() != "discord":
+            return f"base64://{audio_b64}"
+        if stream:
+            self.logger.warning("Discord voice bubble does not support voice_stream, send as raw record")
+            return f"base64://{audio_b64}"
+        ogg_data_url = self._convert_to_opus_data_url(audio_b64)
+        if ogg_data_url:
+            return ogg_data_url
+        return f"base64://{audio_b64}"
+
+    def _build_record_data(self, file_value: str) -> Dict[str, Any]:
+        data = {"file": file_value}
+        if str(self.config.platform).lower() == "discord" and file_value.startswith("data:audio/ogg"):
+            data["file_name"] = "voice-message.ogg"
+        return data
+
+    def _convert_to_opus_data_url(self, audio_b64: str) -> Optional[str]:
+        try:
+            audio_bytes = base64.b64decode(audio_b64)
+        except Exception as exc:
+            self.logger.warning(f"Decode audio base64 failed: {exc}")
+            return None
+
+        ffmpeg_exe = self._resolve_ffmpeg_exe()
+        cmd = [
+            ffmpeg_exe,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            "pipe:0",
+            "-c:a",
+            "libopus",
+            "-b:a",
+            "64k",
+            "-vbr",
+            "on",
+            "-f",
+            "ogg",
+            "pipe:1",
+        ]
+        try:
+            proc = subprocess.run(
+                cmd,
+                input=audio_bytes,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+        except FileNotFoundError:
+            self.logger.warning("ffmpeg not found, cannot convert to opus/ogg")
+            return None
+        if proc.returncode != 0 or not proc.stdout:
+            err = proc.stderr.decode("utf-8", errors="ignore")
+            self.logger.warning(f"ffmpeg convert failed: {err}")
+            return None
+        ogg_b64 = base64.b64encode(proc.stdout).decode("ascii")
+        self.logger.info("ffmpeg convert ok, send ogg/opus voice bubble")
+        return f"data:audio/ogg;base64,{ogg_b64}"
+
+    @staticmethod
+    def _ws_is_closed(ws: Any) -> bool:
+        if ws is None:
+            return True
+        closed_attr = getattr(ws, "closed", None)
+        if closed_attr is not None:
+            return bool(closed_attr)
+        try:
+            from websockets.protocol import State
+        except Exception:
+            return False
+        state = getattr(ws, "state", None)
+        return state in (State.CLOSING, State.CLOSED)
+
     async def _onebot_send(self, action: str, params: Dict[str, Any]) -> None:
-        if not self.onebot_ws or self.onebot_ws.closed:
-            self.logger.warning("OneBot not connected, drop message")
+        ws = self.onebot_ws
+        if self._ws_is_closed(ws):
+            self.logger.warning(
+                "OneBot not connected, drop message (ws=%s closed=%s)",
+                bool(ws),
+                getattr(ws, "closed", None),
+            )
             return
         echo = str(uuid.uuid4())
         payload = {
@@ -495,8 +643,22 @@ class KoishiOneBotAdapter:
             "params": params,
             "echo": echo,
         }
-        async with self.onebot_send_lock:
-            await self.onebot_ws.send(json.dumps(payload, ensure_ascii=True))
+        self.logger.info(f"OneBot action sending: {action} echo={echo}")
+        try:
+            async with self.onebot_send_lock:
+                await asyncio.wait_for(
+                    ws.send(json.dumps(payload, ensure_ascii=True)),
+                    timeout=5,
+                )
+        except asyncio.TimeoutError:
+            self.logger.error(f"OneBot action send timeout: {action} echo={echo}")
+            try:
+                await ws.close()
+            except Exception as close_exc:
+                self.logger.warning(f"OneBot ws close failed after timeout: {close_exc}")
+        except Exception as exc:
+            self.logger.error(f"OneBot action send failed: {action} echo={echo} err={exc}")
+            return
         self.logger.info(f"OneBot action sent: {action} echo={echo}")
 
     @staticmethod
@@ -511,6 +673,7 @@ async def main() -> None:
     config_path = Path(__file__).parent / "config.toml"
     config = load_config(config_path)
     logger = setup_logging(config.log_level)
+    logger.info(f"Adapter build tag: {BUILD_TAG}")
     adapter = KoishiOneBotAdapter(config, logger)
     await adapter.run()
 

@@ -1,0 +1,21 @@
+name: Clean
+
+on:
+  release:
+    types:
+      - deleted
+
+jobs:
+  clean:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Delete tag
+        run: |
+          git tag -d ${{ github.event.release.tag_name }}
+          git push origin :refs/tags/${{ github.event.release.tag_name }}

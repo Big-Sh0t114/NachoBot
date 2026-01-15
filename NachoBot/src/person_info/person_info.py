@@ -4,6 +4,7 @@ import json
 import time
 import random
 import math
+import re
 
 from json_repair import repair_json
 from typing import Union, Optional
@@ -123,6 +124,34 @@ def calculate_string_similarity(s1: str, s2: str) -> float:
     # 计算相似度：1 - (编辑距离 / 最大长度)
     similarity = 1 - (distance / max_len if max_len > 0 else 0)
     return similarity
+
+
+def tokenize_for_overlap(text: str) -> list[str]:
+    """简单分词，用于计算文本重叠度"""
+    if not isinstance(text, str):
+        return []
+    text = text.strip().lower()
+    if not text:
+        return []
+    if re.search(r"[\u4e00-\u9fff]", text):
+        compact = re.sub(r"\s+", "", text)
+        return [ch for ch in compact if ch.strip()]
+    return re.findall(r"[a-z0-9_]+", text)
+
+
+def calculate_overlap_score(text_a: str, text_b: str) -> float:
+    """计算两个文本的重叠度"""
+    terms_a = tokenize_for_overlap(text_a)
+    terms_b = tokenize_for_overlap(text_b)
+    if not terms_a or not terms_b:
+        return 0.0
+    set_a = set(terms_a)
+    set_b = set(terms_b)
+    overlap = len(set_a & set_b)
+    denom = min(len(set_a), len(set_b))
+    if denom == 0:
+        return 0.0
+    return overlap / denom
 
 
 def levenshtein_distance(s1: str, s2: str) -> int:
@@ -344,6 +373,63 @@ class Person:
             return memory_list
         return random.sample(memory_list, num)
 
+    def get_top_memories_by_category(self, category: str, num: int = 1):
+        memory_list = self.get_memory_list_by_category(category)
+        if not memory_list:
+            return []
+
+        def _memory_weight(memory: str) -> float:
+            weight = get_weight_from_memory(memory)
+            return weight if math.isfinite(weight) else 0.0
+
+        return sorted(memory_list, key=_memory_weight, reverse=True)[:num]
+
+    def get_relevant_memories(self, query: str, max_num: int = 3, min_score: float = 0.2) -> list[str]:
+        if not query or not self.memory_points:
+            return []
+        query = query.strip()
+        if not query:
+            return []
+
+        scored = []
+        for memory_point in self.memory_points:
+            if memory_point is None:
+                continue
+            content = get_memory_content_from_memory(memory_point)
+            if not content:
+                continue
+            category = get_category_from_memory(memory_point) or ""
+
+            content_overlap = calculate_overlap_score(query, content)
+            content_similarity = calculate_string_similarity(query, content)
+            content_score = max(content_overlap, content_similarity)
+
+            category_score = 0.0
+            if category:
+                category_overlap = calculate_overlap_score(query, category)
+                category_similarity = calculate_string_similarity(query, category)
+                category_score = 0.6 * max(category_overlap, category_similarity)
+
+            score = max(content_score, category_score)
+            weight = get_weight_from_memory(memory_point)
+            if math.isfinite(weight) and weight > 0:
+                score *= 1 + min(weight, 5.0) * 0.05
+
+            scored.append((score, category, content))
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        result = []
+        for score, category, content in scored:
+            if score < min_score:
+                break
+            if category:
+                result.append(f"有关 {category} 的内容：{content}")
+            else:
+                result.append(content)
+            if len(result) >= max_num:
+                break
+        return result
+
     def load_from_database(self):
         """从数据库加载个人信息数据"""
         try:
@@ -440,7 +526,11 @@ class Person:
         category_list = self.get_all_category()
       
         if chat_content:
-            prompt = f"""当前聊天内容：
+            relevant_points = self.get_relevant_memories(chat_content, max_num=2)
+            if relevant_points:
+                points_text = "\n".join(relevant_points)
+            else:
+                prompt = f"""当前聊天内容：
 {chat_content}
 
 分类列表：
@@ -450,19 +540,25 @@ class Person:
 <分类1><分类2><分类3>......
 如果没有相关的分类，请输出<none>"""
 
-            response, _ = await relation_selection_model.generate_response_async(prompt)
-            # print(prompt)
-            # print(response)
-            category_list = extract_categories_from_response(response)
-            if  "none" not in category_list:
-                for category in category_list:
-                    random_memory = self.get_random_memory_by_category(category, 2)
-                    if random_memory:
-                        random_memory_str = "\n".join([get_memory_content_from_memory(memory) for memory in random_memory])
-                        points_text = f"有关 {category} 的内容：{random_memory_str}"
-                        break
+                response, _ = await relation_selection_model.generate_response_async(prompt)
+                # print(prompt)
+                # print(response)
+                category_list = [c for c in extract_categories_from_response(response) if c.lower() != "none"]
+                if category_list:
+                    for category in category_list:
+                        top_memories = self.get_top_memories_by_category(category, 2)
+                        if top_memories:
+                            random_memory_str = "\n".join(
+                                [get_memory_content_from_memory(memory) for memory in top_memories]
+                            )
+                            points_text = f"有关 {category} 的内容：{random_memory_str}"
+                            break
         elif info_type:
-            prompt = f"""你需要获取用户{self.person_name}的 **{info_type}** 信息。
+            relevant_points = self.get_relevant_memories(info_type, max_num=3)
+            if relevant_points:
+                points_text = "\n".join(relevant_points)
+            else:
+                prompt = f"""你需要获取用户{self.person_name}的 **{info_type}** 信息。
 
 现有信息类别列表：
 {category_list}
@@ -470,24 +566,27 @@ class Person:
 例如:
 <分类1><分类2><分类3>......
 如果没有相关的分类，请输出<none>"""
-            response, _ = await relation_selection_model.generate_response_async(prompt)
-            print(prompt)
-            print(response)
-            category_list = extract_categories_from_response(response)
-            if  "none" not in category_list:
-                for category in category_list:
-                    random_memory = self.get_random_memory_by_category(category, 3)
-                    if random_memory:
-                        random_memory_str = "\n".join([get_memory_content_from_memory(memory) for memory in random_memory])
-                        points_text = f"有关 {category} 的内容：{random_memory_str}"
-                        break
+                response, _ = await relation_selection_model.generate_response_async(prompt)
+                print(prompt)
+                print(response)
+                category_list = [c for c in extract_categories_from_response(response) if c.lower() != "none"]
+                if category_list:
+                    for category in category_list:
+                        top_memories = self.get_top_memories_by_category(category, 3)
+                        if top_memories:
+                            random_memory_str = "\n".join(
+                                [get_memory_content_from_memory(memory) for memory in top_memories]
+                            )
+                            points_text = f"有关 {category} 的内容：{random_memory_str}"
+                            break
         else:
-        
             for category in category_list:
-                random_memory = self.get_random_memory_by_category(category, 1)[0]
-                if random_memory:
-                    points_text = f"有关 {category} 的内容：{get_memory_content_from_memory(random_memory)}"
-                    break
+                top_memories = self.get_top_memories_by_category(category, 1)
+                if top_memories:
+                    memory_content = get_memory_content_from_memory(top_memories[0])
+                    if memory_content:
+                        points_text = f"有关 {category} 的内容：{memory_content}"
+                        break
 
         points_info = ""
         if points_text:

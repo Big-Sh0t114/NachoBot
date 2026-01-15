@@ -1,0 +1,95 @@
+plugins:
+  group:server:
+    server:e5r2g6:
+      port: 5140
+      maxPort: 5149
+    ~server-satori:afwp8z: {}
+    ~server-temp:zcji9z: {}
+  group:basic:
+    ~admin:9rsa7e: {}
+    ~bind:28lwd6: {}
+    commands:219zrk: {}
+    help:mw5ufg: {}
+    http:up8zo1: {}
+    ~inspect:uu4df9: {}
+    locales:e1mv6f: {}
+    proxy-agent:n3qo79:
+      proxyAgent: http://127.0.0.1:7897
+    rate-limit:241jid: {}
+    telemetry:nym5b5: {}
+    ./nachobot-slash-bridge:nbcmd:
+      host: 127.0.0.1
+      port: 8070
+      platform: discord
+  group:console:
+    actions:0w1i5w: {}
+    analytics:19gqdw: {}
+    android:7qa6m8:
+      $if: env.KOISHI_AGENT?.includes('Android')
+    ~auth:zyvwiu: {}
+    config:kjd7fa: {}
+    console:idr73d:
+      open: true
+    dataview:ly3300: {}
+    desktop:5fk3p3:
+      $if: env.KOISHI_AGENT?.includes('Desktop')
+    explorer:zp5pt4: {}
+    logger:u9fhuz: {}
+    insight:ncdyq8: {}
+    market:8zm33h:
+      search:
+        endpoint: https://registry.koishi.chat/index.json
+    notifier:56uyop: {}
+    oobe:s8acau: {}
+    sandbox:u89x0b: {}
+    status:bcr45b: {}
+    theme-vanilla:i268dq: {}
+  group:storage:
+    ~database-mongo:1hb2ow:
+      database: koishi
+    ~database-mysql:4szu05:
+      database: koishi
+    ~database-postgres:7nf60j:
+      database: koishi
+    database-sqlite:4b6xgh:
+      path: data/koishi.db
+    assets-local:79fukq: {}
+  group:adapter:
+    ~adapter-dingtalk:wp560n: {}
+    adapter-discord:97kjzj:
+      token: 
+      intents:
+        - GUILDS
+        - GUILD_MEMBERS
+        - GUILD_MESSAGES
+        - GUILD_MESSAGE_REACTIONS
+        - GUILD_MESSAGE_TYPING
+        - DIRECT_MESSAGES
+        - DIRECT_MESSAGE_REACTIONS
+        - DIRECT_MESSAGE_TYPING
+        - MESSAGE_CONTENT
+    ~adapter-kook:dfaoua: {}
+    ~adapter-lark:439n9n: {}
+    ~adapter-line:4gklsb: {}
+    ~adapter-mail:jfaioj: {}
+    ~adapter-matrix:sq583x: {}
+    ~adapter-qq:4cl7rd: {}
+    ~adapter-satori:wvr2kj: {}
+    ~adapter-slack:32tf5t: {}
+    ~adapter-telegram:lacka0: {}
+    ~adapter-wechat-official:70m36x: {}
+    ~adapter-wecom:7be9j0: {}
+    ~adapter-whatsapp:miu2cl: {}
+    ~adapter-zulip:47r8qg: {}
+  group:develop:
+    $if: env.NODE_ENV === 'development'
+    hmr:0dnupx:
+      root: .
+  server-onebot:wdndch:
+    platform: discord
+    selfId: ' '
+    enabledWs: true
+    path: /onebot/v11/ws
+    selfname: NachoBot
+    groupname: discord-channel
+    loggerinfo: true

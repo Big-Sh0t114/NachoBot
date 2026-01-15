@@ -151,8 +151,10 @@ class PromptBuilder:
                 person_ids.append(person_id)
 
             # 使用 Person 的 build_relationship 方法，设置 points_num=3 保持与原来相同的行为
-            relation_info_list = [Person(person_id=person_id).build_relationship() for person_id in person_ids]
-            if relation_info := "".join(relation_info_list):
+            relation_tasks = [Person(person_id=person_id).build_relationship() for person_id in person_ids]
+            relation_info_list = await asyncio.gather(*relation_tasks) if relation_tasks else []
+            relation_info = "".join([info for info in relation_info_list if info])
+            if relation_info:
                 relation_prompt = await global_prompt_manager.format_prompt(
                     "relation_prompt", relation_info=relation_info
                 )

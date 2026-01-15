@@ -317,6 +317,8 @@ class ChatBot:
             # 确保所有任务已启动
             await self._ensure_started()
 
+            promise_cache_manager.touch_activity()
+
             platform = message_data["message_info"].get("platform")
 
             if platform == "amaidesu_default":
