@@ -3,6 +3,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import os
 import re
 import socket
 import sys
@@ -15,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple, Iterable
 
 import aiohttp
 import brotli
+import requests
 import urllib.parse
 import websockets
 
@@ -106,9 +108,20 @@ class AdapterConfig:
     live_max_hosts: int
     live_max_attempts: int
     live_ws_proxy: str
+    live_proxy_pool_path: str
+    live_proxy_check_url: str
+    live_proxy_check_timeout: int
+    live_allow_self_danmu: bool
+    live_log_danmu: bool
+    live_mention_keywords: List[str]
+    live_mention_prefixes: List[str]
+    live_mention_any_at: bool
     live_reply_prompt: str
     live_planner_prompt: str
+    live_room_prompts: Dict[int, Dict[str, str]]
+    live_resolve_user_nickname: bool
     enable_reply_notice: bool
+    comment_resolve_user_nickname: bool
     comment_poll_interval: int
     comment_max_items: int
     private_enable: bool
@@ -118,6 +131,7 @@ class AdapterConfig:
     private_auto_session_types: List[int]
     private_auto_session_refresh_seconds: int
     private_auto_session_size: int
+    private_force_mention: bool
     disable_video_sender_plugin: bool
     disable_command_trigger: bool
     log_level: str
@@ -134,6 +148,63 @@ def _load_toml(path: Path) -> Dict[str, Any]:
     if hasattr(toml, "loads"):
         return toml.loads(raw.decode("utf-8"))
     return toml.load(path)  # type: ignore[attr-defined]
+
+def _load_proxy_pool(path: Path) -> List[Dict[str, str]]:
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    if not isinstance(data, list):
+        return []
+    proxies: List[Dict[str, str]] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        ip = str(item.get("ip") or "").strip()
+        port = str(item.get("port") or "").strip()
+        if not ip or not port:
+            continue
+        proxy_url = f"http://{ip}:{port}"
+        proxies.append({"http": proxy_url, "https": proxy_url})
+    return proxies
+
+
+def _check_proxy_list(
+    proxy_list: List[Dict[str, str]],
+    url: str,
+    timeout: int,
+    logger: logging.Logger,
+) -> List[Dict[str, str]]:
+    can_use: List[Dict[str, str]] = []
+    if timeout <= 0:
+        timeout = 1
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        )
+    }
+    for proxy in proxy_list:
+        try:
+            resp = requests.get(url=url, headers=headers, proxies=proxy, timeout=timeout)
+            if resp.status_code == 200:
+                can_use.append(proxy)
+        except requests.RequestException:
+            continue
+    if not can_use:
+        logger.warning("No proxies passed check_url=%s", url)
+    return can_use
+
+
+def _proxy_dicts_to_urls(proxy_list: List[Dict[str, str]]) -> List[str]:
+    urls: List[str] = []
+    for proxy in proxy_list:
+        url = proxy.get("http") or proxy.get("https")
+        if url:
+            urls.append(url)
+    return urls
 
 
 def load_config(path: Path) -> AdapterConfig:
@@ -172,6 +243,37 @@ def load_config(path: Path) -> AdapterConfig:
     if not auto_session_types:
         auto_session_types = [4]
 
+    mention_keywords_raw = live.get("mention_keywords", [])
+    if isinstance(mention_keywords_raw, list):
+        mention_keywords = [str(x) for x in mention_keywords_raw if str(x).strip()]
+    elif mention_keywords_raw is None:
+        mention_keywords = []
+    else:
+        mention_keywords = [str(mention_keywords_raw)]
+
+    mention_prefixes_raw = live.get("mention_prefixes", ["@", "＠"])
+    if isinstance(mention_prefixes_raw, list):
+        mention_prefixes = [str(x) for x in mention_prefixes_raw if str(x).strip()]
+    elif mention_prefixes_raw is None:
+        mention_prefixes = ["@", "＠"]
+    else:
+        mention_prefixes = [str(mention_prefixes_raw)]
+
+    room_prompts_raw = live.get("room_prompts", {}) or {}
+    room_prompts: Dict[int, Dict[str, str]] = {}
+    if isinstance(room_prompts_raw, dict):
+        for key, value in room_prompts_raw.items():
+            try:
+                room_id = int(key)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(value, dict):
+                continue
+            room_prompts[room_id] = {
+                "reply_prompt": str(value.get("reply_prompt", "") or ""),
+                "planner_prompt": str(value.get("planner_prompt", "") or ""),
+            }
+
     return AdapterConfig(
         nachobot_host=str(nachobot.get("host", "127.0.0.1")),
         nachobot_port=int(nachobot.get("port", 8070)),
@@ -198,11 +300,24 @@ def load_config(path: Path) -> AdapterConfig:
         live_max_hosts=int(live.get("max_hosts", 0)),
         live_max_attempts=int(live.get("max_attempts", 0)),
         live_ws_proxy=str(live.get("ws_proxy", "auto") or "auto"),
+        live_proxy_pool_path=str(live.get("proxy_pool_path", "proxy.json") or "proxy.json"),
+        live_proxy_check_url=str(
+            live.get("proxy_check_url", "https://www.baidu.com") or "https://www.baidu.com"
+        ),
+        live_proxy_check_timeout=int(live.get("proxy_check_timeout", 1)),
+        live_allow_self_danmu=bool(live.get("allow_self_danmu", False)),
+        live_log_danmu=bool(live.get("log_danmu", False)),
+        live_mention_keywords=mention_keywords,
+        live_mention_prefixes=mention_prefixes,
+        live_mention_any_at=bool(live.get("mention_any_at", False)),
         live_reply_prompt=str(live.get("reply_prompt", "") or ""),
         live_planner_prompt=str(live.get("planner_prompt", "") or ""),
+        live_room_prompts=room_prompts,
+        live_resolve_user_nickname=bool(live.get("resolve_user_nickname", False)),
         enable_reply_notice=bool(comment.get("enable_reply_notice", True)),
         comment_poll_interval=int(comment.get("poll_interval_seconds", 20)),
         comment_max_items=int(comment.get("max_items_per_poll", 20)),
+        comment_resolve_user_nickname=bool(comment.get("resolve_user_nickname", False)),
         private_enable=bool(private_message.get("enable", False)),
         private_poll_interval=int(private_message.get("poll_interval_seconds", 20)),
         private_sessions=sessions,
@@ -212,6 +327,7 @@ def load_config(path: Path) -> AdapterConfig:
             private_message.get("auto_session_refresh_seconds", 60)
         ),
         private_auto_session_size=int(private_message.get("auto_session_size", 100)),
+        private_force_mention=bool(private_message.get("force_mention", False)),
         disable_video_sender_plugin=bool(
             compat.get("disable_video_sender_plugin", False)
         ),
@@ -436,11 +552,29 @@ class BilibiliApi:
             headers=headers,
         ) as resp:
             text = await resp.text()
+            if resp.status >= 400:
+                self.logger.warning(
+                    "HTTP error: status=%s url=%s body=%s",
+                    resp.status,
+                    url,
+                    text[:200],
+                )
             try:
-                return json.loads(text)
+                payload = json.loads(text)
             except json.JSONDecodeError:
                 self.logger.warning(f"Non-JSON response from {url}: {text[:200]}")
                 return {}
+            if isinstance(payload, dict):
+                code = payload.get("code")
+                if code not in (None, 0):
+                    self.logger.warning(
+                        "Bilibili API error: url=%s status=%s code=%s message=%s",
+                        url,
+                        resp.status,
+                        code,
+                        payload.get("message") or payload.get("msg"),
+                    )
+            return payload
 
     async def get_danmu_info(self, room_id: int) -> Dict[str, Any]:
         return await self.request_json(
@@ -527,6 +661,28 @@ class BilibiliApi:
             use_wbi=False,
         )
         items = (resp or {}).get("data", {}).get("items") or []
+        return list(items)[:size]
+
+    async def get_at_notifications(self, size: int) -> List[Dict[str, Any]]:
+        params = {
+            "build": 0,
+            "mobi_app": "web",
+        }
+        resp = await self.request_json(
+            "GET",
+            "https://api.bilibili.com/x/msgfeed/at",
+            params=params,
+            use_wbi=False,
+        )
+        items = (resp or {}).get("data", {}).get("items") or []
+        if (resp or {}).get("code") not in (None, 0):
+            resp = await self.request_json(
+                "GET",
+                "https://api.vc.bilibili.com/x/im/web/msgfeed/at",
+                params=params,
+                use_wbi=False,
+            )
+            items = (resp or {}).get("data", {}).get("items") or []
         return list(items)[:size]
 
     async def get_user_info(self, mid: int) -> Dict[str, Any]:
@@ -647,11 +803,57 @@ class LiveRoomWorker:
         self.logger = logger
         self._stop_event = asyncio.Event()
         self._ws: Optional[websockets.WebSocketClientProtocol] = None
+        self._proxy_index: int = 0
+        self._proxy_cycle: Optional[List[str]] = None
+        self._authed = False
 
     async def stop(self) -> None:
         self._stop_event.set()
         if self._ws:
             await self._ws.close()
+
+    def _get_proxy_cycle(self) -> Optional[List[str]]:
+        if self._proxy_cycle:
+            return self._proxy_cycle
+        pool_path = Path(self.config.live_proxy_pool_path)
+        if not pool_path.is_absolute():
+            pool_path = Path(__file__).resolve().parent / pool_path
+        proxy_list = _load_proxy_pool(pool_path)
+        if not proxy_list:
+            self.logger.warning("Proxy pool is empty: %s", pool_path)
+            return None
+        check_url = (self.config.live_proxy_check_url or "").strip()
+        if check_url:
+            checked = _check_proxy_list(
+                proxy_list,
+                check_url,
+                self.config.live_proxy_check_timeout,
+                self.logger,
+            )
+            if checked:
+                proxy_list = checked
+        proxy_cycle = _proxy_dicts_to_urls(proxy_list)
+        if not proxy_cycle:
+            self.logger.warning("Proxy pool has no usable entries: %s", pool_path)
+            return None
+        self._proxy_cycle = proxy_cycle
+        return proxy_cycle
+
+    def _should_mark_mention(self, text: str) -> bool:
+        if self.config.live_mention_any_at:
+            if "@" in text or "＠" in text:
+                return True
+        for keyword in self.config.live_mention_keywords:
+            if not keyword:
+                continue
+            if keyword in text:
+                return True
+            for prefix in self.config.live_mention_prefixes:
+                if not prefix:
+                    continue
+                if f"{prefix}{keyword}" in text:
+                    return True
+        return False
 
     async def run(self) -> None:
         backoff = self.config.reconnect_seconds
@@ -675,11 +877,35 @@ class LiveRoomWorker:
 
     async def _run_once(self) -> None:
         info = await self.api.get_danmu_info(self.room_id)
+        info_code = (info or {}).get("code")
+        info_msg = (info or {}).get("message") or (info or {}).get("msg") or ""
         data = (info or {}).get("data", {})
         token = data.get("token")
         host_list = data.get("host_list") or []
+        self.logger.info(
+            "Room %s getDanmuInfo: code=%s message=%s token=%s hosts=%s",
+            self.room_id,
+            info_code,
+            info_msg,
+            bool(token),
+            len(host_list),
+        )
+        if host_list:
+            host_preview = [
+                {
+                    "host": item.get("host"),
+                    "wss_port": item.get("wss_port"),
+                    "ws_port": item.get("ws_port"),
+                }
+                for item in host_list[:3]
+                if isinstance(item, dict)
+            ]
+            if host_preview:
+                self.logger.debug("Room %s host_list preview: %s", self.room_id, host_preview)
         if not token or not host_list:
-            raise RuntimeError("getDanmuInfo missing token/host_list")
+            raise RuntimeError(
+                f"getDanmuInfo missing token/host_list: code={info_code} message={info_msg}"
+            )
         if self.config.live_max_hosts > 0:
             host_list = host_list[: self.config.live_max_hosts]
         schemes = ["wss", "ws"] if self.config.use_wss else ["ws", "wss"]
@@ -709,10 +935,28 @@ class LiveRoomWorker:
         }
         proxy_value = (self.config.live_ws_proxy or "").strip()
         proxy_lower = proxy_value.lower()
+        proxy_cycle: Optional[List[str]] = None
         if proxy_lower in {"", "none", "false", "off", "disable"}:
             proxy_setting: object = None
         elif proxy_lower in {"auto", "env", "true", "on"}:
             proxy_setting = True
+            env_flags = {
+                name: bool(os.environ.get(name))
+                for name in (
+                    "HTTP_PROXY",
+                    "HTTPS_PROXY",
+                    "ALL_PROXY",
+                    "NO_PROXY",
+                    "http_proxy",
+                    "https_proxy",
+                    "all_proxy",
+                    "no_proxy",
+                )
+            }
+            self.logger.info("Room %s ws_proxy=auto env=%s", self.room_id, env_flags)
+        elif proxy_lower in {"pool", "file", "proxy_pool"}:
+            proxy_cycle = self._get_proxy_cycle()
+            proxy_setting = proxy_cycle[0] if proxy_cycle else None
         else:
             proxy_setting = proxy_value
         connect_variants = [
@@ -722,14 +966,16 @@ class LiveRoomWorker:
             ("ipv4-no-compression", {"compression": None, "family": socket.AF_INET}),
         ]
 
+        proxy_cycle_size = len(proxy_cycle) if proxy_cycle else 0
         self.logger.info(
-            "Room %s websocket proxy=%s use_wss=%s open_timeout=%s max_hosts=%s max_attempts=%s",
+            "Room %s websocket proxy=%s use_wss=%s open_timeout=%s max_hosts=%s max_attempts=%s pool=%s",
             self.room_id,
             proxy_setting if proxy_setting is not True else "auto",
             self.config.use_wss,
             self.config.live_open_timeout,
             self.config.live_max_hosts,
             self.config.live_max_attempts,
+            proxy_cycle_size,
         )
 
         attempt_count = 0
@@ -737,12 +983,26 @@ class LiveRoomWorker:
             for variant_name, variant_kwargs in connect_variants:
                 if self._stop_event.is_set():
                     return
+                if proxy_cycle:
+                    if not hasattr(self, "_proxy_index"):
+                        self._proxy_index = 0
+                    proxy_setting = proxy_cycle[self._proxy_index % len(proxy_cycle)]
+                    self._proxy_index += 1
                 if self.config.live_max_attempts > 0 and attempt_count >= self.config.live_max_attempts:
                     if last_exc:
                         raise last_exc
                     raise RuntimeError("websocket connect attempts exhausted")
                 attempt_count += 1
-                self.logger.info(f"Room {self.room_id} connecting: {uri} ({variant_name})")
+                proxy_label = (
+                    "auto" if proxy_setting is True else (proxy_setting if proxy_setting else "none")
+                )
+                self.logger.info(
+                    "Room %s connecting: %s (%s) proxy=%s",
+                    self.room_id,
+                    uri,
+                    variant_name,
+                    proxy_label,
+                )
                 try:
                     connect = websockets.connect(
                         uri,
@@ -777,6 +1037,14 @@ class LiveRoomWorker:
                         raise
                     try:
                         self._ws = ws
+                        self._authed = False
+                        self.logger.info(
+                            "Room %s websocket connected: %s (%s) proxy=%s",
+                            self.room_id,
+                            uri,
+                            variant_name,
+                            proxy_label,
+                        )
                         auth_body = {
                             "uid": int(self.config.dede_user_id) if self.config.dede_user_id else 0,
                             "roomid": self.room_id,
@@ -786,6 +1054,7 @@ class LiveRoomWorker:
                             "key": token,
                         }
                         await ws.send(self._pack(auth_body, op=7))
+                        self.logger.debug("Room %s auth packet sent", self.room_id)
                         heartbeat_task = asyncio.create_task(self._heartbeat_loop(ws))
                         try:
                             async for message in ws:
@@ -795,6 +1064,12 @@ class LiveRoomWorker:
                             heartbeat_task.cancel()
                             with contextlib.suppress(asyncio.CancelledError):
                                 await heartbeat_task
+                        self.logger.warning(
+                            "Room %s websocket closed: code=%s reason=%s",
+                            self.room_id,
+                            ws.close_code,
+                            ws.close_reason,
+                        )
                     finally:
                         self._ws = None
                         with contextlib.suppress(Exception):
@@ -840,6 +1115,13 @@ class LiveRoomWorker:
                 except json.JSONDecodeError:
                     continue
                 await self._handle_event(payload)
+            elif op == 8 and not self._authed:
+                try:
+                    payload = json.loads(body.decode("utf-8"))
+                except json.JSONDecodeError:
+                    payload = {}
+                self._authed = True
+                self.logger.info("Room %s auth ok: %s", self.room_id, payload)
 
     async def _handle_event(self, payload: Dict[str, Any]) -> None:
         cmd = payload.get("cmd") or ""
@@ -852,6 +1134,12 @@ class LiveRoomWorker:
         user_info = info[2] if isinstance(info[2], list) else []
         user_id = str(user_info[0] or "")
         user_name = str(user_info[1] or user_id)
+        if (
+            self.config.live_resolve_user_nickname
+            and user_id
+            and (not user_name or user_name == user_id)
+        ):
+            user_name = await self.adapter._resolve_user_nickname(user_id)
         timestamp_ms = 0
         if isinstance(info[0], list) and len(info[0]) > 4:
             timestamp_ms = int(info[0][4] or 0)
@@ -864,7 +1152,37 @@ class LiveRoomWorker:
             reply_dmid = str(extra.get("reply_dmid") or extra.get("reply_id") or "")
 
         if self.adapter.is_self_danmu(self.room_id, user_id, message_id, message_text):
+            if self.config.live_log_danmu:
+                safe_text = _normalize_text(message_text)
+                if len(safe_text) > 120:
+                    safe_text = safe_text[:117] + "..."
+                self.logger.info(
+                    "Danmu ignored (self): room_id=%s user_id=%s message_id=%s text=%s",
+                    self.room_id,
+                    user_id,
+                    message_id,
+                    safe_text,
+                )
             return
+        if self.config.live_log_danmu:
+            safe_text = _normalize_text(message_text)
+            if len(safe_text) > 120:
+                safe_text = safe_text[:117] + "..."
+            self.logger.info(
+                "Danmu received: room_id=%s user_id=%s message_id=%s text=%s",
+                self.room_id,
+                user_id,
+                message_id,
+                safe_text,
+            )
+        is_mentioned = self._should_mark_mention(message_text)
+        if is_mentioned:
+            self.logger.info(
+                "Danmu mention detected: room_id=%s user_id=%s message_id=%s",
+                self.room_id,
+                user_id,
+                message_id,
+            )
 
         self.adapter.remember_danmu(self.room_id, message_id, user_id)
         await self.adapter.handle_incoming_danmu(
@@ -876,6 +1194,7 @@ class LiveRoomWorker:
             timestamp=timestamp_ms / 1000 if timestamp_ms else time.time(),
             reply_mid=reply_mid,
             reply_dmid=reply_dmid,
+            is_mentioned=is_mentioned,
         )
 
     @staticmethod
@@ -1000,21 +1319,30 @@ class BilibiliAdapter:
         timestamp: float,
         reply_mid: str = "",
         reply_dmid: str = "",
+        is_mentioned: bool = False,
     ) -> None:
         if not text:
             return
         template_info = None
-        if self.config.live_reply_prompt or self.config.live_planner_prompt:
+        reply_prompt, planner_prompt = self._resolve_live_prompts(room_id)
+        if reply_prompt or planner_prompt:
             template_items: Dict[str, str] = {}
-            if self.config.live_reply_prompt:
-                template_items["replyer_prompt"] = self.config.live_reply_prompt
-            if self.config.live_planner_prompt:
-                template_items["planner_prompt"] = self.config.live_planner_prompt
+            if reply_prompt:
+                template_items["replyer_prompt"] = reply_prompt
+            if planner_prompt:
+                template_items["planner_prompt"] = planner_prompt
             template_info = TemplateInfo(
                 template_items=template_items,
                 template_name=f"bilibili_live_{room_id}",
                 template_default=False,
             )
+        additional_config = {
+            "room_id": room_id,
+            "reply_mid": reply_mid,
+            "reply_dmid": reply_dmid,
+        }
+        if is_mentioned:
+            additional_config["is_mentioned"] = 1.0
         message_info = BaseMessageInfo(
             platform=self.config.platform,
             message_id=str(message_id),
@@ -1034,11 +1362,7 @@ class BilibiliAdapter:
                 accept_format=ACCEPT_FORMAT,
             ),
             template_info=template_info,
-            additional_config={
-                "room_id": room_id,
-                "reply_mid": reply_mid,
-                "reply_dmid": reply_dmid,
-            },
+            additional_config=additional_config,
         )
         message = MessageBase(
             message_info=message_info,
@@ -1047,50 +1371,120 @@ class BilibiliAdapter:
         )
         await self._send_to_nachobot(message)
 
+    def _resolve_live_prompts(self, room_id: int) -> Tuple[str, str]:
+        reply_prompt = self.config.live_reply_prompt
+        planner_prompt = self.config.live_planner_prompt
+        room_prompts = self.config.live_room_prompts.get(room_id)
+        if room_prompts is not None:
+            room_reply = str(room_prompts.get("reply_prompt", "") or "")
+            room_planner = str(room_prompts.get("planner_prompt", "") or "")
+            if room_reply:
+                reply_prompt = room_reply
+            if room_planner:
+                planner_prompt = room_planner
+        return reply_prompt, planner_prompt
+
     async def _comment_notice_loop(self) -> None:
         while True:
+            reply_items: List[Dict[str, Any]] = []
+            at_items: List[Dict[str, Any]] = []
             try:
-                items = await self.api.get_reply_notifications(self.config.comment_max_items)
-                await self._handle_reply_notifications(items)
+                reply_items = await self.api.get_reply_notifications(
+                    self.config.comment_max_items
+                )
             except Exception as exc:
-                self.logger.warning(f"Comment notice loop error: {exc}")
+                self.logger.warning(f"Reply notice fetch error: {exc}")
+            try:
+                at_items = await self.api.get_at_notifications(
+                    self.config.comment_max_items
+                )
+            except Exception as exc:
+                self.logger.warning(f"At notice fetch error: {exc}")
+            if reply_items or at_items:
+                self.logger.info(
+                    "Comment notices: reply=%s at=%s",
+                    len(reply_items),
+                    len(at_items),
+                )
+            else:
+                self.logger.debug("Comment notices: 0")
+            if not self._comment_bootstrap_done:
+                for item in reply_items:
+                    self._track_notice_key(self._notice_key("reply", item))
+                for item in at_items:
+                    self._track_notice_key(self._notice_key("at", item))
+                self._comment_bootstrap_done = True
+            else:
+                await self._handle_reply_notifications(reply_items, source="reply")
+                await self._handle_reply_notifications(at_items, source="at")
             await asyncio.sleep(self.config.comment_poll_interval)
 
-    async def _handle_reply_notifications(self, items: List[Dict[str, Any]]) -> None:
-        if not self._comment_bootstrap_done:
-            for item in items:
-                notify_id = str(item.get("id") or "")
-                if not notify_id or notify_id in self._reply_seen_set:
-                    continue
-                self._reply_seen_set.add(notify_id)
-                self._reply_seen.append(notify_id)
-                if len(self._reply_seen) > 500:
-                    old = self._reply_seen.pop(0)
-                    self._reply_seen_set.discard(old)
-            self._comment_bootstrap_done = True
+    def _notice_key(self, source: str, item: Dict[str, Any]) -> str:
+        notify_id = str(item.get("id") or "")
+        if not notify_id:
+            return ""
+        return f"{source}:{notify_id}"
+
+    def _track_notice_key(self, notify_key: str) -> bool:
+        if not notify_key or notify_key in self._reply_seen_set:
+            return False
+        self._reply_seen_set.add(notify_key)
+        self._reply_seen.append(notify_key)
+        if len(self._reply_seen) > 500:
+            old = self._reply_seen.pop(0)
+            self._reply_seen_set.discard(old)
+        return True
+
+    def _is_at_me(self, at_details: Any) -> bool:
+        if not self.config.dede_user_id:
+            return False
+        if not isinstance(at_details, list):
+            return False
+        for detail in at_details:
+            if not isinstance(detail, dict):
+                continue
+            if str(detail.get("mid") or "") == self.config.dede_user_id:
+                return True
+        return False
+
+    async def _handle_reply_notifications(
+        self, items: List[Dict[str, Any]], source: str
+    ) -> None:
+        if not items:
             return
         for item in items:
             notify_id = str(item.get("id") or "")
-            if not notify_id or notify_id in self._reply_seen_set:
+            if not notify_id:
                 continue
-            self._reply_seen_set.add(notify_id)
-            self._reply_seen.append(notify_id)
-            if len(self._reply_seen) > 500:
-                old = self._reply_seen.pop(0)
-                self._reply_seen_set.discard(old)
+            notify_key = self._notice_key(source, item)
+            if not self._track_notice_key(notify_key):
+                continue
 
             user = item.get("user") or {}
             reply_item = item.get("item") or {}
             user_id = str(user.get("mid") or "")
             user_name = str(user.get("nickname") or user_id)
+            if (
+                self.config.comment_resolve_user_nickname
+                and user_id
+                and (not user_name or user_name == user_id)
+            ):
+                user_name = await self._resolve_user_nickname(user_id)
             business_id = reply_item.get("business_id")
             subject_id = reply_item.get("subject_id")
             content = (
                 reply_item.get("source_content")
                 or reply_item.get("target_reply_content")
+                or reply_item.get("root_reply_content")
                 or reply_item.get("title")
                 or ""
             )
+            at_details = reply_item.get("at_details") or []
+            is_at_me = self._is_at_me(at_details)
+            if source == "at" and self.config.dede_user_id and not is_at_me:
+                self.logger.debug(
+                    "At notice without bot mention: id=%s", notify_id
+                )
             group_id = f"comment:{business_id}:{subject_id}"
             self._remember_comment_context(
                 group_id=group_id,
@@ -1118,15 +1512,13 @@ class BilibiliAdapter:
                     content_format=["text"],
                     accept_format=ACCEPT_FORMAT,
                 ),
-                additional_config={
-                    "comment_type": business_id,
-                    "comment_oid": subject_id,
-                    "root_id": reply_item.get("root_id"),
-                    "source_id": reply_item.get("source_id"),
-                    "target_id": reply_item.get("target_id"),
-                    "uri": reply_item.get("uri"),
-                    "is_mentioned": 1.0,
-                },
+                additional_config=self._build_comment_notice_config(
+                    business_id=business_id,
+                    subject_id=subject_id,
+                    reply_item=reply_item,
+                    source=source,
+                    is_at_me=is_at_me,
+                ),
             )
             message = MessageBase(
                 message_info=message_info,
@@ -1134,6 +1526,27 @@ class BilibiliAdapter:
                 raw_message=json.dumps(item, ensure_ascii=True),
             )
             await self._send_to_nachobot(message)
+
+    def _build_comment_notice_config(
+        self,
+        business_id: Any,
+        subject_id: Any,
+        reply_item: Dict[str, Any],
+        source: str,
+        is_at_me: bool,
+    ) -> Dict[str, Any]:
+        config: Dict[str, Any] = {
+            "comment_type": business_id,
+            "comment_oid": subject_id,
+            "root_id": reply_item.get("root_id"),
+            "source_id": reply_item.get("source_id"),
+            "target_id": reply_item.get("target_id"),
+            "uri": reply_item.get("uri"),
+            "notice_source": source,
+        }
+        if source == "reply" or source == "at" or is_at_me:
+            config["is_mentioned"] = 1.0
+        return config
 
     async def handle_from_nachobot(self, raw_message_base_dict: dict) -> None:
         message = MessageBase.from_dict(raw_message_base_dict)
@@ -1246,7 +1659,7 @@ class BilibiliAdapter:
         message_id: str,
         text: str,
     ) -> bool:
-        if self.config.dede_user_id and user_id:
+        if (not self.config.live_allow_self_danmu) and self.config.dede_user_id and user_id:
             if str(user_id) == str(self.config.dede_user_id):
                 return True
         now = time.time()
@@ -1433,7 +1846,9 @@ class BilibiliAdapter:
     async def _poll_private_messages(self) -> None:
         sessions = await self._get_private_sessions()
         if not sessions:
+            self.logger.debug("Private polling: no sessions")
             return
+        self.logger.debug("Private polling: %s sessions", len(sessions))
         for session in sessions:
             key = (session.session_type, session.talker_id)
             last_seqno = self._dm_last_seqno.get(key)
@@ -1463,10 +1878,7 @@ class BilibiliAdapter:
                 if int(max_seqno) > last_seqno:
                     self._dm_last_seqno[key] = int(max_seqno)
                 continue
-            await self._emit_private_messages(
-                session=session,
-                messages=messages,
-            )
+            await self._emit_private_messages(session=session, messages=messages)
             self._dm_last_seqno[key] = int(max_seqno)
 
     async def _emit_private_messages(
@@ -1474,7 +1886,15 @@ class BilibiliAdapter:
         session: PrivateSessionConfig,
         messages: Iterable[Dict[str, Any]],
     ) -> None:
-        for msg in reversed(list(messages)):
+        messages_list = list(messages)
+        if messages_list:
+            self.logger.info(
+                "Private messages: talker_id=%s session_type=%s count=%s",
+                session.talker_id,
+                session.session_type,
+                len(messages_list),
+            )
+        for msg in reversed(messages_list):
             sender_uid = str(msg.get("sender_uid") or "")
             if sender_uid and self.config.dede_user_id and sender_uid == str(self.config.dede_user_id):
                 continue
@@ -1487,6 +1907,14 @@ class BilibiliAdapter:
             group_id = f"dm:{session.session_type}:{session.talker_id}"
             self._remember_private_session(group_id, session)
             sender_name = await self._resolve_user_nickname(sender_uid or str(session.talker_id))
+            additional_config = {
+                "session_type": session.session_type,
+                "talker_id": session.talker_id,
+                "msg_type": msg_type,
+                "msg_seqno": msg.get("msg_seqno"),
+            }
+            if self.config.private_force_mention:
+                additional_config["is_mentioned"] = 1.0
             message_info = BaseMessageInfo(
                 platform=self.config.platform,
                 message_id=message_id,
@@ -1501,12 +1929,7 @@ class BilibiliAdapter:
                     content_format=["text"],
                     accept_format=ACCEPT_FORMAT,
                 ),
-                additional_config={
-                    "session_type": session.session_type,
-                    "talker_id": session.talker_id,
-                    "msg_type": msg_type,
-                    "msg_seqno": msg.get("msg_seqno"),
-                },
+                additional_config=additional_config,
             )
             message = MessageBase(
                 message_info=message_info,

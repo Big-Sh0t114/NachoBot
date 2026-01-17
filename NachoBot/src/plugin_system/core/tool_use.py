@@ -27,7 +27,8 @@ def init_tool_executor_prompt():
 
 If you need to use a tool, please directly call the corresponding tool function. If you do not need to use any tool, simply output "No tool needed".
 """
-    Prompt(tool_executor_prompt, "tool_executor_prompt")
+    prompt = Prompt(tool_executor_prompt, "tool_executor_prompt", _should_register=False)
+    global_prompt_manager.register(prompt)
 
 
 # 初始化提示词
