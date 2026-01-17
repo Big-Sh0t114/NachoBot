@@ -28,6 +28,10 @@ Bridge NachoBot to Bilibili live danmu and comment replies.
 - `live.open_timeout` controls the WebSocket open timeout (seconds), useful to avoid long hangs on blocked networks.
 - `live.max_hosts` limits how many hosts from `host_list` to try (0 = unlimited).
 - `live.max_attempts` limits total connect attempts per run (0 = unlimited).
+- `live.proxy_pool_path` points to a proxy list JSON file (default `proxy.json`).
+- `live.proxy_check_url` is the URL used to validate proxies.
+- `live.proxy_check_timeout` controls proxy check timeout (seconds).
+- When `live.ws_proxy = "pool"`, the adapter rotates to the next proxy on each connection attempt.
 
 ## Private messages
 - `private_message.sessions` lets you pin specific talker IDs.
