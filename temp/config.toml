@@ -1,0 +1,27 @@
+[inner]
+version = "0.1.0"
+
+[nachobot_server]
+host = "127.0.0.1"
+port = 8000
+platform = "bilibili"
+
+[bilibili]
+sessdata = " "
+bili_jct = " "
+buvid3 = " "
+buvid4 = " "
+dede_user_id = " "
+user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+
+[live]
+enable = true
+room_ids = [ ]
+use_wss = true
+heartbeat_interval = 30
+reconnect_seconds = 5
+max_reconnect_seconds = 60
+ws_proxy = "auto"
+open_timeout = 10
+max_hosts = 1
+max_attempts = 4

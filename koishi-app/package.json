@@ -83,6 +83,7 @@
     "@koishijs/plugin-server-temp": "^1.5.0",
     "@koishijs/plugin-status": "^7.4.10",
     "koishi": "^4.18.7",
+    "koishi-plugin-adapter-bilibili-dm": "2.5.4",
     "koishi-plugin-android": "^0.0.1",
     "koishi-plugin-assets-local": "^3.3.2",
     "koishi-plugin-dataview": "^2.6.1",
