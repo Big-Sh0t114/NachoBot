@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import contextlib
 import hashlib
 import json
@@ -83,6 +84,13 @@ ACCEPT_FORMAT = [
     "reply",
     "command",
 ]
+ACCEPT_FORMAT_PRIVATE = [
+    "text",
+    "image",
+    "emoji",
+    "reply",
+    "command",
+]
 
 BUILD_TAG = "bilibili-adapter-build-2026-01-16"
 
@@ -122,6 +130,7 @@ class AdapterConfig:
     live_resolve_user_nickname: bool
     enable_reply_notice: bool
     comment_resolve_user_nickname: bool
+    comment_force_mention: bool
     comment_poll_interval: int
     comment_max_items: int
     private_enable: bool
@@ -134,6 +143,8 @@ class AdapterConfig:
     private_force_mention: bool
     disable_video_sender_plugin: bool
     disable_command_trigger: bool
+    response_filter_enable: bool
+    response_filter_blocked_markers: List[str]
     log_level: str
 
 
@@ -215,6 +226,7 @@ def load_config(path: Path) -> AdapterConfig:
     comment = data.get("comment", {})
     private_message = data.get("private_message", {})
     compat = data.get("compat", {})
+    response_filter = data.get("response_filter", {})
     debug = data.get("debug", {})
 
     sessions_raw = private_message.get("sessions", []) or []
@@ -274,6 +286,20 @@ def load_config(path: Path) -> AdapterConfig:
                 "planner_prompt": str(value.get("planner_prompt", "") or ""),
             }
 
+    response_filter_enable = bool(response_filter.get("enable", True))
+    blocked_markers_raw = response_filter.get("blocked_markers", [])
+    response_filter_blocked_markers: List[str] = []
+    if isinstance(blocked_markers_raw, list):
+        response_filter_blocked_markers = [
+            str(marker).strip().lower()
+            for marker in blocked_markers_raw
+            if str(marker).strip()
+        ]
+    elif blocked_markers_raw is not None:
+        marker = str(blocked_markers_raw).strip()
+        if marker:
+            response_filter_blocked_markers = [marker.lower()]
+
     return AdapterConfig(
         nachobot_host=str(nachobot.get("host", "127.0.0.1")),
         nachobot_port=int(nachobot.get("port", 8070)),
@@ -318,6 +344,7 @@ def load_config(path: Path) -> AdapterConfig:
         comment_poll_interval=int(comment.get("poll_interval_seconds", 20)),
         comment_max_items=int(comment.get("max_items_per_poll", 20)),
         comment_resolve_user_nickname=bool(comment.get("resolve_user_nickname", False)),
+        comment_force_mention=bool(comment.get("force_mention", False)),
         private_enable=bool(private_message.get("enable", False)),
         private_poll_interval=int(private_message.get("poll_interval_seconds", 20)),
         private_sessions=sessions,
@@ -327,13 +354,15 @@ def load_config(path: Path) -> AdapterConfig:
             private_message.get("auto_session_refresh_seconds", 60)
         ),
         private_auto_session_size=int(private_message.get("auto_session_size", 100)),
-        private_force_mention=bool(private_message.get("force_mention", False)),
+        private_force_mention=bool(private_message.get("force_mention", True)),
         disable_video_sender_plugin=bool(
             compat.get("disable_video_sender_plugin", False)
         ),
         disable_command_trigger=bool(
             compat.get("disable_command_trigger", False)
         ),
+        response_filter_enable=response_filter_enable,
+        response_filter_blocked_markers=response_filter_blocked_markers,
         log_level=str(debug.get("level", "INFO")),
     )
 
@@ -364,6 +393,8 @@ _EMOJI_RE = re.compile(
     "]",
     flags=re.UNICODE,
 )
+_URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
+_IMAGE_PREFIX_RE = re.compile(r"^data:image/([a-zA-Z0-9.+-]+);base64,", re.IGNORECASE)
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 _COMMAND_GUARD_PREFIX = "\u200b"
 
@@ -387,12 +418,58 @@ def _normalize_text(text: str) -> str:
     return cleaned
 
 
+def _guess_image_format(image_bytes: bytes) -> str:
+    if not image_bytes:
+        return ""
+    if image_bytes.startswith(b"\xFF\xD8\xFF"):
+        return "jpeg"
+    if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if image_bytes.startswith(b"GIF87a") or image_bytes.startswith(b"GIF89a"):
+        return "gif"
+    return ""
+
+
+def _decode_image_base64(data: Any) -> Tuple[Optional[bytes], str]:
+    if not data or not isinstance(data, str):
+        return None, ""
+    raw = data.strip()
+    if raw.startswith("base64://"):
+        raw = raw[len("base64://") :]
+    fmt = ""
+    match = _IMAGE_PREFIX_RE.match(raw)
+    if match:
+        fmt = match.group(1).lower()
+        raw = raw[match.end() :]
+    try:
+        image_bytes = base64.b64decode(raw)
+    except Exception:
+        return None, ""
+    if not fmt:
+        fmt = _guess_image_format(image_bytes)
+    if fmt == "jpg":
+        fmt = "jpeg"
+    return image_bytes, fmt
+
+
 def _extract_plain_text(seg: Seg) -> str:
     if seg.type == "seglist" and isinstance(seg.data, list):
         parts = [_extract_plain_text(child) for child in seg.data]
         return "".join(parts)
     if seg.type == "text":
         return _strip_emoji(str(seg.data or ""))
+    return ""
+
+
+def _extract_image_base64(seg: Seg) -> str:
+    if seg.type in ("image", "emoji"):
+        return str(seg.data or "")
+    if seg.type == "seglist" and isinstance(seg.data, list):
+        for child in seg.data:
+            if isinstance(child, Seg):
+                image_data = _extract_image_base64(child)
+                if image_data:
+                    return image_data
     return ""
 
 
@@ -571,6 +648,86 @@ class BilibiliApi:
                         "Bilibili API error: url=%s status=%s code=%s message=%s",
                         url,
                         resp.status,
+                        code,
+                        payload.get("message") or payload.get("msg"),
+                    )
+            return payload
+
+    async def fetch_bytes(
+        self, url: str, referer: str = "https://message.bilibili.com/"
+    ) -> Optional[bytes]:
+        if self.session is None:
+            raise RuntimeError("HTTP session not started")
+        headers = self._build_headers(referer=referer)
+        async with self.session.get(url, headers=headers) as resp:
+            if resp.status >= 400:
+                self.logger.warning(
+                    "HTTP error: status=%s url=%s",
+                    resp.status,
+                    url,
+                )
+                return None
+            return await resp.read()
+
+    async def fetch_base64(
+        self, url: str, referer: str = "https://message.bilibili.com/"
+    ) -> Optional[str]:
+        data = await self.fetch_bytes(url, referer=referer)
+        if not data:
+            return None
+        return base64.b64encode(data).decode("ascii")
+
+    async def upload_dynamic_image(
+        self,
+        image_bytes: bytes,
+        image_format: str = "",
+        category: str = "daily",
+    ) -> Dict[str, Any]:
+        if self.session is None:
+            raise RuntimeError("HTTP session not started")
+        if not self.config.bili_jct:
+            raise RuntimeError("bili_jct is required to upload images")
+        if not image_bytes:
+            return {}
+        fmt = (image_format or "jpeg").lower()
+        ext = "jpg" if fmt in ("jpeg", "jpg") else fmt
+        content_type = f"image/{fmt}" if fmt else "application/octet-stream"
+        form = aiohttp.FormData()
+        form.add_field(
+            "file_up",
+            image_bytes,
+            filename=f"image.{ext}",
+            content_type=content_type,
+        )
+        form.add_field("category", category)
+        form.add_field("biz", "new_dyn")
+        form.add_field("csrf", self.config.bili_jct)
+        headers = self._build_headers(referer="https://t.bilibili.com/")
+        async with self.session.post(
+            "https://api.bilibili.com/x/dynamic/feed/draw/upload_bfs",
+            data=form,
+            headers=headers,
+        ) as resp:
+            text = await resp.text()
+            if resp.status >= 400:
+                self.logger.warning(
+                    "HTTP error: status=%s url=%s body=%s",
+                    resp.status,
+                    "https://api.bilibili.com/x/dynamic/feed/draw/upload_bfs",
+                    text[:200],
+                )
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError:
+                self.logger.warning(
+                    "Non-JSON response from upload_bfs: %s", text[:200]
+                )
+                return {}
+            if isinstance(payload, dict):
+                code = payload.get("code")
+                if code not in (None, 0):
+                    self.logger.warning(
+                        "Upload image failed: code=%s message=%s",
                         code,
                         payload.get("message") or payload.get("msg"),
                     )
@@ -776,6 +933,46 @@ class BilibiliApi:
             "csrf_token": self.config.bili_jct,
             "build": 0,
             "mobi_app": "web",
+        }
+        return await self.request_json(
+            "POST",
+            "https://api.vc.bilibili.com/web_im/v1/web_im/send_msg",
+            params=params,
+            data=payload,
+            use_wbi=True,
+            referer="https://message.bilibili.com/",
+        )
+
+    async def send_private_image_message(
+        self,
+        talker_id: int,
+        session_type: int,
+        content: Dict[str, Any],
+        dev_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        if not self.config.bili_jct:
+            raise RuntimeError("bili_jct is required to send private images")
+        if dev_id is None:
+            dev_id = str(uuid.uuid4())
+        sender_uid = self.config.dede_user_id
+        payload = {
+            "msg[sender_uid]": sender_uid,
+            "msg[receiver_id]": talker_id,
+            "msg[receiver_type]": session_type,
+            "msg[msg_type]": 2,
+            "msg[msg_status]": 0,
+            "msg[dev_id]": dev_id,
+            "msg[timestamp]": int(time.time()),
+            "msg[content]": json.dumps(content, ensure_ascii=False),
+            "csrf": self.config.bili_jct,
+            "csrf_token": self.config.bili_jct,
+            "build": 0,
+            "mobi_app": "web",
+        }
+        params = {
+            "w_sender_uid": sender_uid,
+            "w_receiver_id": talker_id,
+            "w_dev_id": dev_id,
         }
         return await self.request_json(
             "POST",
@@ -1309,6 +1506,96 @@ class BilibiliAdapter:
             for key in list(cache.keys())[:500]:
                 cache.pop(key, None)
 
+    def _filter_outgoing_text(self, text: str) -> str:
+        if not text:
+            return text
+        if not self.config.response_filter_enable:
+            return text
+        markers = self.config.response_filter_blocked_markers
+        if not markers:
+            return text
+        normalized = text.lower()
+        for marker in markers:
+            if marker and marker in normalized:
+                self.logger.error(
+                    "[BilibiliAdapter] Detected blocked marker in outgoing text, replaced with Filtered"
+                )
+                return "Filtered"
+        return text
+
+    @staticmethod
+    def _normalize_image_url(url: str) -> str:
+        if not url:
+            return ""
+        if url.startswith("//"):
+            return f"https:{url}"
+        return url
+
+    def _extract_private_image_url(self, content: Any) -> str:
+        image_keys = (
+            "url",
+            "image_url",
+            "img_url",
+            "image",
+            "img",
+            "src",
+            "origin_url",
+            "original_url",
+            "preview",
+            "cover",
+            "thumb",
+            "pic",
+            "pic_url",
+            "picture",
+            "photo",
+            "face",
+            "raw_url",
+        )
+
+        def scan(value: Any) -> str:
+            if isinstance(value, str):
+                candidate = value.strip()
+                if candidate.startswith(("http://", "https://", "//")):
+                    return candidate
+                match = _URL_RE.search(candidate)
+                return match.group(0) if match else ""
+            if isinstance(value, dict):
+                for key in image_keys:
+                    if key in value:
+                        found = scan(value.get(key))
+                        if found:
+                            return found
+                for item in value.values():
+                    found = scan(item)
+                    if found:
+                        return found
+            if isinstance(value, list):
+                for item in value:
+                    found = scan(item)
+                    if found:
+                        return found
+            return ""
+
+        content_value: Any = content
+        if isinstance(content, str):
+            trimmed = content.strip()
+            if trimmed.startswith("{") or trimmed.startswith("["):
+                try:
+                    content_value = json.loads(trimmed)
+                except json.JSONDecodeError:
+                    content_value = content
+        url = scan(content_value)
+        return self._normalize_image_url(url)
+
+    async def _download_private_image(self, url: str) -> Optional[str]:
+        if not url:
+            return None
+        try:
+            return await self.api.fetch_base64(url)
+        except Exception as exc:
+            self.logger.warning("Private image download failed: url=%s error=%s", url, exc)
+            return None
+
     async def handle_incoming_danmu(
         self,
         room_id: int,
@@ -1494,10 +1781,12 @@ class BilibiliAdapter:
                 source_id=reply_item.get("source_id"),
                 target_id=reply_item.get("target_id"),
             )
+            now_ts = time.time()
+            reply_time = float(item.get("reply_time") or now_ts)
             message_info = BaseMessageInfo(
                 platform=self.config.platform,
                 message_id=notify_id,
-                time=float(item.get("reply_time") or time.time()),
+                time=now_ts,
                 user_info=UserInfo(
                     platform=self.config.platform,
                     user_id=user_id,
@@ -1518,6 +1807,7 @@ class BilibiliAdapter:
                     reply_item=reply_item,
                     source=source,
                     is_at_me=is_at_me,
+                    reply_time=reply_time,
                 ),
             )
             message = MessageBase(
@@ -1534,6 +1824,7 @@ class BilibiliAdapter:
         reply_item: Dict[str, Any],
         source: str,
         is_at_me: bool,
+        reply_time: float,
     ) -> Dict[str, Any]:
         config: Dict[str, Any] = {
             "comment_type": business_id,
@@ -1543,8 +1834,9 @@ class BilibiliAdapter:
             "target_id": reply_item.get("target_id"),
             "uri": reply_item.get("uri"),
             "notice_source": source,
+            "reply_time": reply_time,
         }
-        if source == "reply" or source == "at" or is_at_me:
+        if self.config.comment_force_mention or source == "reply" or source == "at" or is_at_me:
             config["is_mentioned"] = 1.0
         return config
 
@@ -1559,6 +1851,18 @@ class BilibiliAdapter:
         seg = message.message_segment
         if seg.type == "command":
             await self._handle_command(message)
+            return
+
+        image_data = _extract_image_base64(seg)
+        if image_data:
+            private_target = self._resolve_private_target(message)
+            if private_target:
+                await self._send_private_image(private_target, image_data)
+                text = _extract_plain_text(seg).strip()
+                if text:
+                    await self._send_private_message(private_target, text)
+            else:
+                self.logger.warning("Image message unsupported for non-private target")
             return
 
         text = _extract_plain_text(seg).strip()
@@ -1609,6 +1913,7 @@ class BilibiliAdapter:
         reply_mid: Optional[str],
         reply_dmid: Optional[str],
     ) -> None:
+        text = self._filter_outgoing_text(text)
         self.logger.info(
             "Send danmu: room_id=%s reply_mid=%s reply_dmid=%s text=%s",
             room_id,
@@ -1697,6 +2002,7 @@ class BilibiliAdapter:
         if not text:
             self.logger.warning("Empty comment reply text")
             return
+        text = self._filter_outgoing_text(text)
         try:
             comment_type = int(args.get("type"))
             oid = int(args.get("oid"))
@@ -1899,11 +2205,30 @@ class BilibiliAdapter:
             if sender_uid and self.config.dede_user_id and sender_uid == str(self.config.dede_user_id):
                 continue
             msg_type = int(msg.get("msg_type") or 0)
-            content_text = self._parse_private_content(msg_type, msg.get("content"))
-            if not content_text:
-                continue
+            content = msg.get("content")
+            content_text = ""
+            segment: Optional[Seg] = None
+            content_format = ["text"]
+            image_url = ""
+            if msg_type in (2, 6):
+                image_url = self._extract_private_image_url(content)
+                if image_url:
+                    image_base64 = await self._download_private_image(image_url)
+                    if image_base64:
+                        segment = Seg(type="image", data=image_base64)
+                        content_format = ["image"]
+                if segment is None:
+                    content_text = self._parse_private_content(msg_type, content) or "[image]"
+            else:
+                content_text = self._parse_private_content(msg_type, content)
+
+            if segment is None:
+                if not content_text:
+                    continue
+                segment = Seg(type="text", data=content_text)
             message_id = str(msg.get("msg_key") or msg.get("msg_seqno") or uuid.uuid4().hex)
-            ts = float(msg.get("timestamp") or time.time())
+            now_ts = time.time()
+            msg_time = float(msg.get("timestamp") or now_ts)
             group_id = f"dm:{session.session_type}:{session.talker_id}"
             self._remember_private_session(group_id, session)
             sender_name = await self._resolve_user_nickname(sender_uid or str(session.talker_id))
@@ -1912,13 +2237,16 @@ class BilibiliAdapter:
                 "talker_id": session.talker_id,
                 "msg_type": msg_type,
                 "msg_seqno": msg.get("msg_seqno"),
+                "message_time": msg_time,
             }
+            if image_url:
+                additional_config["image_url"] = image_url
             if self.config.private_force_mention:
                 additional_config["is_mentioned"] = 1.0
             message_info = BaseMessageInfo(
                 platform=self.config.platform,
                 message_id=message_id,
-                time=ts,
+                time=now_ts,
                 user_info=UserInfo(
                     platform=self.config.platform,
                     user_id=sender_uid or str(session.talker_id),
@@ -1926,14 +2254,14 @@ class BilibiliAdapter:
                 ),
                 group_info=None,
                 format_info=FormatInfo(
-                    content_format=["text"],
-                    accept_format=ACCEPT_FORMAT,
+                    content_format=content_format,
+                    accept_format=ACCEPT_FORMAT_PRIVATE,
                 ),
                 additional_config=additional_config,
             )
             message = MessageBase(
                 message_info=message_info,
-                message_segment=Seg(type="text", data=content_text),
+                message_segment=segment,
                 raw_message=json.dumps(msg, ensure_ascii=False),
             )
             await self._send_to_nachobot(message)
@@ -2012,6 +2340,7 @@ class BilibiliAdapter:
         target: Tuple[int, int, Optional[int], Optional[int]],
         text: str,
     ) -> None:
+        text = self._filter_outgoing_text(text)
         comment_type, oid, root_id, parent_id = target
         self.logger.info(
             "Send comment reply: type=%s oid=%s root=%s parent=%s",
@@ -2114,7 +2443,7 @@ class BilibiliAdapter:
                     text = content
             text = _normalize_text(text)
             return _strip_emoji(text).strip()
-        if msg_type == 2:
+        if msg_type in (2, 6):
             return "[image]"
         return ""
 
@@ -2127,19 +2456,82 @@ class BilibiliAdapter:
         )
         try:
             safe_text = _normalize_text(text)
+            safe_text = self._filter_outgoing_text(safe_text)
             if not safe_text:
                 return
-            resp = await self.api.send_private_message(
-                talker_id=session.talker_id,
-                session_type=session.session_type,
-                message=safe_text,
-            )
-            if (resp or {}).get("code") != 0:
-                self.logger.warning(f"Private message failed: {resp}")
-            else:
+            max_attempts = 3
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    resp = await self.api.send_private_message(
+                        talker_id=session.talker_id,
+                        session_type=session.session_type,
+                        message=safe_text,
+                    )
+                except Exception as exc:
+                    if attempt < max_attempts:
+                        self.logger.warning(
+                            "Private message send failed (attempt %s/%s): %s",
+                            attempt,
+                            max_attempts,
+                            exc,
+                        )
+                        await asyncio.sleep(0.6 * attempt)
+                        continue
+                    raise
+                if (resp or {}).get("code") != 0:
+                    self.logger.warning(f"Private message failed: {resp}")
+                    return
                 self.logger.info("Private message ok")
+                return
         except Exception as exc:
             self.logger.error(f"Private message error: {exc}")
+
+    async def _send_private_image(self, session: PrivateSessionConfig, image_base64: str) -> None:
+        image_bytes, image_format = _decode_image_base64(image_base64)
+        if not image_bytes:
+            self.logger.warning("Private image send failed: invalid image data")
+            return
+        try:
+            upload_resp = await self.api.upload_dynamic_image(
+                image_bytes=image_bytes,
+                image_format=image_format,
+                category="daily",
+            )
+        except Exception as exc:
+            self.logger.error("Private image upload error: %s", exc)
+            return
+        data = (upload_resp or {}).get("data", {})
+        image_url = str(data.get("image_url") or "")
+        if not image_url:
+            self.logger.warning("Private image upload missing url: %s", upload_resp)
+            return
+        content: Dict[str, Any] = {"url": image_url}
+        if data.get("image_height"):
+            content["height"] = data.get("image_height")
+        if data.get("image_width"):
+            content["width"] = data.get("image_width")
+        if data.get("img_size"):
+            content["size"] = data.get("img_size")
+        if image_format:
+            content["imageType"] = image_format
+        self.logger.info(
+            "Send private image: talker_id=%s session_type=%s url=%s",
+            session.talker_id,
+            session.session_type,
+            image_url,
+        )
+        try:
+            resp = await self.api.send_private_image_message(
+                talker_id=session.talker_id,
+                session_type=session.session_type,
+                content=content,
+            )
+            if isinstance(resp, dict) and resp.get("code") not in (None, 0):
+                self.logger.warning(f"Private image failed: {resp}")
+            else:
+                self.logger.info("Private image ok")
+        except Exception as exc:
+            self.logger.error(f"Private image error: {exc}")
 
 
 async def main() -> None:
