@@ -123,6 +123,7 @@ enable_reply_notice = true
 poll_interval_seconds = 20
 max_items_per_poll = 20
 resolve_user_nickname = true
+force_mention = true
 
 [private_message]
 enable = true
@@ -134,5 +135,12 @@ auto_session_refresh_seconds = 60
 auto_session_size = 100
 force_mention = true
 
+[response_filter]
+enable = true
+blocked_markers = [
+    "TEXT",
+]
+
 [compat]
 disable_video_sender_plugin = true
+disable_command_trigger = true
