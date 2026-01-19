@@ -1,0 +1,36 @@
+{
+  "manifest_version": 1,
+  "name": "repeat_plugin",
+  "display_name": "复读插件",
+  "version": "1.0.0",
+  "description": "一个简单的复读插件(和上面的复读插件不一样，无需更改代码)，可以检测群聊中连续重复的消息并自动进行复读，为群聊增添乐趣。",
+  "author": {
+    "name": "何夕",
+    "url": "https://github.com/Heximiao/repeat_plugin",
+    "email": "lcy1416603026@gmail.com"
+  },
+  "license": "MIT",
+  "host_application": {
+    "min_version": "0.10.1",
+    "max_version": "0.11.6 "
+  },
+  "entry": "plugin.py",
+  "homepage_url": "https://github.com/Heximiao/repeat_plugin",
+  "repository_url": "https://github.com/Heximiao/repeat_plugin",
+  "keywords": ["repeat", "maimai", "复读", "梗", "插件"],
+  "categories": ["Fun", "Interaction"],
+  "default_locale": "zh-CN",
+  "locales_path": "_locales",
+  "plugin_info": {
+    "is_built_in": false,
+    "plugin_type": "chat",
+    "components": [
+      {
+        "type": "handler",
+        "name": "RepeatHandler",
+        "description": "复读处理器，用于检测群聊中的连续重复消息并进行复读。"
+      }
+    ],
+    "features": ["复读", "自动互动"]
+  }
+}

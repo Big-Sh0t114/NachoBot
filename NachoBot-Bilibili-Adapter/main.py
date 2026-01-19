@@ -93,6 +93,8 @@ ACCEPT_FORMAT_PRIVATE = [
 ]
 
 BUILD_TAG = "bilibili-adapter-build-2026-01-16"
+COMMENT_REPLY_LIMIT = 10
+COMMENT_LIMIT_FALLBACK_TEXT = "NachoBot有点口渴了哦，先休息一下啦~"
 
 
 @dataclass
@@ -1479,6 +1481,7 @@ class BilibiliAdapter:
         self._user_name_cache_seconds = 3600
         self._comment_context: Dict[str, Dict[str, Any]] = {}
         self._comment_bootstrap_done = False
+        self._comment_reply_state: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self._self_danmu_ids: Dict[int, Dict[str, float]] = {}
         self._self_danmu_texts: Dict[int, List[Tuple[str, float]]] = {}
 
@@ -1734,6 +1737,44 @@ class BilibiliAdapter:
                 return True
         return False
 
+    @staticmethod
+    def _build_comment_reply_target_from_item(
+        comment_type: Any,
+        comment_oid: Any,
+        reply_item: Dict[str, Any],
+    ) -> Optional[Tuple[int, int, Optional[int], Optional[int]]]:
+        try:
+            comment_type_int = int(comment_type)
+            comment_oid_int = int(comment_oid)
+        except (TypeError, ValueError):
+            return None
+
+        root = None
+        parent = None
+        for value in (
+            reply_item.get("root_id"),
+            reply_item.get("source_id"),
+            reply_item.get("target_id"),
+        ):
+            if value not in (None, "", 0):
+                try:
+                    root = int(value)
+                    break
+                except (TypeError, ValueError):
+                    continue
+        for value in (
+            reply_item.get("source_id"),
+            reply_item.get("target_id"),
+            reply_item.get("root_id"),
+        ):
+            if value not in (None, "", 0):
+                try:
+                    parent = int(value)
+                    break
+                except (TypeError, ValueError):
+                    continue
+        return comment_type_int, comment_oid_int, root, parent
+
     async def _handle_reply_notifications(
         self, items: List[Dict[str, Any]], source: str
     ) -> None:
@@ -1781,6 +1822,31 @@ class BilibiliAdapter:
                 source_id=reply_item.get("source_id"),
                 target_id=reply_item.get("target_id"),
             )
+            state_key = (group_id, user_id)
+            state = self._comment_reply_state.get(
+                state_key, {"count": 0, "silenced": False, "fallback_sent": False}
+            )
+            if state.get("silenced"):
+                continue
+            if state.get("count", 0) >= COMMENT_REPLY_LIMIT:
+                if not state.get("fallback_sent"):
+                    target = self._build_comment_reply_target_from_item(
+                        business_id, subject_id, reply_item
+                    )
+                    if target:
+                        await self._send_comment_reply_from_context(
+                            target, COMMENT_LIMIT_FALLBACK_TEXT
+                        )
+                    else:
+                        self.logger.warning(
+                            "Comment fallback reply skipped: invalid target group_id=%s user_id=%s",
+                            group_id,
+                            user_id,
+                        )
+                    state["fallback_sent"] = True
+                state["silenced"] = True
+                self._comment_reply_state[state_key] = state
+                continue
             now_ts = time.time()
             reply_time = float(item.get("reply_time") or now_ts)
             message_info = BaseMessageInfo(
@@ -1816,6 +1882,8 @@ class BilibiliAdapter:
                 raw_message=json.dumps(item, ensure_ascii=True),
             )
             await self._send_to_nachobot(message)
+            state["count"] = int(state.get("count", 0)) + 1
+            self._comment_reply_state[state_key] = state
 
     def _build_comment_notice_config(
         self,

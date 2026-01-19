@@ -1,0 +1,37 @@
+{
+  "manifest_version": 1,
+  "name": "戳一戳插件 (Poke_Plugin)",
+  "version": "0.4.2",
+  "description": "适用于MaiBot 0.8.x or later 版本的戳一戳插件",
+  "author": {
+    "name": "Neorestim",
+    "url": "https://github.com/Nacho-with-u"
+  },
+  "license": "GPL-v3.0-or-later",
+  
+  "host_application": {
+    "min_version": "0.8.0"
+  },
+  "homepage_url": "https://github.com/Nacho-with-u/maibot",
+  "repository_url": "https://github.com/Nacho-with-u/maibot",
+  "keywords": ["poke"],
+  "categories": ["chat"],
+  
+  "default_locale": "zh-CN",
+  "locales_path": "_locales",
+  
+  "plugin_info": {
+    "is_built_in": false,
+    "plugin_type": "chat",
+    "components": [
+      {
+        "type": "action",
+        "name": "ActivePokeAction",
+        "description": "focus模式下，麦麦可以主动戳一戳用户（需要开启聊天规划器）"
+      }
+    ],
+    "features": [
+      "戳一戳"
+    ]
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "manifest_version": 1,
+  "name": "群聊静音插件 (GroupMuterPlugin)",
+  "version": "1.4.0",
+  "description": "一个允许管理员通过聊天命令，让麦麦在指定群聊中临时进入“静音状态”的群组管理插件。",
+  "author": {
+        "name": "TaiYang",
+        "url": "https://github.com/TAIY2020"
+  },
+  "license": "AGPL-3.0",
+  "host_application": {
+    "min_version": "0.10.0"
+  },
+  "homepage_url": "https://github.com/TAIY2020/group_muter_plugin",
+  "repository_url": "https://github.com/TAIY2020/group_muter_plugin",
+  "keywords": ["Mute", "静音", "群聊"],
+  "categories": ["Utility Tools", "Content Generation", "Other"],
+
+  "default_locale": "zh-CN",
+  "locales_path": "_locales",
+
+  "plugin_info": {
+    "is_built_in": false
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "manifest_version": 1,
+  "name": "麦麦发B站视频",
+  "version": "1.0.7",
+  "description": "让麦麦解析b站视频链接并发送，群聊私聊都可用",
+  "author": {
+    "name": "XinxInxiN0",
+    "url": "https://github.com/XinxInxiN0"
+  },
+  "license": "MIT",
+  "host_application": {
+    "min_version": "0.9.0"
+  },
+  "homepage_url": "https://github.com/XinxInxiN0/bilibili_video_sender_plugin",
+  "repository_url": "https://github.com/XinxInxiN0/bilibili_video_sender_plugin",
+  "config_file_name": "config.toml",
+  "keywords": ["bilibili", "video", "send"],
+  "categories": ["Multimedia", "Utility Tools"],
+  "default_locale": "zh-CN",
+  "plugin_info": {
+    "is_built_in": false,
+    "plugin_type": "utility",
+    "components": [],
+    "features": [
+      "自动识别B站链接",
+      "发送视频文件",
+      "支持b23.tv短链"
+    ]
+  }
+
+}
+
+
+
+

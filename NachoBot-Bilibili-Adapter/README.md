@@ -1,47 +1,50 @@
 # NachoBot-Bilibili-Adapter
 
-Bridge NachoBot to Bilibili live danmu and comment replies.
+将 NachoBot 桥接到哔哩哔哩（Bilibili）直播弹幕与评论回复系统。
 
-## Features
-- Multi-room live danmu receive/send (reply danmu supported).
-- Comment reply send (all comment types).
-- Reply notification polling and forwarding.
-- Private message polling and send (text only).
-- QR login helper to update cookies in `config.toml`.
+## 功能特性
+- 多直播间弹幕接收 / 发送（支持弹幕回复）。
+- 评论回复发送（支持所有评论类型）。
+- 回复通知轮询与转发。
+- 私信轮询与发送（仅支持文本）。
+- 二维码登录辅助工具，用于更新 `config.toml` 中的 Cookies。
 
-## Setup
-1. Install deps:
+## 安装与运行
+1. 安装依赖：
    - `pip install -r requirements.txt`
-2. Edit `config.toml` with `SESSDATA`, `bili_jct`, `buvid3`, and room IDs.
-3. Run:
+2. 编辑 `config.toml`，填写 `SESSDATA`、`bili_jct`、`buvid3` 以及直播间 ID。
+3. 运行：
    - `python main.py`
 
-## Compatibility
-- Set `compat.disable_video_sender_plugin = true` to avoid triggering the Bilibili video sender plugin on the core.
-- Set `compat.disable_command_trigger = true` to prevent command triggers for bilibili messages.
+## 兼容性设置
+- 设置 `compat.disable_video_sender_plugin = true`，以避免在核心中触发 Bilibili 视频发送插件。
+- 设置 `compat.disable_command_trigger = true`，以防止 Bilibili 消息触发指令。
 
-## Live reply prompt
-- Set `live.reply_prompt` to override the live room reply prompt (uses `replyer_prompt` template name).
-- Set `live.planner_prompt` to override the planner prompt shown in core logs (uses `planner_prompt` template name).
-- Use a TOML multi-line string (`"""..."""`) if you need line breaks.
-- `live.ws_proxy` controls the WebSocket proxy: `auto` (env), `none` (disable), or an explicit proxy URL.
-- `live.open_timeout` controls the WebSocket open timeout (seconds), useful to avoid long hangs on blocked networks.
-- `live.max_hosts` limits how many hosts from `host_list` to try (0 = unlimited).
-- `live.max_attempts` limits total connect attempts per run (0 = unlimited).
-- `live.proxy_pool_path` points to a proxy list JSON file (default `proxy.json`).
-- `live.proxy_check_url` is the URL used to validate proxies.
-- `live.proxy_check_timeout` controls proxy check timeout (seconds).
-- When `live.ws_proxy = "pool"`, the adapter rotates to the next proxy on each connection attempt.
+## 直播回复提示词（Live reply prompt）
+- 设置 `live.reply_prompt` 可覆盖直播间回复提示词（使用 `replyer_prompt` 模板名）。
+- 设置 `live.planner_prompt` 可覆盖在核心日志中显示的规划器提示词（使用 `planner_prompt` 模板名）。
+- 如需换行，可使用 TOML 多行字符串（`"""..."""`）。
+- `live.ws_proxy` 用于控制 WebSocket 代理：
+  - `auto`：使用环境变量中的代理
+  - `none`：禁用代理
+  - 或直接指定代理 URL
+- `live.open_timeout`：WebSocket 打开超时时间（秒），用于避免在受限网络下长时间卡住。
+- `live.max_hosts`：限制从 `host_list` 中尝试的主机数量（0 表示不限制）。
+- `live.max_attempts`：每次运行的最大连接尝试次数（0 表示不限制）。
+- `live.proxy_pool_path`：代理池 JSON 文件路径（默认 `proxy.json`）。
+- `live.proxy_check_url`：用于校验代理可用性的 URL。
+- `live.proxy_check_timeout`：代理校验超时时间（秒）。
+- 当 `live.ws_proxy = "pool"` 时，每次连接尝试都会轮换到下一个代理。
 
-## Private messages
-- `private_message.sessions` lets you pin specific talker IDs.
-- Set `private_message.auto_sessions = true` to auto-poll all recent sessions (recommended for "any user" DMs).
-- `private_message.auto_session_types` defaults to `4` (all sessions).
-- `private_message.auto_session_refresh_seconds` controls how often the session list refreshes.
+## 私信（Private messages）
+- `private_message.sessions`：用于固定（pin）指定的会话（talker ID）。
+- 设置 `private_message.auto_sessions = true` 可自动轮询所有最近会话（推荐用于“任意用户”私信场景）。
+- `private_message.auto_session_types` 默认值为 `4`（表示所有会话类型）。
+- `private_message.auto_session_refresh_seconds` 控制会话列表的刷新频率（秒）。
 
-## QR login
-- `python qr_login.py`
-- This writes `SESSDATA`, `bili_jct`, and `DedeUserID` into `config.toml`.
+## 二维码登录
+- 运行：`python qr_login.py`
+- 该脚本会将 `SESSDATA`、`bili_jct` 和 `DedeUserID` 写入 `config.toml`。
 
-## Command usage
-See `command_args.md`.
+## 指令用法
+参见 `command_args.md`。

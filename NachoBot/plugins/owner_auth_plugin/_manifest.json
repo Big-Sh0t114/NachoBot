@@ -1,0 +1,47 @@
+{
+  "manifest_version": 1,
+  "name": "主人身份验证插件 (Owner Authentication Plugin)",
+  "version": "1.2.0",
+  "description": "为麦麦机器人提供主人/额外身份验证功能，在思考流程前验证发言者身份，兼容0.10.2版本",
+  "author": {
+    "name": "风花叶/V1.2.0 by Big_Sh0t",
+    "url": "https://github.com/khiqwq"
+  },
+  "license": "GPL-v3.0-or-later",
+  
+  "host_application": {
+    "min_version": "0.10.2"
+  },
+  "homepage_url": "https://github.com/khiqwq/owner_auth_plugin",
+  "repository_url": "https://github.com/khiqwq/owner_auth_plugin",
+  "keywords": ["authentication", "owner", "security", "identity", "patch"],
+  "categories": ["Other"],
+  
+  "default_locale": "zh-CN",
+  "locales_path": "_locales",
+  
+  "plugin_info": {
+    "is_built_in": false,
+    "plugin_type": "security",
+    "components": [
+      {
+        "type": "event_handler",
+        "name": "owner_auth_handler",
+        "description": "主人身份验证事件处理器",
+        "event_type": "on_message",
+        "weight": 1000,
+        "intercept_message": false
+      }
+    ],
+    "features": [
+      "主人身份验证",
+      "额外身份识别",
+      "高优先级事件处理",
+      "思考流程前介入",
+      "安全身份识别",
+      "0.10.0版本兼容",
+      "补丁自动管理",
+      "插件卸载时自动清理"
+    ]
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "manifest_version": 1,
+  "name": "日记插件 (Diary Plugin)",
+  "version": "2.1.0",
+  "description": "让麦麦能够回忆和记录每一天的聊天，生成个性化的日记内容(适配0.10.0及以上)",
+  "author": {
+    "name": "约瑟夫.k",
+    "url": "https://github.com/bockegai"
+  },
+  "license": "MIT",
+  "host_application": {
+    "min_version": "0.10.2"
+  },
+  "homepage_url": "https://github.com/bockegai/diary_plugin",
+  "repository_url": "https://github.com/bockegai/diary_plugin",
+  "keywords": ["日记", "记录", "回忆", "QQ空间"],
+  "categories": ["效率工具", "社交"],
+  "default_locale": "zh-CN",
+  "locales_path": "_locales"
+}

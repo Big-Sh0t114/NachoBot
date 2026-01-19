@@ -1,0 +1,29 @@
+# repeat_plugin - 自动生成的配置文件
+# 一个简单的复读插件(和上面的复读插件不一样，无需更改代码)，可以检测群聊中连续重复的消息并自动进行复读，为群聊增添乐趣。
+
+# 插件基本信息
+[plugin]
+
+# 插件名称
+name = "repeat_plugin"
+
+# 插件版本
+version = "1.0.0"
+
+# 是否启用插件
+enabled = true
+
+
+# 复读功能配置
+[repeat]
+
+# 是否开启调试模式
+debug_mode = false
+
+# 复读概率 (0~1)
+repeat_probability = 0.7
+
+# 不复读概率 (0~1)
+skip_probability = 0.3
+
+
