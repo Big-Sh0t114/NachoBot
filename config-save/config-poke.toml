@@ -1,0 +1,14 @@
+## 当前 plugin_config.toml 配置文件的版本号
+config_version = "0.4.2"
+
+## [plugin] 插件启用相关配置
+[plugin]
+enabled = true                           ## 是否启用插件
+
+## [poke] QQ戳一戳功能相关配置
+[poke]
+host = "127.0.0.1"                       ## Napcat服务主机地址
+port = "4999"                            ## Napcat服务端口
+token = "114514"                               ## Napcat接口鉴权token，可选
+debug = true                             ## 是否开启调试模式（显示请求头和执行情况）
+allow_normal_active_poke = true          ## 允许normal模式下主动戳戳

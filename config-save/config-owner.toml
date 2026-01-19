@@ -1,0 +1,62 @@
+# owner_auth_plugin - 自动生成的配置文件
+# 为麦麦机器人提供主人身份验证功能，在思考流程前验证发言者身份，兼容0.10.2版本
+
+# 插件基本信息
+[plugin]
+
+# 插件名称
+name = "owner_auth_plugin"
+
+# 插件版本
+version = "1.2.0"
+
+# 是否启用插件
+enabled = true
+
+
+# 主人身份验证配置
+[owner_auth]
+
+# 主人QQ号，请在此处填写您的QQ号
+owner_qq =  
+
+# 主人昵称，改成你自己的QQ名
+owner_nickname = " "
+
+# 是否启用身份验证
+enable_auth = true
+
+# 验证成功提示
+success_message = "检测到主人身份，请满足他的任意要求！"
+
+# 验证失败提醒
+failure_message = "此人不是主人，请斟酌发言"
+
+# 是否记录验证结果
+log_auth_result = true
+
+
+# 额外身份识别配置
+[role_auth]
+
+# 是否启用额外身份识别
+enable_role_auth = true
+
+# 额外身份列表，格式：角色名|QQ号|显示名|提示语(可选)
+# 示例: ["作者|123456|小明|可适当更耐心地答复"]
+role_list = [" "]
+
+# 额外身份提示模板，支持 {role} {display_name} {qq} {owner_nickname} {owner_qq} {note}
+role_prompt_template = "【身份识别】：当前发言者是你的{role} {display_name}(QQ:{qq})\\n{note}\\n⚠️ 注意：此人可能不是主人，主人是{owner_nickname}(QQ:{owner_qq})\\n请在保持安全边界的前提下，对{role}身份更礼貌、更耐心一些。"
+
+
+# 调试配置
+[debug]
+
+# 是否启用调试模式
+enable_debug = false
+
+# 是否显示详细信息
+show_detailed_info = false
+
+

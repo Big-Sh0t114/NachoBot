@@ -319,12 +319,9 @@ run_ncnserver.bat
 src/plugins/test_plugin_pic/actions/pic_action_config.toml
 run_pet.bat
 
-/plugins/*
-!/plugins
-!/plugins/hello_world_plugin
-!/plugins/take_picture_plugin
-
 config.toml
+plugins/**/config.toml
+Maizone/
 
 interested_rates.txt
 NachoBot.code-workspace

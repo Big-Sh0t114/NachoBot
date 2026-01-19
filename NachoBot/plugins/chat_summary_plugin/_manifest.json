@@ -1,0 +1,125 @@
+{
+  "manifest_version": 1,
+  "name": "聊天记录总结插件 (Chat Summary Plugin)",
+  "version": "1.1.0",
+  "description": "智能分析QQ群聊天记录并生成总结，支持精美图片输出。功能包括：群聊整体总结、单个用户总结（含AI个性标签、活跃时段、今日名言、心情指数）、智能群友称号、群聊金句提取、炫压抑指数分析、每日定时自动总结。",
+  "author": {
+    "name": "久远(Modified by BigSh0t)",
+    "url": "https://github.com/saberlights"
+  },
+  "license": "GPL-3.0-or-later",
+  "homepage_url": "https://github.com/saberlights/chat_summary_plugin",
+  "repository_url": "https://github.com/saberlights/chat_summary_plugin",
+  "host_application": {
+    "name": "MaiBot",
+    "min_version": "0.10.3"
+  },
+  "keywords": [
+    "chat",
+    "summary",
+    "analysis",
+    "ai",
+    "群聊",
+    "总结",
+    "分析",
+    "图片生成",
+    "定时任务"
+  ],
+  "categories": [
+    "Utilities",
+    "Analysis",
+    "AI"
+  ],
+  "default_locale": "zh-CN",
+  "locales_path": "_locales",
+  "plugin_info": {
+    "is_built_in": false,
+    "plugin_type": "utility",
+    "components": [
+      {
+        "type": "command",
+        "name": "chat_summary",
+        "description": "生成聊天记录总结",
+        "pattern": "#summary",
+        "usage": "#summary [QQ号] YYYY-MM-DD（省略日期默认今天）"
+      },
+      {
+        "type": "event_handler",
+        "name": "daily_summary_handler",
+        "description": "每日定时自动生成群聊总结",
+        "event_type": "ON_START"
+      }
+    ],
+    "features": [
+      "群聊整体聊天记录总结",
+      "单个用户聊天记录总结",
+      "用户画像分析（AI生成个性标签、活跃时段、今日名言、心情指数）",
+      "支持指定日期（YYYY-MM-DD）时间范围",
+      "AI智能分析聊天内容",
+      "智能群友称号分析",
+      "群聊金句提取（群圣经）",
+      "炫压抑指数分析（AI评估用户发言情绪）",
+      "精美图片输出（失败时自动降级为文本）",
+      "每日定时自动总结",
+      "支持时区配置",
+      "24小时发言活跃度分布图表",
+      "支持自定义装饰图片"
+    ],
+    "dependencies": {
+      "python": [
+        {
+          "name": "Pillow",
+          "version": ">=8.0.0",
+          "required": true,
+          "description": "用于生成总结图片"
+        },
+        {
+          "name": "pytz",
+          "version": ">=2021.1",
+          "required": false,
+          "description": "用于时区支持（自动总结功能需要）"
+        }
+      ],
+      "plugins": []
+    },
+    "config": {
+      "config_file": "config.toml",
+      "has_default_config": true
+    }
+  },
+  "permissions": [
+    "database.messages.read",
+    "llm.generate",
+    "send.image",
+    "send.text"
+  ],
+  "changelog": {
+    "1.1.0": {
+      "date": "2025-11-15",
+      "changes": [
+        "新增用户画像分析功能（单个用户总结时）",
+        "新增AI生成个性标签（1-2个有趣的个性标签）",
+        "新增活跃时段分析（分析用户活跃时段特征）",
+        "新增今日名言提取（从用户发言中选取代表性语句）",
+        "新增心情指数评估（积极/中性/消极，0-100分及理由）",
+        "优化单个用户总结的图片布局"
+      ]
+    },
+    "1.0.0": {
+      "date": "2025-11-15",
+      "changes": [
+        "初始版本发布",
+        "支持群聊整体总结",
+        "支持单个用户总结",
+        "支持指定日期（YYYY-MM-DD）时间范围",
+        "支持智能群友称号分析",
+        "支持群聊金句提取（群圣经）",
+        "支持炫压抑指数分析（AI评估用户发言情绪）",
+        "支持精美图片输出（霓虹赛博朋克风格）",
+        "支持每日定时自动总结",
+        "支持24小时发言活跃度分布图表"
+      ]
+    }
+  },
+  "id": "久远.chat_summary_plugin"
+}
