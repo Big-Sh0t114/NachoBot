@@ -3,6 +3,7 @@ setlocal EnableExtensions
 chcp 65001 >nul
 title Launch TTS + NachoBot
 set "FINAL_RC=0"
+set "ROOT=%~dp0"
 
 echo ===== 启动 TTS 组件 =====
 call :START_TTS
@@ -28,10 +29,10 @@ chcp 65001 >nul
 set "TTS_RC=0"
 
 REM ===== 基本路径（如你改过目录，只需改这里）=====
-set "BASE_DIR=C:\Users\BigSh0t\Nacho-with-u"
-set "ADAPTER_DIR=%BASE_DIR%\nachobot_tts_adapter"
-set "NAPCAT_DIR=%BASE_DIR%\NachoBot-Napcat-Adapter"
-set "NAPCAT_SRC=%BASE_DIR%\NachoBot-Napcat-Adapter\src"
+set "BASE_DIR=%ROOT%"
+set "ADAPTER_DIR=%BASE_DIR%nachobot_tts_adapter"
+set "NAPCAT_DIR=%BASE_DIR%NachoBot-Napcat-Adapter"
+set "NAPCAT_SRC=%NAPCAT_DIR%\src"
 set "SOVITS_DIR=C:\Users\BigSh0t\GPT-SoVITS\GPT-SoVITS-v2pro-20250604"
 
 REM ===== 端口（如你改过 SoVITS 端口，这里也要改）=====
@@ -186,19 +187,19 @@ title Launch Process
 chcp 65001 >nul
 
 REM ===== 路径/端口 =====
-set "NACHOBOT_DIR=C:\Users\BigSh0t\Nacho-with-u\NachoBot"
+set "NACHOBOT_DIR=%ROOT%NachoBot"
 set "NACHOBOT_MAIN=bot.py"
 set "NACHOBOT_PORT=8000"
 
-set "SHIM_DIR=C:\Users\BigSh0t\Nacho-with-u\NachoBot"
+set "SHIM_DIR=%ROOT%NachoBot"
 set "SHIM_EXE=shim.exe"
 set "SHIM_PORT=11435"
 
-set "ADAPTER_DIR=C:\Users\BigSh0t\Nacho-with-u\NachoBot-Napcat-Adapter"
+set "ADAPTER_DIR=%ROOT%NachoBot-Napcat-Adapter"
 set "ADAPTER_MAIN=main.py"
 set "ADAPTER_PORT=8095"
 
-set "NAPCAT_SHELL_DIR=C:\Users\BigSh0t\NapCat.Shell"
+set "NAPCAT_SHELL_DIR=%ROOT%NapCat.Shell"
 set "NAPCAT_SHELL_BAT=launcher-user.bat"
 
 set "PYTHON_CMD=uv run python"

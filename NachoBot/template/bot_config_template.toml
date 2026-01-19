@@ -13,7 +13,7 @@ version = "6.14.11_bs"
 
 [bot]
 platform = "qq" 
-qq_account = "" # QQ账号
+qq_account = " " # QQ账号
 nickname = "NachoBot" # 昵称
 alias_names = ['人机', '机器人', 'AI', 'Bot'] # 别名
 

@@ -35,7 +35,7 @@ mention_prefixes = ["@", "＠"]
 mention_any_at = false
 resolve_user_nickname = true
 
-[live.room_prompts." "]
+[live.room_prompts." "] #填写直播间id
 
 
 
