@@ -1,0 +1,1 @@
+python NachoBot-Bilibili-Adapter\main.py
