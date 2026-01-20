@@ -69,7 +69,7 @@ NachoBot 是在上游 **MaiBot 0.10.3 Beta** 基础上定制的角色扮演聊�
   - 双击`launch_bili.bat`运行适配器
 
 `Discord配置`
-  - 双击`koishi-app/launch Koishi.bat`启动Koishi，在webUI中填写自己的Discord Bot token
+  - 双击`koishi-app/launch Koishi.bat`启动Koishi，在webUI中填写自己的Discord Bot token 和 self id
   - 双击`launch_koishi_adapter.bat`运行适配器
 
 ## 安全与隐私提示

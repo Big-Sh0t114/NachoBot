@@ -123,6 +123,38 @@ def _should_suppress_reply_set(reply_set: "ReplySetModel") -> bool:
     return False
 
 
+def _get_silent_reply_texts(target_stream) -> List[str]:
+    try:
+        context = getattr(target_stream, "context", None)
+        last_message = getattr(context, "message", None) if context else None
+        if not last_message:
+            return []
+        message_info = getattr(last_message, "message_info", None)
+        additional = getattr(message_info, "additional_config", None)
+        if not isinstance(additional, dict):
+            return []
+        if not additional.get("silent_reply"):
+            return []
+        if additional.get("source") not in ("koishi-slash", "koishi"):
+            return []
+        texts = additional.get("silent_reply_texts") or []
+        if isinstance(texts, str):
+            texts = [texts]
+        cleaned = [str(text).strip() for text in texts if str(text).strip()]
+        return cleaned
+    except Exception:
+        return []
+
+
+def _should_suppress_silent_reply(target_stream, text: str) -> bool:
+    if not text:
+        return False
+    texts = _get_silent_reply_texts(target_stream)
+    if not texts:
+        return False
+    return text in texts
+
+
 async def _send_to_target(
     message_segment: Seg,
     stream_id: str,
@@ -153,11 +185,13 @@ async def _send_to_target(
             logger.warning("[SendAPI] 使用引用回复，但未提供回复消息")
             return False
 
+        text_data: Optional[str] = None
         if message_segment.type == "text":
             text_data = str(message_segment.data)
             if _should_suppress_text_reply(text_data):
                 logger.error("[SendAPI] 检测到可疑回复模板，已替换为 Filtered")
                 message_segment = Seg(type="text", data="Filtered")
+                text_data = "Filtered"
 
         if show_log:
             logger.debug(f"[SendAPI] 发送{message_segment.type}消息到 {stream_id}")
@@ -167,6 +201,9 @@ async def _send_to_target(
         if not target_stream:
             logger.error(f"[SendAPI] 未找到聊天流: {stream_id}")
             return False
+        if text_data is not None and _should_suppress_silent_reply(target_stream, text_data):
+            logger.info("[SendAPI] 本次回复已被 silent_reply 抑制")
+            return True
 
         # 创建发送器
         message_sender = UniversalMessageSender()

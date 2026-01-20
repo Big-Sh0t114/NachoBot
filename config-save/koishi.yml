@@ -19,8 +19,19 @@ plugins:
     telemetry:nym5b5: {}
     ./nachobot-slash-bridge:nbcmd:
       host: 127.0.0.1
-      port: 8070
+      port: 8000
       platform: discord
+      enableLocalLangSwitch: false
+      silentCommands:
+        - adv-on
+        - adv-off
+        - mute
+        - mus-rand
+        - help-all
+        - lang-switch
+      localReplies:
+        help-all: ''
+        lang-switch: ''
   group:console:
     actions:0w1i5w: {}
     analytics:19gqdw: {}
@@ -57,7 +68,7 @@ plugins:
   group:adapter:
     ~adapter-dingtalk:wp560n: {}
     adapter-discord:97kjzj:
-      token: 
+      token: <YOUR_DISCORD_BOT_TOKEN_HERE>
       intents:
         - GUILDS
         - GUILD_MEMBERS
@@ -92,4 +103,4 @@ plugins:
     path: /onebot/v11/ws
     selfname: NachoBot
     groupname: discord-channel
-    loggerinfo: true
+    loggerinfo: false

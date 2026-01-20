@@ -1,5 +1,8 @@
+1/20
+    修复Discord slash commands与核心的桥接问题
 1/18
-    增加对Bilibili的可选反反爬措施，通过修改ws_proxy="pool"启用代理池
+    增加对Bilibili的可选反反爬措施，通过修改 ws_proxy="pool" 启用代理池
+    为Bilibili增加了额外的blocked_markers
 1/17
     基本完成对Bilibili的接入，现在支持三平台同时接入
 1/16
