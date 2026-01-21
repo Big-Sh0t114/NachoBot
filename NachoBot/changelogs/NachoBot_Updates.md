@@ -1,3 +1,5 @@
+1/21
+    Bilibili直播增加可编辑的直播内容，注入给replyer
 1/20
     修复Discord slash commands与核心的桥接问题
 1/18
@@ -51,7 +53,7 @@
 12/25
     删除超时信息，现在保持静默丢弃
 12/24
-    mus_library用户请求更新
+    加入mus_library用户请求，未收入曲库音乐会被整理进list
     基本解决了TTS语种问题
 12/20
     日记生成模型从Gemini 2.5 pro切换至Deepseek v3

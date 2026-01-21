@@ -286,6 +286,10 @@ def load_config(path: Path) -> AdapterConfig:
             room_prompts[room_id] = {
                 "reply_prompt": str(value.get("reply_prompt", "") or ""),
                 "planner_prompt": str(value.get("planner_prompt", "") or ""),
+                "live_category": str(value.get("live_category", "") or ""),
+                "live_title": str(value.get("live_title", "") or ""),
+                "live_content": str(value.get("live_content", "") or ""),
+                "live_detail": str(value.get("live_detail", "") or ""),
             }
 
     response_filter_enable = bool(response_filter.get("enable", True))
@@ -1661,10 +1665,39 @@ class BilibiliAdapter:
         )
         await self._send_to_nachobot(message)
 
+    @staticmethod
+    def _build_live_plan_block(room_prompts: Optional[Dict[str, str]]) -> str:
+        if not room_prompts:
+            return ""
+        sections = (
+            ("直播分类", room_prompts.get("live_category", "")),
+            ("直播标题", room_prompts.get("live_title", "")),
+            ("直播内容", room_prompts.get("live_content", "")),
+            ("直播细节", room_prompts.get("live_detail", "")),
+        )
+        lines: List[str] = []
+        for label, value in sections:
+            content = str(value or "").strip()
+            if content:
+                lines.append(f"{label}：{content}")
+        if not lines:
+            return ""
+        return "以下是本场直播计划，请在回复时参考：\n" + "\n".join(lines)
+
+    @staticmethod
+    def _inject_live_plan_into_prompt(reply_prompt: str, live_plan_block: str) -> str:
+        if not reply_prompt or not live_plan_block:
+            return reply_prompt
+        placeholder = "{extra_info_block}"
+        if placeholder in reply_prompt:
+            return reply_prompt.replace(placeholder, f"{placeholder}\n{live_plan_block}")
+        return f"{live_plan_block}\n{reply_prompt}"
+
     def _resolve_live_prompts(self, room_id: int) -> Tuple[str, str]:
         reply_prompt = self.config.live_reply_prompt
         planner_prompt = self.config.live_planner_prompt
         room_prompts = self.config.live_room_prompts.get(room_id)
+        live_plan_block = self._build_live_plan_block(room_prompts)
         if room_prompts is not None:
             room_reply = str(room_prompts.get("reply_prompt", "") or "")
             room_planner = str(room_prompts.get("planner_prompt", "") or "")
@@ -1672,6 +1705,8 @@ class BilibiliAdapter:
                 reply_prompt = room_reply
             if room_planner:
                 planner_prompt = room_planner
+        if reply_prompt and live_plan_block:
+            reply_prompt = self._inject_live_plan_into_prompt(reply_prompt, live_plan_block)
         return reply_prompt, planner_prompt
 
     async def _comment_notice_loop(self) -> None:

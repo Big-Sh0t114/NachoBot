@@ -23,6 +23,12 @@
 ## 直播回复提示词（Live reply prompt）
 - 设置 `live.reply_prompt` 可覆盖直播间回复提示词（使用 `replyer_prompt` 模板名）。
 - 设置 `live.planner_prompt` 可覆盖在核心日志中显示的规划器提示词（使用 `planner_prompt` 模板名）。
+- `live.room_prompts."<room_id>"` 支持填写本场直播计划（注入 replyer）：
+  - `live_category`：直播分类
+  - `live_title`：直播标题
+  - `live_content`：直播内容
+  - `live_detail`：直播细节
+  - 若四项均为空，则不进行注入。
 - 如需换行，可使用 TOML 多行字符串（`"""..."""`）。
 - `live.ws_proxy` 用于控制 WebSocket 代理：
   - `auto`：使用环境变量中的代理
