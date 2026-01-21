@@ -35,10 +35,6 @@ class SendArtworkAction(BaseAction):
     associated_types = ["text"]
 
     async def execute(self) -> Tuple[bool, str]:
-        # 文本未明确要“看/发”画作则直接跳过
-        if not self._is_view_request():
-            return False, "未检测到明确的看画请求"
-
         artwork_dir = self._resolve_artwork_dir()
         allowed_exts = self._get_allowed_extensions()
         artwork_files = self._collect_artworks(artwork_dir, allowed_exts)
