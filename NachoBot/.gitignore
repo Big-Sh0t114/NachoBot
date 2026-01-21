@@ -323,6 +323,9 @@ config.toml
 plugins/**/config.toml
 Maizone/
 
+src/plugins/built_in/mus_library/list.txt
+src/plugins/built_in/mus_library/dump.txt
+
 interested_rates.txt
 NachoBot.code-workspace
 shim.exe

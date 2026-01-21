@@ -173,9 +173,20 @@ def _append_pending(query: str) -> None:
         hit, _ = _fuzzy_contains(norm, existing, 85)
         if hit:
             return
-        TODO_LIST_PATH.touch(exist_ok=True)
+        if not TODO_LIST_PATH.exists():
+            _ensure_dump_template()
+            TODO_LIST_PATH.touch(exist_ok=True)
         with open(TODO_LIST_PATH, "a", encoding="utf-8") as f:
             f.write(query.strip() + "\n")
+    except Exception:
+        pass
+
+
+def _ensure_dump_template() -> None:
+    if DUMP_LIST_PATH.exists():
+        return
+    try:
+        DUMP_LIST_PATH.write_text("[dump]\n\n[invaild]\n", encoding="utf-8")
     except Exception:
         pass
 
