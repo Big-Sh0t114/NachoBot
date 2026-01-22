@@ -2,6 +2,7 @@ import asyncio
 import base64
 import contextlib
 import hashlib
+from io import BytesIO
 import json
 import logging
 import os
@@ -20,6 +21,7 @@ import brotli
 import requests
 import urllib.parse
 import websockets
+from PIL import ImageGrab
 
 try:
     import tomllib as toml
@@ -128,7 +130,11 @@ class AdapterConfig:
     live_mention_any_at: bool
     live_reply_prompt: str
     live_planner_prompt: str
-    live_room_prompts: Dict[int, Dict[str, str]]
+    live_room_prompts: Dict[int, Dict[str, Any]]
+    live_host_room_id: Optional[int]
+    screen_manual_enable: bool
+    screen_manual_duration_seconds: int
+    screen_manual_user_ids: List[str]
     live_resolve_user_nickname: bool
     enable_reply_notice: bool
     comment_resolve_user_nickname: bool
@@ -154,6 +160,17 @@ class AdapterConfig:
 class PrivateSessionConfig:
     talker_id: int
     session_type: int
+
+
+@dataclass
+class VlmModelConfig:
+    base_url: str
+    api_key: str
+    model: str
+    max_tokens: int
+    timeout: int
+    temperature: float
+    client_type: str
 
 
 def _load_toml(path: Path) -> Dict[str, Any]:
@@ -230,6 +247,7 @@ def load_config(path: Path) -> AdapterConfig:
     compat = data.get("compat", {})
     response_filter = data.get("response_filter", {})
     debug = data.get("debug", {})
+    screen_monitor = live.get("screen_monitor", {}) or {}
 
     sessions_raw = private_message.get("sessions", []) or []
     sessions: List[PrivateSessionConfig] = []
@@ -274,7 +292,8 @@ def load_config(path: Path) -> AdapterConfig:
         mention_prefixes = [str(mention_prefixes_raw)]
 
     room_prompts_raw = live.get("room_prompts", {}) or {}
-    room_prompts: Dict[int, Dict[str, str]] = {}
+    room_prompts: Dict[int, Dict[str, Any]] = {}
+    host_room_ids: List[int] = []
     if isinstance(room_prompts_raw, dict):
         for key, value in room_prompts_raw.items():
             try:
@@ -283,6 +302,7 @@ def load_config(path: Path) -> AdapterConfig:
                 continue
             if not isinstance(value, dict):
                 continue
+            host_flag = bool(value.get("host", False))
             room_prompts[room_id] = {
                 "reply_prompt": str(value.get("reply_prompt", "") or ""),
                 "planner_prompt": str(value.get("planner_prompt", "") or ""),
@@ -290,7 +310,29 @@ def load_config(path: Path) -> AdapterConfig:
                 "live_title": str(value.get("live_title", "") or ""),
                 "live_content": str(value.get("live_content", "") or ""),
                 "live_detail": str(value.get("live_detail", "") or ""),
+                "host": host_flag,
             }
+            if host_flag:
+                host_room_ids.append(room_id)
+
+    room_ids = [int(x) for x in live.get("room_ids", [])]
+    if len(host_room_ids) > 1:
+        raise ValueError(f"Multiple host rooms detected: {host_room_ids}")
+    host_room_id = host_room_ids[0] if host_room_ids else None
+    if host_room_id is not None and host_room_id not in room_ids:
+        raise ValueError(f"Host room_id {host_room_id} not in live.room_ids")
+
+    manual_enable = bool(screen_monitor.get("manual_enable", True))
+    manual_duration_minutes = int(screen_monitor.get("manual_duration_minutes", 30))
+    manual_user_ids_raw = screen_monitor.get("manual_user_ids", []) or []
+    if isinstance(manual_user_ids_raw, list):
+        manual_user_ids = [str(x).strip() for x in manual_user_ids_raw if str(x).strip()]
+    elif manual_user_ids_raw is None:
+        manual_user_ids = []
+    else:
+        manual_user_ids = [str(manual_user_ids_raw).strip()]
+    if not manual_user_ids and bilibili.get("dede_user_id"):
+        manual_user_ids = [str(bilibili.get("dede_user_id"))]
 
     response_filter_enable = bool(response_filter.get("enable", True))
     blocked_markers_raw = response_filter.get("blocked_markers", [])
@@ -323,7 +365,7 @@ def load_config(path: Path) -> AdapterConfig:
             )
         ),
         live_enable=bool(live.get("enable", True)),
-        room_ids=[int(x) for x in live.get("room_ids", [])],
+        room_ids=room_ids,
         use_wss=bool(live.get("use_wss", True)),
         heartbeat_interval=int(live.get("heartbeat_interval", 30)),
         reconnect_seconds=int(live.get("reconnect_seconds", 5)),
@@ -345,6 +387,10 @@ def load_config(path: Path) -> AdapterConfig:
         live_reply_prompt=str(live.get("reply_prompt", "") or ""),
         live_planner_prompt=str(live.get("planner_prompt", "") or ""),
         live_room_prompts=room_prompts,
+        live_host_room_id=host_room_id,
+        screen_manual_enable=manual_enable,
+        screen_manual_duration_seconds=max(60, manual_duration_minutes * 60),
+        screen_manual_user_ids=manual_user_ids,
         live_resolve_user_nickname=bool(live.get("resolve_user_nickname", False)),
         enable_reply_notice=bool(comment.get("enable_reply_notice", True)),
         comment_poll_interval=int(comment.get("poll_interval_seconds", 20)),
@@ -403,6 +449,9 @@ _URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
 _IMAGE_PREFIX_RE = re.compile(r"^data:image/([a-zA-Z0-9.+-]+);base64,", re.IGNORECASE)
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 _COMMAND_GUARD_PREFIX = "\u200b"
+_KAOMOJI_PLACEHOLDER_RE = re.compile(r"__KAOMOJI_\d+__")
+BILIBILI_DANMU_MAX_LENGTH = 40
+BILIBILI_DANMU_SEND_DELAY_SECONDS = 0.8
 
 
 def _strip_emoji(text: str) -> str:
@@ -506,6 +555,291 @@ def _find_reply_id(seg: Seg) -> Optional[str]:
             if reply_id:
                 return reply_id
     return None
+
+
+def _protect_kaomoji(sentence: str) -> Tuple[str, Dict[str, str]]:
+    kaomoji_pattern = re.compile(
+        r"("
+        r"[(\[（【]"
+        r"[^()\[\]（）【】]*?"
+        r"[^一-龥a-zA-Z0-9\s]"
+        r"[^()\[\]（）【】]*?"
+        r"[)\]）】]"
+        r")"
+        r"|"
+        r"([▼▽・ᴥω･﹏^><≧≦￣｀´∀ヮДд︿﹀へ｡ﾟ╥╯╰︶︹•⁄]{2,15})"
+    )
+    kaomoji_matches = kaomoji_pattern.findall(sentence)
+    placeholder_to_kaomoji: Dict[str, str] = {}
+    for idx, match in enumerate(kaomoji_matches):
+        kaomoji = match[0] or match[1]
+        placeholder = f"__KAOMOJI_{idx}__"
+        sentence = sentence.replace(kaomoji, placeholder, 1)
+        placeholder_to_kaomoji[placeholder] = kaomoji
+    return sentence, placeholder_to_kaomoji
+
+
+def _recover_kaomoji(sentences: List[str], placeholder_to_kaomoji: Dict[str, str]) -> List[str]:
+    recovered: List[str] = []
+    for sentence in sentences:
+        for placeholder, kaomoji in placeholder_to_kaomoji.items():
+            sentence = sentence.replace(placeholder, kaomoji)
+        recovered.append(sentence)
+    return recovered
+
+
+def _is_split_break_token(token: str) -> bool:
+    if not token or _KAOMOJI_PLACEHOLDER_RE.fullmatch(token):
+        return False
+    return token.isspace() or token in "，。！？；：、,.!?;:"
+
+
+def _tokenize_with_kaomoji(text: str) -> List[str]:
+    tokens: List[str] = []
+    i = 0
+    while i < len(text):
+        match = _KAOMOJI_PLACEHOLDER_RE.match(text, i)
+        if match:
+            tokens.append(match.group(0))
+            i = match.end()
+            continue
+        tokens.append(text[i])
+        i += 1
+    return tokens
+
+
+def _split_bilibili_text(text: str, max_length: int = BILIBILI_DANMU_MAX_LENGTH) -> List[str]:
+    if not text:
+        return []
+    protected_text, kaomoji_mapping = _protect_kaomoji(text)
+    tokens = _tokenize_with_kaomoji(protected_text)
+    segments: List[str] = []
+    current_tokens: List[str] = []
+    current_len = 0
+    last_break_index: Optional[int] = None
+
+    def token_length(token: str) -> int:
+        if token in kaomoji_mapping:
+            return len(kaomoji_mapping[token])
+        return len(token)
+
+    def recompute_state() -> None:
+        nonlocal current_len, last_break_index
+        current_len = 0
+        last_break_index = None
+        for idx, tok in enumerate(current_tokens):
+            current_len += token_length(tok)
+            if _is_split_break_token(tok):
+                last_break_index = idx
+
+    def flush(count: int) -> None:
+        nonlocal current_tokens
+        if count <= 0:
+            return
+        segment = "".join(current_tokens[:count]).strip()
+        if segment:
+            segments.append(segment)
+        current_tokens = current_tokens[count:]
+        recompute_state()
+
+    for token in tokens:
+        if token == "\n":
+            flush(len(current_tokens))
+            continue
+        tok_len = token_length(token)
+        if current_len + tok_len > max_length and current_tokens:
+            if last_break_index is not None:
+                flush(last_break_index + 1)
+            else:
+                flush(len(current_tokens))
+        if not current_tokens and tok_len > max_length:
+            current_tokens.append(token)
+            flush(len(current_tokens))
+            continue
+        current_tokens.append(token)
+        current_len += tok_len
+        if _is_split_break_token(token):
+            last_break_index = len(current_tokens) - 1
+
+    if current_tokens:
+        flush(len(current_tokens))
+
+    return _recover_kaomoji(segments, kaomoji_mapping)
+
+
+def _resolve_vlm_model_config(
+    model_config_path: Path, logger: logging.Logger
+) -> Optional[VlmModelConfig]:
+    if not model_config_path.exists():
+        logger.warning("Model config not found: %s", model_config_path)
+        return None
+    try:
+        data = _load_toml(model_config_path)
+    except Exception as exc:
+        logger.warning("Failed to load model config: %s", exc)
+        return None
+    task_config = data.get("model_task_config", {}) or {}
+    vlm_config = task_config.get("vlm", {}) or {}
+    model_list = vlm_config.get("model_list", []) or []
+    if not model_list:
+        logger.warning("model_task_config.vlm.model_list is empty")
+        return None
+    model_name = str(model_list[0])
+    models = data.get("models", []) or []
+    selected_model = None
+    for item in models:
+        if str(item.get("name") or "") == model_name:
+            selected_model = item
+            break
+    if selected_model is None:
+        for item in models:
+            if str(item.get("model_identifier") or "") == model_name:
+                selected_model = item
+                break
+    if selected_model is None:
+        logger.warning("VLM model not found in model_config: %s", model_name)
+        return None
+    model_identifier = str(selected_model.get("model_identifier") or model_name)
+    provider_name = str(selected_model.get("api_provider") or "")
+    providers = data.get("api_providers", []) or []
+    provider = None
+    for item in providers:
+        if str(item.get("name") or "") == provider_name:
+            provider = item
+            break
+    if provider is None:
+        logger.warning("VLM provider not found: %s", provider_name)
+        return None
+    base_url = str(provider.get("base_url") or "")
+    if not base_url:
+        logger.warning("VLM provider base_url empty for %s", provider_name)
+        return None
+    api_key = str(provider.get("api_key") or "")
+    client_type = str(provider.get("client_type") or "openai")
+    timeout = int(provider.get("timeout") or 30)
+    max_tokens = int(vlm_config.get("max_tokens") or 800)
+    temperature = float(vlm_config.get("temperature") or 0.2)
+    return VlmModelConfig(
+        base_url=base_url,
+        api_key=api_key,
+        model=model_identifier,
+        max_tokens=max_tokens,
+        timeout=timeout,
+        temperature=temperature,
+        client_type=client_type,
+    )
+
+
+class ScreenMonitor:
+    def __init__(
+        self,
+        config: VlmModelConfig,
+        logger: logging.Logger,
+        min_interval_seconds: int = 15,
+    ):
+        self.config = config
+        self.logger = logger
+        self.min_interval_seconds = max(1, int(min_interval_seconds))
+        self._last_attempt = 0.0
+        self._last_summary: Optional[str] = None
+        self._lock = asyncio.Lock()
+
+    async def maybe_analyze(self, message_text: str = "") -> Optional[str]:
+        now = time.time()
+        if now - self._last_attempt < self.min_interval_seconds:
+            return self._last_summary
+        if self._lock.locked():
+            return self._last_summary
+        async with self._lock:
+            now = time.time()
+            if now - self._last_attempt < self.min_interval_seconds:
+                return self._last_summary
+            self._last_attempt = now
+            summary = await self._analyze_current_screen(message_text)
+            if summary:
+                self._last_summary = summary
+                return summary
+            if self._last_summary:
+                self.logger.warning("Screen analysis failed, fallback to previous summary")
+                return self._last_summary
+            return None
+
+    async def _analyze_current_screen(self, message_text: str = "") -> Optional[str]:
+        image_bytes = await asyncio.to_thread(self._grab_screen_png)
+        if not image_bytes:
+            return None
+        return await self._call_vlm(image_bytes, message_text)
+
+    def _grab_screen_png(self) -> Optional[bytes]:
+        try:
+            image = ImageGrab.grab(all_screens=False)
+        except Exception as exc:
+            self.logger.warning("Screen capture failed: %s", exc)
+            return None
+        with BytesIO() as buffer:
+            image.save(buffer, format="PNG")
+            return buffer.getvalue()
+
+    async def _call_vlm(self, image_bytes: bytes, message_text: str = "") -> Optional[str]:
+        if self.config.client_type != "openai":
+            self.logger.warning("Unsupported VLM client_type: %s", self.config.client_type)
+            return None
+        url = f"{self.config.base_url.rstrip('/')}/chat/completions"
+        image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+        danmu_text = _normalize_text(message_text or "")
+        prompt_text = (
+            "你将收到一张直播截图和当前观众弹幕。先判断截图中是否存在与弹幕相关或需要特别注意的部分，"
+            "再用300到500字尽可能详细描述屏幕内容，包含主窗口细节与活动窗口标题，并简要概括其他区域。"
+            "只输出纯文本，不要使用markdown。"
+        )
+        if danmu_text:
+            prompt_text += f" 弹幕内容：{danmu_text}"
+        payload = {
+            "model": self.config.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "你是一个专业的图像分析助手。",
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{image_b64}"},
+                        },
+                        {"type": "text", "text": prompt_text},
+                    ],
+                },
+            ],
+            "max_tokens": self.config.max_tokens,
+            "temperature": self.config.temperature,
+        }
+        headers = {"Content-Type": "application/json"}
+        if self.config.api_key:
+            headers["Authorization"] = f"Bearer {self.config.api_key}"
+        timeout = aiohttp.ClientTimeout(total=max(5, self.config.timeout))
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, json=payload, headers=headers) as resp:
+                    if resp.status >= 400:
+                        body = await resp.text()
+                        self.logger.warning("VLM request failed: status=%s body=%s", resp.status, body)
+                        return None
+                    data = await resp.json(content_type=None)
+        except Exception as exc:
+            self.logger.warning("VLM request error: %s", exc)
+            return None
+        choices = data.get("choices") if isinstance(data, dict) else None
+        if not choices:
+            self.logger.warning("VLM response missing choices")
+            return None
+        message = choices[0].get("message") if isinstance(choices[0], dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        if not content:
+            self.logger.warning("VLM response missing content")
+            return None
+        return str(content).strip()
 
 
 class WbiSigner:
@@ -682,6 +1016,24 @@ class BilibiliApi:
         if not data:
             return None
         return base64.b64encode(data).decode("ascii")
+
+    async def get_live_status(self, room_id: int) -> Optional[int]:
+        payload = await self.request_json(
+            "GET",
+            "https://api.live.bilibili.com/room/v1/Room/get_info",
+            params={"room_id": room_id},
+            referer=f"https://live.bilibili.com/{room_id}",
+        )
+        if not isinstance(payload, dict):
+            return None
+        data = payload.get("data", {})
+        if not isinstance(data, dict):
+            return None
+        status = data.get("live_status")
+        try:
+            return int(status)
+        except (TypeError, ValueError):
+            return None
 
     async def upload_dynamic_image(
         self,
@@ -1473,6 +1825,15 @@ class BilibiliAdapter:
         self.router = Router(route_config, custom_logger=logger)
         self.router.register_class_handler(self.handle_from_nachobot)
         self.api = BilibiliApi(config, logger)
+        self._screen_host_room_id = config.live_host_room_id
+        self._screen_monitor: Optional[ScreenMonitor] = None
+        self._screen_manual_enable = config.screen_manual_enable
+        self._screen_manual_duration_seconds = config.screen_manual_duration_seconds
+        self._screen_manual_user_ids = {
+            str(user_id) for user_id in config.screen_manual_user_ids if str(user_id)
+        }
+        self._screen_manual_state: Optional[bool] = None
+        self._screen_manual_until: float = 0.0
         self._danmu_cache: Dict[int, Dict[str, str]] = {}
         self._reply_seen: List[str] = []
         self._reply_seen_set: set[str] = set()
@@ -1488,6 +1849,16 @@ class BilibiliAdapter:
         self._comment_reply_state: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self._self_danmu_ids: Dict[int, Dict[str, float]] = {}
         self._self_danmu_texts: Dict[int, List[Tuple[str, float]]] = {}
+        self._live_status_cache: Dict[int, Tuple[int, float]] = {}
+        self._live_status_cache_seconds = 20
+        if self._screen_host_room_id is not None:
+            monitor_config = self._load_vlm_model_config()
+            if monitor_config:
+                self._screen_monitor = ScreenMonitor(monitor_config, logger)
+            else:
+                self.logger.warning("Screen monitor disabled: VLM config unavailable")
+        else:
+            self.logger.info("Screen monitor disabled: host room not configured")
 
     async def run(self) -> None:
         await self.api.start()
@@ -1505,6 +1876,11 @@ class BilibiliAdapter:
         ):
             tasks.append(self._private_message_loop())
         await asyncio.gather(*tasks)
+
+    def _load_vlm_model_config(self) -> Optional[VlmModelConfig]:
+        root_dir = Path(__file__).resolve().parents[1]
+        model_config_path = root_dir / "NachoBot" / "config" / "model_config.toml"
+        return _resolve_vlm_model_config(model_config_path, self.logger)
 
     def remember_danmu(self, room_id: int, message_id: str, user_id: str) -> None:
         cache = self._danmu_cache.setdefault(room_id, {})
@@ -1603,6 +1979,85 @@ class BilibiliAdapter:
             self.logger.warning("Private image download failed: url=%s error=%s", url, exc)
             return None
 
+    async def _get_live_status(self, room_id: int) -> Optional[int]:
+        now = time.time()
+        cached = self._live_status_cache.get(room_id)
+        if cached and (now - cached[1]) < self._live_status_cache_seconds:
+            return cached[0]
+        status = await self.api.get_live_status(room_id)
+        if status is None:
+            self.logger.warning("Live status check failed: room_id=%s", room_id)
+            return None
+        self._live_status_cache[room_id] = (status, now)
+        return status
+
+    async def _get_screen_summary(self, room_id: int, user_id: str, message_text: str) -> Optional[str]:
+        if not self._screen_monitor:
+            return None
+        if not self._screen_host_room_id or room_id != self._screen_host_room_id:
+            return None
+        manual_state = self._get_screen_manual_state()
+        if manual_state is not True:
+            live_status = await self._get_live_status(room_id)
+            if live_status != 1:
+                return None
+        if self.config.dede_user_id and user_id and user_id == str(self.config.dede_user_id):
+            return None
+        return await self._screen_monitor.maybe_analyze(message_text)
+
+    @staticmethod
+    def _inject_screen_summary(prompt: str, summary: str) -> str:
+        if not prompt or not summary:
+            return prompt
+        screen_block = f"【直播画面】{summary}"
+        placeholder = "{extra_info_block}"
+        if placeholder in prompt:
+            return prompt.replace(placeholder, f"{placeholder}\n{screen_block}")
+        return f"{screen_block}\n{prompt}"
+
+    def _get_screen_manual_state(self) -> Optional[bool]:
+        if self._screen_manual_state is None:
+            return None
+        if time.time() >= self._screen_manual_until:
+            self._screen_manual_state = None
+            self._screen_manual_until = 0.0
+            return None
+        return self._screen_manual_state
+
+    def _handle_screen_manual_command(
+        self,
+        room_id: int,
+        user_id: str,
+        text: str,
+        user_name: str,
+    ) -> bool:
+        if not self._screen_manual_enable:
+            return False
+        if not self._screen_host_room_id or room_id != self._screen_host_room_id:
+            return False
+        command = text.strip().lower()
+        if command not in ("#screen_on", "#screen_off"):
+            return False
+        if self._screen_manual_user_ids and user_id not in self._screen_manual_user_ids:
+            self.logger.warning(
+                "Screen monitor manual command rejected: room_id=%s user_id=%s user_name=%s",
+                room_id,
+                user_id,
+                user_name,
+            )
+            return True
+        enable = command == "#screen_on"
+        self._screen_manual_state = enable
+        self._screen_manual_until = time.time() + self._screen_manual_duration_seconds
+        action = "enabled" if enable else "disabled"
+        self.logger.info(
+            "Screen monitor manual %s for %s seconds by user_id=%s",
+            action,
+            self._screen_manual_duration_seconds,
+            user_id,
+        )
+        return True
+
     async def handle_incoming_danmu(
         self,
         room_id: int,
@@ -1617,8 +2072,15 @@ class BilibiliAdapter:
     ) -> None:
         if not text:
             return
+        if self._handle_screen_manual_command(room_id, user_id, text, user_name):
+            return
         template_info = None
+        screen_summary = await self._get_screen_summary(room_id, user_id, text)
         reply_prompt, planner_prompt = self._resolve_live_prompts(room_id)
+        if screen_summary:
+            reply_prompt = self._inject_screen_summary(reply_prompt, screen_summary)
+            if planner_prompt:
+                planner_prompt = self._inject_screen_summary(planner_prompt, screen_summary)
         if reply_prompt or planner_prompt:
             template_items: Dict[str, str] = {}
             if reply_prompt:
@@ -2017,6 +2479,10 @@ class BilibiliAdapter:
         reply_dmid: Optional[str],
     ) -> None:
         text = self._filter_outgoing_text(text)
+        segments = _split_bilibili_text(text, max_length=BILIBILI_DANMU_MAX_LENGTH)
+        if not segments:
+            self.logger.warning("Empty danmu after splitting")
+            return
         self.logger.info(
             "Send danmu: room_id=%s reply_mid=%s reply_dmid=%s text=%s",
             room_id,
@@ -2024,24 +2490,29 @@ class BilibiliAdapter:
             reply_dmid or "",
             text,
         )
-        try:
-            resp = await self.api.send_danmu(
-                room_id=room_id,
-                message=text,
-                reply_mid=reply_mid or None,
-                reply_dmid=reply_dmid or None,
-            )
-            if (resp or {}).get("code") != 0:
-                self.logger.warning(f"Danmu send failed: {resp}")
-            else:
-                dmid = None
-                data = (resp or {}).get("data", {})
-                if isinstance(data, dict):
-                    dmid = data.get("dmid") or data.get("dmid_str")
-                self._remember_self_danmu(room_id, str(dmid) if dmid else "", text)
-                self.logger.info("Danmu send ok")
-        except Exception as exc:
-            self.logger.error(f"Danmu send error: {exc}")
+        for idx, segment in enumerate(segments):
+            segment_reply_mid = reply_mid if idx == 0 else None
+            segment_reply_dmid = reply_dmid if idx == 0 else None
+            try:
+                resp = await self.api.send_danmu(
+                    room_id=room_id,
+                    message=segment,
+                    reply_mid=segment_reply_mid or None,
+                    reply_dmid=segment_reply_dmid or None,
+                )
+                if (resp or {}).get("code") != 0:
+                    self.logger.warning(f"Danmu send failed: {resp}")
+                else:
+                    dmid = None
+                    data = (resp or {}).get("data", {})
+                    if isinstance(data, dict):
+                        dmid = data.get("dmid") or data.get("dmid_str")
+                    self._remember_self_danmu(room_id, str(dmid) if dmid else "", segment)
+                    self.logger.info("Danmu send ok")
+            except Exception as exc:
+                self.logger.error(f"Danmu send error: {exc}")
+            if idx < len(segments) - 1:
+                await asyncio.sleep(BILIBILI_DANMU_SEND_DELAY_SECONDS)
 
     def _remember_self_danmu(self, room_id: int, message_id: str, text: str) -> None:
         now = time.time()
