@@ -24,7 +24,7 @@ const LOCAL_HELP_ALL_TEXT = [
   '- /help-all：View all commands（Admin included）',
   '- /lang-switch：Switch TTS language(zh&ja)',
   '- /mus-rand：Random playing a song',
-  '- /mute：300s(Channels Only)',
+  '- /mute：mute for 300s(Channels Only)',
   '- /summary：Summarize the Chat',
   '- /adv-on：Enable AdvancedMode（DMs Only/Whitelist required）',
   '- /adv-off：Disable AdvancedMode（DMs Only/Whitelist required）',
@@ -196,6 +196,8 @@ module.exports = {
       ws = null
       connecting = null
     }
+
+
 
     const ensureWs = async () => {
       if (ws && ws.readyState === 1) return ws
@@ -411,7 +413,7 @@ module.exports = {
     registerCommand('help-all', 'View all commands（Admin included）', () => '#help_all')
     registerCommand('lang-switch', 'Switch TTS language(zh&ja)', () => '#lang_switch')
     registerCommand('mus-rand', 'Random playing a song', () => '#mus_rand')
-    registerCommand('mute', '300s(Channels Only)', () => '#mute')
+    registerCommand('mute', 'Mute for 300s(Channels Only)', () => '#mute')
     registerCommand('summary', 'Summarize the Chat', () => '#summary')
     registerCommand('adv-on', 'Enable AdvancedMode（DMs Only/Whitelist required）', () => '#adv_on')
     registerCommand('adv-off', 'Disable AdvancedMode（DMs Only/Whitelist required）', () => '#adv_off')
@@ -427,5 +429,11 @@ module.exports = {
         return '指令转发失败，请查看 Koishi 日志'
       }
     })
+
+    // Register commands for Discord VC Adapter (handled by external process)
+    // We define an empty action to satisfy Koishi's command flow without sending a response.
+    // The actual handling is done by the Python adapter.
+    ctx.command('join-vc', 'Join your voice channel (Server Only)', slashConfig).action(() => { })
+    ctx.command('leave-vc', 'Leave the voice channel (Server Only)', slashConfig).action(() => { })
   },
 }

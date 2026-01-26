@@ -1,11 +1,15 @@
 import asyncio
 import logging
 import sys
-import json
 import uuid
 import time
+import re
 from pathlib import Path
 from typing import Optional
+
+from config import AdapterConfig
+from discord_client import NachoDiscordBot
+from voice_handler import VoiceHandler
 
 # Add NachoBot path for ncnk_message module (Standard NachoBot Architecture)
 # Assuming directory structure:
@@ -16,7 +20,7 @@ _root_dir = Path(__file__).resolve().parents[1]
 _nachobot_path = _root_dir / "NachoBot"
 if _nachobot_path.exists() and str(_nachobot_path) not in sys.path:
     sys.path.insert(0, str(_nachobot_path))
-    
+
 try:
     from ncnk_message import (
         BaseMessageInfo,
@@ -31,36 +35,62 @@ try:
     )
 except ImportError:
     # Fallback if NachoBot not found (Logic won't work but prevents import error crash)
-    print("Warning: ncnk_message not found. Please ensure NachoBot is adjacent to this folder.")
-    BaseMessageInfo = FormatInfo = GroupInfo = MessageBase = Router = RouteConfig = Seg = TargetConfig = UserInfo = None
-
-from config import AdapterConfig
-from discord_client import NachoDiscordBot
-from voice_handler import VoiceHandler
-import re
+    print(
+        "Warning: ncnk_message not found. Please ensure NachoBot is adjacent to this folder."
+    )
+    BaseMessageInfo = FormatInfo = GroupInfo = MessageBase = Router = RouteConfig = (
+        Seg
+    ) = TargetConfig = UserInfo = None
 
 _URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
+
 
 def _mask_urls(text: str) -> str:
     if not text:
         return ""
     return _URL_RE.sub("[link]", text)
 
+
+# Regex to match kaomoji and special emoticons (Ported from Bilibili Adapter)
+_KAOMOJI_RE = re.compile(
+    r"[\(\（]"  # Opening bracket
+    r"[^\(\)\（\）]{1,15}"  # Content (1-15 chars, no nested brackets)
+    r"[\)\）]"  # Closing bracket
+    r"|"
+    r"[｡ﾟ✧♪♡☆★●○◎◇◆□■△▲▽▼※→←↑↓]+"  # Special symbols
+)
+
+
+def _clean_text_for_tts(text: str) -> str:
+    """Clean text for TTS: remove kaomoji, emoticons, and special characters."""
+    if not text:
+        return ""
+    # Remove kaomoji like (๑•́ ₃ •̀๑), (=^･ω･^=), etc.
+    cleaned = _KAOMOJI_RE.sub("", text)
+    # Remove standalone special chars that might cause issues
+    cleaned = re.sub(r"[～〜♪♡☆★]", "", cleaned)
+    # Normalize multiple spaces/punctuation
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = re.sub(r"[。、！？]{2,}", "。", cleaned)
+    return cleaned.strip()
+
+
 class DiscordAdapter:
     def __init__(self, config: AdapterConfig, logger: logging.Logger):
         self.config = config
         self.logger = logger
-        
+
         # Initialize Voice & Bot
         self.voice_handler = VoiceHandler(config, logger)
-        
+
         # Initialize TTS
         from tts_handler import TTSHandler
+
         self.tts_handler = TTSHandler(logger)
-        
+
         self.bot = NachoDiscordBot(config, self.voice_handler, logger)
         self.bot.set_speech_callback(self.handle_speech_recognized)
-        
+
         # Initialize Router (Connection to NachoBot Core)
         self.router = None
         if Router:
@@ -83,38 +113,38 @@ class DiscordAdapter:
         if self.router:
             # Router typically runs in a loop, we might just cancel tasks if no explicit stop
             pass
-            
+
         if self.bot:
             await self.bot.close()
             self.logger.info("Discord Bot closed.")
-        
+
         # Wait a bit for background threads (like heartbeats) to clean up
         # This prevents "RuntimeError: Event loop is closed" on Windows
         await asyncio.sleep(1.0)
-            
+
     async def run(self):
         tasks = []
-        
+
         # Start Router (WebSocket)
         if self.router:
             tasks.append(asyncio.create_task(self.router.run()))
-            
+
         # Start Discord Bot
         # bot.start() is async, we wrap it
         tasks.append(asyncio.create_task(self.bot.start(self.config.discord.token)))
-        
+
         try:
             await asyncio.gather(*tasks)
         except asyncio.CancelledError:
             self.logger.info("Adapter run cancelled, stopping bot...")
             if self.bot and not self.bot.is_closed():
-                 await self.bot.close()
-            
+                await self.bot.close()
+
             # Allow time for background threads (heartbeat) to notice the closed connection
             # BEFORE we cancel all tasks and exit the loop
             self.logger.info("Waiting for background threads to cleanup...")
             await asyncio.sleep(2.0)
-            
+
             self.logger.info("Cleaning up tasks...")
             for t in tasks:
                 if not t.done():
@@ -124,15 +154,17 @@ class DiscordAdapter:
         except Exception as e:
             self.logger.error(f"Error in adapter run: {e}")
             for t in tasks:
-                 if not t.done():
+                if not t.done():
                     t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
 
-    async def handle_speech_recognized(self, guild_id: int, user_id: int, text: str):
+    async def handle_speech_recognized(
+        self, guild_id: int, user_id: int, text: str, user_name: str = None
+    ):
         """Called when audio is recognized as text."""
-        self.logger.info(f"Speech from {user_id} in {guild_id}: {text}")
-        
+        self.logger.info(f"Speech from {user_name or user_id} in {guild_id}: {text}")
+
         if not self.router:
             return
 
@@ -141,14 +173,18 @@ class DiscordAdapter:
         if self.config.disable_network_search:
             processed_text = _mask_urls(processed_text)
 
-
         # Construct Message for NachoBot
         # Platform: 'discord_vc'
-        
+
         additional_config = {}
+        # Unconditionally disable tools/MCP for VC environment
+        additional_config["disable_tools"] = True
+
         if self.config.disable_network_search:
-            additional_config["disable_tools"] = True
-            
+            # We also mask URLs if specifically requested, though disable_tools usually covers search actions
+            # Keeping mask logic for text sanitization if needed
+            pass
+
         message_info = BaseMessageInfo(
             platform="discord_vc",
             message_id=str(uuid.uuid4()),
@@ -156,7 +192,7 @@ class DiscordAdapter:
             user_info=UserInfo(
                 platform="discord_vc",
                 user_id=str(user_id),
-                user_nickname=f"User{user_id}", # We could resolve name if we want
+                user_nickname=user_name or f"User{user_id}",
             ),
             group_info=GroupInfo(
                 platform="discord_vc",
@@ -165,27 +201,27 @@ class DiscordAdapter:
             ),
             format_info=FormatInfo(
                 content_format=["text"],
-                accept_format=["text", "voice"], # We accept voice reply
+                accept_format=["text", "voice"],  # We accept voice reply
             ),
-            additional_config=additional_config
+            additional_config=additional_config,
         )
-        
+
         message = MessageBase(
             message_info=message_info,
             message_segment=Seg(type="text", data=processed_text),
         )
-        
+
         await self.router.send_message(message)
 
     async def handle_from_nachobot(self, message: MessageBase) -> None:
         """Handle outgoing messages from NachoBot (Core -> Adapter -> Discord)."""
         # This implementation depends on how Router calls this callback.
         # Assuming it calls this for messages directed TO this adapter.
-        
+
         try:
             # We only care about text or voice segments
             text_to_speak = ""
-            
+
             # Helper to extract seg
             segment = None
             if isinstance(message, dict):
@@ -197,55 +233,67 @@ class DiscordAdapter:
                     if isinstance(group_info, dict):
                         guild_id = int(group_info.get("group_id", 0))
                     else:
-                         # Fallback if object
+                        # Fallback if object
                         guild_id = int(group_info.group_id)
                 except Exception:
-                     self.logger.error("Could not parse guild_id from message dict")
-                     return
+                    self.logger.error("Could not parse guild_id from message dict")
+                    return
             else:
                 segment = message.message_segment
                 try:
                     guild_id = int(message.message_info.group_info.group_id)
                 except Exception:
-                     return
+                    return
 
             # Flatten segments to text
             if segment:
-                if isinstance(segment, dict): # Dict segment
+                if isinstance(segment, dict):  # Dict segment
                     if segment.get("type") == "text":
                         text_to_speak = segment.get("data", "")
-                elif isinstance(segment, list): # List of segments
+                elif isinstance(segment, list):  # List of segments
                     for seg in segment:
                         if isinstance(seg, dict):
                             if seg.get("type") == "text":
                                 text_to_speak += seg.get("data", "")
-                        elif hasattr(seg, 'type') and hasattr(seg, 'data'):
-                             if seg.type == "text":
-                                 text_to_speak += seg.data
-                elif hasattr(segment, 'type') and hasattr(segment, 'data'): # Object segment
+                        elif hasattr(seg, "type") and hasattr(seg, "data"):
+                            if seg.type == "text":
+                                text_to_speak += seg.data
+                elif hasattr(segment, "type") and hasattr(
+                    segment, "data"
+                ):  # Object segment
                     if segment.type == "text":
                         text_to_speak = segment.data
-                        
+
             if not text_to_speak:
                 return
 
             self.logger.info(f"Received from Core: {text_to_speak}")
-            
+
             # Filtering typo correction messages (Same as Bilibili Adapter)
             # Typically these are short messages containing only Chinese characters
-            if len(text_to_speak) <= 4 and all('\u4e00' <= c <= '\u9fff' for c in text_to_speak):
+            if len(text_to_speak) <= 4 and all(
+                "\u4e00" <= c <= "\u9fff" for c in text_to_speak
+            ):
                 self.logger.info(f"Skipping typo correction message: {text_to_speak}")
                 return
-            
+
             # Target Guild extracted earlier
-            
-            # 1. Generate TTS
-            audio_path = await self._generate_tts(text_to_speak)
-            
+
+            # 1. Clean text for TTS
+            cleaned_text = _clean_text_for_tts(text_to_speak)
+            self.logger.info(f"Cleaned text for TTS: {cleaned_text}")
+
+            if not cleaned_text:
+                self.logger.warning("Text became empty after cleaning, skipping TTS.")
+                return
+
+            # 2. Generate TTS
+            audio_path = await self._generate_tts(cleaned_text)
+
             if audio_path:
                 # 2. Speak
                 await self.bot.speak(guild_id, audio_path)
-                
+
         except Exception as e:
             self.logger.error(f"Error handling message from NachoBot: {e}")
 

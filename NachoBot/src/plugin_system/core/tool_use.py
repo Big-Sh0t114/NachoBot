@@ -22,11 +22,11 @@ def init_tool_executor_prompt():
 
 现在，{sender}发送了内容:{target_message},你想要回复ta。
 
-**重要**：你必须优先使用工具来完成用户请求。请仔细分析：
-1. 用户是否需要浏览网页、操作浏览器、获取文件内容等操作？
-2. 是否有任何可用的工具能够帮助完成这个请求？
+**重要**：仅在**确有必要**时才使用工具。请仔细判断：
+1. 用户的请求是否必须通过工具才能完成？（如必应搜索、知识库检索）
+2. 如果可以通过常识直接回答，或者只是简单的闲聊/情感交流，请**不要调用工具**。
+3. 频繁调用工具会严重拖慢回复速度，请务必克制。
 
-如果你收到的工具列表中有任何工具能够帮助完成用户的请求，请**立即调用该工具**，不要犹豫。
 If you need to use a tool, please directly call the corresponding tool function. If you do not need to use any tool, simply output "No tool needed".
 """
     prompt = Prompt(tool_executor_prompt, "tool_executor_prompt", _should_register=False)
@@ -71,7 +71,16 @@ class ToolExecutor:
     可以直接输入聊天消息内容，自动判断并执行相应的工具，返回结构化的工具执行结果。
     """
 
-    def __init__(self, chat_id: str, enable_cache: bool = True, cache_ttl: int = 3, model_set: Optional[Any] = None, include_prefix: Optional[str] = None, exclude_prefix: Optional[str] = None, prompt_template: str = "tool_executor_prompt"):
+    def __init__(
+        self,
+        chat_id: str,
+        enable_cache: bool = True,
+        cache_ttl: int = 3,
+        model_set: Optional[Any] = None,
+        include_prefix: Optional[str] = None,
+        exclude_prefix: Optional[str] = None,
+        prompt_template: str = "tool_executor_prompt",
+    ):
         """初始化工具执行器
 
         Args:
@@ -97,7 +106,9 @@ class ToolExecutor:
         self.cache_ttl = cache_ttl
         self.tool_cache = {}  # 格式: {cache_key: {"result": result, "ttl": ttl, "timestamp": timestamp}}
 
-        logger.info(f"{self.log_prefix}工具执行器初始化完成，模式={'启用' if enable_cache else '禁用'}，过滤器=[+{include_prefix or 'All'}, -{exclude_prefix or 'None'}]")
+        logger.info(
+            f"{self.log_prefix}工具执行器初始化完成，模式={'启用' if enable_cache else '禁用'}，过滤器=[+{include_prefix or 'All'}, -{exclude_prefix or 'None'}]"
+        )
 
     async def execute_from_chat_message(
         self, target_message: str, chat_history: str, sender: str, return_details: bool = False
@@ -129,7 +140,7 @@ class ToolExecutor:
         # 缓存未命中，执行工具调用
         # 获取可用工具
         tools = self._get_tool_definitions()
-        
+
         # print(f"tools: {tools}")
 
         # 获取当前时间
@@ -152,7 +163,7 @@ class ToolExecutor:
         # 调用LLM进行工具决策
         model_list = self.llm_model.model_for_task.model_list
         logger.info(f"{self.log_prefix} 工具执行器正在使用模型: {model_list}")
-        
+
         response, (reasoning_content, model_name, tool_calls) = await self.llm_model.generate_response_async(
             prompt=prompt, tools=tools, raise_when_empty=False
         )
@@ -176,29 +187,31 @@ class ToolExecutor:
         all_tools = get_llm_available_tool_definitions()
         # Debug: Print all available tools
         logger.debug(f"{self.log_prefix} DEBUG: ALL Available Tools: {[name for name, _ in all_tools]}")
-        
+
         user_disabled_tools = global_announcement_manager.get_disabled_chat_tools(self.chat_id)
-        
+
         filtered_tools = []
         for name, definition in all_tools:
             if name in user_disabled_tools:
                 continue
-            
+
             # 过滤器逻辑
             if self.include_prefix and not name.startswith(self.include_prefix):
                 continue
             if self.exclude_prefix and name.startswith(self.exclude_prefix):
                 continue
-                
+
             filtered_tools.append(definition)
-            
+
         if self.include_prefix or self.exclude_prefix:
-            logger.info(f"{self.log_prefix} 工具Filter: 总数={len(all_tools)}, 剩余={len(filtered_tools)}, Include={self.include_prefix}, Exclude={self.exclude_prefix}")
+            logger.info(
+                f"{self.log_prefix} 工具Filter: 总数={len(all_tools)}, 剩余={len(filtered_tools)}, Include={self.include_prefix}, Exclude={self.exclude_prefix}"
+            )
             if self.include_prefix and filtered_tools:
                 logger.info(f"{self.log_prefix} MCP工具可见: {[t['name'] for t in filtered_tools]}")
             if not filtered_tools and self.include_prefix:
                 logger.warning(f"{self.log_prefix} MCP工具列表为空! 请检查是否已连接服务器或权限设置。")
-        
+
         return filtered_tools
 
     async def execute_tool_calls(self, tool_calls: Optional[List[ToolCall]]) -> Tuple[List[Dict[str, Any]], List[str]]:
@@ -285,11 +298,24 @@ class ToolExecutor:
                 logger.warning(f"未知工具名称: {function_name}")
                 return None
 
+            # 2. 安全检查：验证工具是否允许在此执行器中运行 (Fix Permission Leak)
+            if self.include_prefix and not function_name.startswith(self.include_prefix):
+                logger.warning(
+                    f"{self.log_prefix} 拒绝执行非包含前缀工具: {function_name} (Filter: +{self.include_prefix})"
+                )
+                return None
+
+            if self.exclude_prefix and function_name.startswith(self.exclude_prefix):
+                logger.warning(
+                    f"{self.log_prefix} 拒绝执行排除前缀工具: {function_name} (Filter: -{self.exclude_prefix})"
+                )
+                return None
+
             # 注入 chat_stream (如果工具支持)
             try:
                 tool_instance.chat_stream = self.chat_stream
             except Exception:
-                pass # 忽略错误
+                pass  # 忽略错误
 
             # 执行工具
             result = await tool_instance.execute(function_args)
