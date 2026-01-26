@@ -245,7 +245,13 @@ class PluginBase(ABC):
                         # 添加字段值
                         value = field.default
                         if isinstance(value, str):
-                            toml_str += f'{field_name} = "{value}"\n'
+                            if '\n' in value:
+                                toml_str += f"{field_name} = '''\n{value}'''\n"
+                            elif '"' in value:
+                                # Use single quotes for strings containing double quotes
+                                toml_str += f"{field_name} = '{value}'\n"
+                            else:
+                                toml_str += f'{field_name} = "{value}"\n'
                         elif isinstance(value, bool):
                             toml_str += f"{field_name} = {str(value).lower()}\n"
                         else:
@@ -423,7 +429,13 @@ class PluginBase(ABC):
                         # 添加字段值（使用迁移后的值）
                         value = section_data.get(field_name, field.default)
                         if isinstance(value, str):
-                            toml_str += f'{field_name} = "{value}"\n'
+                            if '\n' in value:
+                                toml_str += f"{field_name} = '''\n{value}'''\n"
+                            elif '"' in value:
+                                # Use single quotes for strings containing double quotes
+                                toml_str += f"{field_name} = '{value}'\n"
+                            else:
+                                toml_str += f'{field_name} = "{value}"\n'
                         elif isinstance(value, bool):
                             toml_str += f"{field_name} = {str(value).lower()}\n"
                         elif isinstance(value, list):

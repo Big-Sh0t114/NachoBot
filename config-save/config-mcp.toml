@@ -1,0 +1,292 @@
+# mcp_bridge_plugin - 配置文件
+# 将 MCP (Model Context Protocol) 服务器的工具桥接到 MaiBot，使麦麦能够调用外部 MCP 工具
+# 配置版本: 1.0.0
+
+# {'label': '📖 快速入门', 'order': 1, 'collapsed': False}
+[guide]
+
+# 三步开始使用
+quick_start = "1. 获取 MCP 服务器  2. 在 MCP Servers 粘贴配置  3. 发送 /mcp reconnect"
+
+# 复制链接到浏览器打开，获取免费 MCP 服务器
+mcp_sources = "https://modelscope.cn/mcp | https://smithery.ai | https://glama.ai"
+
+# 复制到 MCP Servers（Claude）可直接使用（免费时间服务器）
+example_config = '{"mcpServers":{"time":{"url":"https://mcp.api-inference.modelscope.cn/server/mcp-server-time"}}}'
+
+
+# {'label': '🔘 插件开关', 'order': 2, 'collapsed': False}
+[plugin]
+
+# 是否启用插件
+enabled = true
+
+
+# {'label': '⚙️ 高级设置', 'order': 30, 'collapsed': True}
+[settings]
+
+# 🏷️ 工具前缀 - 生成的工具名格式: {前缀}_{服务器名}_{工具名}
+tool_prefix = "mcp"
+
+# ⏱️ 连接超时（秒）
+connect_timeout = 30.0
+
+# ⏱️ 调用超时（秒）
+call_timeout = 60.0
+
+# 🔄 启动时自动连接所有已启用的服务器
+auto_connect = true
+
+# 🔁 连接失败时的重试次数
+retry_attempts = 3
+
+# ⏳ 重试间隔（秒）
+retry_interval = 5.0
+
+# 💓 定期检测服务器连接状态
+heartbeat_enabled = true
+
+# 💓 基准心跳间隔（秒）
+heartbeat_interval = 60.0
+
+# 🧠 根据服务器稳定性自动调整心跳间隔
+heartbeat_adaptive = true
+
+# 稳定服务器的最大间隔倍数
+heartbeat_max_multiplier = 3.0
+
+# 🔄 检测到断开时自动尝试重连
+auto_reconnect = true
+
+# 🔄 连续重连失败后暂停重连
+max_reconnect_attempts = 3
+
+# 📊 定期更新 WebUI 状态显示
+status_refresh_enabled = true
+
+# 📊 状态刷新间隔（秒）
+status_refresh_interval = 10.0
+
+# 📦 允许读取 MCP 服务器提供的资源
+enable_resources = false
+
+# 📝 允许使用 MCP 服务器提供的提示模板
+enable_prompts = false
+
+# 🔄 使用 LLM 对长结果进行摘要提炼
+post_process_enabled = false
+
+# 📏 结果长度超过此值才触发后处理
+post_process_threshold = 500
+
+# 📝 LLM 摘要输出的最大 token 数
+post_process_max_tokens = 500
+
+# 🤖 指定用于后处理的模型名称
+post_process_model = ""
+
+# 📋 后处理提示词模板
+post_process_prompt = "(见插件说明)"
+
+# 🔍 记录工具调用详情
+trace_enabled = true
+
+# 内存中保留的最大记录数
+trace_max_records = 50
+
+# 是否将追踪记录写入日志文件
+trace_log_enabled = false
+
+# 🗄️ 缓存相同参数的调用结果
+cache_enabled = false
+
+# 缓存有效期（秒）
+cache_ttl = 300
+
+# 最大缓存条目数（超出后 LRU 淘汰）
+cache_max_entries = 200
+
+# 不缓存的工具（每行一个，支持通配符 *）
+cache_exclude_tools = ""
+
+
+# {'label': '🔧 工具管理', 'order': 20, 'collapsed': True}
+[tools]
+
+# 当前已注册的 MCP 工具列表（只读）
+tool_list = '''
+📦 fetch-local (1个工具):
+  • mcp_fetch_local_fetch
+
+📦 filesystem-local (14个工具):
+  • mcp_filesystem_local_read_file
+  • mcp_filesystem_local_read_text_file
+  • mcp_filesystem_local_read_media_file
+  • mcp_filesystem_local_read_multiple_files
+  • mcp_filesystem_local_write_file ❌
+  • mcp_filesystem_local_edit_file ❌
+  • mcp_filesystem_local_create_directory ❌
+  • mcp_filesystem_local_list_directory
+  • mcp_filesystem_local_list_directory_with_sizes
+  • mcp_filesystem_local_directory_tree
+  • mcp_filesystem_local_move_file ❌
+  • mcp_filesystem_local_search_files
+  • mcp_filesystem_local_get_file_info
+  • mcp_filesystem_local_list_allowed_directories
+
+📦 puppeteer-local (7个工具):
+  • mcp_puppeteer_local_puppeteer_navigate
+  • mcp_puppeteer_local_puppeteer_screenshot
+  • mcp_puppeteer_local_puppeteer_click
+  • mcp_puppeteer_local_puppeteer_fill
+  • mcp_puppeteer_local_puppeteer_select
+  • mcp_puppeteer_local_puppeteer_hover
+  • mcp_puppeteer_local_puppeteer_evaluate
+'''
+
+# 要禁用的工具名（每行一个）
+disabled_tools = '''
+mcp_filesystem_local_write_file
+mcp_filesystem_local_edit_file
+mcp_filesystem_local_create_directory
+mcp_filesystem_local_move_file
+'''
+
+
+# {'label': '🔗 Workflow（硬流程/工具链）', 'order': 4, 'collapsed': False}
+[tool_chains]
+
+# 🔗 启用工具链功能
+chains_enabled = true
+
+# 工具链使用说明
+chains_guide = "(见插件说明)"
+
+# 工具链名称（英文，如 search_and_summarize）
+quick_chain_name = ""
+
+# 工具链描述（供 LLM 理解何时使用）
+quick_chain_desc = ""
+
+# 输入参数（每行一个，格式: 参数名=描述）
+quick_chain_params = ""
+
+# 执行步骤（每行一个，格式: 工具名|参数JSON|输出键）
+quick_chain_steps = ""
+
+# 填写上方信息后，在此输入 ADD 并保存即可添加
+quick_chain_add = ""
+
+# 工具链配置模板参考
+chains_templates = "(见插件说明)"
+
+# 工具链配置（JSON 数组格式）
+chains_list = "[]"
+
+# 当前已注册的工具链状态（只读）
+chains_status = "(无工具链配置)"
+
+
+# {'label': '🔄 ReAct（软流程）', 'order': 5, 'collapsed': True}
+[react]
+
+# 🔄 将 MCP 工具注册到记忆检索 ReAct 系统
+react_enabled = false
+
+# ReAct 软流程使用说明
+react_guide = "(见 config.toml)"
+
+# 过滤模式
+# 可选值: whitelist, blacklist
+filter_mode = "whitelist"
+
+# 工具过滤列表（每行一个，支持通配符 * 和精确匹配）
+tool_filter = ""
+
+# 当前已注册到 ReAct 的工具状态（只读）
+react_status = "(启动后自动生成)"
+
+
+# {'label': '🔐 权限控制', 'order': 21, 'collapsed': True}
+[permissions]
+
+# 🔐 按群/用户限制工具使用
+perm_enabled = true
+
+# 默认模式：allow_all（默认允许）或 deny_all（默认禁止）
+perm_default_mode = "deny_all"
+
+# 禁止使用所有 MCP 工具的群号（每行一个）
+quick_deny_groups = ""
+
+# 始终允许使用所有工具的用户 QQ 号（管理员白名单，每行一个）
+quick_allow_users = " "
+
+# 高级权限规则（JSON 格式，可针对特定工具配置）
+perm_rules = "[]"
+
+
+# {'label': '🔌 MCP Servers（Claude）', 'order': 3, 'collapsed': False}
+[servers]
+
+# Claude Desktop 规范的 MCP 配置（JSON）
+claude_config_json = '''
+{
+  "mcpServers": {
+
+    "fetch-local": {
+      "command": "uvx",
+      "args": ["mcp-server-fetch"]
+    },
+    "filesystem-local": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:\\", "D:\\"]
+    },
+    "puppeteer-local": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-puppeteer"]
+    }
+  }
+}
+'''
+
+# 配置说明（只读）
+claude_config_guide = "(见插件说明)"
+
+
+# {'label': '📊 运行状态', 'order': 10, 'collapsed': False}
+[status]
+
+# 当前 MCP 服务器连接状态和工具列表
+connection_status = '''
+服务器: 3/3 已连接
+工具数: 22
+心跳: 运行中
+
+✅ fetch-local (stdio)
+   • fetch
+✅ filesystem-local (stdio)
+   • read_file
+   • read_text_file
+   • read_media_file
+   • read_multiple_files
+   • write_file
+   • edit_file
+   • create_directory
+   • list_directory
+   • list_directory_with_sizes
+   • directory_tree
+   • move_file
+   • search_files
+   • get_file_info
+   • list_allowed_directories
+✅ puppeteer-local (stdio)
+   • puppeteer_navigate
+   • puppeteer_screenshot
+   • puppeteer_click
+   • puppeteer_fill
+   • puppeteer_select
+   • puppeteer_hover
+   • puppeteer_evaluate'''
+
+

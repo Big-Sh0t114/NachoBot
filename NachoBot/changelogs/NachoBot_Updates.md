@@ -1,3 +1,10 @@
+1/26
+    Bilibili适配器与MaiBot s4u直播相关代码对接
+        礼物/上舰/VIP队列等事件，未经过测试 (财力不足)
+    Bilibili直播接入可选的TTS回复以及语音识别，同时打印中文字幕
+    优化Bilibili Adapter整体架构
+1/25
+    接入MCP工具，本地部署MCP服务
 1/22
     Bilibili直播间接入视觉模块，识别本地屏幕并注入直播
 1/21
