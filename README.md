@@ -28,6 +28,7 @@ NachoBot 是在上游 **MaiBot 0.10.3 Beta** 基础上定制的角色扮演聊�
 
 `Discord平台改动`
 - 适配了Discord内的语音发送，格式由QQ的silk变为ogg
+- 通过配置DiscordVC-Adapter，实现Discord语音频道自由发言
 - 翻译#help菜单中有效指令至英语
 - 适配了slash commands
 
@@ -73,6 +74,7 @@ NachoBot 是在上游 **MaiBot 0.10.3 Beta** 基础上定制的角色扮演聊�
   - 从项目根目录`config-save/`中复制`koishi.yml`移动至`koishi-app/`目录中
   - 双击`koishi-app/launch Koishi.bat`启动Koishi，在webUI中填写自己的Discord Bot token 和 self id
   - 双击`launch_koishi_adapter.bat`运行适配器
+  - 复制 DiscordVC-Adapter中的`config.toml.example`，并重命名为`config.toml`，填写相关配置
 
 ## 安全与隐私提示
 - 请勿将真实密钥、Cookie、个人账号信息提交到仓库；部署前在本地/环境变量中填充。

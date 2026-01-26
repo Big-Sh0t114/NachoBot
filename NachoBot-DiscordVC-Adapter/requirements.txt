@@ -1,0 +1,6 @@
+py-cord[voice]
+numpy
+aiohttp
+toml
+websockets
+pynacl

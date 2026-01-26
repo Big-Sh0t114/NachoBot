@@ -1,0 +1,14 @@
+log_level = "INFO"
+
+[discord]
+token = "YOUR_DISCORD_BOT_TOKEN"
+app_id = "YOUR_APP_ID"
+
+[nachobot]
+host = "localhost"
+port = 8000
+
+[voice]
+enabled = true
+silence_threshold = 0.8
+sample_rate = 48000
