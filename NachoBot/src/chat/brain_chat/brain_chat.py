@@ -99,7 +99,6 @@ class BrainChatting:
         self.last_read_time = time.time() - 2
 
         self.more_plan = False
-        
 
     async def start(self):
         """检查是否需要启动主循环，如果未激活则启动。"""
@@ -174,10 +173,8 @@ class BrainChatting:
 
         if len(recent_messages_list) >= 1:
             self.last_read_time = time.time()
-            await self._observe(
-                recent_messages_list=recent_messages_list
-            )
-            
+            await self._observe(recent_messages_list=recent_messages_list)
+
         else:
             # Normal模式：消息数量不足，等待
             await asyncio.sleep(0.2)
@@ -236,7 +233,7 @@ class BrainChatting:
 
     async def _observe(
         self,  # interest_value: float = 0.0,
-        recent_messages_list: Optional[List["DatabaseMessages"]] = None
+        recent_messages_list: Optional[List["DatabaseMessages"]] = None,
     ) -> bool:  # sourcery skip: merge-else-if-into-elif, remove-redundant-if
         if recent_messages_list is None:
             recent_messages_list = []
@@ -555,7 +552,6 @@ class BrainChatting:
         """执行单个动作的通用函数"""
         try:
             with Timer(f"动作{action_planner_info.action_type}", cycle_timers):
-                
                 if action_planner_info.action_type == "no_reply":
                     # 直接处理no_action逻辑，不再通过动作系统
                     reason = action_planner_info.reasoning or "选择不回复"
@@ -587,6 +583,13 @@ class BrainChatting:
                         # 高级模式路由：禁用工具/联网并移除TTS动作
                         advanced_on = advanced_manager.is_on(self.chat_stream)
                         enable_tool_flag = global_config.tool.enable_tool
+
+                        # Check for disable_tools in message config (e.g. from Discord VC)
+                        if action_planner_info.action_message and action_planner_info.action_message.message_info:
+                            add_conf = getattr(action_planner_info.action_message.message_info, "additional_config", {})
+                            if add_conf and isinstance(add_conf, dict) and add_conf.get("disable_tools"):
+                                enable_tool_flag = False
+                                logger.info(f"{self.log_prefix} 检测到消息配置 disable_tools=True，禁用工具")
                         filtered_available_actions = available_actions
                         filtered_chosen_actions = chosen_action_plan_infos or []
 
@@ -617,7 +620,9 @@ class BrainChatting:
 
                         if not success or not llm_response or not llm_response.reply_set:
                             if action_planner_info.action_message:
-                                logger.info(f"对 {action_planner_info.action_message.processed_plain_text} 的回复生成失败")
+                                logger.info(
+                                    f"对 {action_planner_info.action_message.processed_plain_text} 的回复生成失败"
+                                )
                             else:
                                 logger.info("回复生成失败")
                             return {"action_type": "reply", "success": False, "reply_text": "", "loop_info": None}
