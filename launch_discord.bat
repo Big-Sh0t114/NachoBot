@@ -14,4 +14,8 @@ rem ---- Start NachoBot-Koishi-Adapter in a new window ----
 echo Starting NachoBot-Koishi-Adapter...
 start "NachoBot-Koishi-Adapter" cmd /k "cd /d ""%BASE_DIR%"" && python NachoBot-Koishi-Adapter\main.py"
 
+rem ---- Start NachoBot-DiscordVC-Adapter in a new window ----
+echo Starting NachoBot-DiscordVC-Adapter...
+start "NachoBot-DiscordVC-Adapter" cmd /k "cd /d ""%BASE_DIR%"" && python NachoBot-DiscordVC-Adapter\main.py"
+
 endlocal

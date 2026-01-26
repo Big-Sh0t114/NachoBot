@@ -11,7 +11,7 @@ import time
 import uuid
 import winsound
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 # Add NachoBot path for ncnk_message module
 _root_dir = Path(__file__).resolve().parents[1]
@@ -19,7 +19,7 @@ _nachobot_path = _root_dir / "NachoBot"
 if _nachobot_path.exists() and str(_nachobot_path) not in sys.path:
     sys.path.insert(0, str(_nachobot_path))
 
-from ncnk_message import (
+from ncnk_message import (  # noqa: E402
     BaseMessageInfo,
     FormatInfo,
     GroupInfo,
@@ -32,7 +32,7 @@ from ncnk_message import (
     UserInfo,
 )
 
-from config import (
+from config import (  # noqa: E402
     AdapterConfig,
     AsrModelConfig,
     PrivateSessionConfig,
@@ -40,7 +40,7 @@ from config import (
     _resolve_asr_model_config,
     _resolve_vlm_model_config,
 )
-from utils import (
+from utils import (  # noqa: E402
     BILIBILI_DANMU_MAX_LENGTH,
     _clean_text_for_tts,
     _decode_image_base64,
@@ -54,10 +54,10 @@ from utils import (
     _strip_emoji,
     _URL_RE,
 )
-from api import BilibiliApi
-from live_worker import LiveRoomWorker
-from screen_monitor import ScreenMonitor
-from mic_capture import MicCaptureWorker, MicConfig
+from api import BilibiliApi  # noqa: E402
+from live_worker import LiveRoomWorker  # noqa: E402
+from screen_monitor import ScreenMonitor  # noqa: E402
+from mic_capture import MicCaptureWorker, MicConfig  # noqa: E402
 
 # Try to import TTS model
 tts_adapter_path = Path(r"C:\Users\BigSh0t\Nacho-with-u\nachobot_tts_adapter")
@@ -132,9 +132,11 @@ class BilibiliAdapter:
                 subtitle_path=config.mic_asr_subtitle_path,
                 silence_threshold=config.mic_asr_silence_threshold,
                 silence_duration=config.mic_asr_silence_duration,
-                sample_rate=config.mic_asr_sample_rate
+                sample_rate=config.mic_asr_sample_rate,
             )
-            self.mic_worker = MicCaptureWorker(mic_config, self._handle_mic_recognition, logger)
+            self.mic_worker = MicCaptureWorker(
+                mic_config, self._handle_mic_recognition, logger
+            )
             self.mic_worker.set_asr_callback(self._call_asr_api)
         self._self_danmu_texts: Dict[int, List[Tuple[str, float]]] = {}
         self._live_status_cache: Dict[int, Tuple[int, float]] = {}
@@ -147,19 +149,21 @@ class BilibiliAdapter:
                 self.logger.warning("Screen monitor disabled: VLM config unavailable")
         else:
             self.logger.info("Screen monitor disabled: host room not configured")
-        
+
         # Initialize TTS
         self.tts_model: Optional["TTSModel"] = None
         self.tts_enable = False
         self.subtitle_path = "subtitles.txt"
-        
+
         if self.config.live_room_prompts:
             for room_cfg in self.config.live_room_prompts.values():
                 if room_cfg.get("tts", {}).get("enable"):
                     self.tts_enable = True
-                    self.subtitle_path = room_cfg.get("tts", {}).get("subtitle_path", "subtitles.txt")
+                    self.subtitle_path = room_cfg.get("tts", {}).get(
+                        "subtitle_path", "subtitles.txt"
+                    )
                     break
-        
+
         if self.tts_enable:
             if TTSModel:
                 try:
@@ -168,7 +172,9 @@ class BilibiliAdapter:
                 except Exception as e:
                     self.logger.error(f"Failed to initialize TTS Model: {e}")
             else:
-                self.logger.error(f"TTS enabled but TTSModel not available: {_tts_import_error}")
+                self.logger.error(
+                    f"TTS enabled but TTSModel not available: {_tts_import_error}"
+                )
 
     # ========== Run and Control Methods ==========
 
@@ -177,7 +183,9 @@ class BilibiliAdapter:
         tasks = [self.router.run()]
         if self.config.live_enable:
             for room_id in self.config.room_ids:
-                worker = LiveRoomWorker(room_id, self.config, self.api, self, self.logger)
+                worker = LiveRoomWorker(
+                    room_id, self.config, self.api, self, self.logger
+                )
                 tasks.append(worker.run())
         else:
             self.logger.info("Live adapter disabled by config")
@@ -187,23 +195,23 @@ class BilibiliAdapter:
             self.config.private_sessions or self.config.private_auto_sessions
         ):
             tasks.append(self._private_message_loop())
-        
+
         if self.mic_worker:
             tasks.append(self.mic_worker.start())
             tasks.append(self._mic_control_loop())
-            
+
         await asyncio.gather(*tasks)
 
     async def _mic_control_loop(self) -> None:
         if not self.mic_worker or not self.mic_worker.config.room_id:
             return
-            
+
         room_id = self.mic_worker.config.room_id
-        
+
         while True:
             try:
                 should_pause = True
-                
+
                 if self._mic_manual_state is not None:
                     should_pause = not self._mic_manual_state
                 else:
@@ -212,17 +220,17 @@ class BilibiliAdapter:
                         should_pause = False
                     else:
                         should_pause = True
-                
+
                 if should_pause:
                     if not self.mic_worker.is_paused():
                         self.mic_worker.pause()
                 else:
                     if self.mic_worker.is_paused():
                         self.mic_worker.resume()
-                        
+
             except Exception as e:
                 self.logger.error(f"Error in mic control loop: {e}")
-                
+
             await asyncio.sleep(5)
 
     def _load_vlm_model_config(self) -> Optional[VlmModelConfig]:
@@ -240,23 +248,23 @@ class BilibiliAdapter:
     def _parse_bilingual_response(self, text: str) -> Tuple[str, str]:
         if not text:
             return "", ""
-            
+
         jp_match = re.search(r"<JP>(.*?)</JP>", text, re.DOTALL)
         zh_match = re.search(r"<ZH>(.*?)</ZH>", text, re.DOTALL)
-        
+
         text_jp = jp_match.group(1).strip() if jp_match else ""
         text_zh = zh_match.group(1).strip() if zh_match else ""
-        
+
         if not text_jp and not text_zh:
             cleaned = re.sub(r"</?[A-Z]{2}>", "", text).strip()
             return "", cleaned
-            
+
         return text_jp, text_zh
 
     async def _play_audio(self, audio_data: bytes) -> None:
         if not audio_data:
             return
-        
+
         try:
             temp_path = os.path.join(tempfile.gettempdir(), "nachobot_tts_temp.wav")
             with open(temp_path, "wb") as f:
@@ -268,9 +276,9 @@ class BilibiliAdapter:
     def _update_subtitle(self, text: str, subtitle_path: str = None) -> None:
         if not text:
             return
-        
+
         target_path = subtitle_path or self.subtitle_path
-        
+
         try:
             with open(target_path, "w", encoding="utf-8-sig") as f:
                 f.write(text)
@@ -314,9 +322,23 @@ class BilibiliAdapter:
 
     def _extract_private_image_url(self, content: Any) -> str:
         image_keys = (
-            "url", "image_url", "img_url", "image", "img", "src",
-            "origin_url", "original_url", "preview", "cover", "thumb",
-            "pic", "pic_url", "picture", "photo", "face", "raw_url",
+            "url",
+            "image_url",
+            "img_url",
+            "image",
+            "img",
+            "src",
+            "origin_url",
+            "original_url",
+            "preview",
+            "cover",
+            "thumb",
+            "pic",
+            "pic_url",
+            "picture",
+            "photo",
+            "face",
+            "raw_url",
         )
 
         def scan(value: Any) -> str:
@@ -360,7 +382,9 @@ class BilibiliAdapter:
         try:
             return await self.api.fetch_base64(url)
         except Exception as exc:
-            self.logger.warning("Private image download failed: url=%s error=%s", url, exc)
+            self.logger.warning(
+                "Private image download failed: url=%s error=%s", url, exc
+            )
             return None
 
     # ========== Live Status and Screen Methods ==========
@@ -377,7 +401,9 @@ class BilibiliAdapter:
         self._live_status_cache[room_id] = (status, now)
         return status
 
-    async def _get_screen_summary(self, room_id: int, user_id: str, message_text: str) -> Optional[str]:
+    async def _get_screen_summary(
+        self, room_id: int, user_id: str, message_text: str
+    ) -> Optional[str]:
         if not self._screen_monitor:
             return None
         if not self._screen_host_room_id or room_id != self._screen_host_room_id:
@@ -387,7 +413,11 @@ class BilibiliAdapter:
             live_status = await self._get_live_status(room_id)
             if live_status != 1:
                 return None
-        if self.config.dede_user_id and user_id and user_id == str(self.config.dede_user_id):
+        if (
+            self.config.dede_user_id
+            and user_id
+            and user_id == str(self.config.dede_user_id)
+        ):
             return None
         return await self._screen_monitor.maybe_analyze(message_text)
 
@@ -427,7 +457,9 @@ class BilibiliAdapter:
         if self._screen_manual_user_ids and user_id not in self._screen_manual_user_ids:
             self.logger.warning(
                 "Screen monitor manual command rejected: room_id=%s user_id=%s user_name=%s",
-                room_id, user_id, user_name,
+                room_id,
+                user_id,
+                user_name,
             )
             return True
         enable = command == "#screen_on"
@@ -436,7 +468,9 @@ class BilibiliAdapter:
         action = "enabled" if enable else "disabled"
         self.logger.info(
             "Screen monitor manual %s for %s seconds by user_id=%s",
-            action, self._screen_manual_duration_seconds, user_id,
+            action,
+            self._screen_manual_duration_seconds,
+            user_id,
         )
         return True
 
@@ -449,24 +483,26 @@ class BilibiliAdapter:
     ) -> bool:
         if not self.mic_worker or not self.mic_worker.config.room_id:
             return False
-            
+
         if room_id != self.mic_worker.config.room_id:
             return False
-            
+
         command = text.strip().lower()
         if command not in ("#asr_on", "#asr_off"):
             return False
-        
+
         if self._screen_manual_user_ids and user_id not in self._screen_manual_user_ids:
             self.logger.warning(
                 "Mic manual command rejected: room_id=%s user_id=%s user_name=%s",
-                room_id, user_id, user_name,
+                room_id,
+                user_id,
+                user_name,
             )
             return True
-            
+
         enable = command == "#asr_on"
         self._mic_manual_state = enable
-        
+
         action = "force enabled" if enable else "force disabled"
         self.logger.info("Mic capture %s by user_id=%s", action, user_id)
         return True
@@ -497,7 +533,9 @@ class BilibiliAdapter:
         if screen_summary:
             reply_prompt = self._inject_screen_summary(reply_prompt, screen_summary)
             if planner_prompt:
-                planner_prompt = self._inject_screen_summary(planner_prompt, screen_summary)
+                planner_prompt = self._inject_screen_summary(
+                    planner_prompt, screen_summary
+                )
         if reply_prompt or planner_prompt:
             template_items: Dict[str, str] = {}
             if reply_prompt:
@@ -516,10 +554,11 @@ class BilibiliAdapter:
         }
         if is_mentioned:
             additional_config["is_mentioned"] = 1.0
-        
+
         processed_text = text
         if self.config.live_disable_network_search:
             processed_text = _mask_urls(processed_text)
+            additional_config["disable_tools"] = True
 
         message_info = BaseMessageInfo(
             platform=self.config.platform,
@@ -561,7 +600,7 @@ class BilibiliAdapter:
         self.logger.info(
             f"Gift: [{room_id}] {user_name}({user_id}) sent {gift_name} x{num}"
         )
-        gift_data = f"{gift_name}:{num}"
+        # gift_data = f"{gift_name}:{num}"
         # TODO: Implement gift handling if needed
         pass
 
@@ -575,28 +614,35 @@ class BilibiliAdapter:
 
     async def _call_asr_api(self, wav_data: bytes) -> Optional[str]:
         import aiohttp
+
         asr_config = self._load_asr_model_config()
         if not asr_config:
             self.logger.warning("ASR config not available, cannot process speech")
             return None
-            
+
         try:
             data = aiohttp.FormData()
-            data.add_field("file", wav_data, filename="audio.wav", content_type="audio/wav")
+            data.add_field(
+                "file", wav_data, filename="audio.wav", content_type="audio/wav"
+            )
             data.add_field("model", asr_config.model)
             data.add_field("language", "zh")
             data.add_field("prompt", "ZH")
-            
+
             headers = {"Authorization": f"Bearer {asr_config.api_key}"}
             url = f"{asr_config.base_url}/audio/transcriptions"
-            
+
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, data=data, headers=headers, timeout=asr_config.timeout) as resp:
+                async with session.post(
+                    url, data=data, headers=headers, timeout=asr_config.timeout
+                ) as resp:
                     if resp.status != 200:
                         error_text = await resp.text()
-                        self.logger.error(f"ASR API error: {resp.status} - {error_text}")
+                        self.logger.error(
+                            f"ASR API error: {resp.status} - {error_text}"
+                        )
                         return None
-                    
+
                     result = await resp.json()
                     text = str(result.get("text", "")).strip()
                     if text:
@@ -605,7 +651,7 @@ class BilibiliAdapter:
                         # Then remove trailing punctuation
                         text = text.rstrip("。?.，,！!？")
                     return text
-                    
+
         except Exception as e:
             self.logger.error(f"ASR API call failed: {e}")
             return None
@@ -614,12 +660,12 @@ class BilibiliAdapter:
         additional_config = {
             "room_id": room_id,
             "is_mentioned": 2.0,
-            "source": "mic_asr"
+            "source": "mic_asr",
         }
-        
+
         message_info = BaseMessageInfo(
             platform=self.config.platform,
-            message_id=f"mic_{int(time.time()*1000)}",
+            message_id=f"mic_{int(time.time() * 1000)}",
             time=time.time(),
             user_info=UserInfo(
                 platform=self.config.platform,
@@ -638,11 +684,11 @@ class BilibiliAdapter:
             template_info=None,
             additional_config=additional_config,
         )
-        
+
         processed_text = text
         if self.config.live_disable_network_search:
             processed_text = _mask_urls(processed_text)
-             
+
         message = MessageBase(
             message_info=message_info,
             message_segment=Seg(type="text", data=processed_text),
@@ -668,7 +714,7 @@ class BilibiliAdapter:
 
         message_info = BaseMessageInfo(
             platform=self.config.platform,
-            message_id=f"sc_{room_id}_{user_id}_{int(timestamp*1000)}_{uuid.uuid4().hex[:8]}",
+            message_id=f"sc_{room_id}_{user_id}_{int(timestamp * 1000)}_{uuid.uuid4().hex[:8]}",
             time=float(timestamp),
             user_info=UserInfo(
                 platform=self.config.platform,
@@ -714,17 +760,17 @@ class BilibiliAdapter:
         priority_data = {
             "message_type": "vip",
             "message_priority": 1000.0,
-            "guard_level": guard_level
+            "guard_level": guard_level,
         }
-        
+
         segments = [
             Seg(type="gift", data=gift_data),
-            Seg(type="priority_info", data=json.dumps(priority_data))
+            Seg(type="priority_info", data=json.dumps(priority_data)),
         ]
 
         message_info = BaseMessageInfo(
             platform=self.config.platform,
-            message_id=f"guard_{room_id}_{user_id}_{int(timestamp*1000)}_{uuid.uuid4().hex[:8]}",
+            message_id=f"guard_{room_id}_{user_id}_{int(timestamp * 1000)}_{uuid.uuid4().hex[:8]}",
             time=float(timestamp),
             user_info=UserInfo(
                 platform=self.config.platform,
@@ -779,7 +825,9 @@ class BilibiliAdapter:
             return reply_prompt
         placeholder = "{extra_info_block}"
         if placeholder in reply_prompt:
-            return reply_prompt.replace(placeholder, f"{placeholder}\n{live_plan_block}")
+            return reply_prompt.replace(
+                placeholder, f"{placeholder}\n{live_plan_block}"
+            )
         return f"{live_plan_block}\n{reply_prompt}"
 
     def _resolve_live_prompts(self, room_id: int) -> Tuple[str, str]:
@@ -795,12 +843,14 @@ class BilibiliAdapter:
             if room_planner:
                 planner_prompt = room_planner
         if reply_prompt and live_plan_block:
-            reply_prompt = self._inject_live_plan_into_prompt(reply_prompt, live_plan_block)
-            
+            reply_prompt = self._inject_live_plan_into_prompt(
+                reply_prompt, live_plan_block
+            )
+
         tts_enable = False
         if room_prompts:
             tts_enable = bool(room_prompts.get("tts", {}).get("enable", False))
-        
+
         if tts_enable:
             tts_instruction = (
                 "\n\n非常重要：请必须同时输出中文回复和对应的日文翻译（用于语音播放），格式严格如下：\n"
@@ -979,7 +1029,8 @@ class BilibiliAdapter:
                     else:
                         self.logger.warning(
                             "Comment fallback reply skipped: invalid target group_id=%s user_id=%s",
-                            group_id, user_id,
+                            group_id,
+                            user_id,
                         )
                     state["fallback_sent"] = True
                 state["silenced"] = True
@@ -1042,7 +1093,12 @@ class BilibiliAdapter:
             "notice_source": source,
             "reply_time": reply_time,
         }
-        if self.config.comment_force_mention or source == "reply" or source == "at" or is_at_me:
+        if (
+            self.config.comment_force_mention
+            or source == "reply"
+            or source == "at"
+            or is_at_me
+        ):
             config["is_mentioned"] = 1.0
         return config
 
@@ -1086,12 +1142,14 @@ class BilibiliAdapter:
             reply_mid = ""
             if reply_dmid:
                 reply_mid = self._lookup_reply_mid(room_id, reply_dmid)
-            await self._handle_live_reply({
-                "message": text,
-                "room_id": room_id,
-                "reply_mid": reply_mid or "",
-                "reply_dmid": reply_dmid or "",
-            })
+            await self._handle_live_reply(
+                {
+                    "message": text,
+                    "room_id": room_id,
+                    "reply_mid": reply_mid or "",
+                    "reply_dmid": reply_dmid or "",
+                }
+            )
             return
         private_target = self._resolve_private_target(message)
         if private_target:
@@ -1135,7 +1193,10 @@ class BilibiliAdapter:
             return
         self.logger.info(
             "Send danmu: room_id=%s reply_mid=%s reply_dmid=%s text=%s",
-            room_id, reply_mid or "", reply_dmid or "", text,
+            room_id,
+            reply_mid or "",
+            reply_dmid or "",
+            text,
         )
         for idx, segment in enumerate(segments):
             segment_reply_mid = reply_mid if idx == 0 else None
@@ -1154,7 +1215,9 @@ class BilibiliAdapter:
                     data = (resp or {}).get("data", {})
                     if isinstance(data, dict):
                         dmid = data.get("dmid") or data.get("dmid_str")
-                    self._remember_self_danmu(room_id, str(dmid) if dmid else "", segment)
+                    self._remember_self_danmu(
+                        room_id, str(dmid) if dmid else "", segment
+                    )
                     self.logger.info("Danmu send ok")
             except Exception as exc:
                 self.logger.error(f"Danmu send error: {exc}")
@@ -1185,7 +1248,11 @@ class BilibiliAdapter:
         message_id: str,
         text: str,
     ) -> bool:
-        if (not self.config.live_allow_self_danmu) and self.config.dede_user_id and user_id:
+        if (
+            (not self.config.live_allow_self_danmu)
+            and self.config.dede_user_id
+            and user_id
+        ):
             if str(user_id) == str(self.config.dede_user_id):
                 return True
         now = time.time()
@@ -1238,7 +1305,10 @@ class BilibiliAdapter:
         parent_id = int(parent) if parent not in (None, "", 0) else None
         self.logger.info(
             "Send comment reply: type=%s oid=%s root=%s parent=%s",
-            comment_type, oid, root_id, parent_id,
+            comment_type,
+            oid,
+            root_id,
+            parent_id,
         )
         try:
             resp = await self.api.send_comment_reply(
@@ -1259,8 +1329,8 @@ class BilibiliAdapter:
         text = _strip_emoji(str(args.get("message") or "")).strip()
         if not text:
             return
-        
-        if len(text) <= 4 and all('\u4e00' <= c <= '\u9fff' for c in text):
+
+        if len(text) <= 4 and all("\u4e00" <= c <= "\u9fff" for c in text):
             self.logger.debug(f"Skipping typo correction message: {text}")
             return
         try:
@@ -1274,25 +1344,28 @@ class BilibiliAdapter:
         room_config = self.config.live_room_prompts.get(room_id, {})
         tts_config = room_config.get("tts", {})
         tts_enable = bool(tts_config.get("enable", False))
-        
-        self.logger.info(f"TTS Debug: room_id={room_id}, tts_enable={tts_enable}, tts_model={self.tts_model is not None}")
-        
+
+        self.logger.info(
+            f"TTS Debug: room_id={room_id}, tts_enable={tts_enable}, tts_model={self.tts_model is not None}"
+        )
+
         if tts_enable and self.tts_model:
             text_jp, text_zh = self._parse_bilingual_response(text)
-            
+
             display_text = text_zh if text_zh else text
             tts_text = text_jp if text_jp else ""
-            
+
             subtitle_path = str(tts_config.get("subtitle_path") or "subtitles.txt")
             self._update_subtitle(display_text, subtitle_path=subtitle_path)
-            
+
             if tts_text:
                 cleaned_tts_text = _clean_text_for_tts(tts_text)
-                self.logger.info(f"TTS Generating for room {room_id}: {cleaned_tts_text}")
+                self.logger.info(
+                    f"TTS Generating for room {room_id}: {cleaned_tts_text}"
+                )
                 try:
                     audio_data = await self.tts_model.tts(
-                        text=cleaned_tts_text,
-                        platform=self.config.platform
+                        text=cleaned_tts_text, platform=self.config.platform
                     )
                     await self._play_audio(audio_data)
                     self.logger.info(f"TTS Played successfully for room {room_id}")
@@ -1301,14 +1374,20 @@ class BilibiliAdapter:
                     self.logger.error(f"TTS generation failed: {e}")
                     self.logger.info("Fallback to sending danmu due to TTS error")
             else:
-                self.logger.warning(f"TTS enabled for room {room_id} but no Japanese text parsed. Sending raw text as danmu.")
+                self.logger.warning(
+                    f"TTS enabled for room {room_id} but no Japanese text parsed. Sending raw text as danmu."
+                )
                 msg_to_send = text_zh if text_zh else text
-                await self._send_danmu(room_id, msg_to_send, reply_mid or None, reply_dmid or None)
+                await self._send_danmu(
+                    room_id, msg_to_send, reply_mid or None, reply_dmid or None
+                )
                 return
 
         await self._send_danmu(room_id, text, reply_mid or None, reply_dmid or None)
 
-    async def _handle_private_send(self, args: Dict[str, Any], message: Optional[MessageBase]) -> None:
+    async def _handle_private_send(
+        self, args: Dict[str, Any], message: Optional[MessageBase]
+    ) -> None:
         text = _strip_emoji(str(args.get("message") or "")).strip()
         if not text:
             return
@@ -1359,7 +1438,8 @@ class BilibiliAdapter:
 
     async def _get_private_sessions(self) -> List[PrivateSessionConfig]:
         sessions: Dict[Tuple[int, int], PrivateSessionConfig] = {
-            (item.session_type, item.talker_id): item for item in self.config.private_sessions
+            (item.session_type, item.talker_id): item
+            for item in self.config.private_sessions
         }
         if not self.config.private_auto_sessions:
             return list(sessions.values())
@@ -1379,7 +1459,9 @@ class BilibiliAdapter:
                 if isinstance(resp, dict) and resp.get("code") not in (None, 0):
                     self.logger.warning(
                         "Session list failed: session_type=%s code=%s message=%s",
-                        session_type, resp.get("code"), resp.get("message") or resp.get("msg"),
+                        session_type,
+                        resp.get("code"),
+                        resp.get("message") or resp.get("msg"),
                     )
                     continue
                 data = (resp or {}).get("data", {})
@@ -1427,8 +1509,10 @@ class BilibiliAdapter:
             if isinstance(resp, dict) and resp.get("code") not in (None, 0):
                 self.logger.warning(
                     "Private poll failed: talker_id=%s session_type=%s code=%s message=%s",
-                    session.talker_id, session.session_type,
-                    resp.get("code"), resp.get("message") or resp.get("msg"),
+                    session.talker_id,
+                    session.session_type,
+                    resp.get("code"),
+                    resp.get("message") or resp.get("msg"),
                 )
             data = (resp or {}).get("data", {})
             messages = data.get("messages") or []
@@ -1454,11 +1538,17 @@ class BilibiliAdapter:
         if messages_list:
             self.logger.info(
                 "Private messages: talker_id=%s session_type=%s count=%s",
-                session.talker_id, session.session_type, len(messages_list),
+                session.talker_id,
+                session.session_type,
+                len(messages_list),
             )
         for msg in reversed(messages_list):
             sender_uid = str(msg.get("sender_uid") or "")
-            if sender_uid and self.config.dede_user_id and sender_uid == str(self.config.dede_user_id):
+            if (
+                sender_uid
+                and self.config.dede_user_id
+                and sender_uid == str(self.config.dede_user_id)
+            ):
                 continue
             msg_type = int(msg.get("msg_type") or 0)
             content = msg.get("content")
@@ -1474,7 +1564,9 @@ class BilibiliAdapter:
                         segment = Seg(type="image", data=image_base64)
                         content_format = ["image"]
                 if segment is None:
-                    content_text = self._parse_private_content(msg_type, content) or "[image]"
+                    content_text = (
+                        self._parse_private_content(msg_type, content) or "[image]"
+                    )
             else:
                 content_text = self._parse_private_content(msg_type, content)
 
@@ -1482,12 +1574,16 @@ class BilibiliAdapter:
                 if not content_text:
                     continue
                 segment = Seg(type="text", data=content_text)
-            message_id = str(msg.get("msg_key") or msg.get("msg_seqno") or uuid.uuid4().hex)
+            message_id = str(
+                msg.get("msg_key") or msg.get("msg_seqno") or uuid.uuid4().hex
+            )
             now_ts = time.time()
             msg_time = float(msg.get("timestamp") or now_ts)
             group_id = f"dm:{session.session_type}:{session.talker_id}"
             self._remember_private_session(group_id, session)
-            sender_name = await self._resolve_user_nickname(sender_uid or str(session.talker_id))
+            sender_name = await self._resolve_user_nickname(
+                sender_uid or str(session.talker_id)
+            )
             additional_config = {
                 "session_type": session.session_type,
                 "talker_id": session.talker_id,
@@ -1522,7 +1618,9 @@ class BilibiliAdapter:
             )
             await self._send_to_nachobot(message)
 
-    def _remember_private_session(self, group_id: str, session: PrivateSessionConfig) -> None:
+    def _remember_private_session(
+        self, group_id: str, session: PrivateSessionConfig
+    ) -> None:
         self._private_session_by_group[group_id] = session
         self._last_private_session = session
 
@@ -1600,7 +1698,10 @@ class BilibiliAdapter:
         comment_type, oid, root_id, parent_id = target
         self.logger.info(
             "Send comment reply: type=%s oid=%s root=%s parent=%s",
-            comment_type, oid, root_id, parent_id,
+            comment_type,
+            oid,
+            root_id,
+            parent_id,
         )
         try:
             resp = await self.api.send_comment_reply(
@@ -1637,7 +1738,9 @@ class BilibiliAdapter:
         self._user_name_cache[user_id] = (str(name), now)
         return str(name)
 
-    def _resolve_private_target(self, message: MessageBase) -> Optional[PrivateSessionConfig]:
+    def _resolve_private_target(
+        self, message: MessageBase
+    ) -> Optional[PrivateSessionConfig]:
         group_info = message.message_info.group_info
         if group_info and group_info.group_id:
             parsed = self._parse_private_group_id(group_info.group_id)
@@ -1684,12 +1787,22 @@ class BilibiliAdapter:
         if msg_type == 1 and content:
             text = ""
             if isinstance(content, dict):
-                text = str(content.get("content") or content.get("text") or content.get("title") or "")
+                text = str(
+                    content.get("content")
+                    or content.get("text")
+                    or content.get("title")
+                    or ""
+                )
             elif isinstance(content, str):
                 try:
                     data = json.loads(content)
                     if isinstance(data, dict):
-                        text = str(data.get("content") or data.get("text") or data.get("title") or "")
+                        text = str(
+                            data.get("content")
+                            or data.get("text")
+                            or data.get("title")
+                            or ""
+                        )
                     elif isinstance(data, str):
                         text = data
                 except Exception:
@@ -1700,10 +1813,14 @@ class BilibiliAdapter:
             return "[image]"
         return ""
 
-    async def _send_private_message(self, session: PrivateSessionConfig, text: str) -> None:
+    async def _send_private_message(
+        self, session: PrivateSessionConfig, text: str
+    ) -> None:
         self.logger.info(
             "Send private message: talker_id=%s session_type=%s text=%s",
-            session.talker_id, session.session_type, text,
+            session.talker_id,
+            session.session_type,
+            text,
         )
         try:
             safe_text = _normalize_text(text)
@@ -1722,7 +1839,9 @@ class BilibiliAdapter:
                     if attempt < max_attempts:
                         self.logger.warning(
                             "Private message send failed (attempt %s/%s): %s",
-                            attempt, max_attempts, exc,
+                            attempt,
+                            max_attempts,
+                            exc,
                         )
                         await asyncio.sleep(0.6 * attempt)
                         continue
@@ -1735,7 +1854,9 @@ class BilibiliAdapter:
         except Exception as exc:
             self.logger.error(f"Private message error: {exc}")
 
-    async def _send_private_image(self, session: PrivateSessionConfig, image_base64: str) -> None:
+    async def _send_private_image(
+        self, session: PrivateSessionConfig, image_base64: str
+    ) -> None:
         image_bytes, image_format = _decode_image_base64(image_base64)
         if not image_bytes:
             self.logger.warning("Private image send failed: invalid image data")
@@ -1765,7 +1886,9 @@ class BilibiliAdapter:
             content["imageType"] = image_format
         self.logger.info(
             "Send private image: talker_id=%s session_type=%s url=%s",
-            session.talker_id, session.session_type, image_url,
+            session.talker_id,
+            session.session_type,
+            image_url,
         )
         try:
             resp = await self.api.send_private_image_message(
@@ -1779,4 +1902,3 @@ class BilibiliAdapter:
                 self.logger.info("Private image ok")
         except Exception as exc:
             self.logger.error(f"Private image error: {exc}")
-
