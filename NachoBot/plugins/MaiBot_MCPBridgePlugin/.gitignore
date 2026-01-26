@@ -1,0 +1,30 @@
+# 运行时配置（包含用户敏感信息）
+config.toml
+
+# 备份文件
+*.backup.*
+*.bak
+
+# 日志
+logs/
+*.log
+*.jsonl
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 本地测试脚本（仓库不提交）
+test_*.py
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 系统文件
+.DS_Store
+Thumbs.db

@@ -4,6 +4,8 @@ default_preset = "default" # 默认使用的预设名称
 # pipeline平台预设映射
 [pipeline.platform_presets]
 qq = "default" # QQ平台使用default预设
+bilibili = "default" # Bilibili直播平台使用default预设
+discord = "default" # Discord平台使用default预设
 
 [tts]
 # GPT-SoVITS API 配置

@@ -19,6 +19,7 @@ enable = true
 room_ids = [ ]
 use_wss = true
 heartbeat_interval = 30
+disable_network_search = true
 reconnect_seconds = 5
 max_reconnect_seconds = 60
 ws_proxy = "none"
@@ -35,26 +36,34 @@ mention_prefixes = ["@", "＠"]
 mention_any_at = false
 resolve_user_nickname = true
 
-[live.room_prompts." "] #填写直播间id
+[live.screen_monitor]
+manual_enable = true
+manual_duration_minutes = 30
+manual_user_ids = [ ]
+
+[live.room_prompts." "]
+host = true
+live_category = ""
+live_title = ""
+live_content = ""
+live_detail = """"""
 
 
-
-
-
-reply_prompt = """{knowledge_prompt}{tool_info_block}{extra_info_block}
+reply_prompt = """{knowledge_prompt}{tool_info_block}
 {expression_habits_block}
 
-你正在你主人甘油三酯的直播间里聊天，下面是群里正在聊的内容:
+你正在你主人甘油三酯的直播间里聊天，下面是直播间里正在聊的内容:
 {time_block}
 {background_dialogue_prompt}
 {core_dialogue_prompt}
 
 {reply_target_block}。
 {identity}
+以下是直播的相关信息：{extra_info_block}，
 你正在你主人甘油三酯的直播间里聊天,现在请你读读之前的聊天记录，然后给出日常且口语化的回复，平淡一些，
 说话简短一些，单次回复控制在50字以内。{keywords_reaction_prompt}请注意把握聊天内容，不要回复的太有条理，可以有个性，带动直播间的氛围。
 {reply_style}
-请注意只对聊天内容做回复，不要对直播内容进行臆想(你目前没有接入直播视觉模块)，不要输出多余内容(包括前后缀，冒号和引号，括号，表情等)，只输出回复内容。
+请注意只对聊天内容做回复，可参考【直播画面】的屏幕信息，不要输出多余内容(包括前后缀，冒号和引号，括号，表情等)，只输出回复内容。
 {moderation_prompt}不要输出多余内容(包括前后缀，冒号和引号，括号，表情包，at或 @等 )。
 """
 
@@ -95,11 +104,9 @@ no_reply
 **动作选择要求**
 请你根据聊天内容,用户的最新消息和以下标准选择合适的动作:
 1. 逐条检查所有可用 action，满足条件就执行，避免遗漏。
-2. 如果对话对象是他人或指向他人，保持沉默。
-3. 应尽量保持直播间气氛活跃。
-4. 避免过多发言导致刷屏。
-5. 如果有人表现出厌烦，进一步降低回复频率。
-6. 遭遇他人攻击或情绪激动时，礼貌且适度回击，不升级冲突。
+2. 应尽量保持直播间气氛活跃。
+3. 如果有人表现出厌烦，降低回复频率。
+4. 遭遇他人攻击或情绪激动时，礼貌且适度回击，不升级冲突。
 回复动作若未明确指定 target_message_id，请选择最新的非机器人消息。
 {moderation_prompt}
 
@@ -114,9 +121,21 @@ no_reply
 }}
 """
 
+[live.room_prompts." ".tts]
+enable = true
+subtitle_path = "C:/Users/BigSh0t/Nacho-with-u/NachoBot-Bilibili-Adapter/subtitles.txt"
 
 
 
+
+
+[mic_asr]
+enable = true
+room_id = 
+subtitle_path = "C:/Users/BigSh0t/Nacho-with-u/NachoBot-Bilibili-Adapter/subtitles1.txt"
+silence_threshold = 0.01
+silence_duration = 0.5
+sample_rate = 16000
 
 [comment]
 enable_reply_notice = true
@@ -138,7 +157,7 @@ force_mention = true
 [response_filter]
 enable = true
 blocked_markers = [
-    "TEXT",
+    " ",
 ]
 
 [compat]

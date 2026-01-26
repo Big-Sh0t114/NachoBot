@@ -3,6 +3,8 @@ import time
 import asyncio
 import random
 import re
+import os
+import tomlkit
 
 from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime
@@ -60,9 +62,88 @@ class DefaultReplyer:
 
         from src.plugin_system.core.tool_use import ToolExecutor  # 延迟导入ToolExecutor，不然会循环依赖
 
-        self.tool_executor = ToolExecutor(chat_id=self.chat_stream.stream_id, enable_cache=True, cache_ttl=3)
+        # 标准工具执行器 (使用默认 tool_use 模型，排除 MCP 工具)
+        self.tool_executor = ToolExecutor(
+            chat_id=self.chat_stream.stream_id, 
+            enable_cache=True, 
+            cache_ttl=3,
+            exclude_prefix="mcp"
+        )
+        
+        # MCP 工具执行器 (使用 mcp 模型，只包含 MCP 工具)
+        try:
+            logger.info(f"MCP Executor Config: {model_config.model_task_config.mcp.model_list}")
+        except Exception:
+            logger.warning("MCP Executor Config Read Failed")
+            
+        self.mcp_executor = ToolExecutor(
+            chat_id=self.chat_stream.stream_id,
+            enable_cache=True,
+            cache_ttl=3,
+            model_set=model_config.model_task_config.mcp,
+            include_prefix="mcp",
+            prompt_template="mcp_tool_executor_prompt"
+        )
         self.web_search_manager = WebSearchManager(chat_id=self.chat_stream.stream_id, enable_cache=True, cache_ttl=2)
         self.url_fetcher = UrlContentFetcher()
+
+    def _check_mcp_permission(self) -> bool:
+        """检查当前用户是否有权限使用 MCP 工具 (前置检查)"""
+        try:
+            # 获取当前用户ID
+            user_id = ""
+            if self.chat_stream.user_info:
+                user_id = str(self.chat_stream.user_info.user_id)
+            
+            # DEBUG LOG
+            logger.info(f"MCP Permission Check: user_id='{user_id}'")
+            
+            if not user_id:
+                logger.warning("MCP Permission Check: FAILED (No user_id)")
+                return False
+
+            # 读取插件配置
+            # 路径 hardcode 指向 plugins/MaiBot_MCPBridgePlugin/config.toml
+            # 注意：需根据实际项目结构调整路径
+            config_path = os.path.join(os.getcwd(), "plugins", "MaiBot_MCPBridgePlugin", "config.toml")
+            
+            # DEBUG LOG
+            logger.info(f"MCP Permission Check: config_path='{config_path}' (Exists: {os.path.exists(config_path)})")
+            
+            if not os.path.exists(config_path):
+                # 配置文件不存在，默认允许? 或者默认禁止? 
+                # 假设插件未安装/未配置，则不启用
+                logger.warning(f"MCP Permission Check: FAILED (Config not found at {config_path})")
+                return False
+            
+            with open(config_path, "r", encoding="utf-8") as f:
+                doc = tomlkit.load(f)
+            
+            permissions = doc.get("permissions", {})
+            quick_allow_users_str = permissions.get("quick_allow_users", "")
+            default_mode = permissions.get("perm_default_mode", "deny_all")
+            
+            # 解析白名单
+            allow_users = {u.strip() for u in quick_allow_users_str.strip().split("\n") if u.strip()}
+            
+            # DEBUG LOG
+            is_allowed = user_id in allow_users
+            logger.info(f"MCP Permission Check: allow_users={allow_users}, default_mode={default_mode}, result={is_allowed}")
+            
+            if is_allowed:
+                return True
+            
+            # 如果默认是 deny_all 且不在白名单，则禁止
+            if default_mode == "deny_all":
+                logger.warning(f"MCP Permission Check: FAILED (User {user_id} not in whitelist and default is deny_all)")
+                return False
+                
+            return True
+            
+        except Exception as e:
+            logger.error(f"MCP Permission Check: ERROR ({e})")
+            logger.error(f"MCP 权限检查失败: {e}")
+            return False
 
     async def generate_reply_with_context(
         self,
@@ -394,10 +475,49 @@ class DefaultReplyer:
 
             tool_results = []
             try:
-                # 使用工具执行器获取信息
-                tool_results, _, _ = await self.tool_executor.execute_from_chat_message(
+                # 并行执行两个工具执行器
+                tasks = []
+                
+                # 1. 标准工具 (Standard)
+                tasks.append(self.tool_executor.execute_from_chat_message(
                     sender=sender, target_message=target, chat_history=chat_history, return_details=False
-                )
+                ))
+                
+                # 2. MCP工具 (High-Intelligence) - 仅在权限校验通过时执行
+                has_mcp_permission = self._check_mcp_permission()
+                if has_mcp_permission:
+                    tasks.append(self.mcp_executor.execute_from_chat_message(
+                        sender=sender, target_message=target, chat_history=chat_history, return_details=False
+                    ))
+                else:
+                    logger.info(f"用户无 MCP 权限，跳过 MCP 执行器")
+                
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                # 处理结果
+                # 如果 has_mcp_permission 为 True，results[0] 是 standard, results[1] 是 mcp
+                # 如果 False，results[0] 是 standard
+                
+                standard_res = results[0]
+                mcp_res = results[1] if has_mcp_permission and len(results) > 1 else None
+                
+                # 处理 Standard 结果
+                if isinstance(standard_res, Exception):
+                    logger.error(f"Standard 工具执行器失败: {standard_res}")
+                else:
+                    t_res, _, _ = standard_res
+                    if t_res:
+                         tool_results.extend(t_res)
+
+                # 处理 MCP 结果
+                if mcp_res:
+                    if isinstance(mcp_res, Exception):
+                        logger.error(f"MCP 工具执行器失败: {mcp_res}")
+                    else:
+                        t_res, _, _ = mcp_res
+                        if t_res:
+                             tool_results.extend(t_res)
+
             except Exception as e:
                 logger.error(f"工具执行器失败，跳过工具结果: {e}")
 
