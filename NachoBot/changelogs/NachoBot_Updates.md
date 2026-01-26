@@ -47,6 +47,7 @@
     新增情景注入内容
     加入指令纠错系统
     修复了关系系统无法添加人物的bug
+    
 # 2026
 
 12/31
@@ -135,5 +136,5 @@
     着手于langbot的TTS开发
 10/18
     clone了langbot repository并使用docker部署
-`Before Story`
+
 # 2025

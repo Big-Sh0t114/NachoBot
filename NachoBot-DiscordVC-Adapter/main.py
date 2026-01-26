@@ -9,6 +9,7 @@ sys.path.append(str(Path(__file__).parent))
 from config import load_config
 from adapter import DiscordAdapter
 
+
 def setup_logging(level: str = "INFO") -> logging.Logger:
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
@@ -16,6 +17,7 @@ def setup_logging(level: str = "INFO") -> logging.Logger:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     return logging.getLogger("DiscordVCAdapter")
+
 
 async def main():
     config_path = Path(__file__).parent / "config.toml"
@@ -42,26 +44,39 @@ async def main():
     # Try multiple common locations
     possible_ffmpeg_paths = [
         # User reported path
-        Path(r"C:\Users\BigSh0t\Nacho-with-u\NachoBot\plugins\bilibili_video_sender_plugin\ffmpeg"),
+        Path(
+            r"C:\Users\BigSh0t\Nacho-with-u\NachoBot\plugins\bilibili_video_sender_plugin\ffmpeg"
+        ),
         # Relative path attempt
-        Path(__file__).parent.parent / "NachoBot" / "plugins" / "bilibili_video_sender_plugin" / "ffmpeg",
+        Path(__file__).parent.parent
+        / "NachoBot"
+        / "plugins"
+        / "bilibili_video_sender_plugin"
+        / "ffmpeg",
     ]
 
     import os
+
     for p in possible_ffmpeg_paths:
         if p.exists() and p.is_dir():
             # Check if it has bin or is bin
             if (p / "bin").exists():
                 p = p / "bin"
-            
+
             logger.info(f"Found FFmpeg at {p}, adding to PATH")
             os.environ["PATH"] += os.pathsep + str(p)
             break
-            
+
+    # FORCE PROXY for Discord
+    os.environ["HTTP_PROXY"] = "http://127.0.0.1:7897"
+    os.environ["HTTPS_PROXY"] = "http://127.0.0.1:7897"
+    os.environ["NO_PROXY"] = "localhost,127.0.0.1"
+    logger.info("Forced Proxy: http://127.0.0.1:7897 (Bypassing localhost)")
+
     logger.info("Starting NachoBot Discord Voice Adapter...")
 
     adapter = DiscordAdapter(config, logger)
-    
+
     try:
         await adapter.run()
     except KeyboardInterrupt:
@@ -70,6 +85,7 @@ async def main():
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
         await adapter.stop()
+
 
 if __name__ == "__main__":
     try:

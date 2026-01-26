@@ -1,8 +1,9 @@
 import sys
 import logging
-import importlib
 import asyncio
 import os
+import time
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -10,15 +11,16 @@ from typing import Optional
 _root_dir = Path(__file__).resolve().parents[1]
 _tts_adapter_path = _root_dir / "nachobot_tts_adapter"
 
+
 class TTSHandler:
     def __init__(self, logger: logging.Logger):
         self.logger = logger
         self.tts_model = None
         self.enabled = False
-        
+
         if _tts_adapter_path.exists() and str(_tts_adapter_path) not in sys.path:
             sys.path.insert(0, str(_tts_adapter_path))
-            
+
         self._init_model()
 
     def _init_model(self):
@@ -28,25 +30,26 @@ class TTSHandler:
             # The structure in tts_model_debugger.py suggests: src.plugins.{name}
             # We'll try a default or look for config.
             # For now, let's try to import the BaseTTSModel or a specific one.
-            
+
             # Note: We don't have the TTS config here easily unless we read its config file.
             # We'll try to generic import or assume GPT_Sovits exists as per Bilibili logic.
-            
+
             # Try importing directly if we know the path
             # From Bilibili adapter: from src.plugins.GPT_Sovits.tts_model import TTSModel
-            
+
             try:
                 from src.plugins.GPT_Sovits.tts_model import TTSModel
+
                 self.tts_model = TTSModel()
                 self.enabled = True
                 self.logger.info("GPT-SoVITS TTS Model initialized successfully.")
                 return
             except ImportError:
                 pass
-                
+
             # If that fails, maybe we can't find it.
             self.logger.warning("Could not import GPT-SoVITS TTS Model.")
-            
+
         except Exception as e:
             self.logger.error(f"Failed to initialize TTS: {e}")
 
@@ -58,37 +61,37 @@ class TTSHandler:
         if not self.enabled or not self.tts_model:
             self.logger.warning("TTS is disabled or not initialized.")
             return None
-            
+
         try:
             # The TTSModel.tts() usually returns bytes or saves a file.
             # In debugger it returned bytes: audio_data = await tts_class.tts(...)
-            
+
             # We need to save it to a temp file for Discord to play
-            import tempfile
-            
+
             self.logger.info(f"Generating TTS for: {text}")
-            
+
             # Assume tts() is async and takes text
             start = time.time()
-            audio_data = await self.tts_model.tts(text=text, platform="discord")
+            # Enforce Chinese for target text, but Japanese for reference audio (as user clarified)
+            audio_data = await self.tts_model.tts(
+                text=text, platform="discord", text_lang="zh", prompt_lang="ja"
+            )
             duration = time.time() - start
             self.logger.info(f"TTS Generation took {duration:.2f}s")
-            
+
             if not audio_data:
                 return None
-                
+
             # Save to temp file
             # Discord uses ffmpeg, wav is fine.
             fd, path = tempfile.mkstemp(suffix=".wav")
             os.close(fd)
-            
+
             with open(path, "wb") as f:
                 f.write(audio_data)
-                
+
             return path
-            
+
         except Exception as e:
             self.logger.error(f"Error generating speech: {e}")
             return None
-            
-import time

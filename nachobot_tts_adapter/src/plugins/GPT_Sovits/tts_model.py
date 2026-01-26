@@ -155,6 +155,7 @@ class TTSModel(BaseTTSModel):
         response = requests.get(f"{self.base_url}/set_gpt_weights", params={"weights_path": weights_path})
         if response.status_code != 200:
             raise RuntimeError(f"{response.json().get('message', '')}: {response.json().get('Exception', '')}")
+        self._loaded_gpt_weights = weights_path
 
     def set_sovits_weights(self, weights_path):
         """
@@ -171,6 +172,7 @@ class TTSModel(BaseTTSModel):
         response = requests.get(f"{self.base_url}/set_sovits_weights", params={"weights_path": weights_path})
         if response.status_code != 200:
             raise RuntimeError(f"{response.json().get('message', '')}: {response.json().get('Exception', '')}")
+        self._loaded_sovits_weights = weights_path
 
     def build_parameters(
         self,
@@ -210,7 +212,9 @@ class TTSModel(BaseTTSModel):
         final_text_lang = text_lang or preset_cfg.text_language or "auto"
         final_prompt_lang = prompt_lang or final_text_lang or preset_cfg.prompt_language or "zh"
         resolved_ref_audio_path = self._resolve_path(ref_audio_path)
-        resolved_aux_ref_paths = [self._resolve_path(p) for p in (aux_ref_audio_paths or preset_cfg.aux_ref_audio_paths or [])]
+        resolved_aux_ref_paths = [
+            self._resolve_path(p) for p in (aux_ref_audio_paths or preset_cfg.aux_ref_audio_paths or [])
+        ]
 
         params = {
             "text": text,
