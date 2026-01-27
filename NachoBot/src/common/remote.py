@@ -84,14 +84,14 @@ class TelemetryHeartBeatTask(AsyncTask):
                         else:
                             response_text = await response.text()
                             logger.error(
-                                f"请求UUID失败，不过你还是可以正常使用麦麦，状态码: {response.status}, 响应内容: {response_text}"
+                                f"请求UUID失败，不过你还是可以正常使用，状态码: {response.status}, 响应内容: {response_text}"
                             )
             except Exception as e:
                 import traceback
 
                 error_msg = str(e) or "未知错误"
                 logger.warning(
-                    f"请求UUID出错，不过你还是可以正常使用麦麦: {type(e).__name__}: {error_msg}"
+                    f"请求UUID出错，不过你还是可以正常使用: {type(e).__name__}: {error_msg}"
                 )  # 可能是网络问题
                 logger.debug(f"完整错误信息: {traceback.format_exc()}")
 

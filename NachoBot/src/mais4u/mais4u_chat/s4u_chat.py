@@ -515,8 +515,8 @@ class S4UChat:
             except asyncio.TimeoutError:
                 logger.warning(f"[{self.stream_name}] 回复生成超时，发送默认回复。")
                 sender_container.msg_id = self.msg_id
-                await sender_container.add_message("麦麦不知道哦")
-                total_chars_sent = len("麦麦不知道哦")
+                await sender_container.add_message("NachoBot不知道哦")
+                total_chars_sent = len("NachoBot不知道哦")
 
             mood = mood_manager.get_mood_by_chat_id(self.stream_id)
             await yes_or_no_head(

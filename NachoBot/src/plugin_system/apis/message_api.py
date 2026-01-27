@@ -47,7 +47,7 @@ def get_messages_by_time(
         end_time: 结束时间戳
         limit: 限制返回的消息数量，0为不限制
         limit_mode: 当limit>0时生效，'earliest'表示获取最早的记录，'latest'表示获取最新的记录
-        filter_mai: 是否过滤麦麦自身的消息，默认为False
+        filter_mai: 是否过滤自身的消息，默认为False
 
     Returns:
         List[Dict[str, Any]]: 消息列表
@@ -82,7 +82,7 @@ def get_messages_by_time_in_chat(
         end_time: 结束时间戳
         limit: 限制返回的消息数量，0为不限制
         limit_mode: 当limit>0时生效，'earliest'表示获取最早的记录，'latest'表示获取最新的记录
-        filter_mai: 是否过滤麦麦自身的消息，默认为False
+        filter_mai: 是否过滤自身的消息，默认为False
         filter_command: 是否过滤命令消息，默认为False
     Returns:
         List[Dict[str, Any]]: 消息列表
@@ -123,7 +123,7 @@ def get_messages_by_time_in_chat_inclusive(
         end_time: 结束时间戳（包含）
         limit: 限制返回的消息数量，0为不限制
         limit_mode: 当limit>0时生效，'earliest'表示获取最早的记录，'latest'表示获取最新的记录
-        filter_mai: 是否过滤麦麦自身的消息，默认为False
+        filter_mai: 是否过滤自身的消息，默认为False
 
     Returns:
         List[Dict[str, Any]]: 消息列表
@@ -197,7 +197,7 @@ def get_random_chat_messages(
         end_time: 结束时间戳
         limit: 限制返回的消息数量，0为不限制
         limit_mode: 当limit>0时生效，'earliest'表示获取最早的记录，'latest'表示获取最新的记录
-        filter_mai: 是否过滤麦麦自身的消息，默认为False
+        filter_mai: 是否过滤自身的消息，默认为False
 
     Returns:
         List[Dict[str, Any]]: 消息列表
@@ -247,7 +247,7 @@ def get_messages_before_time(timestamp: float, limit: int = 0, filter_mai: bool 
     Args:
         timestamp: 时间戳
         limit: 限制返回的消息数量，0为不限制
-        filter_mai: 是否过滤麦麦自身的消息，默认为False
+        filter_mai: 是否过滤自身的消息，默认为False
 
     Returns:
         List[Dict[str, Any]]: 消息列表
@@ -274,7 +274,7 @@ def get_messages_before_time_in_chat(
         chat_id: 聊天ID
         timestamp: 时间戳
         limit: 限制返回的消息数量，0为不限制
-        filter_mai: 是否过滤麦麦自身的消息，默认为False
+        filter_mai: 是否过滤自身的消息，默认为False
 
     Returns:
         List[Dict[str, Any]]: 消息列表
@@ -330,7 +330,7 @@ def get_recent_messages(
         hours: 最近多少小时，默认24小时
         limit: 限制返回的消息数量，默认100条
         limit_mode: 当limit>0时生效，'earliest'表示获取最早的记录，'latest'表示获取最新的记录
-        filter_mai: 是否过滤麦麦自身的消息，默认为False
+        filter_mai: 是否过滤自身的消息，默认为False
 
     Returns:
         List[Dict[str, Any]]: 消息列表
@@ -480,7 +480,7 @@ async def get_person_ids_from_messages(messages: List[Dict[str, Any]]) -> List[s
 
 def filter_mai_messages(messages: List[DatabaseMessages]) -> List[DatabaseMessages]:
     """
-    从消息列表中移除麦麦的消息
+    从消息列表中移滤的消息
     Args:
         messages: 消息列表，每个元素是消息字典
     Returns:

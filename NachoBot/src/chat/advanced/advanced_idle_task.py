@@ -26,7 +26,7 @@ class AdvancedIdleTimeoutTask(AsyncTask):
         self._timeout_seconds = timeout_minutes * 60
         self._group_timeout_seconds = group_timeout_minutes * 60
         self._notice = getattr(cfg, "idle_notice", "20分钟未收到你的新消息，高级模式已自动关闭哦~")
-        self._group_notice = getattr(cfg, "group_idle_notice", "20分钟未收到{user_id}的新消息，高级模式已自动关闭哦~")
+        self._group_notice = getattr(cfg, "group_idle_notice", "20分钟未收到 {UserId} 的新消息，高级模式已自动关闭哦~")
 
     async def run(self):
         now = time.time()

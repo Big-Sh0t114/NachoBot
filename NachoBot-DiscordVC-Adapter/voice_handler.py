@@ -138,6 +138,9 @@ class VoiceHandler:
         self.config = config
         self.logger = logger
         self.stt_config = config.stt
+        self.proxy_url = (
+            config.discord.proxy_url if config.discord.proxy_enabled else None
+        )
 
     async def process_audio(self, user_id: int, pcm_data: bytes) -> Optional[str]:
         """
@@ -202,6 +205,8 @@ class VoiceHandler:
         # Optional: prompt, language
 
         try:
+            # User requested Voice Processing NOT to use proxy
+
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, headers=headers, data=data) as resp:
                     if resp.status != 200:

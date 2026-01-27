@@ -2,6 +2,7 @@ import asyncio
 import time
 import traceback
 import random
+import json
 from typing import List, Optional, Dict, Any, Tuple, TYPE_CHECKING
 from rich.traceback import install
 
@@ -239,7 +240,14 @@ class BrainChatting:
             recent_messages_list = []
         reply_text = ""  # 初始化reply_text变量，避免UnboundLocalError
 
-        async with global_prompt_manager.async_message_scope(self.chat_stream.context.get_template_name()):
+        # 刷新上下文以确保获取最新的模板信息
+        get_chat_manager().get_stream(self.stream_id)
+        current_template = self.chat_stream.context.get_template_name()
+        logger.debug(f"{self.log_prefix} Current template name: {current_template}")
+        async with global_prompt_manager.async_message_scope(current_template):
+            # Debug check
+            debug_prompt = await global_prompt_manager.get_prompt_async("brain_planner_prompt")
+            logger.debug(f"{self.log_prefix} Resolved brain_planner_prompt preview: {str(debug_prompt)[:50]}...")
             await self.expression_learner.trigger_learning_for_chat()
 
             cycle_timers, thinking_id = self.start_cycle()
@@ -421,9 +429,9 @@ class BrainChatting:
                     break
         except asyncio.CancelledError:
             # 设置了关闭标志位后被取消是正常流程
-            logger.info(f"{self.log_prefix} 麦麦已关闭聊天")
+            logger.info(f"{self.log_prefix} 已关闭聊天")
         except Exception:
-            logger.error(f"{self.log_prefix} 麦麦聊天意外错误，将于3s后尝试重新启动")
+            logger.error(f"{self.log_prefix} 聊天意外错误，将于3s后尝试重新启动")
             print(traceback.format_exc())
             await asyncio.sleep(3)
             self._loop_task = asyncio.create_task(self._main_chat_loop())
@@ -585,8 +593,22 @@ class BrainChatting:
                         enable_tool_flag = global_config.tool.enable_tool
 
                         # Check for disable_tools in message config (e.g. from Discord VC)
-                        if action_planner_info.action_message and action_planner_info.action_message.message_info:
-                            add_conf = getattr(action_planner_info.action_message.message_info, "additional_config", {})
+                        if action_planner_info.action_message:
+                            add_conf = getattr(action_planner_info.action_message, "additional_config", None)
+
+                            # If not found directly, try message_info.additional_config (safely)
+                            # DatabaseMessages does not have message_info, MessageRecv does.
+                            if add_conf is None:
+                                msg_info = getattr(action_planner_info.action_message, "message_info", None)
+                                if msg_info:
+                                    add_conf = getattr(msg_info, "additional_config", {})
+
+                            if isinstance(add_conf, str) and add_conf:
+                                try:
+                                    add_conf = json.loads(add_conf)
+                                except Exception:
+                                    add_conf = {}
+
                             if add_conf and isinstance(add_conf, dict) and add_conf.get("disable_tools"):
                                 enable_tool_flag = False
                                 logger.info(f"{self.log_prefix} 检测到消息配置 disable_tools=True，禁用工具")
