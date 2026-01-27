@@ -59,7 +59,7 @@ qq = "http://127.0.0.1:8090/ws" # 或者nonebot-qq
 # nonebot-qq = "default"
 ```
 ### Probability 配置
-这部分决定麦麦选取语音的概率
+这部分决定选取语音的概率
 ```toml
 [probability]
 voice_probability = 0.2 # 使用语音的概率

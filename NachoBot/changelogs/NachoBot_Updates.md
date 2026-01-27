@@ -1,5 +1,6 @@
 1/27
-    开发DiscordVC-Adapter，支持Discord语音频道自由发言   
+    开发DiscordVC-Adapter，支持Discord语音频道自由发言
+    为Discord语音频道配置独立prompt
 1/26
     Bilibili适配器与MaiBot s4u直播相关代码对接
         礼物/上舰/VIP队列等事件，未经过测试 (财力不足)

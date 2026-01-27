@@ -294,12 +294,12 @@ price_in = 0.9
 price_out = 7.5
 
 
-[model_task_config.utils] # 在麦麦的一些组件中使用的模型，例如表情包模块，取名模块，关系模块，麦麦的情绪变化等，是麦麦必须的模型
+[model_task_config.utils] # 在一些组件中使用的模型，例如表情包模块，取名模块，关系模块，情绪变化等，是必须的模型
 model_list = ["gpt-4.1-mini","gpt-5-mini"] # 使用的模型列表，每个子项对应上面的模型名称(name)
 temperature = 0.7                        # 模型温度，新V3建议0.1-0.3
 max_tokens = 800                         # 最大输出token数
 
-[model_task_config.utils_small] # 在麦麦的一些组件中使用的小模型，消耗量较大，建议使用速度较快的小模型
+[model_task_config.utils_small] # 在一些组件中使用的小模型，消耗量较大，建议使用速度较快的小模型
 model_list = ["Qwen/Qwen3-8B","THUDM/glm-4-9b-chat","Qwen/Qwen2.5-7B-Instruct"]
 temperature = 0.2
 max_tokens = 800
@@ -325,7 +325,7 @@ model_list = ["grok-4","grok-3"]
 temperature = 0.5
 max_tokens = 800
 
-[model_task_config.planner] #决策：负责决定麦麦该什么时候回复的模型
+[model_task_config.planner] #决策：负责决定该什么时候回复的模型
 model_list = ["Qwen/Qwen3-8B","Qwen/Qwen2.5-7B-Instruct","THUDM/glm-4-9b-chat"]
 temperature = 0.2
 max_tokens = 800

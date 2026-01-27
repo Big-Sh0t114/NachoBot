@@ -46,13 +46,13 @@ class PersonalityConfig(ConfigBase):
 
     interest: str = ""
     """兴趣"""
-    
+
     plan_style: str = ""
     """说话规则，行为风格"""
-    
+
     visual_style: str = ""
     """图片提示词"""
-    
+
     private_plan_style: str = ""
     """私聊说话规则，行为风格"""
 
@@ -92,7 +92,7 @@ class ChatConfig(ConfigBase):
     """兴趣值计算模式，fast为快速计算，accurate为精确计算"""
 
     planner_size: float = 1.5
-    """副规划器大小，越小，麦麦的动作执行能力越精细，但是消耗更多token，调大可以缓解429类错误"""
+    """副规划器大小，越小，动作执行能力越精细，但是消耗更多token，调大可以缓解429类错误"""
 
     mentioned_bot_reply: bool = True
     """是否启用提及必回复"""
@@ -100,7 +100,6 @@ class ChatConfig(ConfigBase):
     at_bot_inevitable_reply: float = 1
     """@bot 必然回复，1为100%回复，0为不额外增幅"""
 
-    
     talk_value: float = 1
     """思考频率"""
 
@@ -385,7 +384,7 @@ class EmojiConfig(ConfigBase):
     """表情包检查间隔（分钟）"""
 
     steal_emoji: bool = True
-    """是否偷取表情包，让麦麦可以发送她保存的这些表情包"""
+    """是否偷取表情包，可以发送保存的表情包"""
 
     content_filtration: bool = False
     """是否开启表情包过滤"""
@@ -520,7 +519,7 @@ class PromiseCacheConfig(ConfigBase):
     enable: bool = False
     """是否启用约定缓存"""
 
-    keywords: list[str] = field(default_factory=lambda: ["约定", "誓言","说好了"])
+    keywords: list[str] = field(default_factory=lambda: ["约定", "誓言", "说好了"])
     """触发缓存的关键词列表"""
 
     context_size: int = 10

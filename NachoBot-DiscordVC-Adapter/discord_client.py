@@ -1,5 +1,6 @@
 import logging
 from typing import Optional, Callable
+from collections import deque
 import discord
 from discord.ext import commands
 
@@ -20,11 +21,23 @@ class VoiceCog(commands.Cog):
     )
     async def join_voice_channel(self, ctx: discord.ApplicationContext):
         """Join the user's voice channel."""
-        # Defer response to avoid "Unknown interaction" if connection takes > 3s
-        await ctx.defer()
-
+        try:
+            if not ctx.interaction.response.is_done():
+                await ctx.defer()
+        except discord.HTTPException as e:
+            # Ignore "Interaction has already been acknowledged" (40060)
+            if e.code == 40060:
+                pass
+            # Ignore "Unknown interaction" (10062) - likely expired due to network lag
+            elif e.code == 10062:
+                self.bot.logger.warning(
+                    "Interaction expired (10062) - Check network/proxy latency"
+                )
+                return None
+            else:
+                raise e
         if not ctx.author.voice:
-            await ctx.respond("你要我进哪里啊，自己先进一个通话吧(´-ω-`)")
+            await ctx.followup.send("你要我进哪里啊，自己先进一个通话吧(´-ω-`)")
             return None
 
         channel = ctx.author.voice.channel
@@ -34,12 +47,14 @@ class VoiceCog(commands.Cog):
                 # Check if current channel has other members (len > 1 means current channel has bot + users)
                 # If only bot is in current channel (len == 1), we allow move.
                 if len(ctx.voice_client.channel.members) > 1:
-                    await ctx.respond(f"我已经在 {ctx.voice_client.channel.name} 里咯")
+                    await ctx.followup.send(
+                        f"我已经在 {ctx.voice_client.channel.name} 里咯"
+                    )
                     return None
 
                 await ctx.voice_client.move_to(channel)
             else:
-                await ctx.respond("笨蛋..人家已经在这里啦(´-ω-`)")
+                await ctx.followup.send("笨蛋..人家已经在这里啦(´-ω-`)")
                 return ctx.voice_client
         else:
             await channel.connect()
@@ -55,7 +70,19 @@ class VoiceCog(commands.Cog):
         name="leave-vc", description="Leave the voice channel (Server Only)"
     )
     async def leave_voice_channel(self, ctx: discord.ApplicationContext):
-        await ctx.defer()
+        try:
+            if not ctx.interaction.response.is_done():
+                await ctx.defer()
+        except discord.HTTPException as e:
+            if e.code == 40060:
+                pass
+            elif e.code == 10062:
+                self.bot.logger.warning(
+                    "Interaction expired (10062) - Check network/proxy latency"
+                )
+                return None
+            else:
+                raise e
         if ctx.voice_client:
             await ctx.voice_client.disconnect()
             await ctx.followup.send("走啦")
@@ -68,8 +95,8 @@ class NachoDiscordBot(discord.Bot):
         self, config: AdapterConfig, voice_handler: VoiceHandler, logger: logging.Logger
     ):
         # Configure proxy URL if env vars set (though we might redundant set it here)
-        # discord.py supports 'proxy' kwarg in Client/Bot init
-        proxy_url = "http://127.0.0.1:7897"
+        # Configure proxy URL if set in config
+        proxy_url = config.discord.proxy_url if config.discord.proxy_enabled else None
         # Disable auto_sync_commands to avoid conflict with Koishi (who manages registration)
         super().__init__(intents=intents, proxy=proxy_url, auto_sync_commands=False)
         self.adapter_config = config
@@ -78,6 +105,9 @@ class NachoDiscordBot(discord.Bot):
         self.speech_callback: Optional[Callable[[int, int, str], None]] = (
             None  # guild_id, user_id, text
         )
+        self.audio_queues: dict[
+            int, deque
+        ] = {}  # guild_id -> deque of audio_source paths
 
         # Add Cogs
         self.add_cog(VoiceCog(self))
@@ -153,6 +183,42 @@ class NachoDiscordBot(discord.Bot):
         # We might want to restart? Or just let it end.
         sink.cleanup()
 
+    def _play_next(self, guild_id: int, error=None):
+        """Play the next audio in the queue for the given guild."""
+        if error:
+            self.logger.error(f"Error in playback for guild {guild_id}: {error}")
+
+        if guild_id not in self.audio_queues or not self.audio_queues[guild_id]:
+            return
+
+        guild = self.get_guild(guild_id)
+        if not guild:
+            return
+
+        vc: discord.VoiceClient = guild.voice_client
+        if not vc or not vc.is_connected():
+            self.audio_queues[guild_id].clear()
+            return
+
+        if vc.is_playing():
+            return
+
+        audio_source = self.audio_queues[guild_id].popleft()
+
+        try:
+            source = discord.FFmpegPCMAudio(audio_source)
+
+            def after_callback(e):
+                self.loop.call_soon_threadsafe(self._play_next, guild_id, e)
+
+            vc.play(source, after=after_callback)
+            self.logger.info(f"Playing audio: {audio_source}")
+        except Exception as e:
+            self.logger.error(f"Failed to play audio: {e}")
+            self.loop.call_soon_threadsafe(
+                self._play_next, guild_id, e
+            )  # Try next one safely
+
     async def speak(self, guild_id: int, audio_source: str):
         """Play audio in the voice channel of the given guild."""
         guild = self.get_guild(guild_id)
@@ -165,14 +231,12 @@ class NachoDiscordBot(discord.Bot):
             self.logger.warning(f"Not connected to voice in guild {guild_id}")
             return
 
-        if vc.is_playing():
-            # Option: Stop current or Queue? For now, we interrupt.
-            vc.stop()
+        if guild_id not in self.audio_queues:
+            self.audio_queues[guild_id] = deque()
 
-        try:
-            # FFmpegPCMAudio requires ffmpeg installed and in PATH
-            source = discord.FFmpegPCMAudio(audio_source)
-            vc.play(source)
-            self.logger.info(f"Playing audio: {audio_source}")
-        except Exception as e:
-            self.logger.error(f"Failed to play audio: {e}")
+        self.audio_queues[guild_id].append(audio_source)
+
+        if not vc.is_playing():
+            self._play_next(guild_id)
+        else:
+            self.logger.info(f"Audio queued: {audio_source}")
