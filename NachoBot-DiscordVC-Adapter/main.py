@@ -67,11 +67,13 @@ async def main():
             os.environ["PATH"] += os.pathsep + str(p)
             break
 
-    # FORCE PROXY for Discord
-    os.environ["HTTP_PROXY"] = "http://127.0.0.1:7897"
-    os.environ["HTTPS_PROXY"] = "http://127.0.0.1:7897"
-    os.environ["NO_PROXY"] = "localhost,127.0.0.1"
-    logger.info("Forced Proxy: http://127.0.0.1:7897 (Bypassing localhost)")
+    # Configure Proxy for Discord if enabled
+    # We now pass proxy explicitly to Discord Client and ASR handler
+    # instead of setting global env vars, to respect "independence".
+    if config.discord.proxy_enabled and config.discord.proxy_url:
+        logger.info(f"Proxy enabled: {config.discord.proxy_url} (Independent Mode)")
+    else:
+        logger.info("Proxy disabled in config")
 
     logger.info("Starting NachoBot Discord Voice Adapter...")
 

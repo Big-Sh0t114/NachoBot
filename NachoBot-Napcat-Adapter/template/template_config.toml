@@ -12,8 +12,8 @@ token = ""              # Napcat设定的访问令牌，若无则留空
 heartbeat_interval = 30 # 与Napcat设置的心跳相同（按秒计）
 
 [nachobot_server] # 连接NachoBot的ws服务设置
-host = "localhost" # 麦麦在.env文件中设置的主机地址，即HOST字段
-port = 8000        # 麦麦在.env文件中设置的端口，即PORT字段
+host = "localhost" # .env文件中设置的主机地址，即HOST字段
+port = 8000        # .env文件中设置的端口，即PORT字段
 
 [chat] # 黑白名单功能
 group_list_type = "whitelist" # 群组名单类型，可选为：whitelist, blacklist

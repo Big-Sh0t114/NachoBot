@@ -541,6 +541,7 @@ class BilibiliAdapter:
             if reply_prompt:
                 template_items["replyer_prompt"] = reply_prompt
             if planner_prompt:
+                template_items["brain_planner_prompt"] = planner_prompt
                 template_items["planner_prompt"] = planner_prompt
             template_info = TemplateInfo(
                 template_items=template_items,

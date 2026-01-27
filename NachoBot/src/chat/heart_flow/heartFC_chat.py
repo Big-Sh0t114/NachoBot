@@ -204,7 +204,11 @@ class HeartFChatting:
             # *控制频率用
             if mentioned_message:
                 await self._observe(recent_messages_list=recent_messages_list, force_reply_message=mentioned_message)
-            elif random.random() < self.talk_threshold * frequency_control_manager.get_or_create_frequency_control(self.stream_id).get_talk_frequency_adjust():
+            elif (
+                random.random()
+                < self.talk_threshold
+                * frequency_control_manager.get_or_create_frequency_control(self.stream_id).get_talk_frequency_adjust()
+            ):
                 await self._observe(recent_messages_list=recent_messages_list)
             else:
                 # 没有提到，继续保持沉默，等待5秒防止频繁触发
@@ -277,12 +281,20 @@ class HeartFChatting:
         if s4u_config.enable_s4u:
             await send_typing()
 
-        async with global_prompt_manager.async_message_scope(self.chat_stream.context.get_template_name()):
+        # 刷新上下文以确保获取最新的模板信息
+        get_chat_manager().get_stream(self.stream_id)
+        current_template = self.chat_stream.context.get_template_name()
+        logger.debug(f"{self.log_prefix} [HFC] Current template name: {current_template}")
+
+        async with global_prompt_manager.async_message_scope(current_template):
+            # Debug check
+            debug_prompt = await global_prompt_manager.get_prompt_async("brain_planner_prompt")
+            logger.debug(f"{self.log_prefix} [HFC] Resolved brain_planner_prompt preview: {str(debug_prompt)[:50]}...")
+
             await self.expression_learner.trigger_learning_for_chat()
 
             cycle_timers, thinking_id = self.start_cycle()
             logger.info(f"{self.log_prefix} 开始第{self._cycle_counter}次思考")
-
             # 第一步：动作检查
             available_actions: Dict[str, ActionInfo] = {}
             try:
@@ -474,9 +486,9 @@ class HeartFChatting:
                     break
         except asyncio.CancelledError:
             # 设置了关闭标志位后被取消是正常流程
-            logger.info(f"{self.log_prefix} 麦麦已关闭聊天")
+            logger.info(f"{self.log_prefix} 已关闭聊天")
         except Exception:
-            logger.error(f"{self.log_prefix} 麦麦聊天意外错误，将于3s后尝试重新启动")
+            logger.error(f"{self.log_prefix} 聊天意外错误，将于3s后尝试重新启动")
             print(traceback.format_exc())
             await asyncio.sleep(3)
             self._loop_task = asyncio.create_task(self._main_chat_loop())

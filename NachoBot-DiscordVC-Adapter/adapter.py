@@ -31,6 +31,7 @@ try:
         RouteConfig,
         Seg,
         TargetConfig,
+        TemplateInfo,
         UserInfo,
     )
 except ImportError:
@@ -40,7 +41,7 @@ except ImportError:
     )
     BaseMessageInfo = FormatInfo = GroupInfo = MessageBase = Router = RouteConfig = (
         Seg
-    ) = TargetConfig = UserInfo = None
+    ) = TargetConfig = TemplateInfo = UserInfo = None
 
 _URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
 
@@ -159,6 +160,17 @@ class DiscordAdapter:
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
 
+    def _inject_variables(self, template: str, variables: dict) -> str:
+        """Inject variables into template, preserving undefined placeholders."""
+        if not template or not variables:
+            return template
+
+        def replace(match):
+            key = match.group(1)
+            return variables.get(key, match.group(0))
+
+        return re.sub(r"\{(\w+)\}", replace, template)
+
     async def handle_speech_recognized(
         self, guild_id: int, user_id: int, text: str, user_name: str = None
     ):
@@ -185,6 +197,40 @@ class DiscordAdapter:
             # Keeping mask logic for text sanitization if needed
             pass
 
+        # Custom Prompts
+        template_info = None
+        if self.config.prompts.planner_prompt or self.config.prompts.replyer_prompt:
+            if TemplateInfo:
+                template_items = {}
+                variables = self.config.prompts.variables
+
+                if self.config.prompts.planner_prompt:
+                    p_prompt = self.config.prompts.planner_prompt
+                    template_items["planner_prompt"] = self._inject_variables(
+                        p_prompt, variables
+                    )
+                    self.logger.info(
+                        f"Set planner_prompt (len={len(template_items['planner_prompt'])})"
+                    )
+
+                if self.config.prompts.replyer_prompt:
+                    r_prompt = self.config.prompts.replyer_prompt
+                    template_items["replyer_prompt"] = self._inject_variables(
+                        r_prompt, variables
+                    )
+                    self.logger.info(
+                        f"Set replyer_prompt (len={len(template_items['replyer_prompt'])})"
+                    )
+
+                template_info = TemplateInfo(
+                    template_items=template_items,
+                    template_name=f"discord_vc_{guild_id}",
+                    template_default=False,
+                )
+                self.logger.info(
+                    f"Created TemplateInfo: name={template_info.template_name}, keys={list(template_items.keys())}"
+                )
+
         message_info = BaseMessageInfo(
             platform="discord_vc",
             message_id=str(uuid.uuid4()),
@@ -203,6 +249,7 @@ class DiscordAdapter:
                 content_format=["text"],
                 accept_format=["text", "voice"],  # We accept voice reply
             ),
+            template_info=template_info,
             additional_config=additional_config,
         )
 
