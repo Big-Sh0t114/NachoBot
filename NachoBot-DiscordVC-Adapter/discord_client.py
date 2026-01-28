@@ -108,6 +108,9 @@ class NachoDiscordBot(discord.Bot):
         self.audio_queues: dict[
             int, deque
         ] = {}  # guild_id -> deque of audio_source paths
+        self.guild_states: dict[
+            int, dict
+        ] = {}  # guild_id -> {is_user_speaking: bool, current_audio: str, interrupted_audio: str}
 
         # Add Cogs
         self.add_cog(VoiceCog(self))
@@ -154,6 +157,48 @@ class NachoDiscordBot(discord.Bot):
             # Notify adapter with resolved user name
             await self.speech_callback(guild_id, user_id, text, user_name)
 
+        # Logic for resuming AFTER speech ends
+        if guild_id in self.guild_states:
+            state = self.guild_states[guild_id]
+            state["is_user_speaking"] = False
+
+            # Resume interrupted audio if exists
+            if state.get("interrupted_audio"):
+                self.logger.info(
+                    f"Resuming interrupted audio: {state['interrupted_audio']}"
+                )
+                if guild_id not in self.audio_queues:
+                    self.audio_queues[guild_id] = deque()
+                self.audio_queues[guild_id].appendleft(state["interrupted_audio"])
+                state["interrupted_audio"] = None
+
+            # Continue playback
+            self._play_next(guild_id)
+
+    async def _on_speech_start_callback(self, user_id: int, guild_id: int):
+        """Callback from Sink when speech START is detected."""
+        # self.logger.debug(f"Speech start detected from user {user_id} in guild {guild_id}")
+
+        if guild_id not in self.guild_states:
+            self.guild_states[guild_id] = {
+                "is_user_speaking": False,
+                "current_audio": None,
+                "interrupted_audio": None,
+            }
+
+        state = self.guild_states[guild_id]
+        state["is_user_speaking"] = True
+
+        # Stop current playback if any
+        guild = self.get_guild(guild_id)
+        if guild and guild.voice_client and guild.voice_client.is_playing():
+            if state.get("current_audio"):
+                self.logger.info(
+                    f"Stopping audio due to user {user_id} interruption. Saving checkpoint."
+                )
+                state["interrupted_audio"] = state["current_audio"]
+            guild.voice_client.stop()
+
     def start_listening(self, vc: discord.VoiceClient, guild_id: int):
         if not vc:
             return
@@ -167,8 +212,13 @@ class NachoDiscordBot(discord.Bot):
         async def sink_callback(user_id, data):
             await self._on_sink_callback(user_id, data, guild_id)
 
+        async def speech_start_callback(user_id):
+            await self._on_speech_start_callback(user_id, guild_id)
+
         sink = SilenceDetectingSink(
-            callback=sink_callback, config=self.adapter_config.voice
+            callback=sink_callback,
+            on_speech_start_callback=speech_start_callback,
+            config=self.adapter_config.voice,
         )
 
         vc.start_recording(
@@ -203,7 +253,20 @@ class NachoDiscordBot(discord.Bot):
         if vc.is_playing():
             return
 
+        if guild_id not in self.guild_states:
+            self.guild_states[guild_id] = {
+                "is_user_speaking": False,
+                "current_audio": None,
+                "interrupted_audio": None,
+            }
+        state = self.guild_states[guild_id]
+
+        if state["is_user_speaking"]:
+            # self.logger.info("User is speaking, pausing playback.")
+            return
+
         audio_source = self.audio_queues[guild_id].popleft()
+        state["current_audio"] = audio_source
 
         try:
             source = discord.FFmpegPCMAudio(audio_source)
@@ -215,6 +278,8 @@ class NachoDiscordBot(discord.Bot):
             self.logger.info(f"Playing audio: {audio_source}")
         except Exception as e:
             self.logger.error(f"Failed to play audio: {e}")
+            if guild_id in self.guild_states:
+                self.guild_states[guild_id]["current_audio"] = None
             self.loop.call_soon_threadsafe(
                 self._play_next, guild_id, e
             )  # Try next one safely
@@ -233,6 +298,11 @@ class NachoDiscordBot(discord.Bot):
 
         if guild_id not in self.audio_queues:
             self.audio_queues[guild_id] = deque()
+
+        # Queue Limit Logic: Drop oldest if > 5
+        if len(self.audio_queues[guild_id]) >= 5:
+            dropped = self.audio_queues[guild_id].popleft()
+            self.logger.info(f"Queue limit reached, dropped oldest audio: {dropped}")
 
         self.audio_queues[guild_id].append(audio_source)
 

@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import time
+import re
 import urllib.parse
 import urllib.request
 import uuid
@@ -58,6 +59,14 @@ ACCEPT_FORMAT = [
 ]
 
 BUILD_TAG = "koishi-adapter-build-2026-01-15"
+
+
+# RegEx for Bilibili URL detection (Ported from plugin logic)
+BILIBILI_URL_RE = re.compile(
+    r"https?://(?:www\.)?bilibili\.com/video/(?P<bv>BV[\w]+|av\d+)",
+    re.IGNORECASE,
+)
+B23_SHORT_RE = re.compile(r"https?://b23\.tv/[\w]+", re.IGNORECASE)
 
 
 @dataclass
@@ -156,14 +165,26 @@ class KoishiOneBotAdapter:
         if user_id in self.config.ban_user_id:
             return False
         if group_id:
-            if self.config.group_list_type == "whitelist" and group_id not in self.config.group_list:
+            if (
+                self.config.group_list_type == "whitelist"
+                and group_id not in self.config.group_list
+            ):
                 return False
-            if self.config.group_list_type == "blacklist" and group_id in self.config.group_list:
+            if (
+                self.config.group_list_type == "blacklist"
+                and group_id in self.config.group_list
+            ):
                 return False
         else:
-            if self.config.private_list_type == "whitelist" and user_id not in self.config.private_list:
+            if (
+                self.config.private_list_type == "whitelist"
+                and user_id not in self.config.private_list
+            ):
                 return False
-            if self.config.private_list_type == "blacklist" and user_id in self.config.private_list:
+            if (
+                self.config.private_list_type == "blacklist"
+                and user_id in self.config.private_list
+            ):
                 return False
         return True
 
@@ -198,7 +219,9 @@ class KoishiOneBotAdapter:
     async def _open_onebot(self, ws_url: str) -> websockets.WebSocketClientProtocol:
         connect_kwargs: Dict[str, Any] = {"max_size": 2**26}
         if self.config.onebot_token:
-            connect_kwargs["extra_headers"] = {"Authorization": f"Bearer {self.config.onebot_token}"}
+            connect_kwargs["extra_headers"] = {
+                "Authorization": f"Bearer {self.config.onebot_token}"
+            }
 
         try:
             return await websockets.connect(ws_url, **connect_kwargs)
@@ -236,6 +259,33 @@ class KoishiOneBotAdapter:
                         f"OneBot action ok: retcode={retcode} echo={echo}"
                     )
 
+    def _mask_bilibili_raw_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Deep copy and mask Bilibili URLs in raw data to prevent plugin triggering on Discord."""
+        # Use simple recursion or json clone
+        try:
+            cloned = json.loads(json.dumps(data, ensure_ascii=False))
+        except Exception:
+            self.logger.warning("Failed to clone raw data for masking, using original")
+            return data
+
+        def _recursive_mask(obj: Any) -> Any:
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    obj[k] = _recursive_mask(v)
+            elif isinstance(obj, list):
+                for i, v in enumerate(obj):
+                    obj[i] = _recursive_mask(v)
+            elif isinstance(obj, str):
+                # Mask if matches
+                if BILIBILI_URL_RE.search(obj) or B23_SHORT_RE.search(obj):
+                    # Replace with harmless text
+                    s = BILIBILI_URL_RE.sub("[Bilibili Link]", obj)
+                    s = B23_SHORT_RE.sub("[Bilibili Link]", s)
+                    return s
+            return obj
+
+        return _recursive_mask(cloned)
+
     async def handle_onebot_message(self, data: Dict[str, Any]) -> None:
         message_type = data.get("message_type")
         user_id = str(data.get("user_id") or "")
@@ -260,7 +310,10 @@ class KoishiOneBotAdapter:
             )
             return
 
-        segments, additional_config, content_format = await self._parse_onebot_message(data.get("message"))
+        # Parse segments from ORIGINAL data (preserving URLs for normal usage)
+        segments, additional_config, content_format = await self._parse_onebot_message(
+            data.get("message")
+        )
         if not segments:
             return
 
@@ -283,6 +336,10 @@ class KoishiOneBotAdapter:
                 group_name=group_name,
             )
 
+        # Sanitize data for raw_message construction
+        # This ensures 'raw_message' field (used by Bilibili plugin) does not contain the URL
+        sanitized_data = self._mask_bilibili_raw_data(data)
+
         message_info = BaseMessageInfo(
             platform=self.config.platform,
             message_id=str(data.get("message_id") or f"ob-{int(time.time() * 1000)}"),
@@ -299,11 +356,16 @@ class KoishiOneBotAdapter:
         message = MessageBase(
             message_info=message_info,
             message_segment=Seg(type="seglist", data=segments),
-            raw_message=json.dumps(data, ensure_ascii=True),
+            # Use sanitized data for raw_message
+            raw_message=json.dumps(sanitized_data, ensure_ascii=True),
         )
         message_payload = message.to_dict()
         group_payload = message_payload.get("message_info", {}).get("group_info")
-        if group_id and group_payload is not None and not group_payload.get("group_name"):
+        if (
+            group_id
+            and group_payload is not None
+            and not group_payload.get("group_name")
+        ):
             group_payload["group_name"] = str(group_id)
         self.logger.info(
             f"Forward OneBot -> NachoBot: message_type={message_type} user_id={user_id} group_id={group_id}"
@@ -318,14 +380,18 @@ class KoishiOneBotAdapter:
                 return str(value)
         return str(group_id) if group_id else ""
 
-    async def _send_to_nachobot(self, message: MessageBase, payload: Dict[str, Any]) -> None:
+    async def _send_to_nachobot(
+        self, message: MessageBase, payload: Dict[str, Any]
+    ) -> None:
         client = self.router.clients.get(self.config.platform)
         if client is not None:
             await client.send_message(payload)
             return
         await self.router.send_message(message)
 
-    def _remember_user_group(self, user_id: str, group_id: str, group_name: str) -> None:
+    def _remember_user_group(
+        self, user_id: str, group_id: str, group_name: str
+    ) -> None:
         if not user_id or not group_id:
             return
         self._recent_group_by_user[user_id] = (group_id, group_name, time.time())
@@ -486,12 +552,18 @@ class KoishiOneBotAdapter:
         elif seg_data.type == "image":
             if seg_data.data:
                 payload.append(
-                    {"type": "image", "data": {"file": f"base64://{seg_data.data}", "subtype": 0}}
+                    {
+                        "type": "image",
+                        "data": {"file": f"base64://{seg_data.data}", "subtype": 0},
+                    }
                 )
         elif seg_data.type == "emoji":
             if seg_data.data:
                 payload.append(
-                    {"type": "image", "data": {"file": f"base64://{seg_data.data}", "subtype": 1}}
+                    {
+                        "type": "image",
+                        "data": {"file": f"base64://{seg_data.data}", "subtype": 1},
+                    }
                 )
         elif seg_data.type in ("voice", "voice_stream"):
             if self.config.use_tts and seg_data.data:
@@ -500,7 +572,9 @@ class KoishiOneBotAdapter:
                     stream=(seg_data.type == "voice_stream"),
                 )
                 if file_value:
-                    payload.append({"type": "record", "data": self._build_record_data(file_value)})
+                    payload.append(
+                        {"type": "record", "data": self._build_record_data(file_value)}
+                    )
         elif seg_data.type == "imageurl":
             if seg_data.data:
                 payload.append({"type": "image", "data": {"file": str(seg_data.data)}})
@@ -557,7 +631,9 @@ class KoishiOneBotAdapter:
         if str(self.config.platform).lower() != "discord":
             return f"base64://{audio_b64}"
         if stream:
-            self.logger.warning("Discord voice bubble does not support voice_stream, send as raw record")
+            self.logger.warning(
+                "Discord voice bubble does not support voice_stream, send as raw record"
+            )
             return f"base64://{audio_b64}"
         ogg_data_url = self._convert_to_opus_data_url(audio_b64)
         if ogg_data_url:
@@ -566,7 +642,9 @@ class KoishiOneBotAdapter:
 
     def _build_record_data(self, file_value: str) -> Dict[str, Any]:
         data = {"file": file_value}
-        if str(self.config.platform).lower() == "discord" and file_value.startswith("data:audio/ogg"):
+        if str(self.config.platform).lower() == "discord" and file_value.startswith(
+            "data:audio/ogg"
+        ):
             data["file_name"] = "voice-message.ogg"
         return data
 
@@ -655,9 +733,13 @@ class KoishiOneBotAdapter:
             try:
                 await ws.close()
             except Exception as close_exc:
-                self.logger.warning(f"OneBot ws close failed after timeout: {close_exc}")
+                self.logger.warning(
+                    f"OneBot ws close failed after timeout: {close_exc}"
+                )
         except Exception as exc:
-            self.logger.error(f"OneBot action send failed: {action} echo={echo} err={exc}")
+            self.logger.error(
+                f"OneBot action send failed: {action} echo={echo} err={exc}"
+            )
             return
         self.logger.info(f"OneBot action sent: {action} echo={echo}")
 

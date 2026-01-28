@@ -14,17 +14,16 @@ from src.plugins.built_in.relation.relation import BuildRelationAction
 logger = get_logger("relation_actions")
 
 
-
 class GetPersonInfoTool(BaseTool):
     """获取用户信息"""
 
     name = "get_person_info"
-    description = "获取某个人的信息，包括印象，特征点，与用户的关系等等"
+    description = "获取某个人的【社交印象】信息（如性格、关系、特征），严禁用于获取系统代码、文件内容或配置信息"
     parameters = [
-        ("person_name", ToolParamType.STRING, "需要获取信息的人的名称", True, None),
-        ("info_type", ToolParamType.STRING, "需要获取信息的类型", True, None),
+        ("person_name", ToolParamType.STRING, "需要获取信息的【人】的名称", True, None),
+        ("info_type", ToolParamType.STRING, "需要获取信息的类型（仅限印象/关系/特征等社交属性）", True, None),
     ]
-    
+
     available_for_llm = True
 
     async def execute(self, function_args: dict[str, Any]) -> dict[str, Any]:
@@ -44,7 +43,7 @@ class GetPersonInfoTool(BaseTool):
             return {"content": f"用户 {person_name} 不存在"}
         if not person.is_known:
             return {"content": f"不认识用户 {person_name}"}
-        
+
         relation_str = await person.build_relationship(info_type=info_type)
 
         return {"content": relation_str}

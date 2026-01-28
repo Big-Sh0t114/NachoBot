@@ -161,7 +161,9 @@ class TTSAction(BaseAction):
         import re
 
         # 移除emoji/非常用符号，保留中日文、数字、常见标点
-        processed_text = re.sub(r"[^\w\s\u3040-\u30ff\u4e00-\u9fff\u3000-\u303f。，！？、；：,.!?~\-（）()…]", "", processed_text)
+        processed_text = re.sub(
+            r"[^\w\s\u3040-\u30ff\u4e00-\u9fff\u3000-\u303f。，！？、；：,.!?~\-（）()…]", "", processed_text
+        )
 
         processed_text = re.sub(r"([!?,.;:。！？，、；：])\1+", r"\1", processed_text)
 
@@ -205,7 +207,7 @@ class TTSAction(BaseAction):
         import re
 
         has_cjk = bool(re.search(r"[\u4e00-\u9fff]", text))
-        has_kana = bool(re.search(r"[ぁ-ゟ゠-ヿ]", text))
+        has_kana = bool(re.search(r"[ぁ-ゟ゠-ヺ\u30fc-\u30ff]", text))
 
         if language == "ja":
             return has_cjk and not has_kana
@@ -254,8 +256,7 @@ class TTSAction(BaseAction):
 
         lang_label = "日语" if language == "ja" else "中文"
         prompt = (
-            f"请把下面的内容改写成{lang_label}口语播报，长度50字以内，保持友好自然，直接输出朗读文本：\n"
-            f"{target_text}"
+            f"请把下面的内容改写成{lang_label}口语播报，长度50字以内，保持友好自然，直接输出朗读文本：\n{target_text}"
         )
 
         try:
@@ -300,7 +301,7 @@ class TTSAction(BaseAction):
 
             # 先看消息里是否有tts标记
             for msg in recent_msgs:
-                content = (getattr(msg, "display_message", None) or getattr(msg, "processed_plain_text", "") or "")
+                content = getattr(msg, "display_message", None) or getattr(msg, "processed_plain_text", "") or ""
                 if "tts_text" in content or "[tts_text:" in content or "(语音消息" in content:
                     return True
 
@@ -326,8 +327,7 @@ class TTSAction(BaseAction):
         """使用回复器改写到目标语种，减少回退到 fallback。"""
         lang_label = "日语" if language == "ja" else "中文"
         prompt = (
-            f"请把下面的内容改写成{lang_label}口语，保持原意，长度控制在50字以内，直接输出改写后的朗读文本：\n"
-            f"{text}"
+            f"请把下面的内容改写成{lang_label}口语，保持原意，长度控制在50字以内，直接输出改写后的朗读文本：\n{text}"
         )
         try:
             rewritten = await self._generate_with_planner(prompt=prompt, request_type="tts_lang_rewrite")
@@ -552,9 +552,7 @@ class TTSPlugin(BasePlugin):
         },
         "components": {
             "enable_tts": ConfigField(type=bool, default=True, description="是否启用TTS Action"),
-            "enable_lang_switch_command": ConfigField(
-                type=bool, default=True, description="是否启用TTS语言切换命令"
-            ),
+            "enable_lang_switch_command": ConfigField(type=bool, default=True, description="是否启用TTS语言切换命令"),
         },
         "logging": {
             "level": ConfigField(

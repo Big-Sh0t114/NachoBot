@@ -11,7 +11,10 @@ import time
 import uuid
 import winsound
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Deque
+import queue
+import wave
+import io
 
 # Add NachoBot path for ncnk_message module
 _root_dir = Path(__file__).resolve().parents[1]
@@ -83,6 +86,123 @@ COMMENT_LIMIT_FALLBACK_TEXT = "NachoBot有点口渴了哦，先休息一下啦~"
 BILIBILI_DANMU_SEND_DELAY_SECONDS = 0.8
 
 
+class AudioPlayer:
+    """
+    Manages audio playback with support for queuing, interruption, and resuming.
+    Uses winsound for playback and calculates duration for timing.
+    """
+
+    def __init__(self, logger: logging.Logger):
+        self.logger = logger
+        self.queue: Deque[bytes] = queue.deque()
+        self.current_audio: Optional[bytes] = None
+        self.interrupted_audio: Optional[bytes] = None
+        self.is_playing = False
+        self.is_paused = False
+        self.stop_event = asyncio.Event()  # Set when stopped/interrupted
+        self.play_task: Optional[asyncio.Task] = None
+        self._loop = None
+
+    def start(self):
+        """Start the playback loop."""
+        if self.play_task and not self.play_task.done():
+            return
+        self._loop = asyncio.get_running_loop()
+        self.stop_event.clear()
+        self.play_task = self._loop.create_task(self._playback_loop())
+        self.logger.info("AudioPlayer started")
+
+    async def _playback_loop(self):
+        while True:
+            try:
+                if self.is_paused:
+                    await asyncio.sleep(0.1)
+                    continue
+
+                if not self.queue:
+                    await asyncio.sleep(0.1)
+                    continue
+
+                # Get next audio
+                audio_data = self.queue.popleft()
+                self.current_audio = audio_data
+                self.is_playing = True
+
+                # Calculate duration
+                duration = self._get_wav_duration(audio_data)
+                # self.logger.debug(f"Playing audio segment ({duration:.2f}s)")
+
+                # Play (Async)
+                self._play_sound(audio_data)
+
+                # Wait for duration (or interruption)
+                # We wait for duration, checking stop_event periodically or using wait_for
+                try:
+                    await asyncio.wait_for(self.stop_event.wait(), timeout=duration)
+                    # If we got here, stop_event was set (Interrupted!)
+                    self.logger.info("Audio playback interrupted!")
+                    self._stop_sound()
+                    self.interrupted_audio = self.current_audio  # Save current
+                    self.current_audio = None
+                except asyncio.TimeoutError:
+                    # Finished playing naturally
+                    pass
+
+                self.current_audio = None
+                self.is_playing = False
+                self.stop_event.clear()  # Reset for next
+
+            except Exception as e:
+                self.logger.error(f"AudioPlayer loop error: {e}")
+                await asyncio.sleep(1)
+
+    def _play_sound(self, audio_data: bytes):
+        try:
+            # Save to temp
+            temp_path = os.path.join(tempfile.gettempdir(), "nachobot_tts_player.wav")
+            with open(temp_path, "wb") as f:
+                f.write(audio_data)
+            winsound.PlaySound(temp_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+        except Exception as e:
+            self.logger.error(f"Winsound play error: {e}")
+
+    def _stop_sound(self):
+        try:
+            winsound.PlaySound(None, winsound.SND_PURGE)
+        except Exception:
+            pass
+
+    def _get_wav_duration(self, audio_data: bytes) -> float:
+        try:
+            with io.BytesIO(audio_data) as f:
+                with wave.open(f, "rb") as wav_file:
+                    frames = wav_file.getnframes()
+                    rate = wav_file.getframerate()
+                    return frames / float(rate)
+        except Exception:
+            return 2.0  # Fallback
+
+    def play(self, audio_data: bytes):
+        """Add audio to queue."""
+        self.queue.append(audio_data)
+
+    def stop_and_pause(self):
+        """Stop current playback immediately and pause."""
+        self.is_paused = True
+        self.stop_event.set()  # Signal loop to stop waiting
+        self.logger.info("AudioPlayer stopped and paused.")
+
+    def resume(self):
+        """Resume playback, re-queueing interrupted audio."""
+        if self.interrupted_audio:
+            self.logger.info("Resuming interrupted audio...")
+            self.queue.appendleft(self.interrupted_audio)
+            self.interrupted_audio = None
+        self.is_paused = False
+        self.stop_event.clear()  # Ensure clear
+        self.logger.info("AudioPlayer resumed.")
+
+
 class BilibiliAdapter:
     def __init__(self, config: AdapterConfig, logger: logging.Logger):
         self.config = config
@@ -134,6 +254,10 @@ class BilibiliAdapter:
                 silence_duration=config.mic_asr_silence_duration,
                 sample_rate=config.mic_asr_sample_rate,
             )
+            # Define callback alias for thread-safe calling if needed,
+            # though MicCaptureWorker handles thread-safety via asyncio.run_coroutine_threadsafe now
+            mic_config.on_speech_start = self._on_speech_start
+
             self.mic_worker = MicCaptureWorker(
                 mic_config, self._handle_mic_recognition, logger
             )
@@ -176,6 +300,9 @@ class BilibiliAdapter:
                     f"TTS enabled but TTSModel not available: {_tts_import_error}"
                 )
 
+        # Initialize AudioPlayer
+        self.audio_player = AudioPlayer(logger)
+
     # ========== Run and Control Methods ==========
 
     async def run(self) -> None:
@@ -199,6 +326,8 @@ class BilibiliAdapter:
         if self.mic_worker:
             tasks.append(self.mic_worker.start())
             tasks.append(self._mic_control_loop())
+
+        self.audio_player.start()  # Start audio player loop
 
         await asyncio.gather(*tasks)
 
@@ -261,17 +390,18 @@ class BilibiliAdapter:
 
         return text_jp, text_zh
 
+        return text_jp, text_zh
+
+    async def _on_speech_start(self):
+        """Callback when user starts speaking."""
+        # Stop audio player immediately
+        self.audio_player.stop_and_pause()
+
     async def _play_audio(self, audio_data: bytes) -> None:
         if not audio_data:
             return
-
-        try:
-            temp_path = os.path.join(tempfile.gettempdir(), "nachobot_tts_temp.wav")
-            with open(temp_path, "wb") as f:
-                f.write(audio_data)
-            winsound.PlaySound(temp_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
-        except Exception as e:
-            self.logger.error(f"Failed to play audio: {e}")
+        # Add to player queue
+        self.audio_player.play(audio_data)
 
     def _update_subtitle(self, text: str, subtitle_path: str = None) -> None:
         if not text:
@@ -613,6 +743,9 @@ class BilibiliAdapter:
         room_id = self.mic_worker.config.room_id
         await self.handle_mic_message(room_id, text)
 
+        # Resume Audio Player after speech is acknowledged
+        self.audio_player.resume()
+
     async def _call_asr_api(self, wav_data: bytes) -> Optional[str]:
         import aiohttp
 
@@ -649,6 +782,10 @@ class BilibiliAdapter:
                     if text:
                         # First strip emojis properly
                         text = _strip_emoji(text).strip()
+                        # Sanitize text to remove control characters (except newlines/tabs)
+                        text = "".join(
+                            ch for ch in text if ch.isprintable() or ch in "\n\r\t"
+                        )
                         # Then remove trailing punctuation
                         text = text.rstrip("。?.，,！!？")
                     return text
@@ -1331,7 +1468,7 @@ class BilibiliAdapter:
         if not text:
             return
 
-        if len(text) <= 4 and all("\u4e00" <= c <= "\u9fff" for c in text):
+        if len(text) <= 2 and all("\u4e00" <= c <= "\u9fff" for c in text):
             self.logger.debug(f"Skipping typo correction message: {text}")
             return
         try:
