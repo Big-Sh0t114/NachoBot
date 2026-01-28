@@ -24,7 +24,11 @@ class SilenceDetectingSink(Sink):
     """
 
     def __init__(
-        self, filters=None, callback: Callable = None, config: VoiceConfig = None
+        self,
+        filters=None,
+        callback: Callable = None,
+        on_speech_start_callback: Callable = None,
+        config: VoiceConfig = None,
     ):
         if filters is None:
             # filters = Filters.default() # Not valid
@@ -34,6 +38,7 @@ class SilenceDetectingSink(Sink):
         super().__init__(filters=filters)
 
         self.callback = callback
+        self.on_speech_start_callback = on_speech_start_callback
         self.config = config
         self.vc = None
         self.audio_data = {}  # User ID -> Bytearray
@@ -42,6 +47,12 @@ class SilenceDetectingSink(Sink):
         self.last_speech_time = {}  # User ID -> timestamp
         self.is_speaking = {}  # User ID -> bool
         self.silence_start = {}  # User ID -> timestamp
+
+        # Capture loop for thread-safe callbacks from DecodeManager thread
+        try:
+            self.loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.loop = asyncio.get_event_loop()
 
         # Buffer for current utterance
         self.utterance_buffer = {}  # User ID -> Bytearray
@@ -53,8 +64,14 @@ class SilenceDetectingSink(Sink):
         # Background task for checking silence
         self.checker_task = None
         self._stopped = False
+        logging.getLogger("VoiceHandler").info(
+            f"SilenceDetectingSink initialized with loop: {self.loop}"
+        )
 
     def init(self, vc):
+        logging.getLogger("VoiceHandler").info(
+            f"SilenceDetectingSink initialized with loop: {self.loop}"
+        )
         self.vc = vc
         if not self.checker_task:
             self.checker_task = asyncio.create_task(self._silence_checker())
@@ -90,47 +107,78 @@ class SilenceDetectingSink(Sink):
                 logging.getLogger("VoiceHandler").debug(
                     f"User {user} started speaking (RMS: {rms})"
                 )
+                if self.on_speech_start_callback:
+                    if self.loop and self.loop.is_running():
+                        asyncio.run_coroutine_threadsafe(
+                            self.on_speech_start_callback(user), self.loop
+                        )
 
         # Debug Log periodically
-        # if int(now) % 5 == 0 and int(now * 10) % 10 == 0:
-        #    logging.getLogger("VoiceHandler").debug(f"Current RMS: {rms} | Threshold: {self.vad_threshold}")
+        if int(now * 10) % 20 == 0:  # Log every ~2 seconds
+            logging.getLogger("VoiceHandler").debug(
+                f"Current RMS: {rms} | Threshold: {self.vad_threshold} | Speaking: {self.is_speaking.get(user)}"
+            )
 
         self.utterance_buffer[user].extend(data)
 
     async def _silence_checker(self):
+        logging.getLogger("VoiceHandler").info("Silence checker started")
         while not self._stopped:
-            await asyncio.sleep(0.1)
-            now = time.time()
+            try:
+                await asyncio.sleep(0.1)
+                now = time.time()
 
-            users = list(self.utterance_buffer.keys())
-            for user in users:
-                if not self.is_speaking.get(user, False):
-                    continue
-
-                last_speech = self.last_speech_time.get(user, 0)
-                if now - last_speech > self.silence_threshold:
-                    # Silence detected after speech
-                    # Determine duration
-                    # We need to calculate duration based on bytes
-                    # but we can also trust the timestamps for "end of speech"
-
-                    data = self.utterance_buffer[user]
-                    length_seconds = len(data) / (
-                        DISCORD_SAMPLE_RATE * DISCORD_CHANNELS * DISCORD_WIDTH
+                # heartbeat log for checker every 10s
+                if int(now) % 10 == 0 and int(now * 10) % 10 == 0:
+                    logging.getLogger("VoiceHandler").debug(
+                        f"Silence checker heartbeat. Users: {list(self.utterance_buffer.keys())}"
                     )
 
-                    if length_seconds >= self.min_speech_duration:
-                        # Flush and callback
-                        logging.getLogger("VoiceHandler").debug(
-                            f"Speech detected from {user}: {length_seconds:.2f}s"
-                        )
-                        if self.callback:
-                            # Run callback in background to not block loop
-                            asyncio.create_task(self.callback(user, data))
+                users = list(self.utterance_buffer.keys())
+                for user in users:
+                    if not self.is_speaking.get(user, False):
+                        continue
 
-                    # Reset
-                    self.utterance_buffer[user] = bytearray()
-                    self.is_speaking[user] = False
+                    last_speech = self.last_speech_time.get(user, 0)
+                    silence_duration = now - last_speech
+
+                    if silence_duration > self.silence_threshold:
+                        # Silence detected after speech
+                        logging.getLogger("VoiceHandler").debug(
+                            f"User {user} silence detected ({silence_duration:.2f}s > {self.silence_threshold}s). Processing..."
+                        )
+
+                        # Retrieve and reset buffer *before* potential callback to avoid race conditions
+                        data_to_process = self.utterance_buffer.pop(user, bytearray())
+                        self.is_speaking[user] = False
+
+                        length_seconds = len(data_to_process) / (
+                            DISCORD_SAMPLE_RATE * DISCORD_CHANNELS * DISCORD_WIDTH
+                        )
+
+                        if length_seconds >= self.min_speech_duration:
+                            # Flush and callback
+                            logging.getLogger("VoiceHandler").info(
+                                f"Speech detected from {user}: {length_seconds:.2f}s"
+                            )
+                            if self.callback:
+                                # Run callback in background to not block loop
+                                asyncio.create_task(
+                                    self.callback(user, data_to_process)
+                                )
+                        else:
+                            logging.getLogger("VoiceHandler").debug(
+                                f"Snippet too short ({length_seconds:.2f}s < {self.min_speech_duration}s), ignoring."
+                            )
+
+                        # Reset (Ensure robust reset)
+                        self.utterance_buffer[user] = bytearray()
+                        self.is_speaking[user] = False
+            except Exception as e:
+                logging.getLogger("VoiceHandler").error(
+                    f"Silence checker error: {e}", exc_info=True
+                )
+                await asyncio.sleep(1)
 
 
 class VoiceHandler:
@@ -217,6 +265,11 @@ class VoiceHandler:
                     result = await resp.json()
                     text = result.get("text", "").strip()
                     if text:
+                        # Sanitize text to remove control characters (except newlines/tabs)
+                        # This prevents 400 Bad Request from LLM if ASR returns garbage
+                        text = "".join(
+                            ch for ch in text if ch.isprintable() or ch in "\n\r\t"
+                        )
                         self.logger.info(f"ASR Recognized: {text}")
                         return text
                     return None

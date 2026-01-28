@@ -318,7 +318,7 @@ class DiscordAdapter:
 
             # Filtering typo correction messages (Same as Bilibili Adapter)
             # Typically these are short messages containing only Chinese characters
-            if len(text_to_speak) <= 4 and all(
+            if len(text_to_speak) <= 2 and all(
                 "\u4e00" <= c <= "\u9fff" for c in text_to_speak
             ):
                 self.logger.info(f"Skipping typo correction message: {text_to_speak}")

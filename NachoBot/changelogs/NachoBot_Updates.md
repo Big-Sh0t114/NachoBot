@@ -1,3 +1,5 @@
+1/28
+    修复一些已知的小bug，在Discord平台禁用了不支持的视频搬运功能
 1/27
     开发DiscordVC-Adapter，支持Discord语音频道自由发言
     为Discord语音频道配置独立prompt
