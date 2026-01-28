@@ -3,10 +3,11 @@ import time
 import asyncio
 import random
 import re
+import os
+import tomlkit
 
 from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime
-from src.mais4u.mai_think import mai_thinking_manager
 from src.common.logger import get_logger
 from src.common.data_models.database_data_model import DatabaseMessages
 from src.common.data_models.info_data_model import ActionPlannerInfo
@@ -47,6 +48,7 @@ init_rewrite_prompt()
 
 logger = get_logger("replyer")
 
+
 class PrivateReplyer:
     def __init__(
         self,
@@ -61,9 +63,92 @@ class PrivateReplyer:
 
         from src.plugin_system.core.tool_use import ToolExecutor  # 延迟导入ToolExecutor，不然会循环依赖
 
-        self.tool_executor = ToolExecutor(chat_id=self.chat_stream.stream_id, enable_cache=True, cache_ttl=3)
+        # 标准工具执行器 (使用默认 tool_use 模型，排除 MCP 工具)
+        self.tool_executor = ToolExecutor(
+            chat_id=self.chat_stream.stream_id, enable_cache=True, cache_ttl=3, exclude_prefix="mcp"
+        )
+
+        # MCP 工具执行器 (使用 mcp 模型，只包含 MCP 工具)
+        try:
+            logger.info(f"MCP Executor Config: {model_config.model_task_config.mcp.model_list}")
+        except Exception:
+            logger.warning("MCP Executor Config Read Failed")
+
+        self.mcp_executor = ToolExecutor(
+            chat_id=self.chat_stream.stream_id,
+            enable_cache=True,
+            cache_ttl=3,
+            model_set=model_config.model_task_config.mcp,
+            include_prefix="mcp",
+            prompt_template="mcp_tool_executor_prompt",
+        )
+
+        # 缓存权限检查结果 (私聊ID不变，只查一次)
+        self.has_mcp_permission = self._check_mcp_permission()
         self.web_search_manager = WebSearchManager(chat_id=self.chat_stream.stream_id, enable_cache=True, cache_ttl=2)
         self.url_fetcher = UrlContentFetcher()
+
+    def _check_mcp_permission(self) -> bool:
+        """检查当前用户是否有权限使用 MCP 工具 (前置检查)"""
+        try:
+            # 获取当前用户ID
+            user_id = ""
+            if self.chat_stream.user_info:
+                user_id = str(self.chat_stream.user_info.user_id)
+
+            # DEBUG LOG
+            logger.info(f"MCP Permission Check: user_id='{user_id}'")
+
+            if not user_id:
+                logger.warning("MCP Permission Check: FAILED (No user_id)")
+                return False
+
+            # 读取插件配置
+            # 路径 hardcode 指向 plugins/MaiBot_MCPBridgePlugin/config.toml
+            # 注意：需根据实际项目结构调整路径
+            config_path = os.path.join(os.getcwd(), "plugins", "MaiBot_MCPBridgePlugin", "config.toml")
+
+            # DEBUG LOG
+            logger.info(f"MCP Permission Check: config_path='{config_path}' (Exists: {os.path.exists(config_path)})")
+
+            if not os.path.exists(config_path):
+                # 配置文件不存在，默认允许? 或者默认禁止?
+                # 假设插件未安装/未配置，则不启用
+                logger.warning(f"MCP Permission Check: FAILED (Config not found at {config_path})")
+                return False
+
+            with open(config_path, "r", encoding="utf-8") as f:
+                doc = tomlkit.load(f)
+
+            permissions = doc.get("permissions", {})
+            quick_allow_users_str = permissions.get("quick_allow_users", "")
+            default_mode = permissions.get("perm_default_mode", "deny_all")
+
+            # 解析白名单
+            allow_users = {u.strip() for u in quick_allow_users_str.strip().split("\n") if u.strip()}
+
+            # DEBUG LOG
+            is_allowed = user_id in allow_users
+            logger.info(
+                f"MCP Permission Check: allow_users={allow_users}, default_mode={default_mode}, result={is_allowed}"
+            )
+
+            if is_allowed:
+                return True
+
+            # 如果默认是 deny_all 且不在白名单，则禁止
+            if default_mode == "deny_all":
+                logger.warning(
+                    f"MCP Permission Check: FAILED (User {user_id} not in whitelist and default is deny_all)"
+                )
+                return False
+
+            return True
+
+        except Exception as e:
+            logger.error(f"MCP Permission Check: ERROR ({e})")
+            logger.error(f"MCP 权限检查失败: {e}")
+            return False
 
     async def generate_reply_with_context(
         self,
@@ -288,9 +373,7 @@ class PrivateReplyer:
         expression_habits_block = ""
         expression_habits_title = ""
         if style_habits_str.strip():
-            expression_habits_title = (
-                "在回复时,你可以参考以下的语言习惯，不要生硬使用："
-            )
+            expression_habits_title = "在回复时,你可以参考以下的语言习惯，不要生硬使用："
             expression_habits_block += f"{style_habits_str}\n"
 
         return f"{expression_habits_title}\n{expression_habits_block}", selected_ids
@@ -391,10 +474,52 @@ class PrivateReplyer:
 
             tool_results = []
             try:
-                # 使用工具执行器获取信息
-                tool_results, _, _ = await self.tool_executor.execute_from_chat_message(
-                    sender=sender, target_message=target, chat_history=chat_history, return_details=False
+                # 并行执行两个工具执行器
+                tasks = []
+
+                # 1. 标准工具 (Standard)
+                tasks.append(
+                    self.tool_executor.execute_from_chat_message(
+                        sender=sender, target_message=target, chat_history=chat_history, return_details=False
+                    )
                 )
+
+                # 2. MCP工具 (High-Intelligence) - 仅在权限校验通过时执行
+                # 使用初始化时缓存的权限结果
+                if self.has_mcp_permission:
+                    tasks.append(
+                        self.mcp_executor.execute_from_chat_message(
+                            sender=sender, target_message=target, chat_history=chat_history, return_details=False
+                        )
+                    )
+                else:
+                    logger.info("用户无 MCP 权限，跳过 MCP 执行器 (Cached)")
+
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                # 处理结果
+                # 如果 has_mcp_permission 为 True，results[0] 是 standard, results[1] 是 mcp
+                # 如果 False，results[0] 是 standard
+
+                standard_res = results[0]
+                mcp_res = results[1] if self.has_mcp_permission and len(results) > 1 else None
+
+                # 处理 Standard 结果
+                if isinstance(standard_res, Exception):
+                    logger.error(f"Standard 工具执行器失败: {standard_res}")
+                else:
+                    t_res, _, _ = standard_res
+                    if t_res:
+                        tool_results.extend(t_res)
+
+                # 处理 MCP 结果
+                if mcp_res:
+                    if isinstance(mcp_res, Exception):
+                        logger.error(f"MCP 工具执行器失败: {mcp_res}")
+                    else:
+                        t_res, _, _ = mcp_res
+                        if t_res:
+                            tool_results.extend(t_res)
             except Exception as e:
                 logger.error(f"工具执行器失败，跳过工具结果: {e}")
 
@@ -617,7 +742,7 @@ class PrivateReplyer:
             timestamp=time.time(),
             limit=context_size,
         )
-        
+
         dialogue_prompt = build_readable_messages(
             message_list_before_now_long,
             replace_bot_name=True,
@@ -672,9 +797,7 @@ class PrivateReplyer:
             self._time_and_run_task(
                 self.build_expression_habits(chat_talking_prompt_short, target), "expression_habits"
             ),
-            self._time_and_run_task(
-                self.build_relation_info(chat_talking_prompt_short, sender), "relation_info"
-            ),
+            self._time_and_run_task(self.build_relation_info(chat_talking_prompt_short, sender), "relation_info"),
             # self._time_and_run_task(self.build_memory_block(message_list_before_short, target), "memory_block"),
             self._time_and_run_task(
                 self.build_tool_info(chat_talking_prompt_short, sender, target, enable_tool=enable_tool), "tool_info"
@@ -744,9 +867,7 @@ class PrivateReplyer:
                 elif chat_stream.user_info and getattr(chat_stream.user_info, "user_id", None):
                     target_id = str(chat_stream.user_info.user_id)
 
-                tts_language_prompt = await TTSAction.get_language_prompt_for_chat(
-                    chat_id=chat_id, target_id=target_id
-                )
+                tts_language_prompt = await TTSAction.get_language_prompt_for_chat(chat_id=chat_id, target_id=target_id)
         except Exception as e:
             logger.debug(f"获取TTS语言提示失败: {e}")
 
@@ -774,11 +895,11 @@ class PrivateReplyer:
             base_prompt = global_config.advanced.prompt.strip()
             moderation_prompt_block = f"{base_prompt}\n{build_guardrail_instruction(injection_detected)}".strip()
         else:
-            moderation_prompt_block = "请不要输出暴力，政治相关内容。 " + build_guardrail_instruction(injection_detected)
+            moderation_prompt_block = "请不要输出暴力，政治相关内容。 " + build_guardrail_instruction(
+                injection_detected
+            )
 
-        reply_target_block = (
-            f"现在对方说的:{target}。引起了你的注意"
-        )
+        reply_target_block = f"现在对方说的:{target}。引起了你的注意"
 
         if global_config.bot.qq_account == user_id and platform == global_config.bot.platform:
             return await global_prompt_manager.format_prompt(
@@ -831,6 +952,7 @@ class PrivateReplyer:
         chat_stream = self.chat_stream
         chat_id = chat_stream.stream_id
         is_group_chat = bool(chat_stream.group_info)
+        context_size = global_config.chat.get_max_context_size(is_group_chat=is_group_chat)
         advanced_on = advanced_manager.is_on(chat_stream)
         injection_detected = False
 
@@ -1088,6 +1210,3 @@ def weighted_sample_no_replacement(items, weights, k) -> list:
                 pool.pop(idx)
                 break
     return selected
-
-
-
