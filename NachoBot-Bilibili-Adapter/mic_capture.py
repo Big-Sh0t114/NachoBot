@@ -70,6 +70,7 @@ class MicCaptureWorker:
         # ASR callback (to be set by adapter)
         self._asr_callback: Optional[Callable[[bytes], Awaitable[Optional[str]]]] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._last_error: Optional[str] = None
 
     def set_asr_callback(
         self, callback: Callable[[bytes], Awaitable[Optional[str]]]
@@ -91,6 +92,10 @@ class MicCaptureWorker:
 
     def is_paused(self) -> bool:
         return self._paused
+
+    def is_running(self) -> bool:
+        """Check if the microphone capture worker is currently running"""
+        return self._running and SOUNDDEVICE_AVAILABLE
 
     def _calculate_rms(self, audio_data: bytes) -> float:
         """Calculate RMS (root mean square) of audio data"""
@@ -229,15 +234,36 @@ class MicCaptureWorker:
 
         self._running = True
         self.logger.info(
-            f"Starting microphone capture (sample_rate={self.config.sample_rate}, threshold={self.config.silence_threshold})"
+            f"Starting microphone capture (configured: sample_rate={self.config.sample_rate}, threshold={self.config.silence_threshold})"
         )
         self._loop = asyncio.get_running_loop()
 
         try:
+            # Query default device to use native sample rate (prevents Exclusive Mode/OBS conflict)
+            try:
+                device_info = sd.query_devices(kind="input")
+                native_rate = int(device_info.get("default_samplerate", 16000))
+                self.logger.info(f"Device native sample rate: {native_rate}")
+
+                # Update config to match native rate
+                self.config.sample_rate = native_rate
+
+                # Recalculate VAD parameters dependent on sample rate
+                self._samples_per_chunk = int(self.config.sample_rate * 0.1)
+                self._silence_sample_threshold = int(
+                    self.config.silence_duration
+                    * self.config.sample_rate
+                    / self._samples_per_chunk
+                )
+            except Exception as e:
+                self.logger.warning(
+                    f"Failed to query device native rate, using default 16000: {e}"
+                )
+
             # Start processing loop
             proc_task = asyncio.create_task(self._process_queue_loop())
 
-            # Start audio stream
+            # Start audio stream using updated config.sample_rate
             with sd.InputStream(
                 samplerate=self.config.sample_rate,
                 channels=self.config.channels,
@@ -251,10 +277,14 @@ class MicCaptureWorker:
 
             # Wait for processing loop to finish (it will exit when _running is False)
             await proc_task
+            self.logger.info("Microphone processing task finished")
 
         except Exception as e:
-            self.logger.error(f"Microphone capture error: {e}")
+            self._last_error = str(e)
+            self.logger.error(f"Microphone capture error: {e}", exc_info=True)
+        finally:
             self._running = False
+            self.logger.info("Microphone capture worker stopped")
 
     def stop(self) -> None:
         """Stop microphone capture"""

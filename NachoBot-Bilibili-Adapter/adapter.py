@@ -63,7 +63,7 @@ from screen_monitor import ScreenMonitor  # noqa: E402
 from mic_capture import MicCaptureWorker, MicConfig  # noqa: E402
 
 # Try to import TTS model
-tts_adapter_path = Path(r"C:\Users\BigSh0t\Nacho-with-u\nachobot_tts_adapter")
+tts_adapter_path = Path(r"C:\Users\BigSh0t\Nacho-with-u\NachoBot-TTS-Adapter")
 TTSModel = None
 _tts_import_error = None
 
@@ -79,7 +79,7 @@ if tts_adapter_path.exists():
 else:
     _tts_import_error = f"TTS adapter path does not exist: {tts_adapter_path}"
 
-ACCEPT_FORMAT = ["text", "reply", "command"]
+ACCEPT_FORMAT = ["text", "reply", "command", "gift", "superchat"]
 ACCEPT_FORMAT_PRIVATE = ["text", "image", "emoji", "reply", "command"]
 COMMENT_REPLY_LIMIT = 10
 COMMENT_LIMIT_FALLBACK_TEXT = "NachoBot有点口渴了哦，先休息一下啦~"
@@ -244,6 +244,8 @@ class BilibiliAdapter:
 
         # Initialize Mic Capture Worker
         self.mic_worker: Optional[MicCaptureWorker] = None
+        self.mic_task: Optional[asyncio.Task] = None
+        self._mic_restart_count = 0
         self._mic_manual_state: Optional[bool] = None
         if config.mic_asr_enable and config.mic_asr_room_id:
             mic_config = MicConfig(
@@ -324,7 +326,7 @@ class BilibiliAdapter:
             tasks.append(self._private_message_loop())
 
         if self.mic_worker:
-            tasks.append(self.mic_worker.start())
+            self.mic_task = asyncio.create_task(self.mic_worker.start())
             tasks.append(self._mic_control_loop())
 
         self.audio_player.start()  # Start audio player loop
@@ -350,15 +352,46 @@ class BilibiliAdapter:
                     else:
                         should_pause = True
 
+                if self.mic_worker:
+                    is_running = self.mic_worker.is_running()
+                    task_done = self.mic_task.done() if self.mic_task else True
+
+                    if not is_running or task_done:
+                        if not should_pause:
+                            self.logger.warning(
+                                "MicCaptureWorker is not running! Attempting restart..."
+                            )
+                            # Cool-down to avoid tight loops if device is physically gone
+                            if self._mic_restart_count > 5:
+                                self.logger.error(
+                                    "Too many mic failures, waiting 30s before next retry."
+                                )
+                                await asyncio.sleep(30)
+                                self._mic_restart_count = 0
+
+                            self._mic_restart_count += 1
+                            if self.mic_task and not self.mic_task.done():
+                                self.mic_task.cancel()
+
+                            self.mic_task = asyncio.create_task(self.mic_worker.start())
+                            await asyncio.sleep(1)  # Give it a second to start
+                        else:
+                            # It's paused and not running, which is fine if we implement "Stop on Switch"
+                            # but currently we only pause. So if it's not running, it's still a crash.
+                            pass
+                    else:
+                        # Running fine, reset restart count
+                        self._mic_restart_count = 0
+
                 if should_pause:
-                    if not self.mic_worker.is_paused():
+                    if self.mic_worker and not self.mic_worker.is_paused():
                         self.mic_worker.pause()
                 else:
-                    if self.mic_worker.is_paused():
+                    if self.mic_worker and self.mic_worker.is_paused():
                         self.mic_worker.resume()
 
             except Exception as e:
-                self.logger.error(f"Error in mic control loop: {e}")
+                self.logger.error(f"Error in mic control loop: {e}", exc_info=True)
 
             await asyncio.sleep(5)
 
@@ -555,7 +588,9 @@ class BilibiliAdapter:
     def _inject_screen_summary(prompt: str, summary: str) -> str:
         if not prompt or not summary:
             return prompt
-        screen_block = f"【直播画面】{summary}"
+        # Escape braces to prevent them from being interpreted as prompt placeholders
+        escaped_summary = summary.replace("{", "\\{").replace("}", "\\}")
+        screen_block = f"【直播画面】{escaped_summary}"
         placeholder = "{extra_info_block}"
         if placeholder in prompt:
             return prompt.replace(placeholder, f"{placeholder}\n{screen_block}")
@@ -619,14 +654,17 @@ class BilibiliAdapter:
 
         command = text.strip().lower()
         if command not in ("#asr_on", "#asr_off"):
+            # Not a mic command
             return False
 
+        # Use screen_manual_user_ids as the "authorized users" for manual overrides
         if self._screen_manual_user_ids and user_id not in self._screen_manual_user_ids:
             self.logger.warning(
-                "Mic manual command rejected: room_id=%s user_id=%s user_name=%s",
+                "Mic manual command rejected (Unauthenticated): room_id=%s user_id=%s user_name=%s cmd=%s",
                 room_id,
                 user_id,
                 user_name,
+                command,
             )
             return True
 
@@ -634,7 +672,19 @@ class BilibiliAdapter:
         self._mic_manual_state = enable
 
         action = "force enabled" if enable else "force disabled"
-        self.logger.info("Mic capture %s by user_id=%s", action, user_id)
+        self.logger.info(
+            "Mic capture %s by user_id=%s (%s)", action, user_id, user_name
+        )
+
+        # Trigger immediate loop check if possible? No, sleep(5) is fine,
+        # but let's log current worker state
+        if self.mic_worker:
+            self.logger.info(
+                f"Worker state: running={self.mic_worker.is_running()}, paused={self.mic_worker.is_paused()}"
+            )
+            if not self.mic_worker.is_running():
+                self.logger.error("CANNOT toggle mic: MicCaptureWorker is NOT RUNNING.")
+
         return True
 
     # ========== Incoming Message Handlers ==========
@@ -657,27 +707,9 @@ class BilibiliAdapter:
             return
         if self._handle_screen_manual_command(room_id, user_id, text, user_name):
             return
-        template_info = None
-        screen_summary = await self._get_screen_summary(room_id, user_id, text)
-        reply_prompt, planner_prompt = self._resolve_live_prompts(room_id)
-        if screen_summary:
-            reply_prompt = self._inject_screen_summary(reply_prompt, screen_summary)
-            if planner_prompt:
-                planner_prompt = self._inject_screen_summary(
-                    planner_prompt, screen_summary
-                )
-        if reply_prompt or planner_prompt:
-            template_items: Dict[str, str] = {}
-            if reply_prompt:
-                template_items["replyer_prompt"] = reply_prompt
-            if planner_prompt:
-                template_items["brain_planner_prompt"] = planner_prompt
-                template_items["planner_prompt"] = planner_prompt
-            template_info = TemplateInfo(
-                template_items=template_items,
-                template_name=f"bilibili_live_{room_id}",
-                template_default=False,
-            )
+
+        template_info = await self._get_template_info(room_id, user_id, text)
+
         additional_config = {
             "room_id": room_id,
             "reply_mid": reply_mid,
@@ -727,13 +759,44 @@ class BilibiliAdapter:
         user_id: str,
         user_name: str,
         timestamp: float,
+        price: int = 0,
     ) -> None:
         self.logger.info(
-            f"Gift: [{room_id}] {user_name}({user_id}) sent {gift_name} x{num}"
+            f"Gift: [{room_id}] {user_name}({user_id}) sent {gift_name} x{num} (Price: {price} CNY)"
         )
-        # gift_data = f"{gift_name}:{num}"
-        # TODO: Implement gift handling if needed
-        pass
+
+        gift_data = f"{gift_name}:{num}:{price}"
+        segments = [Seg(type="gift", data=gift_data)]
+
+        message_info = BaseMessageInfo(
+            platform=self.config.platform,
+            message_id=f"gift_{room_id}_{user_id}_{int(timestamp * 1000)}_{uuid.uuid4().hex[:8]}",
+            time=float(timestamp),
+            user_info=UserInfo(
+                platform=self.config.platform,
+                user_id=user_id,
+                user_nickname=user_name,
+            ),
+            group_info=GroupInfo(
+                platform=self.config.platform,
+                group_id=str(room_id),
+                group_name=str(room_id),
+            ),
+            format_info=FormatInfo(
+                content_format=["text"],
+                accept_format=ACCEPT_FORMAT,
+            ),
+            template_info=await self._get_template_info(room_id, user_id),
+            additional_config={"room_id": room_id, "is_mentioned": 1.0},
+        )
+
+        message = MessageBase(
+            message_info=message_info,
+            message_segment=Seg(type="seglist", data=segments),
+            raw_message=f"送出了 {gift_name} x{num}",
+        )
+
+        await self._send_to_nachobot(message)
 
     async def _handle_mic_recognition(self, text: str) -> None:
         if not text:
@@ -819,7 +882,7 @@ class BilibiliAdapter:
                 content_format=["text"],
                 accept_format=ACCEPT_FORMAT,
             ),
-            template_info=None,
+            template_info=await self._get_template_info(room_id, "2146014839", text),
             additional_config=additional_config,
         )
 
@@ -868,14 +931,14 @@ class BilibiliAdapter:
                 content_format=["text"],
                 accept_format=ACCEPT_FORMAT,
             ),
-            additional_config={"room_id": room_id},
+            template_info=await self._get_template_info(room_id, user_id, message_text),
+            additional_config={"room_id": room_id, "is_mentioned": 1.0},
         )
 
         message = MessageBase(
             message_info=message_info,
             message_segment=Seg(type="seglist", data=segments),
             raw_message=f"[SC￥{price}] {message_text}",
-            processed_plain_text=f"[SC￥{price}] {message_text}",
         )
 
         await self._send_to_nachobot(message)
@@ -889,12 +952,13 @@ class BilibiliAdapter:
         user_name: str,
         timestamp: float,
         guard_level: int = 3,
+        price: int = 0,
     ) -> None:
         self.logger.info(
-            f"Guard: [{room_id}] {user_name}({user_id}) bought {guard_name} x{num}"
+            f"Guard: [{room_id}] {user_name}({user_id}) bought {guard_name} x{num} (Price: {price} CNY)"
         )
 
-        gift_data = f"{guard_name}:{num}"
+        gift_data = f"{guard_name}:{num}:{price}"
         priority_data = {
             "message_type": "vip",
             "message_priority": 1000.0,
@@ -924,19 +988,50 @@ class BilibiliAdapter:
                 content_format=["text"],
                 accept_format=ACCEPT_FORMAT,
             ),
-            additional_config={"room_id": room_id},
+            template_info=await self._get_template_info(room_id, user_id),
+            additional_config={"room_id": room_id, "is_mentioned": 1.0},
         )
 
         message = MessageBase(
             message_info=message_info,
             message_segment=Seg(type="seglist", data=segments),
             raw_message=f"开通了 {guard_name} x{num}",
-            processed_plain_text=f"开通了 {guard_name} x{num}",
         )
 
         await self._send_to_nachobot(message)
 
     # ========== Prompt Resolution ==========
+
+    async def _get_template_info(
+        self, room_id: int, user_id: str = "", text: str = ""
+    ) -> Optional[TemplateInfo]:
+        reply_prompt, planner_prompt = self._resolve_live_prompts(room_id)
+
+        # Inject screen summary if text is provided
+        if text:
+            screen_summary = await self._get_screen_summary(room_id, user_id, text)
+            if screen_summary:
+                reply_prompt = self._inject_screen_summary(reply_prompt, screen_summary)
+                if planner_prompt:
+                    planner_prompt = self._inject_screen_summary(
+                        planner_prompt, screen_summary
+                    )
+
+        if not (reply_prompt or planner_prompt):
+            return None
+
+        template_items: Dict[str, str] = {}
+        if reply_prompt:
+            template_items["replyer_prompt"] = reply_prompt
+        if planner_prompt:
+            template_items["brain_planner_prompt"] = planner_prompt
+            template_items["planner_prompt"] = planner_prompt
+
+        return TemplateInfo(
+            template_items=template_items,
+            template_name=f"bilibili_live_{room_id}",
+            template_default=False,
+        )
 
     @staticmethod
     def _build_live_plan_block(room_prompts: Optional[Dict[str, str]]) -> str:
@@ -972,14 +1067,45 @@ class BilibiliAdapter:
         reply_prompt = self.config.live_reply_prompt
         planner_prompt = self.config.live_planner_prompt
         room_prompts = self.config.live_room_prompts.get(room_id)
+
+        # Resolve gift reaction prompt
+        gift_reaction = ""
+        if room_prompts:
+            gift_reaction = str(room_prompts.get("gift_reaction_prompt", "") or "")
+        if not gift_reaction:
+            gift_reaction = self.config.live_gift_reaction_prompt
+
+        if not gift_reaction:
+            gift_reaction = (
+                "\n**礼物与打赏反应指南**\n"
+                "1. 识别格式：收到礼物时，你会看到“送出了 [礼物名] x[数量]（价值[金额]元）”。超级弹幕（SuperChat）也会标注价值。\n"
+                "2. 反应级别：\n"
+                "   - **小额礼物（< 10元）**：口头快速感谢，保持自然聊天。\n"
+                "   - **中额礼物（10-50元）**：热情感谢，可以停下当前话题互动几句。\n"
+                "   - **大额礼物（> 50元）**：郑重且真诚地感谢，如果对方有留言，请务必优先且认真回复。\n"
+                "3. 语气：保持你的个性，但对打赏者应表现出基本的礼貌和感激。\n"
+            )
+
+        def replace_gift_prompt(p: str) -> str:
+            if not p:
+                return p
+            placeholder = "{gift_reaction_prompt}"
+            if placeholder in p:
+                return p.replace(placeholder, gift_reaction)
+            return p
+
+        reply_prompt = replace_gift_prompt(reply_prompt)
+        planner_prompt = replace_gift_prompt(planner_prompt)
+
         live_plan_block = self._build_live_plan_block(room_prompts)
         if room_prompts is not None:
             room_reply = str(room_prompts.get("reply_prompt", "") or "")
             room_planner = str(room_prompts.get("planner_prompt", "") or "")
             if room_reply:
-                reply_prompt = room_reply
+                reply_prompt = replace_gift_prompt(room_reply)
             if room_planner:
-                planner_prompt = room_planner
+                planner_prompt = replace_gift_prompt(room_planner)
+
         if reply_prompt and live_plan_block:
             reply_prompt = self._inject_live_plan_into_prompt(
                 reply_prompt, live_plan_block
