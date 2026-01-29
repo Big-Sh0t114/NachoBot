@@ -45,6 +45,7 @@ class AdapterConfig:
     live_disable_network_search: bool
     live_reply_prompt: str
     live_planner_prompt: str
+    live_gift_reaction_prompt: str
     live_room_prompts: Dict[int, Dict[str, Any]]
     live_host_room_id: Optional[int]
     screen_manual_enable: bool
@@ -150,7 +151,9 @@ def _check_proxy_list(
     }
     for proxy in proxy_list:
         try:
-            resp = requests.get(url=url, headers=headers, proxies=proxy, timeout=timeout)
+            resp = requests.get(
+                url=url, headers=headers, proxies=proxy, timeout=timeout
+            )
             if resp.status_code == 200:
                 can_use.append(proxy)
         except requests.RequestException:
@@ -169,37 +172,44 @@ def _proxy_dicts_to_urls(proxy_list: List[Dict[str, str]]) -> List[str]:
     return urls
 
 
-def _resolve_asr_model_config(path: Path, logger: logging.Logger) -> Optional[AsrModelConfig]:
+def _resolve_asr_model_config(
+    path: Path, logger: logging.Logger
+) -> Optional[AsrModelConfig]:
     if not path.exists():
         logger.warning(f"Model config not found at {path}")
         return None
     try:
         config = _load_toml(path)
-        
+
         # 1. Get voice model list
         voice_task = config.get("model_task_config", {}).get("voice", {})
         model_list = voice_task.get("model_list", [])
         if not model_list:
             logger.warning("No voice models configured in [model_task_config.voice]")
             return None
-        
+
         target_model_name = model_list[0]
-        
+
         # 2. Find model config
         models = config.get("models", [])
         target_model_conf = None
         for m in models:
-            if m.get("name") == target_model_name or m.get("model_identifier") == target_model_name:
+            if (
+                m.get("name") == target_model_name
+                or m.get("model_identifier") == target_model_name
+            ):
                 target_model_conf = m
                 break
-        
+
         if not target_model_conf:
-            logger.warning(f"Model definition not found for voice model: {target_model_name}")
+            logger.warning(
+                f"Model definition not found for voice model: {target_model_name}"
+            )
             return None
-            
+
         provider_name = target_model_conf.get("api_provider")
         model_identifier = target_model_conf.get("model_identifier", target_model_name)
-        
+
         # 3. Find provider config
         providers = config.get("api_providers", [])
         provider_conf = None
@@ -207,11 +217,11 @@ def _resolve_asr_model_config(path: Path, logger: logging.Logger) -> Optional[As
             if p.get("name") == provider_name:
                 provider_conf = p
                 break
-                
+
         if not provider_conf:
             logger.warning(f"API provider not found: {provider_name}")
             return None
-            
+
         return AsrModelConfig(
             base_url=str(provider_conf.get("base_url", "")).rstrip("/"),
             api_key=str(provider_conf.get("api_key", "")),
@@ -219,7 +229,7 @@ def _resolve_asr_model_config(path: Path, logger: logging.Logger) -> Optional[As
             timeout=int(provider_conf.get("timeout", 30)),
             client_type=str(provider_conf.get("client_type", "openai")),
         )
-            
+
     except Exception as e:
         logger.error(f"Failed to resolve ASR model config: {e}")
         return None
@@ -295,6 +305,9 @@ def load_config(path: Path) -> AdapterConfig:
             room_prompts[room_id] = {
                 "reply_prompt": str(value.get("reply_prompt", "") or ""),
                 "planner_prompt": str(value.get("planner_prompt", "") or ""),
+                "gift_reaction_prompt": str(
+                    value.get("gift_reaction_prompt", "") or ""
+                ),
                 "live_category": str(value.get("live_category", "") or ""),
                 "live_title": str(value.get("live_title", "") or ""),
                 "live_content": str(value.get("live_content", "") or ""),
@@ -316,7 +329,9 @@ def load_config(path: Path) -> AdapterConfig:
     manual_duration_minutes = int(screen_monitor.get("manual_duration_minutes", 30))
     manual_user_ids_raw = screen_monitor.get("manual_user_ids", []) or []
     if isinstance(manual_user_ids_raw, list):
-        manual_user_ids = [str(x).strip() for x in manual_user_ids_raw if str(x).strip()]
+        manual_user_ids = [
+            str(x).strip() for x in manual_user_ids_raw if str(x).strip()
+        ]
     elif manual_user_ids_raw is None:
         manual_user_ids = []
     else:
@@ -364,9 +379,12 @@ def load_config(path: Path) -> AdapterConfig:
         live_max_hosts=int(live.get("max_hosts", 0)),
         live_max_attempts=int(live.get("max_attempts", 0)),
         live_ws_proxy=str(live.get("ws_proxy", "auto") or "auto"),
-        live_proxy_pool_path=str(live.get("proxy_pool_path", "proxy.json") or "proxy.json"),
+        live_proxy_pool_path=str(
+            live.get("proxy_pool_path", "proxy.json") or "proxy.json"
+        ),
         live_proxy_check_url=str(
-            live.get("proxy_check_url", "https://www.baidu.com") or "https://www.baidu.com"
+            live.get("proxy_check_url", "https://www.baidu.com")
+            or "https://www.baidu.com"
         ),
         live_proxy_check_timeout=int(live.get("proxy_check_timeout", 1)),
         live_allow_self_danmu=bool(live.get("allow_self_danmu", False)),
@@ -377,6 +395,7 @@ def load_config(path: Path) -> AdapterConfig:
         live_disable_network_search=bool(live.get("disable_network_search", False)),
         live_reply_prompt=str(live.get("reply_prompt", "") or ""),
         live_planner_prompt=str(live.get("planner_prompt", "") or ""),
+        live_gift_reaction_prompt=str(live.get("gift_reaction_prompt", "") or ""),
         live_room_prompts=room_prompts,
         live_host_room_id=host_room_id,
         screen_manual_enable=manual_enable,
@@ -401,15 +420,15 @@ def load_config(path: Path) -> AdapterConfig:
         disable_video_sender_plugin=bool(
             compat.get("disable_video_sender_plugin", False)
         ),
-        disable_command_trigger=bool(
-            compat.get("disable_command_trigger", False)
-        ),
+        disable_command_trigger=bool(compat.get("disable_command_trigger", False)),
         response_filter_enable=response_filter_enable,
         response_filter_blocked_markers=response_filter_blocked_markers,
         log_level=str(debug.get("level", "INFO")),
         mic_asr_enable=bool(mic_asr.get("enable", False)),
         mic_asr_room_id=int(mic_asr.get("room_id", 0)),
-        mic_asr_subtitle_path=str(mic_asr.get("subtitle_path", "subtitles1.txt") or "subtitles1.txt"),
+        mic_asr_subtitle_path=str(
+            mic_asr.get("subtitle_path", "subtitles1.txt") or "subtitles1.txt"
+        ),
         mic_asr_silence_threshold=float(mic_asr.get("silence_threshold", 500.0)),
         mic_asr_silence_duration=float(mic_asr.get("silence_duration", 1.0)),
         mic_asr_sample_rate=int(mic_asr.get("sample_rate", 16000)),

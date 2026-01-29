@@ -9,7 +9,7 @@ from typing import Optional
 
 # Attempt to include nachobot_tts_adapter
 _root_dir = Path(__file__).resolve().parents[1]
-_tts_adapter_path = _root_dir / "nachobot_tts_adapter"
+_tts_adapter_path = _root_dir / "NachoBot-TTS-Adapter"
 
 
 class TTSHandler:

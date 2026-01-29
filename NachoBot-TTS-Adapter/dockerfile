@@ -18,7 +18,7 @@ RUN mkdir -p /nachobot_tts_adapter/configs && \
 EXPOSE 8070
 
 # 定义可以被映射的卷
-VOLUME ["/nachobot_tts_adapter/configs"]
+VOLUME ["/NachoBot-TTS-Adapter/configs"]
 
 # 运行应用
 CMD ["python", "main.py"]

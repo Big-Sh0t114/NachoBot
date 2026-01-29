@@ -85,13 +85,13 @@ class DefaultReplyer:
         self.web_search_manager = WebSearchManager(chat_id=self.chat_stream.stream_id, enable_cache=True, cache_ttl=2)
         self.url_fetcher = UrlContentFetcher()
 
-    def _check_mcp_permission(self) -> bool:
+    def _check_mcp_permission(self, user_id: str = "") -> bool:
         """检查当前用户是否有权限使用 MCP 工具 (前置检查)"""
         try:
-            # 获取当前用户ID
-            user_id = ""
-            if self.chat_stream.user_info:
-                user_id = str(self.chat_stream.user_info.user_id)
+            # 如果未传入 user_id，尝试从 chat_stream 获取
+            if not user_id:
+                if self.chat_stream.user_info:
+                    user_id = str(self.chat_stream.user_info.user_id)
 
             # DEBUG LOG
             logger.info(f"MCP Permission Check: user_id='{user_id}'")
@@ -411,13 +411,17 @@ class DefaultReplyer:
 
     #     return memory_str
 
-    async def build_tool_info(self, chat_history: str, sender: str, target: str, enable_tool: bool = True) -> str:
+    async def build_tool_info(
+        self, chat_history: str, sender: str, target: str, enable_tool: bool = True, user_id: str = ""
+    ) -> str:
         """构建工具信息块
 
         Args:
             chat_history: 聊天历史记录
-            reply_to: 回复对象，格式为 "发送者:消息内容"
+            sender: 发送者名称
+            target: 目标消息内容
             enable_tool: 是否启用工具调用
+            user_id: 用户ID (用于权限检查)
 
         Returns:
             str: 工具信息字符串
@@ -497,7 +501,7 @@ class DefaultReplyer:
                 )
 
                 # 2. MCP工具 (High-Intelligence) - 仅在权限校验通过时执行
-                has_mcp_permission = self._check_mcp_permission()
+                has_mcp_permission = self._check_mcp_permission(user_id=user_id)
                 if has_mcp_permission:
                     tasks.append(
                         self.mcp_executor.execute_from_chat_message(
@@ -925,7 +929,10 @@ class DefaultReplyer:
             # ),
             # self._time_and_run_task(self.build_memory_block(message_list_before_short, target), "memory_block"),
             self._time_and_run_task(
-                self.build_tool_info(chat_talking_prompt_short, sender, target, enable_tool=enable_tool), "tool_info"
+                self.build_tool_info(
+                    chat_talking_prompt_short, sender, target, enable_tool=enable_tool, user_id=user_id
+                ),
+                "tool_info",
             ),
             self._time_and_run_task(self.get_prompt_info(chat_talking_prompt_short, sender, target), "prompt_info"),
             self._time_and_run_task(self.build_actions_prompt(available_actions, chosen_actions), "actions_info"),

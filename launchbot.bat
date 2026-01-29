@@ -30,7 +30,7 @@ set "TTS_RC=0"
 
 REM ===== 基本路径（如你改过目录，只需改这里）=====
 set "BASE_DIR=%ROOT%"
-set "ADAPTER_DIR=%BASE_DIR%nachobot_tts_adapter"
+set "ADAPTER_DIR=%BASE_DIR%NachoBot-TTS-Adapter"
 set "NAPCAT_DIR=%BASE_DIR%NachoBot-Napcat-Adapter"
 set "NAPCAT_SRC=%NAPCAT_DIR%\src"
 set "SOVITS_DIR=C:\Users\BigSh0t\GPT-SoVITS\GPT-SoVITS-v2pro-20250604"
