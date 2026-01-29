@@ -142,7 +142,9 @@ class LiveRoomWorker:
                 if isinstance(item, dict)
             ]
             if host_preview:
-                self.logger.debug("Room %s host_list preview: %s", self.room_id, host_preview)
+                self.logger.debug(
+                    "Room %s host_list preview: %s", self.room_id, host_preview
+                )
         if not token or not host_list:
             raise RuntimeError(
                 f"getDanmuInfo missing token/host_list: code={info_code} message={info_msg}"
@@ -229,13 +231,18 @@ class LiveRoomWorker:
                         self._proxy_index = 0
                     proxy_setting = proxy_cycle[self._proxy_index % len(proxy_cycle)]
                     self._proxy_index += 1
-                if self.config.live_max_attempts > 0 and attempt_count >= self.config.live_max_attempts:
+                if (
+                    self.config.live_max_attempts > 0
+                    and attempt_count >= self.config.live_max_attempts
+                ):
                     if last_exc:
                         raise last_exc
                     raise RuntimeError("websocket connect attempts exhausted")
                 attempt_count += 1
                 proxy_label = (
-                    "auto" if proxy_setting is True else (proxy_setting if proxy_setting else "none")
+                    "auto"
+                    if proxy_setting is True
+                    else (proxy_setting if proxy_setting else "none")
                 )
                 self.logger.info(
                     "Room %s connecting: %s (%s) proxy=%s",
@@ -287,7 +294,9 @@ class LiveRoomWorker:
                             proxy_label,
                         )
                         auth_body = {
-                            "uid": int(self.config.dede_user_id) if self.config.dede_user_id else 0,
+                            "uid": int(self.config.dede_user_id)
+                            if self.config.dede_user_id
+                            else 0,
                             "roomid": self.room_id,
                             "protover": 3,
                             "platform": "web",
@@ -366,20 +375,39 @@ class LiveRoomWorker:
 
     async def _handle_gift_event(self, payload: Dict[str, Any], cmd: str) -> None:
         data = payload.get("data") or {}
-        gift_name = str(data.get("giftName") or "")
+        # B站不同协议版本 giftName 的字段名可能不同
+        gift_name = str(data.get("giftName") or data.get("gift_name") or "")
         try:
-            num = int(data.get("num") or 1)
-        except ValueError:
+            # combo_num 是连击礼物时的数量
+            num = int(data.get("num") or data.get("combo_num") or 1)
+        except (ValueError, TypeError):
             num = 1
+
         user_name = str(data.get("uname") or "")
         user_id = str(data.get("uid") or "")
         timestamp = time.time()
         if data.get("timestamp"):
             try:
                 timestamp = float(data["timestamp"])
-            except ValueError:
+            except (ValueError, TypeError):
                 pass
-        
+
+        coin_type = str(data.get("coin_type") or "")
+        total_coin = 0
+        try:
+            total_coin = int(data.get("total_coin") or 0)
+        except (ValueError, TypeError):
+            pass
+
+        # 1000 gold coins = 1 CNY
+        price = 0
+        if coin_type == "gold" and total_coin > 0:
+            price = total_coin // 1000
+
+        self.logger.info(
+            f"Gift event processed: {gift_name} x{num} from {user_name} (Price: {price} CNY, cmd: {cmd})"
+        )
+
         await self.adapter.handle_incoming_gift(
             room_id=self.room_id,
             gift_name=gift_name,
@@ -387,6 +415,7 @@ class LiveRoomWorker:
             user_id=user_id,
             user_name=user_name,
             timestamp=timestamp,
+            price=price,
         )
 
     async def _handle_superchat_event(self, payload: Dict[str, Any]) -> None:
@@ -428,13 +457,19 @@ class LiveRoomWorker:
         except ValueError:
             guard_level = 3
         gift_name = str(data.get("gift_name") or "舰长")
-        
+
         timestamp = time.time()
         if data.get("start_time"):
             try:
                 timestamp = float(data["start_time"])
             except ValueError:
                 pass
+
+        try:
+            price_coin = int(data.get("price") or 0)
+            price = price_coin // 1000
+        except ValueError:
+            price = 0
 
         await self.adapter.handle_incoming_guard(
             room_id=self.room_id,
@@ -444,14 +479,21 @@ class LiveRoomWorker:
             user_name=user_name,
             timestamp=timestamp,
             guard_level=guard_level,
+            price=price,
         )
 
     async def _handle_event(self, payload: Dict[str, Any]) -> None:
         cmd = payload.get("cmd") or ""
-        
+        if cmd == "HEARTBEAT_REPLY":
+            return
+
+        self.logger.info(f"Received command: {cmd}")
+
         if cmd.startswith("DANMU_MSG"):
             await self._handle_danmu_event(payload)
         elif cmd == "SEND_GIFT":
+            await self._handle_gift_event(payload, cmd)
+        elif cmd == "COMBO_SEND":
             await self._handle_gift_event(payload, cmd)
         elif cmd == "SUPER_CHAT_MESSAGE":
             await self._handle_superchat_event(payload)
@@ -531,7 +573,9 @@ class LiveRoomWorker:
 
     @staticmethod
     def _pack(body: Any, op: int) -> bytes:
-        body_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8") if body else b""
+        body_bytes = (
+            json.dumps(body, separators=(",", ":")).encode("utf-8") if body else b""
+        )
         packet_len = 16 + len(body_bytes)
         header = packet_len.to_bytes(4, "big")
         header += (16).to_bytes(2, "big")
@@ -562,7 +606,9 @@ class LiveRoomWorker:
         return packets
 
     @staticmethod
-    def _extract_message_id(payload: Dict[str, Any], info: list, timestamp_ms: int) -> str:
+    def _extract_message_id(
+        payload: Dict[str, Any], info: list, timestamp_ms: int
+    ) -> str:
         msg_id = payload.get("msg_id")
         if msg_id:
             return str(msg_id)

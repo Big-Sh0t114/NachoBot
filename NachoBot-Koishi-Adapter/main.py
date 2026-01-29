@@ -22,7 +22,7 @@ except ImportError:  # pragma: no cover
     import toml  # type: ignore
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-for candidate in ("NachoBot", "NachoBot-Napcat-Adapter", "nachobot_tts_adapter"):
+for candidate in ("NachoBot", "NachoBot-Napcat-Adapter", "NachoBot-TTS-Adapter"):
     candidate_path = ROOT_DIR / candidate
     if candidate_path.exists():
         candidate_str = str(candidate_path)
@@ -145,8 +145,6 @@ class KoishiOneBotAdapter:
         self.logger = logger
         self.onebot_ws: Optional[websockets.WebSocketClientProtocol] = None
         self.onebot_send_lock = asyncio.Lock()
-        self._recent_group_by_user: Dict[str, Tuple[str, str, float]] = {}
-        self._recent_group_ttl = 120.0
         route_config = RouteConfig(
             route_config={
                 self.config.platform: TargetConfig(
@@ -329,7 +327,6 @@ class KoishiOneBotAdapter:
         group_info = None
         if group_id:
             group_name = self._extract_group_name(data, group_id)
-            self._remember_user_group(user_id, group_id, group_name)
             group_info = GroupInfo(
                 platform=self.config.platform,
                 group_id=group_id,
@@ -388,25 +385,6 @@ class KoishiOneBotAdapter:
             await client.send_message(payload)
             return
         await self.router.send_message(message)
-
-    def _remember_user_group(
-        self, user_id: str, group_id: str, group_name: str
-    ) -> None:
-        if not user_id or not group_id:
-            return
-        self._recent_group_by_user[user_id] = (group_id, group_name, time.time())
-
-    def _get_recent_group_for_user(self, user_id: str) -> Optional[Tuple[str, str]]:
-        if not user_id:
-            return None
-        data = self._recent_group_by_user.get(user_id)
-        if not data:
-            return None
-        group_id, group_name, last_ts = data
-        if time.time() - last_ts > self._recent_group_ttl:
-            self._recent_group_by_user.pop(user_id, None)
-            return None
-        return group_id, group_name
 
     async def _parse_onebot_message(
         self, raw_message: Any
@@ -501,18 +479,8 @@ class KoishiOneBotAdapter:
             params["message_type"] = "group"
             params["group_id"] = self._maybe_int(group_info.group_id)
         elif user_info and user_info.user_id:
-            fallback = self._get_recent_group_for_user(str(user_info.user_id))
-            if fallback:
-                fallback_group_id, _ = fallback
-                params["message_type"] = "group"
-                params["group_id"] = self._maybe_int(fallback_group_id)
-                self.logger.warning(
-                    f"Outgoing message missing group_info, fallback to group_id={fallback_group_id} "
-                    f"for user_id={user_info.user_id}"
-                )
-            else:
-                params["message_type"] = "private"
-                params["user_id"] = self._maybe_int(user_info.user_id)
+            params["message_type"] = "private"
+            params["user_id"] = self._maybe_int(user_info.user_id)
         else:
             self.logger.warning("Missing target info for outgoing message")
             return
