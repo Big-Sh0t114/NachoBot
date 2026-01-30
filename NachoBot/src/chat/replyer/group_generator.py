@@ -1052,6 +1052,7 @@ class DefaultReplyer:
                 reply_style=global_config.personality.reply_style,
                 keywords_reaction_prompt=keywords_reaction_prompt,
                 moderation_prompt=moderation_prompt_block,
+                gift_reaction_prompt=global_config.personality.gift_reaction_prompt,
             ), selected_expressions
         else:
             return await global_prompt_manager.format_prompt(
@@ -1073,6 +1074,7 @@ class DefaultReplyer:
                 reply_style=global_config.personality.reply_style,
                 keywords_reaction_prompt=keywords_reaction_prompt,
                 moderation_prompt=moderation_prompt_block,
+                gift_reaction_prompt=global_config.personality.gift_reaction_prompt,
             ), selected_expressions
 
     async def build_prompt_rewrite_context(
