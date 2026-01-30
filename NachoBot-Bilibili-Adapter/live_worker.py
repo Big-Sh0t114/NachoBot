@@ -80,6 +80,20 @@ class LiveRoomWorker:
         self._proxy_cycle = proxy_cycle
         return proxy_cycle
 
+    @staticmethod
+    def _safe_get_int(value: Any, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (ValueError, TypeError):
+            return default
+
+    @staticmethod
+    def _safe_get_float(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return default
+
     def _should_mark_mention(self, text: str) -> bool:
         if self.config.live_mention_any_at:
             if "@" in text or "＠" in text:
@@ -377,27 +391,19 @@ class LiveRoomWorker:
         data = payload.get("data") or {}
         # B站不同协议版本 giftName 的字段名可能不同
         gift_name = str(data.get("giftName") or data.get("gift_name") or "")
-        try:
-            # combo_num 是连击礼物时的数量
-            num = int(data.get("num") or data.get("combo_num") or 1)
-        except (ValueError, TypeError):
-            num = 1
+
+        # combo_num 是连击礼物时的数量
+        num = self._safe_get_int(data.get("num") or data.get("combo_num"), 1)
 
         user_name = str(data.get("uname") or "")
         user_id = str(data.get("uid") or "")
+
         timestamp = time.time()
         if data.get("timestamp"):
-            try:
-                timestamp = float(data["timestamp"])
-            except (ValueError, TypeError):
-                pass
+            timestamp = self._safe_get_float(data["timestamp"], timestamp)
 
         coin_type = str(data.get("coin_type") or "")
-        total_coin = 0
-        try:
-            total_coin = int(data.get("total_coin") or 0)
-        except (ValueError, TypeError):
-            pass
+        total_coin = self._safe_get_int(data.get("total_coin"), 0)
 
         # 1000 gold coins = 1 CNY
         price = 0
@@ -424,16 +430,12 @@ class LiveRoomWorker:
         user_name = str(user_info.get("uname") or "")
         user_id = str(data.get("uid") or "")
         message = str(data.get("message") or "")
-        try:
-            price = int(data.get("price") or 0)
-        except ValueError:
-            price = 0
+
+        price = self._safe_get_int(data.get("price"), 0)
+
         timestamp = time.time()
         if data.get("ts"):
-            try:
-                timestamp = float(data["ts"])
-            except ValueError:
-                pass
+            timestamp = self._safe_get_float(data["ts"], timestamp)
 
         await self.adapter.handle_incoming_superchat(
             room_id=self.room_id,
@@ -448,28 +450,17 @@ class LiveRoomWorker:
         data = payload.get("data") or {}
         user_name = str(data.get("username") or "")
         user_id = str(data.get("uid") or "")
-        try:
-            num = int(data.get("num") or 1)
-        except ValueError:
-            num = 1
-        try:
-            guard_level = int(data.get("guard_level") or 3)
-        except ValueError:
-            guard_level = 3
+
+        num = self._safe_get_int(data.get("num"), 1)
+        guard_level = self._safe_get_int(data.get("guard_level"), 3)
         gift_name = str(data.get("gift_name") or "舰长")
 
         timestamp = time.time()
         if data.get("start_time"):
-            try:
-                timestamp = float(data["start_time"])
-            except ValueError:
-                pass
+            timestamp = self._safe_get_float(data["start_time"], timestamp)
 
-        try:
-            price_coin = int(data.get("price") or 0)
-            price = price_coin // 1000
-        except ValueError:
-            price = 0
+        price_coin = self._safe_get_int(data.get("price"), 0)
+        price = price_coin // 1000
 
         await self.adapter.handle_incoming_guard(
             room_id=self.room_id,
@@ -558,6 +549,12 @@ class LiveRoomWorker:
                 message_id,
             )
 
+        # Extract Guard Level (Index 7 in info list)
+        # 0: None, 1: Governor (总督), 2: Admiral (提督), 3: Captain (舰长)
+        guard_level = 0
+        if len(info) > 7:
+            guard_level = self._safe_get_int(info[7], 0)
+
         self.adapter.remember_danmu(self.room_id, message_id, user_id)
         await self.adapter.handle_incoming_danmu(
             room_id=self.room_id,
@@ -569,6 +566,7 @@ class LiveRoomWorker:
             reply_mid=reply_mid,
             reply_dmid=reply_dmid,
             is_mentioned=is_mentioned,
+            guard_level=guard_level,
         )
 
     @staticmethod

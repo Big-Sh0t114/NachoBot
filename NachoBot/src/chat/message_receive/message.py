@@ -45,7 +45,6 @@ def _extract_urls_from_unknown_data(data: Any) -> str:
         cleaned.append(trimmed)
     return " ".join(cleaned)
 
-
 # 这个类是消息数据类，用于存储和管理消息数据。
 # 它定义了消息的属性，包括群组ID、用户ID、消息ID、原始消息内容、纯文本内容和时间戳。
 # 它还定义了两个辅助属性：keywords用于提取消息的关键词，is_plain_text用于判断消息是否为纯文本。
@@ -248,7 +247,6 @@ class MessageRecvS4U(MessageRecv):
         self.gift_info = None
         self.gift_name = None
         self.gift_count: Optional[str] = None
-        self.gift_price = 0
         self.superchat_info = None
         self.superchat_price = None
         self.superchat_message_text = None
@@ -327,21 +325,12 @@ class MessageRecvS4U(MessageRecv):
             elif segment.type == "gift":
                 self.is_voice = False
                 self.is_gift = True
-                # 解析gift_info，格式为"名称:数量" 或 "名称:数量:价格"
-                parts = segment.data.split(":")  # type: ignore
+                # 解析gift_info，格式为"名称:数量"
+                name, count = segment.data.split(":", 1)  # type: ignore
                 self.gift_info = segment.data
-                self.gift_name = parts[0].strip()
-                self.gift_count = int(parts[1].strip())
-                if len(parts) > 2:
-                    try:
-                        self.gift_price = int(parts[2].strip())
-                    except ValueError:
-                        self.gift_price = 0
-
-                # 返回描述文本，以便在 prompt 中显示
-                verb = "开通了" if self.gift_name in ["舰长", "提督", "总督"] else "送出了"
-                price_suffix = f"（价值{self.gift_price}元）" if self.gift_price > 0 else ""
-                return f"{verb} {self.gift_name} x{self.gift_count}{price_suffix}"
+                self.gift_name = name.strip()
+                self.gift_count = int(count.strip())
+                return ""
             elif segment.type == "voice_done":
                 msg_id = segment.data
                 logger.info(f"voice_done: {msg_id}")

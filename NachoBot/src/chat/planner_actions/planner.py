@@ -47,8 +47,8 @@ def _is_bot_message(message: Optional["DatabaseMessages"]) -> bool:
     if not message or not getattr(message, "user_info", None):
         return False
     user_id = str(getattr(message.user_info, "user_id", ""))
-    platform = getattr(message.user_info, "platform", None)
-    return user_id == str(global_config.bot.qq_account) and platform == global_config.bot.platform
+
+    return user_id == str(global_config.bot.qq_account)
 
 
 def _pick_latest_user_message(
@@ -374,7 +374,9 @@ class ActionPlanner:
             # 其他信息
             moderation_prompt_block = "请不要输出违法违规内容，不要输出色情，暴力，政治相关内容，如有敏感内容，请规避。"
             if advanced_on:
-                moderation_prompt_block += "\n[高级模式] 仅允许使用 reply 动作，禁止使用 no_reply、no_reply_until_call 及任何其他动作。"
+                moderation_prompt_block += (
+                    "\n[高级模式] 仅允许使用 reply 动作，禁止使用 no_reply、no_reply_until_call 及任何其他动作。"
+                )
             time_block = f"当前时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             bot_name = global_config.bot.nickname
             bot_nickname = (
@@ -420,10 +422,10 @@ class ActionPlanner:
                 name_block=name_block,
                 interest=interest,
                 plan_style=global_config.personality.plan_style,
+                gift_reaction_prompt=global_config.personality.gift_reaction_prompt,
             )
             if tts_lang_note:
                 prompt += tts_lang_note
-
 
             return prompt, message_id_list
         except Exception as e:

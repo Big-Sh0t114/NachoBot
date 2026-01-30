@@ -53,6 +53,16 @@ private_plan_style = """请你根据聊天内容,用户的最新消息和以下�
 4.no_reply是私聊中最低优先级别的选项，除非用户明确让你停止回复，否则不要选择此动作
 5.短时间内不要自主连续频繁触发tts_action，除非用户明确要求你发送语音信息
 """
+
+# Bilibili直播专属配置
+gift_reaction_prompt = """
+收到礼物（Gift）/大航海（Guard）/超级留言（SuperChat）的处理规则：
+1. 必须使用 `reply` 动作回复，且 `target_message_id` 必须设为该礼物的 message_id。
+2. 必须包含感谢语，且要明确提到礼物名称和数量（或SC金额/大航海等级）。
+3. 如果是高价值礼物（如SC、大航海），语气要更加激动和感激。
+4. 不要忽略任何高价值礼物的通知。
+"""
+
 [expression]
 # 表达学习配置
 learning_list = [['qq:114514:group', 'enable', 'enable', '0.5']]

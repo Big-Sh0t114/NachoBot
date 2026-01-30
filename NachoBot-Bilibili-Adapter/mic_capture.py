@@ -11,6 +11,7 @@ import logging
 import wave
 import struct
 import queue
+import time
 from dataclasses import dataclass
 from typing import Callable, Optional, Awaitable
 
@@ -59,9 +60,11 @@ class MicCaptureWorker:
         self._is_speaking = False
         self._silence_samples = 0
         self._samples_per_chunk = int(config.sample_rate * 0.1)  # 100ms chunks
+        self._samples_per_chunk = int(config.sample_rate * 0.1)  # 100ms chunks
         self._silence_sample_threshold = int(
             config.silence_duration * config.sample_rate / self._samples_per_chunk
         )
+        self._last_activity = 0.0
 
         # Queue to pass complete audio segments from callback thread to main thread
         self._processing_queue = queue.Queue()
@@ -70,7 +73,6 @@ class MicCaptureWorker:
         # ASR callback (to be set by adapter)
         self._asr_callback: Optional[Callable[[bytes], Awaitable[Optional[str]]]] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._last_error: Optional[str] = None
 
     def set_asr_callback(
         self, callback: Callable[[bytes], Awaitable[Optional[str]]]
@@ -93,10 +95,6 @@ class MicCaptureWorker:
     def is_paused(self) -> bool:
         return self._paused
 
-    def is_running(self) -> bool:
-        """Check if the microphone capture worker is currently running"""
-        return self._running and SOUNDDEVICE_AVAILABLE
-
     def _calculate_rms(self, audio_data: bytes) -> float:
         """Calculate RMS (root mean square) of audio data"""
         if len(audio_data) < 2:
@@ -113,6 +111,7 @@ class MicCaptureWorker:
 
     def _audio_callback(self, indata, frames, time_info, status):
         """Callback for sounddevice audio stream (runs in a separate thread)"""
+        self._last_activity = time.time()
         if status:
             self.logger.warning(f"Audio stream status: {status}")
 
@@ -270,21 +269,32 @@ class MicCaptureWorker:
                 dtype="int16",
                 blocksize=self._samples_per_chunk,
                 callback=self._audio_callback,
-            ):
+            ) as stream:
                 # Wait for running flag to be cleared
+                self._last_activity = time.time()
                 while self._running:
-                    await asyncio.sleep(0.1)
+                    if not stream.active:
+                        self.logger.error("Audio stream is no longer active!")
+                        break
+
+                    # Watchdog: If callback hasn't run for > 3 seconds, assume dead
+                    if time.time() - self._last_activity > 3.0:
+                        self.logger.error(
+                            "Audio stream Watchdog timeout (no callback for 3s)!"
+                        )
+                        break
+
+                    await asyncio.sleep(0.5)
+
+            # Ensure flag is cleared so processing loop can exit
+            self._running = False
 
             # Wait for processing loop to finish (it will exit when _running is False)
             await proc_task
-            self.logger.info("Microphone processing task finished")
 
         except Exception as e:
-            self._last_error = str(e)
-            self.logger.error(f"Microphone capture error: {e}", exc_info=True)
-        finally:
+            self.logger.error(f"Microphone capture error: {e}")
             self._running = False
-            self.logger.info("Microphone capture worker stopped")
 
     def stop(self) -> None:
         """Stop microphone capture"""
