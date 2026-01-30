@@ -64,7 +64,7 @@ def _check_ban_regex(text: str, chat: ChatStream, userinfo: UserInfo) -> bool:
     # 检查text是否为None或空字符串
     if text is None or not text:
         return False
-
+    
     for pattern in global_config.message_receive.ban_msgs_regex:
         if re.search(pattern, text):
             chat_name = chat.group_info.group_name if chat.group_info else "私聊"
@@ -128,9 +128,7 @@ class ChatBot:
                     if force_requested:
                         _apply_command_text()
                     if not advanced_manager.is_allowed(user_id):
-                        await send_api.text_to_stream(
-                            "现在的关系还不能使用此指令哦~(´-ω-`)", message.chat_stream.stream_id
-                        )
+                        await send_api.text_to_stream("现在的关系还不能使用此指令哦~(´-ω-`)", message.chat_stream.stream_id)
                         return True, "not allowed", False
                     is_group = bool(message.chat_stream and message.chat_stream.group_info)
                     if is_group and not force_allowed:
@@ -163,9 +161,7 @@ class ChatBot:
                     if force_requested:
                         _apply_command_text()
                     if not advanced_manager.is_admin(user_id):
-                        await send_api.text_to_stream(
-                            "这是只有给主人才能看的东西哦~(´-ω-`)", message.chat_stream.stream_id
-                        )
+                        await send_api.text_to_stream("这是只有给主人才能看的东西哦~(´-ω-`)", message.chat_stream.stream_id)
                         return True, "not admin", False
                     if message.chat_stream and message.chat_stream.group_info and not force_allowed:
                         await send_api.text_to_stream("注意隐私哦，主人~(´-ω-`)", message.chat_stream.stream_id)
@@ -239,9 +235,7 @@ class ChatBot:
                 if suggestions:
                     message.is_command = True
                     stream_id = message.chat_stream.stream_id if message.chat_stream else None
-                    suggestion_text = "笨蛋，错误的指令是执行不了的哦(´-ω-`) 你是不是想输入：" + " 或 ".join(
-                        f"#{cmd}" for cmd in suggestions
-                    )
+                    suggestion_text = "笨蛋，错误的指令是执行不了的哦(´-ω-`) 你是不是想输入：" + " 或 ".join(f"#{cmd}" for cmd in suggestions)
                     if stream_id:
                         await send_api.text_to_stream(suggestion_text, stream_id)
                     return True, suggestion_text, False
@@ -341,10 +335,7 @@ class ChatBot:
                 )
             # print(message_data)
             # logger.debug(str(message_data))
-            if platform == "bilibili":
-                message = MessageRecvS4U(message_data)
-            else:
-                message = MessageRecv(message_data)
+            message = MessageRecv(message_data)
             group_info = message.message_info.group_info
             user_info = message.message_info.user_info
 

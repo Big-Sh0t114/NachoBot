@@ -56,6 +56,9 @@ class PersonalityConfig(ConfigBase):
     private_plan_style: str = ""
     """私聊说话规则，行为风格"""
 
+    gift_reaction_prompt: str = ""
+    """礼物反应提示词"""
+
 
 @dataclass
 class RelationshipConfig(ConfigBase):

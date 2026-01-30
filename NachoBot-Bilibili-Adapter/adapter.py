@@ -79,7 +79,7 @@ if tts_adapter_path.exists():
 else:
     _tts_import_error = f"TTS adapter path does not exist: {tts_adapter_path}"
 
-ACCEPT_FORMAT = ["text", "reply", "command", "gift", "superchat"]
+ACCEPT_FORMAT = ["text", "reply", "command"]
 ACCEPT_FORMAT_PRIVATE = ["text", "image", "emoji", "reply", "command"]
 COMMENT_REPLY_LIMIT = 10
 COMMENT_LIMIT_FALLBACK_TEXT = "NachoBot有点口渴了哦，先休息一下啦~"
@@ -242,10 +242,13 @@ class BilibiliAdapter:
         self._comment_reply_state: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self._self_danmu_ids: Dict[int, Dict[str, float]] = {}
 
+        # TTS Buffering
+        self._tts_buffer: Dict[int, List[str]] = {}
+        self._tts_timer: Dict[int, asyncio.Task] = {}
+        self._tts_metadata: Dict[int, Dict[str, Any]] = {}
+
         # Initialize Mic Capture Worker
         self.mic_worker: Optional[MicCaptureWorker] = None
-        self.mic_task: Optional[asyncio.Task] = None
-        self._mic_restart_count = 0
         self._mic_manual_state: Optional[bool] = None
         if config.mic_asr_enable and config.mic_asr_room_id:
             mic_config = MicConfig(
@@ -326,12 +329,31 @@ class BilibiliAdapter:
             tasks.append(self._private_message_loop())
 
         if self.mic_worker:
-            self.mic_task = asyncio.create_task(self.mic_worker.start())
+            tasks.append(self._run_mic_worker_forever())
             tasks.append(self._mic_control_loop())
 
         self.audio_player.start()  # Start audio player loop
 
         await asyncio.gather(*tasks)
+
+    async def _run_mic_worker_forever(self) -> None:
+        """Keep mic worker running, restarting on failure"""
+        if not self.mic_worker:
+            return
+
+        while True:
+            try:
+                self.logger.info("Starting MicCaptureWorker...")
+                await self.mic_worker.start()
+                self.logger.warning("MicCaptureWorker exited. Restarting in 3s...")
+            except asyncio.CancelledError:
+                self.logger.info("MicCaptureWorker task cancelled")
+                break
+            except Exception as e:
+                self.logger.error(f"MicCaptureWorker crashed: {e}. Restarting in 5s...")
+                await asyncio.sleep(5)
+
+            await asyncio.sleep(3)
 
     async def _mic_control_loop(self) -> None:
         if not self.mic_worker or not self.mic_worker.config.room_id:
@@ -352,46 +374,15 @@ class BilibiliAdapter:
                     else:
                         should_pause = True
 
-                if self.mic_worker:
-                    is_running = self.mic_worker.is_running()
-                    task_done = self.mic_task.done() if self.mic_task else True
-
-                    if not is_running or task_done:
-                        if not should_pause:
-                            self.logger.warning(
-                                "MicCaptureWorker is not running! Attempting restart..."
-                            )
-                            # Cool-down to avoid tight loops if device is physically gone
-                            if self._mic_restart_count > 5:
-                                self.logger.error(
-                                    "Too many mic failures, waiting 30s before next retry."
-                                )
-                                await asyncio.sleep(30)
-                                self._mic_restart_count = 0
-
-                            self._mic_restart_count += 1
-                            if self.mic_task and not self.mic_task.done():
-                                self.mic_task.cancel()
-
-                            self.mic_task = asyncio.create_task(self.mic_worker.start())
-                            await asyncio.sleep(1)  # Give it a second to start
-                        else:
-                            # It's paused and not running, which is fine if we implement "Stop on Switch"
-                            # but currently we only pause. So if it's not running, it's still a crash.
-                            pass
-                    else:
-                        # Running fine, reset restart count
-                        self._mic_restart_count = 0
-
                 if should_pause:
-                    if self.mic_worker and not self.mic_worker.is_paused():
+                    if not self.mic_worker.is_paused():
                         self.mic_worker.pause()
                 else:
-                    if self.mic_worker and self.mic_worker.is_paused():
+                    if self.mic_worker.is_paused():
                         self.mic_worker.resume()
 
             except Exception as e:
-                self.logger.error(f"Error in mic control loop: {e}", exc_info=True)
+                self.logger.error(f"Error in mic control loop: {e}")
 
             await asyncio.sleep(5)
 
@@ -411,17 +402,16 @@ class BilibiliAdapter:
         if not text:
             return "", ""
 
-        jp_match = re.search(r"<JP>(.*?)</JP>", text, re.DOTALL)
-        zh_match = re.search(r"<ZH>(.*?)</ZH>", text, re.DOTALL)
+        # Use findall to capture all occurrences (handling recurrent tags in buffered text)
+        jp_matches = re.findall(r"<JP>(.*?)</JP>", text, re.DOTALL)
+        zh_matches = re.findall(r"<ZH>(.*?)</ZH>", text, re.DOTALL)
 
-        text_jp = jp_match.group(1).strip() if jp_match else ""
-        text_zh = zh_match.group(1).strip() if zh_match else ""
+        text_jp = "".join(m.strip() for m in jp_matches if m.strip())
+        text_zh = "".join(m.strip() for m in zh_matches if m.strip())
 
         if not text_jp and not text_zh:
             cleaned = re.sub(r"</?[A-Z]{2}>", "", text).strip()
             return "", cleaned
-
-        return text_jp, text_zh
 
         return text_jp, text_zh
 
@@ -473,6 +463,30 @@ class BilibiliAdapter:
                     "[BilibiliAdapter] Detected blocked marker in outgoing text, replaced with Filtered"
                 )
                 return "Filtered"
+        return text
+
+    @staticmethod
+    def _sanitize_user_text(text: str) -> str:
+        """
+        Sanitize user text to prevent spoofing system events.
+        If a user message looks like a system gift notification, prefix it to clarify source.
+        """
+        if not text:
+            return ""
+
+        # Patterns that look like system events
+        # "送出了 xxx xN (价值...)"
+        # "开通了 xxx xN"
+        suspicious_prefixes = ("送出了", "开通了")
+
+        # Check if it starts with suspicious prefix AND contains "x" followed by a number
+        if text.startswith(suspicious_prefixes) and re.search(r" x\d+", text):
+            return f"[用户发言] {text}"
+
+        # Check for SuperChat spoofing
+        if "（注意：这是一条超级弹幕信息，价值" in text:
+            return f"[用户发言] {text}"
+
         return text
 
     @staticmethod
@@ -572,7 +586,13 @@ class BilibiliAdapter:
         if not self._screen_host_room_id or room_id != self._screen_host_room_id:
             return None
         manual_state = self._get_screen_manual_state()
-        if manual_state is not True:
+        if manual_state is False:
+            return None
+
+        if manual_state is True:
+            pass  # Force enabled, skip live check
+        else:
+            # None (auto mode)
             live_status = await self._get_live_status(room_id)
             if live_status != 1:
                 return None
@@ -588,9 +608,7 @@ class BilibiliAdapter:
     def _inject_screen_summary(prompt: str, summary: str) -> str:
         if not prompt or not summary:
             return prompt
-        # Escape braces to prevent them from being interpreted as prompt placeholders
-        escaped_summary = summary.replace("{", "\\{").replace("}", "\\}")
-        screen_block = f"【直播画面】{escaped_summary}"
+        screen_block = f"【直播画面】{summary}"
         placeholder = "{extra_info_block}"
         if placeholder in prompt:
             return prompt.replace(placeholder, f"{placeholder}\n{screen_block}")
@@ -629,8 +647,15 @@ class BilibiliAdapter:
             return True
         enable = command == "#screen_on"
         self._screen_manual_state = enable
-        self._screen_manual_until = time.time() + self._screen_manual_duration_seconds
-        action = "enabled" if enable else "disabled"
+        if enable:
+            self._screen_manual_until = (
+                time.time() + self._screen_manual_duration_seconds
+            )
+        else:
+            # Permanent off until next command or restart
+            self._screen_manual_until = float("inf")
+
+        action = "enabled" if enable else "permanently disabled"
         self.logger.info(
             "Screen monitor manual %s for %s seconds by user_id=%s",
             action,
@@ -654,17 +679,14 @@ class BilibiliAdapter:
 
         command = text.strip().lower()
         if command not in ("#asr_on", "#asr_off"):
-            # Not a mic command
             return False
 
-        # Use screen_manual_user_ids as the "authorized users" for manual overrides
         if self._screen_manual_user_ids and user_id not in self._screen_manual_user_ids:
             self.logger.warning(
-                "Mic manual command rejected (Unauthenticated): room_id=%s user_id=%s user_name=%s cmd=%s",
+                "Mic manual command rejected: room_id=%s user_id=%s user_name=%s",
                 room_id,
                 user_id,
                 user_name,
-                command,
             )
             return True
 
@@ -672,22 +694,202 @@ class BilibiliAdapter:
         self._mic_manual_state = enable
 
         action = "force enabled" if enable else "force disabled"
-        self.logger.info(
-            "Mic capture %s by user_id=%s (%s)", action, user_id, user_name
-        )
-
-        # Trigger immediate loop check if possible? No, sleep(5) is fine,
-        # but let's log current worker state
-        if self.mic_worker:
-            self.logger.info(
-                f"Worker state: running={self.mic_worker.is_running()}, paused={self.mic_worker.is_paused()}"
-            )
-            if not self.mic_worker.is_running():
-                self.logger.error("CANNOT toggle mic: MicCaptureWorker is NOT RUNNING.")
-
+        self.logger.info("Mic capture %s by user_id=%s", action, user_id)
         return True
 
+    def _get_template_info(
+        self, room_id: int, user_id: str, prompt_text: str
+    ) -> Optional[TemplateInfo]:
+        """
+        Helper to resolve template info for live events (Gift/SC/Guard).
+        """
+        reply_prompt, planner_prompt = self._resolve_live_prompts(room_id)
+        if not reply_prompt and not planner_prompt:
+            return None
+
+        # Inject screen summary if available (optional for events, but good for context)
+        # However, getting screen summary is async, and this helper is sync in usage pattern?
+        # Usage: template_info = self._get_template_info(...) inside async methods.
+        # But wait, the original usage didn't await it?
+        # "template_info = self._get_template_info(room_id, user_id, prompt_text)"
+        # If it's sync, we can't await _get_screen_summary.
+        # Let's keep it simple for events: just resolve prompts.
+
+        template_items: Dict[str, str] = {}
+        if reply_prompt:
+            template_items["replyer_prompt"] = reply_prompt
+        if planner_prompt:
+            template_items["brain_planner_prompt"] = planner_prompt
+            template_items["planner_prompt"] = planner_prompt
+
+        return TemplateInfo(
+            template_items=template_items,
+            template_name=f"bilibili_live_{room_id}",
+        )
+
     # ========== Incoming Message Handlers ==========
+
+    async def _handle_test_command(
+        self,
+        room_id: int,
+        user_id: str,
+        text: str,
+        user_name: str,
+    ) -> bool:
+        """
+        Handle test commands for simulating live events.
+        Only allows owner (dede_user_id) to trigger.
+        Commands:
+        - #test_gift: Simulate sending a gift
+        - #test_sc <msg>: Simulate sending a superchat
+        - #test_guard: Simulate opening a guard
+        - #test_clear: Clear any temporary test state (placeholder)
+        """
+        if not (text.startswith("#test_") or text.startswith("#guard_")):
+            return False
+
+        # Security check: allow dede_user_id or manual control users
+        allowed_ids = {str(self.config.dede_user_id)}
+        if self.config.screen_manual_user_ids:
+            allowed_ids.update(str(uid) for uid in self.config.screen_manual_user_ids)
+
+        if str(user_id) not in allowed_ids:
+            # Optional: Log attempt?
+            # self.logger.warning(f"Unauthorized test command from {user_id}: {text}")
+            return False
+
+        if str(user_id) not in allowed_ids:
+            return False
+
+        # Robust parsing for commands that might be contiguous like #guard_enable=[...]
+        cmd = text.split(" ")[0].split("=")[0].split("[")[0].strip()
+        arg = ""
+        # Try to extract argument part based on cmd length
+        if len(text) > len(cmd):
+            # The rest of the string is potential reference, but be careful of delimiters
+            # e.g. "#guard_enable=[...]" -> cmd="#guard_enable"
+            # We want arg="[...]"
+            # Find closest delimiter index after cmd
+            candidate_arg = text[len(cmd) :].strip()
+            if (
+                candidate_arg.startswith("=")
+                or candidate_arg.startswith("[")
+                or candidate_arg.startswith(" ")
+            ):
+                # Strip leading delimiters if it's just a separator, but [ might be part of JSON-like structure
+                # Actually for #guard_enable=[...], the arg is [level:...]
+                # For #test_sc msg, the arg is msg
+                # Let's just strip leading space/equals, but preserve brackets for structure
+                arg = candidate_arg.lstrip(" =")
+
+        self.logger.info(f"Test command triggered: {cmd} args={arg} by {user_name}")
+
+        now_ts = time.time()
+
+        try:
+            if cmd == "#test_gift":
+                await self.handle_incoming_gift(
+                    room_id=room_id,
+                    gift_name="测试礼物(TestGift)",
+                    num=1,
+                    user_id=user_id,
+                    user_name=user_name,
+                    timestamp=now_ts,
+                    price=100,  # Simulate a paid gift
+                )
+                await self._send_danmu(
+                    room_id, "【测试】已触发模拟礼物事件", None, None
+                )
+                return True
+
+            elif cmd == "#test_sc":
+                msg = arg if arg else "这是测试SC内容(Test SC Message)"
+                await self.handle_incoming_superchat(
+                    room_id=room_id,
+                    message_text=msg,
+                    price=30,
+                    user_id=user_id,
+                    user_name=user_name,
+                    timestamp=now_ts,
+                )
+                await self._send_danmu(room_id, "【测试】已触发模拟SC事件", None, None)
+                return True
+
+                return True
+
+            elif cmd == "#guard_enable":
+                # Parse args format: [level:<G/A/C>,message:<text>]
+                # Simplified parsing: looking for pattern or just simplistic split
+                # Expected arg: "[level:G,message:Hello]" or similar
+
+                target_level = 0
+                target_msg = "Test VIP Message"
+
+                if arg:
+                    # Remove brackets
+                    clean_arg = arg.strip("[]")
+                    parts = clean_arg.split(",")
+                    for part in parts:
+                        if ":" in part:
+                            key, val = part.split(":", 1)
+                            key = key.strip().lower()
+                            val = val.strip()
+                            if key == "level":
+                                if val.upper() == "G":
+                                    target_level = 1
+                                elif val.upper() == "A":
+                                    target_level = 2
+                                elif val.upper() == "C":
+                                    target_level = 3
+                            elif key == "message":
+                                target_msg = val
+
+                if target_level > 0:
+                    await self.handle_incoming_danmu(
+                        room_id=room_id,
+                        message_id=str(uuid.uuid4()),
+                        text=target_msg,
+                        user_id=user_id,
+                        user_name=user_name,
+                        timestamp=now_ts,
+                        guard_level=target_level,
+                    )
+                    await self._send_danmu(
+                        room_id,
+                        f"【测试】模拟身份发言: Lv{target_level} - {target_msg}",
+                        None,
+                        None,
+                    )
+                else:
+                    await self._send_danmu(
+                        room_id,
+                        "【测试】参数错误，用法: #guard_enable=[level:G/A/C,message:内容]",
+                        None,
+                        None,
+                    )
+                return True
+
+            elif cmd == "#test_guard":
+                await self.handle_incoming_guard(
+                    room_id=room_id,
+                    guard_name="舰长(Captain)",
+                    num=1,
+                    user_id=user_id,
+                    user_name=user_name,
+                    timestamp=now_ts,
+                    guard_level=3,
+                )
+                await self._send_danmu(
+                    room_id, "【测试】已触发模拟上舰事件", None, None
+                )
+                return True
+
+        except Exception as e:
+            self.logger.error(f"Test command execution failed: {e}")
+            await self._send_danmu(room_id, f"【测试】执行失败: {e}", None, None)
+            return True  # Still consume the message so it doesn't loop as normal chat
+
+        return False
 
     async def handle_incoming_danmu(
         self,
@@ -700,6 +902,7 @@ class BilibiliAdapter:
         reply_mid: str = "",
         reply_dmid: str = "",
         is_mentioned: bool = False,
+        guard_level: int = 0,
     ) -> None:
         if not text:
             return
@@ -707,9 +910,29 @@ class BilibiliAdapter:
             return
         if self._handle_screen_manual_command(room_id, user_id, text, user_name):
             return
-
-        template_info = await self._get_template_info(room_id, user_id, text)
-
+        if await self._handle_test_command(room_id, user_id, text, user_name):
+            return
+        template_info = None
+        screen_summary = await self._get_screen_summary(room_id, user_id, text)
+        reply_prompt, planner_prompt = self._resolve_live_prompts(room_id)
+        if screen_summary:
+            reply_prompt = self._inject_screen_summary(reply_prompt, screen_summary)
+            if planner_prompt:
+                planner_prompt = self._inject_screen_summary(
+                    planner_prompt, screen_summary
+                )
+        if reply_prompt or planner_prompt:
+            template_items: Dict[str, str] = {}
+            if reply_prompt:
+                template_items["replyer_prompt"] = reply_prompt
+            if planner_prompt:
+                template_items["brain_planner_prompt"] = planner_prompt
+                template_items["planner_prompt"] = planner_prompt
+            template_info = TemplateInfo(
+                template_items=template_items,
+                template_name=f"bilibili_live_{room_id}",
+                template_default=False,
+            )
         additional_config = {
             "room_id": room_id,
             "reply_mid": reply_mid,
@@ -718,10 +941,38 @@ class BilibiliAdapter:
         if is_mentioned:
             additional_config["is_mentioned"] = 1.0
 
-        processed_text = text
+        if is_mentioned:
+            additional_config["is_mentioned"] = 1.0
+
+        # Sanitize text to prevent spoofing
+        processed_text = self._sanitize_user_text(text)
+
         if self.config.live_disable_network_search:
             processed_text = _mask_urls(processed_text)
             additional_config["disable_tools"] = True
+
+        # If has guard level, force mention to ensure processing if desired, or at least give priority
+        # Guard Levels: 1=Governor (Zongdu), 2=Admiral (Tidu), 3=Captain (Jianzhang)
+        # We assign higher priority to higher ranks
+        priority_segment = None
+        if guard_level > 0:
+            # VIP Logic
+            priority_score = 1000.0  # Default Captain
+            if guard_level == 1:
+                priority_score = 2000.0  # Governor (Highest)
+            elif guard_level == 2:
+                priority_score = 1500.0  # Admiral
+
+            # Ensure VIPs are treated as mentioned so bot pays attention
+            additional_config["is_mentioned"] = 1.0
+
+            priority_segment = Seg(
+                type="priority_info",
+                data={
+                    "message_type": "vip",
+                    "message_priority": priority_score,
+                },
+            )
 
         message_info = BaseMessageInfo(
             platform=self.config.platform,
@@ -744,9 +995,17 @@ class BilibiliAdapter:
             template_info=template_info,
             additional_config=additional_config,
         )
+
+        # Construct message content
+        text_segment = Seg(type="text", data=processed_text)
+
+        final_segment = text_segment
+        if priority_segment:
+            final_segment = Seg(type="seglist", data=[priority_segment, text_segment])
+
         message = MessageBase(
             message_info=message_info,
-            message_segment=Seg(type="text", data=processed_text),
+            message_segment=final_segment,
             raw_message=None,
         )
         await self._send_to_nachobot(message)
@@ -762,16 +1021,26 @@ class BilibiliAdapter:
         price: int = 0,
     ) -> None:
         self.logger.info(
-            f"Gift: [{room_id}] {user_name}({user_id}) sent {gift_name} x{num} (Price: {price} CNY)"
+            f"Gift: [{room_id}] {user_name}({user_id}) sent {gift_name} x{num} (Price: {price})"
         )
 
-        gift_data = f"{gift_name}:{num}:{price}"
-        segments = [Seg(type="gift", data=gift_data)]
+        # Build prompt using helper
+        prompt_text = f"送出了 {gift_name} x{num}"
+        template_info = self._get_template_info(room_id, user_id, prompt_text)
+
+        # Prepare additional config for high value gifts logic if needed
+        # Ensuring mention logic is consistent
+        additional_config = {}
+        # if template_info:
+        #    additional_config = template_info.additional_config or {}
+
+        # Force mention for gifts to ensure reaction
+        additional_config["is_mentioned"] = 1.0
 
         message_info = BaseMessageInfo(
             platform=self.config.platform,
-            message_id=f"gift_{room_id}_{user_id}_{int(timestamp * 1000)}_{uuid.uuid4().hex[:8]}",
-            time=float(timestamp),
+            message_id=str(uuid.uuid4()),
+            time=timestamp,
             user_info=UserInfo(
                 platform=self.config.platform,
                 user_id=user_id,
@@ -786,16 +1055,29 @@ class BilibiliAdapter:
                 content_format=["text"],
                 accept_format=ACCEPT_FORMAT,
             ),
-            template_info=await self._get_template_info(room_id, user_id),
-            additional_config={"room_id": room_id, "is_mentioned": 1.0},
+            template_info=template_info,
+            additional_config=additional_config,
         )
+
+        # Use seglist to include both gift info and text prompt
+        # Gift segment format for S4U: "name:count"
+        gift_segment = Seg(type="gift", data=f"{gift_name}:{num}")
+        text_segment = Seg(type="text", data=prompt_text)
 
         message = MessageBase(
             message_info=message_info,
-            message_segment=Seg(type="seglist", data=segments),
-            raw_message=f"送出了 {gift_name} x{num}",
+            message_segment=Seg(type="seglist", data=[gift_segment, text_segment]),
+            raw_message=json.dumps(
+                {
+                    "type": "gift",
+                    "gift_name": gift_name,
+                    "num": num,
+                    "price": price,
+                    "room_id": room_id,
+                },
+                ensure_ascii=True,
+            ),
         )
-
         await self._send_to_nachobot(message)
 
     async def _handle_mic_recognition(self, text: str) -> None:
@@ -882,7 +1164,7 @@ class BilibiliAdapter:
                 content_format=["text"],
                 accept_format=ACCEPT_FORMAT,
             ),
-            template_info=await self._get_template_info(room_id, "2146014839", text),
+            template_info=None,
             additional_config=additional_config,
         )
 
@@ -907,16 +1189,24 @@ class BilibiliAdapter:
         timestamp: float,
     ) -> None:
         self.logger.info(
-            f"SuperChat: [{room_id}] {user_name}({user_id}): [￥{price}] {message_text}"
+            f"SuperChat: [{room_id}] {user_name}({user_id}): {message_text} (Price: {price} CNY)"
         )
 
-        sc_data = f"{price}:{message_text}"
-        segments = [Seg(type="superchat", data=sc_data)]
+        # Build prompt using helper
+        prompt_text = f"发送了超级弹幕(SC)：{message_text} (价值 {price} 元)"
+        template_info = self._get_template_info(room_id, user_id, prompt_text)
+
+        additional_config = {}
+        # if template_info:
+        #    additional_config = template_info.additional_config or {}
+
+        # Force mention for SC to ensure reaction
+        additional_config["is_mentioned"] = 1.0
 
         message_info = BaseMessageInfo(
             platform=self.config.platform,
-            message_id=f"sc_{room_id}_{user_id}_{int(timestamp * 1000)}_{uuid.uuid4().hex[:8]}",
-            time=float(timestamp),
+            message_id=str(uuid.uuid4()),
+            time=timestamp,
             user_info=UserInfo(
                 platform=self.config.platform,
                 user_id=user_id,
@@ -931,14 +1221,29 @@ class BilibiliAdapter:
                 content_format=["text"],
                 accept_format=ACCEPT_FORMAT,
             ),
-            template_info=await self._get_template_info(room_id, user_id, message_text),
-            additional_config={"room_id": room_id, "is_mentioned": 1.0},
+            template_info=template_info,
+            additional_config=additional_config,
         )
+
+        # Use superchat segment so S4U recognizes it
+        # Superchat segment format: "price:text"
+        sc_segment = Seg(type="superchat", data=f"{price}:{message_text}")
+        text_segment = Seg(type="text", data=prompt_text)
+
+        final_segment = Seg(type="seglist", data=[sc_segment, text_segment])
 
         message = MessageBase(
             message_info=message_info,
-            message_segment=Seg(type="seglist", data=segments),
-            raw_message=f"[SC￥{price}] {message_text}",
+            message_segment=final_segment,
+            raw_message=json.dumps(
+                {
+                    "type": "superchat",
+                    "text": message_text,
+                    "price": price,
+                    "room_id": room_id,
+                },
+                ensure_ascii=True,
+            ),
         )
 
         await self._send_to_nachobot(message)
@@ -952,28 +1257,25 @@ class BilibiliAdapter:
         user_name: str,
         timestamp: float,
         guard_level: int = 3,
-        price: int = 0,
     ) -> None:
         self.logger.info(
-            f"Guard: [{room_id}] {user_name}({user_id}) bought {guard_name} x{num} (Price: {price} CNY)"
+            f"Guard: [{room_id}] {user_name}({user_id}) became {guard_name} (Level: {guard_level}) - PATCHED_VERIFIED"
         )
 
-        gift_data = f"{guard_name}:{num}:{price}"
-        priority_data = {
-            "message_type": "vip",
-            "message_priority": 1000.0,
-            "guard_level": guard_level,
-        }
+        prompt_text = f"开通了 {guard_name} ({num} 个月)"
+        template_info = self._get_template_info(room_id, user_id, prompt_text)
 
-        segments = [
-            Seg(type="gift", data=gift_data),
-            Seg(type="priority_info", data=json.dumps(priority_data)),
-        ]
+        additional_config = {}
+        # if template_info:
+        #    additional_config = template_info.additional_config or {}
+
+        # Force mention for Guardian to ensure reaction
+        additional_config["is_mentioned"] = 1.0
 
         message_info = BaseMessageInfo(
             platform=self.config.platform,
-            message_id=f"guard_{room_id}_{user_id}_{int(timestamp * 1000)}_{uuid.uuid4().hex[:8]}",
-            time=float(timestamp),
+            message_id=str(uuid.uuid4()),
+            time=timestamp,
             user_info=UserInfo(
                 platform=self.config.platform,
                 user_id=user_id,
@@ -988,50 +1290,38 @@ class BilibiliAdapter:
                 content_format=["text"],
                 accept_format=ACCEPT_FORMAT,
             ),
-            template_info=await self._get_template_info(room_id, user_id),
-            additional_config={"room_id": room_id, "is_mentioned": 1.0},
+            template_info=template_info,
+            additional_config=additional_config,
         )
+
+        # Priority Info for VIP
+        priority_segment = Seg(
+            type="priority_info",
+            data={
+                "message_type": "vip",
+                "message_priority": 1000.0,
+            },
+        )
+        text_segment = Seg(type="text", data=prompt_text)
 
         message = MessageBase(
             message_info=message_info,
-            message_segment=Seg(type="seglist", data=segments),
-            raw_message=f"开通了 {guard_name} x{num}",
+            message_segment=Seg(type="seglist", data=[priority_segment, text_segment]),
+            raw_message=json.dumps(
+                {
+                    "type": "guard",
+                    "guard_name": guard_name,
+                    "num": num,
+                    "level": guard_level,
+                    "room_id": room_id,
+                },
+                ensure_ascii=True,
+            ),
         )
 
         await self._send_to_nachobot(message)
 
     # ========== Prompt Resolution ==========
-
-    async def _get_template_info(
-        self, room_id: int, user_id: str = "", text: str = ""
-    ) -> Optional[TemplateInfo]:
-        reply_prompt, planner_prompt = self._resolve_live_prompts(room_id)
-
-        # Inject screen summary if text is provided
-        if text:
-            screen_summary = await self._get_screen_summary(room_id, user_id, text)
-            if screen_summary:
-                reply_prompt = self._inject_screen_summary(reply_prompt, screen_summary)
-                if planner_prompt:
-                    planner_prompt = self._inject_screen_summary(
-                        planner_prompt, screen_summary
-                    )
-
-        if not (reply_prompt or planner_prompt):
-            return None
-
-        template_items: Dict[str, str] = {}
-        if reply_prompt:
-            template_items["replyer_prompt"] = reply_prompt
-        if planner_prompt:
-            template_items["brain_planner_prompt"] = planner_prompt
-            template_items["planner_prompt"] = planner_prompt
-
-        return TemplateInfo(
-            template_items=template_items,
-            template_name=f"bilibili_live_{room_id}",
-            template_default=False,
-        )
 
     @staticmethod
     def _build_live_plan_block(room_prompts: Optional[Dict[str, str]]) -> str:
@@ -1067,45 +1357,14 @@ class BilibiliAdapter:
         reply_prompt = self.config.live_reply_prompt
         planner_prompt = self.config.live_planner_prompt
         room_prompts = self.config.live_room_prompts.get(room_id)
-
-        # Resolve gift reaction prompt
-        gift_reaction = ""
-        if room_prompts:
-            gift_reaction = str(room_prompts.get("gift_reaction_prompt", "") or "")
-        if not gift_reaction:
-            gift_reaction = self.config.live_gift_reaction_prompt
-
-        if not gift_reaction:
-            gift_reaction = (
-                "\n**礼物与打赏反应指南**\n"
-                "1. 识别格式：收到礼物时，你会看到“送出了 [礼物名] x[数量]（价值[金额]元）”。超级弹幕（SuperChat）也会标注价值。\n"
-                "2. 反应级别：\n"
-                "   - **小额礼物（< 10元）**：口头快速感谢，保持自然聊天。\n"
-                "   - **中额礼物（10-50元）**：热情感谢，可以停下当前话题互动几句。\n"
-                "   - **大额礼物（> 50元）**：郑重且真诚地感谢，如果对方有留言，请务必优先且认真回复。\n"
-                "3. 语气：保持你的个性，但对打赏者应表现出基本的礼貌和感激。\n"
-            )
-
-        def replace_gift_prompt(p: str) -> str:
-            if not p:
-                return p
-            placeholder = "{gift_reaction_prompt}"
-            if placeholder in p:
-                return p.replace(placeholder, gift_reaction)
-            return p
-
-        reply_prompt = replace_gift_prompt(reply_prompt)
-        planner_prompt = replace_gift_prompt(planner_prompt)
-
         live_plan_block = self._build_live_plan_block(room_prompts)
         if room_prompts is not None:
             room_reply = str(room_prompts.get("reply_prompt", "") or "")
             room_planner = str(room_prompts.get("planner_prompt", "") or "")
             if room_reply:
-                reply_prompt = replace_gift_prompt(room_reply)
+                reply_prompt = room_reply
             if room_planner:
-                planner_prompt = replace_gift_prompt(room_planner)
-
+                planner_prompt = room_planner
         if reply_prompt and live_plan_block:
             reply_prompt = self._inject_live_plan_into_prompt(
                 reply_prompt, live_plan_block
@@ -1451,7 +1710,15 @@ class BilibiliAdapter:
         reply_dmid: Optional[str],
     ) -> None:
         text = self._filter_outgoing_text(text)
-        segments = _split_bilibili_text(text, max_length=BILIBILI_DANMU_MAX_LENGTH)
+
+        # Check if TTS is enabled for this room
+        max_len = BILIBILI_DANMU_MAX_LENGTH
+        room_prompts = self.config.live_room_prompts.get(room_id, {})
+        tts_config = room_prompts.get("tts", {})
+        if tts_config.get("enable", False):
+            max_len = 9999
+
+        segments = _split_bilibili_text(text, max_length=max_len)
         if not segments:
             self.logger.warning("Empty danmu after splitting")
             return
@@ -1533,6 +1800,116 @@ class BilibiliAdapter:
                     return True
         return False
 
+    async def _wait_and_process_tts(self, room_id: int, delay: float = 0.5) -> None:
+        """Helper to wait and trigger processing."""
+        try:
+            await asyncio.sleep(delay)
+            await self._process_buffered_live_reply(room_id)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            self.logger.error(f"TTS timer error: {e}")
+
+    async def _process_buffered_live_reply(self, room_id: int) -> None:
+        """Process buffered messages for a room after delay."""
+        try:
+            buffer = self._tts_buffer.get(room_id)
+            if not buffer:
+                return
+
+            # Combine text parts
+            # Use empty string join based on verification for bilingual text
+            full_text = "".join(buffer)
+
+            # Smart Buffering: Check for unbalanced tags
+            open_zh = full_text.count("<ZH>")
+            close_zh = full_text.count("</ZH>")
+            open_jp = full_text.count("<JP>")
+            close_jp = full_text.count("</JP>")
+
+            is_balanced = (open_zh == close_zh) and (open_jp == close_jp)
+
+            # Debug log for smart buffering
+            self.logger.info(
+                f"SmartBuffering Check: balanced={is_balanced} (ZH:{open_zh}/{close_zh} JP:{open_jp}/{close_jp}) "
+                f"len={len(full_text)} content={repr(full_text[:100])}..."
+            )
+
+            metadata = self._tts_metadata.get(room_id, {})
+            start_time = metadata.get("start_time", 0)
+            elapsed = time.time() - start_time
+
+            # If unbalanced data and we haven't waited too long (e.g., 8s), extend wait
+            if not is_balanced and elapsed < 8.0:
+                self.logger.info(
+                    f"Buffered TTS text unbalanced (ZH:{open_zh}/{close_zh} JP:{open_jp}/{close_jp}), extending wait... (elapsed={elapsed:.1f}s)"
+                )
+                self._tts_timer[room_id] = asyncio.create_task(
+                    self._wait_and_process_tts(room_id, delay=1.0)
+                )
+                return
+
+            # Proceed to flush
+            self._tts_buffer[room_id] = []
+
+            # Clear timer reference
+            self._tts_timer.pop(room_id, None)
+
+            # Clear metadata
+            self._tts_metadata.pop(room_id, None)
+
+            reply_mid = metadata.get("reply_mid")
+            reply_dmid = metadata.get("reply_dmid")
+
+            self.logger.info(
+                f"Processing buffered TTS reply for room {room_id}: {full_text[:50]}..."
+            )
+
+            room_config = self.config.live_room_prompts.get(room_id, {})
+            tts_config = room_config.get("tts", {})
+
+            if self.tts_model:
+                text_jp, text_zh = self._parse_bilingual_response(full_text)
+                display_text = text_zh if text_zh else full_text
+                tts_text = text_jp if text_jp else ""
+
+                subtitle_path = str(tts_config.get("subtitle_path") or "subtitles.txt")
+                self._update_subtitle(display_text, subtitle_path=subtitle_path)
+
+                if tts_text:
+                    cleaned_tts_text = _clean_text_for_tts(tts_text)
+                    self.logger.info(
+                        f"TTS Generating for room {room_id}: {cleaned_tts_text}"
+                    )
+                    try:
+                        audio_data = await self.tts_model.tts(
+                            text=cleaned_tts_text, platform=self.config.platform
+                        )
+                        await self._play_audio(audio_data)
+                        self.logger.info(f"TTS Played successfully for room {room_id}")
+                        return
+                    except Exception as e:
+                        self.logger.error(f"TTS generation failed: {e}")
+                        self.logger.info("Fallback to sending danmu due to TTS error")
+                else:
+                    self.logger.warning(
+                        f"TTS enabled for room {room_id} but no Japanese text parsed. Sending raw text as danmu."
+                    )
+                    msg_to_send = text_zh if text_zh else full_text
+                    await self._send_danmu(
+                        room_id, msg_to_send, reply_mid or None, reply_dmid or None
+                    )
+                    return
+
+            await self._send_danmu(
+                room_id, full_text, reply_mid or None, reply_dmid or None
+            )
+
+        except Exception as e:
+            self.logger.error(f"Error processing buffered TTS reply: {e}")
+            self._tts_buffer.pop(room_id, None)
+            self._tts_metadata.pop(room_id, None)
+
     # ========== Command Handlers ==========
 
     async def _handle_command(self, message: MessageBase) -> None:
@@ -1591,6 +1968,7 @@ class BilibiliAdapter:
 
     async def _handle_live_reply(self, args: Dict[str, Any]) -> None:
         text = _strip_emoji(str(args.get("message") or "")).strip()
+        text = self._filter_outgoing_text(text)
         if not text:
             return
 
@@ -1613,40 +1991,31 @@ class BilibiliAdapter:
             f"TTS Debug: room_id={room_id}, tts_enable={tts_enable}, tts_model={self.tts_model is not None}"
         )
 
-        if tts_enable and self.tts_model:
-            text_jp, text_zh = self._parse_bilingual_response(text)
+        if tts_enable:
+            # Buffer the text
+            buffer = self._tts_buffer.setdefault(room_id, [])
+            buffer.append(text)
 
-            display_text = text_zh if text_zh else text
-            tts_text = text_jp if text_jp else ""
+            # Save metadata if this is the start of a buffer
+            if room_id not in self._tts_metadata:
+                self._tts_metadata[room_id] = {
+                    "reply_mid": reply_mid,
+                    "reply_dmid": reply_dmid,
+                    "start_time": time.time(),
+                }
 
-            subtitle_path = str(tts_config.get("subtitle_path") or "subtitles.txt")
-            self._update_subtitle(display_text, subtitle_path=subtitle_path)
+            # Reset timer
+            if room_id in self._tts_timer:
+                self._tts_timer[room_id].cancel()
 
-            if tts_text:
-                cleaned_tts_text = _clean_text_for_tts(tts_text)
-                self.logger.info(
-                    f"TTS Generating for room {room_id}: {cleaned_tts_text}"
-                )
-                try:
-                    audio_data = await self.tts_model.tts(
-                        text=cleaned_tts_text, platform=self.config.platform
-                    )
-                    await self._play_audio(audio_data)
-                    self.logger.info(f"TTS Played successfully for room {room_id}")
-                    return
-                except Exception as e:
-                    self.logger.error(f"TTS generation failed: {e}")
-                    self.logger.info("Fallback to sending danmu due to TTS error")
-            else:
-                self.logger.warning(
-                    f"TTS enabled for room {room_id} but no Japanese text parsed. Sending raw text as danmu."
-                )
-                msg_to_send = text_zh if text_zh else text
-                await self._send_danmu(
-                    room_id, msg_to_send, reply_mid or None, reply_dmid or None
-                )
-                return
+            # Start new timer (0.5s)
+            self._tts_timer[room_id] = asyncio.create_task(
+                self._wait_and_process_tts(room_id)
+            )
+            return
 
+        # Original non-TTS logic below
+        # (Actually, we can just execute the immediate logic here if not TTS)
         await self._send_danmu(room_id, text, reply_mid or None, reply_dmid or None)
 
     async def _handle_private_send(
@@ -1691,6 +2060,43 @@ class BilibiliAdapter:
         await self.router.send_message(message)
 
     # ========== Private Message Loop ==========
+
+    @staticmethod
+    def _render_gift_text(gift_name: str, num: int, price: int = 0) -> str:
+        """Render gift event to human-readable text."""
+        verb = "开通了" if gift_name in ["舰长", "提督", "总督"] else "送出了"
+        price_suffix = f"（价值{price}元）" if price > 0 else ""
+        return f"{verb} {gift_name} x{num}{price_suffix}"
+
+    async def _create_live_message_info(
+        self,
+        message_id: str,
+        timestamp: float,
+        room_id: int,
+        user_id: str,
+        user_name: str,
+        additional_config: Optional[Dict[str, Any]] = None,
+    ) -> BaseMessageInfo:
+        return BaseMessageInfo(
+            platform=self.config.platform,
+            message_id=message_id,
+            time=float(timestamp),
+            user_info=UserInfo(
+                platform=self.config.platform,
+                user_id=user_id,
+                user_nickname=user_name,
+            ),
+            group_info=GroupInfo(
+                platform=self.config.platform,
+                group_id=str(room_id),
+                group_name=str(room_id),
+            ),
+            format_info=FormatInfo(
+                content_format=["text"],
+                accept_format=ACCEPT_FORMAT,
+            ),
+            additional_config=additional_config,
+        )
 
     async def _private_message_loop(self) -> None:
         while True:
