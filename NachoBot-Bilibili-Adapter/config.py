@@ -70,13 +70,14 @@ class AdapterConfig:
     response_filter_enable: bool
     response_filter_blocked_markers: List[str]
     log_level: str
-    # Mic ASR config
     mic_asr_enable: bool
     mic_asr_room_id: int
     mic_asr_subtitle_path: str
     mic_asr_silence_threshold: float
     mic_asr_silence_duration: float
     mic_asr_sample_rate: int
+    # Live Streamer mode config (per room)
+    live_streamer_configs: Dict[int, "LiveStreamerConfig"]
 
 
 @dataclass
@@ -103,6 +104,20 @@ class AsrModelConfig:
     model: str
     timeout: int
     client_type: str
+
+
+@dataclass
+class LiveStreamerConfig:
+    """Configuration for Live Streamer mode."""
+
+    enable: bool = False
+    danmu_window_seconds: int = 480  # 8 minutes
+    wait_min_seconds: float = 3.0
+    wait_max_seconds: float = 10.0
+    thinking_prompt: str = ""
+    diverge_prompt: str = ""
+    polish_prompt: str = ""
+    priority_event_prompt: str = ""
 
 
 def _load_toml(path: Path) -> Dict[str, Any]:
@@ -292,6 +307,7 @@ def load_config(path: Path) -> AdapterConfig:
 
     room_prompts_raw = live.get("room_prompts", {}) or {}
     room_prompts: Dict[int, Dict[str, Any]] = {}
+    live_streamer_configs: Dict[int, LiveStreamerConfig] = {}
     host_room_ids: List[int] = []
     if isinstance(room_prompts_raw, dict):
         for key, value in room_prompts_raw.items():
@@ -317,6 +333,24 @@ def load_config(path: Path) -> AdapterConfig:
             }
             if host_flag:
                 host_room_ids.append(room_id)
+
+            # Parse live_streamer config for this room
+            streamer_raw = value.get("live_streamer", {}) or {}
+            if isinstance(streamer_raw, dict) and streamer_raw.get("enable"):
+                live_streamer_configs[room_id] = LiveStreamerConfig(
+                    enable=bool(streamer_raw.get("enable", False)),
+                    danmu_window_seconds=int(
+                        streamer_raw.get("danmu_window_seconds", 480)
+                    ),
+                    wait_min_seconds=float(streamer_raw.get("wait_min_seconds", 3.0)),
+                    wait_max_seconds=float(streamer_raw.get("wait_max_seconds", 10.0)),
+                    thinking_prompt=str(streamer_raw.get("thinking_prompt", "") or ""),
+                    diverge_prompt=str(streamer_raw.get("diverge_prompt", "") or ""),
+                    polish_prompt=str(streamer_raw.get("polish_prompt", "") or ""),
+                    priority_event_prompt=str(
+                        streamer_raw.get("priority_event_prompt", "") or ""
+                    ),
+                )
 
     room_ids = [int(x) for x in live.get("room_ids", [])]
     if len(host_room_ids) > 1:
@@ -432,6 +466,7 @@ def load_config(path: Path) -> AdapterConfig:
         mic_asr_silence_threshold=float(mic_asr.get("silence_threshold", 500.0)),
         mic_asr_silence_duration=float(mic_asr.get("silence_duration", 1.0)),
         mic_asr_sample_rate=int(mic_asr.get("sample_rate", 16000)),
+        live_streamer_configs=live_streamer_configs,
     )
 
 

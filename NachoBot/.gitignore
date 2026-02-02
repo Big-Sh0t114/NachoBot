@@ -327,3 +327,7 @@ src/plugins/built_in/mus_library/dump.txt
 interested_rates.txt
 NachoBot.code-workspace
 shim.exe
+
+# Artwork
+artwork/*
+!artwork/.gitkeep

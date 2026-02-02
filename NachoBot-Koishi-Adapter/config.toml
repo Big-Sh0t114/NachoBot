@@ -16,8 +16,8 @@ port = 8070
 platform = "discord"
 
 [chat]
-group_list_type = "blacklist"
-group_list = []
+group_list_type = "whitelist"
+group_list = [2,20,1459291898132037763]
 private_list_type = "blacklist"
 private_list = []
 ban_user_id = []

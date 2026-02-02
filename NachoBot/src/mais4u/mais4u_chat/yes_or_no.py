@@ -9,6 +9,8 @@ head_actions_list = ["不做额外动作", "点头一次", "点头两次", "摇�
 
 
 async def yes_or_no_head(text: str, emotion: str = "", chat_history: str = "", chat_id: str = ""):
+    return "不做额外动作"
+
     prompt = f"""
 {chat_history}
 以上是对方的发言：
