@@ -22,8 +22,6 @@ def init_prompt():
 {chat_target}
 {time_block}
 {chat_info}
-{identity}
-
 你刚刚在{chat_target_2},你你刚刚的心情是：{mood_state}
 ---------------------
 在这样的情况下，你对上面的内容，你对 {sender} 发送的 消息 “{target}” 进行了回复
@@ -66,32 +64,37 @@ class MaiThinking:
         pass
 
     async def do_think_after_response(self, reponse: str):
-        prompt = await global_prompt_manager.format_prompt(
-            "after_response_think_prompt",
-            mind=self.mind,
-            reponse=reponse,
-            memory_block=self.memory_block,
-            relation_info_block=self.relation_info_block,
-            time_block=self.time_block,
-            chat_target=self.chat_target,
-            chat_target_2=self.chat_target_2,
-            chat_info=self.chat_info,
-            mood_state=self.mood_state,
-            identity=self.identity,
-            sender=self.sender,
-            target=self.target,
-        )
+        # [DISABLED] 为保护用户隐私，禁用将 QQ 群聊天转发到直播间的功能
+        # 启用此功能可能会导致私密对话被公开到直播间
+        logger.debug(f"[{self.chat_id}] do_think_after_response 已禁用（隐私保护）")
+        return
 
-        result, _ = await self.thinking_model.generate_response_async(prompt)
-        self.mind = result
-
-        logger.info(f"[{self.chat_id}] 思考前想法：{self.mind}")
-        # logger.info(f"[{self.chat_id}] 思考前prompt：{prompt}")
-        logger.info(f"[{self.chat_id}] 思考后想法：{self.mind}")
-
-        msg_recv = await self.build_internal_message_recv(self.mind)
-        await self.s4u_message_processor.process_message(msg_recv)
-        internal_manager.set_internal_state(self.mind)
+        # 以下是原有代码，已禁用
+        # prompt = await global_prompt_manager.format_prompt(
+        #     "after_response_think_prompt",
+        #     mind=self.mind,
+        #     reponse=reponse,
+        #     memory_block=self.memory_block,
+        #     relation_info_block=self.relation_info_block,
+        #     time_block=self.time_block,
+        #     chat_target=self.chat_target,
+        #     chat_target_2=self.chat_target_2,
+        #     chat_info=self.chat_info,
+        #     mood_state=self.mood_state,
+        #     identity=self.identity,
+        #     sender=self.sender,
+        #     target=self.target,
+        # )
+        #
+        # result, _ = await self.thinking_model.generate_response_async(prompt)
+        # self.mind = result
+        #
+        # logger.info(f"[{self.chat_id}] 思考前想法：{self.mind}")
+        # logger.info(f"[{self.chat_id}] 思考后想法：{self.mind}")
+        #
+        # msg_recv = await self.build_internal_message_recv(self.mind)
+        # await self.s4u_message_processor.process_message(msg_recv)
+        # internal_manager.set_internal_state(self.mind)
 
     async def do_think_when_receive_message(self):
         pass

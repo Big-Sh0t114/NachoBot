@@ -110,7 +110,42 @@ class LiveRoomWorker:
                     return True
         return False
 
+    async def _screen_push_loop(self) -> None:
+        """Background loop to periodically push screen info to Core."""
+        self.logger.info(f"Screen Push Loop started for room {self.room_id}")
+        while not self._stop_event.is_set():
+            try:
+                # Interval: 15 seconds (adjust as needed)
+                # Ensure we don't spam if VLM is slow, but VLM call awaits, so it's serial.
+                await asyncio.sleep(15)
+                if self._stop_event.is_set():
+                    break
+
+                # Check directly if we should push (e.g. is live?)
+                # We assume if worker is running, we want updates.
+                # However, maybe check if adapter has VLM enabled?
+                # _get_screen_summary checks config internally.
+
+                await self.adapter.push_screen_update(
+                    self.room_id, timestamp=time.time()
+                )
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.logger.error(f"Screen push error: {e}")
+                await asyncio.sleep(5)  # Error backoff
+
     async def run(self) -> None:
+        # Initial Screen Push to prime the cache (since we removed periodic updates)
+        try:
+            # Wait a bit for system to settle
+            await asyncio.sleep(5)
+            self.logger.info(f"Performing initial screen push for room {self.room_id}")
+            await self.adapter.push_screen_update(self.room_id, timestamp=time.time())
+        except Exception as e:
+            self.logger.warning(f"Initial screen push failed: {e}")
+
         backoff = self.config.reconnect_seconds
         while not self._stop_event.is_set():
             try:
@@ -568,6 +603,9 @@ class LiveRoomWorker:
             is_mentioned=is_mentioned,
             guard_level=guard_level,
         )
+
+        # Update Screen Info for S4U System (Self-Talk Context)
+        await self.adapter.push_screen_update(self.room_id)
 
     @staticmethod
     def _pack(body: Any, op: int) -> bytes:

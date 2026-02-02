@@ -112,28 +112,32 @@ def get_recent_message_stats(minutes: float = 30, chat_id: Optional[str] = None)
 
 
 async def send_typing():
-    group_info = GroupInfo(platform="amaidesu_default", group_id="114514", group_name="内心")
-
-    chat = await get_chat_manager().get_or_create_stream(
-        platform="amaidesu_default",
-        user_info=None,
-        group_info=group_info,
-    )
-
-    await send_api.custom_to_stream(
-        message_type="state", content="typing", stream_id=chat.stream_id, storage_message=False
-    )
+    # [DISABLED] amaidesu_default 平台不存在，禁用此功能避免警告
+    return
+    # group_info = GroupInfo(platform="amaidesu_default", group_id="114514", group_name="内心")
+    #
+    # chat = await get_chat_manager().get_or_create_stream(
+    #     platform="amaidesu_default",
+    #     user_info=None,
+    #     group_info=group_info,
+    # )
+    #
+    # await send_api.custom_to_stream(
+    #     message_type="state", content="typing", stream_id=chat.stream_id, storage_message=False
+    # )
 
 
 async def stop_typing():
-    group_info = GroupInfo(platform="amaidesu_default", group_id="114514", group_name="内心")
-
-    chat = await get_chat_manager().get_or_create_stream(
-        platform="amaidesu_default",
-        user_info=None,
-        group_info=group_info,
-    )
-
-    await send_api.custom_to_stream(
-        message_type="state", content="stop_typing", stream_id=chat.stream_id, storage_message=False
-    )
+    # [DISABLED] amaidesu_default 平台不存在，禁用此功能避免警告
+    return
+    # group_info = GroupInfo(platform="amaidesu_default", group_id="114514", group_name="内心")
+    #
+    # chat = await get_chat_manager().get_or_create_stream(
+    #     platform="amaidesu_default",
+    #     user_info=None,
+    #     group_info=group_info,
+    # )
+    #
+    # await send_api.custom_to_stream(
+    #     message_type="state", content="stop_typing", stream_id=chat.stream_id, storage_message=False
+    # )

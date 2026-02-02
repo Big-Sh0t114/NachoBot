@@ -53,33 +53,38 @@ class ChatWatching:
 
     async def on_reply_start(self):
         """开始生成回复时调用"""
-        await send_api.custom_to_stream(
-            message_type="state", content="start_thinking", stream_id=self.chat_id, storage_message=False
-        )
+        # 禁用Live2D前端更新
+        # await send_api.custom_to_stream(
+        #     message_type="state", content="start_thinking", stream_id=self.chat_id, storage_message=False
+        # )
 
     async def on_reply_finished(self):
         """生成回复完毕时调用"""
-        await send_api.custom_to_stream(
-            message_type="state", content="finish_reply", stream_id=self.chat_id, storage_message=False
-        )
+        # 禁用Live2D前端更新
+        # await send_api.custom_to_stream(
+        #     message_type="state", content="finish_reply", stream_id=self.chat_id, storage_message=False
+        # )
 
     async def on_thinking_finished(self):
         """思考完毕时调用"""
-        await send_api.custom_to_stream(
-            message_type="state", content="finish_thinking", stream_id=self.chat_id, storage_message=False
-        )
+        # 禁用Live2D前端更新
+        # await send_api.custom_to_stream(
+        #     message_type="state", content="finish_thinking", stream_id=self.chat_id, storage_message=False
+        # )
 
     async def on_message_received(self):
         """收到消息时调用"""
-        await send_api.custom_to_stream(
-            message_type="state", content="start_viewing", stream_id=self.chat_id, storage_message=False
-        )
+        # 禁用Live2D前端更新
+        # await send_api.custom_to_stream(
+        #     message_type="state", content="start_viewing", stream_id=self.chat_id, storage_message=False
+        # )
 
     async def on_internal_message_start(self):
         """收到消息时调用"""
-        await send_api.custom_to_stream(
-            message_type="state", content="start_internal_thinking", stream_id=self.chat_id, storage_message=False
-        )
+        # 禁用Live2D前端更新
+        # await send_api.custom_to_stream(
+        #     message_type="state", content="start_internal_thinking", stream_id=self.chat_id, storage_message=False
+        # )
 
 
 class WatchingManager:

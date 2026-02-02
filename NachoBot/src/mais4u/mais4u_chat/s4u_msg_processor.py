@@ -1,10 +1,10 @@
 import asyncio
+import re
 import math
 from typing import Tuple
 
 from src.chat.memory_system.Hippocampus import hippocampus_manager
 from src.chat.message_receive.message import MessageRecv, MessageRecvS4U
-from ncnk_message.message_base import GroupInfo
 from src.chat.message_receive.storage import MessageStorage
 from src.chat.message_receive.chat_stream import get_chat_manager
 from src.chat.utils.timer_calculator import Timer
@@ -17,6 +17,7 @@ from src.mais4u.mais4u_chat.s4u_watching_manager import watching_manager
 from src.mais4u.mais4u_chat.context_web_manager import get_context_web_manager
 from src.mais4u.mais4u_chat.gift_manager import gift_manager
 from src.mais4u.mais4u_chat.screen_manager import screen_manager
+from src.mais4u.s4u_config import s4u_config_main  # [NEW] Import config for admin_ids
 
 from .s4u_chat import get_s4u_chat_manager
 
@@ -35,16 +36,20 @@ async def _calculate_interest(message: MessageRecv) -> Tuple[float, bool]:
     Returns:
         Tuple[float, bool]: (兴趣度, 是否被提及)
     """
-    is_mentioned, _ = is_mentioned_bot_in_message(message)
+    is_mentioned, _, _ = is_mentioned_bot_in_message(message)
     interested_rate = 0.0
 
-    if global_config.memory.enable_memory:
-        with Timer("记忆激活"):
-            interested_rate, _, _ = await hippocampus_manager.get_activate_from_text(
-                message.processed_plain_text,
-                fast_retrieval=True,
-            )
-            logger.debug(f"记忆激活率: {interested_rate:.2f}")
+    if global_config.lpmm_knowledge.enable:
+        try:
+            with Timer("记忆激活"):
+                interested_rate, _, _ = await hippocampus_manager.get_activate_from_text(
+                    message.processed_plain_text,
+                    fast_retrieval=True,
+                )
+                logger.debug(f"记忆激活率: {interested_rate:.2f}")
+        except RuntimeError as e:
+            # Hippocampus not initialized - silently skip
+            logger.debug(f"跳过记忆激活: {e}")
 
     text_len = len(message.processed_plain_text)
     # 根据文本长度分布调整兴趣度，采用分段函数实现更精确的兴趣度计算
@@ -137,6 +142,28 @@ class S4UMessageProcessor:
 
         s4u_chat = get_s4u_chat_manager().get_or_create_chat(chat)
 
+        # [NEW] Streamer Mode Control Commands
+        # 拦截 #stop_react 和 #start_react 指令 (Robust Implementation)
+        # 处理零宽空格(\u200b)和其他潜在的不可见字符
+        msg_text = message.processed_plain_text.replace("\u200b", "").strip()
+
+        # 使用正则匹配指令，允许前导空白
+        if re.match(r"^\s*[#＃](stop_react|start_react)", msg_text, re.IGNORECASE):
+            # 强制转换为字符串比较
+            admin_ids = [str(uid) for uid in s4u_config_main.streamer_mode.admin_ids]
+            user_id = str(userinfo.user_id)
+
+            if user_id in admin_ids:
+                if re.search(r"stop_react", msg_text, re.IGNORECASE):
+                    logger.warning(f"[Command] Admin {user_id} executed STOP_REACT")
+                    s4u_chat.stop_react()
+                else:
+                    logger.warning(f"[Command] Admin {user_id} executed START_REACT")
+                    s4u_chat.start_react()
+                return  # 拦截指令，不作为普通消息处理
+            else:
+                logger.warning(f"[Command] Unauthorized user {user_id} attempted control command.")
+
         await s4u_chat.add_message(message)
 
         _interested_rate, _ = await _calculate_interest(message)
@@ -162,24 +189,28 @@ class S4UMessageProcessor:
             logger.info(f"[S4U]{userinfo.user_nickname}:{message.processed_plain_text}")
 
     async def handle_internal_message(self, message: MessageRecvS4U):
+        # [DISABLED] 为保护用户隐私，禁用内部消息处理（QQ→Bilibili 转播）
         if message.is_internal:
-            group_info = GroupInfo(platform="amaidesu_default", group_id=660154, group_name="内心")
+            logger.debug(f"[S4U] 内部消息已禁用，忽略: {message.processed_plain_text[:30]}...")
+            return True  # 返回 True 表示已处理，跳过正常流程
 
-            chat = await get_chat_manager().get_or_create_stream(
-                platform="amaidesu_default", user_info=message.message_info.user_info, group_info=group_info
-            )
-            s4u_chat = get_s4u_chat_manager().get_or_create_chat(chat)
-            message.message_info.group_info = s4u_chat.chat_stream.group_info
-            message.message_info.platform = s4u_chat.chat_stream.platform
-
-            s4u_chat.internal_message.append(message)
-            s4u_chat._new_message_event.set()
-
-            logger.info(
-                f"[{s4u_chat.stream_name}] 添加内部消息-------------------------------------------------------: {message.processed_plain_text}"
-            )
-
-            return True
+            # group_info = GroupInfo(platform="amaidesu_default", group_id=660154, group_name="内心")
+            #
+            # chat = await get_chat_manager().get_or_create_stream(
+            #     platform="amaidesu_default", user_info=message.message_info.user_info, group_info=group_info
+            # )
+            # s4u_chat = get_s4u_chat_manager().get_or_create_chat(chat)
+            # message.message_info.group_info = s4u_chat.chat_stream.group_info
+            # message.message_info.platform = s4u_chat.chat_stream.platform
+            #
+            # s4u_chat.internal_message.append(message)
+            # s4u_chat._new_message_event.set()
+            #
+            # logger.info(
+            #     f"[{s4u_chat.stream_name}] 添加内部消息-------------------------------------------------------: {message.processed_plain_text}"
+            # )
+            #
+            # return True
         return False
 
     async def handle_screen_message(self, message: MessageRecvS4U):

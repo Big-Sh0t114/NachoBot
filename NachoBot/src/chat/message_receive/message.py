@@ -45,6 +45,7 @@ def _extract_urls_from_unknown_data(data: Any) -> str:
         cleaned.append(trimmed)
     return " ".join(cleaned)
 
+
 # 这个类是消息数据类，用于存储和管理消息数据。
 # 它定义了消息的属性，包括群组ID、用户ID、消息ID、原始消息内容、纯文本内容和时间戳。
 # 它还定义了两个辅助属性：keywords用于提取消息的关键词，is_plain_text用于判断消息是否为纯文本。
@@ -176,10 +177,30 @@ class MessageRecv(Message):
             str: 处理后的文本
         """
         try:
-            if segment.type == "text":
+            if segment.type == "screen":
+                # Update ScreenManager even in Normal Mode, but don't show as text
+                try:
+                    from src.mais4u.mais4u_chat.screen_manager import screen_manager
+
+                    screen_manager.set_screen(segment.data)
+                except ImportError:
+                    pass
+                return ""
+            elif segment.type == "text":
                 self.is_picid = False
                 self.is_emoji = False
-                return segment.data  # type: ignore
+                text_data = str(segment.data)
+                if text_data.strip().startswith("<SCREEN_INFO>"):
+                    # Legacy support: Update ScreenManager, don't show as text
+                    try:
+                        from src.mais4u.mais4u_chat.screen_manager import screen_manager
+
+                        info = text_data.strip()[13:]
+                        screen_manager.set_screen(info)
+                    except ImportError:
+                        pass
+                    return ""
+                return text_data
             elif segment.type == "image":
                 # 如果是base64图片数据
                 if isinstance(segment.data, str):
@@ -273,6 +294,13 @@ class MessageRecvS4U(MessageRecv):
                 self.is_voice = False
                 self.is_picid = False
                 self.is_emoji = False
+                text_data = str(segment.data)
+                # [DEBUG] Check for screen info prefix
+                if text_data.strip().startswith("<SCREEN_INFO>"):
+                    logger.info(f"[Message] Detected Screen Info Prefix in: {text_data[:20]}")
+                    self.is_screen = True
+                    self.screen_info = text_data.strip()[13:]
+                    return "屏幕信息"
                 return segment.data  # type: ignore
             elif segment.type == "image":
                 self.is_voice = False
@@ -510,7 +538,9 @@ class MessageSending(MessageProcessBase):
 
     def to_dict(self):
         ret = super().to_dict()
-        ret["message_info"]["user_info"] = self.chat_stream.user_info.to_dict()
+        ret["message_info"]["user_info"] = (
+            self.chat_stream.user_info.to_dict() if self.chat_stream and self.chat_stream.user_info else None
+        )
         return ret
 
     def is_private_message(self) -> bool:
