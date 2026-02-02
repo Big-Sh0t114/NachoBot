@@ -5,7 +5,7 @@ from datetime import datetime
 from tomlkit import TOMLDocument
 from tomlkit.items import Table
 from dataclasses import dataclass, fields, MISSING, field
-from typing import TypeVar, Type, Any, get_origin, get_args, Literal
+from typing import TypeVar, Type, Any, get_origin, get_args, Literal, List
 from src.common.logger import get_logger
 
 logger = get_logger("s4u_config")
@@ -243,7 +243,60 @@ class S4UConfig(S4UConfigBase):
     models: S4UModelConfig = field(default_factory=S4UModelConfig)
     """S4U模型配置"""
 
-    # 兼容性字段，保持向后兼容
+    # 主播模式配置（需要在StreamerModeConfig定义后使用，此处用延迟初始化）
+    # 注意：streamer_mode 字段会在 S4UGlobalConfig 解析时处理
+
+
+@dataclass
+class StreamerModeConfig(S4UConfigBase):
+    """主播模式配置 - 用于Bilibili直播等场景"""
+
+    enable: bool = False
+    """是否启用主播模式"""
+
+    room_ids: List[str] = field(default_factory=list)
+    """启用主播模式的房间ID列表（stream_id），空列表表示禁用"""
+
+    admin_ids: List[str] = field(default_factory=lambda: ["493929844"])
+    """允许执行控制指令（如#stop_react）的管理员ID列表"""
+
+    # 弹幕打分配置
+    score_threshold: float = 0.4
+    """有效弹幕阈值，低于此分数的弹幕被视为垃圾弹幕"""
+
+    batch_score_size: int = 5
+    """批量打分数量，减少模型调用次数"""
+
+    # 动态长度阈值
+    high_activity_threshold: int = 5
+    """>5条有效弹幕时使用短回复"""
+
+    medium_activity_threshold: int = 3
+    """3-5条有效弹幕时使用中等回复"""
+
+    # 回复长度配置
+    short_reply_length: int = 50
+    """高活跃度时的回复长度"""
+
+    medium_reply_length: int = 150
+    """中等活跃度时的回复长度"""
+
+    long_reply_length: int = 250
+    """低活跃度时的回复长度（多段）"""
+
+    # 段间等待配置
+    segment_wait_min: float = 3.0
+    """多段回复时，段间最小等待时间（秒）"""
+
+    segment_wait_max: float = 10.0
+    """多段回复时，段间最大等待时间（秒）"""
+
+    # 屏幕自言自语配置
+    idle_timeout_seconds: int = 30
+    """无有效弹幕多久后触发屏幕自言自语（秒）"""
+
+    max_screen_talk_count: int = 3
+    """连续屏幕自言自语的上限次数"""
 
 
 @dataclass
@@ -251,6 +304,7 @@ class S4UGlobalConfig(S4UConfigBase):
     """S4U总配置类"""
 
     s4u: S4UConfig
+    streamer_mode: StreamerModeConfig = field(default_factory=StreamerModeConfig)
     S4U_VERSION: str = S4U_VERSION
 
 

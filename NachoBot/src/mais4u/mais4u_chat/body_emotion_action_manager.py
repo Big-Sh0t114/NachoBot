@@ -133,10 +133,7 @@ class ChatAction:
         # 新增：body_action冷却池，key为动作名，value为剩余冷却次数
         self.body_action_cooldown: dict[str, int] = {}
 
-        print(s4u_config.models.motion)
-        print(model_config.model_task_config.emotion)
-
-        self.action_model = LLMRequest(model_set=model_config.model_task_config.emotion, request_type="motion")
+        self.action_model = LLMRequest(model_set=model_config.model_task_config.utils_small, request_type="motion")
 
         self.last_change_time: float = 0
 
@@ -144,139 +141,30 @@ class ChatAction:
         """发送动作更新到前端"""
 
         body_code = (await get_body_code()).get(self.body_action, "")
-        await send_api.custom_to_stream(
-            message_type="body_action",
-            content=body_code,
-            stream_id=self.chat_id,
-            storage_message=False,
-            show_log=True,
-        )
+        # 禁用Live2D前端更新
+        # await send_api.custom_to_stream(
+        #     message_type="body_action",
+        #     content=body_code,
+        #     stream_id=self.chat_id,
+        #     storage_message=False,
+        #     show_log=True,
+        # )
 
     async def update_action_by_message(self, message: MessageRecv):
+        # 禁用Live2D动作生成以节省Token
+        # logger.debug("Live2D动作生成已禁用，跳过update_action_by_message")
+        return
+
         self.regression_count = 0
-
-        message_time: float = message.message_info.time  # type: ignore
-        message_list_before_now = get_raw_msg_by_timestamp_with_chat_inclusive(
-            chat_id=self.chat_id,
-            timestamp_start=self.last_change_time,
-            timestamp_end=message_time,
-            limit=15,
-            limit_mode="last",
-        )
-        chat_talking_prompt = build_readable_messages(
-            message_list_before_now,
-            replace_bot_name=True,
-            timestamp_mode="normal_no_YMD",
-            read_mark=0.0,
-            truncate=True,
-            show_actions=True,
-        )
-
-        bot_name = global_config.bot.nickname
-        if global_config.bot.alias_names:
-            bot_nickname = f",也有人叫你{','.join(global_config.bot.alias_names)}"
-        else:
-            bot_nickname = ""
-
-        prompt_personality = global_config.personality.personality
-        indentify_block = f"你的名字是{bot_name}{bot_nickname}，你{prompt_personality}："
-
-        try:
-            # 冷却池处理：过滤掉冷却中的动作
-            self._update_body_action_cooldown()
-            available_actions = [k for k in (await get_body_code()).keys() if k not in self.body_action_cooldown]
-            all_actions = "\n".join(available_actions)
-
-            prompt = await global_prompt_manager.format_prompt(
-                "change_action_prompt",
-                chat_talking_prompt=chat_talking_prompt,
-                indentify_block=indentify_block,
-                body_action=self.body_action,
-                all_actions=all_actions,
-            )
-
-            logger.info(f"prompt: {prompt}")
-            response, (reasoning_content, _, _) = await self.action_model.generate_response_async(
-                prompt=prompt, temperature=0.7
-            )
-            logger.info(f"response: {response}")
-            logger.info(f"reasoning_content: {reasoning_content}")
-
-            if action_data := json.loads(repair_json(response)):
-                # 记录原动作，切换后进入冷却
-                prev_body_action = self.body_action
-                new_body_action = action_data.get("body_action", self.body_action)
-                if new_body_action != prev_body_action and prev_body_action:
-                    self.body_action_cooldown[prev_body_action] = 3
-                self.body_action = new_body_action
-                self.head_action = action_data.get("head_action", self.head_action)
-                # 发送动作更新
-                await self.send_action_update()
-
-            self.last_change_time = message_time
-        except Exception as e:
-            logger.error(f"update_action_by_message error: {e}")
+        # ... (rest of the original code commented out or unreachable) ...
 
     async def regress_action(self):
+        # 禁用Live2D动作生成以节省Token
+        # logger.debug("Live2D动作生成已禁用，跳过regress_action")
+        return
+
         message_time = time.time()
-        message_list_before_now = get_raw_msg_by_timestamp_with_chat_inclusive(
-            chat_id=self.chat_id,
-            timestamp_start=self.last_change_time,
-            timestamp_end=message_time,
-            limit=10,
-            limit_mode="last",
-        )
-        chat_talking_prompt = build_readable_messages(
-            message_list_before_now,
-            replace_bot_name=True,
-            timestamp_mode="normal_no_YMD",
-            read_mark=0.0,
-            truncate=True,
-            show_actions=True,
-        )
-
-        bot_name = global_config.bot.nickname
-        if global_config.bot.alias_names:
-            bot_nickname = f",也有人叫你{','.join(global_config.bot.alias_names)}"
-        else:
-            bot_nickname = ""
-
-        prompt_personality = global_config.personality.personality
-        indentify_block = f"你的名字是{bot_name}{bot_nickname}，你{prompt_personality}："
-        try:
-            # 冷却池处理：过滤掉冷却中的动作
-            self._update_body_action_cooldown()
-            available_actions = [k for k in (await get_body_code()).keys() if k not in self.body_action_cooldown]
-            all_actions = "\n".join(available_actions)
-
-            prompt = await global_prompt_manager.format_prompt(
-                "regress_action_prompt",
-                chat_talking_prompt=chat_talking_prompt,
-                indentify_block=indentify_block,
-                body_action=self.body_action,
-                all_actions=all_actions,
-            )
-
-            logger.info(f"prompt: {prompt}")
-            response, (reasoning_content, _, _) = await self.action_model.generate_response_async(
-                prompt=prompt, temperature=0.7
-            )
-            logger.info(f"response: {response}")
-            logger.info(f"reasoning_content: {reasoning_content}")
-
-            if action_data := json.loads(repair_json(response)):
-                prev_body_action = self.body_action
-                new_body_action = action_data.get("body_action", self.body_action)
-                if new_body_action != prev_body_action and prev_body_action:
-                    self.body_action_cooldown[prev_body_action] = 6
-                self.body_action = new_body_action
-                # 发送动作更新
-                await self.send_action_update()
-
-            self.regression_count += 1
-            self.last_change_time = message_time
-        except Exception as e:
-            logger.error(f"regress_action error: {e}")
+        # ... (rest of the original code commented out or unreachable) ...
 
     # 新增：冷却池维护方法
     def _update_body_action_cooldown(self):

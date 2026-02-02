@@ -20,6 +20,7 @@ from src.plugin_system.apis import send_api
 from src.mais4u.mais4u_chat.s4u_msg_processor import S4UMessageProcessor
 from src.person_info.person_info import Person
 from src.chat.keyword_cache import promise_cache_manager
+from src.mais4u.s4u_config import s4u_config_main
 
 # 定义日志配置
 
@@ -64,7 +65,7 @@ def _check_ban_regex(text: str, chat: ChatStream, userinfo: UserInfo) -> bool:
     # 检查text是否为None或空字符串
     if text is None or not text:
         return False
-    
+
     for pattern in global_config.message_receive.ban_msgs_regex:
         if re.search(pattern, text):
             chat_name = chat.group_info.group_name if chat.group_info else "私聊"
@@ -128,7 +129,9 @@ class ChatBot:
                     if force_requested:
                         _apply_command_text()
                     if not advanced_manager.is_allowed(user_id):
-                        await send_api.text_to_stream("现在的关系还不能使用此指令哦~(´-ω-`)", message.chat_stream.stream_id)
+                        await send_api.text_to_stream(
+                            "现在的关系还不能使用此指令哦~(´-ω-`)", message.chat_stream.stream_id
+                        )
                         return True, "not allowed", False
                     is_group = bool(message.chat_stream and message.chat_stream.group_info)
                     if is_group and not force_allowed:
@@ -161,7 +164,9 @@ class ChatBot:
                     if force_requested:
                         _apply_command_text()
                     if not advanced_manager.is_admin(user_id):
-                        await send_api.text_to_stream("这是只有给主人才能看的东西哦~(´-ω-`)", message.chat_stream.stream_id)
+                        await send_api.text_to_stream(
+                            "这是只有给主人才能看的东西哦~(´-ω-`)", message.chat_stream.stream_id
+                        )
                         return True, "not admin", False
                     if message.chat_stream and message.chat_stream.group_info and not force_allowed:
                         await send_api.text_to_stream("注意隐私哦，主人~(´-ω-`)", message.chat_stream.stream_id)
@@ -235,7 +240,9 @@ class ChatBot:
                 if suggestions:
                     message.is_command = True
                     stream_id = message.chat_stream.stream_id if message.chat_stream else None
-                    suggestion_text = "笨蛋，错误的指令是执行不了的哦(´-ω-`) 你是不是想输入：" + " 或 ".join(f"#{cmd}" for cmd in suggestions)
+                    suggestion_text = "笨蛋，错误的指令是执行不了的哦(´-ω-`) 你是不是想输入：" + " 或 ".join(
+                        f"#{cmd}" for cmd in suggestions
+                    )
                     if stream_id:
                         await send_api.text_to_stream(suggestion_text, stream_id)
                     return True, suggestion_text, False
@@ -321,9 +328,28 @@ class ChatBot:
 
             platform = message_data["message_info"].get("platform")
 
+            # Debug Log: Trace incoming platform
+            logger.debug(f"Incoming Message Platform: {platform}, Message Type: {message_data.get('type')}")
+
             if platform == "amaidesu_default":
                 await self.do_s4u(message_data)
                 return
+
+            if platform == "bilibili.live":
+                # 检查是否启用主播模式
+                if s4u_config_main.streamer_mode.enable:
+                    await self.do_s4u(message_data)
+                    return
+                else:
+                    # 如果未启用主播模式，回落到 bilibili 平台（使用 HeartFlow）
+                    logger.info("主播模式未启用，bilibili.live 回落到 bilibili 平台处理")
+                    platform = "bilibili"
+                    message_data["message_info"]["platform"] = "bilibili"
+                    if message_data["message_info"].get("user_info"):
+                        message_data["message_info"]["user_info"]["platform"] = "bilibili"
+                    if message_data["message_info"].get("group_info"):
+                        message_data["message_info"]["group_info"]["platform"] = "bilibili"
+                    # 继续向下执行，走 standard HeartFlow 流程
 
             if message_data["message_info"].get("group_info") is not None:
                 message_data["message_info"]["group_info"]["group_id"] = str(

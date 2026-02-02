@@ -31,6 +31,7 @@ class SendArtworkAction(BaseAction):
         "当用户提到想看画、作品图或发一张图时使用",
         "若非用户明确要求，不要连续触发该动作",
         "不符合以上条件时不要触发该动作",
+        "若最近十轮对话中已使用过该动作，不再触发该动作",
     ]
     associated_types = ["text"]
 
@@ -102,11 +103,7 @@ class SendArtworkAction(BaseAction):
             logger.error(f"{self.log_prefix} 创建artwork目录失败: {e}")
             return []
 
-        return [
-            path
-            for path in directory.iterdir()
-            if path.is_file() and path.suffix.lower() in allowed_extensions
-        ]
+        return [path for path in directory.iterdir() if path.is_file() and path.suffix.lower() in allowed_extensions]
 
     def _is_view_request(self) -> bool:
         """
@@ -123,7 +120,7 @@ class SendArtworkAction(BaseAction):
         text = str(text).lower()
 
         # 需要同时包含动词和画作相关名词
-        view_verbs = ["看", "看看", "想看", "给", "发", "来", "给我", "来张", "求", "想要","发张"]
+        view_verbs = ["看", "看看", "想看", "给", "发", "来", "给我", "来张", "求", "想要", "发张"]
         art_nouns = ["画", "画作", "作品", "插画", "图片", "图", "图图", "画廊"]
 
         has_verb = any(v in text for v in view_verbs)
@@ -134,7 +131,6 @@ class SendArtworkAction(BaseAction):
             return False
 
         return has_verb and has_noun
-
 
 
 @register_plugin
@@ -171,7 +167,9 @@ class ArtworkPlugin(BasePlugin):
                 description="允许读取的图片后缀",
             ),
             "caption": ConfigField(type=str, default="送你一张最近的画~", description="发送图片时附带的文案"),
-            "empty_message": ConfigField(type=str, default="画夹里暂时没有图片，等我补几张再给你看~", description="画夹为空时的回复"),
+            "empty_message": ConfigField(
+                type=str, default="画夹里暂时没有图片，等我补几张再给你看~", description="画夹为空时的回复"
+            ),
         },
     }
 

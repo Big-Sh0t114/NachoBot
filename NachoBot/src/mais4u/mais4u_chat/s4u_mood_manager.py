@@ -114,9 +114,9 @@ class ChatMood:
 
         self.regression_count: int = 0
 
-        self.mood_model = LLMRequest(model_set=model_config.model_task_config.emotion, request_type="mood_text")
+        self.mood_model = LLMRequest(model_set=model_config.model_task_config.utils_small, request_type="mood_text")
         self.mood_model_numerical = LLMRequest(
-            model_set=model_config.model_task_config.emotion, request_type="mood_numerical"
+            model_set=model_config.model_task_config.utils_small, request_type="mood_numerical"
         )
 
         self.last_change_time: float = 0
@@ -325,13 +325,14 @@ class ChatMood:
             "fear": mood_values.get("fear", 1),
         }
 
-        await send_api.custom_to_stream(
-            message_type="emotion",
-            content=emotion_data,
-            stream_id=self.chat_id,
-            storage_message=False,
-            show_log=True,
-        )
+        # 禁用Live2D前端更新
+        # await send_api.custom_to_stream(
+        #     message_type="emotion",
+        #     content=emotion_data,
+        #     stream_id=self.chat_id,
+        #     storage_message=False,
+        #     show_log=True,
+        # )
 
         logger.info(f"[{self.chat_id}] 发送情绪更新: {emotion_data}")
 

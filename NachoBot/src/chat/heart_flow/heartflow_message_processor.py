@@ -66,6 +66,10 @@ class HeartFCMessageReceiver:
             message_data: 原始消息字符串
         """
         try:
+            # [Fix] Drop empty messages (e.g. Screen Updates processed by message.py)
+            if not message.processed_plain_text and not (message.is_picid or message.is_emoji or message.is_voice):
+                return
+
             # 1. 消息解析与初始化
             userinfo = message.message_info.user_info
             chat = message.chat_stream
@@ -107,7 +111,7 @@ class HeartFCMessageReceiver:
                 replace_bot_name=True,
             )
             # if not processed_plain_text:
-                # print(message)
+            # print(message)
 
             logger.info(f"[{mes_name}]{userinfo.user_nickname}:{processed_plain_text}")  # type: ignore
 

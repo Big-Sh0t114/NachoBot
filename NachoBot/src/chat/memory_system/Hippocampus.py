@@ -1451,8 +1451,7 @@ class HippocampusManager:
 
         logger.info(f"""
                     --------------------------------
-                    记忆系统参数配置:
-                    遗忘间隔: {global_config.memory.forget_memory_interval}秒|遗忘比例: {global_config.memory.memory_forget_percentage}|遗忘: {global_config.memory.memory_forget_time}小时之后
+                    记忆系统初始化完成
                     记忆图统计信息: 节点数量: {node_count}, 连接数量: {edge_count}
                     --------------------------------""")  # noqa: E501
 

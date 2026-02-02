@@ -91,13 +91,14 @@ class MainSystem:
 
         logger.info("聊天管理器初始化成功")
 
-        # # 根据配置条件性地初始化记忆系统
-        # if global_config.memory.enable_memory:
-        #     if self.hippocampus_manager:
-        #         self.hippocampus_manager.initialize()
-        #         logger.info("记忆系统初始化成功")
-        # else:
-        #     logger.info("记忆系统已禁用，跳过初始化")
+        # 根据配置条件性地初始化记忆系统
+        if global_config.lpmm_knowledge.enable:
+            from src.chat.memory_system.Hippocampus import hippocampus_manager
+
+            hippocampus_manager.initialize()
+            logger.info("记忆系统初始化成功")
+        else:
+            logger.info("记忆系统已禁用，跳过初始化")
 
         # await asyncio.sleep(0.5) #防止logger输出飞了
 

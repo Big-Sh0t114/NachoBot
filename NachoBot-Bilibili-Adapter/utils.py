@@ -7,27 +7,29 @@ from typing import Any, Dict, List, Optional, Tuple
 # Lazy import Seg to avoid circular dependency
 Seg = None
 
+
 def _get_seg_class():
     """Lazy import Seg class."""
     global Seg
     if Seg is None:
         from ncnk_message import Seg as _Seg
+
         Seg = _Seg
     return Seg
 
 
 _EMOJI_RE = re.compile(
     "["  # noqa: W605
-    "\U0001F100-\U0001F1FF"
-    "\U0001F300-\U0001F5FF"
-    "\U0001F600-\U0001F64F"
-    "\U0001F680-\U0001F6FF"
-    "\U0001F700-\U0001F77F"
-    "\U0001F780-\U0001F7FF"
-    "\U0001F800-\U0001F8FF"
-    "\U0001F900-\U0001F9FF"
-    "\U0001FA00-\U0001FAFF"
-    "\U00002702-\U000027B0"
+    "\U0001f100-\U0001f1ff"
+    "\U0001f300-\U0001f5ff"
+    "\U0001f600-\U0001f64f"
+    "\U0001f680-\U0001f6ff"
+    "\U0001f700-\U0001f77f"
+    "\U0001f780-\U0001f7ff"
+    "\U0001f800-\U0001f8ff"
+    "\U0001f900-\U0001f9ff"
+    "\U0001fa00-\U0001faff"
+    "\U00002702-\U000027b0"
     "]",
     flags=re.UNICODE,
 )
@@ -54,11 +56,11 @@ def _mask_urls(text: str) -> str:
 
 # Regex to match kaomoji and special emoticons
 _KAOMOJI_RE = re.compile(
-    r"[\(\（]"  # Opening bracket
-    r"[^\(\)\（\）]{1,15}"  # Content (1-15 chars, no nested brackets)
-    r"[\)\）]"  # Closing bracket
+    r"[\(\（\[\]\{\}\u208d\u208e]"  # Opening bracket: ( （ [ ] { } ₍ ₎
+    r"[^\(\)\（\）\[\]\{\}\u208d\u208e]{1,20}"  # Content (1-20 chars)
+    r"[\)\）\]\]\}\}\u208e]"  # Closing bracket
     r"|"
-    r"[｡ﾟ✧♪♡☆★●○◎◇◆□■△▲▽▼※→←↑↓]+"  # Special symbols
+    r"[｡ﾟ✧♪♡☆★●○◎◇◆□■△▲▽▼※→←↑↓\u25de\u0311]+"  # Special symbols (including ◞ ̑)
 )
 
 
@@ -93,7 +95,7 @@ def _normalize_text(text: str) -> str:
 def _guess_image_format(image_bytes: bytes) -> str:
     if not image_bytes:
         return ""
-    if image_bytes.startswith(b"\xFF\xD8\xFF"):
+    if image_bytes.startswith(b"\xff\xd8\xff"):
         return "jpeg"
     if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
         return "png"
@@ -128,7 +130,7 @@ def _extract_plain_text(seg) -> str:
     if seg.type == "seglist" and isinstance(seg.data, list):
         parts = [_extract_plain_text(child) for child in seg.data]
         return "".join(parts)
-    if seg.type == "text":
+    if seg.type == "text" or seg.type == "tts_text":
         return _strip_emoji(str(seg.data or ""))
     return ""
 
@@ -196,7 +198,9 @@ def _protect_kaomoji(sentence: str) -> Tuple[str, Dict[str, str]]:
     return sentence, placeholder_to_kaomoji
 
 
-def _recover_kaomoji(sentences: List[str], placeholder_to_kaomoji: Dict[str, str]) -> List[str]:
+def _recover_kaomoji(
+    sentences: List[str], placeholder_to_kaomoji: Dict[str, str]
+) -> List[str]:
     recovered: List[str] = []
     for sentence in sentences:
         for placeholder, kaomoji in placeholder_to_kaomoji.items():
@@ -225,7 +229,9 @@ def _tokenize_with_kaomoji(text: str) -> List[str]:
     return tokens
 
 
-def _split_bilibili_text(text: str, max_length: int = BILIBILI_DANMU_MAX_LENGTH) -> List[str]:
+def _split_bilibili_text(
+    text: str, max_length: int = BILIBILI_DANMU_MAX_LENGTH
+) -> List[str]:
     if not text:
         return []
     protected_text, kaomoji_mapping = _protect_kaomoji(text)

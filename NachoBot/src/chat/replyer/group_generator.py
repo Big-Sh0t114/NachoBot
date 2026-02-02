@@ -996,12 +996,23 @@ class DefaultReplyer:
                     target_id = str(chat_stream.group_info.group_id)
                 elif chat_stream.user_info and getattr(chat_stream.user_info, "user_id", None):
                     target_id = str(chat_stream.user_info.user_id)
-
-                tts_language_prompt = await TTSAction.get_language_prompt_for_chat(chat_id=chat_id, target_id=target_id)
+                    tts_language_prompt = await TTSAction.get_language_prompt_for_chat(
+                        chat_id=chat_id, target_id=target_id
+                    )
         except Exception as e:
             logger.debug(f"获取TTS语言提示失败: {e}")
 
         extra_info_block_parts = []
+        # [Injection] Inject Screen Info (Normal Mode)
+        try:
+            from src.mais4u.mais4u_chat.screen_manager import screen_manager
+
+            screen_info_content = screen_manager.get_screen()
+            if screen_info_content:
+                extra_info_block_parts.append(f"【直播画面】\n{screen_info_content}")
+        except Exception:
+            pass
+
         if extra_info:
             extra_info_block_parts.append(
                 f"以下是你在回复时需要参考的信息，现在请你阅读以下内容，进行决策\n{extra_info}\n以上是你在回复时需要参考的信息，现在请你阅读以下内容，进行决策"
