@@ -8,3 +8,5 @@ backup_files
 /.venv
 /logs
 base.toml
+*.ckpt
+ncnk1_e10_s370.pth
