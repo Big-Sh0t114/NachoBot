@@ -325,9 +325,9 @@ src/plugins/built_in/mus_library/list.txt
 src/plugins/built_in/mus_library/dump.txt
 
 interested_rates.txt
+s4u_screen_cache.txt
 NachoBot.code-workspace
 shim.exe
 
-# Artwork
 artwork/*
 !artwork/.gitkeep
