@@ -10,3 +10,4 @@ backup_files
 base.toml
 *.ckpt
 ncnk1_e10_s370.pth
+ncnk_fin.pth

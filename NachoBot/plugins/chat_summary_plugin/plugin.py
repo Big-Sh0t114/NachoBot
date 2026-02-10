@@ -121,9 +121,7 @@ class ChatSummaryCommand(BaseCommand):
                             # 优先使用群名片，其次使用昵称
                             first_msg = messages[0]
                             user_display_name = (
-                                first_msg.get("user_cardname") or
-                                first_msg.get("user_nickname") or
-                                target_user
+                                first_msg.get("user_cardname") or first_msg.get("user_nickname") or target_user
                             )
                         title = f"{user_display_name} {time_range}的聊天总结"
                     else:
@@ -150,6 +148,7 @@ class ChatSummaryCommand(BaseCommand):
 
                         # 计算24小时发言分布
                         from collections import Counter
+
                         hourly_distribution = Counter()
                         for msg in messages:
                             timestamp = msg.get("time", 0)
@@ -169,11 +168,15 @@ class ChatSummaryCommand(BaseCommand):
                         # 分析炫压抑指数（如果启用）
                         depression_index = []
                         if self.get_config("summary.enable_depression_index", True):
-                            depression_index = await ChatAnalysisUtils.analyze_depression_index(messages, user_stats) or []
+                            depression_index = (
+                                await ChatAnalysisUtils.analyze_depression_index(messages, user_stats) or []
+                            )
                     else:
                         # 单个用户模式：分析用户画像
                         if self.get_config("summary.enable_user_summary", True):
-                            user_profile = await ChatAnalysisUtils.analyze_user_profile(messages, user_display_name) or None
+                            user_profile = (
+                                await ChatAnalysisUtils.analyze_user_profile(messages, user_display_name) or None
+                            )
 
                     # 生成图片并获取临时文件路径
                     img_path = await SummaryImageGenerator.generate_summary_image(
@@ -186,7 +189,7 @@ class ChatSummaryCommand(BaseCommand):
                         golden_quotes=golden_quotes,
                         depression_index=depression_index,
                         hourly_distribution=hourly_distribution,
-                        user_profile=user_profile
+                        user_profile=user_profile,
                     )
 
                     # 发送图片
@@ -194,11 +197,12 @@ class ChatSummaryCommand(BaseCommand):
                         if not os.path.exists(img_path):
                             raise FileNotFoundError(f"图片文件不存在: {img_path}")
 
-                        with open(img_path, 'rb') as f:
+                        with open(img_path, "rb") as f:
                             img_data = f.read()
 
                         import base64
-                        img_base64 = base64.b64encode(img_data).decode('utf-8')
+
+                        img_base64 = base64.b64encode(img_data).decode("utf-8")
                         await self.send_custom("image", img_base64)
                         await asyncio.sleep(2)
                     finally:
@@ -303,9 +307,7 @@ class ChatSummaryCommand(BaseCommand):
         history[key] = dates
         local_storage[cls._USER_SUMMARY_STORE_KEY] = history
 
-    async def _get_messages(
-        self, start_time: float, end_time: float, target_user: Optional[str] = None
-    ) -> List[dict]:
+    async def _get_messages(self, start_time: float, end_time: float, target_user: Optional[str] = None) -> List[dict]:
         """获取聊天记录
 
         Args:
@@ -358,9 +360,7 @@ class ChatSummaryCommand(BaseCommand):
                     user_id = str(msg.get("user_id") or "")
 
                     # 匹配昵称、群名片或用户ID（用于CQ码at）
-                    if (target_user not in user_nickname and
-                        target_user not in user_cardname and
-                        target_user != user_id):
+                    if target_user not in user_nickname and target_user not in user_cardname and target_user != user_id:
                         continue
 
                 filtered_messages.append(msg)
@@ -453,8 +453,15 @@ class ChatSummaryCommand(BaseCommand):
 直接开始，不要标题。记住：必须在{max_words}字以内完成！"""
 
             # 使用LLM生成总结
-            # 使用主回复模型 (replyer)
+            # 优先使用高级模式回复模型 (advanced_replyer), 如果未配置则使用主回复模型 (replyer)
             model_task_config = model_config.model_task_config.replyer
+
+            if (
+                model_config.model_task_config.advanced_replyer
+                and model_config.model_task_config.advanced_replyer.model_list
+            ):
+                model_task_config = model_config.model_task_config.advanced_replyer
+                logger.info(f"使用高级模式模型组进行总结: {model_task_config.model_list}")
 
             success, summary, reasoning, model_name = await llm_api.generate_with_model(
                 prompt=prompt,
@@ -497,6 +504,7 @@ class SummaryScheduler:
         timezone_str = self.get_config("auto_summary.timezone", "Asia/Shanghai")
         try:
             import pytz
+
             tz = pytz.timezone(timezone_str)
             return datetime.now(tz)
         except ImportError:
@@ -573,7 +581,9 @@ class SummaryScheduler:
 
                 # 计算等待秒数
                 wait_seconds = (today_schedule - now).total_seconds()
-                logger.info(f"⏰ 下次总结生成时间: {today_schedule.strftime('%Y-%m-%d %H:%M:%S')} (等待 {int(wait_seconds/3600)}小时{int((wait_seconds%3600)/60)}分钟)")
+                logger.info(
+                    f"⏰ 下次总结生成时间: {today_schedule.strftime('%Y-%m-%d %H:%M:%S')} (等待 {int(wait_seconds / 3600)}小时{int((wait_seconds % 3600) / 60)}分钟)"
+                )
 
                 # 等待到执行时间
                 await asyncio.sleep(wait_seconds)
@@ -685,9 +695,7 @@ class DailySummaryEventHandler(BaseEventHandler):
             for chat_id, group_id in chat_id_to_group_id.items():
                 try:
                     # 获取今天的聊天记录
-                    messages = await self._get_messages_for_chat(
-                        chat_id, start_time, end_time
-                    )
+                    messages = await self._get_messages_for_chat(chat_id, start_time, end_time)
 
                     # 检查消息数量是否达到最小要求
                     if len(messages) < min_messages:
@@ -713,6 +721,7 @@ class DailySummaryEventHandler(BaseEventHandler):
 
                             # 计算24小时发言分布
                             from collections import Counter
+
                             hourly_distribution = Counter()
                             for msg in messages:
                                 timestamp = msg.get("time", 0)
@@ -732,7 +741,9 @@ class DailySummaryEventHandler(BaseEventHandler):
                             # 分析炫压抑指数（如果启用）
                             depression_index = []
                             if self.get_config("summary.enable_depression_index", True):
-                                depression_index = await ChatAnalysisUtils.analyze_depression_index(messages, user_stats) or []
+                                depression_index = (
+                                    await ChatAnalysisUtils.analyze_depression_index(messages, user_stats) or []
+                                )
 
                             # 生成图片并获取临时文件路径
                             img_path = await SummaryImageGenerator.generate_summary_image(
@@ -744,7 +755,7 @@ class DailySummaryEventHandler(BaseEventHandler):
                                 user_titles=user_titles,
                                 golden_quotes=golden_quotes,
                                 depression_index=depression_index,
-                                hourly_distribution=hourly_distribution
+                                hourly_distribution=hourly_distribution,
                             )
 
                             # 发送图片
@@ -752,11 +763,12 @@ class DailySummaryEventHandler(BaseEventHandler):
                                 if not os.path.exists(img_path):
                                     raise FileNotFoundError(f"图片文件不存在: {img_path}")
 
-                                with open(img_path, 'rb') as f:
+                                with open(img_path, "rb") as f:
                                     img_data = f.read()
 
                                 import base64
-                                img_base64 = base64.b64encode(img_data).decode('utf-8')
+
+                                img_base64 = base64.b64encode(img_data).decode("utf-8")
                                 await send_api.image_to_stream(img_base64, chat_id, storage_message=False)
                                 await send_api.text_to_stream(
                                     "今天的群聊总结和NachoBot的日记一起发送啦~",
@@ -785,9 +797,7 @@ class DailySummaryEventHandler(BaseEventHandler):
         except Exception as e:
             logger.error(f"生成每日总结失败: {e}", exc_info=True)
 
-    async def _get_messages_for_chat(
-        self, chat_id: str, start_time: float, end_time: float
-    ) -> List[dict]:
+    async def _get_messages_for_chat(self, chat_id: str, start_time: float, end_time: float) -> List[dict]:
         """获取指定群聊的聊天记录"""
         try:
             # 查询消息
@@ -830,6 +840,7 @@ class DailySummaryEventHandler(BaseEventHandler):
 
             # 获取人设和回复风格
             from src.config.config import global_config
+
             bot_name = global_config.bot.nickname
             personality = global_config.personality.personality
             reply_style = global_config.personality.reply_style
@@ -866,7 +877,15 @@ class DailySummaryEventHandler(BaseEventHandler):
 直接开始，不要标题。记住：必须在{max_words}字以内完成！"""
 
             # 使用LLM生成总结
+            # 优先使用高级模式回复模型 (advanced_replyer), 如果未配置则使用主回复模型 (replyer)
             model_task_config = model_config.model_task_config.replyer
+
+            if (
+                model_config.model_task_config.advanced_replyer
+                and model_config.model_task_config.advanced_replyer.model_list
+            ):
+                model_task_config = model_config.model_task_config.advanced_replyer
+                logger.info(f"使用高级模式模型组进行自动总结: {model_task_config.model_list}")
 
             success, summary, reasoning, model_name = await llm_api.generate_with_model(
                 prompt=prompt,
@@ -909,12 +928,8 @@ class ChatSummaryPlugin(BasePlugin):
             "enabled": ConfigField(type=bool, default=False, description="是否启用插件"),
         },
         "summary": {
-            "group_summary_max_words": ConfigField(
-                type=int, default=400, description="群聊总结的字数限制"
-            ),
-            "user_summary_max_words": ConfigField(
-                type=int, default=300, description="单个用户总结的字数限制"
-            ),
+            "group_summary_max_words": ConfigField(type=int, default=400, description="群聊总结的字数限制"),
+            "user_summary_max_words": ConfigField(type=int, default=300, description="单个用户总结的字数限制"),
             "enable_user_summary": ConfigField(type=bool, default=True, description="是否启用单个用户的聊天总结"),
             "enable_user_titles": ConfigField(type=bool, default=True, description="是否启用群友称号分析"),
             "enable_golden_quotes": ConfigField(type=bool, default=True, description="是否启用金句提取"),

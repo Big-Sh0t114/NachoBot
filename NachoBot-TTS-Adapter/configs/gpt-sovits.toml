@@ -32,8 +32,8 @@ super_sampling = false     # 是否启用超采样
 # 预设角色配置示例
 [tts.models.presets.default]
 name = "默认角色"
-gpt_model = "ncnk1-e15.ckpt"
-sovits_model = "ncnk1_e10_s370.pth"
+gpt_model = "17.ckpt"
+sovits_model = "ncnk_fin.pth"
 ref_audio_path = "1_test_(Vocals).wav" # 参考音频路径
 aux_ref_audio_paths = []                   # 辅助参考音频路径列表
 prompt_text = "おはようみんな、ミサイドっていうさ、女の子のゲームをやりたいんだけど"        # 提示文本
@@ -43,8 +43,8 @@ speed_factor = 1.0                         # 语速控制
 
 [tts.models.presets.custom1]
 name = "NachoChan"
-gpt_model = "ncnk1-e15.ckpt"
-sovits_model = "ncnk1_e10_s370.pth"
+gpt_model = "17.ckpt"
+sovits_model = "ncnk_fin.pth"
 ref_audio_path = "1_test_(Vocals).wav"
 aux_ref_audio_paths = []                                              # 辅助参考音频路径列表
 prompt_text = "おはようみんな、ミサイドっていうさ、女の子のゲームをやりたいんだけど"                       # 提示文本

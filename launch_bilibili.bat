@@ -1,1 +1,2 @@
-python NachoBot-Bilibili-Adapter\main.py
+cd /d "%~dp0NachoBot-Bilibili-Adapter"
+python main.py

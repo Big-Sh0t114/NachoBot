@@ -3,3 +3,6 @@ qr_login.png
 subtitles.txt
 subtitles1.txt
 __pycache__/
+Live2DCubismCore.dll
+Resources/*
+logs/
