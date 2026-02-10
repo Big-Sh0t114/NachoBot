@@ -23,6 +23,10 @@ _nachobot_path = _root_dir / "NachoBot"
 if _nachobot_path.exists() and str(_nachobot_path) not in sys.path:
     sys.path.insert(0, str(_nachobot_path))
 
+from live2d.controller import Live2DController
+from model_client import get_model_client
+from src.chat.message_receive.message import MessageRecv
+
 from ncnk_message import (  # noqa: E402
     BaseMessageInfo,
     FormatInfo,
@@ -74,7 +78,7 @@ if tts_adapter_path.exists():
     if str(tts_adapter_path) not in sys.path:
         sys.path.insert(0, str(tts_adapter_path))
     try:
-        from src.plugins.GPT_Sovits.tts_model import TTSModel
+        from tts_src.plugins.GPT_Sovits.tts_model import TTSModel
     except ImportError as e:
         _tts_import_error = str(e)
     except Exception as e:
@@ -95,8 +99,10 @@ class AudioPlayer:
     Uses winsound for playback and calculates duration for timing.
     """
 
-    def __init__(self, logger: logging.Logger):
+    def __init__(self, logger: logging.Logger, on_start=None, on_stop=None):
         self.logger = logger
+        self.on_start = on_start
+        self.on_stop = on_stop
         self.queue: Deque[bytes] = queue.deque()
         self.current_audio: Optional[bytes] = None
         self.interrupted_audio: Optional[bytes] = None
@@ -136,6 +142,11 @@ class AudioPlayer:
                 # self.logger.debug(f"Playing audio segment ({duration:.2f}s)")
 
                 # Play (Async)
+                if self.on_start:
+                    if asyncio.iscoroutinefunction(self.on_start):
+                        asyncio.create_task(self.on_start())
+                    else:
+                        self.on_start()
                 self._play_sound(audio_data)
 
                 # Wait for duration (or interruption)
@@ -153,6 +164,11 @@ class AudioPlayer:
 
                 self.current_audio = None
                 self.is_playing = False
+                if self.on_stop:
+                    if asyncio.iscoroutinefunction(self.on_stop):
+                        asyncio.create_task(self.on_stop())
+                    else:
+                        self.on_stop()
                 self.stop_event.clear()  # Reset for next
 
             except Exception as e:
@@ -339,10 +355,34 @@ class BilibiliAdapter:
         #         )
         #         self.logger.info(f"Live Streamer mode enabled for room {room_id}")
 
+        # Initialize ModelClient (for Live2D)
+        self.model_client = None
+        self.live2d_controller = None
+        if self.config.live_live2d_enable:
+            _nachobot_path = Path(__file__).resolve().parents[1] / "NachoBot"
+            self.model_client = get_model_client(_nachobot_path, self.logger)
+            self.live2d_controller = Live2DController(self, self.logger)
+
+            # Wire AudioPlayer callbacks to Live2D lip sync
+            def _on_audio_start():
+                if self.live2d_controller:
+                    self.live2d_controller.set_speaking(True)
+
+            def _on_audio_stop():
+                if self.live2d_controller:
+                    self.live2d_controller.set_speaking(False)
+                    # Reset gaze to center after audio finishes
+                    asyncio.ensure_future(self.live2d_controller.on_reply_finished())
+
+            self.audio_player.on_start = _on_audio_start
+            self.audio_player.on_stop = _on_audio_stop
+
     # ========== Run and Control Methods ==========
 
     async def run(self) -> None:
         await self.api.start()
+        if self.live2d_controller:
+            await self.live2d_controller.start()
         tasks = [self.router.run()]
         if self.config.live_enable:
             for room_id in self.config.room_ids:
@@ -455,10 +495,67 @@ class BilibiliAdapter:
         text_zh = "".join(m.strip() for m in zh_matches if m.strip())
 
         if not text_jp and not text_zh:
+            self.logger.warning(
+                f"Failed to parse bilingual tags. Original text: {repr(text[:100])}..."
+            )
             cleaned = re.sub(r"</?[A-Z]{2}>", "", text).strip()
             return "", cleaned
 
         return text_jp, text_zh
+
+    def _repair_unbalanced_tags(
+        self, text: str, open_zh: int, close_zh: int, open_jp: int, close_jp: int
+    ) -> str:
+        """
+        Repair unbalanced bilingual tags in text.
+
+        Strategy:
+        1. If only closing tags exist (0 open, N close) - remove all closing tags
+        2. If only opening tags exist (N open, 0 close) - add closing tags at end
+        3. If mismatch count - try to balance by adding/removing tags
+
+        Args:
+            text: Text with potentially unbalanced tags
+            open_zh: Count of <ZH> tags
+            close_zh: Count of </ZH> tags
+            open_jp: Count of <JP> tags
+            close_jp: Count of </JP> tags
+
+        Returns:
+            Repaired text with balanced or removed tags
+        """
+        repaired = text
+
+        # Handle ZH tags
+        if open_zh == 0 and close_zh > 0:
+            # Missing opening tags - remove orphaned closing tags
+            self.logger.warning(
+                f"Removing {close_zh} orphaned </ZH> closing tag(s) without opening tags"
+            )
+            repaired = repaired.replace("</ZH>", "")
+        elif close_zh == 0 and open_zh > 0:
+            # Missing closing tags - add them at the end
+            self.logger.warning(f"Adding {open_zh} missing </ZH> closing tag(s)")
+            repaired = repaired + "</ZH>" * open_zh
+
+        # Handle JP tags
+        if open_jp == 0 and close_jp > 0:
+            # Missing opening tags - remove orphaned closing tags
+            self.logger.warning(
+                f"Removing {close_jp} orphaned </JP> closing tag(s) without opening tags"
+            )
+            repaired = repaired.replace("</JP>", "")
+        elif close_jp == 0 and open_jp > 0:
+            # Missing closing tags - add them at the end
+            self.logger.warning(f"Adding {open_jp} missing </JP> closing tag(s)")
+            repaired = repaired + "</JP>" * open_jp
+
+        if repaired != text:
+            self.logger.info(
+                f"Tag repair applied: {repr(text[:50])} -> {repr(repaired[:50])}"
+            )
+
+        return repaired
 
     async def _on_speech_start(self):
         """Callback when user starts speaking."""
@@ -1179,6 +1276,34 @@ class BilibiliAdapter:
             template_info=template_info,
             additional_config=additional_config,
         )
+
+        # Hook Live2D: Message Received
+        if self.live2d_controller:
+            try:
+                # Construct a minimal MessageRecv compatible dict
+                # We need to map adapter's data to MessageRecv structure
+                msg_dict = {
+                    "message_info": message_info.to_dict(),
+                    "message_segment": {"type": "text", "data": processed_text},
+                    "raw_message": None,
+                    "processed_plain_text": processed_text,
+                }
+                # For dependencies like chat_stream, we rely on managers to handle missing streams or use chat_id from msg_info
+                msg_recv = MessageRecv(msg_dict)
+
+                # Inject chat_stream mock if needed by MoodManager?
+                # MoodManager uses message.chat_stream.stream_id.
+                # MessageRecv doesn't set chat_stream in __init__ from dict.
+                # We can monkey-patch it or use a mock object.
+                class MockStream:
+                    def __init__(self, room_id):
+                        self.stream_id = str(room_id)
+
+                msg_recv.chat_stream = MockStream(room_id)
+
+                await self.live2d_controller.on_message_received(msg_recv)
+            except Exception as e:
+                self.logger.error(f"Live2D hook error: {e}")
 
         # Construct message content
         text_segment = Seg(type="text", data=processed_text)
@@ -2130,6 +2255,15 @@ class BilibiliAdapter:
                 )
                 return
 
+            # If still unbalanced after timeout, attempt to repair tags
+            if not is_balanced:
+                self.logger.warning(
+                    f"TTS buffer timeout with unbalanced tags (ZH:{open_zh}/{close_zh} JP:{open_jp}/{close_jp}). Attempting repair..."
+                )
+                full_text = self._repair_unbalanced_tags(
+                    full_text, open_zh, close_zh, open_jp, close_jp
+                )
+
             # Proceed to flush
             self._tts_buffer[room_id] = []
 
@@ -2166,6 +2300,13 @@ class BilibiliAdapter:
                         audio_data = await self.tts_model.tts(
                             text=cleaned_tts_text, platform=self.config.platform
                         )
+                        # Hook Live2D: Start Replying (look down while speaking)
+                        if self.live2d_controller:
+                            try:
+                                await self.live2d_controller.on_start_replying()
+                            except Exception as e:
+                                self.logger.error(f"Live2D reply hook error: {e}")
+
                         await self._play_audio(audio_data)
                         self.logger.info(f"TTS Played successfully for room {room_id}")
                         return
@@ -2176,15 +2317,43 @@ class BilibiliAdapter:
                     self.logger.warning(
                         f"TTS enabled for room {room_id} but no Japanese text parsed. Sending raw text as danmu."
                     )
+                    # Hook Live2D: Start Replying (look down while sending)
+                    if self.live2d_controller:
+                        try:
+                            await self.live2d_controller.on_start_replying()
+                        except Exception as e:
+                            self.logger.error(f"Live2D reply hook error: {e}")
+
                     msg_to_send = text_zh if text_zh else full_text
                     await self._send_danmu(
                         room_id, msg_to_send, reply_mid or None, reply_dmid or None
                     )
+
+                    # Hook Live2D: Reply Finished (back to center)
+                    if self.live2d_controller:
+                        try:
+                            await self.live2d_controller.on_reply_finished()
+                        except Exception as e:
+                            self.logger.error(f"Live2D reply hook error: {e}")
                     return
+
+            # Hook Live2D: Start Replying (look down while sending)
+            if self.live2d_controller:
+                try:
+                    await self.live2d_controller.on_start_replying()
+                except Exception as e:
+                    self.logger.error(f"Live2D reply hook error: {e}")
 
             await self._send_danmu(
                 room_id, full_text, reply_mid or None, reply_dmid or None
             )
+
+            # Hook Live2D: Reply Finished (back to center)
+            if self.live2d_controller:
+                try:
+                    await self.live2d_controller.on_reply_finished()
+                except Exception as e:
+                    self.logger.error(f"Live2D reply hook error: {e}")
 
         except Exception as e:
             self.logger.error(f"Error processing buffered TTS reply: {e}")
@@ -2297,7 +2466,22 @@ class BilibiliAdapter:
 
         # Original non-TTS logic below
         # (Actually, we can just execute the immediate logic here if not TTS)
+
+        # Hook Live2D: Start Replying (look down while sending)
+        if self.live2d_controller:
+            try:
+                await self.live2d_controller.on_start_replying()
+            except Exception as e:
+                self.logger.error(f"Live2D reply hook error: {e}")
+
         await self._send_danmu(room_id, text, reply_mid or None, reply_dmid or None)
+
+        # Hook Live2D: Reply Finished (back to center)
+        if self.live2d_controller:
+            try:
+                await self.live2d_controller.on_reply_finished()
+            except Exception as e:
+                self.logger.error(f"Live2D reply hook error: {e}")
 
     async def _handle_private_send(
         self, args: Dict[str, Any], message: Optional[MessageBase]

@@ -16,29 +16,54 @@ class SendArtworkAction(BaseAction):
     """随机从本地artwork目录发送一张画作"""
 
     action_name = "send_artwork"
-    action_description = "当用户想看画时，随机发送一张本地画作图片"
+    action_description = "响应用户明确的看图请求，随机发送一张本地画作"  # 修改描述，强调“响应请求”而非“当用户想看时”
 
-    activation_type = ActionActivationType.LLM_JUDGE  # 由planner判断是否触发
+    activation_type = ActionActivationType.LLM_JUDGE
+
+    # --- 修改重点 1: 强化 LLM 判断提示词 ---
     llm_judge_prompt = (
-        "仅在用户文本明确表示想看画/作品/插画/图片且已确认时才激活；"
-        "如果只是说“想画画”或讨论绘画、未要求查看，或由机器人自身消息触发，请不要选择该动作。"
+        "严格触发规则：仅在用户文本中包含明确的指令性词汇（如'看看画'、'发张图'、'看作品'、'来张图'）时才激活。"
+        "绝对禁止基于语境推断（如'用户很开心'、'聊到了画画'）触发。"
+        "如果用户只是讨论绘画技巧、说'我也想画'，或者夸奖之前的画，请保持静默，不要选择此动作。"
+        "你必须在 action_parameters 中填写 'trigger_evidence' 字段以证明你的判断。"
     )
+
     parallel_action = True
 
-    action_parameters = {}
+    # --- 修改重点 2: 增加证据参数 (核心) ---
+    # 这迫使模型必须从用户的话里“摘抄”出证据，如果摘抄不出来，它就无法通过校验
+    action_parameters = {"trigger_evidence": "用户请求看图的原话片段（必须精准摘录自用户消息文本，例如'发张图看看'）"}
+
+    # --- 修改重点 3: 完善触发条件 ---
     action_require = [
-        "用户已明确说想看/确认要看画之后使用（未确认时不要触发）",
-        "当用户提到想看画、作品图或发一张图时使用",
+        "用户必须有明确的指令行为（Imperative Request），而非陈述行为",
+        "参数 trigger_evidence 必须非空，且必须能从用户的最新消息中找到对应文本",  # 双重保险
         "若非用户明确要求，不要连续触发该动作",
         "不符合以上条件时不要触发该动作",
         "若最近十轮对话中已使用过该动作，不再触发该动作",
     ]
+
     associated_types = ["text"]
 
-    async def execute(self) -> Tuple[bool, str]:
+    async def execute(self, trigger_evidence: str = "") -> Tuple[bool, str]:
         artwork_dir = self._resolve_artwork_dir()
         allowed_exts = self._get_allowed_extensions()
         artwork_files = self._collect_artworks(artwork_dir, allowed_exts)
+
+        # Discord 平台画作发送控制逻辑
+        if str(self.platform).lower() == "discord":
+            # ... (原有逻辑保持不变) ...
+            if self.is_group:
+                logger.warning(f"{self.log_prefix} Discord平台群聊禁用发送画作，已拦截")
+                return False, "Discord群聊禁用发送画作"
+
+            discord_artwork_whitelist = self.get_config("access_control.discord_artwork_whitelist", [])
+            whitelist_strs = [str(uid) for uid in discord_artwork_whitelist]
+            current_user_id = str(self.user_id) if self.user_id else ""
+
+            if current_user_id not in whitelist_strs:
+                logger.warning(f"{self.log_prefix} 用户 {current_user_id} 不在Discord画作白名单中，已拦截")
+                return False, "用户不在Discord画作白名单中"
 
         if not artwork_files:
             empty_reply = self.get_config(
@@ -169,6 +194,11 @@ class ArtworkPlugin(BasePlugin):
             "caption": ConfigField(type=str, default="送你一张最近的画~", description="发送图片时附带的文案"),
             "empty_message": ConfigField(
                 type=str, default="画夹里暂时没有图片，等我补几张再给你看~", description="画夹为空时的回复"
+            ),
+        },
+        "access_control": {
+            "discord_artwork_whitelist": ConfigField(
+                type=list, default=[], description="Discord画作功能白名单用户ID列表"
             ),
         },
     }

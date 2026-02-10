@@ -7,11 +7,6 @@ from ncnk_message import (
     Seg,
     FormatInfo,
 )
-from src.config import Config
-from src.logger import logger
-from src.plugins.base_tts_model import BaseTTSModel
-from src.utils.audio_encode import encode_audio, encode_audio_stream
-from src.utils import post_process
 import asyncio
 from typing import List, Tuple, Dict, Optional
 import importlib
@@ -20,13 +15,20 @@ import random
 from pathlib import Path
 
 
+from tts_src.config import Config
+from tts_src.logger import logger
+from tts_src.plugins.base_tts_model import BaseTTSModel
+from tts_src.utils.audio_encode import encode_audio, encode_audio_stream
+from tts_src.utils import post_process
+
+
 class TTSPipeline:
     tts_list: List[BaseTTSModel] = []
 
     def __init__(self, config_path: str):  # sourcery skip: dict-comprehension
         self.config: Config = Config(config_path)
         # 根据配置刷新日志级别
-        from src.logger import set_logging_level
+        from tts_src.logger import set_logging_level
 
         set_logging_level(self.config.config_data["debug"].get("logging_level", "INFO"))
         self.server = MessageServer(
@@ -52,7 +54,7 @@ class TTSPipeline:
         """动态导入TTS适配"""
         for tts in self.config.enabled_plugin.enabled:
             # 动态导入模块
-            module_name = f"src.plugins.{tts}"
+            module_name = f"tts_src.plugins.{tts}"
             try:
                 module = importlib.import_module(module_name)
                 tts_class: BaseTTSModel = module.TTSModel()
@@ -104,24 +106,25 @@ class TTSPipeline:
                 message_text += seg.data
         return message_text, text_lang
 
-
     async def client_handle(self, message_dict: dict) -> None:
         # sourcery skip: remove-redundant-if
         """处理客户端收到的消息并进行TTS转换（分群缓冲）"""
         message = MessageBase.from_dict(message_dict)
         stream_mode = self.config.tts_base_config.stream_mode
-        if message.message_segment.type != 'tts_text' and random.random() > self.config.probability.voice_probability:
+        if message.message_segment.type != "tts_text" and random.random() > self.config.probability.voice_probability:
             #  如果概率不满足，直接透传消息
             await self.server.send_message(message)
             return
-        
+
         if stream_mode:
             await self.send_voice_stream(message)
             return
 
         message_text, text_lang = self.process_seg(message.message_segment)
         if not text_lang and message.message_info.additional_config:
-            text_lang = message.message_info.additional_config.get("tts_language") or message.message_info.additional_config.get("text_lang")
+            text_lang = message.message_info.additional_config.get(
+                "tts_language"
+            ) or message.message_info.additional_config.get("text_lang")
         if message_text == "":
             # 非文本消息直接透传
             await self.server.send_message(message)
@@ -164,7 +167,9 @@ class TTSPipeline:
         message = latest_message_obj
         text_lang = None
         if message.message_info.additional_config:
-            text_lang = message.message_info.additional_config.get("tts_language") or message.message_info.additional_config.get("text_lang")
+            text_lang = message.message_info.additional_config.get(
+                "tts_language"
+            ) or message.message_info.additional_config.get("text_lang")
         new_seg = await self.get_voice_no_stream(text, message.message_info.platform, text_lang=text_lang)
         try:
             if not new_seg:
@@ -201,7 +206,7 @@ class TTSPipeline:
     async def cleanup_task(self, group_id: str):
         task = self.buffer_task_dict.pop(group_id)
         task.cancel()
- 
+
     async def get_voice_no_stream(self, text: str, platform: str, text_lang: str | None = None) -> Seg | None:
         """获取语音消息段"""
         if not self.tts_list:
@@ -230,7 +235,9 @@ class TTSPipeline:
         platform = message.message_info.platform
         message_text, text_lang = self.process_seg(message.message_segment)
         if not text_lang and message.message_info.additional_config:
-            text_lang = message.message_info.additional_config.get("tts_language") or message.message_info.additional_config.get("text_lang")
+            text_lang = message.message_info.additional_config.get(
+                "tts_language"
+            ) or message.message_info.additional_config.get("text_lang")
         if not message_text:
             logger.warning("处理文本为空，跳过发送")
             return
@@ -261,13 +268,9 @@ class TTSPipeline:
                         # 发送到下游
                         try:
                             ok = await self.server.send_message(message)
-                            logger.debug(
-                                f"流式分片发送: platform={message.message_info.platform}, ok={ok}"
-                            )
+                            logger.debug(f"流式分片发送: platform={message.message_info.platform}, ok={ok}")
                             if not ok:
-                                logger.warning(
-                                    f"流式语音发送失败 platform={message.message_info.platform}"
-                                )
+                                logger.warning(f"流式语音发送失败 platform={message.message_info.platform}")
                         except Exception as exc:
                             logger.exception(f"流式发送异常: {exc}")
                     except Exception as e:

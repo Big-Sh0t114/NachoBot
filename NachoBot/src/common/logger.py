@@ -12,7 +12,7 @@ from typing import Callable, Optional
 from datetime import datetime, timedelta
 
 # 创建logs目录
-LOG_DIR = Path("logs")
+LOG_DIR = Path("logs").resolve()
 LOG_DIR.mkdir(exist_ok=True)
 logger_file = Path(__file__).resolve()
 PROJECT_ROOT = logger_file.parent.parent.parent.resolve()
@@ -39,7 +39,7 @@ def get_file_handler():
         _file_handler = TimestampedFileHandler(
             log_dir=LOG_DIR,
             max_bytes=5 * 1024 * 1024,  # 5MB
-            backup_count=30,
+            backup_count=LOG_CONFIG.get("backup_count", 30),
             encoding="utf-8",
         )
         # 设置文件handler的日志级别
@@ -75,6 +75,8 @@ class TimestampedFileHandler(logging.Handler):
         self.current_file = None
         self.current_stream = None
         self._init_current_file()
+        # 清理旧文件，保留指定数量
+        self._cleanup_old_files()
 
     def _init_current_file(self):
         """初始化当前日志文件"""
@@ -209,6 +211,7 @@ def load_log_config():  # sourcery skip: use-contextlib-suppress
             "jieba",
         ],
         "library_log_levels": {"aiohttp": "WARNING"},
+        "backup_count": 30,
     }
 
     try:

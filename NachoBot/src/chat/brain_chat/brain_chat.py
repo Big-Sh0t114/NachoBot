@@ -294,27 +294,54 @@ class BrainChatting:
                 promise_block = "\n".join(["[约定缓存]"] + promise_snippets)
                 chat_content_block = f"{promise_block}\n----\n{chat_content_block}"
 
-            prompt_info = await self.action_planner.build_planner_prompt(
-                is_group_chat=is_group_chat,
-                chat_target_info=chat_target_info,
-                current_available_actions=available_actions,
-                chat_content_block=chat_content_block,
-                message_id_list=message_id_list,
-                interest=global_config.personality.interest,
-            )
-            continue_flag, modified_message = await events_manager.handle_mai_events(
-                EventType.ON_PLAN, None, prompt_info[0], None, self.chat_stream.stream_id
-            )
-            if not continue_flag:
-                return False
-            if modified_message and modified_message._modify_flags.modify_llm_prompt:
-                prompt_info = (modified_message.llm_prompt, prompt_info[1])
+            # High-level mode check
+            if advanced_manager.is_on(self.chat_stream):
+                logger.info(f"{self.log_prefix} 检测到高级模式开启，跳过Planner直接回复")
 
-            with Timer("规划器", cycle_timers):
-                action_to_use_info, _ = await self.action_planner.plan(
-                    loop_start_time=self.last_read_time,
-                    available_actions=available_actions,
+                # Try to find the latest user message to reply to
+                target_message = None
+                # Use message_id_list from build_readable_messages_with_id which contains (id, msg) tuples
+                if message_id_list:
+                    # Iterate backwards to find last non-bot message
+                    for _, msg in reversed(message_id_list):
+                        if msg and msg.user_info and str(msg.user_info.user_id) != str(global_config.bot.qq_account):
+                            target_message = msg
+                            break
+                    # If no user message found, fallback to the very last message
+                    if target_message is None and message_id_list:
+                        target_message = message_id_list[-1][1]
+
+                action_to_use_info = [
+                    ActionPlannerInfo(
+                        action_type="reply",
+                        reasoning="Advanced Mode: Direct Reply",
+                        action_data={"loop_start_time": self.last_read_time},
+                        action_message=target_message,
+                        available_actions=available_actions,
+                    )
+                ]
+            else:
+                prompt_info = await self.action_planner.build_planner_prompt(
+                    is_group_chat=is_group_chat,
+                    chat_target_info=chat_target_info,
+                    current_available_actions=available_actions,
+                    chat_content_block=chat_content_block,
+                    message_id_list=message_id_list,
+                    interest=global_config.personality.interest,
                 )
+                continue_flag, modified_message = await events_manager.handle_mai_events(
+                    EventType.ON_PLAN, None, prompt_info[0], None, self.chat_stream.stream_id
+                )
+                if not continue_flag:
+                    return False
+                if modified_message and modified_message._modify_flags.modify_llm_prompt:
+                    prompt_info = (modified_message.llm_prompt, prompt_info[1])
+
+                with Timer("规划器", cycle_timers):
+                    action_to_use_info, _ = await self.action_planner.plan(
+                        loop_start_time=self.last_read_time,
+                        available_actions=available_actions,
+                    )
 
             # 3. 按并行标记执行动作，避免非并行动作互相抢占
             serial_actions = []

@@ -2,7 +2,7 @@ import requests
 import aiohttp
 from typing import Dict, Any, List
 from pathlib import Path
-from src.plugins.base_tts_model import BaseTTSModel
+from tts_src.plugins.base_tts_model import BaseTTSModel
 from .tts_config import TTSBaseConfig, TTSPreset
 
 response_error_status_list = [
