@@ -1,7 +1,7 @@
 import asyncio
 import importlib
 from pathlib import Path
-from src.plugins.base_tts_model import BaseTTSModel
+from tts_src.plugins.base_tts_model import BaseTTSModel
 from typing import List
 import soundfile as sf
 import numpy as np
@@ -14,7 +14,7 @@ class TTSModelDebugger:
 
     def import_module(self):
         """动态导入TTS适配"""
-        from src.config import Config
+        from tts_src.config import Config
 
         config = Config(self.config_path)
         for tts in config.enabled_plugin.enabled:

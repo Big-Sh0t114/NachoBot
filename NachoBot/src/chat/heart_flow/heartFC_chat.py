@@ -22,6 +22,7 @@ from src.chat.frequency_control.frequency_control import frequency_control_manag
 from src.chat.keyword_cache import promise_cache_manager
 from src.person_info.person_info import Person
 from src.plugin_system.base.component_types import EventType, ActionInfo
+from src.chat.injection.injection_manager import injection_manager
 from src.plugin_system.core import events_manager
 from src.plugin_system.apis import generator_api, send_api, message_api, database_api
 from src.mais4u.mai_think import mai_thinking_manager
@@ -647,6 +648,15 @@ class HeartFChatting:
 
                 elif action_planner_info.action_type == "reply":
                     try:
+                        message_text_for_injection = ""
+                        if action_planner_info.action_message:
+                            message_text_for_injection = (
+                                getattr(action_planner_info.action_message, "processed_plain_text", "") or ""
+                            )
+                        injection_text = injection_manager.build_injection_text(
+                            chat_id=self.chat_stream.stream_id, message_text=message_text_for_injection
+                        )
+
                         success, llm_response = await generator_api.generate_reply(
                             chat_stream=self.chat_stream,
                             reply_message=action_planner_info.action_message,
@@ -656,6 +666,7 @@ class HeartFChatting:
                             enable_tool=global_config.tool.enable_tool,
                             request_type="replyer",
                             from_plugin=False,
+                            extra_info=injection_text,
                         )
 
                         if not success or not llm_response or not llm_response.reply_set:

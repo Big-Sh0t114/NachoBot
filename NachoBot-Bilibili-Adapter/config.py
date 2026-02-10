@@ -39,6 +39,16 @@ class AdapterConfig:
     live_proxy_check_timeout: int
     live_allow_self_danmu: bool
     live_log_danmu: bool
+    live_live2d_enable: bool
+    live_live2d_model_path: str
+    live_live2d_transparent: bool
+    live_live2d_antialiasing: bool
+    live_live2d_width: int
+    live_live2d_height: int
+    live_live2d_scale: float
+    live_live2d_track_mouse: bool
+    live_live2d_mood_enable: bool
+    live_live2d_action_enable: bool
     live_mention_keywords: List[str]
     live_mention_prefixes: List[str]
     live_mention_any_at: bool
@@ -423,6 +433,16 @@ def load_config(path: Path) -> AdapterConfig:
         live_proxy_check_timeout=int(live.get("proxy_check_timeout", 1)),
         live_allow_self_danmu=bool(live.get("allow_self_danmu", False)),
         live_log_danmu=bool(live.get("log_danmu", False)),
+        live_live2d_enable=bool(live.get("enable_live2D", False)),
+        live_live2d_model_path=str(live.get("live2d_model_path", "")),
+        live_live2d_transparent=bool(live.get("live2d_transparent", False)),
+        live_live2d_antialiasing=bool(live.get("live2d_antialiasing", True)),
+        live_live2d_width=int(live.get("live2d_width", 800)),
+        live_live2d_height=int(live.get("live2d_height", 600)),
+        live_live2d_scale=float(live.get("live2d_scale", 1.0)),
+        live_live2d_track_mouse=bool(live.get("live2d_track_mouse", False)),
+        live_live2d_mood_enable=bool(live.get("live2d_mood_enable", True)),
+        live_live2d_action_enable=bool(live.get("live2d_action_enable", True)),
         live_mention_keywords=mention_keywords,
         live_mention_prefixes=mention_prefixes,
         live_mention_any_at=bool(live.get("mention_any_at", False)),

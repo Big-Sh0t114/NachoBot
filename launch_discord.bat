@@ -12,10 +12,10 @@ timeout /t 5 /nobreak >nul
 
 rem ---- Start NachoBot-Koishi-Adapter in a new window ----
 echo Starting NachoBot-Koishi-Adapter...
-start "NachoBot-Koishi-Adapter" cmd /k "cd /d ""%BASE_DIR%"" && python NachoBot-Koishi-Adapter\main.py"
+start "NachoBot-Koishi-Adapter" cmd /k "cd /d ""%BASE_DIR%NachoBot-Koishi-Adapter"" && python main.py"
 
 rem ---- Start NachoBot-DiscordVC-Adapter in a new window ----
 echo Starting NachoBot-DiscordVC-Adapter...
-start "NachoBot-DiscordVC-Adapter" cmd /k "cd /d ""%BASE_DIR%"" && python NachoBot-DiscordVC-Adapter\main.py"
+start "NachoBot-DiscordVC-Adapter" cmd /k "cd /d ""%BASE_DIR%NachoBot-DiscordVC-Adapter"" && python main.py"
 
 endlocal

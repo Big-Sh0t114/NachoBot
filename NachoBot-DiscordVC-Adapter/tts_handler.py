@@ -38,7 +38,7 @@ class TTSHandler:
             # From Bilibili adapter: from src.plugins.GPT_Sovits.tts_model import TTSModel
 
             try:
-                from src.plugins.GPT_Sovits.tts_model import TTSModel
+                from tts_src.plugins.GPT_Sovits.tts_model import TTSModel
 
                 self.tts_model = TTSModel()
                 self.enabled = True
