@@ -105,10 +105,9 @@ def section_meta(label: str, order: int = 0, collapsed: bool = False):
 
 def ConfigField(*args, **kwargs):
     """Compatibility shim for ConfigField that accepts extra UI args"""
-    valid_keys = {'type', 'default', 'description', 'example', 'required', 'choices'}
+    valid_keys = {"type", "default", "description", "example", "required", "choices"}
     filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_keys}
     return _ConfigField(*args, **filtered_kwargs)
-
 
 
 from .mcp_client import (
@@ -138,9 +137,11 @@ logger = get_logger("mcp_bridge_plugin")
 # v1.4.0: 调用链路追踪
 # ============================================================================
 
+
 @dataclass
 class ToolCallRecord:
     """工具调用记录"""
+
     call_id: str
     timestamp: float
     tool_name: str
@@ -160,46 +161,46 @@ class ToolCallRecord:
 
 class ToolCallTracer:
     """工具调用追踪器"""
-    
+
     def __init__(self, max_records: int = 100):
         self._records: deque[ToolCallRecord] = deque(maxlen=max_records)
         self._enabled: bool = True
         self._log_enabled: bool = False
         self._log_path: Optional[Path] = None
-    
+
     def configure(self, enabled: bool, max_records: int, log_enabled: bool, log_path: Optional[Path] = None) -> None:
         """配置追踪器"""
         self._enabled = enabled
         self._records = deque(self._records, maxlen=max_records)
         self._log_enabled = log_enabled
         self._log_path = log_path
-    
+
     def record(self, record: ToolCallRecord) -> None:
         """添加调用记录"""
         if not self._enabled:
             return
-        
+
         self._records.append(record)
-        
+
         if self._log_enabled and self._log_path:
             self._write_to_log(record)
-    
+
     def get_recent(self, n: int = 10) -> List[ToolCallRecord]:
         """获取最近 N 条记录"""
         return list(self._records)[-n:]
-    
+
     def get_by_tool(self, tool_name: str) -> List[ToolCallRecord]:
         """按工具名筛选记录"""
         return [r for r in self._records if r.tool_name == tool_name]
-    
+
     def get_by_server(self, server_name: str) -> List[ToolCallRecord]:
         """按服务器名筛选记录"""
         return [r for r in self._records if r.server_name == server_name]
-    
+
     def clear(self) -> None:
         """清空记录"""
         self._records.clear()
-    
+
     def _write_to_log(self, record: ToolCallRecord) -> None:
         """写入 JSONL 日志文件"""
         try:
@@ -209,7 +210,7 @@ class ToolCallTracer:
                     f.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")
         except Exception as e:
             logger.warning(f"写入追踪日志失败: {e}")
-    
+
     @property
     def total_records(self) -> int:
         return len(self._records)
@@ -223,9 +224,11 @@ tool_call_tracer = ToolCallTracer()
 # v1.4.0: 工具调用缓存
 # ============================================================================
 
+
 @dataclass
 class CacheEntry:
     """缓存条目"""
+
     tool_name: str
     args_hash: str
     result: str
@@ -236,7 +239,7 @@ class CacheEntry:
 
 class ToolCallCache:
     """工具调用缓存（LRU）"""
-    
+
     def __init__(self, max_entries: int = 200, ttl: int = 300):
         self._cache: OrderedDict[str, CacheEntry] = OrderedDict()
         self._max_entries = max_entries
@@ -244,54 +247,54 @@ class ToolCallCache:
         self._enabled = False
         self._exclude_patterns: List[str] = []
         self._stats = {"hits": 0, "misses": 0}
-    
+
     def configure(self, enabled: bool, ttl: int, max_entries: int, exclude_tools: str) -> None:
         """配置缓存"""
         self._enabled = enabled
         self._ttl = ttl
         self._max_entries = max_entries
         self._exclude_patterns = [p.strip() for p in exclude_tools.strip().split("\n") if p.strip()]
-    
+
     def get(self, tool_name: str, args: Dict) -> Optional[str]:
         """获取缓存"""
         if not self._enabled:
             return None
-        
+
         if self._is_excluded(tool_name):
             return None
-        
+
         key = self._generate_key(tool_name, args)
-        
+
         if key not in self._cache:
             self._stats["misses"] += 1
             return None
-        
+
         entry = self._cache[key]
-        
+
         # 检查是否过期
         if time.time() > entry.expires_at:
             del self._cache[key]
             self._stats["misses"] += 1
             return None
-        
+
         # LRU: 移到末尾
         self._cache.move_to_end(key)
         entry.hit_count += 1
         self._stats["hits"] += 1
-        
+
         return entry.result
-    
+
     def set(self, tool_name: str, args: Dict, result: str) -> None:
         """设置缓存"""
         if not self._enabled:
             return
-        
+
         if self._is_excluded(tool_name):
             return
-        
+
         key = self._generate_key(tool_name, args)
         now = time.time()
-        
+
         entry = CacheEntry(
             tool_name=tool_name,
             args_hash=key,
@@ -299,7 +302,7 @@ class ToolCallCache:
             created_at=now,
             expires_at=now + self._ttl,
         )
-        
+
         # 如果已存在，更新
         if key in self._cache:
             self._cache[key] = entry
@@ -308,25 +311,25 @@ class ToolCallCache:
             # 检查容量
             self._evict_if_needed()
             self._cache[key] = entry
-    
+
     def clear(self) -> None:
         """清空缓存"""
         self._cache.clear()
         self._stats = {"hits": 0, "misses": 0}
-    
+
     def _generate_key(self, tool_name: str, args: Dict) -> str:
         """生成缓存键"""
         args_str = json.dumps(args, sort_keys=True, ensure_ascii=False)
         content = f"{tool_name}:{args_str}"
         return hashlib.md5(content.encode()).hexdigest()
-    
+
     def _is_excluded(self, tool_name: str) -> bool:
         """检查是否在排除列表中"""
         for pattern in self._exclude_patterns:
             if fnmatch.fnmatch(tool_name, pattern):
                 return True
         return False
-    
+
     def _evict_if_needed(self) -> None:
         """必要时淘汰条目"""
         # 先清理过期的
@@ -334,11 +337,11 @@ class ToolCallCache:
         expired_keys = [k for k, v in self._cache.items() if now > v.expires_at]
         for k in expired_keys:
             del self._cache[k]
-        
+
         # LRU 淘汰
         while len(self._cache) >= self._max_entries:
             self._cache.popitem(last=False)
-    
+
     def get_stats(self) -> Dict[str, Any]:
         """获取缓存统计"""
         total = self._stats["hits"] + self._stats["misses"]
@@ -362,16 +365,17 @@ tool_call_cache = ToolCallCache()
 # v1.4.0: 工具权限控制
 # ============================================================================
 
+
 class PermissionChecker:
     """工具权限检查器"""
-    
+
     def __init__(self):
         self._enabled = False
         self._default_mode = "allow_all"  # allow_all 或 deny_all
         self._rules: List[Dict] = []
         self._quick_deny_groups: set = set()
         self._quick_allow_users: set = set()
-    
+
     def configure(
         self,
         enabled: bool,
@@ -383,61 +387,61 @@ class PermissionChecker:
         """配置权限检查器"""
         self._enabled = enabled
         self._default_mode = default_mode if default_mode in ("allow_all", "deny_all") else "allow_all"
-        
+
         # 解析快捷配置
         self._quick_deny_groups = {g.strip() for g in quick_deny_groups.strip().split("\n") if g.strip()}
         self._quick_allow_users = {u.strip() for u in quick_allow_users.strip().split("\n") if u.strip()}
-        
+
         try:
             self._rules = json.loads(rules_json) if rules_json.strip() else []
         except json.JSONDecodeError as e:
             logger.warning(f"权限规则 JSON 解析失败: {e}")
             self._rules = []
-    
+
     def check(self, tool_name: str, chat_id: str, user_id: str, is_group: bool) -> bool:
         """检查权限
-        
+
         Args:
             tool_name: 工具名称
             chat_id: 聊天 ID（群号或私聊 ID）
             user_id: 用户 ID
             is_group: 是否为群聊
-            
+
         Returns:
             True 表示允许，False 表示拒绝
         """
         if not self._enabled:
             return True
-        
+
         # 快捷配置优先级最高
         # 1. 管理员白名单（始终允许）
         if user_id and user_id in self._quick_allow_users:
             return True
-        
+
         # 2. 禁用群列表（始终拒绝）
         if is_group and chat_id and chat_id in self._quick_deny_groups:
             return False
-        
+
         # 查找匹配的规则
         for rule in self._rules:
             tool_pattern = rule.get("tool", "")
             if not self._match_tool(tool_pattern, tool_name):
                 continue
-            
+
             # 找到匹配的规则
             mode = rule.get("mode", "")
             allowed = rule.get("allowed", [])
             denied = rule.get("denied", [])
-            
+
             # 构建当前上下文的 ID 列表
             context_ids = self._build_context_ids(chat_id, user_id, is_group)
-            
+
             # 检查 denied 列表（优先级最高）
             if denied:
                 for ctx_id in context_ids:
                     if self._match_id_list(denied, ctx_id):
                         return False
-            
+
             # 检查 allowed 列表
             if allowed:
                 for ctx_id in context_ids:
@@ -446,41 +450,41 @@ class PermissionChecker:
                 # 如果是 whitelist 模式且不在 allowed 中，拒绝
                 if mode == "whitelist":
                     return False
-            
+
             # 规则匹配但没有明确允许/拒绝，继续检查下一条规则
-        
+
         # 没有匹配的规则，使用默认模式
         return self._default_mode == "allow_all"
-    
+
     def _match_tool(self, pattern: str, tool_name: str) -> bool:
         """工具名通配符匹配"""
         if not pattern:
             return False
         return fnmatch.fnmatch(tool_name, pattern)
-    
+
     def _build_context_ids(self, chat_id: str, user_id: str, is_group: bool) -> List[str]:
         """构建上下文 ID 列表"""
         ids = []
-        
+
         # 用户级别（任何场景生效）
         if user_id:
             ids.append(f"qq:{user_id}:user")
-        
+
         # 场景级别
         if is_group and chat_id:
             ids.append(f"qq:{chat_id}:group")
         elif chat_id:
             ids.append(f"qq:{chat_id}:private")
-        
+
         return ids
-    
+
     def _match_id_list(self, id_list: List[str], context_id: str) -> bool:
         """检查 ID 是否在列表中"""
         for rule_id in id_list:
             if fnmatch.fnmatch(context_id, rule_id):
                 return True
         return False
-    
+
     def get_rules_for_tool(self, tool_name: str) -> List[Dict]:
         """获取特定工具的权限规则"""
         return [r for r in self._rules if self._match_tool(r.get("tool", ""), tool_name)]
@@ -493,6 +497,7 @@ permission_checker = PermissionChecker()
 # ============================================================================
 # 工具类型转换
 # ============================================================================
+
 
 def convert_json_type_to_tool_param_type(json_type: str) -> ToolParamType:
     """将 JSON Schema 类型转换为 MaiBot 的 ToolParamType"""
@@ -507,41 +512,43 @@ def convert_json_type_to_tool_param_type(json_type: str) -> ToolParamType:
     return type_mapping.get(json_type, ToolParamType.STRING)
 
 
-def parse_mcp_parameters(input_schema: Dict[str, Any]) -> List[Tuple[str, ToolParamType, str, bool, Optional[List[str]]]]:
+def parse_mcp_parameters(
+    input_schema: Dict[str, Any],
+) -> List[Tuple[str, ToolParamType, str, bool, Optional[List[str]]]]:
     """解析 MCP 工具的参数 schema，转换为 MaiBot 的参数格式"""
     parameters = []
-    
+
     if not input_schema:
         # 为无参数的工具添加占位参数，避免某些模型报错
         parameters.append(("_placeholder", ToolParamType.STRING, "占位参数，无需填写", False, None))
         return parameters
-    
+
     properties = input_schema.get("properties", {})
     required = input_schema.get("required", [])
-    
+
     # 如果没有任何参数，添加占位参数
     if not properties:
         parameters.append(("_placeholder", ToolParamType.STRING, "占位参数，无需填写", False, None))
         return parameters
-    
+
     for param_name, param_info in properties.items():
         json_type = param_info.get("type", "string")
         param_type = convert_json_type_to_tool_param_type(json_type)
         description = param_info.get("description", f"参数 {param_name}")
-        
+
         if json_type == "array":
             description = f"{description} (JSON 数组格式)"
         elif json_type == "object":
             description = f"{description} (JSON 对象格式)"
-        
+
         is_required = param_name in required
         enum_values = param_info.get("enum")
-        
+
         if enum_values is not None:
             enum_values = [str(v) for v in enum_values]
-        
+
         parameters.append((param_name, param_type, description, is_required, enum_values))
-    
+
     return parameters
 
 
@@ -549,28 +556,29 @@ def parse_mcp_parameters(input_schema: Dict[str, Any]) -> List[Tuple[str, ToolPa
 # MCP 工具代理
 # ============================================================================
 
+
 class MCPToolProxy(BaseTool):
     """MCP 工具代理基类"""
-    
+
     name: str = ""
     description: str = ""
     parameters: List[Tuple[str, ToolParamType, str, bool, Optional[List[str]]]] = []
     available_for_llm: bool = True
-    
+
     _mcp_tool_key: str = ""
     _mcp_original_name: str = ""
     _mcp_server_name: str = ""
-    
+
     async def execute(self, function_args: Dict[str, Any]) -> Dict[str, Any]:
         """执行 MCP 工具调用"""
         global _plugin_instance
-        
+
         call_id = str(uuid.uuid4())[:8]
         start_time = time.time()
-        
+
         # 移除 MaiBot 内部标记
         args = {k: v for k, v in function_args.items() if k != "llm_called"}
-        
+
         # 解析 JSON 字符串参数
         parsed_args = {}
         for key, value in args.items():
@@ -584,24 +592,21 @@ class MCPToolProxy(BaseTool):
                     parsed_args[key] = value
             else:
                 parsed_args[key] = value
-        
+
         # 获取上下文信息
         chat_id, user_id, is_group, user_query = self._get_context_info()
-        
+
         # v1.4.0: 权限检查
         if not permission_checker.check(self.name, chat_id, user_id, is_group):
             logger.warning(f"权限拒绝: 工具 {self.name}, chat={chat_id}, user={user_id}")
-            return {
-                "name": self.name,
-                "content": f"⛔ 权限不足：工具 {self.name} 在当前场景下不可用"
-            }
-        
+            return {"name": self.name, "content": f"⛔ 权限不足：工具 {self.name} 在当前场景下不可用"}
+
         logger.debug(f"调用 MCP 工具: {self._mcp_tool_key}, 参数: {parsed_args}")
-        
+
         # v1.4.0: 检查缓存
         cache_hit = False
         cached_result = tool_call_cache.get(self.name, parsed_args)
-        
+
         if cached_result is not None:
             cache_hit = True
             content = cached_result
@@ -612,31 +617,31 @@ class MCPToolProxy(BaseTool):
         else:
             # 调用 MCP
             result = await mcp_manager.call_tool(self._mcp_tool_key, parsed_args)
-            
+
             if result.success:
                 content = result.content
                 raw_result = content
                 success = True
                 error = ""
-                
+
                 # 存入缓存
                 tool_call_cache.set(self.name, parsed_args, content)
             else:
                 # 检查是否需要自动重连 (v2.1.0)
                 error_lower = result.error.lower()
                 should_reconnect = (
-                    "connection" in error_lower and ("closed" in error_lower or "reset" in error_lower)
-                ) or (
-                    "target closed" in error_lower or "session closed" in error_lower
-                ) or (
-                    "not connected" in error_lower
+                    ("connection" in error_lower and ("closed" in error_lower or "reset" in error_lower))
+                    or ("target closed" in error_lower or "session closed" in error_lower)
+                    or ("not connected" in error_lower)
                 )
 
                 if should_reconnect:
-                    logger.warning(f"检测到 MCP 服务器 {self._mcp_server_name} 可能断开 ({result.error})，尝试自动重连...")
+                    logger.warning(
+                        f"检测到 MCP 服务器 {self._mcp_server_name} 可能断开 ({result.error})，尝试自动重连..."
+                    )
                     # 异步触发重连，不等待
                     asyncio.create_task(mcp_manager.reconnect_server(self._mcp_server_name))
-                    
+
                     # 尝试更新错误消息提示
                     result.error += " (正在尝试自动重连服务器...)"
 
@@ -645,7 +650,7 @@ class MCPToolProxy(BaseTool):
                 success = False
                 error = result.error
                 logger.warning(f"MCP 工具 {self.name} 调用失败: {result.error}")
-        
+
         # v1.3.0: 后处理
         post_processed = False
         processed_result = content
@@ -655,9 +660,9 @@ class MCPToolProxy(BaseTool):
                 post_processed = True
                 processed_result = processed_content
                 content = processed_content
-        
+
         duration_ms = (time.time() - start_time) * 1000
-        
+
         # v1.4.0: 记录调用追踪
         record = ToolCallRecord(
             call_id=call_id,
@@ -677,33 +682,33 @@ class MCPToolProxy(BaseTool):
             cache_hit=cache_hit,
         )
         tool_call_tracer.record(record)
-        
+
         return {"name": self.name, "content": content}
-    
+
     def _get_context_info(self) -> Tuple[str, str, bool, str]:
         """获取上下文信息"""
         chat_id = ""
         user_id = ""
         is_group = False
         user_query = ""
-        
+
         # 安全访问 chat_stream
         chat_stream = getattr(self, "chat_stream", None)
-        
+
         if chat_stream:
             try:
                 # 获取群组信息
                 if chat_stream.group_info:
                     is_group = True
                     chat_id = str(chat_stream.group_info.group_id)
-                
+
                 # 获取用户信息
                 if chat_stream.user_info:
                     user_id = str(chat_stream.user_info.user_id)
                     # 如果不是群聊，chat_id 通常就是 user_id (私聊)
                     if not is_group and not chat_id:
                         chat_id = user_id
-                
+
                 # 获取消息内容上下文
                 if hasattr(chat_stream, "context") and chat_stream.context:
                     ctx = chat_stream.context
@@ -712,47 +717,47 @@ class MCPToolProxy(BaseTool):
                         user_query = last_message.processed_plain_text or ""
             except Exception as e:
                 logger.debug(f"获取上下文信息失败: {e}")
-        
+
         return chat_id, user_id, is_group, user_query
 
     async def _post_process_result(self, content: str) -> str:
         """v1.3.0: 对工具返回结果进行后处理（摘要提炼）"""
         global _plugin_instance
-        
+
         if _plugin_instance is None:
             return content
-        
+
         settings = _plugin_instance.config.get("settings", {})
-        
+
         if not settings.get("post_process_enabled", False):
             return content
-        
+
         server_post_config = self._get_server_post_process_config()
-        
+
         if server_post_config is not None:
             if not server_post_config.get("enabled", True):
                 return content
-        
+
         threshold = settings.get("post_process_threshold", 500)
         if server_post_config and "threshold" in server_post_config:
             threshold = server_post_config["threshold"]
-        
+
         content_length = len(content) if content else 0
         if content_length <= threshold:
             return content
-        
+
         user_query = self._get_context_info()[3]
         if not user_query:
             return content
-        
+
         max_tokens = settings.get("post_process_max_tokens", 500)
         if server_post_config and "max_tokens" in server_post_config:
             max_tokens = server_post_config["max_tokens"]
-        
+
         prompt_template = settings.get("post_process_prompt", "")
         if server_post_config and "prompt" in server_post_config:
             prompt_template = server_post_config["prompt"]
-        
+
         if not prompt_template:
             prompt_template = """用户问题：{query}
 
@@ -760,13 +765,13 @@ class MCPToolProxy(BaseTool):
 {result}
 
 请从上述内容中提取与用户问题最相关的关键信息，简洁准确地输出："""
-        
+
         try:
             prompt = prompt_template.format(query=user_query, result=content)
         except KeyError as e:
             logger.warning(f"后处理 prompt 模板格式错误: {e}")
             return content
-        
+
         try:
             processed_content = await self._call_post_process_llm(prompt, max_tokens, settings, server_post_config)
             if processed_content:
@@ -776,11 +781,11 @@ class MCPToolProxy(BaseTool):
         except Exception as e:
             logger.error(f"MCP 工具 {self.name} 后处理失败: {e}")
             return content
-    
+
     def _get_server_post_process_config(self) -> Optional[Dict[str, Any]]:
         """获取当前服务器的后处理配置"""
         global _plugin_instance
-        
+
         if _plugin_instance is None:
             return None
 
@@ -788,25 +793,21 @@ class MCPToolProxy(BaseTool):
         for server_conf in servers:
             if server_conf.get("name") == self._mcp_server_name:
                 return server_conf.get("post_process")
-        
+
         return None
-    
+
     async def _call_post_process_llm(
-        self,
-        prompt: str,
-        max_tokens: int,
-        settings: Dict[str, Any],
-        server_config: Optional[Dict[str, Any]]
+        self, prompt: str, max_tokens: int, settings: Dict[str, Any], server_config: Optional[Dict[str, Any]]
     ) -> Optional[str]:
         """调用 LLM 进行后处理"""
         from src.config.config import model_config
         from src.config.api_ada_configs import TaskConfig
         from src.llm_models.utils_model import LLMRequest
-        
+
         model_name = settings.get("post_process_model", "")
         if server_config and "model" in server_config:
             model_name = server_config["model"]
-        
+
         if model_name:
             task_config = TaskConfig(
                 model_list=[model_name],
@@ -816,59 +817,56 @@ class MCPToolProxy(BaseTool):
             )
         else:
             task_config = model_config.model_task_config.utils
-        
+
         llm_request = LLMRequest(model_set=task_config, request_type="mcp_post_process")
-        
+
         response, (reasoning, model_used, _) = await llm_request.generate_response_async(
             prompt=prompt,
             max_tokens=max_tokens,
             temperature=0.3,
         )
-        
+
         return response.strip() if response else None
-    
+
     def _format_error_message(self, error: str, duration_ms: float) -> str:
         """格式化友好的错误消息"""
         if not error:
             return "工具调用失败（未知错误）"
-        
+
         error_lower = error.lower()
-        
+
         if "未连接" in error or "not connected" in error_lower:
             return f"⚠️ MCP 服务器 [{self._mcp_server_name}] 未连接，请检查服务器状态或等待自动重连"
-        
+
         if "超时" in error or "timeout" in error_lower:
             return f"⏱️ 工具调用超时（耗时 {duration_ms:.0f}ms），服务器响应过慢，请稍后重试"
-        
+
         if "connection" in error_lower and ("closed" in error_lower or "reset" in error_lower):
             return f"🔌 与 MCP 服务器 [{self._mcp_server_name}] 的连接已断开，正在尝试重连..."
-        
+
         if "invalid" in error_lower and "argument" in error_lower:
             return f"❌ 参数错误: {error}"
-        
+
         return f"❌ 工具调用失败: {error}"
-    
+
     async def direct_execute(self, **function_args) -> Dict[str, Any]:
         """直接执行（供其他插件调用）"""
         return await self.execute(function_args)
 
 
 def create_mcp_tool_class(
-    tool_key: str,
-    tool_info: MCPToolInfo,
-    tool_prefix: str,
-    disabled: bool = False
+    tool_key: str, tool_info: MCPToolInfo, tool_prefix: str, disabled: bool = False
 ) -> Type[MCPToolProxy]:
     """根据 MCP 工具信息动态创建 BaseTool 子类"""
     parameters = parse_mcp_parameters(tool_info.input_schema)
-    
+
     class_name = f"MCPTool_{tool_info.server_name}_{tool_info.name}".replace("-", "_").replace(".", "_")
     tool_name = tool_key.replace("-", "_").replace(".", "_")
-    
+
     description = tool_info.description
     if not description.endswith(f"[来自 MCP 服务器: {tool_info.server_name}]"):
         description = f"{description} [来自 MCP 服务器: {tool_info.server_name}]"
-    
+
     tool_class = type(
         class_name,
         (MCPToolProxy,),
@@ -880,31 +878,27 @@ def create_mcp_tool_class(
             "_mcp_tool_key": tool_key,
             "_mcp_original_name": tool_info.name,
             "_mcp_server_name": tool_info.server_name,
-        }
+        },
     )
-    
+
     return tool_class
 
 
 class MCPToolRegistry:
     """MCP 工具注册表"""
-    
+
     def __init__(self):
         self._tool_classes: Dict[str, Type[MCPToolProxy]] = {}
         self._tool_infos: Dict[str, ToolInfo] = {}
-    
+
     def register_tool(
-        self,
-        tool_key: str,
-        tool_info: MCPToolInfo,
-        tool_prefix: str,
-        disabled: bool = False
+        self, tool_key: str, tool_info: MCPToolInfo, tool_prefix: str, disabled: bool = False
     ) -> Tuple[ToolInfo, Type[MCPToolProxy]]:
         """注册 MCP 工具"""
         tool_class = create_mcp_tool_class(tool_key, tool_info, tool_prefix, disabled)
-        
+
         self._tool_classes[tool_key] = tool_class
-        
+
         info = ToolInfo(
             name=tool_class.name,
             tool_description=tool_class.description,
@@ -913,9 +907,9 @@ class MCPToolRegistry:
             component_type=ComponentType.TOOL,
         )
         self._tool_infos[tool_key] = info
-        
+
         return info, tool_class
-    
+
     def unregister_tool(self, tool_key: str) -> bool:
         """注销工具"""
         if tool_key in self._tool_classes:
@@ -923,11 +917,11 @@ class MCPToolRegistry:
             del self._tool_infos[tool_key]
             return True
         return False
-    
+
     def get_all_components(self) -> List[Tuple[ComponentInfo, Type]]:
         """获取所有工具组件"""
         return [(self._tool_infos[key], self._tool_classes[key]) for key in self._tool_classes.keys()]
-    
+
     def clear(self) -> None:
         """清空所有注册"""
         self._tool_classes.clear()
@@ -945,9 +939,10 @@ _plugin_instance: Optional["MCPBridgePlugin"] = None
 # 内置工具
 # ============================================================================
 
+
 class MCPReadResourceTool(BaseTool):
     """v1.2.0: MCP 资源读取工具"""
-    
+
     name = "mcp_read_resource"
     description = "读取 MCP 服务器提供的资源内容（如文件、数据库记录等）。使用前请先用 mcp_status 查看可用资源。"
     parameters = [
@@ -955,28 +950,28 @@ class MCPReadResourceTool(BaseTool):
         ("server_name", ToolParamType.STRING, "指定服务器名称（可选，不指定则自动查找）", False, None),
     ]
     available_for_llm = True
-    
+
     async def execute(self, function_args: Dict[str, Any]) -> Dict[str, Any]:
         uri = function_args.get("uri", "")
         server_name = function_args.get("server_name")
-        
+
         if not uri:
             return {"name": self.name, "content": "❌ 请提供资源 URI"}
-        
+
         result = await mcp_manager.read_resource(uri, server_name)
-        
+
         if result.success:
             return {"name": self.name, "content": result.content}
         else:
             return {"name": self.name, "content": f"❌ 读取资源失败: {result.error}"}
-    
+
     async def direct_execute(self, **function_args) -> Dict[str, Any]:
         return await self.execute(function_args)
 
 
 class MCPGetPromptTool(BaseTool):
     """v1.2.0: MCP 提示模板工具"""
-    
+
     name = "mcp_get_prompt"
     description = "获取 MCP 服务器提供的提示模板内容。使用前请先用 mcp_status 查看可用模板。"
     parameters = [
@@ -985,29 +980,29 @@ class MCPGetPromptTool(BaseTool):
         ("server_name", ToolParamType.STRING, "指定服务器名称（可选）", False, None),
     ]
     available_for_llm = True
-    
+
     async def execute(self, function_args: Dict[str, Any]) -> Dict[str, Any]:
         prompt_name = function_args.get("name", "")
         arguments_str = function_args.get("arguments", "")
         server_name = function_args.get("server_name")
-        
+
         if not prompt_name:
             return {"name": self.name, "content": "❌ 请提供提示模板名称"}
-        
+
         arguments = None
         if arguments_str:
             try:
                 arguments = json.loads(arguments_str)
             except json.JSONDecodeError:
                 return {"name": self.name, "content": "❌ 参数格式错误，请使用 JSON 对象格式"}
-        
+
         result = await mcp_manager.get_prompt(prompt_name, arguments, server_name)
-        
+
         if result.success:
             return {"name": self.name, "content": result.content}
         else:
             return {"name": self.name, "content": f"❌ 获取提示模板失败: {result.error}"}
-    
+
     async def direct_execute(self, **function_args) -> Dict[str, Any]:
         return await self.execute(function_args)
 
@@ -1016,40 +1011,41 @@ class MCPGetPromptTool(BaseTool):
 # v1.8.0: 工具链代理工具
 # ============================================================================
 
+
 class ToolChainProxyBase(BaseTool):
     """工具链代理基类"""
-    
+
     name: str = ""
     description: str = ""
     parameters: List[Tuple[str, ToolParamType, str, bool, Optional[List[str]]]] = []
     available_for_llm: bool = True
-    
+
     _chain_name: str = ""
-    
+
     async def execute(self, function_args: Dict[str, Any]) -> Dict[str, Any]:
         """执行工具链"""
         # 移除内部标记
         args = {k: v for k, v in function_args.items() if k != "llm_called"}
-        
+
         logger.debug(f"执行工具链 {self._chain_name}，参数: {args}")
-        
+
         result = await tool_chain_manager.execute_chain(self._chain_name, args)
-        
+
         if result.success:
             # 构建输出
             output_parts = []
             output_parts.append(result.final_output)
-            
+
             # 可选：添加执行摘要
             # output_parts.append(f"\n\n---\n执行摘要:\n{result.to_summary()}")
-            
+
             return {"name": self.name, "content": "\n".join(output_parts)}
         else:
             error_msg = f"⚠️ 工具链执行失败: {result.error}"
             if result.step_results:
                 error_msg += f"\n\n执行详情:\n{result.to_summary()}"
             return {"name": self.name, "content": error_msg}
-    
+
     async def direct_execute(self, **function_args) -> Dict[str, Any]:
         return await self.execute(function_args)
 
@@ -1060,17 +1056,17 @@ def create_chain_tool_class(chain: ToolChainDefinition) -> Type[ToolChainProxyBa
     parameters = []
     for param_name, param_desc in chain.input_params.items():
         parameters.append((param_name, ToolParamType.STRING, param_desc, True, None))
-    
+
     # 生成类名和工具名
     class_name = f"ToolChain_{chain.name}".replace("-", "_").replace(".", "_")
     tool_name = f"chain_{chain.name}".replace("-", "_").replace(".", "_")
-    
+
     # 构建描述
     description = chain.description
     if chain.steps:
         step_names = [s.tool_name.split("_")[-1] for s in chain.steps[:3]]
         description += f" (执行流程: {' → '.join(step_names)}{'...' if len(chain.steps) > 3 else ''})"
-    
+
     tool_class = type(
         class_name,
         (ToolChainProxyBase,),
@@ -1080,25 +1076,25 @@ def create_chain_tool_class(chain: ToolChainDefinition) -> Type[ToolChainProxyBa
             "parameters": parameters,
             "available_for_llm": True,
             "_chain_name": chain.name,
-        }
+        },
     )
-    
+
     return tool_class
 
 
 class ToolChainRegistry:
     """工具链注册表"""
-    
+
     def __init__(self):
         self._tool_classes: Dict[str, Type[ToolChainProxyBase]] = {}
         self._tool_infos: Dict[str, ToolInfo] = {}
-    
+
     def register_chain(self, chain: ToolChainDefinition) -> Tuple[ToolInfo, Type[ToolChainProxyBase]]:
         """注册工具链为组合工具"""
         tool_class = create_chain_tool_class(chain)
-        
+
         self._tool_classes[chain.name] = tool_class
-        
+
         info = ToolInfo(
             name=tool_class.name,
             tool_description=tool_class.description,
@@ -1107,9 +1103,9 @@ class ToolChainRegistry:
             component_type=ComponentType.TOOL,
         )
         self._tool_infos[chain.name] = info
-        
+
         return info, tool_class
-    
+
     def unregister_chain(self, chain_name: str) -> bool:
         """注销工具链"""
         if chain_name in self._tool_classes:
@@ -1117,11 +1113,11 @@ class ToolChainRegistry:
             del self._tool_infos[chain_name]
             return True
         return False
-    
+
     def get_all_components(self) -> List[Tuple[ComponentInfo, Type]]:
         """获取所有工具链组件"""
         return [(self._tool_infos[key], self._tool_classes[key]) for key in self._tool_classes.keys()]
-    
+
     def clear(self) -> None:
         """清空所有注册"""
         self._tool_classes.clear()
@@ -1134,21 +1130,27 @@ tool_chain_registry = ToolChainRegistry()
 
 class MCPStatusTool(BaseTool):
     """MCP 状态查询工具"""
-    
+
     name = "mcp_status"
     description = "查询 MCP 桥接插件的状态，包括服务器连接状态、可用工具列表、工具链列表、资源列表、提示模板列表、调用统计、追踪记录等信息"
     parameters = [
-        ("query_type", ToolParamType.STRING, "查询类型", False, ["status", "tools", "chains", "resources", "prompts", "stats", "trace", "cache", "all"]),
+        (
+            "query_type",
+            ToolParamType.STRING,
+            "查询类型",
+            False,
+            ["status", "tools", "chains", "resources", "prompts", "stats", "trace", "cache", "all"],
+        ),
         ("server_name", ToolParamType.STRING, "指定服务器名称（可选）", False, None),
     ]
     available_for_llm = True
-    
+
     async def execute(self, function_args: Dict[str, Any]) -> Dict[str, Any]:
         query_type = function_args.get("query_type", "status")
         server_name = function_args.get("server_name")
-        
+
         result_parts = []
-        
+
         if query_type in ("status", "all"):
             # 检查是否需要自动重连 (v2.1.0)
             status = mcp_manager.get_status()
@@ -1156,38 +1158,36 @@ class MCPStatusTool(BaseTool):
                 result_parts.append("⚠️ 警告：当前未连接任何服务器，正在尝试自动重连...")
                 logger.warning("mcp_status 检测到无连接服务器，触发自动重连")
                 import asyncio
+
                 asyncio.create_task(mcp_manager.reconnect_all())
 
             result_parts.append(self._format_status(server_name))
-        
+
         if query_type in ("tools", "all"):
             result_parts.append(self._format_tools(server_name))
-        
+
         if query_type in ("chains", "all"):
             result_parts.append(self._format_chains())
-        
+
         if query_type in ("resources", "all"):
             result_parts.append(self._format_resources(server_name))
-        
+
         if query_type in ("prompts", "all"):
             result_parts.append(self._format_prompts(server_name))
-        
+
         if query_type in ("stats", "all"):
             result_parts.append(self._format_stats(server_name))
-        
+
         # v1.4.0: 追踪记录
         if query_type in ("trace",):
             result_parts.append(self._format_trace())
-        
+
         # v1.4.0: 缓存状态
         if query_type in ("cache",):
             result_parts.append(self._format_cache())
-        
-        return {
-            "name": self.name,
-            "content": "\n\n".join(result_parts) if result_parts else "未知的查询类型"
-        }
-    
+
+        return {"name": self.name, "content": "\n\n".join(result_parts) if result_parts else "未知的查询类型"}
+
     def _format_status(self, server_name: Optional[str] = None) -> str:
         status = mcp_manager.get_status()
         lines = ["📊 MCP 桥接插件状态"]
@@ -1196,24 +1196,24 @@ class MCPStatusTool(BaseTool):
         lines.append(f"  已断开: {status['disconnected_servers']}")
         lines.append(f"  可用工具数: {status['total_tools']}")
         lines.append(f"  心跳检测: {'运行中' if status['heartbeat_running'] else '已停止'}")
-        
+
         lines.append("\n🔌 服务器详情:")
-        for name, info in status['servers'].items():
+        for name, info in status["servers"].items():
             if server_name and name != server_name:
                 continue
-            status_icon = "✅" if info['connected'] else "❌"
-            enabled_text = "" if info['enabled'] else " (已禁用)"
+            status_icon = "✅" if info["connected"] else "❌"
+            enabled_text = "" if info["enabled"] else " (已禁用)"
             lines.append(f"  {status_icon} {name}{enabled_text}")
             lines.append(f"     传输: {info['transport']}, 工具数: {info['tools_count']}")
-            if info['consecutive_failures'] > 0:
+            if info["consecutive_failures"] > 0:
                 lines.append(f"     ⚠️ 连续失败: {info['consecutive_failures']} 次")
-        
+
         return "\n".join(lines)
-    
+
     def _format_tools(self, server_name: Optional[str] = None) -> str:
         tools = mcp_manager.all_tools
         lines = ["🔧 可用 MCP 工具"]
-        
+
         by_server: Dict[str, List[str]] = {}
         for tool_key, (tool_info, _) in tools.items():
             if server_name and tool_info.server_name != server_name:
@@ -1221,35 +1221,35 @@ class MCPStatusTool(BaseTool):
             if tool_info.server_name not in by_server:
                 by_server[tool_info.server_name] = []
             by_server[tool_info.server_name].append(f"  • {tool_key}: {tool_info.description[:50]}...")
-        
+
         for srv_name, tool_list in by_server.items():
             lines.append(f"\n📦 {srv_name} ({len(tool_list)} 个工具):")
             lines.extend(tool_list)
-        
+
         if not by_server:
             lines.append("  (无可用工具)")
-        
+
         return "\n".join(lines)
-    
+
     def _format_stats(self, server_name: Optional[str] = None) -> str:
         stats = mcp_manager.get_all_stats()
         lines = ["📈 调用统计"]
-        
-        g = stats['global']
+
+        g = stats["global"]
         lines.append(f"  总调用次数: {g['total_tool_calls']}")
         lines.append(f"  成功: {g['successful_calls']}, 失败: {g['failed_calls']}")
-        if g['total_tool_calls'] > 0:
-            success_rate = (g['successful_calls'] / g['total_tool_calls']) * 100
+        if g["total_tool_calls"] > 0:
+            success_rate = (g["successful_calls"] / g["total_tool_calls"]) * 100
             lines.append(f"  成功率: {success_rate:.1f}%")
         lines.append(f"  运行时间: {g['uptime_seconds']:.0f} 秒")
-        
+
         return "\n".join(lines)
-    
+
     def _format_resources(self, server_name: Optional[str] = None) -> str:
         resources = mcp_manager.all_resources
         if not resources:
             return "📦 当前没有可用的 MCP 资源"
-        
+
         lines = ["📦 可用 MCP 资源"]
         by_server: Dict[str, List[MCPResourceInfo]] = {}
         for key, (resource_info, _) in resources.items():
@@ -1258,19 +1258,19 @@ class MCPStatusTool(BaseTool):
             if resource_info.server_name not in by_server:
                 by_server[resource_info.server_name] = []
             by_server[resource_info.server_name].append(resource_info)
-        
+
         for srv_name, resource_list in by_server.items():
             lines.append(f"\n🔌 {srv_name} ({len(resource_list)} 个资源):")
             for res in resource_list:
                 lines.append(f"  • {res.name}: {res.uri}")
-        
+
         return "\n".join(lines)
-    
+
     def _format_prompts(self, server_name: Optional[str] = None) -> str:
         prompts = mcp_manager.all_prompts
         if not prompts:
             return "📝 当前没有可用的 MCP 提示模板"
-        
+
         lines = ["📝 可用 MCP 提示模板"]
         by_server: Dict[str, List[MCPPromptInfo]] = {}
         for key, (prompt_info, _) in prompts.items():
@@ -1279,20 +1279,20 @@ class MCPStatusTool(BaseTool):
             if prompt_info.server_name not in by_server:
                 by_server[prompt_info.server_name] = []
             by_server[prompt_info.server_name].append(prompt_info)
-        
+
         for srv_name, prompt_list in by_server.items():
             lines.append(f"\n🔌 {srv_name} ({len(prompt_list)} 个模板):")
             for prompt in prompt_list:
                 lines.append(f"  • {prompt.name}")
-        
+
         return "\n".join(lines)
-    
+
     def _format_trace(self) -> str:
         """v1.4.0: 格式化追踪记录"""
         records = tool_call_tracer.get_recent(10)
         if not records:
             return "🔍 暂无调用追踪记录"
-        
+
         lines = ["🔍 最近调用追踪记录"]
         for r in reversed(records):
             status = "✅" if r.success else "❌"
@@ -1301,9 +1301,9 @@ class MCPStatusTool(BaseTool):
             lines.append(f"  {status}{cache}{post} {r.tool_name} ({r.duration_ms:.0f}ms)")
             if r.error:
                 lines.append(f"     错误: {r.error[:50]}")
-        
+
         return "\n".join(lines)
-    
+
     def _format_cache(self) -> str:
         """v1.4.0: 格式化缓存状态"""
         stats = tool_call_cache.get_stats()
@@ -1314,13 +1314,13 @@ class MCPStatusTool(BaseTool):
         lines.append(f"  命中: {stats['hits']}, 未命中: {stats['misses']}")
         lines.append(f"  命中率: {stats['hit_rate']}")
         return "\n".join(lines)
-    
+
     def _format_chains(self) -> str:
         """v1.8.0: 格式化工具链列表"""
         chains = tool_chain_manager.get_all_chains()
         if not chains:
             return "🔗 当前没有配置工具链"
-        
+
         lines = ["🔗 工具链列表"]
         for name, chain in chains.items():
             status = "✅" if chain.enabled else "❌"
@@ -1328,15 +1328,15 @@ class MCPStatusTool(BaseTool):
             lines.append(f"   描述: {chain.description[:50]}...")
             lines.append(f"   步骤: {len(chain.steps)} 个")
             for i, step in enumerate(chain.steps[:3]):
-                lines.append(f"     {i+1}. {step.tool_name}")
+                lines.append(f"     {i + 1}. {step.tool_name}")
             if len(chain.steps) > 3:
                 lines.append(f"     ... 还有 {len(chain.steps) - 3} 个步骤")
             if chain.input_params:
                 params = ", ".join(chain.input_params.keys())
                 lines.append(f"   参数: {params}")
-        
+
         return "\n".join(lines)
-    
+
     async def direct_execute(self, **function_args) -> Dict[str, Any]:
         return await self.execute(function_args)
 
@@ -1344,6 +1344,7 @@ class MCPStatusTool(BaseTool):
 # ============================================================================
 # 命令处理
 # ============================================================================
+
 
 class MCPStatusCommand(BaseCommand):
     """MCP 状态查询命令 - 通过 /mcp 命令查看服务器状态"""
@@ -1356,6 +1357,7 @@ class MCPStatusCommand(BaseCommand):
         """执行命令"""
         # 权限检查
         from src.config.config import global_config
+
         sender_id = str(self.message.sender_id)
         if sender_id not in global_config.advanced.admins:
             await self.send_text("⛔ 权限不足：该命令仅限管理员使用")
@@ -1366,27 +1368,27 @@ class MCPStatusCommand(BaseCommand):
 
         if subcommand == "reconnect":
             return await self._handle_reconnect(arg)
-        
+
         # v1.4.0: 追踪命令
         if subcommand == "trace":
             return await self._handle_trace(arg)
-        
+
         # v1.4.0: 缓存命令
         if subcommand == "cache":
             return await self._handle_cache(arg)
-        
+
         # v1.4.0: 权限命令
         if subcommand == "perm":
             return await self._handle_perm(arg)
-        
+
         # v1.6.0: 导出命令
         if subcommand == "export":
             return await self._handle_export(arg)
-        
+
         # v1.7.0: 工具搜索命令
         if subcommand == "search":
             return await self._handle_search(arg)
-        
+
         # v1.8.0: 工具链命令
         if subcommand == "chain":
             return await self._handle_chain(arg)
@@ -1399,7 +1401,7 @@ class MCPStatusCommand(BaseCommand):
         """查找相似的服务器名称"""
         name_lower = name.lower()
         all_servers = list(mcp_manager._clients.keys())
-        
+
         # 简单的相似度匹配：包含关系或前缀匹配
         similar = []
         for srv in all_servers:
@@ -1408,7 +1410,7 @@ class MCPStatusCommand(BaseCommand):
                 similar.append(srv)
             elif srv_lower.startswith(name_lower[:3]) if len(name_lower) >= 3 else False:
                 similar.append(srv)
-        
+
         return similar[:max_results]
 
     async def _handle_reconnect(self, server_name: Optional[str] = None) -> Tuple[bool, Optional[str], bool]:
@@ -1442,7 +1444,7 @@ class MCPStatusCommand(BaseCommand):
                 await self.send_text(f"{status} {srv}")
 
         return (True, None, True)
-    
+
     async def _handle_trace(self, arg: Optional[str] = None) -> Tuple[bool, Optional[str], bool]:
         """v1.4.0: 处理追踪命令"""
         if arg and arg.isdigit():
@@ -1455,11 +1457,11 @@ class MCPStatusCommand(BaseCommand):
         else:
             # /mcp trace - 最近 10 条
             records = tool_call_tracer.get_recent(10)
-        
+
         if not records:
             await self.send_text("🔍 暂无调用追踪记录\n\n用法: /mcp trace [数量|工具名]")
             return (True, None, True)
-        
+
         lines = [f"🔍 调用追踪记录 ({len(records)} 条)"]
         lines.append("-" * 30)
         for i, r in enumerate(reversed(records)):
@@ -1473,17 +1475,17 @@ class MCPStatusCommand(BaseCommand):
                 lines.append(f"   错误: {r.error[:50]}")
             if i < len(records) - 1:
                 lines.append("")
-        
+
         await self.send_text("\n".join(lines))
         return (True, None, True)
-    
+
     async def _handle_cache(self, arg: Optional[str] = None) -> Tuple[bool, Optional[str], bool]:
         """v1.4.0: 处理缓存命令"""
         if arg == "clear":
             tool_call_cache.clear()
             await self.send_text("✅ 缓存已清空")
             return (True, None, True)
-        
+
         stats = tool_call_cache.get_stats()
         lines = ["🗄️ 缓存状态"]
         lines.append(f"├ 启用: {'是' if stats['enabled'] else '否'}")
@@ -1492,22 +1494,22 @@ class MCPStatusCommand(BaseCommand):
         lines.append(f"├ 命中: {stats['hits']}")
         lines.append(f"├ 未命中: {stats['misses']}")
         lines.append(f"└ 命中率: {stats['hit_rate']}")
-        
+
         await self.send_text("\n".join(lines))
         return (True, None, True)
-    
+
     async def _handle_perm(self, arg: Optional[str] = None) -> Tuple[bool, Optional[str], bool]:
         """v1.4.0: 处理权限命令"""
         global _plugin_instance
-        
+
         if _plugin_instance is None:
             await self.send_text("❌ 插件未初始化")
             return (True, None, True)
-        
+
         perm_config = _plugin_instance.config.get("permissions", {})
         enabled = perm_config.get("perm_enabled", False)
         default_mode = perm_config.get("perm_default_mode", "allow_all")
-        
+
         if arg:
             # 查看特定工具的权限
             rules = permission_checker.get_rules_for_tool(arg)
@@ -1536,17 +1538,17 @@ class MCPStatusCommand(BaseCommand):
                 lines.append(f"├ 管理员白名单: {allow_count} 人")
             lines.append(f"└ 高级规则: {len(permission_checker._rules)} 条")
             await self.send_text("\n".join(lines))
-        
+
         return (True, None, True)
-    
+
     async def _handle_export(self, format_type: Optional[str] = None) -> Tuple[bool, Optional[str], bool]:
         """v1.6.0: 处理导出命令"""
         global _plugin_instance
-        
+
         if _plugin_instance is None:
             await self.send_text("❌ 插件未初始化")
             return (True, None, True)
-        
+
         servers_section = _plugin_instance.config.get("servers", {})
         if not isinstance(servers_section, dict):
             servers_section = {}
@@ -1571,7 +1573,7 @@ class MCPStatusCommand(BaseCommand):
         lines.append("")
         lines.append(pretty)
         await self.send_text("\n".join(lines))
-        
+
         return (True, None, True)
 
     async def _handle_search(self, query: Optional[str] = None) -> Tuple[bool, Optional[str], bool]:
@@ -1628,11 +1630,11 @@ class MCPStatusCommand(BaseCommand):
 
         for srv_name, tool_list in by_server.items():
             lines.append(f"\n📦 {srv_name} ({len(tool_list)} 个):")
-            
+
             # 单服务器或结果少于 15 个时显示全部
             show_all = single_server or len(matched) <= 15
             display_limit = len(tool_list) if show_all else 5
-            
+
             for tool_key, tool_info in tool_list[:display_limit]:
                 desc = tool_info.description[:40] + "..." if len(tool_info.description) > 40 else tool_info.description
                 lines.append(f"  • {tool_key}")
@@ -1648,10 +1650,10 @@ class MCPStatusCommand(BaseCommand):
         if not arg or not arg.strip():
             # 显示工具链列表和帮助
             chains = tool_chain_manager.get_all_chains()
-            
+
             lines = ["🔗 工具链管理"]
             lines.append("")
-            
+
             if chains:
                 lines.append(f"已配置 {len(chains)} 个工具链:")
                 for name, chain in chains.items():
@@ -1660,7 +1662,7 @@ class MCPStatusCommand(BaseCommand):
                     lines.append(f"  {status} {name} ({steps_count} 步)")
             else:
                 lines.append("当前没有配置工具链")
-            
+
             lines.append("")
             lines.append("命令:")
             lines.append("  /mcp chain list       查看所有工具链")
@@ -1669,20 +1671,20 @@ class MCPStatusCommand(BaseCommand):
             lines.append("  /mcp chain reload     重新加载配置")
             lines.append("")
             lines.append("💡 在 WebUI「工具链」配置区编辑工具链")
-            
+
             await self.send_text("\n".join(lines))
             return (True, None, True)
-        
+
         parts = arg.strip().split(maxsplit=2)
         sub_action = parts[0].lower()
-        
+
         if sub_action == "list":
             # 列出所有工具链
             chains = tool_chain_manager.get_all_chains()
             if not chains:
                 await self.send_text("🔗 当前没有配置工具链")
                 return (True, None, True)
-            
+
             lines = [f"🔗 工具链列表 ({len(chains)} 个)"]
             for name, chain in chains.items():
                 status = "✅" if chain.enabled else "❌"
@@ -1691,10 +1693,10 @@ class MCPStatusCommand(BaseCommand):
                 lines.append(f"   步骤: {' → '.join([s.tool_name.split('_')[-1] for s in chain.steps[:4]])}")
                 if chain.input_params:
                     lines.append(f"   参数: {', '.join(chain.input_params.keys())}")
-            
+
             await self.send_text("\n".join(lines))
             return (True, None, True)
-        
+
         elif sub_action == "reload":
             # 重新加载工具链配置
             global _plugin_instance
@@ -1702,6 +1704,7 @@ class MCPStatusCommand(BaseCommand):
                 _plugin_instance._load_tool_chains()
                 chains = tool_chain_manager.get_all_chains()
                 from src.plugin_system.core.component_registry import component_registry
+
                 registered = 0
                 for name, chain in tool_chain_manager.get_enabled_chains().items():
                     tool_name = f"chain_{name}".replace("-", "_").replace(".", "_")
@@ -1720,27 +1723,27 @@ class MCPStatusCommand(BaseCommand):
             else:
                 await self.send_text("❌ 插件未初始化")
             return (True, None, True)
-        
+
         elif sub_action == "test" and len(parts) >= 2:
             # 测试执行工具链
             chain_name = parts[1]
             args_json = parts[2] if len(parts) > 2 else "{}"
-            
+
             chain = tool_chain_manager.get_chain(chain_name)
             if not chain:
                 await self.send_text(f"❌ 工具链 '{chain_name}' 不存在")
                 return (True, None, True)
-            
+
             try:
                 input_args = json.loads(args_json)
             except json.JSONDecodeError:
                 await self.send_text("❌ 参数 JSON 格式错误")
                 return (True, None, True)
-            
+
             await self.send_text(f"🔄 正在执行工具链 {chain_name}...")
-            
+
             result = await tool_chain_manager.execute_chain(chain_name, input_args)
-            
+
             lines = []
             if result.success:
                 lines.append(f"✅ 工具链执行成功 ({result.total_duration_ms:.0f}ms)")
@@ -1760,15 +1763,15 @@ class MCPStatusCommand(BaseCommand):
                     lines.append("")
                     lines.append("执行详情:")
                     lines.append(result.to_summary())
-            
+
             await self.send_text("\n".join(lines))
             return (True, None, True)
-        
+
         else:
             # 查看特定工具链详情
             chain_name = sub_action
             chain = tool_chain_manager.get_chain(chain_name)
-            
+
             if not chain:
                 # 尝试模糊匹配
                 all_chains = tool_chain_manager.get_all_chains()
@@ -1778,22 +1781,22 @@ class MCPStatusCommand(BaseCommand):
                     msg += f"\n💡 你是不是想找: {', '.join(similar[:3])}"
                 await self.send_text(msg)
                 return (True, None, True)
-            
+
             lines = [f"🔗 工具链: {chain.name}"]
             lines.append(f"状态: {'✅ 启用' if chain.enabled else '❌ 禁用'}")
             lines.append(f"描述: {chain.description}")
             lines.append("")
-            
+
             if chain.input_params:
                 lines.append("📥 输入参数:")
                 for param, desc in chain.input_params.items():
                     lines.append(f"  • {param}: {desc}")
                 lines.append("")
-            
+
             lines.append(f"📋 执行步骤 ({len(chain.steps)} 个):")
             for i, step in enumerate(chain.steps):
                 optional_tag = " (可选)" if step.optional else ""
-                lines.append(f"  {i+1}. {step.tool_name}{optional_tag}")
+                lines.append(f"  {i + 1}. {step.tool_name}{optional_tag}")
                 if step.description:
                     lines.append(f"     {step.description}")
                 if step.output_key:
@@ -1801,10 +1804,10 @@ class MCPStatusCommand(BaseCommand):
                 if step.args_template:
                     args_preview = json.dumps(step.args_template, ensure_ascii=False)[:60]
                     lines.append(f"     参数: {args_preview}...")
-            
+
             lines.append("")
             lines.append(f"💡 测试: /mcp chain test {chain.name} " + '{"参数": "值"}')
-            
+
             await self.send_text("\n".join(lines))
             return (True, None, True)
 
@@ -1851,7 +1854,7 @@ class MCPStatusCommand(BaseCommand):
 
                 # 如果指定了服务器名，显示全部工具；否则折叠显示
                 show_all = server_name is not None
-                
+
                 for srv, tool_list in by_server.items():
                     lines.append(f"  📦 {srv} ({len(tool_list)})")
                     if show_all:
@@ -1919,13 +1922,13 @@ class MCPImportCommand(BaseCommand):
     async def execute(self) -> Tuple[bool, Optional[str], bool]:
         """执行导入命令"""
         global _plugin_instance
-        
+
         if _plugin_instance is None:
             await self.send_text("❌ 插件未初始化")
             return (True, None, True)
-        
+
         content = self.matched_groups.get("content", "")
-        
+
         if not content or not content.strip():
             # 显示使用帮助
             help_text = """📥 MCP 配置导入
@@ -2041,52 +2044,53 @@ class MCPImportCommand(BaseCommand):
 # 事件处理器
 # ============================================================================
 
+
 class MCPStartupHandler(BaseEventHandler):
     """MCP 启动事件处理器"""
-    
+
     event_type = EventType.ON_START
     handler_name = "mcp_startup_handler"
     handler_description = "MCP 桥接插件启动处理器"
     weight = 0
     intercept_message = False
-    
+
     async def execute(self, message: Optional[Any]) -> Tuple[bool, bool, Optional[str], None, None]:
         """处理启动事件"""
         global _plugin_instance
-        
+
         if _plugin_instance is None:
             logger.warning("MCP 桥接插件实例未初始化")
             return (False, True, None, None, None)
-        
+
         logger.info("MCP 桥接插件收到 ON_START 事件，开始连接 MCP 服务器...")
         await _plugin_instance._async_connect_servers()
-        
+
         await mcp_manager.start_heartbeat()
-        
+
         return (True, True, None, None, None)
 
 
 class MCPStopHandler(BaseEventHandler):
     """MCP 停止事件处理器"""
-    
+
     event_type = EventType.ON_STOP
     handler_name = "mcp_stop_handler"
     handler_description = "MCP 桥接插件停止处理器"
     weight = 0
     intercept_message = False
-    
+
     async def execute(self, message: Optional[Any]) -> Tuple[bool, bool, Optional[str], None, None]:
         """处理停止事件"""
         global _plugin_instance
-        
+
         logger.info("MCP 桥接插件收到 ON_STOP 事件，正在关闭...")
 
         if _plugin_instance is not None:
             await _plugin_instance._stop_status_refresher()
-        
+
         await mcp_manager.shutdown()
         mcp_tool_registry.clear()
-        
+
         logger.info("MCP 桥接插件已关闭所有连接")
         return (True, True, None, None, None)
 
@@ -2095,16 +2099,17 @@ class MCPStopHandler(BaseEventHandler):
 # 主插件类
 # ============================================================================
 
+
 @register_plugin
 class MCPBridgePlugin(BasePlugin):
     """MCP 桥接插件 v2.0.0 - 将 MCP 服务器的工具桥接到 MaiBot"""
-    
+
     plugin_name: str = "mcp_bridge_plugin"
     enable_plugin: bool = False  # 默认禁用，用户需在 WebUI 手动启用
     dependencies: List[str] = []
     python_dependencies: List[str] = ["mcp"]
     config_file_name: str = "config.toml"
-    
+
     config_section_descriptions = {
         "guide": section_meta("📖 快速入门", order=1),
         "plugin": section_meta("🔘 插件开关", order=2),
@@ -2116,7 +2121,7 @@ class MCPBridgePlugin(BasePlugin):
         "permissions": section_meta("🔐 权限控制", collapsed=True, order=21),
         "settings": section_meta("⚙️ 高级设置", collapsed=True, order=30),
     }
-    
+
     config_schema: dict = {
         # 新手引导区（只读）
         "guide": {
@@ -2516,7 +2521,7 @@ class MCPBridgePlugin(BasePlugin):
                 label="📋 工具链列表",
                 input_type="textarea",
                 rows=20,
-                placeholder='''[
+                placeholder="""[
   {
     "name": "search_and_detail",
     "description": "先搜索再获取详情",
@@ -2526,7 +2531,7 @@ class MCPBridgePlugin(BasePlugin):
       {"tool_name": "mcp_server_get_detail", "args_template": {"id": "${step.search_result}"}}
     ]
   }
-]''',
+]""",
                 hint="每个工具链包含 name、description、input_params、steps",
                 order=30,
             ),
@@ -2645,9 +2650,9 @@ mcp_bing_*""",
                 label="📜 高级权限规则（可选）",
                 input_type="textarea",
                 rows=10,
-                placeholder='''[
+                placeholder="""[
   {"tool": "mcp_*_delete_*", "denied": ["qq:123456:group"]}
-]''',
+]""",
                 hint="格式: qq:ID:group/private/user，工具名支持通配符 *",
                 order=10,
             ),
@@ -2689,11 +2694,10 @@ mcp_bing_*""",
             ),
         },
     }
-    
 
     def __init__(self, *args, **kwargs):
         global _plugin_instance
-        
+
         super().__init__(*args, **kwargs)
         self._initialized = False
         self._status_refresh_running = False
@@ -2701,11 +2705,11 @@ mcp_bing_*""",
         self._last_persisted_display_hash: str = ""
         self._last_servers_config_error: str = ""
         _plugin_instance = self
-        
+
         # 配置 MCP 管理器
         settings = self.config.get("settings", {})
         mcp_manager.configure(settings)
-        
+
         # v1.4.0: 配置追踪器
         trace_log_path = Path(__file__).parent / "logs" / "trace.jsonl"
         tool_call_tracer.configure(
@@ -2714,7 +2718,7 @@ mcp_bing_*""",
             log_enabled=settings.get("trace_log_enabled", False),
             log_path=trace_log_path,
         )
-        
+
         # v1.4.0: 配置缓存
         tool_call_cache.configure(
             enabled=settings.get("cache_enabled", False),
@@ -2722,7 +2726,7 @@ mcp_bing_*""",
             max_entries=settings.get("cache_max_entries", 200),
             exclude_tools=settings.get("cache_exclude_tools", ""),
         )
-        
+
         # v1.4.0: 配置权限检查器
         perm_config = self.config.get("permissions", {})
         permission_checker.configure(
@@ -2732,15 +2736,14 @@ mcp_bing_*""",
             quick_deny_groups=perm_config.get("quick_deny_groups", ""),
             quick_allow_users=perm_config.get("quick_allow_users", ""),
         )
-        
+
         # 注册状态变化回调
         mcp_manager.set_status_change_callback(self._update_status_display)
-        
+
         # v2.0: 服务器配置统一由 servers.claude_config_json 提供（不再通过 WebUI 导入/快速添加写入旧 servers.list）
-        
+
         # v1.8.0: 初始化工具链管理器
-        tool_chain_manager.set_executor(mcp_manager)
-        self._load_tool_chains()
+        # moved to register_plugin
 
     def _persist_runtime_displays(self) -> None:
         """将 WebUI 只读展示字段写回配置文件，使 WebUI 能正确显示运行状态。"""
@@ -2761,38 +2764,50 @@ mcp_bing_*""",
             self._last_persisted_display_hash = digest
         except Exception as e:
             logger.debug(f"写回运行状态到配置文件失败: {e}")
-    
+
+    def register_plugin(self) -> bool:
+        """注册插件到插件管理器"""
+        # 调用父类的注册逻辑（会注册组件并检查依赖）
+        if not super().register_plugin():
+            return False
+
+        # v1.8.0: 初始化工具链管理器（移至此处，确保仅在插件启用时加载）
+        tool_chain_manager.set_executor(mcp_manager)
+        self._load_tool_chains()
+
+        return True
+
     def _process_quick_add_chain(self) -> None:
         """v1.8.0: 处理快速添加工具链表单"""
         chains_config = self.config.get("tool_chains", {})
-        
+
         # 检查是否触发添加
         add_trigger = chains_config.get("quick_chain_add", "").strip().upper()
         if add_trigger != "ADD":
             return
-        
+
         # 获取表单数据
         chain_name = chains_config.get("quick_chain_name", "").strip()
         chain_desc = chains_config.get("quick_chain_desc", "").strip()
         params_str = chains_config.get("quick_chain_params", "").strip()
         steps_str = chains_config.get("quick_chain_steps", "").strip()
-        
+
         # 验证必填字段
         if not chain_name:
             logger.warning("快速添加工具链: 名称不能为空")
             self._clear_quick_chain_fields()
             return
-        
+
         if not chain_desc:
             logger.warning("快速添加工具链: 描述不能为空")
             self._clear_quick_chain_fields()
             return
-        
+
         if not steps_str:
             logger.warning("快速添加工具链: 步骤不能为空")
             self._clear_quick_chain_fields()
             return
-        
+
         # 解析输入参数
         input_params = {}
         if params_str:
@@ -2804,41 +2819,43 @@ mcp_bing_*""",
                 param_name = parts[0].strip()
                 param_desc = parts[1].strip() if len(parts) > 1 else param_name
                 input_params[param_name] = param_desc
-        
+
         # 解析步骤
         steps = []
         for line in steps_str.split("\n"):
             line = line.strip()
             if not line:
                 continue
-            
+
             parts = line.split("|")
             if len(parts) < 2:
                 logger.warning(f"快速添加工具链: 步骤格式错误: {line}")
                 continue
-            
+
             tool_name = parts[0].strip()
             args_str = parts[1].strip() if len(parts) > 1 else "{}"
             output_key = parts[2].strip() if len(parts) > 2 else ""
-            
+
             # 解析参数 JSON
             try:
                 args_template = json.loads(args_str) if args_str else {}
             except json.JSONDecodeError:
                 logger.warning(f"快速添加工具链: 参数 JSON 格式错误: {args_str}")
                 args_template = {}
-            
-            steps.append({
-                "tool_name": tool_name,
-                "args_template": args_template,
-                "output_key": output_key,
-            })
-        
+
+            steps.append(
+                {
+                    "tool_name": tool_name,
+                    "args_template": args_template,
+                    "output_key": output_key,
+                }
+            )
+
         if not steps:
             logger.warning("快速添加工具链: 没有有效的步骤")
             self._clear_quick_chain_fields()
             return
-        
+
         # 构建新工具链
         new_chain = {
             "name": chain_name,
@@ -2847,36 +2864,36 @@ mcp_bing_*""",
             "steps": steps,
             "enabled": True,
         }
-        
+
         # 获取现有工具链列表
         chains_json = chains_config.get("chains_list", "[]")
         try:
             chains_list = json.loads(chains_json) if chains_json.strip() else []
         except json.JSONDecodeError:
             chains_list = []
-        
+
         # 检查是否已存在同名工具链
         for existing in chains_list:
             if existing.get("name") == chain_name:
                 logger.info(f"快速添加: 工具链 {chain_name} 已存在，将更新")
                 chains_list.remove(existing)
                 break
-        
+
         # 添加新工具链
         chains_list.append(new_chain)
         new_chains_json = json.dumps(chains_list, ensure_ascii=False, indent=2)
-        
+
         # 更新配置
         self.config["tool_chains"]["chains_list"] = new_chains_json
-        
+
         # 清空表单字段
         self._clear_quick_chain_fields()
-        
+
         # 保存到配置文件
         self._save_chains_list(new_chains_json)
-        
+
         logger.info(f"快速添加: 已添加工具链 {chain_name} ({len(steps)} 个步骤)")
-    
+
     def _clear_quick_chain_fields(self) -> None:
         """清空快速添加工具链表单字段"""
         if "tool_chains" not in self.config:
@@ -2886,7 +2903,7 @@ mcp_bing_*""",
         self.config["tool_chains"]["quick_chain_params"] = ""
         self.config["tool_chains"]["quick_chain_steps"] = ""
         self.config["tool_chains"]["quick_chain_add"] = ""
-    
+
     def _save_chains_list(self, chains_json: str) -> None:
         """保存工具链列表到配置文件"""
         try:
@@ -2895,12 +2912,12 @@ mcp_bing_*""",
             logger.info("工具链列表已保存到配置文件")
         except Exception as e:
             logger.warning(f"保存工具链列表失败: {e}")
-    
+
     def _load_tool_chains(self) -> None:
         """v1.8.0: 加载工具链配置"""
         # 先处理快速添加
         self._process_quick_add_chain()
-        
+
         chains_config = self.config.get("tool_chains", {})
         if not isinstance(chains_config, dict):
             chains_config = {}
@@ -2936,7 +2953,9 @@ mcp_bing_*""",
                 if "tool_chains" not in self.config or not isinstance(self.config.get("tool_chains"), dict):
                     self.config["tool_chains"] = {}
                 self.config["tool_chains"]["chains_list"] = chains_json
-                logger.info("检测到旧版 Workflow 配置字段，已自动迁移为 tool_chains.chains_list（请在 WebUI 保存一次以固化）")
+                logger.info(
+                    "检测到旧版 Workflow 配置字段，已自动迁移为 tool_chains.chains_list（请在 WebUI 保存一次以固化）"
+                )
 
         chains_config = self.config.get("tool_chains", {})
         if not isinstance(chains_config, dict):
@@ -2945,32 +2964,32 @@ mcp_bing_*""",
         if not chains_config.get("chains_enabled", True):
             logger.info("工具链功能已禁用")
             return
-        
+
         chains_json = str(chains_config.get("chains_list", "[]") or "")
         if not chains_json or not chains_json.strip():
             return
-        
+
         # 清空现有工具链
         tool_chain_manager.clear()
         tool_chain_registry.clear()
-        
+
         # 加载新配置
         loaded, errors = tool_chain_manager.load_from_json(chains_json)
-        
+
         if errors:
             for err in errors:
                 logger.warning(f"工具链配置错误: {err}")
-        
+
         if loaded > 0:
             logger.info(f"已加载 {loaded} 个工具链")
             # 注册工具链到组件系统
             self._register_tool_chains()
             self._update_chains_status_display()
-    
+
     def _register_tool_chains(self) -> None:
         """v1.8.1: 将工具链注册到 MaiBot 组件系统，使 LLM 可调用"""
         from src.plugin_system.core.component_registry import component_registry
-        
+
         chain_count = 0
         for chain_name, chain in tool_chain_manager.get_enabled_chains().items():
             try:
@@ -2990,16 +3009,14 @@ mcp_bing_*""",
                     logger.warning(f"⚠️ 工具链注册被跳过（可能已存在）: {tool_class.name}")
             except Exception as e:
                 logger.error(f"注册工具链 {chain_name} 失败: {e}")
-        
+
         if chain_count > 0:
             logger.info(f"已注册 {chain_count} 个工具链到组件系统")
-    
 
-    
     def _update_chains_status_display(self) -> None:
         """v1.8.0: 更新工具链状态显示"""
         chains = tool_chain_manager.get_all_chains()
-        
+
         if not chains:
             status_text = "(无工具链配置)"
         else:
@@ -3009,40 +3026,41 @@ mcp_bing_*""",
                 # 显示工具链基本信息
                 lines.append(f"{status} chain_{name}")
                 lines.append(f"   描述: {chain.description[:40]}{'...' if len(chain.description) > 40 else ''}")
-                
+
                 # 显示输入参数
                 if chain.input_params:
                     params = ", ".join(chain.input_params.keys())
                     lines.append(f"   参数: {params}")
-                
+
                 # 显示步骤
                 lines.append(f"   步骤: {len(chain.steps)} 个")
                 for i, step in enumerate(chain.steps):
                     opt = " (可选)" if step.optional else ""
                     out = f" → {step.output_key}" if step.output_key else ""
-                    lines.append(f"      {i+1}. {step.tool_name}{out}{opt}")
+                    lines.append(f"      {i + 1}. {step.tool_name}{out}{opt}")
                 lines.append("")
-            
+
             status_text = "\n".join(lines)
-        
+
         # 更新内存配置
         if "tool_chains" not in self.config:
             self.config["tool_chains"] = {}
         self.config["tool_chains"]["chains_status"] = status_text
-    
+
     def _get_disabled_tools(self) -> set:
         """v1.4.0: 获取禁用的工具列表"""
         tools_config = self.config.get("tools", {})
         disabled_str = tools_config.get("disabled_tools", "")
         return {t.strip() for t in disabled_str.strip().split("\n") if t.strip()}
-    
+
     async def _async_connect_servers(self) -> None:
         """异步连接所有配置的 MCP 服务器（v1.5.0: 并行连接优化）"""
         import asyncio
+
         settings = self.config.get("settings", {})
 
         servers_config = self._load_mcp_servers_config()
-        
+
         if not servers_config:
             logger.warning("未配置任何 MCP 服务器")
             self._initialized = True
@@ -3052,7 +3070,7 @@ mcp_bing_*""",
             self._start_status_refresher()
             self._persist_runtime_displays()
             return
-        
+
         auto_connect = settings.get("auto_connect", True)
         if not auto_connect:
             logger.info("auto_connect 已禁用，跳过自动连接")
@@ -3063,27 +3081,27 @@ mcp_bing_*""",
             self._start_status_refresher()
             self._persist_runtime_displays()
             return
-        
+
         tool_prefix = settings.get("tool_prefix", "mcp")
         disabled_tools = self._get_disabled_tools()
         enable_resources = settings.get("enable_resources", False)
         enable_prompts = settings.get("enable_prompts", False)
-        
+
         # 解析所有服务器配置
         enabled_configs: List[MCPServerConfig] = []
         for idx, server_conf in enumerate(servers_config):
             server_name = server_conf.get("name", f"unknown_{idx}")
-            
+
             if not server_conf.get("enabled", True):
                 logger.info(f"服务器 {server_name} 已禁用，跳过")
                 continue
-            
+
             try:
                 config = self._parse_server_config(server_conf)
                 enabled_configs.append(config)
             except Exception as e:
                 logger.error(f"解析服务器 {server_name} 配置失败: {e}")
-        
+
         if not enabled_configs:
             logger.warning("没有已启用的 MCP 服务器")
             self._initialized = True
@@ -3093,9 +3111,9 @@ mcp_bing_*""",
             self._start_status_refresher()
             self._persist_runtime_displays()
             return
-        
+
         logger.info(f"准备并行连接 {len(enabled_configs)} 个 MCP 服务器")
-        
+
         # v1.5.0: 并行连接所有服务器
         async def connect_single_server(config: MCPServerConfig) -> Tuple[MCPServerConfig, bool]:
             """连接单个服务器"""
@@ -3121,15 +3139,12 @@ mcp_bing_*""",
             except Exception as e:
                 logger.error(f"❌ 服务器 {config.name} 连接异常: {e}")
                 return config, False
-        
+
         # 并行执行所有连接
         start_time = time.time()
-        results = await asyncio.gather(
-            *[connect_single_server(cfg) for cfg in enabled_configs],
-            return_exceptions=True
-        )
+        results = await asyncio.gather(*[connect_single_server(cfg) for cfg in enabled_configs], return_exceptions=True)
         connect_duration = time.time() - start_time
-        
+
         # 统计连接结果
         success_count = 0
         failed_count = 0
@@ -3143,47 +3158,47 @@ mcp_bing_*""",
                     success_count += 1
                 else:
                     failed_count += 1
-        
+
         logger.info(f"并行连接完成: {success_count} 成功, {failed_count} 失败, 耗时 {connect_duration:.2f}s")
-        
+
         # 注册所有工具
         from src.plugin_system.core.component_registry import component_registry
+
         registered_count = 0
-        
+
         logger.info(f"======== 开始注册 MCP 工具到组件系统 (Total: {len(mcp_manager.all_tools)}) ========")
         for tool_key, (tool_info, _) in mcp_manager.all_tools.items():
             tool_name = tool_key.replace("-", "_").replace(".", "_")
             is_disabled = tool_name in disabled_tools
-            
-            info, tool_class = mcp_tool_registry.register_tool(
-                tool_key, tool_info, tool_prefix, disabled=is_disabled
-            )
+
+            info, tool_class = mcp_tool_registry.register_tool(tool_key, tool_info, tool_prefix, disabled=is_disabled)
             info.plugin_name = self.plugin_name
-            
+
             if component_registry.register_component(info, tool_class):
                 registered_count += 1
                 status = "🚫" if is_disabled else "✅"
                 logger.info(f"{status} 注册 MCP 工具: {tool_class.name}")
             else:
                 logger.warning(f"❌ 注册 MCP 工具失败: {tool_class.name}")
-        
+
         chains_config = self.config.get("tool_chains", {})
         chains_enabled = bool(chains_config.get("chains_enabled", True)) if isinstance(chains_config, dict) else True
         chain_count = len(tool_chain_manager.get_enabled_chains()) if chains_enabled else 0
-        
+
         react_count = 0
 
-        
         self._initialized = True
-        logger.info(f"MCP 桥接插件初始化完成，已注册 {registered_count} 个工具，{chain_count} 个工具链，{react_count} 个 ReAct 工具")
-        
+        logger.info(
+            f"MCP 桥接插件初始化完成，已注册 {registered_count} 个工具，{chain_count} 个工具链，{react_count} 个 ReAct 工具"
+        )
+
         # 更新状态显示
         self._update_status_display()
         self._update_tool_list_display()
         self._update_chains_status_display()
         self._start_status_refresher()
         self._persist_runtime_displays()
-    
+
     def _start_status_refresher(self) -> None:
         """启动 WebUI 状态刷新任务（不写入磁盘）"""
         task = getattr(self, "_status_refresh_task", None)
@@ -3250,7 +3265,9 @@ mcp_bing_*""",
                 logger.info("检测到旧版 servers.list，已自动迁移为 Claude mcpServers（请在 WebUI 保存一次以固化）")
 
         if not claude_json.strip():
-            self._last_servers_config_error = "未配置任何 MCP 服务器（请在 WebUI 的「MCP Servers（Claude）」粘贴 mcpServers JSON）"
+            self._last_servers_config_error = (
+                "未配置任何 MCP 服务器（请在 WebUI 的「MCP Servers（Claude）」粘贴 mcpServers JSON）"
+            )
             return []
 
         try:
@@ -3295,11 +3312,11 @@ mcp_bing_*""",
             configs.append(cfg)
 
         return configs
-    
+
     def _parse_server_config(self, conf: Dict) -> MCPServerConfig:
         """解析服务器配置字典"""
         transport_str = conf.get("transport", "stdio").lower()
-        
+
         transport_map = {
             "stdio": TransportType.STDIO,
             "sse": TransportType.SSE,
@@ -3307,7 +3324,7 @@ mcp_bing_*""",
             "streamable_http": TransportType.STREAMABLE_HTTP,
         }
         transport = transport_map.get(transport_str, TransportType.STDIO)
-        
+
         return MCPServerConfig(
             name=conf.get("name", "unnamed"),
             enabled=conf.get("enabled", True),
@@ -3318,39 +3335,39 @@ mcp_bing_*""",
             url=conf.get("url", ""),
             headers=conf.get("headers", {}),  # v1.4.2: 鉴权头支持
         )
-    
+
     def _update_tool_list_display(self) -> None:
         """v1.4.0: 更新工具列表显示"""
         tools = mcp_manager.all_tools
         disabled_tools = self._get_disabled_tools()
-        
+
         lines = []
         by_server: Dict[str, List[str]] = {}
-        
+
         for tool_key, (tool_info, _) in tools.items():
             tool_name = tool_key.replace("-", "_").replace(".", "_")
             if tool_info.server_name not in by_server:
                 by_server[tool_info.server_name] = []
-            
+
             is_disabled = tool_name in disabled_tools
             status = " ❌" if is_disabled else ""
             by_server[tool_info.server_name].append(f"  • {tool_name}{status}")
-        
+
         for srv_name, tool_list in by_server.items():
             lines.append(f"📦 {srv_name} ({len(tool_list)}个工具):")
             lines.extend(tool_list)
             lines.append("")
-        
+
         if not by_server:
             lines.append("(无已注册工具)")
-        
+
         tool_list_text = "\n".join(lines)
-        
+
         # 更新内存配置
         if "tools" not in self.config:
             self.config["tools"] = {}
         self.config["tools"]["tool_list"] = tool_list_text
-    
+
     def _update_status_display(self) -> None:
         """更新配置文件中的状态显示字段"""
         status = mcp_manager.get_status()
@@ -3361,7 +3378,7 @@ mcp_bing_*""",
         if cfg_err:
             lines.append(f"⚠️ 配置: {cfg_err}")
             lines.append("")
-        
+
         lines.append(f"服务器: {status['connected_servers']}/{status['total_servers']} 已连接")
         lines.append(f"工具数: {status['total_tools']}")
         if settings.get("enable_resources", False):
@@ -3370,13 +3387,13 @@ mcp_bing_*""",
             lines.append(f"模板数: {status.get('total_prompts', 0)}")
         lines.append(f"心跳: {'运行中' if status['heartbeat_running'] else '已停止'}")
         lines.append("")
-        
+
         tools = mcp_manager.all_tools
-        
+
         for name, info in status.get("servers", {}).items():
             icon = "✅" if info["connected"] else "❌"
             lines.append(f"{icon} {name} ({info['transport']})")
-            
+
             # v1.7.0: 显示断路器状态
             cb_status = info.get("circuit_breaker", {})
             cb_state = cb_status.get("state", "closed")
@@ -3384,35 +3401,35 @@ mcp_bing_*""",
                 lines.append("   ⚡ 断路器: 熔断中")
             elif cb_state == "half_open":
                 lines.append("   ⚡ 断路器: 试探中")
-            
+
             server_tools = [t.name for key, (t, _) in tools.items() if t.server_name == name]
             if server_tools:
                 for tool_name in server_tools:
                     lines.append(f"   • {tool_name}")
             else:
                 lines.append("   (无工具)")
-        
+
         if not status.get("servers"):
             lines.append("(无服务器)")
-        
+
         status_text = "\n".join(lines)
-        
+
         if "status" not in self.config:
             self.config["status"] = {}
         self.config["status"]["connection_status"] = status_text
-    
+
     def get_plugin_components(self) -> List[Tuple[ComponentInfo, Type]]:
         """返回插件的所有组件"""
         components: List[Tuple[ComponentInfo, Type]] = []
-        
+
         # 事件处理器
         components.append((MCPStartupHandler.get_handler_info(), MCPStartupHandler))
         components.append((MCPStopHandler.get_handler_info(), MCPStopHandler))
-        
+
         # 命令
         components.append((MCPStatusCommand.get_command_info(), MCPStatusCommand))
         components.append((MCPImportCommand.get_command_info(), MCPImportCommand))
-        
+
         # 内置工具
         status_tool_info = ToolInfo(
             name=MCPStatusTool.name,
@@ -3422,9 +3439,9 @@ mcp_bing_*""",
             component_type=ComponentType.TOOL,
         )
         components.append((status_tool_info, MCPStatusTool))
-        
+
         settings = self.config.get("settings", {})
-        
+
         if settings.get("enable_resources", False):
             read_resource_info = ToolInfo(
                 name=MCPReadResourceTool.name,
@@ -3434,7 +3451,7 @@ mcp_bing_*""",
                 component_type=ComponentType.TOOL,
             )
             components.append((read_resource_info, MCPReadResourceTool))
-        
+
         if settings.get("enable_prompts", False):
             get_prompt_info = ToolInfo(
                 name=MCPGetPromptTool.name,
@@ -3444,9 +3461,9 @@ mcp_bing_*""",
                 component_type=ComponentType.TOOL,
             )
             components.append((get_prompt_info, MCPGetPromptTool))
-        
+
         return components
-    
+
     def get_status(self) -> Dict[str, Any]:
         """获取插件状态"""
         return {
@@ -3456,7 +3473,7 @@ mcp_bing_*""",
             "trace_records": tool_call_tracer.total_records,
             "cache_stats": tool_call_cache.get_stats(),
         }
-    
+
     def get_stats(self) -> Dict[str, Any]:
         """获取详细统计信息"""
         return mcp_manager.get_all_stats()

@@ -120,6 +120,12 @@ class PrivateReplyer:
             with open(config_path, "r", encoding="utf-8") as f:
                 doc = tomlkit.load(f)
 
+            # 检查插件是否启用
+            plugin_config = doc.get("plugin", {})
+            if not plugin_config.get("enabled", True):
+                logger.debug(f"MCP Permission Check: FAILED (Plugin disabled in config)")
+                return False
+
             permissions = doc.get("permissions", {})
             quick_allow_users_str = permissions.get("quick_allow_users", "")
             default_mode = permissions.get("perm_default_mode", "deny_all")

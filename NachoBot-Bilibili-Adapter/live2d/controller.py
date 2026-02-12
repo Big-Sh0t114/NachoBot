@@ -161,6 +161,12 @@ class Live2DController:
                 elif event_type == "state":
                     # Update Gaze State
                     self.command_queue.put_nowait(("state", content))
+                elif event_type == "auto_gaze":
+                    # Direct Gaze Control
+                    self.command_queue.put_nowait(("auto_gaze", content))
+                elif event_type == "body_action":
+                    # Body Action (Motion)
+                    self.command_queue.put_nowait(("body_action", content))
                 else:
                     self.logger.warning(f"Unknown Live2D event type: {event_type}")
             except Exception as e:

@@ -13,6 +13,7 @@ from src.config.config import global_config, model_config
 from src.common.logger import get_logger
 from src.common.data_models.info_data_model import ActionPlannerInfo
 from src.chat.utils.prompt_builder import Prompt, global_prompt_manager
+from src.chat.utils.prompt_injection_guard import build_guardrail_instruction, guard_user_content
 from src.chat.utils.chat_message_builder import (
     build_readable_actions,
     get_actions_by_timestamp_with_chat,
@@ -371,8 +372,13 @@ class ActionPlanner:
             action_options_block = await self._build_action_options_block(current_available_actions)
             advanced_on = advanced_manager.is_on(get_chat_manager().get_stream(self.chat_id))
 
+            # 注入检测
+            guarded_chat_content, injection_detected, _ = guard_user_content(chat_content_block)
+            if injection_detected:
+                chat_content_block = guarded_chat_content
+
             # 其他信息
-            moderation_prompt_block = "请不要输出违法违规内容，不要输出色情，暴力，政治相关内容，如有敏感内容，请规避。"
+            moderation_prompt_block = f"请不要输出违法违规内容，不要输出色情，暴力，政治相关内容，如有敏感内容，请规避。 {build_guardrail_instruction(injection_detected)}"
             if advanced_on:
                 moderation_prompt_block += (
                     "\n[高级模式] 仅允许使用 reply 动作，禁止使用 no_reply、no_reply_until_call 及任何其他动作。"
