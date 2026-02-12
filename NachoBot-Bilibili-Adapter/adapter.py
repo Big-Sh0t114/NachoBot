@@ -273,9 +273,6 @@ class BilibiliAdapter:
 
         # Event Serialization & Aggregation
         self._event_queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
-        self._core_ready_event: asyncio.Event = asyncio.Event()
-        self._core_ready_event.set()  # Initially ready
-        self._event_lock_timestamp: float = 0.0
         self._seq_counter = itertools.count()
 
         # Gift Aggregation: (room_id, user_id, gift_name) -> {'count': int, 'price': int, 'timestamp': float, 'user_name': str}
@@ -882,23 +879,24 @@ class BilibiliAdapter:
 
         return True
 
-    def _get_template_info(
+    async def _get_template_info(
         self, room_id: int, user_id: str, prompt_text: str
     ) -> Optional[TemplateInfo]:
         """
         Helper to resolve template info for live events (Gift/SC/Guard).
         """
+        screen_summary = await self._get_screen_summary(room_id, user_id, prompt_text)
         reply_prompt, planner_prompt = self._resolve_live_prompts(room_id)
+
+        if screen_summary:
+            reply_prompt = self._inject_screen_summary(reply_prompt, screen_summary)
+            if planner_prompt:
+                planner_prompt = self._inject_screen_summary(
+                    planner_prompt, screen_summary
+                )
+
         if not reply_prompt and not planner_prompt:
             return None
-
-        # Inject screen summary if available (optional for events, but good for context)
-        # However, getting screen summary is async, and this helper is sync in usage pattern?
-        # Usage: template_info = self._get_template_info(...) inside async methods.
-        # But wait, the original usage didn't await it?
-        # "template_info = self._get_template_info(room_id, user_id, prompt_text)"
-        # If it's sync, we can't await _get_screen_summary.
-        # Let's keep it simple for events: just resolve prompts.
 
         template_items: Dict[str, str] = {}
         if reply_prompt:
@@ -907,9 +905,25 @@ class BilibiliAdapter:
             template_items["brain_planner_prompt"] = planner_prompt
             template_items["planner_prompt"] = planner_prompt
 
+        # Check if TTS is enabled to generate a distinct template name
+        # This prevents prompt caching issues when hot-switching
+        template_suffix = ""
+        if self.config.live_room_prompts:
+            room_pts = self.config.live_room_prompts.get(room_id, {})
+            if room_pts.get("tts", {}).get("enable", False):
+                template_suffix = "_tts"
+
+        if template_suffix:
+            self.logger.info(
+                f"Using TTS template: bilibili_live_{room_id}{template_suffix}"
+            )
+        else:
+            self.logger.info(f"Using standard template: bilibili_live_{room_id}")
+
         return TemplateInfo(
             template_items=template_items,
-            template_name=f"bilibili_live_{room_id}",
+            template_name=f"bilibili_live_{room_id}{template_suffix}",
+            template_default=False,
         )
 
     # ========== Incoming Message Handlers ==========
@@ -1173,47 +1187,20 @@ class BilibiliAdapter:
         #         f"[LiveStreamer] Danmu routed to buffer: {user_name}: {text[:30]}..."
         #     )
         #     return  # Don't process through normal path
-        template_info = None
         screen_summary = await self._get_screen_summary(room_id, user_id, text)
-        reply_prompt, planner_prompt = self._resolve_live_prompts(room_id)
+        template_info = await self._get_template_info(room_id, user_id, text)
+
+        # [NEW] Send Screen Info to Core Key Update
         if screen_summary:
-            reply_prompt = self._inject_screen_summary(reply_prompt, screen_summary)
-            if planner_prompt:
-                planner_prompt = self._inject_screen_summary(
-                    planner_prompt, screen_summary
+            try:
+                await self.push_screen_update(
+                    room_id, user_id, user_name, timestamp, screen_summary
                 )
-        if reply_prompt or planner_prompt:
-            # [NEW] Send Screen Info to Core Key Update
-            if screen_summary:
-                try:
-                    await self.push_screen_update(
-                        room_id, user_id, user_name, timestamp, screen_summary
-                    )
-                except Exception as e:
-                    self.logger.error(f"Failed to send screen info: {e}")
-
-            template_items: Dict[str, str] = {}
-            if reply_prompt:
-                template_items["replyer_prompt"] = reply_prompt
-            if planner_prompt:
-                template_items["brain_planner_prompt"] = planner_prompt
-                template_items["planner_prompt"] = planner_prompt
-            # Check if TTS is enabled to generate a distinct template name
-            # This prevents prompt caching issues when hot-switching
-            template_suffix = ""
-            if self.config.live_room_prompts:
-                room_pts = self.config.live_room_prompts.get(room_id, {})
-                if room_pts.get("tts", {}).get("enable", False):
-                    template_suffix = "_tts"
-
-            template_info = TemplateInfo(
-                template_items=template_items,
-                template_name=f"bilibili_live_{room_id}{template_suffix}",
-                template_default=False,
-            )
-            self.logger.info(
-                f"Using template: {template_info.template_name} (suffix='{template_suffix}')"
-            )
+            except Exception as e:
+                self.logger.error(f"Failed to send screen info: {e}")
+        if template_info:
+            # Info logged inside _get_template_info
+            pass
         additional_config = {
             "room_id": room_id,
             "reply_mid": reply_mid,
@@ -1362,7 +1349,7 @@ class BilibiliAdapter:
 
         # Build prompt using helper
         prompt_text = f"送出了 {gift_name} x{num}"
-        template_info = self._get_template_info(room_id, user_id, prompt_text)
+        template_info = await self._get_template_info(room_id, user_id, prompt_text)
 
         # Prepare additional config for high value gifts logic if needed
         # Ensuring mention logic is consistent
@@ -1549,7 +1536,7 @@ class BilibiliAdapter:
 
         # Build prompt using helper
         prompt_text = f"发送了超级弹幕(SC)：{message_text} (价值 {price} 元)"
-        template_info = self._get_template_info(room_id, user_id, prompt_text)
+        template_info = await self._get_template_info(room_id, user_id, prompt_text)
 
         additional_config = {}
         # if template_info:
@@ -1635,7 +1622,7 @@ class BilibiliAdapter:
         #     return  # Don't process through normal path
 
         prompt_text = f"开通了 {guard_name} ({num} 个月)"
-        template_info = self._get_template_info(room_id, user_id, prompt_text)
+        template_info = await self._get_template_info(room_id, user_id, prompt_text)
 
         additional_config = {}
         # if template_info:
@@ -1780,6 +1767,11 @@ class BilibiliAdapter:
                 "\n禁止使用<JP><ZH>标签，不要进行日语翻译，只输出中文。"
             )
             reply_prompt += anti_tts_instruction
+
+        if reply_prompt:
+            reply_prompt += "\n{moderation_prompt}"
+        if planner_prompt:
+            planner_prompt += "\n{moderation_prompt}"
 
         self.logger.debug(
             f"Resolved prompts for room {room_id}: tts_enable={tts_enable}"
@@ -2062,11 +2054,6 @@ class BilibiliAdapter:
             return
         room_id = self._resolve_room_id(message)
         if room_id is not None:
-            # Release lock to allow next event to be processed
-            if not self._core_ready_event.is_set():
-                self.logger.info("Core reply received, releasing event lock.")
-                self._core_ready_event.set()
-
             reply_dmid = _find_reply_id(seg)
             reply_mid = ""
             if reply_dmid:
@@ -3063,33 +3050,14 @@ class BilibiliAdapter:
         self.logger.info("Event serialization queue started.")
         while True:
             try:
-                # Wait for Core to be ready (Lock released)
-                await self._core_ready_event.wait()
-
                 # Get next highest priority event
                 priority, timestamp, count, message = await self._event_queue.get()
-
-                # Double check ready state (though wait() handles it)
-                if not self._core_ready_event.is_set():
-                    # Should not happen usually
-                    self._event_queue.put_nowait((priority, timestamp, count, message))
-                    await asyncio.sleep(0.1)
-                    continue
-
-                # Lock the core processing
-                self._core_ready_event.clear()
-                self._event_lock_timestamp = time.time()
 
                 # Send to Core
                 try:
                     await self._send_to_nachobot(message)
-
-                    # Start watchdog to force release if Core hangs/doesn't reply
-                    asyncio.create_task(self._event_lock_watchdog())
                 except Exception as e:
                     self.logger.error(f"Failed to send event to core: {e}")
-                    # If send failed, release lock immediately so we don't hang
-                    self._core_ready_event.set()
 
                 # Yield slightly to allow other tasks
                 await asyncio.sleep(0.01)
@@ -3099,24 +3067,6 @@ class BilibiliAdapter:
             except Exception as e:
                 self.logger.error(f"Event processing loop error: {e}")
                 await asyncio.sleep(1)
-
-    async def _event_lock_watchdog(self) -> None:
-        """
-        Force release core lock if no reply received within timeout.
-        """
-        timeout = 20.0  # seconds
-        lock_ts = self._event_lock_timestamp
-        await asyncio.sleep(timeout)
-
-        # Check if lock is still held and timestamp matches (meaning same lock session)
-        if (
-            not self._core_ready_event.is_set()
-            and self._event_lock_timestamp == lock_ts
-        ):
-            self.logger.warning(
-                f"Core processing timed out ({timeout}s), forcing lock release."
-            )
-            self._core_ready_event.set()
 
     async def _gift_flush_loop(self) -> None:
         """
@@ -3159,7 +3109,7 @@ class BilibiliAdapter:
                         )
 
                         prompt_text = f"送出了 {gift_name} x{count}"
-                        template_info = self._get_template_info(
+                        template_info = await self._get_template_info(
                             room_id, user_id, prompt_text
                         )
 

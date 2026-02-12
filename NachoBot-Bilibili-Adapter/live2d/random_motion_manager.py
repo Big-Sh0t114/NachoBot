@@ -59,7 +59,9 @@ class RandomMotionManager:
                         # Gaze
                         x = random.uniform(-1.0, 1.0)
                         y = random.uniform(-1.0, 1.0)
-                        self.controller.send_command("auto_gaze", {"x": x, "y": y})
+                        await self.controller.send_live2d_event(
+                            "auto_gaze", {"x": x, "y": y}
+                        )
                         self.logger.debug(
                             f"[RandomMotion] Gaze set to ({x:.2f}, {y:.2f})"
                         )

@@ -386,6 +386,8 @@ class Live2DRenderer:
 
         self.dragging_window = False
         self.last_global_mouse_pos = (0, 0)
+        self.btn_6_down = False
+        self.btn_7_down = False
 
         while self.running:
             # Handle Window Dragging (Manual)
@@ -473,6 +475,24 @@ class Live2DRenderer:
                         except:
                             self.dragging_window = False
 
+                    elif event.button == 6:
+                        self.btn_6_down = True
+                        # Debug Model Relative Coords
+                        rel_x, rel_y = self._get_model_relative_coords(
+                            event.pos[0], event.pos[1]
+                        )
+                        self.logger.info(
+                            f"[Live2D] Button 6 Down: Enable Gaze Tracking (Model Rel: {rel_x:.1f}, {rel_y:.1f})"
+                        )
+                    elif event.button == 7:
+                        self.btn_7_down = True
+                        rel_x, rel_y = self._get_model_relative_coords(
+                            event.pos[0], event.pos[1]
+                        )
+                        self.logger.info(
+                            f"[Live2D] Button 7 Down: Enable Gaze Tracking (Model Rel: {rel_x:.1f}, {rel_y:.1f})"
+                        )
+
                 if event.type == pygame.MOUSEBUTTONUP:
                     if event.button == 1:
                         self.dragging_model = False
@@ -482,6 +502,12 @@ class Live2DRenderer:
                     elif event.button == 3:
                         self.dragging_window = False
                         self.logger.info("[Live2D] Right Click: End Window Drag")
+                    elif event.button == 6:
+                        self.btn_6_down = False
+                        self.logger.info("[Live2D] Button 6 Up: Disable Gaze Tracking")
+                    elif event.button == 7:
+                        self.btn_7_down = False
+                        self.logger.info("[Live2D] Button 7 Up: Disable Gaze Tracking")
 
                 if event.type == pygame.MOUSEWHEEL:
                     zoom_speed = 0.1
@@ -506,13 +532,40 @@ class Live2DRenderer:
                         self.offset_y -= unit_dy  # Invert Y for OpenGL
                         # self.logger.debug(f"Pan: {unit_dx:.4f}, {unit_dy:.4f}")
 
-                    # Interactions
-                    x, y = pygame.mouse.get_pos()
-                    if self.model and not self.dragging_model and self.track_mouse:
-                        self.model.Drag(x, y)
+            # Interactions
+            x, y = pygame.mouse.get_pos()
+            should_track = self.track_mouse or self.btn_6_down or self.btn_7_down
 
-            # Auto Gaze Control (if not tracking mouse)
-            if self.model and not self.track_mouse and not self.dragging_model:
+            if self.model and not self.dragging_model and should_track:
+                # CRITICAL FIX: Account for model offset and coordinate system
+                # Standard Live2D Unit: Height = 2.0 Units (-1.0 to 1.0)
+                # We need to shift the mouse coordinates to be relative to the model's new center.
+                # Model Center X (Screen) = CenterX + OffsetX * (Height / 2)
+                # Model Center Y (Screen) = CenterY - OffsetY * (Height / 2)  (Y is inverted: Up is Positive Offset)
+
+                cx = self.width / 2.0
+                cy = self.height / 2.0
+
+                # Simplified Gaze Logic (User Request):
+                # Calculate Model Center on Screen and find relative Mouse Vector
+                # Using helper method for consistency
+                scaled_dx, scaled_dy = self._get_model_relative_coords(x, y)
+
+                # Look Target (Screen Coords relative to Base Center)
+                final_x = cx + scaled_dx
+                final_y = cy + scaled_dy
+
+                if frame_count % 60 == 0:
+                    self.logger.debug(
+                        f"[GazeDebug] Mouse:({x}, {y}) "
+                        f"Rel:({scaled_dx:.1f}, {scaled_dy:.1f}) "
+                        f"Final:({final_x:.1f}, {final_y:.1f})"
+                    )
+
+                self.model.Drag(final_x, final_y)
+
+            # Auto Gaze Control (if not tracking mouse explicitly)
+            if self.model and not should_track and not self.dragging_model:
                 pass  # Logic continues below
             elif frame_count % 300 == 0:
                 self.logger.debug(
@@ -529,7 +582,12 @@ class Live2DRenderer:
                 except Exception as e:
                     self.logger.error(f"Command error: {e}")
 
-            if self.model and not self.track_mouse and not self.dragging_model:
+            if (
+                self.model
+                and not self.track_mouse
+                and not should_track
+                and not self.dragging_model
+            ):
                 # Auto Gaze: Lerp towards target
                 # CRITICAL SAFETY: Skip AutoGaze (Drag) if:
                 # 1. Tweens are active (prevents SetParameterValue crash)
@@ -732,6 +790,26 @@ class Live2DRenderer:
         pygame.quit()
         self.logger.info("Live2D Renderer Stopped")
 
+    def _get_model_relative_coords(self, x, y):
+        """Helper to get coordinates relative to the model center (considering offset and scale)"""
+        cx = self.width / 2.0
+        cy = self.height / 2.0
+        ppu = self.height / 2.0
+
+        # Model Center (Screen Coords)
+        model_center_x = cx + (self.offset_x * ppu)
+        model_center_y = cy + (self.offset_y * ppu)
+
+        # Mouse Vector relative to Model Center
+        dx = x - model_center_x
+        dy = y - model_center_y
+
+        # Scale the vector (Zoom)
+        rel_x = dx / self.scale
+        rel_y = dy / self.scale
+
+        return rel_x, rel_y
+
     def _handle_command(self, cmd_type: str, cmd_data: Any):
         if not self.model:
             return
@@ -821,6 +899,32 @@ class Live2DRenderer:
                 # Back to Center/Camera
                 self.target_x = 0.0
                 self.target_y = 0.0
+
+        elif cmd_type == "auto_gaze":
+            # Direct Gaze Control (x, y)
+            # Coordinates are in Live2D Unit Space (-1..1)
+            try:
+                self.target_x = float(cmd_data.get("x", 0.0))
+                self.target_y = float(cmd_data.get("y", 0.0))
+                self.logger.debug(
+                    f"[Live2D] Auto Gaze set to: ({self.target_x}, {self.target_y})"
+                )
+            except (ValueError, TypeError):
+                pass
+
+        elif cmd_type == "body_action":
+            # Body Action Command (Motion Group)
+            # e.g., "Tap", "Flick", "Idle"
+            group = str(cmd_data)
+            self.logger.info(f"[Live2D] Body Action: {group}")
+            if self.model:
+                try:
+                    # Priority 3 (Force play)
+                    self.model.StartMotion(group, 0, 3)
+                except Exception as e:
+                    self.logger.error(
+                        f"[Live2D] Failed to start body action {group}: {e}"
+                    )
 
         elif cmd_type == "emotion":
             # Handle emotion dict: {"joy": 5, "anger": 1, ...}

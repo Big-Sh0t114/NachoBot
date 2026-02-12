@@ -578,6 +578,48 @@ class HeartFChatting:
             )
             return "Filtered"
 
+        # Smart Aggregation for Bilibili TTS in HeartFC_Chat
+        # If platform is Bilibili AND message contains TTS tags (<ZH> or <JP>),
+        # aggregate all text into one message to prevent tag splitting.
+        is_bilibili = self.chat_stream.platform in ["bilibili", "bilibili.live"]
+        has_tts_tags = False
+
+        # DEBUG LOGGING (HeartFC)
+        logger.debug(
+            f"{self.log_prefix} [HFC-SmartAggregation]Platform='{self.chat_stream.platform}' is_bilibili={is_bilibili}"
+        )
+
+        if is_bilibili:
+            for i, reply_content in enumerate(reply_set.reply_data):
+                if reply_content.content_type == ReplyContentType.TEXT:
+                    content = str(reply_content.content)
+                    # Relaxed check: case insensitive
+                    if "<zh>" in content.lower() or "<jp>" in content.lower():
+                        has_tts_tags = True
+                        logger.debug(
+                            f"{self.log_prefix} [HFC-SmartAggregation] Found TTS tag in chunk {i}: {content[:20]}..."
+                        )
+                        break
+
+        if is_bilibili and has_tts_tags:
+            logger.debug(f"{self.log_prefix} [HFC] 检测到 Bilibili TTS 标签，启用智能聚合发送模式")
+            full_text = ""
+            for reply_content in reply_set.reply_data:
+                if reply_content.content_type == ReplyContentType.TEXT:
+                    full_text += str(reply_content.content)
+
+            if full_text:
+                await send_api.text_to_stream(
+                    text=full_text,
+                    stream_id=self.chat_stream.stream_id,
+                    reply_message=message_data,
+                    set_reply=need_reply,
+                    typing=False,
+                    selected_expressions=selected_expressions,
+                )
+                return full_text
+            return ""
+
         reply_text = ""
         first_replied = False
         for reply_content in reply_set.reply_data:

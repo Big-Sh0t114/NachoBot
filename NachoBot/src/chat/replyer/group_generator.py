@@ -117,6 +117,12 @@ class DefaultReplyer:
             with open(config_path, "r", encoding="utf-8") as f:
                 doc = tomlkit.load(f)
 
+            # 检查插件是否启用
+            plugin_config = doc.get("plugin", {})
+            if not plugin_config.get("enabled", True):
+                # logger.debug(f"MCP Permission Check: FAILED (Plugin disabled in config)")
+                return False
+
             permissions = doc.get("permissions", {})
             quick_allow_users_str = permissions.get("quick_allow_users", "")
             default_mode = permissions.get("perm_default_mode", "deny_all")
@@ -432,75 +438,89 @@ class DefaultReplyer:
             return ""
 
         try:
-            url_info = ""
-            urls = extract_urls(target)
-            if urls:
-                url_preview = ", ".join(urls[:3])
-                if len(urls) > 3:
-                    url_preview += " ..."
-                logger.info(f"检测到URL，开始抓取: {url_preview}")
-                try:
-                    url_info = await self.url_fetcher.build_url_info(urls)
-                except Exception as e:
-                    logger.debug(f"URL解析失败: {e}")
-
-            search_info = ""
-            search_url_info = ""
-
-            # Check if tools (including web search check) are disabled
-            tools_disabled = False
+            # 检测是否为开启TTS的Bilibili直播间，如果是则仅允许MCP工具
+            tts_mcp_only = False
             try:
-                if self.chat_stream.context and self.chat_stream.context.message:
-                    add_conf = self.chat_stream.context.message.message_info.additional_config
-                    if add_conf and isinstance(add_conf, dict) and add_conf.get("disable_tools"):
-                        tools_disabled = True
+                if self.chat_stream.platform == "bilibili" and self.chat_stream.context:
+                    msg = self.chat_stream.context.message
+                    if msg and msg.message_info and msg.message_info.template_info:
+                        template_name = msg.message_info.template_info.template_name
+                        if template_name and isinstance(template_name, str) and template_name.endswith("_tts"):
+                            tts_mcp_only = True
+                            logger.info("Bilibili TTS直播间检测到，仅允许MCP工具")
             except Exception:
                 pass
 
-            if not urls and not tools_disabled:
-                logger.info("未检测到URL，尝试联网搜索判定")
+            url_info = ""
+            search_info = ""
+            search_url_info = ""
+
+            if not tts_mcp_only:
+                urls = extract_urls(target)
+                if urls:
+                    url_preview = ", ".join(urls[:3])
+                    if len(urls) > 3:
+                        url_preview += " ..."
+                    logger.info(f"检测到URL，开始抓取: {url_preview}")
+                    try:
+                        url_info = await self.url_fetcher.build_url_info(urls)
+                    except Exception as e:
+                        logger.debug(f"URL解析失败: {e}")
+
+                # Check if tools (including web search check) are disabled
+                tools_disabled = False
                 try:
-                    search_info = await self.web_search_manager.build_search_info(
-                        chat_history=chat_history,
-                        sender=sender,
-                        target=target,
-                        bot_name=global_config.bot.nickname,
-                    )
-                except Exception as e:
-                    logger.debug(f"联网搜索信息获取失败: {e}")
-                if search_info:
-                    logger.info("联网搜索已返回结果")
-                    search_urls = []
-                    seen_urls = set()
-                    for url in extract_urls(search_info):
-                        if url in seen_urls:
-                            continue
-                        seen_urls.add(url)
-                        search_urls.append(url)
-                        if len(search_urls) >= 3:
-                            break
-                    if search_urls:
-                        logger.info("开始抓取搜索结果正文")
-                        try:
-                            search_url_info = await self.url_fetcher.build_url_info(search_urls)
-                        except Exception as e:
-                            logger.debug(f"搜索结果正文抓取失败: {e}")
-                else:
-                    logger.info("联网搜索未触发或无结果")
+                    if self.chat_stream.context and self.chat_stream.context.message:
+                        add_conf = self.chat_stream.context.message.message_info.additional_config
+                        if add_conf and isinstance(add_conf, dict) and add_conf.get("disable_tools"):
+                            tools_disabled = True
+                except Exception:
+                    pass
+
+                if not urls and not tools_disabled:
+                    logger.info("未检测到URL，尝试联网搜索判定")
+                    try:
+                        search_info = await self.web_search_manager.build_search_info(
+                            chat_history=chat_history,
+                            sender=sender,
+                            target=target,
+                            bot_name=global_config.bot.nickname,
+                        )
+                    except Exception as e:
+                        logger.debug(f"联网搜索信息获取失败: {e}")
+                    if search_info:
+                        logger.info("联网搜索已返回结果")
+                        search_urls = []
+                        seen_urls = set()
+                        for url in extract_urls(search_info):
+                            if url in seen_urls:
+                                continue
+                            seen_urls.add(url)
+                            search_urls.append(url)
+                            if len(search_urls) >= 3:
+                                break
+                        if search_urls:
+                            logger.info("开始抓取搜索结果正文")
+                            try:
+                                search_url_info = await self.url_fetcher.build_url_info(search_urls)
+                            except Exception as e:
+                                logger.debug(f"搜索结果正文抓取失败: {e}")
+                    else:
+                        logger.info("联网搜索未触发或无结果")
 
             tool_results = []
             try:
-                # 并行执行两个工具执行器
                 tasks = []
 
-                # 1. 标准工具 (Standard)
-                tasks.append(
-                    self.tool_executor.execute_from_chat_message(
-                        sender=sender, target_message=target, chat_history=chat_history, return_details=False
+                if not tts_mcp_only:
+                    # 标准工具 (Standard) - TTS直播间下跳过
+                    tasks.append(
+                        self.tool_executor.execute_from_chat_message(
+                            sender=sender, target_message=target, chat_history=chat_history, return_details=False
+                        )
                     )
-                )
 
-                # 2. MCP工具 (High-Intelligence) - 仅在权限校验通过时执行
+                # MCP工具 - 始终允许（权限校验通过时）
                 has_mcp_permission = self._check_mcp_permission(user_id=user_id)
                 if has_mcp_permission:
                     tasks.append(
@@ -511,31 +531,33 @@ class DefaultReplyer:
                 else:
                     logger.info(f"用户无 MCP 权限，跳过 MCP 执行器")
 
-                results = await asyncio.gather(*tasks, return_exceptions=True)
+                if tasks:
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
 
-                # 处理结果
-                # 如果 has_mcp_permission 为 True，results[0] 是 standard, results[1] 是 mcp
-                # 如果 False，results[0] 是 standard
+                    if not tts_mcp_only:
+                        # 正常模式: results[0] 是 standard, results[1] 是 mcp (如果有)
+                        standard_res = results[0]
+                        mcp_res = results[1] if has_mcp_permission and len(results) > 1 else None
 
-                standard_res = results[0]
-                mcp_res = results[1] if has_mcp_permission and len(results) > 1 else None
-
-                # 处理 Standard 结果
-                if isinstance(standard_res, Exception):
-                    logger.error(f"Standard 工具执行器失败: {standard_res}")
-                else:
-                    t_res, _, _ = standard_res
-                    if t_res:
-                        tool_results.extend(t_res)
-
-                # 处理 MCP 结果
-                if mcp_res:
-                    if isinstance(mcp_res, Exception):
-                        logger.error(f"MCP 工具执行器失败: {mcp_res}")
+                        # 处理 Standard 结果
+                        if isinstance(standard_res, Exception):
+                            logger.error(f"Standard 工具执行器失败: {standard_res}")
+                        else:
+                            t_res, _, _ = standard_res
+                            if t_res:
+                                tool_results.extend(t_res)
                     else:
-                        t_res, _, _ = mcp_res
-                        if t_res:
-                            tool_results.extend(t_res)
+                        # TTS模式: 只有 MCP 结果
+                        mcp_res = results[0] if has_mcp_permission else None
+
+                    # 处理 MCP 结果
+                    if mcp_res:
+                        if isinstance(mcp_res, Exception):
+                            logger.error(f"MCP 工具执行器失败: {mcp_res}")
+                        else:
+                            t_res, _, _ = mcp_res
+                            if t_res:
+                                tool_results.extend(t_res)
 
             except Exception as e:
                 logger.error(f"工具执行器失败，跳过工具结果: {e}")
@@ -1009,7 +1031,7 @@ class DefaultReplyer:
 
             screen_info_content = screen_manager.get_screen()
             if screen_info_content:
-                extra_info_block_parts.append(f"【直播画面】\n{screen_info_content}")
+                extra_info_block_parts.append(f"【屏幕画面】\n{screen_info_content}")
         except Exception:
             pass
 
