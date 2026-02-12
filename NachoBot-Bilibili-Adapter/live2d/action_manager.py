@@ -1,6 +1,5 @@
-import asyncio
 import json
-from typing import Dict, Any, Optional
+from typing import Optional
 from src.chat.utils.prompt_builder import Prompt, global_prompt_manager
 from src.config.config import global_config
 from src.chat.utils.chat_message_builder import (
@@ -9,19 +8,29 @@ from src.chat.utils.chat_message_builder import (
 )
 from src.chat.message_receive.message import MessageRecv
 
+# Hiyori Model Motions
 DEFAULT_BODY_CODE = {
-    "双手背后向前弯腰": "010_0070",
-    "歪头双手合十": "010_0100",
-    "标准文静站立": "010_0101",
-    "双手交叠腹部站立": "010_0150",
-    "帅气的姿势": "010_0190",
-    "另一个帅气的姿势": "010_0191",
-    "手掌朝前可爱": "010_0210",
-    "平静，双手后放": "平静，双手后放",
-    "思考": "思考",
-    "优雅，左手放在腰上": "优雅，左手放在腰上",
-    "一般": "一般",
-    "可爱，双手前放": "可爱，双手前放",
+    "待机/放松": "Idle",
+    "点头/同意": "Tap",
+    "摇头/否定": "Flick",
+    "惊讶/身体前倾": "Tap@Body",
+    "大幅度动作/躲避": "Flick@Body",
+    "一般": "Idle",
+}
+
+# Hiyori Model Gaze Map (Live2D Unit Coordinates -1 to 1)
+# X: -1 (Left) to 1 (Right)
+# Y: -1 (Down) to 1 (Up)
+HEAD_DIRECTION_MAP = {
+    "Center": {"x": 0.0, "y": 0.0},
+    "Left": {"x": -1.0, "y": 0.0},
+    "Right": {"x": 1.0, "y": 0.0},
+    "Up": {"x": 0.0, "y": 1.0},
+    "Down": {"x": 0.0, "y": -1.0},
+    "UpLeft": {"x": -0.8, "y": 0.8},
+    "UpRight": {"x": 0.8, "y": 0.8},
+    "DownLeft": {"x": -0.8, "y": -0.8},
+    "DownRight": {"x": 0.8, "y": -0.8},
 }
 
 
@@ -30,7 +39,7 @@ class ChatAction:
         self.chat_id = chat_id
         self.manager = manager
         self.body_action = "一般"
-        self.head_action = "注视摄像机"
+        self.head_action = "Center"
         self.last_change_time = 0
 
     async def _call_llm(self, prompt: str) -> Optional[str]:
@@ -39,12 +48,19 @@ class ChatAction:
         if not model_client:
             self.manager.logger.warning("ModelClient not available")
             return None
-        return await model_client.call_planner(prompt)
+        return await model_client._call_task_model("utils_small", prompt)
 
     async def send_action_update(self):
+        # 1. Send Body Action
         body_code = DEFAULT_BODY_CODE.get(self.body_action, "")
-        if body_code:
+        # Only send if valid and NOT Idle (Idle is handled automatically by Live2D loop)
+        if body_code and body_code != "Idle":
             await self.manager.controller.send_live2d_event("body_action", body_code)
+
+        # 2. Send Head/Gaze Action
+        gaze_data = HEAD_DIRECTION_MAP.get(self.head_action, None)
+        if gaze_data:
+            await self.manager.controller.send_live2d_event("auto_gaze", gaze_data)
 
     async def update_action_by_message(self, message: MessageRecv):
         message_time = message.message_info.time
@@ -85,13 +101,16 @@ class ChatAction:
         )
 
         all_actions = "\n".join([f"- {k}" for k in DEFAULT_BODY_CODE.keys()])
+        all_head_actions = ", ".join(HEAD_DIRECTION_MAP.keys())
 
         prompt = await global_prompt_manager.format_prompt(
             "change_action_prompt",
             chat_talking_prompt=chat_talking_prompt,
             indentify_block=indentify_block,
             body_action=self.body_action,
+            head_action=self.head_action,
             all_actions=all_actions,
+            all_head_actions=all_head_actions,
         )
 
         response = await self._call_llm(prompt)
@@ -105,13 +124,30 @@ class ChatAction:
                     response = response.split("```")[1].split("```")[0]
 
                 data = json.loads(response)
-                new_action = data.get("body_action")
-                if new_action and new_action in DEFAULT_BODY_CODE:
-                    self.body_action = new_action
+
+                new_body = data.get("body_action")
+                new_head = data.get("head_action")
+
+                updated = False
+                if new_body and new_body in DEFAULT_BODY_CODE:
+                    self.body_action = new_body
+                    updated = True
+
+                if new_head and new_head in HEAD_DIRECTION_MAP:
+                    self.head_action = new_head
+                    updated = True
+
+                if updated:
                     await self.send_action_update()
                     self.last_change_time = message_time
+                    self.manager.logger.info(
+                        f"[Action] Updated: Body={self.body_action}, Head={self.head_action}"
+                    )
+
             except Exception as e:
-                self.manager.logger.error(f"Failed to parse action response: {e}")
+                self.manager.logger.error(
+                    f"Failed to parse action response: {e}, resp: {response}"
+                )
 
 
 class ActionManager:
@@ -130,21 +166,31 @@ class ActionManager:
 {indentify_block}
 你现在的动作状态是：
 - 身体动作：{body_action}
+- 头部朝向：{head_action}
 
-现在，因为你发送了消息，或者群里其他人发送了消息，引起了你的注意，你对其进行了阅读和思考，请你更新你的动作状态。
+请分析最新的聊天内容，判断你是否需要改变动作或视线方向。
+原则：
+1. **多保持当前状态或归位**：如果没有明确的指令或强烈的情绪触发，请保持“待机/放松”和“Center”。
+2. **不要频繁乱动**：动作应该自然且有意义，不要每一句话都触发大动作。
+3. **视线控制**：只有在被要求“看左边”、“看右边”等，或者有明显空间指向性时才改变视线。否则保持“Center”。
+
 身体动作可选：
 {all_actions}
 
-请只按照以下json格式输出，描述你新的动作状态，确保每个字段都存在：
+头部朝向可选（Center为默认看镜头）：
+{all_head_actions}
+
+请只按照以下json格式输出：
 {{
-  "body_action": "..."
+  "body_action": "...", 
+  "head_action": "..."
 }}
 """,
             "change_action_prompt",
         )
 
     async def start(self):
-        pass
+        self.logger.info("ActionManager started")
 
     def get_action_state_by_chat_id(self, chat_id: str) -> ChatAction:
         for action in self.action_state_list:
