@@ -10,3 +10,10 @@ backup_files
 base.toml
 *.ckpt
 ncnk_fin.pth
+# Local Models
+iic/
+microsoft/
+FunAudioLLM/
+SenseVoiceSmall/
+Florence-2-large/
+hub/

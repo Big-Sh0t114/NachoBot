@@ -46,7 +46,7 @@ logger = get_logger("chat_summary_plugin")
 class ChatSummaryCommand(BaseCommand):
     """聊天记录总结命令"""
 
-    command_name = "chat_summary"
+    command_name = "summary"
     command_description = "生成聊天记录总结"
     command_pattern = r"^#summary(?:\s+(?:(?P<qq>\d+)\s+)?(?P<date>\d{4}-\d{2}-\d{2}))?\s*$"
     _PRIVATE_SUMMARY_STORE_KEY = "chat_summary_plugin.private_summary_history"

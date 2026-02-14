@@ -11,8 +11,8 @@ from src.plugin_system import BasePlugin, register_plugin, BaseCommand
 
 
 PLUGIN_DIR = Path(__file__).parent
-LIB_PATH   = PLUGIN_DIR / "music_library.json"
-AUDIO_DIR  = PLUGIN_DIR / "audio"
+LIB_PATH = PLUGIN_DIR / "music_library.json"
+AUDIO_DIR = PLUGIN_DIR / "audio"
 TODO_LIST_PATH = PLUGIN_DIR / "list.txt"
 DUMP_LIST_PATH = PLUGIN_DIR / "dump.txt"
 AUDIO_EXT_WHITELIST = {".wav"}
@@ -91,7 +91,9 @@ def _sync_library_with_audio(library: List[dict]) -> List[dict]:
         # 如果库里已有同名歌曲但未记录文件，则补全文件路径
         if title_key and title_key in known_titles:
             for item in updated:
-                if _normalize_query(item.get("title", "")) == title_key and not _normalize_file_key(str(item.get("file", ""))):
+                if _normalize_query(item.get("title", "")) == title_key and not _normalize_file_key(
+                    str(item.get("file", ""))
+                ):
                     item["file"] = audio_file.relative_to(PLUGIN_DIR).as_posix()
                     known_files.add(file_key)
                     changed = True
@@ -228,6 +230,7 @@ def _best_similarity(query: str, candidates: List[str]) -> Tuple[float, Optional
         return best_score, best_item
     try:
         from rapidfuzz import process, fuzz  # type: ignore
+
         matched = process.extractOne(query, candidates, scorer=fuzz.WRatio)
         if matched:
             item, score, _ = matched
@@ -250,9 +253,9 @@ def _fuzzy_contains(query: str, candidates: set[str], threshold: float) -> Tuple
 async def _play_song(cmd: BaseCommand, song: dict) -> Tuple[bool, Optional[str], bool]:
     """共用播放流程：根据 song dict 发送语音/文件。"""
     rel = song.get("file") or ""
-    wav = (PLUGIN_DIR / rel).resolve() if rel else (AUDIO_DIR / f"{song.get('title','')}.wav").resolve()
+    wav = (PLUGIN_DIR / rel).resolve() if rel else (AUDIO_DIR / f"{song.get('title', '')}.wav").resolve()
     if not wav.exists():
-        await cmd.send_text(f"找到歌曲 {song.get('title','?')}，但音频缺失：{wav.name}")
+        await cmd.send_text(f"找到歌曲 {song.get('title', '?')}，但音频缺失：{wav.name}")
         return True, f"file_missing:{wav.name}", True
 
     prefer_silk = bool(cmd.get_config("mus_library.prefer_silk", _cfg(cmd, "prefer_silk", True)))  # type: ignore
@@ -266,6 +269,7 @@ async def _play_song(cmd: BaseCommand, song: dict) -> Tuple[bool, Optional[str],
         if debug_timing:
             try:
                 import rsilk  # type: ignore
+
                 try:
                     await cmd.send_text(f"[mus_library] rsilk OK @ {silk_bitrate}bps")
                 except Exception:
@@ -294,7 +298,7 @@ async def _play_song(cmd: BaseCommand, song: dict) -> Tuple[bool, Optional[str],
                         src_wav.unlink(missing_ok=True)
                     except Exception:
                         pass
-                return True, f"play:{song.get('title','?')}", True
+                return True, f"play:{song.get('title', '?')}", True
         else:
             if debug_timing:
                 try:
@@ -311,7 +315,7 @@ async def _play_song(cmd: BaseCommand, song: dict) -> Tuple[bool, Optional[str],
                     src_wav.unlink(missing_ok=True)
                 except Exception:
                     pass
-            return True, f"play:{song.get('title','?')}", True
+            return True, f"play:{song.get('title', '?')}", True
     except Exception:
         pass
 
@@ -322,7 +326,7 @@ async def _play_song(cmd: BaseCommand, song: dict) -> Tuple[bool, Optional[str],
                 src_wav.unlink(missing_ok=True)
             except Exception:
                 pass
-        return True, f"file:{song.get('title','?')}", True
+        return True, f"file:{song.get('title', '?')}", True
 
     if src_wav != wav:
         try:
@@ -345,7 +349,7 @@ async def _trim_wav(src: Path, max_seconds: int) -> Path:
     """把 WAV 裁剪为前 max_seconds 秒；max_seconds<=0 则返回原文件。"""
     if not max_seconds or max_seconds <= 0:
         return src
-    tmp = Path(tempfile.gettempdir()) / f"mus_trim_{os.getpid()}_{int(asyncio.get_event_loop().time()*1000)}.wav"
+    tmp = Path(tempfile.gettempdir()) / f"mus_trim_{os.getpid()}_{int(asyncio.get_event_loop().time() * 1000)}.wav"
     with wave.open(str(src), "rb") as r:
         ch, sw, sr, n = r.getnchannels(), r.getsampwidth(), r.getframerate(), r.getnframes()
         frames_keep = min(n, int(max_seconds * sr))
@@ -382,11 +386,7 @@ async def _wav_to_silk_py(wav_path: Path, bit_rate: int = 24000) -> Optional[byt
         try:
             br = int(max(8000, min(int(bit_rate or 24000), 40000)))
             return rsilk.encode(
-                input=pcm_local,
-                sample_rate=24000,
-                bit_rate=br,
-                max_internal_sample_rate=24000,
-                tencent=True
+                input=pcm_local, sample_rate=24000, bit_rate=br, max_internal_sample_rate=24000, tencent=True
             )
         except Exception:
             return None
@@ -443,6 +443,7 @@ async def _http_post_json(url: str, payload: dict, headers: Dict[str, str] | Non
         req = urllib.request.Request(url, data=data, headers=hdr)
         with urllib.request.urlopen(req, timeout=10) as resp:
             return resp.getcode(), resp.read().decode("utf-8", "ignore")
+
     try:
         return await asyncio.to_thread(_do)
     except urllib.error.HTTPError as e:
@@ -458,15 +459,19 @@ async def _http_post_json(url: str, payload: dict, headers: Dict[str, str] | Non
 async def _send_record_v11(cmd: BaseCommand, silk_bytes: bytes) -> bool:
     """用 OneBot v11 的 record 段发送语音（群聊/私聊）。"""
     ob_base = str(_cfg(cmd, "onebot_base", "http://127.0.0.1:5700")).rstrip("/")
-    token   = _cfg(cmd, "onebot_token", "")
+    token = _cfg(cmd, "onebot_token", "")
     headers = {"Content-Type": "application/json; charset=utf-8"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
     msg = getattr(cmd, "message", None)
     force_gid = _cfg(cmd, "nonebot_force_group_id", None) or _cfg(cmd, "onebot_force_group_id", None)
-    group_id = (str(force_gid).strip() if force_gid else None) or getattr(msg, "group_id", None) or getattr(getattr(cmd, "chat_stream", None), "group_id", None)
-    user_id  = getattr(msg, "user_id", None) or getattr(getattr(cmd, "chat_stream", None), "user_id", None)
+    group_id = (
+        (str(force_gid).strip() if force_gid else None)
+        or getattr(msg, "group_id", None)
+        or getattr(getattr(cmd, "chat_stream", None), "group_id", None)
+    )
+    user_id = getattr(msg, "user_id", None) or getattr(getattr(cmd, "chat_stream", None), "user_id", None)
 
     uri = _as_base64_uri_from_bytes(silk_bytes)
 
@@ -488,14 +493,18 @@ async def _send_record_v11(cmd: BaseCommand, silk_bytes: bytes) -> bool:
 async def _send_file_v11(cmd: BaseCommand, wav_path: Path) -> bool:
     """兜底：上传群文件（base64 传输，规避中文路径）。私聊无官方上传接口，忽略。"""
     ob_base = str(_cfg(cmd, "onebot_base", "http://127.0.0.1:5700")).rstrip("/")
-    token   = _cfg(cmd, "onebot_token", "")
+    token = _cfg(cmd, "onebot_token", "")
     headers = {"Content-Type": "application/json; charset=utf-8"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
     msg = getattr(cmd, "message", None)
     force_gid = _cfg(cmd, "nonebot_force_group_id", None) or _cfg(cmd, "onebot_force_group_id", None)
-    group_id = (str(force_gid).strip() if force_gid else None) or getattr(msg, "group_id", None) or getattr(getattr(cmd, "chat_stream", None), "group_id", None)
+    group_id = (
+        (str(force_gid).strip() if force_gid else None)
+        or getattr(msg, "group_id", None)
+        or getattr(getattr(cmd, "chat_stream", None), "group_id", None)
+    )
 
     if not group_id:
         return False
@@ -508,7 +517,8 @@ async def _send_file_v11(cmd: BaseCommand, wav_path: Path) -> bool:
 
 class PlayMusicCommand(BaseCommand):
     """点歌命令：点歌/播放/来首 + 关键词"""
-    command_name = "play_music_command"
+
+    command_name = "play"
     command_description = "点歌/播放/来首 + 关键词，匹配内置音乐库并以语音播放"
     command_pattern = r"^(?:\S+\s+)?(?:点歌|播放|来首)\s*(?P<query>.+)$"
 
@@ -546,7 +556,9 @@ class PlayMusicCommand(BaseCommand):
                     return True, f"no_match_pending:{query}", True
 
                 _append_pending(query)
-                await self.send_text(f"「{query}」现在还不会唱喵..（相似度 {int(score)}），已经加入NachoBot的待做清单了！")
+                await self.send_text(
+                    f"「{query}」现在还不会唱喵..（相似度 {int(score)}），已经加入NachoBot的待做清单了！"
+                )
                 return True, f"no_match:{query}", True
             return await _play_song(self, song)
 
@@ -559,7 +571,8 @@ class PlayMusicCommand(BaseCommand):
 
 class RandomMusicCommand(BaseCommand):
     """随机播放曲库中的一首歌曲 (#mus_rand)"""
-    command_name = "mus_rand_command"
+
+    command_name = "mus_rand"
     command_description = "随机从曲库挑选一首歌并播放"
     command_pattern = r"^#mus_rand$"
 
@@ -572,7 +585,7 @@ class RandomMusicCommand(BaseCommand):
 
             song = random.choice(lib)
             try:
-                await self.send_text(f"那就来一首「{song.get('title','?')}」好了喵(´-ω-` )")
+                await self.send_text(f"那就来一首「{song.get('title', '?')}」好了喵(´-ω-` )")
             except Exception:
                 pass
 
@@ -588,6 +601,7 @@ class RandomMusicCommand(BaseCommand):
 @register_plugin
 class MusicPlayerPlugin(BasePlugin):
     """Mus Library 插件：内置音乐库点歌并语音播放（低延迟整合版）"""
+
     plugin_name = "mus_library"
     enable_plugin = True
 
@@ -607,8 +621,16 @@ class MusicPlayerPlugin(BasePlugin):
         },
         "onebot_base": {"type": "string", "default": "http://127.0.0.1:5700", "description": "Napcat OneBot HTTP 地址"},
         "onebot_token": {"type": "string", "default": "", "description": "Napcat OneBot HTTP Token（可留空）"},
-        "nonebot_force_group_id": {"type": "string", "default": "", "description": "可选：强制把消息发到此群（拿不到 group_id 时兜底）"},
-        "prefer_silk": {"type": "boolean", "default": True, "description": "优先本地转 SILK 并以 record 段发送（低延迟）"},
+        "nonebot_force_group_id": {
+            "type": "string",
+            "default": "",
+            "description": "可选：强制把消息发到此群（拿不到 group_id 时兜底）",
+        },
+        "prefer_silk": {
+            "type": "boolean",
+            "default": True,
+            "description": "优先本地转 SILK 并以 record 段发送（低延迟）",
+        },
         "silk_bitrate": {"type": "integer", "default": 24000, "description": "SILK 编码比特率（8k~40k）"},
         "cache_ttl_hours": {"type": "number", "default": 0, "description": "SILK 磁盘缓存有效期（小时，0 关闭）"},
         "debug_timing": {"type": "boolean", "default": False, "description": "打印编码/缓存耗时（调试）"},

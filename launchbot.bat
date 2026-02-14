@@ -204,15 +204,12 @@ set "NAPCAT_SHELL_BAT=launcher-user.bat"
 
 set "PYTHON_CMD=uv run python"
 set "MAX_WAIT=60"        REM 每步最多等 60 秒
-set "ALIGN_WAIT=1"       REM 每步就绪后对齐等待 1 秒
+set "ALIGN_WAIT=0"       REM 每步就绪后对齐等待 0 秒
 REM =====================
 
 
-REM ---- 0) 预清理（防端口占用） ----
-echo [CLEAN] 清理可能残留的进程…
-taskkill /im shim.exe /f >nul 2>&1
-for /f "tokens=2" %%i in ('tasklist /v /fi "windowtitle eq NachoBot-Napcat" ^| find /i "python.exe"') do taskkill /PID %%i /f >nul 2>&1
-for /f "tokens=2 delims=," %%p in ('tasklist /fo csv /nh ^| findstr /i "launcher-user.bat"') do taskkill /PID %%p /f >nul 2>&1
+
+REM ---- 0) 预清理（已根据需求移除） ----
 
 REM ---- 1) 启动 NachoBot（新窗口）并等待 8000 ----
 if not exist "%NACHOBOT_DIR%\%NACHOBOT_MAIN%" (

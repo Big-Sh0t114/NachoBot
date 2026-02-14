@@ -1,6 +1,8 @@
 import threading
 import queue
 import logging
+import asyncio
+import time
 from typing import Any
 
 
@@ -24,6 +26,12 @@ class Live2DController:
         self.renderer = None
         self.render_thread = None
         self.command_queue = queue.Queue()
+        self._last_poke_time = 0.0
+
+        try:
+            self.loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.loop = None
 
     def initialize_managers(self):
         from .watching_manager import WatchingManager
@@ -45,6 +53,39 @@ class Live2DController:
 
         self.watching_manager = WatchingManager(self)
         self.random_motion_manager = RandomMotionManager(self)
+
+    def _on_renderer_click(self, button: int):
+        """Callback from renderer thread when model is clicked."""
+        if button not in (6, 7):
+            return
+
+        now = time.time()
+        if now - self._last_poke_time < 10.0:
+            self.logger.info(
+                f"Poke cooldown active. Time remaining: {10.0 - (now - self._last_poke_time):.1f}s"
+            )
+            return
+
+        self._last_poke_time = now
+
+        # Helper to run async task from thread
+        if self.loop and self.adapter:
+            config = self.adapter.config
+            room_id = config.live_host_room_id
+            # Use specific User ID for Master (same as Microphone input) to avoid being treated as self-talk
+            user_id = "2146014839"
+            user_name = "主人"
+
+            if not room_id:
+                self.logger.warning("Cannot poke: Host Room ID not configured.")
+                return
+
+            import asyncio
+
+            asyncio.run_coroutine_threadsafe(
+                self.adapter.handle_incoming_poke(room_id, str(user_id), user_name),
+                self.loop,
+            )
 
     async def start(self):
         if self.is_running:
@@ -95,6 +136,7 @@ class Live2DController:
                     height=self.adapter.config.live_live2d_height,
                     scale=self.adapter.config.live_live2d_scale,
                     track_mouse=self.adapter.config.live_live2d_track_mouse,
+                    on_click=self._on_renderer_click,
                 )
                 self.render_thread = threading.Thread(
                     target=self.renderer.run, daemon=True

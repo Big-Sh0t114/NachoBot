@@ -44,29 +44,69 @@ class ScreenMonitor:
                 self._last_summary = summary
                 return summary
             if self._last_summary:
-                self.logger.warning("Screen analysis failed, fallback to previous summary")
+                self.logger.warning(
+                    "Screen analysis failed, fallback to previous summary"
+                )
                 return self._last_summary
             return None
 
     async def _analyze_current_screen(self, message_text: str = "") -> Optional[str]:
-        image_bytes = await asyncio.to_thread(self._grab_screen_png)
+        image_bytes = await asyncio.to_thread(self._grab_screen_image)
         if not image_bytes:
             return None
         return await self._call_vlm(image_bytes, message_text)
 
-    def _grab_screen_png(self) -> Optional[bytes]:
+    def _grab_screen_image(self) -> Optional[bytes]:
         try:
-            image = ImageGrab.grab(all_screens=False)
+            import mss
+            from PIL import Image
+
+            with mss.mss() as sct:
+                # Get the primary monitor
+                monitor = sct.monitors[1]
+                sct_img = sct.grab(monitor)
+                # Convert to PIL Image
+                image = Image.frombytes(
+                    "RGB", sct_img.size, sct_img.bgra, "raw", "BGRX"
+                )
+        except ImportError:
+            self.logger.warning("mss not found, falling back to ImageGrab")
+            try:
+                image = ImageGrab.grab(all_screens=False)
+            except Exception as exc:
+                self.logger.warning("Screen capture failed: %s", exc)
+                return None
         except Exception as exc:
-            self.logger.warning("Screen capture failed: %s", exc)
-            return None
+            self.logger.warning(
+                "mss capture failed: %s, falling back to ImageGrab", exc
+            )
+            try:
+                image = ImageGrab.grab(all_screens=False)
+            except Exception as inner_exc:
+                self.logger.warning("Fallback screen capture failed: %s", inner_exc)
+                return None
+
+        # Resize if too large
+        max_dim = 1280
+        w, h = image.size
+        if max(w, h) > max_dim:
+            scale = max_dim / max(w, h)
+            new_w = int(w * scale)
+            new_h = int(h * scale)
+            image = image.resize((new_w, new_h))
+
         with BytesIO() as buffer:
-            image.save(buffer, format="PNG")
+            image = image.convert("RGB")
+            image.save(buffer, format="JPEG", quality=85)
             return buffer.getvalue()
 
-    async def _call_vlm(self, image_bytes: bytes, message_text: str = "") -> Optional[str]:
+    async def _call_vlm(
+        self, image_bytes: bytes, message_text: str = ""
+    ) -> Optional[str]:
         if self.config.client_type != "openai":
-            self.logger.warning("Unsupported VLM client_type: %s", self.config.client_type)
+            self.logger.warning(
+                "Unsupported VLM client_type: %s", self.config.client_type
+            )
             return None
         url = f"{self.config.base_url.rstrip('/')}/chat/completions"
         image_b64 = base64.b64encode(image_bytes).decode("utf-8")
@@ -90,7 +130,7 @@ class ScreenMonitor:
                     "content": [
                         {
                             "type": "image_url",
-                            "image_url": {"url": f"data:image/png;base64,{image_b64}"},
+                            "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"},
                         },
                         {"type": "text", "text": prompt_text},
                     ],
@@ -108,7 +148,9 @@ class ScreenMonitor:
                 async with session.post(url, json=payload, headers=headers) as resp:
                     if resp.status >= 400:
                         body = await resp.text()
-                        self.logger.warning("VLM request failed: status=%s body=%s", resp.status, body)
+                        self.logger.warning(
+                            "VLM request failed: status=%s body=%s", resp.status, body
+                        )
                         return None
                     data = await resp.json(content_type=None)
         except Exception as exc:
