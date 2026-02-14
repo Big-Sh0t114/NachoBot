@@ -3,7 +3,7 @@ import sys
 import logging
 import queue
 import pygame
-from typing import Optional, Any
+from typing import Optional, Any, Callable
 
 # Ensure user site-packages is at position 0 for highest priority
 user_site = r"c:\users\bigsh0t\appdata\roaming\python\python310\site-packages"
@@ -26,6 +26,7 @@ class Live2DRenderer:
         height: int = 600,
         scale: float = 1.0,
         track_mouse: bool = False,
+        on_click: Optional[Callable[[int], None]] = None,
     ):
         self.model_path = model_path
         self.logger = logger
@@ -36,6 +37,7 @@ class Live2DRenderer:
         self.height = height
         self.scale = scale
         self.track_mouse = track_mouse
+        self.on_click = on_click
         self.running = False
         self.hwnd = None
         self.model = None
@@ -476,21 +478,31 @@ class Live2DRenderer:
                             self.dragging_window = False
 
                     elif event.button == 6:
+                        # Side Button 1 (Back)
                         self.btn_6_down = True
-                        # Debug Model Relative Coords
-                        rel_x, rel_y = self._get_model_relative_coords(
-                            event.pos[0], event.pos[1]
-                        )
+                        self.logger.info("[Live2D] Button 6 Down: Enable Gaze Tracking")
+                        if self.on_click:
+                            self.on_click(6)
+
+                        # Debug: Log Model relative coords
+                        x, y = pygame.mouse.get_pos()
+                        rel_x, rel_y = self._get_model_relative_coords(x, y)
                         self.logger.info(
-                            f"[Live2D] Button 6 Down: Enable Gaze Tracking (Model Rel: {rel_x:.1f}, {rel_y:.1f})"
+                            f"[Live2D] Button 6 Click at Screen({x}, {y}) -> Model({rel_x:.2f}, {rel_y:.2f})"
                         )
+
                     elif event.button == 7:
+                        # Side Button 2 (Forward)
                         self.btn_7_down = True
-                        rel_x, rel_y = self._get_model_relative_coords(
-                            event.pos[0], event.pos[1]
-                        )
+                        self.logger.info("[Live2D] Button 7 Down: Enable Gaze Tracking")
+                        if self.on_click:
+                            self.on_click(7)
+
+                        # Debug: Log Model relative coords
+                        x, y = pygame.mouse.get_pos()
+                        rel_x, rel_y = self._get_model_relative_coords(x, y)
                         self.logger.info(
-                            f"[Live2D] Button 7 Down: Enable Gaze Tracking (Model Rel: {rel_x:.1f}, {rel_y:.1f})"
+                            f"[Live2D] Button 7 Click at Screen({x}, {y}) -> Model({rel_x:.2f}, {rel_y:.2f})"
                         )
 
                 if event.type == pygame.MOUSEBUTTONUP:

@@ -9,8 +9,11 @@ from typing import Any, Dict, List, Optional
 
 try:
     import tomllib as toml
-except ImportError:  # pragma: no cover
-    import toml  # type: ignore
+except ImportError:
+    try:
+        import tomli as toml
+    except ImportError:
+        import toml  # type: ignore
 
 
 @dataclass
@@ -270,7 +273,7 @@ def load_config(path: Path) -> AdapterConfig:
     compat = data.get("compat", {})
     response_filter = data.get("response_filter", {})
     debug = data.get("debug", {})
-    mic_asr = data.get("mic_asr", {})
+    mic_asr = data.get("mic_asr") or {}
     screen_monitor = live.get("screen_monitor", {}) or {}
 
     sessions_raw = private_message.get("sessions", []) or []
@@ -299,6 +302,11 @@ def load_config(path: Path) -> AdapterConfig:
     if not auto_session_types:
         auto_session_types = [4]
 
+    auto_session_size = int(private_message.get("auto_session_size", 100))
+    auto_session_refresh_seconds = int(
+        private_message.get("auto_session_refresh_seconds", 60)
+    )
+
     mention_keywords_raw = live.get("mention_keywords", [])
     if isinstance(mention_keywords_raw, list):
         mention_keywords = [str(x) for x in mention_keywords_raw if str(x).strip()]
@@ -322,7 +330,9 @@ def load_config(path: Path) -> AdapterConfig:
     if isinstance(room_prompts_raw, dict):
         for key, value in room_prompts_raw.items():
             try:
-                room_id = int(key)
+                # Robustly handle quoted keys from legacy TOML parsers
+                clean_key = str(key).strip('"').strip("'")
+                room_id = int(clean_key)
             except (TypeError, ValueError):
                 continue
             if not isinstance(value, dict):
@@ -513,7 +523,8 @@ def _resolve_vlm_model_config(
         logger.warning("Failed to load model config: %s", exc)
         return None
     task_config = data.get("model_task_config", {}) or {}
-    vlm_config = task_config.get("vlm", {}) or {}
+    # Prefer bilibili_vlm (local Florence-2) over the generic vlm section
+    vlm_config = task_config.get("bilibili_vlm") or task_config.get("vlm", {}) or {}
     model_list = vlm_config.get("model_list", []) or []
     if not model_list:
         logger.warning("model_task_config.vlm.model_list is empty")

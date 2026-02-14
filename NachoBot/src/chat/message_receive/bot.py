@@ -1,6 +1,7 @@
 import traceback
 import os
 import re
+import time
 
 from typing import Dict, Any, Optional
 from ncnk_message import UserInfo, Seg
@@ -256,8 +257,10 @@ class ChatBot:
 
     async def handle_notice_message(self, message: MessageRecv):
         if message.message_info.message_id == "notice":
+            # 给 notice 消息一个唯一的 ID，避免被 message_repository 过滤
+            message.message_info.message_id = f"notice_{int(time.time() * 1000)}"
             message.is_notify = True
-            logger.info("notice消息")
+            logger.info(f"notice消息处理: {message.message_info.message_id}")
             # print(message)
 
             return True
@@ -285,7 +288,25 @@ class ChatBot:
             nickname=user_info.user_nickname,  # type: ignore
         )
 
-        await self.s4u_message_processor.process_message(message)
+        # Handle Template Info for S4U (Streamer Mode Prompts)
+        template_group_name = None
+        if message.message_info.template_info and not message.message_info.template_info.template_default:
+            template_group_name = message.message_info.template_info.template_name
+            template_items = message.message_info.template_info.template_items
+            async with global_prompt_manager.async_message_scope(template_group_name):
+                if isinstance(template_items, dict):
+                    for k in template_items.keys():
+                        await Prompt.create_async(template_items[k], k)
+                        logger.debug(f"注册S4U Prompt: {k}")
+
+        async def process():
+            await self.s4u_message_processor.process_message(message)
+
+        if template_group_name:
+            async with global_prompt_manager.async_message_scope(template_group_name):
+                await process()
+        else:
+            await process()
 
         return
 
@@ -430,7 +451,6 @@ class ChatBot:
                     if isinstance(template_items, dict):
                         for k in template_items.keys():
                             await Prompt.create_async(template_items[k], k)
-                            logger.debug(f"注册{template_items[k]},{k}")
             else:
                 template_group_name = None
 

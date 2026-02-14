@@ -329,27 +329,53 @@ class HeartFChatting:
                 promise_block = "\n".join(["[约定缓存]"] + promise_snippets)
                 chat_content_block = f"{promise_block}\n----\n{chat_content_block}"
 
-            prompt_info = await self.action_planner.build_planner_prompt(
-                is_group_chat=is_group_chat,
-                chat_target_info=chat_target_info,
-                current_available_actions=available_actions,
-                chat_content_block=chat_content_block,
-                message_id_list=message_id_list,
-                interest=global_config.personality.interest,
-            )
-            continue_flag, modified_message = await events_manager.handle_mai_events(
-                EventType.ON_PLAN, None, prompt_info[0], None, self.chat_stream.stream_id
-            )
-            if not continue_flag:
-                return False
-            if modified_message and modified_message._modify_flags.modify_llm_prompt:
-                prompt_info = (modified_message.llm_prompt, prompt_info[1])
+            # Check if planner prompt is empty (disable planner)
+            should_bypass_planner = not debug_prompt or not str(debug_prompt).strip()
 
-            with Timer("规划器", cycle_timers):
-                action_to_use_info, _ = await self.action_planner.plan(
-                    loop_start_time=self.last_read_time,
-                    available_actions=available_actions,
+            if should_bypass_planner:
+                logger.info(f"{self.log_prefix} [HFC] Planner prompt is empty. Bypassing planner, forcing reply.")
+
+                # Find target message (latest user message preferably)
+                target_message = None
+                if message_list_before_now:
+                    for msg in reversed(message_list_before_now):
+                        # Simple check for non-self message if possible, or just take latest
+                        # DatabaseMessages usually has user_info. We can check if it's not the bot.
+                        # For now, taking the latest message is the standard fallback.
+                        target_message = msg
+                        break
+
+                action_to_use_info = [
+                    ActionPlannerInfo(
+                        action_type="reply",
+                        reasoning="Planner bypassed (empty prompt)",
+                        action_data={"loop_start_time": self.last_read_time},
+                        action_message=target_message,
+                        available_actions=available_actions,
+                    )
+                ]
+            else:
+                prompt_info = await self.action_planner.build_planner_prompt(
+                    is_group_chat=is_group_chat,
+                    chat_target_info=chat_target_info,
+                    current_available_actions=available_actions,
+                    chat_content_block=chat_content_block,
+                    message_id_list=message_id_list,
+                    interest=global_config.personality.interest,
                 )
+                continue_flag, modified_message = await events_manager.handle_mai_events(
+                    EventType.ON_PLAN, None, prompt_info[0], None, self.chat_stream.stream_id
+                )
+                if not continue_flag:
+                    return False
+                if modified_message and modified_message._modify_flags.modify_llm_prompt:
+                    prompt_info = (modified_message.llm_prompt, prompt_info[1])
+
+                with Timer("规划器", cycle_timers):
+                    action_to_use_info, _ = await self.action_planner.plan(
+                        loop_start_time=self.last_read_time,
+                        available_actions=available_actions,
+                    )
 
             has_reply = False
             for action in action_to_use_info:

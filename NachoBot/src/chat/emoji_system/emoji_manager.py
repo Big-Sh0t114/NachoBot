@@ -591,7 +591,6 @@ class EmojiManager:
         while True:
             # logger.info("[扫描] 开始检查表情包完整性...")
             await self.check_emoji_file_integrity()
-            await clear_temp_emoji()
             logger.info("[扫描] 开始扫描新表情包...")
 
             # 检查表情包目录是否存在
@@ -599,6 +598,7 @@ class EmojiManager:
                 logger.warning(f"[警告] 表情包目录不存在: {EMOJI_DIR}")
                 os.makedirs(EMOJI_DIR, exist_ok=True)
                 logger.info(f"[创建] 已创建表情包目录: {EMOJI_DIR}")
+                await clear_temp_emoji()
                 await asyncio.sleep(global_config.emoji.check_interval * 60)
                 continue
 
@@ -606,12 +606,13 @@ class EmojiManager:
             files = os.listdir(EMOJI_DIR)
             if not files:
                 logger.warning(f"[警告] 表情包目录为空: {EMOJI_DIR}")
+                await clear_temp_emoji()
                 await asyncio.sleep(global_config.emoji.check_interval * 60)
                 continue
 
             # 检查是否需要处理表情包(数量超过最大值或不足)
             if global_config.emoji.steal_emoji and (
-                (self.emoji_num > self.emoji_num_max and global_config.emoji.do_replace)
+                (self.emoji_num >= self.emoji_num_max and global_config.emoji.do_replace)
                 or (self.emoji_num < self.emoji_num_max)
             ):
                 try:
@@ -623,21 +624,28 @@ class EmojiManager:
                         and f.lower().endswith((".jpg", ".jpeg", ".png", ".gif"))
                     ]
 
-                    # 处理每个符合条件的文件
+                    # 处理每个符合条件的文件，每周期最多注册5个
+                    registered_count = 0
                     for filename in files_to_process:
+                        if registered_count >= 5:
+                            break
                         # 尝试注册表情包
                         success = await self.register_emoji_by_filename(filename)
                         if success:
-                            # 注册成功则跳出循环
-                            break
+                            registered_count += 1
+                            continue
 
                         # 注册失败则删除对应文件
                         file_path = os.path.join(EMOJI_DIR, filename)
                         os.remove(file_path)
                         logger.warning(f"[清理] 删除注册失败的表情包文件: {filename}")
+
+                    if registered_count > 0:
+                        logger.info(f"[扫描] 本周期成功注册 {registered_count} 个新表情包")
                 except Exception as e:
                     logger.error(f"[错误] 扫描表情包目录失败: {str(e)}")
 
+            await clear_temp_emoji()
             await asyncio.sleep(global_config.emoji.check_interval * 60)
 
     async def get_all_emoji_from_db(self) -> None:

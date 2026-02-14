@@ -117,7 +117,7 @@ class DiaryManageCommand(BaseCommand):
         所有方法都包含完整的错误处理和日志记录。
     """
 
-    command_name = "diary"
+    command_name = "diary_list"
     command_description = "日记管理命令集合"
     command_pattern = r"^\s*#\s*diary_(?P<action>list|generate_all|generate|help|debug|view)(?:\s+(?P<param>.+))?\s*$"
     command_action_override: Optional[str] = None

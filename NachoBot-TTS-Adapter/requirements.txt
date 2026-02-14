@@ -12,6 +12,21 @@ scipy
 aiohttp>=3.9.0
 websockets>=12.0
 fastapi
+python-multipart
 uvicorn
 pydantic
 cryptography>=41.0.0
+
+# Florence-2 local vision
+--extra-index-url https://download.pytorch.org/whl/cu118
+torch
+torchvision
+torchaudio
+transformers==4.44.2
+einops
+timm
+Pillow
+
+# FunASR local speech recognition
+funasr
+modelscope

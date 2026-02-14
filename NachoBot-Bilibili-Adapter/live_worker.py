@@ -146,6 +146,9 @@ class LiveRoomWorker:
         except Exception as e:
             self.logger.warning(f"Initial screen push failed: {e}")
 
+        # Start Screen Push Loop
+        asyncio.create_task(self._screen_push_loop())
+
         backoff = self.config.reconnect_seconds
         while not self._stop_event.is_set():
             try:
@@ -605,7 +608,8 @@ class LiveRoomWorker:
         )
 
         # Update Screen Info for S4U System (Self-Talk Context)
-        await self.adapter.push_screen_update(self.room_id)
+        # DEPRECATED: Screen update moved to independent loop
+        # await self.adapter.push_screen_update(self.room_id)
 
     @staticmethod
     def _pack(body: Any, op: int) -> bytes:

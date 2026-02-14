@@ -54,7 +54,9 @@ class HelpCommand(BaseCommand):
         """收集当前可用的命令信息，并按权限分组"""
         skip_names = skip_names or set()
         enabled_commands = component_registry.get_enabled_components_by_type(ComponentType.COMMAND)
-        disabled_commands = set(global_announcement_manager.get_disabled_chat_commands(stream_id)) if stream_id else set()
+        disabled_commands = (
+            set(global_announcement_manager.get_disabled_chat_commands(stream_id)) if stream_id else set()
+        )
         existing_names = set(enabled_commands.keys())
 
         public_entries: List[Tuple[str, str]] = []
@@ -119,6 +121,9 @@ class HelpCommand(BaseCommand):
         # Maizone 发说说指令：需要配置权限，视为白名单
         if name in {"send_post", "send_feed"}:
             return "whitelist"
+        # MCP 状态指令：管理员专用，隐藏
+        if name == "mcp_status_command":
+            return "admin"
         # 默认公共
         return "public"
 
@@ -173,7 +178,11 @@ class HelpCommand(BaseCommand):
         # 日记命令：仅展示所有人可用的 #diary_view，隐藏管理员子命令
         diary_enabled = self._is_diary_command_enabled()
         diary_view_pattern = "#diary_view"
-        if diary_enabled and diary_view_pattern not in existing_patterns and diary_view_pattern not in disabled_commands:
+        if (
+            diary_enabled
+            and diary_view_pattern not in existing_patterns
+            and diary_view_pattern not in disabled_commands
+        ):
             desc = "查看日记内容" + self._scope_suffix("diary_view", diary_view_pattern)
             public_entries.append((diary_view_pattern, desc))
             existing_patterns.add(diary_view_pattern)
