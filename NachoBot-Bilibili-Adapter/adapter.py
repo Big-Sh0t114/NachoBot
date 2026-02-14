@@ -2579,6 +2579,9 @@ class BilibiliAdapter:
 
     async def _handle_live_reply(self, args: Dict[str, Any]) -> None:
         text = _strip_emoji(str(args.get("message") or "")).strip()
+        # Explicitly strip zero-width space (both unicode and literal escaped) and other invisible characters
+        text = text.replace("\u200b", "").replace("\\u200b", "").strip()
+
         text = self._filter_outgoing_text(text)
         if not text:
             return

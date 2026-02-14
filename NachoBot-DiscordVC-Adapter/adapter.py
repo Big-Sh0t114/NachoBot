@@ -68,8 +68,8 @@ def _clean_text_for_tts(text: str) -> str:
         return ""
     # Remove kaomoji like (๑•́ ₃ •̀๑), (=^･ω･^=), etc.
     cleaned = _KAOMOJI_RE.sub("", text)
-    # Remove zero-width space and other invisible characters
-    cleaned = cleaned.replace("\u200b", "").strip()
+    # Remove zero-width space (both unicode and literal escaped) and other invisible characters
+    cleaned = cleaned.replace("\u200b", "").replace("\\u200b", "").strip()
     # Remove standalone special chars that might cause issues
     cleaned = re.sub(r"[～〜♪♡☆★]", "", cleaned)
     # Normalize multiple spaces/punctuation

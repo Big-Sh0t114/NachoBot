@@ -35,7 +35,7 @@ json-repair
 structlog
 google.genai
 pandas
-beautifulsoup4
-json5
+beautifulsoup4>=4.13.3
+json5>=0.10.0
 mcp
-httpx
+httpx>=0.28.1
