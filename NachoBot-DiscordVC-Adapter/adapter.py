@@ -68,6 +68,8 @@ def _clean_text_for_tts(text: str) -> str:
         return ""
     # Remove kaomoji like (๑•́ ₃ •̀๑), (=^･ω･^=), etc.
     cleaned = _KAOMOJI_RE.sub("", text)
+    # Remove zero-width space and other invisible characters
+    cleaned = cleaned.replace("\u200b", "").strip()
     # Remove standalone special chars that might cause issues
     cleaned = re.sub(r"[～〜♪♡☆★]", "", cleaned)
     # Normalize multiple spaces/punctuation
@@ -204,13 +206,13 @@ class DiscordAdapter:
                 template_items = {}
                 variables = self.config.prompts.variables
 
-                if self.config.prompts.planner_prompt:
+                if self.config.prompts.planner_prompt is not None:
                     p_prompt = self.config.prompts.planner_prompt
-                    template_items["planner_prompt"] = self._inject_variables(
-                        p_prompt, variables
-                    )
+                    resolved_planner = self._inject_variables(p_prompt, variables)
+                    template_items["planner_prompt"] = resolved_planner
+                    template_items["brain_planner_prompt"] = resolved_planner
                     self.logger.info(
-                        f"Set planner_prompt (len={len(template_items['planner_prompt'])})"
+                        f"Set planner_prompt (len={len(resolved_planner)})"
                     )
 
                 if self.config.prompts.replyer_prompt:

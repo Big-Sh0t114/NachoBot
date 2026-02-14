@@ -223,7 +223,12 @@ class AudioPlayer:
 
 
 class BilibiliAdapter:
-    def __init__(self, config: AdapterConfig, logger: logging.Logger):
+    def __init__(
+        self,
+        config: AdapterConfig,
+        logger: logging.Logger,
+        config_path: Optional[Path] = None,
+    ):
         self.config = config
         self.logger = logger
         route_config = RouteConfig(
@@ -252,6 +257,7 @@ class BilibiliAdapter:
         self._screen_manual_state: Optional[bool] = None
         self._screen_manual_until: float = 0.0
         self._danmu_cache: Dict[int, Dict[str, str]] = {}
+        self._last_sent_summary: Dict[int, str] = {}
         self._reply_seen: List[str] = []
         self._reply_seen_set: set[str] = set()
         self._dm_last_seqno: Dict[Tuple[int, int], int] = {}
@@ -264,12 +270,15 @@ class BilibiliAdapter:
         self._comment_context: Dict[str, Dict[str, Any]] = {}
         self._comment_bootstrap_done = False
         self._comment_reply_state: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        # Store config path for persistence
+        self.config_path = config_path
         self._self_danmu_ids: Dict[int, Dict[str, float]] = {}
 
         # TTS Buffering
         self._tts_buffer: Dict[int, List[str]] = {}
         self._tts_timer: Dict[int, asyncio.Task] = {}
         self._tts_metadata: Dict[int, Dict[str, Any]] = {}
+        self._tts_manual_overrides: Dict[int, bool] = {}
 
         # Event Serialization & Aggregation
         self._event_queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
@@ -282,6 +291,9 @@ class BilibiliAdapter:
         # Initialize Mic Capture Worker
         self.mic_worker: Optional[MicCaptureWorker] = None
         self._mic_manual_state: Optional[bool] = None
+        self.logger.info(
+            f"Mic Config Check: enable={config.mic_asr_enable}, room_id={config.mic_asr_room_id}"
+        )
         if config.mic_asr_enable and config.mic_asr_room_id:
             mic_config = MicConfig(
                 enable=config.mic_asr_enable,
@@ -311,11 +323,12 @@ class BilibiliAdapter:
         else:
             self.logger.info("Screen monitor disabled: host room not configured")
 
-        # Initialize TTS
+        # Initialize TTS (Lazy Load)
         self.tts_model: Optional["TTSModel"] = None
         self.tts_enable = False
         self.subtitle_path = "subtitles.txt"
 
+        # Check config once, but defer model loading
         if self.config.live_room_prompts:
             for room_cfg in self.config.live_room_prompts.values():
                 if room_cfg.get("tts", {}).get("enable"):
@@ -326,16 +339,7 @@ class BilibiliAdapter:
                     break
 
         if self.tts_enable:
-            if TTSModel:
-                try:
-                    self.tts_model = TTSModel()
-                    self.logger.info("TTS Model initialized successfully")
-                except Exception as e:
-                    self.logger.error(f"Failed to initialize TTS Model: {e}")
-            else:
-                self.logger.error(
-                    f"TTS enabled but TTSModel not available: {_tts_import_error}"
-                )
+            self._ensure_tts_model()
 
         # Initialize AudioPlayer
         self.audio_player = AudioPlayer(logger)
@@ -373,6 +377,25 @@ class BilibiliAdapter:
 
             self.audio_player.on_start = _on_audio_start
             self.audio_player.on_stop = _on_audio_stop
+
+    def _ensure_tts_model(self) -> bool:
+        """Ensure TTS model is initialized if available."""
+        if self.tts_model:
+            return True
+
+        if TTSModel:
+            try:
+                self.tts_model = TTSModel()
+                self.logger.info("TTS Model initialized successfully")
+                return True
+            except Exception as e:
+                self.logger.error(f"Failed to initialize TTS Model: {e}")
+                return False
+        else:
+            self.logger.error(
+                f"TTS enabled but TTSModel not available: {_tts_import_error}"
+            )
+            return False
 
     # ========== Run and Control Methods ==========
 
@@ -866,18 +889,91 @@ class BilibiliAdapter:
             return True
 
         enable = command == "#tts_on"
+        self._tts_manual_overrides[room_id] = enable
 
-        # Update Config
+        # Update Config (Best Effort for consistency)
         if self.config.live_room_prompts and room_id in self.config.live_room_prompts:
             room_config = self.config.live_room_prompts[room_id]
             if "tts" not in room_config:
                 room_config["tts"] = {}
             room_config["tts"]["enable"] = enable
 
-            action = "Enabled" if enable else "Disabled"
-            self.logger.info("TTS %s manually by user_id=%s", action, user_id)
+        action = "Enabled" if enable else "Disabled"
+        self.logger.info(
+            "TTS %s manually by user_id=%s (Room: %s)", action, user_id, room_id
+        )
+
+        # Persist to config file
+        if self.config_path:
+            try:
+                self._save_tts_config(room_id, enable)
+            except Exception as e:
+                self.logger.error(f"Failed to persist TTS config: {e}")
 
         return True
+
+    def _save_tts_config(self, room_id: int, enable: bool) -> None:
+        """Save TTS enable state to config.toml using tomlkit (preserves comments)."""
+        try:
+            import tomlkit
+        except ImportError:
+            self.logger.error("tomlkit not installed, cannot persist config")
+            return
+
+        if not self.config_path or not self.config_path.exists():
+            self.logger.warning("Config path not set or file missing, skip persist")
+            return
+
+        try:
+            with open(self.config_path, "r", encoding="utf-8") as f:
+                doc = tomlkit.load(f)
+
+            # Navigate: live -> room_prompts -> "<room_id>" -> tts -> enable
+            live_sec = doc.get("live")
+            if not live_sec:
+                self.logger.warning("Config missing [live] section, skip persist")
+                return
+
+            prompts = live_sec.get("room_prompts")
+            if not prompts:
+                self.logger.warning("Config missing [live.room_prompts], skip persist")
+                return
+
+            str_room_id = str(room_id)
+            room_conf = prompts.get(str_room_id)
+            if not room_conf:
+                self.logger.warning(
+                    f"Room {room_id} not in config room_prompts, skip persist"
+                )
+                return
+
+            # Ensure tts sub-table exists
+            if "tts" not in room_conf:
+                room_conf["tts"] = tomlkit.table()
+
+            room_conf["tts"]["enable"] = enable
+
+            with open(self.config_path, "w", encoding="utf-8") as f:
+                tomlkit.dump(doc, f)
+
+            self.logger.info(
+                f"Persisted TTS config for room {room_id}: enable={enable}"
+            )
+        except Exception as e:
+            self.logger.error(f"Error persisting TTS config: {e}")
+            raise
+
+    def _is_tts_enabled(self, room_id: int) -> bool:
+        # 1. Check Manual Override
+        if room_id in self._tts_manual_overrides:
+            return self._tts_manual_overrides[room_id]
+
+        # 2. Check Configuration
+        if self.config.live_room_prompts:
+            room_pts = self.config.live_room_prompts.get(room_id, {})
+            return bool(room_pts.get("tts", {}).get("enable", False))
+
+        return False
 
     async def _get_template_info(
         self, room_id: int, user_id: str, prompt_text: str
@@ -890,35 +986,28 @@ class BilibiliAdapter:
 
         if screen_summary:
             reply_prompt = self._inject_screen_summary(reply_prompt, screen_summary)
-            if planner_prompt:
+            if planner_prompt is not None:
                 planner_prompt = self._inject_screen_summary(
                     planner_prompt, screen_summary
                 )
 
-        if not reply_prompt and not planner_prompt:
-            return None
-
         template_items: Dict[str, str] = {}
         if reply_prompt:
             template_items["replyer_prompt"] = reply_prompt
-        if planner_prompt:
+            template_items["reply_prompt"] = reply_prompt
+
+        if planner_prompt is not None:
             template_items["brain_planner_prompt"] = planner_prompt
             template_items["planner_prompt"] = planner_prompt
+
+        if not template_items:  # Check if any prompts were set
+            return None
 
         # Check if TTS is enabled to generate a distinct template name
         # This prevents prompt caching issues when hot-switching
         template_suffix = ""
-        if self.config.live_room_prompts:
-            room_pts = self.config.live_room_prompts.get(room_id, {})
-            if room_pts.get("tts", {}).get("enable", False):
-                template_suffix = "_tts"
-
-        if template_suffix:
-            self.logger.info(
-                f"Using TTS template: bilibili_live_{room_id}{template_suffix}"
-            )
-        else:
-            self.logger.info(f"Using standard template: bilibili_live_{room_id}")
+        if self._is_tts_enabled(room_id):
+            template_suffix = "_tts"
 
         return TemplateInfo(
             template_items=template_items,
@@ -1097,6 +1186,7 @@ class BilibiliAdapter:
         user_name: str = "System",
         timestamp: float = 0.0,
         existing_summary: Optional[str] = None,
+        force: bool = False,
     ):
         """
         Proactively push screen info to Core.
@@ -1112,6 +1202,13 @@ class BilibiliAdapter:
             summary = await self._get_screen_summary(
                 room_id, user_id, "Checking screen content"
             )
+
+        if summary:
+            # Deduplication: Don't send if identical to last sent summary
+            last_summary = self._last_sent_summary.get(room_id)
+            if not force and last_summary and summary == last_summary:
+                return
+            self._last_sent_summary[room_id] = summary
 
         if summary:
             try:
@@ -1416,6 +1513,57 @@ class BilibiliAdapter:
         # Resume Audio Player after speech is acknowledged
         self.audio_player.resume()
 
+    async def handle_incoming_poke(
+        self,
+        room_id: int,
+        user_id: str,
+        user_name: str,
+    ) -> None:
+        """
+        Handle a poke event (simulated or real).
+        """
+        self.logger.info(f"Poke event received from {user_name} ({user_id})")
+
+        timestamp = time.time()
+
+        # Standard format for poke/notice
+        text = f"{user_name}用鼠标戳了戳你"
+
+        additional_config = {
+            "room_id": room_id,
+        }
+
+        message_info = BaseMessageInfo(
+            platform="bilibili.live",
+            # Special ID for notice messages as seen in bot.py logic
+            message_id="notice",
+            time=timestamp,
+            user_info=UserInfo(
+                platform="bilibili.live",
+                user_id=user_id,
+                user_nickname=user_name,
+            ),
+            group_info=GroupInfo(
+                platform="bilibili.live",
+                group_id=str(room_id),
+                group_name=str(room_id),
+            ),
+            format_info=FormatInfo(
+                content_format=["text"],
+                accept_format=ACCEPT_FORMAT,
+            ),
+            additional_config=additional_config,
+        )
+
+        message = MessageBase(
+            message_info=message_info,
+            message_segment=Seg(type="text", data=text),
+            raw_message=None,
+        )
+
+        # High priority to ensure immediate reaction
+        self._push_to_event_queue(20, message)
+
     async def _call_asr_api(self, wav_data: bytes) -> Optional[str]:
         import aiohttp
 
@@ -1713,28 +1861,30 @@ class BilibiliAdapter:
             )
         return f"{live_plan_block}\n{reply_prompt}"
 
-    def _resolve_live_prompts(self, room_id: int) -> Tuple[str, str]:
-        reply_prompt = self.config.live_reply_prompt
-        planner_prompt = self.config.live_planner_prompt
+    def _resolve_live_prompts(
+        self, room_id: int
+    ) -> Tuple[Optional[str], Optional[str]]:
+        reply_prompt: Optional[str] = self.config.live_reply_prompt
+        planner_prompt: Optional[str] = self.config.live_planner_prompt
+
         room_prompts = self.config.live_room_prompts.get(room_id)
         live_plan_block = self._build_live_plan_block(room_prompts)
         if room_prompts is not None:
-            room_reply = str(room_prompts.get("reply_prompt", "") or "")
-            room_planner = str(room_prompts.get("planner_prompt", "") or "")
-            if room_reply:
-                reply_prompt = room_reply
-            if room_planner:
-                planner_prompt = room_planner
+            room_reply = room_prompts.get("reply_prompt")
+            room_planner = room_prompts.get("planner_prompt")
+            if room_reply is not None:
+                reply_prompt = str(room_reply)
+            if room_planner is not None:
+                planner_prompt = str(room_planner)
         if reply_prompt and live_plan_block:
             reply_prompt = self._inject_live_plan_into_prompt(
                 reply_prompt, live_plan_block
             )
 
-        tts_enable = False
+        tts_enable = self._is_tts_enabled(room_id)
         tts_config = {}
         if room_prompts:
             tts_config = room_prompts.get("tts", {})
-            tts_enable = bool(tts_config.get("enable", False))
 
         if tts_enable:
             # Check for TTS-specific prompts in config
@@ -1749,7 +1899,11 @@ class BilibiliAdapter:
 
             # Fallback: append generic instructions if no specific reply prompt was found
             # (Or if the custom one is missing the required XML instructions)
-            if "<JP>" not in reply_prompt and "<ZH>" not in reply_prompt:
+            if (
+                reply_prompt
+                and "<JP>" not in reply_prompt
+                and "<ZH>" not in reply_prompt
+            ):
                 tts_instruction = (
                     "\n\n非常重要：请必须同时输出中文回复和对应的日文翻译（用于语音播放），格式严格如下：\n"
                     "<JP>日文翻译内容</JP><ZH>中文原本意思</ZH>\n"
@@ -1763,10 +1917,11 @@ class BilibiliAdapter:
                 reply_prompt += tts_instruction
         else:
             # Force disable XML if TTS is off (Circuit Breaker for Context Pollution)
-            anti_tts_instruction = (
-                "\n禁止使用<JP><ZH>标签，不要进行日语翻译，只输出中文。"
-            )
-            reply_prompt += anti_tts_instruction
+            if reply_prompt:
+                anti_tts_instruction = (
+                    "\n禁止使用<JP><ZH>标签，不要进行日语翻译，只输出中文。"
+                )
+                reply_prompt += anti_tts_instruction
 
         if reply_prompt:
             reply_prompt += "\n{moderation_prompt}"
@@ -2106,9 +2261,7 @@ class BilibiliAdapter:
 
         # Check if TTS is enabled for this room
         max_len = BILIBILI_DANMU_MAX_LENGTH
-        room_prompts = self.config.live_room_prompts.get(room_id, {})
-        tts_config = room_prompts.get("tts", {})
-        if tts_config.get("enable", False):
+        if self._is_tts_enabled(room_id):
             max_len = 9999
 
         segments = _split_bilibili_text(text, max_length=max_len)
@@ -2270,9 +2423,14 @@ class BilibiliAdapter:
             room_config = self.config.live_room_prompts.get(room_id, {})
             tts_config = room_config.get("tts", {})
 
-            if self.tts_model:
-                text_jp, text_zh = self._parse_bilingual_response(full_text)
-                display_text = text_zh if text_zh else full_text
+            # Always parse bilingual text first
+            text_jp, text_zh = self._parse_bilingual_response(full_text)
+            display_text = text_zh if text_zh else full_text
+            msg_to_send = text_zh if text_zh else full_text
+
+            if self.tts_model or (
+                tts_config and tts_config.get("enable") and self._ensure_tts_model()
+            ):
                 tts_text = text_jp if text_jp else ""
 
                 subtitle_path = str(tts_config.get("subtitle_path") or "subtitles.txt")
@@ -2304,25 +2462,38 @@ class BilibiliAdapter:
                     self.logger.warning(
                         f"TTS enabled for room {room_id} but no Japanese text parsed. Sending raw text as danmu."
                     )
-                    # Hook Live2D: Start Replying (look down while sending)
-                    if self.live2d_controller:
-                        try:
-                            await self.live2d_controller.on_start_replying()
-                        except Exception as e:
-                            self.logger.error(f"Live2D reply hook error: {e}")
 
-                    msg_to_send = text_zh if text_zh else full_text
-                    await self._send_danmu(
-                        room_id, msg_to_send, reply_mid or None, reply_dmid or None
-                    )
+            # Fallback Logic (TTS failed or disabled)
+            # Ensure message length is safe for Danmu (40 chars max for Bilibili, check utils.BILIBILI_DANMU_MAX_LENGTH)
+            # If msg_to_send is too long, truncate it.
+            # Using _strip_emoji or _clean_text_for_tts might be good if it's very messy.
+            # But mostly we just want to avoid the "raw XML" being sent.
 
-                    # Hook Live2D: Reply Finished (back to center)
-                    if self.live2d_controller:
-                        try:
-                            await self.live2d_controller.on_reply_finished()
-                        except Exception as e:
-                            self.logger.error(f"Live2D reply hook error: {e}")
-                    return
+            # Hook Live2D: Start Replying (look down while sending)
+            if self.live2d_controller:
+                try:
+                    await self.live2d_controller.on_start_replying()
+                except Exception as e:
+                    self.logger.error(f"Live2D reply hook error: {e}")
+
+            # Send Danmu (Truncated if needed, but simple slicing is safer than crash)
+            # Use split logic if available, or just first segment.
+            # Here we just take first 30 chars to be safe.
+            safe_danmu_text = msg_to_send
+            if len(safe_danmu_text) > 30:
+                safe_danmu_text = safe_danmu_text[:30] + "..."
+
+            await self._send_danmu(
+                room_id, safe_danmu_text, reply_mid or None, reply_dmid or None
+            )
+
+            # Hook Live2D: Reply Finished (back to center)
+            if self.live2d_controller:
+                try:
+                    await self.live2d_controller.on_reply_finished()
+                except Exception as e:
+                    self.logger.error(f"Live2D reply hook error: {e}")
+            return
 
             # Hook Live2D: Start Replying (look down while sending)
             if self.live2d_controller:
@@ -2366,9 +2537,12 @@ class BilibiliAdapter:
         self.logger.warning(f"Unknown command: {command_name}")
 
     async def _handle_comment_reply(self, args: Dict[str, Any]) -> None:
-        text = _strip_emoji(str(args.get("message") or "")).strip()
+        text: str = str(args.get("message") or "")
+        # Explicitly strip zero-width space and other invisible characters
+        text = text.replace("\u200b", "").strip()
+
         if not text:
-            self.logger.warning("Empty comment reply text")
+            self.logger.warning("Empty comment reply text (after stripping), ignoring")
             return
         text = self._filter_outgoing_text(text)
         try:
@@ -2422,7 +2596,7 @@ class BilibiliAdapter:
 
         room_config = self.config.live_room_prompts.get(room_id, {})
         tts_config = room_config.get("tts", {})
-        tts_enable = bool(tts_config.get("enable", False))
+        tts_enable = self._is_tts_enabled(room_id)
 
         self.logger.info(
             f"TTS Debug: room_id={room_id}, tts_enable={tts_enable}, tts_model={self.tts_model is not None}"

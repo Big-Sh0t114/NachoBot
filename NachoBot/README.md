@@ -64,6 +64,8 @@ NachoBot 是在上游 **MaiBot 0.10.3 Beta** 基础上定制的角色扮演聊�
 
 3) launchbot.bat一键启动依赖独立的GPT-SoVITS项目[https://www.yuque.com/baicaigongchang1145haoyuangong/ib3g1e](本仓库同款)，因内容较大，本仓库未提供本体，请自行下载后配置launchbot.bat内路径**line36** (使用绝对路径)。
 
+4) NapCat需自行下载
+
 `Bilibili配置`
   - 从项目根目录`config-save/`中复制`config-biliadapter.toml`移动至`NachoBot-Bilbili-Adapter`目录中，删除`-biliadapter.toml`后缀
   - cmd运行 **python qr_login.py** 扫描二维码 

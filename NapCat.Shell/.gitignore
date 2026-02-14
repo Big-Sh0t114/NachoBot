@@ -1,8 +1,0 @@
-# NapCat.Shell runtime data and secrets
-/cache/
-/logs/
-/config/*.json
-*.db
-*.db-shm
-*.db-wal
-/node_modules/

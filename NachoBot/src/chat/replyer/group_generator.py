@@ -1026,14 +1026,15 @@ class DefaultReplyer:
 
         extra_info_block_parts = []
         # [Injection] Inject Screen Info (Normal Mode)
-        try:
-            from src.mais4u.mais4u_chat.screen_manager import screen_manager
+        if chat_stream.platform == "bilibili":
+            try:
+                from src.mais4u.mais4u_chat.screen_manager import screen_manager
 
-            screen_info_content = screen_manager.get_screen()
-            if screen_info_content:
-                extra_info_block_parts.append(f"【屏幕画面】\n{screen_info_content}")
-        except Exception:
-            pass
+                screen_info_content = screen_manager.get_screen()
+                if screen_info_content:
+                    extra_info_block_parts.append(f"【屏幕画面】\n{screen_info_content}")
+            except Exception:
+                pass
 
         if extra_info:
             extra_info_block_parts.append(

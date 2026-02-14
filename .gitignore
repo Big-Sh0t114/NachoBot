@@ -1,2 +1,10 @@
 .tmp.driveupload/
 .tmp.drivedownload/
+# Local Models
+iic/
+microsoft/
+FunAudioLLM/
+SenseVoiceSmall/
+Florence-2-large/
+hub/
+NapCat.Shell/

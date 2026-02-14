@@ -21,7 +21,7 @@ class TTSHandler:
         if _tts_adapter_path.exists() and str(_tts_adapter_path) not in sys.path:
             sys.path.insert(0, str(_tts_adapter_path))
 
-        self._init_model()
+        # self._init_model()  # Lazy init in generate_speech
 
     def _init_model(self):
         """Initialize the TTS model based on availability."""
@@ -58,6 +58,10 @@ class TTSHandler:
         Generate speech audio file from text.
         Returns the path to the generated file.
         """
+        # Lazy initialization: Try to load model if not present
+        if not self.tts_model:
+            self._init_model()
+
         if not self.enabled or not self.tts_model:
             self.logger.warning("TTS is disabled or not initialized.")
             return None
