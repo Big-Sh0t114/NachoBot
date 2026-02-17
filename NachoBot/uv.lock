@@ -1401,6 +1401,7 @@ dependencies = [
     { name = "reportportal-client" },
     { name = "requests" },
     { name = "rich" },
+    { name = "rsilk" },
     { name = "ruff" },
     { name = "scikit-learn" },
     { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -1458,6 +1459,7 @@ requires-dist = [
     { name = "reportportal-client", specifier = ">=5.6.5" },
     { name = "requests", specifier = ">=2.32.4" },
     { name = "rich", specifier = ">=14.0.0" },
+    { name = "rsilk", specifier = ">=0.1.4" },
     { name = "ruff", specifier = ">=0.12.2" },
     { name = "scikit-learn", specifier = ">=1.7.0" },
     { name = "scipy", specifier = ">=1.15.3" },
@@ -2328,6 +2330,25 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/da/8a/22b7beea3ee0d44b1916c0c1cb0ee3af23b700b6da9f04991899d0c555d4/rsa-4.9.1.tar.gz", hash = "sha256:e7bdbfdb5497da4c07dfd35530e1a902659db6ff241e39d9953cad06ebd0ae75", size = 29034, upload-time = "2025-04-16T09:51:18.218Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/64/8d/0133e4eb4beed9e425d9a98ed6e081a55d195481b7632472be1af08d2f6b/rsa-4.9.1-py3-none-any.whl", hash = "sha256:68635866661c6836b8d39430f97a996acbd61bfa49406748ea243539fe239762", size = 34696, upload-time = "2025-04-16T09:51:17.142Z" },
+]
+
+[[package]]
+name = "rsilk"
+version = "0.1.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/cb/86/3be7b1f83582ae8853698777522a8c4f28de48ece16a1c40db655a817742/rsilk-0.1.4.tar.gz", hash = "sha256:f691fdaee6ac7592dfc180e27413dc73dfda230e6a84cfb209dfe2a57617ba31", size = 3690, upload-time = "2022-03-18T08:43:18.643Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fe/2a/9f7c25bad4caf4116a88cf4567866c7eebc88f2f407ba8dd510afa38b4a3/rsilk-0.1.4-cp310-cp310-macosx_11_0_x86_64.whl", hash = "sha256:be51ff5bea06c1107142d2c3a6582a93bee8bd86b0ac0a9888fd987674e96444", size = 294700, upload-time = "2022-03-18T08:44:21.923Z" },
+    { url = "https://files.pythonhosted.org/packages/b8/86/1348247a3f681dd303392784cca2512927307a250f6c1f1a6bb0bb4d35a1/rsilk-0.1.4-cp310-cp310-macosx_12_0_x86_64.whl", hash = "sha256:8daeb157f33085a0063762edb473e6ef3ade123c88d5ff64c92698469d9da6e2", size = 305359, upload-time = "2023-10-13T15:14:23.7Z" },
+    { url = "https://files.pythonhosted.org/packages/8e/23/9e7f538db6f5881f8bf0ced47d32fbda4004c37a74db1164ccec631266e5/rsilk-0.1.4-cp310-cp310-manylinux2014_x86_64.whl", hash = "sha256:694ca05c3875643899178297e57e5f4aea137c04040c0811c619282216e5c375", size = 327192, upload-time = "2022-03-18T08:43:30.871Z" },
+    { url = "https://files.pythonhosted.org/packages/e0/b2/e36e82f9d211e632d45cab2b984f62635849ab5f85a3a5b269c7641e58f8/rsilk-0.1.4-cp310-cp310-win_amd64.whl", hash = "sha256:5babc1d11e29a21431a383be5457a5351522ca25516b6bb10b7d10b26ee96fb8", size = 187100, upload-time = "2022-03-18T08:45:38.133Z" },
+    { url = "https://files.pythonhosted.org/packages/3b/bb/7fcac64c44891c12b717cf9e5b93cba07b9976d65a4b667abd1f122580dd/rsilk-0.1.4-cp311-cp311-macosx_11_0_universal2.whl", hash = "sha256:5f47a8b5e8ffe4d76f9cc4744291757fef89f5c908f0f58b147e02442f810322", size = 295899, upload-time = "2022-11-05T03:10:55.24Z" },
+    { url = "https://files.pythonhosted.org/packages/42/13/ac315f8fb23135264ade5171f3bfca0ae9ad37a969a8e67c381339b14175/rsilk-0.1.4-cp311-cp311-macosx_12_0_universal2.whl", hash = "sha256:492199045843fca89311b1d1026aaa4572c1321481af8d8a2d4685ece9013931", size = 305361, upload-time = "2023-10-13T15:15:04.155Z" },
+    { url = "https://files.pythonhosted.org/packages/68/70/d22498c65a203175565707a012caac3d897c42d44e4df5a6590abc72a47b/rsilk-0.1.4-cp311-cp311-manylinux2014_x86_64.whl", hash = "sha256:0077c1616ab390dc3a344fe79ae45f48aa5cfca127a9e58892ededa985cbe764", size = 333842, upload-time = "2022-11-05T03:07:15.688Z" },
+    { url = "https://files.pythonhosted.org/packages/54/a1/d6e89ceb06df9c6f872e348a09fc1b6aabeb6e834b5f9b177d0f1a6d6d82/rsilk-0.1.4-cp311-cp311-win_amd64.whl", hash = "sha256:8d34753169212a119af3999ee8264b02eee071baa9069babbb76cdae4e978129", size = 186483, upload-time = "2022-11-05T03:09:34.28Z" },
+    { url = "https://files.pythonhosted.org/packages/55/89/7b966a0b67fe3aa54bd452ff97003ea7bee3389955ecdd0a5619bd3d9706/rsilk-0.1.4-cp312-cp312-macosx_12_0_universal2.whl", hash = "sha256:e181608cffaa0e89c0e144346cc7717479352bbc31ba67cfde343b8814dd804c", size = 305290, upload-time = "2023-10-13T15:16:34.888Z" },
+    { url = "https://files.pythonhosted.org/packages/19/9a/c043166d5ab9cc52e2cfe6556b4820fc5cc2c3e729b53e6f8ca3c36c0256/rsilk-0.1.4-cp312-cp312-manylinux2014_x86_64.whl", hash = "sha256:f218f0d86c873c77e46d0db614610bd3f27123e923d7b878474ec5478707239d", size = 356373, upload-time = "2023-10-13T15:12:03.095Z" },
+    { url = "https://files.pythonhosted.org/packages/72/7c/76293a4e3783833c0f9b4d6410282ae14b378fe74053fbbdea3329973593/rsilk-0.1.4-cp312-cp312-win_amd64.whl", hash = "sha256:a0549ccc1456e048eb4bac002dfb6d8b37fbf493e44767e9421a5dbc49ffe138", size = 184923, upload-time = "2023-10-13T15:15:09.958Z" },
 ]
 
 [[package]]

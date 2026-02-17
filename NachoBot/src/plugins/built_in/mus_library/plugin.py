@@ -299,12 +299,46 @@ async def _play_song(cmd: BaseCommand, song: dict) -> Tuple[bool, Optional[str],
                     except Exception:
                         pass
                 return True, f"play:{song.get('title', '?')}", True
+            else:
+                print(f"[mus_library] HTTP send failed for SILK. Fallback to WS sending SILK...")
+                try:
+                    # Fallback: try sending SILK via WS directly
+                    voice_b64 = base64.b64encode(silk).decode("ascii")
+                    ok = await cmd.send_voice(voice_b64)
+                    if ok:
+                        if debug_timing:
+                            try:
+                                await cmd.send_text(f"[mus_library] SILK(WS) sent. Fallback success.")
+                            except Exception:
+                                pass
+                        if src_wav != wav:
+                            try:
+                                src_wav.unlink(missing_ok=True)
+                            except Exception:
+                                pass
+                        return True, f"play_ws:{song.get('title', '?')}", True
+                except Exception as e:
+                    print(f"[mus_library] SILK WS fallback failed: {e}")
+
         else:
             if debug_timing:
                 try:
                     await cmd.send_text("[mus_library] SILK encode returned None (codec unavailable or error)")
                 except Exception:
                     pass
+
+    # Safety check: Do not send large WAVs over WS
+    try:
+        fsize = src_wav.stat().st_size
+        if fsize > 2 * 1024 * 1024:  # 2MB limit
+            await cmd.send_text(
+                f"[mus_library] 发送失败：HTTP接口未配置或连接失败，且文件过大({fsize / 1024 / 1024:.1f}MB)无法通过WS发送。请检查 config.toml 中的 onebot_base 配置。"
+            )
+            if src_wav != wav:
+                src_wav.unlink(missing_ok=True)
+            return True, "file_too_large", True
+    except Exception:
+        pass
 
     try:
         voice_b64 = base64.b64encode(src_wav.read_bytes()).decode("ascii")
@@ -371,29 +405,34 @@ async def _wav_to_silk_py(wav_path: Path, bit_rate: int = 24000) -> Optional[byt
 
     def _encode() -> Optional[bytes]:
         # 放到线程里跑，避免阻塞事件循环
-        with wave.open(str(wav_path), "rb") as w:
-            n_ch, sw, sr, n = w.getnchannels(), w.getsampwidth(), w.getframerate(), w.getnframes()
-            pcm = w.readframes(n)
-        if sw != 2:
-            pcm_local = audioop.lin2lin(pcm, sw, 2)
-        else:
-            pcm_local = pcm
-        if n_ch != 1:
-            pcm_local = audioop.tomono(pcm_local, 2, 0.5, 0.5)
-        if sr != 24000:
-            pcm_local, _ = audioop.ratecv(pcm_local, 2, 1, sr, 24000, None)
-
         try:
+            with wave.open(str(wav_path), "rb") as w:
+                n_ch, sw, sr, n = w.getnchannels(), w.getsampwidth(), w.getframerate(), w.getnframes()
+                pcm = w.readframes(n)
+            if sw != 2:
+                pcm_local = audioop.lin2lin(pcm, sw, 2)
+            else:
+                pcm_local = pcm
+            if n_ch != 1:
+                pcm_local = audioop.tomono(pcm_local, 2, 0.5, 0.5)
+            if sr != 24000:
+                pcm_local, _ = audioop.ratecv(pcm_local, 2, 1, sr, 24000, None)
+
             br = int(max(8000, min(int(bit_rate or 24000), 40000)))
             return rsilk.encode(
                 input=pcm_local, sample_rate=24000, bit_rate=br, max_internal_sample_rate=24000, tencent=True
             )
-        except Exception:
+        except Exception as e:
+            import traceback
+
+            traceback.print_exc()
+            print(f"[mus_library] rsilk encode failed: {e}")
             return None
 
     try:
         return await asyncio.to_thread(_encode)
-    except Exception:
+    except Exception as e:
+        print(f"[mus_library] _wav_to_silk_py thread failed: {e}")
         return None
 
 
@@ -451,8 +490,10 @@ async def _http_post_json(url: str, payload: dict, headers: Dict[str, str] | Non
             body = e.read().decode("utf-8", "ignore")
         except Exception:
             body = str(e)
+        print(f"[mus_library] HTTP POST Error {e.code}: {body}")
         return e.code, body
     except Exception as e:
+        print(f"[mus_library] HTTP POST Exception: {type(e).__name__}: {e}")
         return 0, f"{type(e).__name__}: {e}"
 
 

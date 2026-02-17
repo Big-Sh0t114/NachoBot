@@ -86,8 +86,8 @@ if not exist "%PY_ADAPTER%" (
 echo [INFO] 升级 pip ... >> "%SETUP_LOG%"
 "%PY_ADAPTER%" -s -m pip install --upgrade pip >> "%SETUP_LOG%" 2>&1
 
-echo [INFO] 安装/补全依赖 ... >> "%SETUP_LOG%"
-"%PY_ADAPTER%" -s -m pip install fastapi uvicorn requests toml pydantic loguru websockets aiohttp >> "%SETUP_LOG%" 2>&1
+echo [INFO] 安装/补全依赖 (from requirements.txt) ... >> "%SETUP_LOG%"
+"%PY_ADAPTER%" -s -m pip install -r "%ADAPTER_DIR%\requirements.txt" >> "%SETUP_LOG%" 2>&1
 
 REM ===== 选择 SoVITS 启动文件 =====
 set "API_FILE=%SOVITS_DIR%\api_v2.py"
@@ -191,9 +191,6 @@ set "NACHOBOT_DIR=%ROOT%NachoBot"
 set "NACHOBOT_MAIN=bot.py"
 set "NACHOBOT_PORT=8000"
 
-set "SHIM_DIR=%ROOT%NachoBot"
-set "SHIM_EXE=shim.exe"
-set "SHIM_PORT=11435"
 
 set "ADAPTER_DIR=%ROOT%NachoBot-Napcat-Adapter"
 set "ADAPTER_MAIN=main.py"
@@ -225,21 +222,9 @@ if not exist "%NACHOBOT_DIR%\%NACHOBOT_MAIN%" (
   timeout /t %ALIGN_WAIT% /nobreak >nul
 )
 
-REM ---- 2) 启动 Shim（新窗口）并尽量检查 11435 ----
-if not exist "%SHIM_DIR%\%SHIM_EXE%" (
-  echo  未找到垫片： "%SHIM_DIR%\%SHIM_EXE%"
-) else (
-  echo.
-  echo ▶ 启动 Gemini 垫片窗口…
-  start "GeminiShim" /D "%SHIM_DIR%" cmd /k "%SHIM_EXE%"
-  echo [WAIT] 检查垫片端口 %SHIM_PORT%…
-  powershell -NoLogo -NoProfile -Command ^
-    "for($i=0;$i -lt 10;$i++){if((Test-NetConnection 127.0.0.1 -Port %SHIM_PORT%).TcpTestSucceeded){exit 0}; Start-Sleep -s 1}; exit 1"
-  if errorlevel 1 ( echo  垫片端口 %SHIM_PORT% 暂未检测到监听（继续）。 ) else ( echo  垫片端口可用。 )
-  timeout /t %ALIGN_WAIT% /nobreak >nul
-)
 
-REM ---- 3) 启动 Adapter（新窗口）并等待 8095 ----
+
+REM ---- 2) 启动 Adapter（新窗口）并等待 8095 ----
 if not exist "%ADAPTER_DIR%\%ADAPTER_MAIN%" (
   echo  未找到 Adapter： "%ADAPTER_DIR%\%ADAPTER_MAIN%"
 ) else (
@@ -253,7 +238,7 @@ if not exist "%ADAPTER_DIR%\%ADAPTER_MAIN%" (
   timeout /t %ALIGN_WAIT% /nobreak >nul
 )
 
-REM ---- 4) 启动 NapCat Shell（新窗口）----
+REM ---- 3) 启动 NapCat Shell（新窗口）----
 if not exist "%NAPCAT_SHELL_DIR%\%NAPCAT_SHELL_BAT%" (
   echo  未找到 NapCat Shell： "%NAPCAT_SHELL_DIR%\%NAPCAT_SHELL_BAT%"
 ) else (

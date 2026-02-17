@@ -68,8 +68,6 @@ def _clean_text_for_tts(text: str) -> str:
         return ""
     # Remove kaomoji like (๑•́ ₃ •̀๑), (=^･ω･^=), etc.
     cleaned = _KAOMOJI_RE.sub("", text)
-    # Remove zero-width space (both unicode and literal escaped) and other invisible characters
-    cleaned = cleaned.replace("\u200b", "").replace("\\u200b", "").strip()
     # Remove standalone special chars that might cause issues
     cleaned = re.sub(r"[～〜♪♡☆★]", "", cleaned)
     # Normalize multiple spaces/punctuation
@@ -206,13 +204,13 @@ class DiscordAdapter:
                 template_items = {}
                 variables = self.config.prompts.variables
 
-                if self.config.prompts.planner_prompt is not None:
+                if self.config.prompts.planner_prompt:
                     p_prompt = self.config.prompts.planner_prompt
-                    resolved_planner = self._inject_variables(p_prompt, variables)
-                    template_items["planner_prompt"] = resolved_planner
-                    template_items["brain_planner_prompt"] = resolved_planner
+                    template_items["planner_prompt"] = self._inject_variables(
+                        p_prompt, variables
+                    )
                     self.logger.info(
-                        f"Set planner_prompt (len={len(resolved_planner)})"
+                        f"Set planner_prompt (len={len(template_items['planner_prompt'])})"
                     )
 
                 if self.config.prompts.replyer_prompt:
@@ -312,6 +310,20 @@ class DiscordAdapter:
                 ):  # Object segment
                     if segment.type == "text":
                         text_to_speak = segment.data
+
+            if not text_to_speak:
+                return
+
+            # Strip invisible characters like zero-width space (\u200b) and literal escape sequences
+            # This prevents generating TTS for "silent" replies
+            if text_to_speak:
+                text_to_speak = (
+                    text_to_speak.replace("\u200b", "")
+                    .replace("\\u200b", "")
+                    .replace("\\u200B", "")
+                    .replace("\ufeff", "")
+                    .strip()
+                )
 
             if not text_to_speak:
                 return
