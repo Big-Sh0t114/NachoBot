@@ -32,9 +32,6 @@ from .base import (
     ReplySetModel,
 )
 
-# Backward compatibility alias
-MaiMessages = NachoMessages
-
 # 导入工具模块
 from .utils import (
     ManifestValidator,
@@ -68,6 +65,9 @@ from src.common.data_models.database_data_model import (
 )
 from src.common.data_models.info_data_model import TargetPersonInfo, ActionPlannerInfo
 from src.common.data_models.llm_data_model import LLMGenerationDataModel
+
+# Backward compatibility alias
+MaiMessages = NachoMessages
 
 
 __version__ = "2.0.0"

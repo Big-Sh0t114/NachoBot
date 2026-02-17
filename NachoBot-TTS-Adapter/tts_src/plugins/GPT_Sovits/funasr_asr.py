@@ -63,6 +63,13 @@ def load_model():
 
             if os.path.exists(req_file):
                 logger.info("[FunASR] Renaming requirements.txt to bypass auto-install...")
+                # If backup exists (e.g. from previous crash), remove it first to allow rename
+                if os.path.exists(req_bak):
+                    try:
+                        os.remove(req_bak)
+                    except Exception as e:
+                        logger.warning(f"[FunASR] Failed to remove stale backup: {e}")
+
                 os.rename(req_file, req_bak)
         except Exception as e:
             logger.warning("[FunASR] Failed to pre-process model files: %s", e)
@@ -79,12 +86,17 @@ def load_model():
             )
         finally:
             # Restore requirements.txt
-            if 'req_file' in locals() and os.path.exists(req_bak):
+            if "req_file" in locals() and os.path.exists(req_bak):
                 try:
+                    if os.path.exists(req_file):
+                        try:
+                            os.remove(req_file)
+                        except Exception:
+                            pass
                     os.rename(req_bak, req_file)
                     logger.info("[FunASR] Restored requirements.txt")
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"[FunASR] Failed to restore requirements.txt: {e}")
 
         _loaded = True
         logger.info("[FunASR] Model loaded successfully")

@@ -26,8 +26,12 @@ async def startup_event():
     from .funasr_asr import load_model as load_funasr
 
     print("启动 GPT-SoVITS TTS 服务中 ...")
-    tts_model = TTSModel()
-    print("默认配置加载完成")
+    try:
+        tts_model = TTSModel()
+        print("默认配置加载完成")
+    except Exception as e:
+        logger.error(f"TTS Model initialization failed: {e}")
+        print(f"TTS 模型加载失败，TTS 功能将不可用。错误: {e}")
 
     print("[Florence-2] 正在预加载 VLM 模型 ...")
     await asyncio.to_thread(load_florence2)
