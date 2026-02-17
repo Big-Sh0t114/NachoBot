@@ -257,7 +257,6 @@ class BilibiliAdapter:
         self._screen_manual_state: Optional[bool] = None
         self._screen_manual_until: float = 0.0
         self._danmu_cache: Dict[int, Dict[str, str]] = {}
-        self._last_sent_summary: Dict[int, str] = {}
         self._reply_seen: List[str] = []
         self._reply_seen_set: set[str] = set()
         self._dm_last_seqno: Dict[Tuple[int, int], int] = {}
@@ -982,26 +981,18 @@ class BilibiliAdapter:
         Helper to resolve template info for live events (Gift/SC/Guard).
         """
         screen_summary = await self._get_screen_summary(room_id, user_id, prompt_text)
-        reply_prompt, planner_prompt = self._resolve_live_prompts(room_id)
+        reply_prompt, _ = self._resolve_live_prompts(room_id)
 
         if screen_summary:
             reply_prompt = self._inject_screen_summary(reply_prompt, screen_summary)
-            if planner_prompt is not None:
-                planner_prompt = self._inject_screen_summary(
-                    planner_prompt, screen_summary
-                )
+
+        if not reply_prompt:
+            return None
 
         template_items: Dict[str, str] = {}
         if reply_prompt:
             template_items["replyer_prompt"] = reply_prompt
             template_items["reply_prompt"] = reply_prompt
-
-        if planner_prompt is not None:
-            template_items["brain_planner_prompt"] = planner_prompt
-            template_items["planner_prompt"] = planner_prompt
-
-        if not template_items:  # Check if any prompts were set
-            return None
 
         # Check if TTS is enabled to generate a distinct template name
         # This prevents prompt caching issues when hot-switching
@@ -1186,7 +1177,6 @@ class BilibiliAdapter:
         user_name: str = "System",
         timestamp: float = 0.0,
         existing_summary: Optional[str] = None,
-        force: bool = False,
     ):
         """
         Proactively push screen info to Core.
@@ -1202,13 +1192,6 @@ class BilibiliAdapter:
             summary = await self._get_screen_summary(
                 room_id, user_id, "Checking screen content"
             )
-
-        if summary:
-            # Deduplication: Don't send if identical to last sent summary
-            last_summary = self._last_sent_summary.get(room_id)
-            if not force and last_summary and summary == last_summary:
-                return
-            self._last_sent_summary[room_id] = summary
 
         if summary:
             try:
@@ -1861,21 +1844,19 @@ class BilibiliAdapter:
             )
         return f"{live_plan_block}\n{reply_prompt}"
 
-    def _resolve_live_prompts(
-        self, room_id: int
-    ) -> Tuple[Optional[str], Optional[str]]:
-        reply_prompt: Optional[str] = self.config.live_reply_prompt
-        planner_prompt: Optional[str] = self.config.live_planner_prompt
+    def _resolve_live_prompts(self, room_id: int) -> Tuple[str, str]:
+        reply_prompt = self.config.live_reply_prompt
+        planner_prompt = self.config.live_planner_prompt
 
         room_prompts = self.config.live_room_prompts.get(room_id)
         live_plan_block = self._build_live_plan_block(room_prompts)
         if room_prompts is not None:
-            room_reply = room_prompts.get("reply_prompt")
-            room_planner = room_prompts.get("planner_prompt")
-            if room_reply is not None:
-                reply_prompt = str(room_reply)
-            if room_planner is not None:
-                planner_prompt = str(room_planner)
+            room_reply = str(room_prompts.get("reply_prompt", "") or "")
+            room_planner = str(room_prompts.get("planner_prompt", "") or "")
+            if room_reply:
+                reply_prompt = room_reply
+            if room_planner:
+                planner_prompt = room_planner
         if reply_prompt and live_plan_block:
             reply_prompt = self._inject_live_plan_into_prompt(
                 reply_prompt, live_plan_block
@@ -1899,11 +1880,7 @@ class BilibiliAdapter:
 
             # Fallback: append generic instructions if no specific reply prompt was found
             # (Or if the custom one is missing the required XML instructions)
-            if (
-                reply_prompt
-                and "<JP>" not in reply_prompt
-                and "<ZH>" not in reply_prompt
-            ):
+            if "<JP>" not in reply_prompt and "<ZH>" not in reply_prompt:
                 tts_instruction = (
                     "\n\n非常重要：请必须同时输出中文回复和对应的日文翻译（用于语音播放），格式严格如下：\n"
                     "<JP>日文翻译内容</JP><ZH>中文原本意思</ZH>\n"
@@ -1917,11 +1894,10 @@ class BilibiliAdapter:
                 reply_prompt += tts_instruction
         else:
             # Force disable XML if TTS is off (Circuit Breaker for Context Pollution)
-            if reply_prompt:
-                anti_tts_instruction = (
-                    "\n禁止使用<JP><ZH>标签，不要进行日语翻译，只输出中文。"
-                )
-                reply_prompt += anti_tts_instruction
+            anti_tts_instruction = (
+                "\n禁止使用<JP><ZH>标签，不要进行日语翻译，只输出中文。"
+            )
+            reply_prompt += anti_tts_instruction
 
         if reply_prompt:
             reply_prompt += "\n{moderation_prompt}"
@@ -2537,12 +2513,9 @@ class BilibiliAdapter:
         self.logger.warning(f"Unknown command: {command_name}")
 
     async def _handle_comment_reply(self, args: Dict[str, Any]) -> None:
-        text: str = str(args.get("message") or "")
-        # Explicitly strip zero-width space and other invisible characters
-        text = text.replace("\u200b", "").strip()
-
+        text = _strip_emoji(str(args.get("message") or "")).strip()
         if not text:
-            self.logger.warning("Empty comment reply text (after stripping), ignoring")
+            self.logger.warning("Empty comment reply text")
             return
         text = self._filter_outgoing_text(text)
         try:
@@ -2579,8 +2552,19 @@ class BilibiliAdapter:
 
     async def _handle_live_reply(self, args: Dict[str, Any]) -> None:
         text = _strip_emoji(str(args.get("message") or "")).strip()
-        # Explicitly strip zero-width space (both unicode and literal escaped) and other invisible characters
-        text = text.replace("\u200b", "").replace("\\u200b", "").strip()
+
+        # Strip invisible characters like zero-width space (\u200b)
+        # This allows the replyer to output specific invisible chars to signal "no reply"
+        if text:
+            # Common invisible characters: \u200b (Zero Width Space), \u200c, \u200d, \ufeff
+            # Also strip literal "\u200b" string if the LLM outputs it as text
+            text = (
+                text.replace("\u200b", "")
+                .replace("\\u200b", "")
+                .replace("\\u200B", "")
+                .replace("\ufeff", "")
+                .strip()
+            )
 
         text = self._filter_outgoing_text(text)
         if not text:
@@ -2706,8 +2690,8 @@ class BilibiliAdapter:
         user_name: str,
         additional_config: Optional[Dict[str, Any]] = None,
     ) -> BaseMessageInfo:
-        # 直播消息使用 bilibili.live 平台，走 S4U 系统
-        live_platform = "bilibili.live"
+        # 直播消息使用 bilibili 平台
+        live_platform = "bilibili"
         return BaseMessageInfo(
             platform=live_platform,
             message_id=message_id,

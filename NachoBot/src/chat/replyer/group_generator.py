@@ -1025,7 +1025,7 @@ class DefaultReplyer:
             logger.debug(f"获取TTS语言提示失败: {e}")
 
         extra_info_block_parts = []
-        # [Injection] Inject Screen Info (Normal Mode)
+
         if chat_stream.platform == "bilibili":
             try:
                 from src.mais4u.mais4u_chat.screen_manager import screen_manager
@@ -1089,7 +1089,7 @@ class DefaultReplyer:
                 gift_reaction_prompt=global_config.personality.gift_reaction_prompt,
             ), selected_expressions
         else:
-            return await global_prompt_manager.format_prompt(
+            prompt = await global_prompt_manager.format_prompt(
                 "replyer_prompt",
                 expression_habits_block=expression_habits_block,
                 tool_info_block=tool_info,
@@ -1109,7 +1109,22 @@ class DefaultReplyer:
                 keywords_reaction_prompt=keywords_reaction_prompt,
                 moderation_prompt=moderation_prompt_block,
                 gift_reaction_prompt=global_config.personality.gift_reaction_prompt,
-            ), selected_expressions
+            )
+
+            # [LOGGING] Log Prompt for Bilibili (Live & Comments) and Discord VC
+            should_log = False
+            # 1. Always log for Discord VC and Bilibili Live
+            if chat_stream.platform in ["discord_vc", "bilibili.live"]:
+                should_log = True
+            # 2. For 'bilibili' (Comments), log if it's a group context (not private)
+            elif chat_stream.platform == "bilibili":
+                if chat_stream.group_info:
+                    should_log = True
+
+            if should_log:
+                logger.info(f"Replyer Prompt: {prompt}")
+
+            return prompt, selected_expressions
 
     async def build_prompt_rewrite_context(
         self,
