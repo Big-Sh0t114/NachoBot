@@ -17,7 +17,7 @@ import time
 from typing import Any, Dict, List, Tuple
 
 from openai import AsyncOpenAI
-from .utils import get_bot_personality,DiaryConstants
+from .utils import get_bot_personality, DiaryConstants
 from src.plugin_system.apis import config_api, llm_api, get_logger
 
 from .storage import DiaryStorage, DiaryQzoneAPI
@@ -53,6 +53,7 @@ class DiaryService:
         bot_qq_account = str(config_api.get_global_config("bot.qq_account", ""))
 
         from .image_processor import ImageProcessor
+
         image_processor = ImageProcessor()
 
         bot_message_count = 0
@@ -71,7 +72,7 @@ class DiaryService:
                 timeline_parts.append(f"\n【{time_period}】")
                 current_hour = hour
 
-            nickname = msg.user_info.user_nickname or '某人'
+            nickname = msg.user_info.user_nickname or "某人"
             user_id = str(msg.user_info.user_id)
 
             if image_processor._is_image_message(msg):
@@ -83,7 +84,7 @@ class DiaryService:
                     timeline_parts.append(f"{nickname}: [图片]{description}")
                     user_message_count += 1
             else:
-                content = msg.processed_plain_text or ''
+                content = msg.processed_plain_text or ""
                 if content and len(content) > 50:
                     content = content[:50] + "..."
                 if user_id == bot_qq_account:
@@ -103,6 +104,7 @@ class DiaryService:
     # ===================== Token估算与截断 =====================
     def _estimate_tokens(self, text: str) -> int:
         import re
+
         chinese_chars = len(re.findall(r"[\u4e00-\u9fff]", text))
         other_chars = len(text) - chinese_chars
         return int(chinese_chars / 1.5 + other_chars / 4)
@@ -118,7 +120,7 @@ class DiaryService:
         target_length = int(len(timeline) * ratio * 0.95)
         truncated = timeline[:target_length]
         for i in range(len(truncated) - 1, len(truncated) // 2, -1):
-            if truncated[i] in ['。', '！', '？', '\n']:
+            if truncated[i] in ["。", "！", "？", "\n"]:
                 truncated = truncated[: i + 1]
                 break
         logger.info(f"时间线截断: {current_tokens}→{self._estimate_tokens(truncated)} tokens")
@@ -131,7 +133,7 @@ class DiaryService:
         if len(text) <= max_length:
             return text
         for i in range(max_length - 3, max_length // 2, -1):
-            if text[i] in ['。', '！', '？', '~']:
+            if text[i] in ["。", "！", "？", "~"]:
                 return text[: i + 1]
         return text[: max_length - 3] + "..."
 
@@ -139,7 +141,7 @@ class DiaryService:
     def get_weather_by_emotion(self, messages: List[Any]) -> str:
         if not messages:
             return random.choice(["晴", "多云", "阴", "多云转晴"])
-        all_content = " ".join([(msg.processed_plain_text or '') for msg in messages])
+        all_content = " ".join([(msg.processed_plain_text or "") for msg in messages])
         happy_words = ["哈哈", "笑", "开心", "高兴", "棒", "好", "赞", "爱", "喜欢"]
         sad_words = ["难过", "伤心", "哭", "痛苦", "失望"]
         angry_words = ["无语", "醉了", "服了", "烦", "气", "怒"]
@@ -289,7 +291,7 @@ class DiaryService:
 随便挑一个喜欢的主题，围绕这个主题写。
 你需要写的日常且口语化的文段，平淡一些，就像微博和贴吧的风格
 遣词造句尽量简短一些。请注意把握聊天内容，不要书写的太有条理，可以有个性。
-{personality['style']}
+{personality["style"]}
 请注意不要输出多余内容(包括前后缀，冒号和引号，括号，表情等)，只输出一段说说内容就好。
 说说内容:"""
             elif style == "diary":
@@ -311,16 +313,30 @@ class DiaryService:
 书写风格：
 你需要写的日常且口语化的文段，平淡一些
 遣词造句尽量简短一些。请注意把握聊天内容，不要书写的太有条理，可以有个性。
-{personality['style']}
+{personality["style"]}
 请注意不要输出多余内容(包括前后缀，冒号和引号，括号，表情等)，只输出一段日记内容就好。
 不要输出多余内容(包括前后缀，冒号和引号，括号，表情包，at或 @等 )。
 日记内容:"""
 
             use_custom_model = self.get_config("custom_model.use_custom_model", False)
-            if use_custom_model:
-                success, diary_content = await self._generate_with_custom_model(prompt)
+            from src.plugin_system.apis.send_api import should_filter_text
+
+            max_retries = 3
+            for attempt in range(1, max_retries + 1):
+                if use_custom_model:
+                    success, diary_content = await self._generate_with_custom_model(prompt)
+                else:
+                    success, diary_content = await self._generate_with_default_model(prompt, timeline)
+
+                if not success or not diary_content:
+                    return False, diary_content or "模型生成日记失败"
+
+                if not should_filter_text(diary_content):
+                    break
+                logger.warning(f"日记内容命中过滤器，重新生成 ({attempt}/{max_retries})")
             else:
-                success, diary_content = await self._generate_with_default_model(prompt, timeline)
+                logger.error("日记内容多次命中过滤器，放弃生成")
+                return False, "日记内容未通过安全过滤"
 
             if not success or not diary_content:
                 return False, diary_content or "模型生成日记失败"
@@ -399,4 +415,3 @@ class DiaryService:
                 diary_data["error_message"] = f"原因:发布异常 - {str(e)}"
                 await self.storage.save_diary(diary_data)
             return False
-

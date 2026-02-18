@@ -463,11 +463,26 @@ class ChatSummaryCommand(BaseCommand):
                 model_task_config = model_config.model_task_config.advanced_replyer
                 logger.info(f"使用高级模式模型组进行总结: {model_task_config.model_list}")
 
-            success, summary, reasoning, model_name = await llm_api.generate_with_model(
-                prompt=prompt,
-                model_config=model_task_config,
-                request_type="plugin.chat_summary",
-            )
+            from src.plugin_system.apis.send_api import should_filter_text
+
+            max_retries = 3
+            for attempt in range(1, max_retries + 1):
+                success, summary, reasoning, model_name = await llm_api.generate_with_model(
+                    prompt=prompt,
+                    model_config=model_task_config,
+                    request_type="plugin.chat_summary",
+                )
+
+                if not success:
+                    logger.error(f"LLM生成总结失败: {summary}")
+                    return None
+
+                if not should_filter_text(summary):
+                    break
+                logger.warning(f"总结内容命中过滤器，重新生成 ({attempt}/{max_retries})")
+            else:
+                logger.error("总结内容多次命中过滤器，放弃生成")
+                return None
 
             if not success:
                 logger.error(f"LLM生成总结失败: {summary}")
@@ -887,11 +902,26 @@ class DailySummaryEventHandler(BaseEventHandler):
                 model_task_config = model_config.model_task_config.advanced_replyer
                 logger.info(f"使用高级模式模型组进行自动总结: {model_task_config.model_list}")
 
-            success, summary, reasoning, model_name = await llm_api.generate_with_model(
-                prompt=prompt,
-                model_config=model_task_config,
-                request_type="plugin.chat_summary.auto",
-            )
+            from src.plugin_system.apis.send_api import should_filter_text
+
+            max_retries = 3
+            for attempt in range(1, max_retries + 1):
+                success, summary, reasoning, model_name = await llm_api.generate_with_model(
+                    prompt=prompt,
+                    model_config=model_task_config,
+                    request_type="plugin.chat_summary.auto",
+                )
+
+                if not success:
+                    logger.error(f"LLM生成自动总结失败: {summary}")
+                    return None
+
+                if not should_filter_text(summary):
+                    break
+                logger.warning(f"自动总结内容命中过滤器，重新生成 ({attempt}/{max_retries})")
+            else:
+                logger.error("自动总结内容多次命中过滤器，放弃生成")
+                return None
 
             if not success:
                 logger.error(f"LLM生成自动总结失败: {summary}")

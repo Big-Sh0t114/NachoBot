@@ -349,7 +349,18 @@ class HeartFChatting:
             # Both need low latency and simple reply/no-reply logic
             if (is_group_chat and self.chat_stream.platform == "bilibili") or self.chat_stream.platform == "discord_vc":
                 logger.info(f"{self.log_prefix} [HFC] Bypassing Planner for {self.chat_stream.platform}")
-                target_msg = message_list_before_now[-1] if message_list_before_now else None
+                # Skip bot's own messages to prevent self-reply loops
+                bot_id = str(global_config.bot.qq_account)
+                target_msg = None
+                if message_list_before_now:
+                    for msg in reversed(message_list_before_now):
+                        if str(msg.user_info.user_id) != bot_id:
+                            target_msg = msg
+                            break
+                if target_msg is None:
+                    logger.info(f"{self.log_prefix} [HFC] No non-bot message found, skipping reply")
+                    return True
+
                 action_to_use_info = [
                     ActionPlannerInfo(
                         action_type="reply",
@@ -367,8 +378,9 @@ class HeartFChatting:
                     )
 
             has_reply = False
+            _reply_equivalent = {"reply", "make_appoint", "cancel_appoint"}
             for action in action_to_use_info:
-                if action.action_type == "reply":
+                if action.action_type in _reply_equivalent:
                     has_reply = True
                     break
 
@@ -703,6 +715,24 @@ class HeartFChatting:
                     self.no_reply_until_call = True
                     return {"action_type": "no_reply_until_call", "success": True, "reply_text": "", "command": ""}
 
+                elif action_planner_info.action_type == "make_appoint":
+                    return await self._handle_make_appoint(
+                        action_planner_info,
+                        chosen_action_plan_infos,
+                        thinking_id,
+                        available_actions,
+                        cycle_timers,
+                    )
+
+                elif action_planner_info.action_type == "cancel_appoint":
+                    return await self._handle_cancel_appoint(
+                        action_planner_info,
+                        chosen_action_plan_infos,
+                        thinking_id,
+                        available_actions,
+                        cycle_timers,
+                    )
+
                 elif action_planner_info.action_type == "reply":
                     try:
                         message_text_for_injection = ""
@@ -714,13 +744,26 @@ class HeartFChatting:
                             chat_id=self.chat_stream.stream_id, message_text=message_text_for_injection
                         )
 
+                        # Logic to allow tools for Bilibili Comments while keeping disabled for Live Danmu
+                        # even if reasoning says "Bilibili Live Bypass: Direct Reply"
+                        current_enable_tool = global_config.tool.enable_tool
+                        if action_planner_info.reasoning == "Bilibili Live Bypass: Direct Reply":
+                            current_enable_tool = False
+                            # Check if it is a comment section (re-enable tools)
+                            if (
+                                getattr(self.chat_stream, "group_info", None)
+                                and self.chat_stream.group_info.group_id
+                                and str(self.chat_stream.group_info.group_id).startswith("comment:")
+                            ):
+                                current_enable_tool = global_config.tool.enable_tool
+
                         success, llm_response = await generator_api.generate_reply(
                             chat_stream=self.chat_stream,
                             reply_message=action_planner_info.action_message,
                             available_actions=available_actions,
                             chosen_actions=chosen_action_plan_infos,
                             reply_reason=action_planner_info.reasoning or "",
-                            enable_tool=global_config.tool.enable_tool,
+                            enable_tool=current_enable_tool,
                             request_type="replyer",
                             from_plugin=False,
                             extra_info=injection_text,
@@ -806,3 +849,251 @@ class HeartFChatting:
                 "loop_info": None,
                 "error": str(e),
             }
+
+    async def _handle_make_appoint(
+        self,
+        action_planner_info: ActionPlannerInfo,
+        chosen_action_plan_infos: List[ActionPlannerInfo],
+        thinking_id: str,
+        available_actions: Dict[str, ActionInfo],
+        cycle_timers: Dict[str, float],
+    ):
+        """处理 make_appoint 动作：设定定时提醒"""
+        from datetime import datetime, timedelta, timezone
+
+        from src.chat.heart_flow.appointment_scheduler import appointment_scheduler
+
+        action_data = action_planner_info.action_data or {}
+        remind_time_raw = action_data.get("remind_time", "")
+        remind_content = action_data.get("remind_content", "提醒")
+
+        # 获取 user_id
+        user_id = ""
+        if action_planner_info.action_message and hasattr(action_planner_info.action_message, "user_info"):
+            user_id = str(getattr(action_planner_info.action_message.user_info, "user_id", ""))
+
+        # --- 解析时间 ---
+        from src.chat.heart_flow.appointment_scheduler import parse_remind_time
+
+        tz_local = timezone(timedelta(hours=8))
+        now = datetime.now(tz_local)
+        remind_datetime = parse_remind_time(remind_time_raw)
+
+        # 校验
+        if not remind_datetime:
+            extra_info = (
+                f'[预约提醒失败] 用户请求设定提醒但时间格式无法解析："{remind_time_raw}"。'
+                f"请告知用户时间格式无法识别，请重新指定。"
+            )
+        elif remind_datetime <= now:
+            extra_info = (
+                f"[预约提醒失败] 用户请求设定提醒，但指定的时间 {remind_datetime.strftime('%Y-%m-%d %H:%M')} 已经过去了。"
+                f"请告知用户指定的时间已过，请重新指定一个未来的时间。"
+            )
+        elif (remind_datetime - now).total_seconds() > 7 * 24 * 3600:
+            extra_info = "[预约提醒失败] 用户请求设定提醒，但指定的时间超过7天后。请告知用户提醒时间不能超过7天。"
+        else:
+            extra_info = None  # 时间有效
+
+        if extra_info:
+            # 时间无效，生成错误回复
+            try:
+                success, llm_response = await generator_api.generate_reply(
+                    chat_stream=self.chat_stream,
+                    reply_message=action_planner_info.action_message,
+                    available_actions=available_actions,
+                    chosen_actions=chosen_action_plan_infos,
+                    reply_reason=action_planner_info.reasoning or "",
+                    request_type="replyer",
+                    from_plugin=False,
+                    extra_info=extra_info,
+                )
+                if success and llm_response and llm_response.reply_set:
+                    _, reply_text, _ = await self._send_and_store_reply(
+                        response_set=llm_response.reply_set,
+                        action_message=action_planner_info.action_message,
+                        cycle_timers=cycle_timers,
+                        thinking_id=thinking_id,
+                        actions=chosen_action_plan_infos,
+                        selected_expressions=llm_response.selected_expressions,
+                    )
+                    return {"action_type": "make_appoint", "success": False, "reply_text": reply_text}
+            except Exception as e:
+                logger.error(f"{self.log_prefix} make_appoint 错误回复生成失败: {e}")
+            return {"action_type": "make_appoint", "success": False, "reply_text": ""}
+
+        # --- 时间有效，生成确认回复 ---
+        formatted_time = remind_datetime.strftime("%Y-%m-%d %H:%M")
+        confirm_extra_info = (
+            f'[预约提醒] 用户要求你在 {formatted_time} 提醒他"{remind_content}"。'
+            f"请回复确认你已了解这个预约提醒请求，并在回复中自然地提及你会在指定时间提醒。"
+        )
+
+        try:
+            success, llm_response = await generator_api.generate_reply(
+                chat_stream=self.chat_stream,
+                reply_message=action_planner_info.action_message,
+                available_actions=available_actions,
+                chosen_actions=chosen_action_plan_infos,
+                reply_reason=action_planner_info.reasoning or "",
+                request_type="replyer",
+                from_plugin=False,
+                extra_info=confirm_extra_info,
+            )
+            if success and llm_response and llm_response.reply_set:
+                _, confirm_text, _ = await self._send_and_store_reply(
+                    response_set=llm_response.reply_set,
+                    action_message=action_planner_info.action_message,
+                    cycle_timers=cycle_timers,
+                    thinking_id=thinking_id,
+                    actions=chosen_action_plan_infos,
+                    selected_expressions=llm_response.selected_expressions,
+                )
+            else:
+                logger.warning(f"{self.log_prefix} make_appoint 确认回复生成失败")
+                confirm_text = ""
+        except Exception as e:
+            logger.error(f"{self.log_prefix} make_appoint 确认回复异常: {e}")
+            confirm_text = ""
+
+        # --- 预生成提醒消息 ---
+        reminder_extra_info = (
+            f'[定时提醒触发] 现在是 {formatted_time}，之前用户要求你在这个时间提醒他"{remind_content}"。'
+            f"请现在发送提醒消息，直接提醒用户该做的事情。语气亲切自然。"
+        )
+
+        remind_text = f"提醒你：{remind_content}"  # 默认兜底文本
+        try:
+            success, llm_response = await generator_api.generate_reply(
+                chat_stream=self.chat_stream,
+                reply_message=action_planner_info.action_message,
+                available_actions=available_actions,
+                chosen_actions=chosen_action_plan_infos,
+                reply_reason="定时提醒触发",
+                request_type="replyer",
+                from_plugin=False,
+                extra_info=reminder_extra_info,
+            )
+            if success and llm_response and llm_response.reply_set:
+                # 提取纯文本
+                parts = []
+                for item in llm_response.reply_set.reply_data:
+                    if item.content_type == ReplyContentType.TEXT:
+                        parts.append(item.content)
+                if parts:
+                    remind_text = " ".join(parts)
+        except Exception as e:
+            logger.error(f"{self.log_prefix} make_appoint 提醒文本预生成失败: {e}")
+
+        # --- 注册到调度器 ---
+        appt_id = await appointment_scheduler.schedule(
+            chat_id=self.chat_stream.stream_id,
+            user_id=user_id,
+            remind_datetime=remind_datetime,
+            remind_content=remind_content,
+            remind_text=remind_text,
+        )
+
+        logger.info(f"{self.log_prefix} 预约已创建: id={appt_id}, time={formatted_time}, content={remind_content}")
+
+        # 存储 action info
+        await database_api.store_action_info(
+            chat_stream=self.chat_stream,
+            action_build_into_prompt=True,
+            action_prompt_display=f'你设定了一个提醒：在 {formatted_time} 提醒用户"{remind_content}"',
+            action_done=True,
+            thinking_id=thinking_id,
+            action_data={"remind_time": formatted_time, "remind_content": remind_content, "appt_id": appt_id},
+            action_name="make_appoint",
+        )
+
+        return {"action_type": "make_appoint", "success": True, "reply_text": confirm_text}
+
+    async def _handle_cancel_appoint(
+        self,
+        action_planner_info: ActionPlannerInfo,
+        chosen_action_plan_infos: List[ActionPlannerInfo],
+        thinking_id: str,
+        available_actions: Dict[str, ActionInfo],
+        cycle_timers: Dict[str, float],
+    ):
+        """处理 cancel_appoint 动作：取消定时提醒"""
+        from src.chat.heart_flow.appointment_scheduler import appointment_scheduler
+
+        action_data = action_planner_info.action_data or {}
+        remind_content = action_data.get("remind_content", "")
+
+        # 获取 user_id
+        user_id = ""
+        if action_planner_info.action_message and hasattr(action_planner_info.action_message, "user_info"):
+            user_id = str(getattr(action_planner_info.action_message.user_info, "user_id", ""))
+
+        chat_id = self.chat_stream.stream_id
+
+        # 模糊匹配预约
+        matches = appointment_scheduler.cancel_by_content(chat_id, user_id, remind_content)
+
+        if len(matches) == 0:
+            extra_info = (
+                f'[取消预约] 用户要求取消"{remind_content}"的提醒，'
+                f"但没有找到匹配的待执行预约。请告知用户当前没有这个提醒。"
+            )
+        elif len(matches) == 1:
+            # 直接取消
+            appt = matches[0]
+            appointment_scheduler.cancel_by_id(appt["id"])
+            extra_info = (
+                f'[取消预约成功] 已取消"{appt["remind_content"]}"的提醒'
+                f"（原定时间：{appt['remind_time_iso']}）。请确认告知用户已取消。"
+            )
+        else:
+            # 多个匹配，列出让用户选择
+            appt_list = ""
+            for appt in matches:
+                appt_list += f"- {appt['remind_content']}（时间：{appt['remind_time_iso']}）\n"
+            extra_info = (
+                f'[取消预约] 用户要求取消"{remind_content}"的提醒，'
+                f"但找到了多个匹配的预约：\n{appt_list}"
+                f"请询问用户具体要取消哪一个。"
+            )
+
+        # 生成回复
+        try:
+            success, llm_response = await generator_api.generate_reply(
+                chat_stream=self.chat_stream,
+                reply_message=action_planner_info.action_message,
+                available_actions=available_actions,
+                chosen_actions=chosen_action_plan_infos,
+                reply_reason=action_planner_info.reasoning or "",
+                request_type="replyer",
+                from_plugin=False,
+                extra_info=extra_info,
+            )
+            if success and llm_response and llm_response.reply_set:
+                _, reply_text, _ = await self._send_and_store_reply(
+                    response_set=llm_response.reply_set,
+                    action_message=action_planner_info.action_message,
+                    cycle_timers=cycle_timers,
+                    thinking_id=thinking_id,
+                    actions=chosen_action_plan_infos,
+                    selected_expressions=llm_response.selected_expressions,
+                )
+            else:
+                reply_text = ""
+        except Exception as e:
+            logger.error(f"{self.log_prefix} cancel_appoint 回复生成异常: {e}")
+            reply_text = ""
+
+        # 存储 action info
+        cancel_success = len(matches) == 1
+        await database_api.store_action_info(
+            chat_stream=self.chat_stream,
+            action_build_into_prompt=True,
+            action_prompt_display=f'你处理了取消提醒请求："{remind_content}"，{"已取消" if cancel_success else "需要用户确认"}',
+            action_done=True,
+            thinking_id=thinking_id,
+            action_data={"remind_content": remind_content, "matches_count": len(matches)},
+            action_name="cancel_appoint",
+        )
+
+        return {"action_type": "cancel_appoint", "success": cancel_success, "reply_text": reply_text}

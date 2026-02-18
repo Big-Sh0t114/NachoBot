@@ -90,6 +90,33 @@ no_reply
     "action": "no_reply",
 }}
 
+make_appoint
+动作描述：
+为用户设定一个定时提醒，在指定时间发送提醒消息
+使用条件：当用户的消息中包含提醒、定时、闹钟、叫我、到时候等意图时使用
+典型触发语句：「xx分钟后提醒我」「今晚十点叫我」「帮我定个闹钟」「到时候记得叫我」「xx后叫我起床」
+注意：只要用户表达了"在某个时间提醒/叫/通知"的意图，就应该选择此动作而不是reply
+{{
+    "action": "make_appoint",
+    "target_message_id":"触发action的消息id",
+    "remind_time":"提醒的绝对时间，ISO8601格式如2026-02-18T22:00:00+08:00，或相对时间如+20m/+1h/+30s",
+    "remind_content":"到时间后提醒用户的事项内容",
+    "reason":"设定提醒的原因"
+}}
+
+cancel_appoint
+动作描述：
+取消用户之前设定的定时提醒
+使用条件：当用户明确要求取消某个预约提醒时使用
+当前待执行的预约列表：
+{pending_appointments}
+{{
+    "action": "cancel_appoint",
+    "target_message_id":"触发action的消息id",
+    "remind_content":"要取消的提醒事项内容",
+    "reason":"取消提醒的原因"
+}}
+
 {action_options_text}
 
 请选择合适的action，并说明触发action的消息id和选择该action的原因。消息id格式:m+数字
@@ -97,6 +124,7 @@ no_reply
 **动作选择要求**
 请你根据聊天内容,用户的最新消息和以下标准选择合适的动作:
 {plan_style}
+**重要**：如果用户最新消息中包含"提醒""叫我""闹钟""定时""记得叫""到时候"等词语，并且指定了时间，必须选择make_appoint动作，不要选择reply。
 回复动作若未明确指定 target_message_id，请选择最新的非机器人消息。
 {moderation_prompt}
 
@@ -206,7 +234,7 @@ class BrainPlanner:
 
             # 验证action是否可用
             available_action_names = [action_name for action_name, _ in current_available_actions]
-            internal_action_names = ["no_reply", "reply", "wait_time"]
+            internal_action_names = ["no_reply", "reply", "wait_time", "make_appoint", "cancel_appoint"]
 
             if action not in internal_action_names and action not in available_action_names:
                 invalid_action = action
@@ -283,6 +311,29 @@ class BrainPlanner:
                     available_actions=available_actions,
                 )
                 return [action], latest_message
+            # 检测提醒/预约关键词，强制选择 make_appoint
+            latest_text = (getattr(latest_message, "processed_plain_text", "") or "").strip()
+            if not _is_bot_message(latest_message) and latest_text:
+                import re as _kw_re
+
+                _remind_kw = _kw_re.search(r"提醒|叫我|闹钟|定时|记得叫|到时候|醒我", latest_text)
+                _time_kw = _kw_re.search(
+                    r"\d+\s*(分钟|小时|秒钟|秒|分|时|点)|后|明天|今晚|今天|下午|上午|晚上", latest_text
+                )
+                if _remind_kw and _time_kw:
+                    logger.info(f"{self.log_prefix} 检测到提醒关键词，强制选择 make_appoint")
+                    action = ActionPlannerInfo(
+                        action_type="make_appoint",
+                        reasoning="检测到提醒关键词，强制执行预约提醒",
+                        action_data={
+                            "loop_start_time": loop_start_time,
+                            "remind_time": latest_text,
+                            "remind_content": latest_text,
+                        },
+                        action_message=latest_message,
+                        available_actions=available_actions,
+                    )
+                    return [action], latest_message
         message_id_list: list[Tuple[str, "DatabaseMessages"]] = []
         chat_content_block, message_id_list = build_readable_messages_with_id(
             messages=message_list_before_now,
@@ -359,10 +410,25 @@ class BrainPlanner:
 
             if chat_target_info:
                 # 构建聊天上下文描述
-                chat_context_description = f"你正在和 {chat_target_info.person_name or chat_target_info.user_nickname or '对方'} 聊天中"
+                chat_context_description = (
+                    f"你正在和 {chat_target_info.person_name or chat_target_info.user_nickname or '对方'} 聊天中"
+                )
 
             # 构建动作选项块
             action_options_block = await self._build_action_options_block(current_available_actions)
+
+            # 构建待执行预约列表
+            from src.chat.heart_flow.appointment_scheduler import appointment_scheduler
+
+            pending_appointments = appointment_scheduler.get_pending(chat_id=self.chat_id)
+            if pending_appointments:
+                pending_text = ""
+                for appt in pending_appointments:
+                    pending_text += (
+                        f"- {appt['remind_content']}（时间：{appt['remind_time_iso']}，用户：{appt['user_id']}）\n"
+                    )
+            else:
+                pending_text = "无待执行预约"
 
             # 其他信息
             moderation_prompt_block = "请不要输出违法违规内容，不要输出色情，暴力，政治相关内容，如有敏感内容，请规避。"
@@ -385,6 +451,7 @@ class BrainPlanner:
                 name_block=name_block,
                 interest=interest,
                 plan_style=global_config.personality.private_plan_style,
+                pending_appointments=pending_text,
             )
 
             return prompt, message_id_list

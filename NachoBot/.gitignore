@@ -6,6 +6,7 @@ NapCat.Framework.Windows.Once/
 log/
 logs/
 out/
+temp/
 tool_call_benchmark.py
 run_nachobot_core.bat
 run_voice.bat

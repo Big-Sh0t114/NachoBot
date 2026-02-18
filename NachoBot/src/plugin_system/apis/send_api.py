@@ -505,7 +505,7 @@ async def custom_reply_set_to_stream(
 ) -> bool:
     """
     向指定流发送混合型消息集
-    
+
     Args:
         reply_set: ReplySetModel 对象，包含多个 ReplyContent
         stream_id: 聊天流ID
@@ -604,9 +604,19 @@ def _parse_content_to_seg(reply_content: "ReplyContent") -> Tuple[Seg, bool]:
                         single_node_content.append(sub_seg)
                 message_segment = Seg(type="seglist", data=single_node_content)
             forward_message_list.append(
-                MessageBase(message_segment=message_segment, message_info=BaseMessageInfo(user_info=user_info)).to_dict()
+                MessageBase(
+                    message_segment=message_segment, message_info=BaseMessageInfo(user_info=user_info)
+                ).to_dict()
             )
         return Seg(type="forward", data=forward_message_list), False  # type: ignore
     else:
         message_type_in_str = content_type.value if isinstance(content_type, ReplyContentType) else str(content_type)
         return Seg(type=message_type_in_str, data=reply_content.content), True  # type: ignore
+
+
+def should_filter_text(text: str) -> bool:
+    """公共接口：检测文本是否命中 response_filter 规则。
+    插件在发布到外部平台（如 QQ 空间）前应调用此函数检查内容。
+    Returns True 表示内容应被拦截。
+    """
+    return _should_suppress_text_reply(text)
