@@ -25,6 +25,7 @@ class AdapterConfig:
     bili_jct: str
     buvid3: str
     buvid4: str
+    bot_account: str
     dede_user_id: str
     user_agent: str
     live_enable: bool
@@ -415,6 +416,7 @@ def load_config(path: Path) -> AdapterConfig:
         bili_jct=str(bilibili.get("bili_jct", "") or ""),
         buvid3=str(bilibili.get("buvid3", "") or ""),
         buvid4=str(bilibili.get("buvid4", "") or ""),
+        bot_account=str(bilibili.get("bot_account", "") or ""),
         dede_user_id=str(bilibili.get("dede_user_id", "") or ""),
         user_agent=str(
             bilibili.get(

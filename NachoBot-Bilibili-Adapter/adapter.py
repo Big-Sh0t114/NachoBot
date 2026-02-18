@@ -1253,6 +1253,17 @@ class BilibiliAdapter:
         if await self._handle_test_command(room_id, user_id, text, user_name):
             return
 
+        # Fallback: if bot danmu leaks past is_self_danmu, drop it based on bot_account config
+        if self.config.bot_account and str(user_id) == str(self.config.bot_account):
+            if self.config.live_log_danmu:
+                self.logger.info(
+                    "Danmu ignored (bot_account match): room_id=%s user_id=%s message_id=%s",
+                    room_id,
+                    user_id,
+                    message_id,
+                )
+            return
+
         # [DEPRECATED] Live Streamer mode moved to mais4u
         # if room_id in self._live_streamer_controllers:
         #     controller = self._live_streamer_controllers[room_id]
@@ -1512,6 +1523,9 @@ class BilibiliAdapter:
         # Standard format for poke/notice
         text = f"{user_name}用鼠标戳了戳你"
 
+        # Resolve template info to ensuring correct persona/TTS settings
+        template_info = await self._get_template_info(room_id, user_id, text)
+
         additional_config = {
             "room_id": room_id,
         }
@@ -1535,6 +1549,7 @@ class BilibiliAdapter:
                 content_format=["text"],
                 accept_format=ACCEPT_FORMAT,
             ),
+            template_info=template_info,
             additional_config=additional_config,
         )
 

@@ -114,6 +114,12 @@ class MainSystem:
 
         await events_manager.handle_mai_events(event_type=EventType.ON_START)
         # logger.info("已触发 ON_START 事件")
+
+        # 恢复待执行的预约提醒
+        from src.chat.heart_flow.appointment_scheduler import appointment_scheduler
+
+        await appointment_scheduler.resume_pending()
+
         try:
             init_time = int(1000 * (time.time() - init_start_time))
             logger.info(f"初始化完成，神经元放电{init_time}次")
