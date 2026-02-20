@@ -313,11 +313,13 @@ async def clear_temp_emoji() -> None:
         os.path.join(BASE_DIR, "emoji"),
         os.path.join(BASE_DIR, "image"),
         os.path.join(BASE_DIR, "images"),
+        os.path.join(BASE_DIR, "video"),
     ):
         if os.path.exists(need_clear):
             files = os.listdir(need_clear)
-            # 如果文件数超过100就全部删除
-            if len(files) > 100:
+            # 视频文件超过20个就清空，表情包及图片超过100个清空
+            limit = 20 if need_clear.endswith("video") else 100
+            if len(files) > limit:
                 for filename in files:
                     file_path = os.path.join(need_clear, filename)
                     if os.path.isfile(file_path):

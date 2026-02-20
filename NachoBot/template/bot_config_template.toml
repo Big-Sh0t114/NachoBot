@@ -355,7 +355,7 @@ date_style = "m-d H:i:s" # 日期格式
 log_level_style = "lite" # 日志级别样式,可选FULL，compact，lite
 color_text = "full" # 日志文本颜色，可选none，title，full
 log_level = "INFO" # 全局日志级别（向下兼容，优先级低于下面的分别设置）
-console_log_level = "DEBUG" # 控制台日志级别，可选: DEBUG, INFO, WARNING, ERROR, CRITICAL
+console_log_level = "INFO" # 控制台日志级别，可选: DEBUG, INFO, WARNING, ERROR, CRITICAL
 file_log_level = "DEBUG" # 文件日志级别，可选: DEBUG, INFO, WARNING, ERROR, CRITICAL
 backup_count = 10 # 日志保留份数
 
