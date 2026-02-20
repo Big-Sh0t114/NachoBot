@@ -1,6 +1,9 @@
 2/21
     完成了伪Agent方案的实现
     核心加入对video信息的处理解析
+    完成以上模式对Discord的适配
+    重构Koishi-Adapter
+    修复Discord侧的语音适配
 2/20
     参考AstrBot的Agent沙盒，模拟了一套伪Agent方案，使得bot能自行阅读编辑文件并发送给用户
 2/17
