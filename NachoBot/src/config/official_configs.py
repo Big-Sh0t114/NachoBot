@@ -30,6 +30,9 @@ class BotConfig(ConfigBase):
     alias_names: list[str] = field(default_factory=lambda: [])
     """别名列表"""
 
+    sandbox_whitelist: list[str] = field(default_factory=lambda: [])
+    """沙盒白名单列表"""
+
 
 @dataclass
 class PersonalityConfig(ConfigBase):

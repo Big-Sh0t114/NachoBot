@@ -43,6 +43,7 @@ class ReplyContentType(Enum):
     EMOJI = "emoji"
     COMMAND = "command"
     VOICE = "voice"
+    FILE = "file"
     FORWARD = "forward"
     HYBRID = "hybrid"  # 混合类型，包含多种内容
 
@@ -81,6 +82,10 @@ class ReplyContent(BaseDataModel):
         return cls(content_type=ReplyContentType.IMAGE, content=image_base64)
 
     @classmethod
+    def construct_as_file(cls, file_path: str):
+        return cls(content_type=ReplyContentType.FILE, content=file_path)
+
+    @classmethod
     def construct_as_voice(cls, voice_base64: str):
         return cls(content_type=ReplyContentType.VOICE, content=voice_base64)
 
@@ -101,7 +106,8 @@ class ReplyContent(BaseDataModel):
                 ReplyContentType.FORWARD,
                 ReplyContentType.VOICE,
                 ReplyContentType.COMMAND,
-            ], "混合内容的每个项不能是混合、转发、语音或命令类型"
+                ReplyContentType.FILE,
+            ], "混合内容的每个项不能是混合、转发、语音、命令或文件类型"
             assert isinstance(content, str), "混合内容的每个项必须是字符串"
             hybrid_content_list.append(ReplyContent(content_type=content_type, content=content))
         return cls(content_type=ReplyContentType.HYBRID, content=hybrid_content_list)

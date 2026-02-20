@@ -42,6 +42,11 @@ async def _calculate_interest(message: MessageRecv) -> Tuple[float, list[str]]:
     message.is_at = is_at
     message.reply_probability_boost = reply_probability_boost
 
+    if message.processed_plain_text and message.processed_plain_text.strip().startswith("[文件:"):
+        message.interest_value = 1
+        message.is_mentioned = True
+        return 1.0, []
+
     return 1, keywords
 
 

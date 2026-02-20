@@ -109,6 +109,54 @@ class LLMRequest:
             )
         return content, (reasoning_content, model_info.name, tool_calls)
 
+    async def generate_response_for_video(
+        self,
+        prompt: str,
+        video_base64: str,
+        video_format: str,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> Tuple[str, Tuple[str, str, Optional[List[ToolCall]]]]:
+        """
+        为视频生成响应
+        Args:
+            prompt (str): 提示词
+            video_base64 (str): 视频的Base64编码字符串
+            video_format (str): 视频格式（如 'mp4' 等）
+        Returns:
+            (Tuple[str, str, str, Optional[List[ToolCall]]]): 响应内容、推理内容、模型名称、工具调用列表
+        """
+        start_time = time.time()
+
+        def message_factory(client: BaseClient) -> List[Message]:
+            message_builder = MessageBuilder()
+            message_builder.add_text_content(prompt)
+            message_builder.add_video_content(video_format=video_format, video_base64=video_base64)
+            return [message_builder.build()]
+
+        response, model_info = await self._execute_request(
+            request_type=RequestType.RESPONSE,
+            message_factory=message_factory,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        content = response.content or ""
+        reasoning_content = response.reasoning_content or ""
+        tool_calls = response.tool_calls
+        if not reasoning_content and content:
+            content, extracted_reasoning = self._extract_reasoning(content)
+            reasoning_content = extracted_reasoning
+        if usage := response.usage:
+            llm_usage_recorder.record_usage_to_database(
+                model_info=model_info,
+                model_usage=usage,
+                user_id="system",
+                request_type=self.request_type,
+                endpoint="/chat/completions",
+                time_cost=time.time() - start_time,
+            )
+        return content, (reasoning_content, model_info.name, tool_calls)
+
     async def generate_response_for_voice(self, voice_base64: str) -> Optional[str]:
         """
         为语音生成响应
@@ -220,9 +268,18 @@ class LLMRequest:
             available_models,
             key=lambda k: available_models[k][0] + available_models[k][1] * 300 + available_models[k][2] * 1000,
         )
+        import copy
+
         model_info = model_config.get_model_info(least_used_model_name)
         api_provider = model_config.get_provider(model_info.api_provider)
+
         force_new_client = self.request_type == "embedding"
+        task_timeout = getattr(self.model_for_task, "timeout", None)
+        if task_timeout is not None:
+            api_provider = copy.deepcopy(api_provider)
+            api_provider.timeout = task_timeout
+            force_new_client = True
+
         client = client_registry.get_client_class_instance(api_provider, force_new=force_new_client)
         logger.debug(f"选择请求模型: {model_info.name}")
         total_tokens, penalty, usage_penalty = self.model_usage[model_info.name]

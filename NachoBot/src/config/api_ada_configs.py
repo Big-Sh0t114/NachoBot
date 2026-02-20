@@ -89,6 +89,9 @@ class TaskConfig(ConfigBase):
     temperature: float = 0.3
     """模型温度"""
 
+    timeout: Optional[int] = None
+    """任务超时时长（秒），如果设置，将覆盖API提供商的默认超时时长"""
+
 
 @dataclass
 class ModelTaskConfig(ConfigBase):
@@ -135,6 +138,15 @@ class ModelTaskConfig(ConfigBase):
 
     mcp: TaskConfig = field(default_factory=TaskConfig)
     """MCP插件专用模型配置"""
+
+    file_edit: TaskConfig = field(default_factory=TaskConfig)
+    """文件编辑/代码生成专用模型配置"""
+
+    video: TaskConfig = field(default_factory=TaskConfig)
+    """视频解析专用模型配置"""
+
+    bilibili_vlm: TaskConfig = field(default_factory=TaskConfig)
+    """Bilibili 直播画面识别专用配置"""
 
     def get_task(self, task_name: str) -> TaskConfig:
         """获取指定任务的配置"""

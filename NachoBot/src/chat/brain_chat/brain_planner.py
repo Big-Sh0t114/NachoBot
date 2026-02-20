@@ -178,6 +178,12 @@ class BrainPlanner:
 
         self.last_obs_time_mark = 0.0
 
+    def _check_sandbox_permission(self, user_id: str) -> bool:
+        """Check if user has permission to use sandbox features"""
+        is_admin = str(user_id) in global_config.advanced.admins
+        is_whitelisted = str(user_id) in global_config.bot.sandbox_whitelist
+        return is_admin or is_whitelisted
+
     def find_message_by_id(
         self, message_id: str, message_id_list: List[Tuple[str, "DatabaseMessages"]]
     ) -> Optional["DatabaseMessages"]:
@@ -334,6 +340,7 @@ class BrainPlanner:
                         available_actions=available_actions,
                     )
                     return [action], latest_message
+
         message_id_list: list[Tuple[str, "DatabaseMessages"]] = []
         chat_content_block, message_id_list = build_readable_messages_with_id(
             messages=message_list_before_now,
@@ -468,6 +475,11 @@ class BrainPlanner:
         is_group_chat, chat_target_info = get_chat_type_and_target_info(self.chat_id)
         logger.debug(f"{self.log_prefix}获取到聊天信息 - 群聊: {is_group_chat}, 目标信息: {chat_target_info}")
 
+        # Check permissions and filter actions before they even reach activation logic
+        has_sandbox_permission = False
+        if chat_target_info and chat_target_info.user_id:
+            has_sandbox_permission = self._check_sandbox_permission(chat_target_info.user_id)
+
         current_available_actions_dict = self.action_manager.get_using_actions()
 
         # 获取完整的动作信息
@@ -476,6 +488,8 @@ class BrainPlanner:
         )
         current_available_actions = {}
         for action_name in current_available_actions_dict:
+            if action_name == "file_edit" and not has_sandbox_permission:
+                continue
             if action_name in all_registered_actions:
                 current_available_actions[action_name] = all_registered_actions[action_name]
             else:

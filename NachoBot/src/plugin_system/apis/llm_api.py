@@ -7,7 +7,7 @@
     success, response, reasoning, model_name = await llm_api.generate_with_model(prompt, model_config)
 """
 
-from typing import Tuple, Dict, List, Any, Optional
+from typing import Tuple, Dict, List, Any, Optional, Callable
 from src.common.logger import get_logger
 from src.llm_models.payload_content.tool_option import ToolCall
 from src.llm_models.utils_model import LLMRequest
@@ -120,3 +120,56 @@ async def generate_with_model_with_tools(
         error_msg = f"生成内容时出错: {str(e)}"
         logger.error(f"[LLMAPI] {error_msg}")
         return False, error_msg, "", "", None
+
+
+async def generate_with_filter_retry(
+    prompt: str,
+    model_config: TaskConfig,
+    filter_func: Callable[[str], bool],
+    retry_count: int = 3,
+    request_type: str = "plugin.generate",
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+) -> Tuple[bool, str, str, str]:
+    """使用指定模型配置生成内容，并在内容命中过滤器时尝试使用其他模型重试
+
+    Args:
+        prompt: 提示词
+        model_config: 模型配置
+        filter_func: 过滤函数，接收字符串返回布尔值（True表示需过滤）
+        retry_count: 每个模型的重试次数
+        request_type: 请求类型
+        temperature: 温度参数
+        max_tokens: 最大token数
+
+    Returns:
+        Tuple[bool, str, str, str]: (是否成功, 生成的内容, 推理过程, 模型名称)
+    """
+    from dataclasses import replace
+
+    # 遍历配置中的每个模型
+    for model_name in model_config.model_list:
+        # 构建单模型配置
+        single_model_config = replace(model_config, model_list=[model_name])
+
+        # 当前模型的重试循环
+        for attempt in range(1, retry_count + 1):
+            success, content, reasoning, actual_model = await generate_with_model(
+                prompt, single_model_config, request_type, temperature, max_tokens
+            )
+
+            if not success:
+                # API调用失败，generate_with_model内部已重试过，此处直接跳过当前模型
+                break
+
+            if not filter_func(content):
+                # 生成成功且未命中过滤器
+                return True, content, reasoning, actual_model
+
+            logger.warning(f"[FilterRetry] 内容命中过滤器，重新生成 ({attempt}/{retry_count}) - Model: {model_name}")
+
+        logger.warning(f"[FilterRetry] 模型 {model_name} 多次命中过滤器或调用失败，尝试下一个模型")
+
+    error_msg = "生成内容未通过安全过滤或所有模型调用失败"
+    logger.error(f"[FilterRetry] {error_msg}")
+    return False, error_msg, "", ""

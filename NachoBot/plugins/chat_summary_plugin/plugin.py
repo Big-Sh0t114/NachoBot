@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 from typing import List, Tuple, Optional, Dict
 from collections import Counter
 from PIL import Image
+from openai import AsyncOpenAI
 
 from src.plugin_system import (
     BasePlugin,
@@ -452,6 +453,46 @@ class ChatSummaryCommand(BaseCommand):
 
 直接开始，不要标题。记住：必须在{max_words}字以内完成！"""
 
+            # 检查是否启用自定义模型
+            use_custom_model = self.get_config("custom_model.use_custom_model", False)
+
+            if use_custom_model:
+                try:
+                    logger.info("正在使用自定义模型生成总结...")
+                    api_key = self.get_config("custom_model.api_key", "")
+                    if not api_key or api_key == " ":
+                        logger.warning("自定义模型API密钥未配置，降级使用默认模型")
+                    else:
+                        # 创建OpenAI客户端
+                        client = AsyncOpenAI(
+                            base_url=self.get_config("custom_model.api_url", "https://api.qhaigc.net/v1"),
+                            api_key=api_key,
+                        )
+
+                        # 获取并验证API超时配置
+                        api_timeout = self.get_config("custom_model.api_timeout", 300)
+                        if not (1 <= api_timeout <= 6000):
+                            api_timeout = 300
+
+                        # 调用模型
+                        completion = await client.chat.completions.create(
+                            model=self.get_config("custom_model.model_name", "deepseek-chat"),
+                            messages=[{"role": "user", "content": prompt}],
+                            temperature=self.get_config("custom_model.temperature", 0.7),
+                            timeout=api_timeout,
+                        )
+
+                        if completion.choices and len(completion.choices) > 0:
+                            summary = completion.choices[0].message.content
+                            logger.info(f"自定义模型调用成功: {self.get_config('custom_model.model_name')}")
+                            return summary.strip()
+                        else:
+                            raise RuntimeError("模型返回的响应为空或格式错误")
+
+                except Exception as e:
+                    logger.error(f"自定义模型调用失败: {e}，尝试使用默认模型")
+                    # 继续执行下面的默认逻辑
+
             # 使用LLM生成总结
             # 优先使用高级模式回复模型 (advanced_replyer), 如果未配置则使用主回复模型 (replyer)
             model_task_config = model_config.model_task_config.replyer
@@ -465,24 +506,13 @@ class ChatSummaryCommand(BaseCommand):
 
             from src.plugin_system.apis.send_api import should_filter_text
 
-            max_retries = 3
-            for attempt in range(1, max_retries + 1):
-                success, summary, reasoning, model_name = await llm_api.generate_with_model(
-                    prompt=prompt,
-                    model_config=model_task_config,
-                    request_type="plugin.chat_summary",
-                )
-
-                if not success:
-                    logger.error(f"LLM生成总结失败: {summary}")
-                    return None
-
-                if not should_filter_text(summary):
-                    break
-                logger.warning(f"总结内容命中过滤器，重新生成 ({attempt}/{max_retries})")
-            else:
-                logger.error("总结内容多次命中过滤器，放弃生成")
-                return None
+            success, summary, reasoning, model_name = await llm_api.generate_with_filter_retry(
+                prompt=prompt,
+                model_config=model_task_config,
+                filter_func=should_filter_text,
+                retry_count=3,
+                request_type="plugin.chat_summary",
+            )
 
             if not success:
                 logger.error(f"LLM生成总结失败: {summary}")
@@ -904,24 +934,13 @@ class DailySummaryEventHandler(BaseEventHandler):
 
             from src.plugin_system.apis.send_api import should_filter_text
 
-            max_retries = 3
-            for attempt in range(1, max_retries + 1):
-                success, summary, reasoning, model_name = await llm_api.generate_with_model(
-                    prompt=prompt,
-                    model_config=model_task_config,
-                    request_type="plugin.chat_summary.auto",
-                )
-
-                if not success:
-                    logger.error(f"LLM生成自动总结失败: {summary}")
-                    return None
-
-                if not should_filter_text(summary):
-                    break
-                logger.warning(f"自动总结内容命中过滤器，重新生成 ({attempt}/{max_retries})")
-            else:
-                logger.error("自动总结内容多次命中过滤器，放弃生成")
-                return None
+            success, summary, reasoning, model_name = await llm_api.generate_with_filter_retry(
+                prompt=prompt,
+                model_config=model_task_config,
+                filter_func=should_filter_text,
+                retry_count=3,
+                request_type="plugin.chat_summary.auto",
+            )
 
             if not success:
                 logger.error(f"LLM生成自动总结失败: {summary}")
@@ -941,7 +960,7 @@ class ChatSummaryPlugin(BasePlugin):
     plugin_name: str = "chat_summary_plugin"
     enable_plugin: bool = False
     dependencies: List[str] = []
-    python_dependencies: List[str] = []
+    python_dependencies: List[str] = ["openai"]
     config_file_name: str = "config.toml"
 
     # 配置节描述
@@ -949,6 +968,7 @@ class ChatSummaryPlugin(BasePlugin):
         "plugin": "插件基本信息",
         "summary": "总结功能配置",
         "auto_summary": "自动总结配置",
+        "custom_model": "自定义模型配置",
     }
 
     # 配置Schema定义
@@ -971,6 +991,15 @@ class ChatSummaryPlugin(BasePlugin):
             "timezone": ConfigField(type=str, default="Asia/Shanghai", description="时区设置（需安装pytz模块）"),
             "min_messages": ConfigField(type=int, default=10, description="生成总结所需的最少消息数量"),
             "target_chats": ConfigField(type=list, default=[], description="目标群聊QQ号列表（为空则对所有群聊生效）"),
+        },
+        "custom_model": {
+            "use_custom_model": ConfigField(type=bool, default=False, description="是否使用自定义模型"),
+            "api_url": ConfigField(type=str, default="https://api.qhaigc.net/v1", description="API地址"),
+            "api_key": ConfigField(type=str, default=" ", description="API密钥"),
+            "model_name": ConfigField(type=str, default="deepseek-chat", description="模型名称"),
+            "temperature": ConfigField(type=float, default=0.7, description="生成温度"),
+            "api_timeout": ConfigField(type=int, default=300, description="API超时时间"),
+            "max_context_tokens": ConfigField(type=int, default=114514, description="最大上下文token数"),
         },
     }
 

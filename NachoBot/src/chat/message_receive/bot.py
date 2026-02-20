@@ -351,6 +351,7 @@ class ChatBot:
 
             # Debug Log: Trace incoming platform
             logger.debug(f"Incoming Message Platform: {platform}, Message Type: {message_data.get('type')}")
+            logger.debug(f"Full message data: {message_data}")
 
             if platform == "amaidesu_default":
                 await self.do_s4u(message_data)

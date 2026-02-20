@@ -47,23 +47,26 @@ class ReplyerManager:
         else:
             desired_cls = AdvancedPrivateReplyer if advanced_on else PrivateReplyer
 
+        # 修改缓存键，包含 request_type，防止 file_edit 被普通 replyer 覆盖
+        cache_key = f"{stream_id}_{request_type}"
+
         # 如果已有缓存但类型不匹配，替换；否则沿用缓存
-        cached = self._repliers.get(stream_id)
+        cached = self._repliers.get(cache_key)
         if cached:
             cached_cls = type(cached)
             if cached_cls is desired_cls:
-                logger.debug(f"[ReplyerManager] 为 stream_id '{stream_id}' 返回已存在的回复器实例。")
+                logger.debug(f"[ReplyerManager] 为 cache_key '{cache_key}' 返回已存在的回复器实例。")
                 return cached
             logger.debug(
-                f"[ReplyerManager] stream_id '{stream_id}' 回复器类型切换 {cached_cls.__name__} -> {desired_cls.__name__}，重新创建。"
+                f"[ReplyerManager] cache_key '{cache_key}' 回复器类型切换 {cached_cls.__name__} -> {desired_cls.__name__}，重新创建。"
             )
 
-        logger.debug(f"[ReplyerManager] 为 stream_id '{stream_id}' 创建新的回复器实例并缓存。")
+        logger.debug(f"[ReplyerManager] 为 cache_key '{cache_key}' 创建新的回复器实例并缓存。")
         replyer = desired_cls(
             chat_stream=target_stream,
             request_type=request_type,
         )
-        self._repliers[stream_id] = replyer
+        self._repliers[cache_key] = replyer
         return replyer
 
 

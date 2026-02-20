@@ -18,7 +18,7 @@ from src.chat.brain_chat.brain_planner import BrainPlanner
 from src.chat.planner_actions.action_modifier import ActionModifier
 from src.chat.planner_actions.action_manager import ActionManager
 from src.chat.heart_flow.hfc_utils import CycleDetail
-from src.chat.heart_flow.hfc_utils import send_typing, stop_typing
+
 from src.chat.express.expression_learner import expression_learner_manager
 from src.chat.advanced.advanced_manager import advanced_manager
 from src.chat.keyword_cache import promise_cache_manager
@@ -358,8 +358,10 @@ class BrainChatting:
                     serial_actions.append(action)
 
             if serial_actions:
-                reply_actions = [action for action in serial_actions if action.action_type == "reply"]
-                other_serial_actions = [action for action in serial_actions if action.action_type != "reply"]
+                reply_actions = [action for action in serial_actions if action.action_type in ["reply", "file_edit"]]
+                other_serial_actions = [
+                    action for action in serial_actions if action.action_type not in ["reply", "file_edit"]
+                ]
                 serial_actions = reply_actions + other_serial_actions
 
             results = []
@@ -374,7 +376,7 @@ class BrainChatting:
                     action, action_to_use_info, thinking_id, available_actions, cycle_timers
                 )
                 results.append(result)
-                if action.action_type == "reply" and isinstance(result, dict) and result.get("success"):
+                if action.action_type in ["reply", "file_edit"] and isinstance(result, dict) and result.get("success"):
                     reply_text_for_tts = (result.get("reply_text") or "").strip()
 
             if reply_text_for_tts:
@@ -405,10 +407,10 @@ class BrainChatting:
                     logger.error(f"{self.log_prefix} 动作执行异常: {result}")
                     continue
 
-                if result["action_type"] != "reply":
+                if result["action_type"] not in ["reply", "file_edit"]:
                     action_success = result["success"]
                     action_reply_text = result["reply_text"]
-                elif result["action_type"] == "reply":
+                elif result["action_type"] in ["reply", "file_edit"]:
                     if result["success"]:
                         reply_loop_info = result["loop_info"]
                         reply_text_from_reply = result["reply_text"]
@@ -623,7 +625,8 @@ class BrainChatting:
                         cycle_timers,
                     )
 
-                elif action_planner_info.action_type == "reply":
+                elif action_planner_info.action_type in ["reply", "file_edit"]:
+                    request_type = "file_edit" if action_planner_info.action_type == "file_edit" else "replyer"
                     try:
                         message_text_for_injection = ""
                         if action_planner_info.action_message:
@@ -680,8 +683,8 @@ class BrainChatting:
                             available_actions=filtered_available_actions,
                             chosen_actions=filtered_chosen_actions,
                             reply_reason=action_planner_info.reasoning or "",
-                            enable_tool=enable_tool_flag,
-                            request_type="replyer",
+                            enable_tool=enable_tool_flag or (request_type == "file_edit"),
+                            request_type=request_type,
                             from_plugin=False,
                             extra_info=injection_text,
                         )
@@ -693,11 +696,21 @@ class BrainChatting:
                                 )
                             else:
                                 logger.info("回复生成失败")
-                            return {"action_type": "reply", "success": False, "reply_text": "", "loop_info": None}
+                            return {
+                                "action_type": action_planner_info.action_type,
+                                "success": False,
+                                "reply_text": "",
+                                "loop_info": None,
+                            }
 
                     except asyncio.CancelledError:
                         logger.debug(f"{self.log_prefix} 并行执行：回复生成任务已被取消")
-                        return {"action_type": "reply", "success": False, "reply_text": "", "loop_info": None}
+                        return {
+                            "action_type": action_planner_info.action_type,
+                            "success": False,
+                            "reply_text": "",
+                            "loop_info": None,
+                        }
                     response_set = llm_response.reply_set
                     selected_expressions = llm_response.selected_expressions
                     loop_info, reply_text, _ = await self._send_and_store_reply(
@@ -709,7 +722,7 @@ class BrainChatting:
                         selected_expressions=selected_expressions,
                     )
                     return {
-                        "action_type": "reply",
+                        "action_type": action_planner_info.action_type,
                         "success": True,
                         "reply_text": reply_text,
                         "loop_info": loop_info,
@@ -731,7 +744,7 @@ class BrainChatting:
                         not success
                         and action_planner_info.action_type == "send_artwork"
                         and "未检测到明确的看画请求" in (reply_text or "")
-                        and not any(action.action_type == "reply" for action in chosen_action_plan_infos)
+                        and not any(action.action_type in ["reply", "file_edit"] for action in chosen_action_plan_infos)
                         and action_planner_info.action_message
                     ):
                         logger.info(f"{self.log_prefix} 画作请求未明确，改为文本回复")
