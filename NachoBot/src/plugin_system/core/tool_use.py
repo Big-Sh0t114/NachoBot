@@ -168,6 +168,71 @@ class ToolExecutor:
             prompt=prompt, tools=tools, raise_when_empty=False
         )
 
+        # 动态模型切换逻辑：如果普通模型决定调用文件相关工具，强制切换为 file_edit 模型重新生成
+        if tool_calls and self.llm_model.request_type != "file_edit":
+            file_tool_names = {
+                "read_file",
+                "write_file",
+                "list_files",
+                "execute_python_code",
+                "search_file",
+                "replace_file_content",
+            }
+            if any(call.func_name in file_tool_names for call in tool_calls):
+                logger.info(
+                    f"{self.log_prefix} 检测到文件操作意图(如 {tool_calls[0].func_name})，强制切换至 file_edit 模型重新生成以保证代码质量！"
+                )
+
+                original_tool_calls = tool_calls
+                file_edit_model_set = getattr(
+                    model_config.model_task_config, "file_edit", self.llm_model.model_for_task
+                )
+                file_edit_llm = LLMRequest(model_set=file_edit_model_set, request_type="file_edit")
+
+                bot_info = global_config.personality
+                rule_addition = (
+                    f"\n\n你的人设是：\n{bot_info.personality}\n"
+                    f"【核心编码规则】当涉及编写代码、调试或专业功能说明时，你必须进入“认真模式”。\n"
+                    f"代码的底层算法、语法结构和逻辑必须100%严谨规范，不可带有任何“笨笨的”或无条理的特征。\n"
+                    f"但是，你必须将你的人设无缝融入代码的“观感层”：请使用可爱的风格来命名变量/函数（在符合命名规范的前提下），并使用慵懒傲娇的语气和颜文字来编写代码注释。\n"
+                    f"代码文件中不要刻意提及以上内容。"
+                )
+
+                file_edit_prompt = (
+                    prompt
+                    + rule_addition
+                    + "\n\n【系统强制指令】：你必须且只能使用提供的文件工具（如 write_file）输出最终内容。绝对不要仅在回复中输出纯文本代码片段！"
+                )
+                logger.info(f"{self.log_prefix} 工具执行器已动态切换模型: {file_edit_model_set.model_list}")
+                logger.info(f"{self.log_prefix} ------------- file_edit 模型原始 Prompt 开始 -------------")
+                logger.info(f"\n{file_edit_prompt}")
+                logger.info(f"{self.log_prefix} ------------- file_edit 模型原始 Prompt 结束 -------------")
+                response, (reasoning_content, model_name, new_tool_calls) = await file_edit_llm.generate_response_async(
+                    prompt=file_edit_prompt, tools=tools, raise_when_empty=False
+                )
+
+                if new_tool_calls:
+                    tool_calls = new_tool_calls
+                else:
+                    logger.warning(
+                        f"{self.log_prefix} file_edit 模型未正确调用工具，尝试从 response 中提取代码块并强行注入原工具调用！"
+                    )
+                    import re
+
+                    code_match = re.search(r"```(?:\w+)?\n(.*?)```", response, re.DOTALL)
+                    extracted_content = code_match.group(1).strip() if code_match else response.strip()
+
+                    # 强行将内容塞回给原本意图（gpt-4o-mini 分析出的 tool_call）
+                    for call in original_tool_calls:
+                        if call.func_name in ["write_file", "replace_file_content"] and isinstance(call.args, dict):
+                            if "content" in call.args:
+                                call.args["content"] = extracted_content
+                            elif "replacementContent" in call.args:
+                                call.args["replacementContent"] = extracted_content
+                            logger.info(f"{self.log_prefix} 已成功将提取出的代码注入到 {call.func_name} 工具链中。")
+
+                    tool_calls = original_tool_calls
+
         # 执行工具调用
         tool_results, used_tools = await self.execute_tool_calls(tool_calls)
 
@@ -320,12 +385,13 @@ class ToolExecutor:
             # 执行工具
             result = await tool_instance.execute(function_args)
             if result:
+                content_val = result.get("content", result.get("error", str(result)))
                 return {
                     "tool_call_id": tool_call.call_id,
                     "role": "tool",
                     "name": function_name,
                     "type": "function",
-                    "content": result["content"],
+                    "content": str(content_val),
                 }
             return None
         except Exception as e:

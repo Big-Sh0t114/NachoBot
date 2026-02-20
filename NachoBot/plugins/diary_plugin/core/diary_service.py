@@ -14,7 +14,7 @@
 import datetime
 import random
 import time
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Callable
 
 from openai import AsyncOpenAI
 from .utils import get_bot_personality, DiaryConstants
@@ -200,7 +200,9 @@ class DiaryService:
             logger.error(f"自定义模型调用失败: {e}")
             return False, f"自定义模型调用出错: {str(e)}"
 
-    async def _generate_with_default_model(self, prompt: str, timeline: str) -> Tuple[bool, str]:
+    async def _generate_with_default_model(
+        self, prompt: str, timeline: str, filter_func: Callable[[str], bool] | None = None
+    ) -> Tuple[bool, str]:
         try:
             max_tokens = DiaryConstants.TOKEN_LIMIT_50K
             current_tokens = self._estimate_tokens(timeline)
@@ -211,13 +213,27 @@ class DiaryService:
             model = models.get("replyer")
             if not model:
                 return False, "未找到默认模型: replyer"
-            success, diary_content, _, _ = await llm_api.generate_with_model(
-                prompt=prompt,
-                model_config=model,
-                request_type="plugin.diary_generation",
-            )
-            if not success or not diary_content:
-                return False, "默认模型生成日记失败"
+
+            if filter_func:
+                success, diary_content, _, _ = await llm_api.generate_with_filter_retry(
+                    prompt=prompt,
+                    model_config=model,
+                    filter_func=filter_func,
+                    retry_count=3,
+                    request_type="plugin.diary_generation",
+                )
+                if not success:
+                    # diary_content contains error message if success is False
+                    return False, diary_content or "默认模型生成日记失败"
+            else:
+                success, diary_content, _, _ = await llm_api.generate_with_model(
+                    prompt=prompt,
+                    model_config=model,
+                    request_type="plugin.diary_generation",
+                )
+                if not success or not diary_content:
+                    return False, "默认模型生成日记失败"
+
             return True, diary_content
         except Exception as e:
             logger.error(f"默认模型调用失败: {e}")
@@ -321,22 +337,26 @@ class DiaryService:
             use_custom_model = self.get_config("custom_model.use_custom_model", False)
             from src.plugin_system.apis.send_api import should_filter_text
 
-            max_retries = 3
-            for attempt in range(1, max_retries + 1):
-                if use_custom_model:
+            if use_custom_model:
+                max_retries = 3
+                for attempt in range(1, max_retries + 1):
                     success, diary_content = await self._generate_with_custom_model(prompt)
+
+                    if not success or not diary_content:
+                        return False, diary_content or "模型生成日记失败"
+
+                    if not should_filter_text(diary_content):
+                        break
+                    logger.warning(f"日记内容命中过滤器，重新生成 ({attempt}/{max_retries})")
                 else:
-                    success, diary_content = await self._generate_with_default_model(prompt, timeline)
-
-                if not success or not diary_content:
-                    return False, diary_content or "模型生成日记失败"
-
-                if not should_filter_text(diary_content):
-                    break
-                logger.warning(f"日记内容命中过滤器，重新生成 ({attempt}/{max_retries})")
+                    logger.error("日记内容多次命中过滤器，放弃生成")
+                    return False, "日记内容未通过安全过滤"
             else:
-                logger.error("日记内容多次命中过滤器，放弃生成")
-                return False, "日记内容未通过安全过滤"
+                success, diary_content = await self._generate_with_default_model(
+                    prompt, timeline, filter_func=should_filter_text
+                )
+                if not success:
+                    return False, diary_content or "默认模型生成日记失败"
 
             if not success or not diary_content:
                 return False, diary_content or "模型生成日记失败"

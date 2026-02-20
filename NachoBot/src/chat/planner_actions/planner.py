@@ -349,6 +349,7 @@ class ActionPlanner:
                         available_actions=available_actions,
                     )
                     return [action], latest_message
+
         message_id_list: list[Tuple[str, "DatabaseMessages"]] = []
         chat_content_block, message_id_list = build_readable_messages_with_id(
             messages=message_list_before_now,

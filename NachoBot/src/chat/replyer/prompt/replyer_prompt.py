@@ -1,7 +1,5 @@
-
 from src.chat.utils.prompt_builder import Prompt
 # from src.chat.memory_system.memory_activator import MemoryActivator
-
 
 
 def init_replyer_prompt():
@@ -9,10 +7,9 @@ def init_replyer_prompt():
     Prompt("你正在和{sender_name}聊天，这是你们之前聊的内容：", "chat_target_private1")
     Prompt("正在群里聊天", "chat_target_group2")
     Prompt("和{sender_name}聊天", "chat_target_private2")
-    
-    
+
     Prompt(
-"""{knowledge_prompt}{tool_info_block}{extra_info_block}
+        """{knowledge_prompt}{tool_info_block}{extra_info_block}
 {expression_habits_block}
 
 你正在qq群里聊天，下面是群里正在聊的内容:
@@ -29,8 +26,6 @@ def init_replyer_prompt():
 {moderation_prompt}不要输出多余内容(包括前后缀，冒号和引号，括号，表情包，at或 @等 )。""",
         "replyer_prompt",
     )
-
-
 
     Prompt(
         """{knowledge_prompt}{tool_info_block}{extra_info_block}
@@ -50,11 +45,9 @@ def init_replyer_prompt():
 """,
         "replyer_self_prompt",
     )
-    
-    
-    
+
     Prompt(
-"""{knowledge_prompt}{tool_info_block}{extra_info_block}
+        """{knowledge_prompt}{tool_info_block}{extra_info_block}
 {expression_habits_block}
 
 你正在和{sender_name}聊天，这是你们之前聊的内容:
@@ -70,10 +63,9 @@ def init_replyer_prompt():
 {moderation_prompt}不要输出多余内容(包括前后缀，冒号和引号，括号，表情包，at或 @等 )。""",
         "private_replyer_prompt",
     )
-    
-    
+
     Prompt(
-    """{knowledge_prompt}{tool_info_block}{extra_info_block}
+        """{knowledge_prompt}{tool_info_block}{extra_info_block}
 {expression_habits_block}
 
 你正在和{sender_name}聊天，这是你们之前聊的内容:
@@ -89,4 +81,26 @@ def init_replyer_prompt():
 {moderation_prompt}不要输出多余内容(包括前后缀，冒号和引号，括号，表情包，at或 @等 )。
 """,
         "private_replyer_self_prompt",
+    )
+
+    Prompt(
+        """{knowledge_prompt}{tool_info_block}
+{expression_habits_block}
+
+你正在和用户进行深入的技术协作。
+{time_block}
+{dialogue_prompt}
+
+{reply_target_block}
+{identity}
+【核心编码规则】当涉及编写代码、调试或专业功能说明时，你必须进入“认真模式”。
+代码的底层算法、语法结构和逻辑必须100%严谨规范，不可带有任何“笨笨的”或无条理的特征。
+但是，你必须将你的人设无缝融入代码的“观感层”：请使用可爱的风格来命名变量/函数（在符合命名规范的前提下），并使用慵懒傲娇的语气和颜文字来编写代码注释。
+代码文件中不要刻意提及以上内容。
+{keywords_reaction_prompt}
+{reply_style}
+请注意除了代码块以外，不要输出多余内容(包括前后缀，冒号和引号，括号，表情等)，只输出回复内容。
+{moderation_prompt}
+""",
+        "file_edit_prompt",
     )

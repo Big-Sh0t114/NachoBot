@@ -300,7 +300,11 @@ class MessageHandler:
                     else:
                         logger.warning("record处理失败或不支持")
                 case RealMessageType.video:
-                    logger.warning("不支持视频解析")
+                    ret_seg = await self.handle_video_message(sub_message)
+                    if ret_seg:
+                        seg_message.append(ret_seg)
+                    else:
+                        logger.warning("video处理失败")
                 case RealMessageType.at:
                     ret_seg = await self.handle_at_message(
                         sub_message,
@@ -332,6 +336,12 @@ class MessageHandler:
                         logger.warning("转发消息处理失败")
                 case RealMessageType.node:
                     logger.warning("不支持转发消息节点解析")
+                case RealMessageType.file:
+                    ret_seg = await self.handle_file_message(sub_message)
+                    if ret_seg:
+                        seg_message.append(ret_seg)
+                    else:
+                        logger.warning("file处理失败")
                 case _:
                     logger.warning(f"未知消息类型: {sub_message_type}")
         return seg_message, additional_config
@@ -444,6 +454,57 @@ class MessageHandler:
             logger.error("语音消息处理失败，未获取到音频数据")
             return None
         return Seg(type="voice", data=audio_base64)
+
+    async def handle_file_message(self, raw_message: dict) -> Seg | None:
+        """
+        处理文件消息
+        Parameters:
+            raw_message: dict: 原始消息
+        Returns:
+            seg_data: Seg: 处理后的消息段
+        """
+        message_data: dict = raw_message.get("data")
+        # NapCat/OneBot11 usually provides 'path', 'url', 'file_id', 'file' keys in data
+        # We need to extract what we can.
+
+        # Log validation for debugging
+        logger.debug(f"Handling file message data: {message_data}")
+
+        # Construct a data dict to pass to core
+        file_info = {
+            "name": message_data.get("file") or message_data.get("name") or "unknown_file",
+            "url": message_data.get("url"),
+            "path": message_data.get("path"),
+            "file_id": message_data.get("file_id"),
+            "size": message_data.get("size") or message_data.get("file_size"),
+        }
+
+        # Ensure we have at least a path or url to be useful
+        if not file_info["url"] and not file_info["path"]:
+            # Try to see if 'file' is unique id and we can get url?
+            # For now, just pass what we have, core might handle it or we might need `get_file` API.
+            pass
+
+        return Seg(type="file", data=file_info)
+
+    async def handle_video_message(self, raw_message: dict) -> Seg | None:
+        """
+        处理视频消息
+        Parameters:
+            raw_message: dict: 原始消息
+        Returns:
+            seg_data: Seg: 处理后的消息段
+        """
+        message_data: dict = raw_message.get("data")
+        logger.debug(f"Handling video message data: {message_data}")
+        file_info = {
+            "name": message_data.get("file") or message_data.get("name") or "unknown_video.mp4",
+            "url": message_data.get("url"),
+            "path": message_data.get("path"),
+            "file_size": message_data.get("file_size"),
+            "file_id": message_data.get("file_id"),
+        }
+        return Seg(type="video", data=file_info)
 
     async def handle_reply_message(self, raw_message: dict, additional_config: dict) -> Tuple[List[Seg] | None, dict]:
         # sourcery skip: move-assign-in-block, use-named-expression

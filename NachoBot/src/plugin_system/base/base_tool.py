@@ -39,16 +39,16 @@ class BaseTool(ABC):
         Returns:
             dict: 工具定义字典
         """
-        if not cls.name or not cls.description or not cls.parameters:
-            raise NotImplementedError(f"工具类 {cls.__name__} 必须定义 name, description 和 parameters 属性")
+        if not cls.name or not cls.description:
+            raise NotImplementedError(f"工具类 {cls.__name__} 必须定义 name, description 属性")
 
         return {"name": cls.name, "description": cls.description, "parameters": cls.parameters}
 
     @classmethod
     def get_tool_info(cls) -> ToolInfo:
         """获取工具信息"""
-        if not cls.name or not cls.description or not cls.parameters:
-            raise NotImplementedError(f"工具类 {cls.__name__} 必须定义 name, description 和 parameters 属性")
+        if not cls.name or not cls.description:
+            raise NotImplementedError(f"工具类 {cls.__name__} 必须定义 name, description 属性")
 
         return ToolInfo(
             name=cls.name,

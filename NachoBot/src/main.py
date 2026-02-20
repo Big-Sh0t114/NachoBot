@@ -77,6 +77,12 @@ class MainSystem:
         # 加载所有actions，包括默认的和插件的
         plugin_manager.load_all_plugins()
 
+        # 注册沙盒工具（核心功能）
+        from src.chat.sandbox.sandbox_tools import register_sandbox_tools
+
+        register_sandbox_tools()
+        logger.info("沙盒工具注册成功")
+
         # 初始化表情管理器
         get_emoji_manager().initialize()
         logger.info("表情包管理器初始化成功")
@@ -129,9 +135,12 @@ class MainSystem:
 
     async def schedule_tasks(self):
         """调度定时任务"""
+        from src.chat.sandbox.sandbox_manager import sandbox_manager
+
         while True:
             tasks = [
                 get_emoji_manager().start_periodic_check_register(),
+                sandbox_manager.start_periodic_cleanup(),
                 self.app.run(),
                 self.server.run(),
             ]
