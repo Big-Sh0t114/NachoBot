@@ -73,6 +73,23 @@ class MessageBuilder:
         self.__content.append((image_format, image_base64))
         return self
 
+    def add_video_content(
+        self,
+        video_format: str,
+        video_base64: str,
+    ) -> "MessageBuilder":
+        """
+        添加视频内容
+        :param video_format: 视频格式
+        :param video_base64: 视频的base64编码
+        :return: MessageBuilder对象
+        """
+        if not video_base64:
+            raise ValueError("视频的base64编码不能为空")
+        # 使用三个元素的元组标记这是视频
+        self.__content.append(("video", video_format, video_base64))
+        return self
+
     def add_tool_call(self, tool_call_id: str) -> "MessageBuilder":
         """
         添加工具调用指令（调用时请确保已设置为Tool角色）

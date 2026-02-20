@@ -8,10 +8,14 @@ from rich.traceback import install
 from typing import Optional, Any, List
 from ncnk_message import Seg, UserInfo, BaseMessageInfo, MessageBase
 
+import os
+from pathlib import Path
+
 from src.common.logger import get_logger
 from src.config.config import global_config
 from src.chat.utils.utils_image import get_image_manager
 from src.chat.utils.utils_voice import get_voice_text
+from src.chat.sandbox.sandbox_manager import sandbox_manager
 from .chat_stream import ChatStream
 
 install(extra_lines=3)
@@ -142,6 +146,7 @@ class MessageRecv(Message):
         self.is_picid = False
         self.has_picid = False
         self.is_voice = False
+        self.is_video = False
         self.is_mentioned = None
         self.is_at = False
         self.reply_probability_boost = 0.0
@@ -167,6 +172,59 @@ class MessageRecv(Message):
         """
         self.processed_plain_text = await self._process_message_segments(self.message_segment)
 
+    async def _save_file_to_sandbox(self, file_data: str, filename: str) -> str:
+        """Save file data to sandbox and return local path
+        Args:
+            file_data: Can be a URL, base64 string, or local path (if from adapter).
+                       For now, we assume it might be a URL/Path from the adapter.
+            filename: The name of the file
+        """
+        if not self.chat_stream:
+            return ""
+
+        try:
+            import httpx
+
+            sandbox = sandbox_manager.get_sandbox(self.chat_stream.stream_id)
+
+            # Case 1: URL
+            if file_data.startswith("http"):
+                async with httpx.AsyncClient() as client:
+                    # Check size first using HEAD
+                    head_resp = await client.head(file_data)
+                    if head_resp.status_code == 200:
+                        content_length = int(head_resp.headers.get("Content-Length", 0))
+                        if content_length > 1048576:  # 1MB
+                            raise ValueError(f"File exceeds 1MB limit ({content_length} bytes)")
+
+                    resp = await client.get(file_data)
+                    if resp.status_code == 200:
+                        # Fallback size check just in case HEAD didn't give Content-Length
+                        if len(resp.content) > 1048576:
+                            raise ValueError(f"File exceeds 1MB limit ({len(resp.content)} bytes)")
+                        return sandbox.save_file(resp.content, filename)
+
+            # Case 2: Local Path (already on disk, e.g. from OneBot/NapCat)
+            # If the adapter saves it somewhere, we might just copy it or leave it.
+            # But sandbox implies isolation. Let's copy it.
+            elif os.path.exists(file_data):
+                if os.path.getsize(file_data) > 1048576:  # 1MB limit
+                    raise ValueError(f"Local file exceeds 1MB limit ({os.path.getsize(file_data)} bytes)")
+
+                with open(file_data, "rb") as f:
+                    content = f.read()
+                return sandbox.save_file(content, filename)
+
+            # Case 3: Base64 (Legacy/Other) - To be implemented if needed
+
+        except ValueError as ve:
+            # Re-raise ValueError so _process_single_segment can catch it specifically for size limits
+            raise ve
+        except Exception as e:
+            logger.error(f"Failed to save file to sandbox: {e}")
+
+        return ""
+
     async def _process_single_segment(self, segment: Seg) -> str:
         """处理单个消息段
 
@@ -177,7 +235,65 @@ class MessageRecv(Message):
             str: 处理后的文本
         """
         try:
-            if segment.type == "screen":
+            if segment.type == "file":
+                # Data format expected: {"url": "...", "name": "...", "size": ...} or just url string?
+                # Adapters usually give a dict for file.
+
+                file_name = "unknown_file"
+                file_url = ""
+
+                if isinstance(segment.data, dict):
+                    file_name = segment.data.get("name", f"file_{int(time.time())}")
+                    file_url = segment.data.get("url", "")
+                    # Some adapters might use 'path' or 'file'
+                    if not file_url:
+                        file_url = segment.data.get("path") or segment.data.get("file")
+                elif isinstance(segment.data, str):
+                    # If it's a string, assume it's url/path
+                    file_url = segment.data
+                    file_name = Path(file_url).name
+
+                # Check whitelist first
+                user_id = ""
+                if hasattr(self, "message_info") and self.message_info:
+                    if self.message_info.sender_info:
+                        user_id = str(self.message_info.sender_info.user_id)
+                    elif self.message_info.user_info:
+                        user_id = str(self.message_info.user_info.user_id)
+
+                if not user_id or user_id not in global_config.bot.sandbox_whitelist:
+                    logger.warning(f"用户 {user_id} 不在沙盒白名单中，拒绝自动保存文件: {file_name}")
+                    return f"[接收到文件: {file_name}，但发送者不在沙盒白名单，已忽略自动保存]"
+
+                if file_url:
+                    try:
+                        saved_path = await self._save_file_to_sandbox(str(file_url), str(file_name))
+                        if saved_path:
+                            # Store in a new attribute 'files' if we want to track it
+                            if not hasattr(self, "files"):
+                                self.files = []
+                            self.files.append(saved_path)
+
+                            # Auto-preview small text files (< 3KB)
+                            preview_text = ""
+                            try:
+                                if os.path.exists(saved_path) and os.path.getsize(saved_path) < 3072:
+                                    with open(saved_path, "r", encoding="utf-8") as f:
+                                        content = f.read()
+                                        if content:
+                                            preview_text = f"\n[自动预览]:\n{content}"
+                            except Exception:
+                                pass  # Not a text file or read error
+
+                            return f"[文件: {file_name} (已保存到沙盒)]{preview_text}"
+                        else:
+                            return f"[文件: {file_name} (下载失败)]"
+                    except ValueError as ve:
+                        logger.warning(f"用户 {user_id} 上传的文件 {file_name} 超过大小限制: {ve}")
+                        return f"[接收到文件: {file_name}，但文件大小超过1MB限制，已丢弃]"
+                return f"[文件: {file_name}]"
+
+            elif segment.type == "screen":
                 # Update ScreenManager even in Normal Mode, but don't show as text
                 try:
                     from src.mais4u.mais4u_chat.screen_manager import screen_manager
@@ -224,9 +340,23 @@ class MessageRecv(Message):
                 self.is_picid = False
                 self.is_emoji = False
                 self.is_voice = True
+                self.is_video = False
                 if isinstance(segment.data, str):
                     return await get_voice_text(segment.data)
                 return "[发了一段语音，网卡了加载不出来]"
+            elif segment.type == "video":
+                self.is_picid = False
+                self.is_emoji = False
+                self.is_voice = False
+                self.is_video = True
+                try:
+                    from src.chat.utils.utils_video import get_video_manager
+
+                    manager = get_video_manager()
+                    return await manager.process_video(segment.data)  # type: ignore
+                except Exception as e:
+                    logger.error(f"处理视频段失败: {e}")
+                    return "[视频(接收失败)]"
             elif segment.type == "mention_bot":
                 self.is_picid = False
                 self.is_emoji = False
@@ -326,9 +456,24 @@ class MessageRecvS4U(MessageRecv):
                 self.is_picid = False
                 self.is_emoji = False
                 self.is_voice = True
+                self.is_video = False
                 if isinstance(segment.data, str):
                     return await get_voice_text(segment.data)
                 return "[发了一段语音，网卡了加载不出来]"
+            elif segment.type == "video":
+                self.has_picid = False
+                self.is_picid = False
+                self.is_emoji = False
+                self.is_voice = False
+                self.is_video = True
+                try:
+                    from src.chat.utils.utils_video import get_video_manager
+
+                    manager = get_video_manager()
+                    return await manager.process_video(segment.data)  # type: ignore
+                except Exception as e:
+                    logger.error(f"处理视频段失败: {e}")
+                    return "[视频(接收失败)]"
             elif segment.type == "mention_bot":
                 self.is_voice = False
                 self.is_picid = False
@@ -449,6 +594,8 @@ class MessageProcessBase(Message):
                 if isinstance(segment.data, str):
                     return await get_voice_text(segment.data)
                 return "[发了一段语音，网卡了加载不出来]"
+            elif segment.type == "video":
+                return "[引用了一段视频]"
             elif segment.type == "at":
                 return f"[@{segment.data}]"
             elif segment.type == "reply":

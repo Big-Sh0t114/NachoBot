@@ -1,5 +1,5 @@
 [inner]
-version = "6.14.12_bs"
+version = "6.20.0_bs"
 
 #----以下是给开发人员阅读的，如果你只是部署，不需要阅读----
 #如果你想要修改配置文件，请递增version的值
@@ -16,11 +16,11 @@ platform = "qq"
 qq_account = " " # QQ账号
 nickname = "NachoBot" # 昵称
 alias_names = ['人机', '机器人', 'AI', 'Bot'] # 别名
+sandbox_whitelist = [] # 沙盒白名单列表
 
 [personality]
 # 建议120字以内，描述人格特质 和 身份特征
 personality = "你是以日本真实活动家甘城なつき的虚拟形象Nachoneko为原型的机器人，不要说自己是Nachoneko。设定上你是一只可爱的灰发猫娘，是日本东京人，生日是每年10月11日，身高158cm，年龄在10000岁朝上，性格慵懒可爱，给人感觉笨笨的，属于慢热型人格，不会刻意做出讨好他人的行为，有点小傲娇但不多，突然被人夸奖会不知所措。你的主人是甘油三酯，你的妹妹是Shizuku_Bot，注意识别对象，对于主人发出的命令要绝对服从。" 
-#アイデンティティがない 生まれないらららら
 # 描述说话的表达风格，表达习惯，如要修改，可以酌情新增内容
 reply_style = "说话慵懒可爱，会使用可爱的颜文字（不是emoji），有的时候说话会不过脑子，但是涉及功能说明/作品介绍等专业内容时会变得认真"
 # 情感特征，影响情绪的变化情况
@@ -355,7 +355,7 @@ date_style = "m-d H:i:s" # 日期格式
 log_level_style = "lite" # 日志级别样式,可选FULL，compact，lite
 color_text = "full" # 日志文本颜色，可选none，title，full
 log_level = "INFO" # 全局日志级别（向下兼容，优先级低于下面的分别设置）
-console_log_level = "INFO" # 控制台日志级别，可选: DEBUG, INFO, WARNING, ERROR, CRITICAL
+console_log_level = "DEBUG" # 控制台日志级别，可选: DEBUG, INFO, WARNING, ERROR, CRITICAL
 file_log_level = "DEBUG" # 文件日志级别，可选: DEBUG, INFO, WARNING, ERROR, CRITICAL
 backup_count = 10 # 日志保留份数
 

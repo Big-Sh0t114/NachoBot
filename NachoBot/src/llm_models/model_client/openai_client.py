@@ -61,12 +61,20 @@ def _convert_messages(messages: list[Message]) -> list[ChatCompletionMessagePara
             content = []
             for item in message.content:
                 if isinstance(item, tuple):
-                    content.append(
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/{item[0].lower()};base64,{item[1]}"},
-                        }
-                    )
+                    if len(item) == 3 and item[0] == "video":
+                        content.append(
+                            {
+                                "type": "video_url",
+                                "video_url": {"url": f"data:video/{item[1].lower()};base64,{item[2]}"},
+                            }
+                        )
+                    else:
+                        content.append(
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/{item[0].lower()};base64,{item[1]}"},
+                            }
+                        )
                 elif isinstance(item, str):
                     content.append({"type": "text", "text": item})
         else:

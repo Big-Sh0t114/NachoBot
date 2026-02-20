@@ -55,7 +55,11 @@ class PrivateReplyer:
         chat_stream: ChatStream,
         request_type: str = "replyer",
     ):
-        self.express_model = LLMRequest(model_set=model_config.model_task_config.replyer, request_type=request_type)
+        model_set = model_config.model_task_config.replyer
+        if request_type == "file_edit":
+            model_set = getattr(model_config.model_task_config, "file_edit", model_set)
+        self.express_model = LLMRequest(model_set=model_set, request_type=request_type)
+        self.request_type = request_type
         self.chat_stream = chat_stream
         self.is_group_chat, self.chat_target_info = get_chat_type_and_target_info(self.chat_stream.stream_id)
         self.heart_fc_sender = UniversalMessageSender()
@@ -63,9 +67,17 @@ class PrivateReplyer:
 
         from src.plugin_system.core.tool_use import ToolExecutor  # 延迟导入ToolExecutor，不然会循环依赖
 
-        # 标准工具执行器 (使用默认 tool_use 模型，排除 MCP 工具)
+        tool_model_set = model_config.model_task_config.tool_use
+        if request_type == "file_edit":
+            tool_model_set = getattr(model_config.model_task_config, "file_edit", tool_model_set)
+
+        # 标准工具执行器 (排除 MCP 工具)
         self.tool_executor = ToolExecutor(
-            chat_id=self.chat_stream.stream_id, enable_cache=True, cache_ttl=3, exclude_prefix="mcp"
+            chat_id=self.chat_stream.stream_id,
+            enable_cache=True,
+            cache_ttl=3,
+            exclude_prefix="mcp",
+            model_set=tool_model_set,
         )
 
         # MCP 工具执行器 (使用 mcp 模型，只包含 MCP 工具)
@@ -908,8 +920,12 @@ class PrivateReplyer:
         reply_target_block = f"现在对方说的:{target}。引起了你的注意"
 
         if global_config.bot.qq_account == user_id and platform == global_config.bot.platform:
+            template_name = "private_replyer_self_prompt"
+            if hasattr(self, "request_type") and self.request_type == "file_edit":
+                template_name = "file_edit_prompt"
+
             return await global_prompt_manager.format_prompt(
-                "private_replyer_self_prompt",
+                template_name,
                 expression_habits_block=expression_habits_block,
                 tool_info_block=tool_info,
                 knowledge_prompt=prompt_info,
@@ -929,8 +945,12 @@ class PrivateReplyer:
                 moderation_prompt=moderation_prompt_block,
             ), selected_expressions
         else:
+            template_name = "private_replyer_prompt"
+            if hasattr(self, "request_type") and self.request_type == "file_edit":
+                template_name = "file_edit_prompt"
+
             return await global_prompt_manager.format_prompt(
-                "private_replyer_prompt",
+                template_name,
                 expression_habits_block=expression_habits_block,
                 tool_info_block=tool_info,
                 knowledge_prompt=prompt_info,
