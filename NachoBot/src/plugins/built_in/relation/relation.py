@@ -89,6 +89,10 @@ class BuildRelationAction(BaseAction):
         "对方与有明确提到有关其自身的事件",
         "对方有提到其个人信息，包括喜好，身份，等等",
         "对方希望你记住对方的信息",
+        "对方分享了日常生活、经历或故事",
+        "对方表达了情绪、态度或观点",
+        "对方提到了自己的习惯、爱好或特长",
+        "对方透露了工作、学习或生活中的细节",
     ]
 
     # 关联类型
@@ -104,8 +108,7 @@ class BuildRelationAction(BaseAction):
             person_name = self.action_data.get("person_name", "")
             # 2. 获取目标用户信息
             if (
-                self.platform == global_config.bot.platform
-                and self.user_id == global_config.bot.qq_account
+                self.platform == global_config.bot.platform and self.user_id == global_config.bot.qq_account
             ) or person_name == global_config.bot.nickname:
                 logger.info(f"{self.log_prefix} 目标为 bot，跳过添加记忆")
                 return False, "目标为 bot，跳过添加记忆"
@@ -230,9 +233,7 @@ class BuildRelationAction(BaseAction):
             try:
                 update_memory_data = json.loads(repair_json(update_memory))
             except Exception as e:
-                logger.warning(
-                    f"{self.log_prefix} 解析记忆更新结果失败: {e}, raw={update_memory!r}，直接添加新记忆"
-                )
+                logger.warning(f"{self.log_prefix} 解析记忆更新结果失败: {e}, raw={update_memory!r}，直接添加新记忆")
                 person.memory_points.append(f"{category}:{impression}:1.0")
                 person.sync_to_database()
                 return True, "记忆更新解析失败，已直接添加新记忆"
