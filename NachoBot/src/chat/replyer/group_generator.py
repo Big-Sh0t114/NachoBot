@@ -355,7 +355,83 @@ class DefaultReplyer:
             person_relation = await person.build_relationship()
             others_relation += person_relation
 
-        return f"{sender_relation}\n{others_relation}"
+        # 跨用户记忆检索：检测聊天内容中被提及的其他已知用户
+        mentioned_relation = ""
+        try:
+            from src.person_info.person_info import person_info_manager
+
+            bot_name = global_config.bot.nickname
+            # 收集已处理过的 person_id，避免重复
+            processed_ids = set()
+            if person and hasattr(person, "person_id"):
+                processed_ids.add(person.person_id)
+            for p in person_list:
+                if hasattr(p, "person_id"):
+                    processed_ids.add(p.person_id)
+
+            # 简单分词：按常见分隔符切分聊天内容
+            import re as _re
+
+            chat_words = _re.split(r'[\s,，。！？!?\n:：;；""' '""]+', chat_content)
+            chat_words = [w for w in chat_words if len(w) >= 2]
+
+            mentioned_persons = []
+            # 收集所有 person_id -> [候选名称] 用于匹配
+            all_candidates: dict = {}  # pid -> set of names to match against
+            for pid, pname in person_info_manager.person_name_list.items():
+                if pid in processed_ids:
+                    continue
+                if pname and pname != bot_name and len(pname) >= 2:
+                    all_candidates.setdefault(pid, set()).add(pname)
+            for pid, nickname in person_info_manager.person_nickname_list.items():
+                if pid in processed_ids:
+                    continue
+                if nickname and nickname != bot_name and len(nickname) >= 2:
+                    all_candidates.setdefault(pid, set()).add(nickname)
+
+            for pid, names in all_candidates.items():
+                if pid in processed_ids:
+                    continue
+
+                # 双向子串匹配（person_name 和 nickname 任一命中即可）
+                matched = False
+                for name in names:
+                    # 正向：名称出现在聊天内容中
+                    if name in chat_content:
+                        matched = True
+                        break
+                    # 反向：聊天中的某个词是名称的子串（长度≥2）
+                    for word in chat_words:
+                        if word in name and len(word) >= 2:
+                            matched = True
+                            break
+                    if matched:
+                        break
+
+                if matched:
+                    try:
+                        mp = Person(person_id=pid)
+                        if mp.is_known:
+                            mentioned_persons.append(mp)
+                            processed_ids.add(pid)
+                    except Exception:
+                        pass
+
+                if len(mentioned_persons) >= 3:
+                    break
+
+            # 构建被提及用户的记忆信息
+            for mp in mentioned_persons:
+                try:
+                    mp_relation = await mp.build_relationship(chat_content)
+                    if mp_relation:
+                        mentioned_relation += mp_relation + "\n"
+                except Exception as e:
+                    logger.debug(f"构建被提及用户 {mp.person_name} 的关系信息失败: {e}")
+        except Exception as e:
+            logger.warning(f"跨用户记忆检索失败: {e}")
+
+        return f"{sender_relation}\n{others_relation}{mentioned_relation}"
 
     async def build_expression_habits(self, chat_history: str, target: str) -> Tuple[str, List[int]]:
         # sourcery skip: for-append-to-extend
@@ -1097,7 +1173,7 @@ class DefaultReplyer:
                 tool_info_block=tool_info,
                 knowledge_prompt=prompt_info,
                 memory_retrieval=memory_block,
-                # relation_info_block=relation_info,
+                relation_info_block=relation_info,
                 extra_info_block=extra_info_block,
                 identity=personality_prompt,
                 action_descriptions=actions_info,
@@ -1122,7 +1198,7 @@ class DefaultReplyer:
                 tool_info_block=tool_info,
                 knowledge_prompt=prompt_info,
                 memory_retrieval=memory_block,
-                # relation_info_block=relation_info,
+                relation_info_block=relation_info,
                 extra_info_block=extra_info_block,
                 identity=personality_prompt,
                 action_descriptions=actions_info,
