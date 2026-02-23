@@ -232,16 +232,19 @@ class ActivePokeAction(BaseAction):
             return fallback_user_id, group_id
 
         # 通过poke_keywords匹配群聊上下文消息内容，获取发送者user_id
-        if group_id:
-            user_id = await self.napcat_get_user_id_from_group_history_by_msg(poke_keywords, group_id)
-            # 若未匹配到，则降级用群成员名单模糊匹配
-            if not user_id:
-                user_id = await self.napcat_get_group_member_id_by_name(poke_keywords, group_id)
+        if poke_keywords.isdigit():
+            user_id = poke_keywords
         else:
-            user_id = await self.napcat_get_user_id_by_name(poke_keywords)
-        # group_id 仍为空时，尝试通过数据库群列表接口获取
-        if not group_id:
-            group_id = await self.napcat_get_group_id_by_name(poke_keywords)
+            if group_id:
+                user_id = await self.napcat_get_user_id_from_group_history_by_msg(poke_keywords, group_id)
+                # 若未匹配到，则降级用群成员名单模糊匹配
+                if not user_id:
+                    user_id = await self.napcat_get_group_member_id_by_name(poke_keywords, group_id)
+            else:
+                user_id = await self.napcat_get_user_id_by_name(poke_keywords)
+            # group_id 仍为空时，尝试通过数据库群列表接口获取
+            if not group_id:
+                group_id = await self.napcat_get_group_id_by_name(poke_keywords)
 
         # Napcat未查到user_id时，降级用core属性
         if not user_id:

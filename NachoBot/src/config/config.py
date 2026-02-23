@@ -16,6 +16,7 @@ from src.config.official_configs import (
     BotConfig,
     PersonalityConfig,
     ExpressionConfig,
+    MemoryConfig,
     ChatConfig,
     EmojiConfig,
     MoodConfig,
@@ -367,6 +368,7 @@ class Config(ConfigBase):
     debug: DebugConfig
     voice: VoiceConfig
     advanced: AdvancedConfig
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
     response_filter: ResponseFilterConfig = field(default_factory=ResponseFilterConfig)
     injections: InjectionConfig = field(default_factory=InjectionConfig)
 
