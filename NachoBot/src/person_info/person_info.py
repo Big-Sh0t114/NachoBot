@@ -18,7 +18,9 @@ from src.config.config import global_config, model_config
 
 logger = get_logger("person_info")
 
-relation_selection_model = LLMRequest(model_set=model_config.model_task_config.utils_small, request_type="relation_selection")
+relation_selection_model = LLMRequest(
+    model_set=model_config.model_task_config.utils_small, request_type="relation_selection"
+)
 
 
 def get_person_id(platform: str, user_id: Union[int, str]) -> str:
@@ -92,9 +94,10 @@ def extract_categories_from_response(response: str) -> list[str]:
     """从response中提取所有<>包裹的内容"""
     if not isinstance(response, str):
         return []
-    
+
     import re
-    pattern = r'<([^<>]+)>'
+
+    pattern = r"<([^<>]+)>"
     matches = re.findall(pattern, response)
     return matches
 
@@ -511,7 +514,7 @@ class Person:
         except Exception as e:
             logger.error(f"同步用户 {self.person_id} 信息到数据库时出错: {e}")
 
-    async def build_relationship(self,chat_content:str = "",info_type = ""):
+    async def build_relationship(self, chat_content: str = "", info_type=""):
         if not self.is_known:
             return ""
         # 构建points文本
@@ -524,7 +527,7 @@ class Person:
 
         points_text = ""
         category_list = self.get_all_category()
-      
+
         if chat_content:
             relevant_points = self.get_relevant_memories(chat_content, max_num=2)
             if relevant_points:
@@ -602,6 +605,7 @@ class Person:
 class PersonInfoManager:
     def __init__(self):
         self.person_name_list = {}
+        self.person_nickname_list = {}  # person_id -> nickname (平台昵称)
         self.qv_name_llm = LLMRequest(model_set=model_config.model_task_config.utils, request_type="relation.qv_name")
         try:
             db.connect(reuse_if_open=True)
@@ -615,14 +619,18 @@ class PersonInfoManager:
         except Exception as e:
             logger.error(f"数据库连接或 PersonInfo 表创建失败: {e}")
 
-        # 初始化时读取所有person_name
+        # 初始化时读取所有person_name和nickname
         try:
-            for record in PersonInfo.select(PersonInfo.person_id, PersonInfo.person_name).where(
+            for record in PersonInfo.select(PersonInfo.person_id, PersonInfo.person_name, PersonInfo.nickname).where(
                 PersonInfo.person_name.is_null(False)
             ):
                 if record.person_name:
                     self.person_name_list[record.person_id] = record.person_name
-            logger.debug(f"已加载 {len(self.person_name_list)} 个用户名称 (Peewee)")
+                if record.nickname:
+                    self.person_nickname_list[record.person_id] = record.nickname
+            logger.debug(
+                f"已加载 {len(self.person_name_list)} 个用户名称, {len(self.person_nickname_list)} 个昵称 (Peewee)"
+            )
         except Exception as e:
             logger.error(f"从 Peewee 加载 person_name_list 失败: {e}")
 

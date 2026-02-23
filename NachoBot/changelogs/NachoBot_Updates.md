@@ -1,4 +1,5 @@
-2/23
+2/24
+    加入跨用户记忆检索
     修复了尝试对notice信息build_reply的bug
 2/22
     记忆系统更新，吸收了上游Maibot的ChatHistorySummarizer来总结记忆并通过{memory_retrieval}板块注入提示词
@@ -6,7 +7,7 @@
     完成了伪Agent方案的实现
     核心加入对video信息的处理解析
     完成以上模式对Discord的适配
-    重构Koishi-Adapter
+    重构Koishi-Adapter，将过长的主程序文件拆分为多个子模块
     修复Discord侧的语音适配
 2/20
     参考AstrBot的Agent沙盒，模拟了一套伪Agent方案，使得bot能自行阅读编辑文件并发送给用户
@@ -50,7 +51,6 @@
     为Discord语音频道配置独立prompt
 1/26
     Bilibili适配器与MaiBot s4u直播相关代码对接
-        礼物/上舰/VIP队列等事件，未经过测试 (财力不足)
     Bilibili直播接入可选的TTS回复以及语音识别，同时打印中文字幕
     优化Bilibili Adapter整体架构
 1/25

@@ -32,6 +32,7 @@ from src.chat.utils.chat_message_builder import (
     get_raw_msg_before_timestamp_with_chat,
 )
 from src.memory_system.chat_history_summarizer import ChatHistorySummarizer
+from src.chat.heart_flow.relation_scanner import RelationScanner
 
 if TYPE_CHECKING:
     from src.common.data_models.database_data_model import DatabaseMessages
@@ -108,6 +109,7 @@ class HeartFChatting:
 
         # 聊天内容概括器
         self.chat_history_summarizer = ChatHistorySummarizer(chat_id=self.stream_id)
+        self.relation_scanner = RelationScanner(chat_id=self.stream_id)
 
         self.no_reply_until_call = False
 
@@ -128,6 +130,7 @@ class HeartFChatting:
 
             # 启动聊天内容概括器的后台定期检查循环
             await self.chat_history_summarizer.start()
+            await self.relation_scanner.start()
 
             logger.info(f"{self.log_prefix} HeartFChatting 启动完成")
 
