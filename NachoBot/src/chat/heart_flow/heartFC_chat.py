@@ -31,6 +31,7 @@ from src.chat.utils.chat_message_builder import (
     build_readable_messages_with_id,
     get_raw_msg_before_timestamp_with_chat,
 )
+from src.memory_system.chat_history_summarizer import ChatHistorySummarizer
 
 if TYPE_CHECKING:
     from src.common.data_models.database_data_model import DatabaseMessages
@@ -102,6 +103,11 @@ class HeartFChatting:
         self.last_read_time = time.time() - 2
 
         self.talk_threshold = global_config.chat.get_talk_value_for_chat(self.stream_id)
+        # 跟踪连续 no_reply 次数，用于动态调整阈值
+        self.consecutive_no_reply_count = 0
+
+        # 聊天内容概括器
+        self.chat_history_summarizer = ChatHistorySummarizer(chat_id=self.stream_id)
 
         self.no_reply_until_call = False
 
@@ -119,6 +125,10 @@ class HeartFChatting:
 
             self._loop_task = asyncio.create_task(self._main_chat_loop())
             self._loop_task.add_done_callback(self._handle_loop_completion)
+
+            # 启动聊天内容概括器的后台定期检查循环
+            await self.chat_history_summarizer.start()
+
             logger.info(f"{self.log_prefix} HeartFChatting 启动完成")
 
         except Exception as e:
@@ -296,86 +306,138 @@ class HeartFChatting:
 
             cycle_timers, thinking_id = self.start_cycle()
             logger.info(f"{self.log_prefix} 开始第{self._cycle_counter}次思考")
-            # 第一步：动作检查
-            available_actions: Dict[str, ActionInfo] = {}
-            try:
-                await self.action_modifier.modify_actions()
-                available_actions = self.action_manager.get_using_actions()
-            except Exception as e:
-                logger.error(f"{self.log_prefix} 动作修改失败: {e}")
 
-            # 执行planner
-            is_group_chat, chat_target_info, _ = self.action_planner.get_necessary_info()
-            context_size = global_config.chat.get_max_context_size(is_group_chat=is_group_chat)
+            # 优先检测是不是通知戳戳，直接旁路 (跳过Bilibili平台，因为不支持且不适用)
+            if len(recent_messages_list) > 0 and getattr(self.chat_stream, "platform", "") not in (
+                "bilibili",
+                "bilibili.live",
+            ):
+                latest_msg = recent_messages_list[-1]
+                if getattr(latest_msg, "is_notify", False) and random.random() < 0.5:
+                    logger.info(f"{self.log_prefix} 检测到戳戳动作，50%概率触发 active_poke")
+                    action_data = {"loop_start_time": self.last_read_time}
+                    if user_info := getattr(latest_msg, "user_info", None):
+                        if user_id := getattr(user_info, "user_id", None):
+                            action_data["poke_keywords"] = str(user_id)
 
-            message_list_before_now = get_raw_msg_before_timestamp_with_chat(
-                chat_id=self.stream_id,
-                timestamp=time.time(),
-                limit=int(context_size * 0.6),
-            )
-            promise_snippets = []
-            if not self.chat_stream.group_info:  # 群聊不启用誓言缓存
-                promise_snippets = promise_cache_manager.collect_snippets_for_messages(
-                    self.stream_id, message_list_before_now
-                )
-            chat_content_block, message_id_list = build_readable_messages_with_id(
-                messages=message_list_before_now,
-                timestamp_mode="normal_no_YMD",
-                read_mark=self.action_planner.last_obs_time_mark,
-                truncate=True,
-                show_actions=True,
-            )
-            if promise_snippets:
-                promise_block = "\n".join(["[约定缓存]"] + promise_snippets)
-                chat_content_block = f"{promise_block}\n----\n{chat_content_block}"
-
-            prompt_info = await self.action_planner.build_planner_prompt(
-                is_group_chat=is_group_chat,
-                chat_target_info=chat_target_info,
-                current_available_actions=available_actions,
-                chat_content_block=chat_content_block,
-                message_id_list=message_id_list,
-                interest=global_config.personality.interest,
-            )
-            continue_flag, modified_message = await events_manager.handle_mai_events(
-                EventType.ON_PLAN, None, prompt_info[0], None, self.chat_stream.stream_id
-            )
-            if not continue_flag:
-                return False
-            if modified_message and modified_message._modify_flags.modify_llm_prompt:
-                prompt_info = (modified_message.llm_prompt, prompt_info[1])
-
-            # Bypass planner for Bilibili Live (Group Chat) AND Discord Voice Channel
-            # Both need low latency and simple reply/no-reply logic
-            if (is_group_chat and self.chat_stream.platform == "bilibili") or self.chat_stream.platform == "discord_vc":
-                logger.info(f"{self.log_prefix} [HFC] Bypassing Planner for {self.chat_stream.platform}")
-                # Skip bot's own messages to prevent self-reply loops
-                bot_id = str(global_config.bot.qq_account)
-                target_msg = None
-                if message_list_before_now:
-                    for msg in reversed(message_list_before_now):
-                        if str(msg.user_info.user_id) != bot_id:
-                            target_msg = msg
-                            break
-                if target_msg is None:
-                    logger.info(f"{self.log_prefix} [HFC] No non-bot message found, skipping reply")
-                    return True
-
-                action_to_use_info = [
-                    ActionPlannerInfo(
-                        action_type="reply",
-                        reasoning="Bilibili Live Bypass: Direct Reply",
+                    poke_action = ActionPlannerInfo(
+                        action_type="active_poke",
+                        reasoning="检测到戳戳动作，依据50%概率触发回复戳戳",
+                        action_data=action_data,
+                        action_message=latest_msg,
+                        available_actions={},
+                    )
+                    no_reply_action = ActionPlannerInfo(
+                        action_type="no_reply",
+                        reasoning="已触发回复戳戳，不需要语言回复",
                         action_data={},
-                        action_message=target_msg,
-                        available_actions=available_actions,
+                        action_message=latest_msg,
+                        available_actions={},
                     )
-                ]
+                    action_to_use_info = [poke_action, no_reply_action]
+
+                    # 假装执行了后面的逻辑，直接跳转到后面动作执行部分
+                    # 需要模拟剩下的几个变量
+                    available_actions = {
+                        "active_poke": ActionInfo(
+                            name="active_poke",
+                            component_type=None,  # type: ignore
+                            description="",
+                            action_require=[],
+                            parallel_action=True,
+                        )
+                    }
+                    is_group_chat = bool(self.chat_stream.group_info)
+                    force_reply_message = None
+                    pass  # 这只是为了不打乱下面的缩进，实际上我们会把整个大块包进 else 里或者使用 goto，最好是用 if-else 包装后续的生成
+                else:
+                    poke_action = None
             else:
-                with Timer("规划器", cycle_timers):
-                    action_to_use_info, _ = await self.action_planner.plan(
-                        loop_start_time=self.last_read_time,
-                        available_actions=available_actions,
+                poke_action = None
+
+            if not poke_action:
+                # 第一步：动作检查
+                available_actions: Dict[str, ActionInfo] = {}
+                try:
+                    await self.action_modifier.modify_actions()
+                    available_actions = self.action_manager.get_using_actions()
+                except Exception as e:
+                    logger.error(f"{self.log_prefix} 动作修改失败: {e}")
+
+                # 执行planner
+                is_group_chat, chat_target_info, _ = self.action_planner.get_necessary_info()
+                context_size = global_config.chat.get_max_context_size(is_group_chat=is_group_chat)
+
+                message_list_before_now = get_raw_msg_before_timestamp_with_chat(
+                    chat_id=self.stream_id,
+                    timestamp=time.time(),
+                    limit=int(context_size * 0.6),
+                )
+                promise_snippets = []
+                if not self.chat_stream.group_info:  # 群聊不启用誓言缓存
+                    promise_snippets = promise_cache_manager.collect_snippets_for_messages(
+                        self.stream_id, message_list_before_now
                     )
+                chat_content_block, message_id_list = build_readable_messages_with_id(
+                    messages=message_list_before_now,
+                    timestamp_mode="normal_no_YMD",
+                    read_mark=self.action_planner.last_obs_time_mark,
+                    truncate=True,
+                    show_actions=True,
+                )
+                if promise_snippets:
+                    promise_block = "\n".join(["[约定缓存]"] + promise_snippets)
+                    chat_content_block = f"{promise_block}\n----\n{chat_content_block}"
+
+                prompt_info = await self.action_planner.build_planner_prompt(
+                    is_group_chat=is_group_chat,
+                    chat_target_info=chat_target_info,
+                    current_available_actions=available_actions,
+                    chat_content_block=chat_content_block,
+                    message_id_list=message_id_list,
+                    interest=global_config.personality.interest,
+                )
+                continue_flag, modified_message = await events_manager.handle_mai_events(
+                    EventType.ON_PLAN, None, prompt_info[0], None, self.chat_stream.stream_id
+                )
+                if not continue_flag:
+                    return False
+                if modified_message and modified_message._modify_flags.modify_llm_prompt:
+                    prompt_info = (modified_message.llm_prompt, prompt_info[1])
+
+                # Bypass planner for Bilibili Live (Group Chat) AND Discord Voice Channel
+                # Both need low latency and simple reply/no-reply logic
+                if (
+                    is_group_chat and self.chat_stream.platform == "bilibili"
+                ) or self.chat_stream.platform == "discord_vc":
+                    logger.info(f"{self.log_prefix} [HFC] Bypassing Planner for {self.chat_stream.platform}")
+                    # Skip bot's own messages to prevent self-reply loops
+                    bot_id = str(global_config.bot.qq_account)
+                    target_msg = None
+                    if message_list_before_now:
+                        for msg in reversed(message_list_before_now):
+                            if str(msg.user_info.user_id) != bot_id:
+                                target_msg = msg
+                                break
+                    if target_msg is None:
+                        logger.info(f"{self.log_prefix} [HFC] No non-bot message found, skipping reply")
+                        return True
+
+                    action_to_use_info = [
+                        ActionPlannerInfo(
+                            action_type="reply",
+                            reasoning="Bilibili Live Bypass: Direct Reply",
+                            action_data={},
+                            action_message=target_msg,
+                            available_actions=available_actions,
+                        )
+                    ]
+                else:
+                    with Timer("规划器", cycle_timers):
+                        action_to_use_info, _ = await self.action_planner.plan(
+                            loop_start_time=self.last_read_time,
+                            available_actions=available_actions,
+                        )
 
             has_reply = False
             _reply_equivalent = {"reply", "make_appoint", "cancel_appoint"}

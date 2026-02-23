@@ -494,15 +494,8 @@ class ChatSummaryCommand(BaseCommand):
                     # 继续执行下面的默认逻辑
 
             # 使用LLM生成总结
-            # 优先使用高级模式回复模型 (advanced_replyer), 如果未配置则使用主回复模型 (replyer)
+            # 默认使用主回复模型 (replyer)
             model_task_config = model_config.model_task_config.replyer
-
-            if (
-                model_config.model_task_config.advanced_replyer
-                and model_config.model_task_config.advanced_replyer.model_list
-            ):
-                model_task_config = model_config.model_task_config.advanced_replyer
-                logger.info(f"使用高级模式模型组进行总结: {model_task_config.model_list}")
 
             from src.plugin_system.apis.send_api import should_filter_text
 
@@ -921,16 +914,49 @@ class DailySummaryEventHandler(BaseEventHandler):
 
 直接开始，不要标题。记住：必须在{max_words}字以内完成！"""
 
-            # 使用LLM生成总结
-            # 优先使用高级模式回复模型 (advanced_replyer), 如果未配置则使用主回复模型 (replyer)
-            model_task_config = model_config.model_task_config.replyer
+            # 检查是否启用自定义模型
+            use_custom_model = self.get_config("custom_model.use_custom_model", False)
 
-            if (
-                model_config.model_task_config.advanced_replyer
-                and model_config.model_task_config.advanced_replyer.model_list
-            ):
-                model_task_config = model_config.model_task_config.advanced_replyer
-                logger.info(f"使用高级模式模型组进行自动总结: {model_task_config.model_list}")
+            if use_custom_model:
+                try:
+                    logger.info("自动总结正在使用自定义模型...")
+                    api_key = self.get_config("custom_model.api_key", "")
+                    if not api_key or api_key == " ":
+                        logger.warning("自定义模型API密钥未配置，降级使用默认模型")
+                    else:
+                        # 创建OpenAI客户端
+                        client = AsyncOpenAI(
+                            base_url=self.get_config("custom_model.api_url", "https://api.qhaigc.net/v1"),
+                            api_key=api_key,
+                        )
+
+                        # 获取并验证API超时配置
+                        api_timeout = self.get_config("custom_model.api_timeout", 300)
+                        if not (1 <= api_timeout <= 6000):
+                            api_timeout = 300
+
+                        # 调用模型
+                        completion = await client.chat.completions.create(
+                            model=self.get_config("custom_model.model_name", "deepseek-chat"),
+                            messages=[{"role": "user", "content": prompt}],
+                            temperature=self.get_config("custom_model.temperature", 0.7),
+                            timeout=api_timeout,
+                        )
+
+                        if completion.choices and len(completion.choices) > 0:
+                            summary = completion.choices[0].message.content
+                            logger.info(f"自动总结自定义模型调用成功: {self.get_config('custom_model.model_name')}")
+                            return summary.strip()
+                        else:
+                            raise RuntimeError("模型返回的响应为空或格式错误")
+
+                except Exception as e:
+                    logger.error(f"自定义模型自动总结调用失败: {e}，尝试使用默认模型")
+                    # 继续执行下面的默认逻辑
+
+            # 使用LLM生成总结
+            # 默认使用主回复模型 (replyer)
+            model_task_config = model_config.model_task_config.replyer
 
             from src.plugin_system.apis.send_api import should_filter_text
 

@@ -1,3 +1,7 @@
+2/23
+    修复了尝试对notice信息build_reply的bug
+2/22
+    记忆系统更新，吸收了上游Maibot的ChatHistorySummarizer来总结记忆并通过{memory_retrieval}板块注入提示词
 2/21
     完成了伪Agent方案的实现
     核心加入对video信息的处理解析
@@ -16,6 +20,7 @@
     加入Live2d互动，用鼠标侧键点击可模拟戳一戳行为
 2/12
     修改核心来适配Bilibili直播中遇到的高频请求
+    更新mus_library曲库
 2/11
     Live2D框架优化
 2/10

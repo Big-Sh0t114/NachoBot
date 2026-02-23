@@ -30,7 +30,7 @@ class SendMessageHandleClass:
         new_payload = payload
         if seg.type == "reply":
             target_id = seg.data
-            if target_id == "notice":
+            if isinstance(target_id, str) and (target_id.startswith("notice") or target_id.startswith("send_api_")):
                 return payload
             new_payload = cls.build_payload(payload, cls.handle_reply_message(target_id), True)
         elif seg.type == "text":
@@ -207,9 +207,9 @@ class SendMessageHandleClass:
         if not encoded_video:
             logger.error("视频数据为空")
             return {}
-            
+
         logger.info(f"处理视频消息，数据长度: {len(encoded_video)} 字符")
-        
+
         return {
             "type": "video",
             "data": {"file": f"base64://{encoded_video}"},
