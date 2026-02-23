@@ -202,6 +202,50 @@ class MessageReceiveConfig(ConfigBase):
 
 
 @dataclass
+class MemoryConfig(ConfigBase):
+    """记忆配置类"""
+
+    max_agent_iterations: int = 5
+    """Agent最多迭代轮数（最低为1）"""
+
+    agent_timeout_seconds: float = 120.0
+    """Agent超时时间（秒）"""
+
+    global_memory: bool = False
+    """是否允许记忆检索在聊天记录中进行全局查询（忽略当前chat_id，仅对 search_chat_history 等工具生效）"""
+
+    global_memory_blacklist: list[str] = field(default_factory=lambda: [])
+    """
+    全局记忆黑名单，当启用全局记忆时，不将特定聊天流纳入检索
+    格式: ["platform:id:type", ...]
+    
+    示例:
+    [
+        "qq:1919810:private",  # 排除特定私聊
+        "qq:114514:group",     # 排除特定群聊
+    ]
+    
+    说明:
+    - 当启用全局记忆时，黑名单中的聊天流不会被检索
+    - 当在黑名单中的聊天流进行查询时，仅使用该聊天流的本地记忆
+    """
+
+    planner_question: bool = True
+    """
+    是否使用 Planner 提供的 question 作为记忆检索问题
+    - True: 当 Planner 在 reply 动作中提供了 question 时，直接使用该问题进行记忆检索，跳过 LLM 生成问题的步骤
+    - False: 沿用旧模式，使用 LLM 生成问题
+    """
+
+    def __post_init__(self):
+        """验证配置值"""
+        if self.max_agent_iterations < 1:
+            raise ValueError(f"max_agent_iterations 必须至少为1，当前值: {self.max_agent_iterations}")
+        if self.agent_timeout_seconds <= 0:
+            raise ValueError(f"agent_timeout_seconds 必须大于0，当前值: {self.agent_timeout_seconds}")
+
+
+@dataclass
 class ExpressionConfig(ConfigBase):
     """表达配置类"""
 

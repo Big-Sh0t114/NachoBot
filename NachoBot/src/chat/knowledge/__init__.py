@@ -81,3 +81,7 @@ def lpmm_start_up():  # sourcery skip: extract-duplicate-method
     else:
         logger.info("LPMM知识库已禁用，跳过初始化")
         # 创建空的占位符对象，避免导入错误
+
+
+def get_qa_manager():
+    return qa_manager

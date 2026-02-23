@@ -669,11 +669,16 @@ class MessageSending(MessageProcessBase):
     def build_reply(self):
         """设置回复消息"""
         if self.reply:
-            self.reply_to_message_id = self.reply.message_info.message_id
+            msg_id = self.reply.message_info.message_id
+            # 跳过非平台消息（如 notice 戳一戳、send_api 内部消息），这些没有有效的平台消息 ID
+            if isinstance(msg_id, str) and (msg_id.startswith("notice") or msg_id.startswith("send_api_")):
+                logger.debug(f"跳过引用回复：message_id '{msg_id}' 不是有效的平台消息ID")
+                return
+            self.reply_to_message_id = msg_id
             self.message_segment = Seg(
                 type="seglist",
                 data=[
-                    Seg(type="reply", data=self.reply.message_info.message_id),  # type: ignore
+                    Seg(type="reply", data=msg_id),  # type: ignore
                     self.message_segment,
                 ],
             )

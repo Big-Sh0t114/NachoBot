@@ -9,6 +9,7 @@ from src.common.logger import get_logger
 def _load_peewee():
     try:
         import peewee
+
         return peewee
     except ModuleNotFoundError:
         repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -26,15 +27,14 @@ def _load_peewee():
             if os.path.isdir(path) and path not in sys.path:
                 sys.path.insert(0, path)
         import peewee
+
         return peewee
 
 
 try:
     _peewee = _load_peewee()
 except ModuleNotFoundError as exc:
-    raise ModuleNotFoundError(
-        "缺少 peewee 依赖，请先安装: pip install peewee 或使用项目 .venv 运行。"
-    ) from exc
+    raise ModuleNotFoundError("缺少 peewee 依赖，请先安装: pip install peewee 或使用项目 .venv 运行。") from exc
 
 Model = _peewee.Model
 DoubleField = _peewee.DoubleField
@@ -45,6 +45,8 @@ FloatField = _peewee.FloatField
 DateTimeField = _peewee.DateTimeField
 
 logger = get_logger("database_model")
+
+
 class BaseModel(Model):
     class Meta:
         # 将下面的 'db' 替换为您实际的数据库实例变量名。
@@ -366,6 +368,45 @@ class GraphEdges(BaseModel):
         table_name = "graph_edges"
 
 
+class ChatHistory(BaseModel):
+    """
+    用于存储聊天历史概括的模型
+    """
+
+    chat_id = TextField(index=True)  # 聊天ID
+    start_time = DoubleField()  # 起始时间
+    end_time = DoubleField()  # 结束时间
+    original_text = TextField()  # 对话原文
+    participants = TextField()  # 参与的所有人的昵称，JSON格式存储
+    theme = TextField()  # 主题：这段对话的主要内容，一个简短的标题
+    keywords = TextField()  # 关键词：这段对话的关键词，JSON格式存储
+    summary = TextField()  # 概括：对这段话的平文本概括
+    key_point = TextField(null=True)  # 关键信息：话题中的关键信息点，JSON格式存储
+    count = IntegerField(default=0)  # 被检索次数
+    forget_times = IntegerField(default=0)  # 被遗忘检查的次数
+
+    class Meta:
+        table_name = "chat_history"
+
+
+class ThinkingBack(BaseModel):
+    """
+    用于存储记忆检索思考过程的模型
+    """
+
+    chat_id = TextField(index=True)  # 聊天ID
+    question = TextField()  # 提出的问题
+    context = TextField(null=True)  # 上下文信息
+    found_answer = BooleanField(default=False)  # 是否找到答案
+    answer = TextField(null=True)  # 答案内容
+    thinking_steps = TextField(null=True)  # 思考步骤（JSON格式）
+    create_time = DoubleField()  # 创建时间
+    update_time = DoubleField()  # 更新时间
+
+    class Meta:
+        table_name = "thinking_back"
+
+
 def create_tables():
     """
     创建所有在模型中定义的数据库表。
@@ -385,6 +426,8 @@ def create_tables():
                 GraphNodes,  # 添加图节点表
                 GraphEdges,  # 添加图边表
                 ActionRecords,  # 添加 ActionRecords 到初始化列表
+                ChatHistory,
+                ThinkingBack,
             ]
         )
 
@@ -412,6 +455,8 @@ def initialize_database(sync_constraints=False):
         GraphNodes,
         GraphEdges,
         ActionRecords,  # 添加 ActionRecords 到初始化列表
+        ChatHistory,
+        ThinkingBack,
     ]
 
     try:
@@ -509,6 +554,8 @@ def sync_field_constraints():
         GraphNodes,
         GraphEdges,
         ActionRecords,
+        ChatHistory,
+        ThinkingBack,
     ]
 
     try:
@@ -693,6 +740,8 @@ def check_field_constraints():
         GraphNodes,
         GraphEdges,
         ActionRecords,
+        ChatHistory,
+        ThinkingBack,
     ]
 
     inconsistencies = {}
@@ -748,11 +797,14 @@ def check_field_constraints():
         logger.exception(f"检查字段约束时出错: {e}")
 
     return inconsistencies
+
+
 def fix_image_id():
     """
     修复表情包的 image_id 字段
     """
     import uuid
+
     try:
         with db:
             for img in Images.select():
@@ -762,6 +814,7 @@ def fix_image_id():
                     logger.info(f"已为表情包 {img.id} 生成新的 image_id: {img.image_id}")
     except Exception as e:
         logger.exception(f"修复 image_id 时出错: {e}")
+
 
 # 模块加载时调用初始化函数
 initialize_database(sync_constraints=True)
