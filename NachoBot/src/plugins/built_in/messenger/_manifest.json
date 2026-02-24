@@ -1,0 +1,37 @@
+{
+    "manifest_version": 1,
+    "name": "信使插件 (Messenger)",
+    "version": "1.0.0",
+    "description": "转告消息插件 - 当用户请求转告时，自动将消息转发到目标用户的私聊",
+    "author": {
+        "name": "BigSh0t",
+        "url": "https://github.com/BigSh0t"
+    },
+    "license": "GPL-v3.0-or-later",
+    "host_application": {
+        "min_version": "0.10.0"
+    },
+    "repository_url": "https://github.com/BigSh0t/Nacho-with-u",
+    "keywords": [
+        "转告",
+        "传话",
+        "信使",
+        "messenger"
+    ],
+    "categories": [
+        "communication"
+    ],
+    "default_locale": "zh-CN",
+    "locales_path": "_locales",
+    "plugin_info": {
+        "is_built_in": true,
+        "plugin_type": "event_handler",
+        "components": [
+            {
+                "type": "event_handler",
+                "name": "messenger_handler",
+                "description": "监听消息并处理转告请求"
+            }
+        ]
+    }
+}

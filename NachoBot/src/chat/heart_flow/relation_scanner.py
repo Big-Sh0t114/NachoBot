@@ -18,6 +18,7 @@ from src.person_info.person_info import (
     Person,
     get_memory_content_from_memory,
     get_weight_from_memory,
+    person_info_manager,
 )
 from src.chat.message_receive.chat_stream import get_chat_manager
 from src.chat.utils.prompt_builder import Prompt, global_prompt_manager
@@ -129,7 +130,7 @@ def init_prompt():
 class RelationScanner:
     """关系扫描器：周期性扫描聊天消息，自动提取用户印象"""
 
-    def __init__(self, chat_id: str, check_interval: int = 120, message_threshold: int = 100):
+    def __init__(self, chat_id: str, check_interval: int = 120, message_threshold: int = 50):
         self.chat_id = chat_id
         self._chat_display_name = self._get_chat_display_name()
         self.log_prefix = f"[{self._chat_display_name}]"
@@ -219,10 +220,14 @@ class RelationScanner:
         )
 
         if not new_messages or len(new_messages) < self.message_threshold:
+            logger.info(
+                f"{self.log_prefix} 关系扫描器检查 | 累积消息: {len(new_messages) if new_messages else 0} 条 | "
+                f"未达阈值 {self.message_threshold}，跳过"
+            )
             return
 
         logger.info(
-            f"{self.log_prefix} 关系扫描触发 | 累积消息: {len(new_messages)} 条 | "
+            f"{self.log_prefix} 对满 {self.message_threshold} 条对话开启记忆扫描与更新 | 累积消息: {len(new_messages)} 条 | "
             f"时间窗口: {self.last_scan_time:.0f} -> {current_time:.0f}"
         )
 
@@ -262,7 +267,7 @@ class RelationScanner:
 
             # 处理该用户
             try:
-                await self._process_user_messages(platform, user_id, messages)
+                await self._process_user_messages(platform, user_id, messages, new_messages)
                 self._recently_scanned_users[person_key] = current_time
                 processed_count += 1
             except Exception as e:
@@ -271,7 +276,7 @@ class RelationScanner:
         if processed_count > 0:
             logger.info(f"{self.log_prefix} 关系扫描完成 | 处理了 {processed_count} 个用户")
 
-    async def _process_user_messages(self, platform: str, user_id: str, messages: list):
+    async def _process_user_messages(self, platform: str, user_id: str, messages: list, all_messages: list = None):
         """处理单个用户的消息，提取印象并写入记忆"""
 
         # 获取 Person
@@ -329,6 +334,42 @@ class RelationScanner:
             except Exception as e:
                 logger.error(f"{self.log_prefix} 存储印象失败: {e}", exc_info=True)
 
+        # 用完整对话（含 bot 回复）更新 nickname
+        if all_messages:
+            try:
+                full_conversation = build_readable_messages(
+                    all_messages,
+                    replace_bot_name=True,
+                    timestamp_mode="normal_no_YMD",
+                    read_mark=0.0,
+                    truncate=True,
+                    show_actions=False,
+                )
+                if full_conversation.strip():
+                    # 从消息列表获取用户最新的平台昵称和群名片
+                    latest_nickname = ""
+                    cardname = ""
+                    for msg in reversed(messages):
+                        try:
+                            latest_nickname = msg.user_info.user_nickname or ""
+                            cardname = getattr(msg.user_info, "user_cardname", "") or ""
+                            if latest_nickname:
+                                break
+                        except Exception:
+                            pass
+
+                    asyncio.create_task(
+                        person_info_manager.qv_person_name(
+                            person_id=person.person_id,
+                            user_nickname=latest_nickname,
+                            user_cardname=cardname,
+                            user_avatar="",
+                            request=full_conversation[:1000],
+                        )
+                    )
+            except Exception as e:
+                logger.error(f"{self.log_prefix} 更新用户 {person_name} 昵称失败: {e}", exc_info=True)
+
     async def _categorize_and_store(self, person: Person, impression: str):
         """对一条印象进行分类并存储（复用 BuildRelationAction 的逻辑）"""
 
@@ -361,7 +402,7 @@ class RelationScanner:
             # 直接新增
             person.memory_points.append(f"{category}:{impression}:1.0")
             person.sync_to_database()
-            logger.info(f"{self.log_prefix} 为 {person_name} 新增记忆点 [{category}]: {impression}")
+            logger.info(f"{self.log_prefix} {person_name} 的记忆：[新增] {impression} ({category})")
             return
 
         # 构建现有记忆列表让 LLM 判断
@@ -402,7 +443,7 @@ class RelationScanner:
         if new_memory:
             person.memory_points.append(f"{category}:{new_memory}:1.0")
             person.sync_to_database()
-            logger.info(f"{self.log_prefix} 为 {person_name} 新增记忆点 [{category}]: {new_memory}")
+            logger.info(f"{self.log_prefix} {person_name} 的记忆：[新增] {new_memory} ({category})")
         elif memory_id and integrate_memory:
             old_memory = memory_list_id.get(memory_id)
             if old_memory:
@@ -412,9 +453,7 @@ class RelationScanner:
                     old_weight = get_weight_from_memory(old_memory)
                     person.memory_points.append(f"{category}:{integrate_memory}:{old_weight + 1.0}")
                     person.sync_to_database()
-                    logger.info(
-                        f"{self.log_prefix} 更新 {person_name} 的记忆点 [{category}]: {old_content} -> {integrate_memory}"
-                    )
+            logger.info(f"{self.log_prefix} {person_name} 的记忆：[更新] {old_content} -> {integrate_memory}")
 
 
 init_prompt()
