@@ -1,8 +1,9 @@
 2/24
     加入跨用户记忆检索
     修复了尝试对notice信息build_reply的bug
+    原创Messenger插件，通过用户名称和上下文检索对应私聊id发送指定信息
 2/22
-    记忆系统更新，吸收了上游Maibot的ChatHistorySummarizer来总结记忆并通过{memory_retrieval}板块注入提示词
+    记忆系统更新，吸收了上游Maibot最新的ChatHistorySummarizer来总结记忆并通过{memory_retrieval}板块注入提示词
 2/21
     完成了伪Agent方案的实现
     核心加入对video信息的处理解析

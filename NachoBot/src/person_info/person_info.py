@@ -1,5 +1,4 @@
 import hashlib
-import asyncio
 import json
 import time
 import random
@@ -606,6 +605,7 @@ class PersonInfoManager:
     def __init__(self):
         self.person_name_list = {}
         self.person_nickname_list = {}  # person_id -> nickname (平台昵称)
+        self.person_platform_list = {}  # person_id -> platform
         self.qv_name_llm = LLMRequest(model_set=model_config.model_task_config.utils, request_type="relation.qv_name")
         try:
             db.connect(reuse_if_open=True)
@@ -621,13 +621,15 @@ class PersonInfoManager:
 
         # 初始化时读取所有person_name和nickname
         try:
-            for record in PersonInfo.select(PersonInfo.person_id, PersonInfo.person_name, PersonInfo.nickname).where(
-                PersonInfo.person_name.is_null(False)
-            ):
+            for record in PersonInfo.select(
+                PersonInfo.person_id, PersonInfo.person_name, PersonInfo.nickname, PersonInfo.platform
+            ).where(PersonInfo.person_name.is_null(False)):
                 if record.person_name:
                     self.person_name_list[record.person_id] = record.person_name
                 if record.nickname:
                     self.person_nickname_list[record.person_id] = record.nickname
+                if record.platform:
+                    self.person_platform_list[record.person_id] = record.platform
             logger.debug(
                 f"已加载 {len(self.person_name_list)} 个用户名称, {len(self.person_nickname_list)} 个昵称 (Peewee)"
             )
@@ -678,95 +680,72 @@ class PersonInfoManager:
     async def qv_person_name(
         self, person_id: str, user_nickname: str, user_cardname: str, user_avatar: str, request: str = ""
     ):
-        """给某个用户取名"""
+        """从对话内容中提取 bot 对用户的称呼，更新 nickname"""
         if not person_id:
-            logger.debug("取名失败：person_id不能为空")
+            logger.debug("更新昵称失败：person_id不能为空")
             return None
 
         person = Person(person_id=person_id)
-        old_name = person.person_name
-        old_reason = person.name_reason
+        if not person.is_known:
+            logger.debug(f"更新昵称失败：用户 {person_id} 未注册")
+            return None
 
-        max_retries = 8
-        current_try = 0
-        existing_names_str = ""
-        current_name_set = set(self.person_name_list.values())
+        old_nickname = person.nickname
+        bot_name = global_config.bot.nickname
 
-        while current_try < max_retries:
-            bot_name = global_config.bot.nickname
+        qv_name_prompt = f"你是{bot_name}。"
+        qv_name_prompt += f"\n用户的平台昵称是「{user_nickname}」"
+        if user_cardname:
+            qv_name_prompt += f"，群名片是「{user_cardname}」"
+        if old_nickname and old_nickname != user_nickname:
+            qv_name_prompt += f"，你之前叫ta「{old_nickname}」"
+        qv_name_prompt += "。"
 
-            qv_name_prompt = f"你是{bot_name}，一个伪装成人类的AI，你不能让别人发现这一点，"
-            qv_name_prompt += f"现在你想给一个用户取一个昵称，用户的qq昵称是{user_nickname}，"
-            qv_name_prompt += f"用户的qq群昵称名是{user_cardname}，"
-            if user_avatar:
-                qv_name_prompt += f"用户的qq头像是{user_avatar}，"
-            if old_name:
-                qv_name_prompt += f"你之前叫他{old_name}，是因为{old_reason}，"
+        if request:
+            qv_name_prompt += f"\n\n以下是你和这个用户的近期对话记录：\n{request}\n"
 
-            qv_name_prompt += f"\n其他取名的要求是：{request}，不要太浮夸，简短，"
-            qv_name_prompt += "\n请根据以上用户信息，想想你叫他什么比较好，不要太浮夸，请最好使用用户的qq昵称或群昵称原文，可以稍作修改，优先使用原文。优先使用用户的qq昵称或者群昵称原文。"
+        qv_name_prompt += f"\n请根据对话记录，判断你（{bot_name}）在对话中是怎么称呼这个用户的。"
+        qv_name_prompt += (
+            "\n提取你对这个用户使用的称呼/昵称。如果对话中没有明确的称呼，请根据用户的平台昵称给出一个简短自然的称呼。"
+        )
+        qv_name_prompt += "\n请用json格式输出，不要输出其他内容："
+        qv_name_prompt += """
+{
+    "nickname": "你对该用户的称呼",
+    "reason": "依据"
+}"""
 
-            if existing_names_str:
-                qv_name_prompt += f"\n请注意，以下名称已被你尝试过或已知存在，请避免：{existing_names_str}。\n"
-
-            if len(current_name_set) < 50 and current_name_set:
-                qv_name_prompt += f"已知的其他昵称有: {', '.join(list(current_name_set)[:10])}等。\n"
-
-            qv_name_prompt += "请用json给出你的想法，并给出理由，示例如下："
-            qv_name_prompt += """{
-                "nickname": "昵称",
-                "reason": "理由"
-            }"""
+        try:
             response, _ = await self.qv_name_llm.generate_response_async(qv_name_prompt)
-            # logger.info(f"取名提示词：{qv_name_prompt}\n取名回复：{response}")
             result = self._extract_json_from_text(response)
 
             if not result or not result.get("nickname"):
-                logger.error("生成的昵称为空或结果格式不正确，重试中...")
-                current_try += 1
-                continue
+                logger.debug(f"提取用户 {person_id} 昵称失败：结果为空")
+                return None
 
-            generated_nickname = result["nickname"]
+            new_nickname = result["nickname"]
 
-            is_duplicate = False
-            if generated_nickname in current_name_set:
-                is_duplicate = True
-                logger.info(f"尝试给用户{user_nickname} {person_id} 取名，但是 {generated_nickname} 已存在，重试中...")
-            else:
-
-                def _db_check_name_exists_sync(name_to_check):
-                    return PersonInfo.select().where(PersonInfo.person_name == name_to_check).exists()
-
-                if await asyncio.to_thread(_db_check_name_exists_sync, generated_nickname):
-                    is_duplicate = True
-                    current_name_set.add(generated_nickname)
-
-            if not is_duplicate:
-                person.person_name = generated_nickname
-                person.name_reason = result.get("reason", "未提供理由")
-                person.sync_to_database()
-
-                logger.info(
-                    f"成功给用户{user_nickname} {person_id} 取名 {generated_nickname}，理由：{result.get('reason', '未提供理由')}"
-                )
-
-                self.person_name_list[person_id] = generated_nickname
+            # 如果昵称没有变化，跳过更新
+            if new_nickname == old_nickname:
+                logger.debug(f"用户 {person_id} 昵称未变化：{new_nickname}")
                 return result
-            else:
-                if existing_names_str:
-                    existing_names_str += "、"
-                existing_names_str += generated_nickname
-                logger.debug(f"生成的昵称 {generated_nickname} 已存在，重试中...")
-                current_try += 1
 
-        # 如果多次尝试后仍未成功，使用唯一的 user_nickname 作为默认值
-        unique_nickname = await self._generate_unique_person_name(user_nickname)
-        logger.warning(f"在{max_retries}次尝试后未能生成唯一昵称，使用默认昵称 {unique_nickname}")
-        person.person_name = unique_nickname
-        person.name_reason = "使用用户原始昵称作为默认值"
-        person.sync_to_database()
-        self.person_name_list[person_id] = unique_nickname
-        return {"nickname": unique_nickname, "reason": "使用用户原始昵称作为默认值"}
+            # 更新 nickname
+            person.nickname = new_nickname
+            person.sync_to_database()
+
+            logger.info(
+                f"更新用户 {user_nickname}({person_id}) 的昵称：{old_nickname} -> {new_nickname}，"
+                f"理由：{result.get('reason', '未提供')}"
+            )
+
+            # 更新内存缓存
+            self.person_nickname_list[person_id] = new_nickname
+            return result
+
+        except Exception as e:
+            logger.error(f"更新用户 {person_id} 昵称时出错: {e}")
+            return None
 
 
 person_info_manager = PersonInfoManager()
