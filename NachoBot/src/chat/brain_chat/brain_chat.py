@@ -31,6 +31,7 @@ from src.chat.utils.chat_message_builder import (
     build_readable_messages_with_id,
     get_raw_msg_before_timestamp_with_chat,
 )
+from src.chat.heart_flow.relation_scanner import RelationScanner
 
 if TYPE_CHECKING:
     from src.common.data_models.database_data_model import DatabaseMessages
@@ -102,6 +103,9 @@ class BrainChatting:
 
         self.more_plan = False
 
+        # 关系扫描器
+        self.relation_scanner = RelationScanner(chat_id=self.stream_id)
+
     async def start(self):
         """检查是否需要启动主循环，如果未激活则启动。"""
 
@@ -116,6 +120,7 @@ class BrainChatting:
 
             self._loop_task = asyncio.create_task(self._main_chat_loop())
             self._loop_task.add_done_callback(self._handle_loop_completion)
+            await self.relation_scanner.start()
             logger.info(f"{self.log_prefix} BrainChatting 启动完成")
 
         except Exception as e:

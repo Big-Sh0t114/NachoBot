@@ -1,0 +1,56 @@
+from typing import List, Tuple, Type
+
+# 导入插件系统
+from src.plugin_system import BasePlugin, register_plugin, ComponentInfo
+from src.plugin_system.base.config_types import ConfigField
+
+# 导入组件
+from src.plugins.built_in.messenger.messenger import MessengerEventHandler
+
+from src.common.logger import get_logger
+
+logger = get_logger("messenger_plugin")
+
+
+@register_plugin
+class MessengerPlugin(BasePlugin):
+    """信使插件
+
+    系统内置插件，当用户请求转告时，自动将消息转发到目标用户的私聊，并触发 LLM 思考。
+
+    注意：插件基本信息优先从_manifest.json文件中读取
+    """
+
+    # 插件基本信息
+    plugin_name: str = "messenger"
+    enable_plugin: bool = True
+    dependencies: list[str] = []
+    python_dependencies: list[str] = []
+    config_file_name: str = "config.toml"
+
+    # 配置节描述
+    config_section_descriptions = {
+        "plugin": "插件启用配置",
+        "components": "组件配置",
+    }
+
+    # 配置Schema定义
+    config_schema: dict = {
+        "plugin": {
+            "enabled": ConfigField(type=bool, default=True, description="是否启用插件"),
+            "config_version": ConfigField(type=str, default="1.0.0", description="配置文件版本"),
+        },
+        "components": {
+            "similarity_threshold": ConfigField(
+                type=float,
+                default=0.4,
+                description="名称匹配最低相似度阈值（0-1）",
+            ),
+        },
+    }
+
+    def get_plugin_components(self) -> List[Tuple[ComponentInfo, Type]]:
+        """返回插件包含的组件列表"""
+        components = []
+        components.append((MessengerEventHandler.get_handler_info(), MessengerEventHandler))
+        return components

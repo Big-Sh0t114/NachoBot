@@ -381,12 +381,12 @@ class DefaultReplyer:
             for pid, pname in person_info_manager.person_name_list.items():
                 if pid in processed_ids:
                     continue
-                if pname and pname != bot_name and len(pname) >= 2:
+                if pname and pname != bot_name and len(pname) >= 1:
                     all_candidates.setdefault(pid, set()).add(pname)
             for pid, nickname in person_info_manager.person_nickname_list.items():
                 if pid in processed_ids:
                     continue
-                if nickname and nickname != bot_name and len(nickname) >= 2:
+                if nickname and nickname != bot_name and len(nickname) >= 1:
                     all_candidates.setdefault(pid, set()).add(nickname)
 
             for pid, names in all_candidates.items():
@@ -412,16 +412,26 @@ class DefaultReplyer:
                     try:
                         mp = Person(person_id=pid)
                         if mp.is_known:
-                            mentioned_persons.append(mp)
+                            mentioned_persons.append((mp, pid))
                             processed_ids.add(pid)
                     except Exception:
                         pass
 
-                if len(mentioned_persons) >= 3:
-                    break
+            # 按平台优先级排序：QQ > Discord > Bilibili > 其他
+            _platform_priority = {"qq": 0, "discord": 1, "bilibili": 2}
+
+            def _get_priority(item):
+                _, pid = item
+                platform = person_info_manager.person_platform_list.get(pid, "")
+                # 处理 "koishi-qq" -> "qq" 这类复合平台名
+                platform_key = platform.split("-")[-1].lower() if platform else ""
+                return _platform_priority.get(platform_key, 3)
+
+            mentioned_persons.sort(key=_get_priority)
+            mentioned_persons = [(mp, pid) for mp, pid in mentioned_persons[:3]]
 
             # 构建被提及用户的记忆信息
-            for mp in mentioned_persons:
+            for mp, _ in mentioned_persons:
                 try:
                     mp_relation = await mp.build_relationship(chat_content)
                     if mp_relation:
