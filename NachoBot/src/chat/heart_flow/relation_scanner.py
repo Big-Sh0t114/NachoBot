@@ -130,7 +130,7 @@ def init_prompt():
 class RelationScanner:
     """关系扫描器：周期性扫描聊天消息，自动提取用户印象"""
 
-    def __init__(self, chat_id: str, check_interval: int = 120, message_threshold: int = 50):
+    def __init__(self, chat_id: str, check_interval: int = 1800, message_threshold: int = 50):
         self.chat_id = chat_id
         self._chat_display_name = self._get_chat_display_name()
         self.log_prefix = f"[{self._chat_display_name}]"
