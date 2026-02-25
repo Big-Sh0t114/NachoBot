@@ -1,9 +1,9 @@
 # NachoBot (基于 MaiBot 0.10.3 Beta)
 
-NachoBot 是在上游 **MaiBot 0.10.3 Beta** 基础上研发的角色扮演聊天机器人，保留了上游插件体系与架构，可以直接沿用上游项目的麦麦插件商店[https://plugins.maibot.chat/]。本文档帮助你快速了解本项目、配置要点，以及如何溯源到上游项目。
+NachoBot 是在上游 **MaiBot 0.10.3 Beta** 基础上研发的角色扮演聊天机器人，保留了上游插件体系与架构，可以直接沿用上游项目的 [麦麦插件商店](https://plugins.maibot.chat/)。本文档帮助你快速了解本项目、配置要点，以及如何溯源到上游项目。
 
 ## 项目背景与溯源
-- 上游项目：MaiBot（https://github.com/MaiM-with-u/MaiBot），版本基线 0.10.3 Beta。
+- 上游项目：[MaiBot](https://github.com/MaiM-with-u/)，版本基线 0.10.3 Beta。
 - 许可证：沿用 MaiBot 的 GPLv3；请遵守本仓库的 `LICENSE` 以及各插件/第三方组件的许可证。
 - 主要差异：见下文。
 
