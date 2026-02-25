@@ -135,7 +135,7 @@ class HelpCommand(BaseCommand):
         stripped_patterns = {p.lower().strip("^$") for p in existing_patterns}
 
         manual = [
-            ("#adv_on", "开启高级模式（会停用联网和TTS功能）"),
+            ("#adv_on", "开启高级模式（会禁用绝大多数功能只保留基础回复）"),
             ("#adv_off", "关闭高级模式"),
         ]
         extras: List[Tuple[str, str]] = []

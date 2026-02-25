@@ -26,6 +26,7 @@ def init_tool_executor_prompt():
 1. 用户的请求是否必须通过工具才能完成？（如必应搜索、知识库检索）
 2. 如果可以通过常识直接回答，或者只是简单的闲聊/情感交流，请**不要调用工具**。
 3. 频繁调用工具会严重拖慢回复速度，请务必克制。
+4. **严禁使用 write_file 来回复聊天消息！** write_file 仅用于用户**明确要求生成、创建或编写文件**的场景。普通的聊天回复、情感互动、日常对话**绝对不能**调用 write_file。
 
 If you need to use a tool, please directly call the corresponding tool function. If you do not need to use any tool, simply output "No tool needed".
 """
@@ -179,6 +180,24 @@ class ToolExecutor:
                 "replace_file_content",
             }
             if any(call.func_name in file_tool_names for call in tool_calls):
+                # 沙盒白名单检查：非白名单用户不允许触发任何文件工具操作
+                # 注意: chat_stream.user_info 在群聊中可能是流创建者而非当前发送者
+                # 必须从 context.message.message_info 获取真实发送者
+                user_id = ""
+                if self.chat_stream and self.chat_stream.context:
+                    msg_info = self.chat_stream.context.message.message_info
+                    if msg_info.sender_info and msg_info.sender_info.user_id:
+                        user_id = str(msg_info.sender_info.user_id)
+                    elif msg_info.user_info and msg_info.user_info.user_id:
+                        user_id = str(msg_info.user_info.user_id)
+                if not user_id and self.chat_stream and self.chat_stream.user_info:
+                    user_id = str(self.chat_stream.user_info.user_id)
+                is_admin = user_id in global_config.advanced.admins
+                is_whitelisted = user_id in global_config.bot.sandbox_whitelist
+                if not (is_admin or is_whitelisted):
+                    logger.warning(f"{self.log_prefix} 用户 {user_id} 不在沙盒白名单中，拒绝执行文件工具操作！")
+                    # 不返回错误信息给LLM，直接返回空结果，当成普通消息处理
+                    return [], [], ""
                 logger.info(
                     f"{self.log_prefix} 检测到文件操作意图(如 {tool_calls[0].func_name})，强制切换至 file_edit 模型重新生成以保证代码质量！"
                 )

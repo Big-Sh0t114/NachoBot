@@ -1,138 +1,77 @@
-# NachoBot TTS 适配器（基于 MaiBot 适配器修改）
+# NachoBot TTS 适配器
 
-基于多个服务商的文本转语音(TTS)适配器，支持流式和非流式语音合成。  
-本仓库在原 `maimbot_tts_adapter` 基础上，已针对 **NachoBot 核心改动** 做了路由/接口适配，与 NachoBot 核心服务约定对齐；教程与用法保持与上游一致，按下文步骤配置即可。
+基于GPT-SoVITS的文本转语音 (TTS) 适配器，支持流式和非流式语音合成。  
+本仓库在原上游 `maimbot_tts_adapter` 基础上，已针对 **NachoBot 核心改动** 做了深度的本地化和一键启动化改造。适配器依赖工作区根目录下的 `launchbot.bat` 进行环境的自动管理和拉起。
 
-本仓库已经预配置好了端口与文件，只需进入configs文件夹修改base.toml中模型路径至你的绝对路径并自行修改ttslaunch.bat路径，以及按照预设的端口配置Napcat即可，以下是上游Maibot项目的原版文件 **注意原版README文件中配置教程有误！！**
+---
 
-## 功能特性
+由于本系统将 TTS 的隔离环境、依赖库安装和启动交给了项目最外层的 `launchbot.bat` 统一接管，请按照本指南配置物理路径与参数。
 
-- 支持多种provider配置，可以动态启用不同的provider
-- 支持流式和非流式语音合成
-- 支持多平台预设配置
-- 基于 GPT-SoVITS 等provider实现高质量语音合成
-- 可配置的语音参数（语速、采样步数等）
-- 支持参考音频设置
-- 灵活的消息路由系统
+## 1. 前置要求：独立的 GPT-SoVITS 端
+本适配器本质上是一个中继网关，负责将 NachoBot 的文本发送给对应的 TTS 引擎生成语音流。
+- 你必须在你的电脑上拥有独立安装好的 **GPT-SoVITS** 环境（推荐 v2pro 版本）。
+- 请确保你拥有训练好/微调好的 GPT 权重文件（`.ckpt`）和 SoVITS 权重文件（`.pth`），以及一段用于音色的**参考音频**（`.wav`）。
 
-## 安装说明
-
-1. 克隆项目仓库：
-
+## 2. 环境依赖与启动前准备
+虽然最外层的 `launchbot.bat` 会尽可能帮你自动创建 `.venv` 虚拟环境并安装依赖，但为了确保环境一致性，你也可以在启动前手动确认组件依赖安装成功：
+进入 `NachoBot-TTS-Adapter` 目录，安装该适配器专属依赖包（推荐使用项目统一的 `uv`）：
 ```bash
-git clone https://github.com/tcmofashi/maimbot_tts_adapter
-cd maimbot_tts_adapter
+uv pip install -r requirements.txt
 ```
 
-2. 安装依赖：
-
-```bash
-pip install -r requirements.txt
+## 3. 对接 GPT-SoVITS 路径 (`launchbot.bat`)
+回到 NachoBot 根目录，使用文本编辑器打开 `launchbot.bat`：
+找到大约第 36 行左右的 `SOVITS_DIR` 变量，将其修改为你电脑上实际存放 GPT-SoVITS 整合包的**绝对硬盘路径**：
+```bat
+REM ===== 基本路径（如你改过目录，只需改这里）=====
+set "SOVITS_DIR=C:\Users\BigSh0t\GPT-SoVITS\GPT-SoVITS-v2pro-20250604" 
 ```
 
-3. 安装 GPT-SoVITS（或其他provider）：
-
-自行配置GPT-SoVITS，配置好相关环境后启动api：
-
-```bash
-# 按照GPT-SoVITS项目教程安装依赖...
-
-python api_v2.py 
-```
-
-## 基本配置说明
-
-配置文件位于 `configs/base.toml`，包含以下配置项：
-
-### Server 配置
-这个配置标识的是给上游的Adapter（比如MaiBot-Napcat-Adapter）提供的服务端
+## 4. 配置实际模型路径 (`configs/base.toml`)
+进入本目录的 `configs/` 文件夹下。
+你可以把你的声音模型直接放到这里。
+打开 `configs/base.toml`，找到最下方的 `[plugins.GPT_Sovits]` 模块，将其中的 `gpt_weights` 和 `sovits_weights` 的文件路径修改为你实际存放权重的**绝对路径**：
 ```toml
-[server]
-host = "127.0.0.1"
-port = 8070
+[plugins.GPT_Sovits]
+api_base = "http://127.0.0.1:9874"
+gpt_weights    = "C:/Users/.../NachoBot-TTS-Adapter/configs/EXAMPLE.ckpt"
+sovits_weights = "C:/Users/.../NachoBot-TTS-Adapter/configs/EXAMPLE.pth"
+speaker = "NachoChan"
 ```
-### Route 配置
-这个配置标识的是给下游的 NachoBot 主体的连接
+
+## 5. 绑定核心路由规则 (`configs/base.toml`)
+为了能让 NachoBot 发出的文本传到这里，你必须配置连接通道。同样在 `configs/base.toml` 里，确认 `[routes]` 块下的端口与主控台一致（NachoBot 默认跑在 `8000` 端口）：
 ```toml
 [routes]
-qq = "http://127.0.0.1:8090/ws" # 或者nonebot-qq
-# nonebot-qq = "default"
+qq = "http://127.0.0.1:8000/ws"        # 对应你在主干代码里的监听地址
+discord = "http://127.0.0.1:8000/ws"
 ```
-### Probability 配置
-这部分决定选取语音的概率
+
+## 6. 调整声音预设参数 (`configs/gpt-sovits.toml`)
+同样在 `configs/` 文件夹下，打开 `gpt-sovits.toml`，找到最下方的预设管理 `[tts.models.presets.default]`（以及你自定义的角色如 `custom1`）：
+你需要重点填写控制音色感情的特征绑定：
 ```toml
-[probability]
-voice_probability = 0.2 # 使用语音的概率
-```
-### EnabledTTS 配置
-这部分标识的是选择启用的插件名称，其名称应该与插件的文件夹名称一至（即python模块名）
-```toml
-[enabled_tts] # 启用的TTS模块，请与各插件的目录名称一致
-enabled = ["GPT_Sovits"]
-```
-### TTSBaseConfig 配置
-这部分是TTS的通用配置
-```toml
-[tts_base_config]
-stream_mode = false    # 是否启用流式输出
-post_process = false # 是否启用后处理（现阶段无效）
+[tts.models.presets.default]
+name = "DEFAULT"
+gpt_model = "EXAMPLE.ckpt"
+sovits_model = "EXAMPLE.pth"
+ref_audio_path = "EXAMPLE.wav"   # 参考音频的文件名或相对路径
+prompt_text = "填入你参考音频里正在说的那句话"  # 参考音频对应的精确文本
+prompt_language = "ja"                   # 参考文本的语种 (ja/zh/en/auto)
+speed_factor = 1.0                       # 生成语速
 ```
 
-## 内置 GPT-SOVITS 插件 TTS 配置
+---
 
-```toml
-[tts]
-host = "localhost"                        # 根据GPT-SoVITS的api配置填写
-port = 9880
-ref_audio_path = "path/to/reference.wav"  # 参考音频路径
-prompt_text = "示例文本"                   # 参考文本
-text_language = "zh"                      # 文本语言
-prompt_language = "zh"                    # 提示语言
-# 其他 TTS 相关参数...
 
-[tts.models]
-gpt_model = "path/to/gpt/model"          # GPT 模型路径
-sovits_model = "path/to/sovits/model"    # SoVITS 模型路径
+**请勿单独在此适配器目录内运行 python 启动接口。**
 
-[tts.models.presets]                      # 预设配置
-[tts.models.presets.default]              # 默认预设
-name = "默认"
-ref_audio = "path/to/default/ref.wav"
-prompt_text = "默认提示文本"
+配置完成后，只需回到根目录双击运行的 **`launchbot.bat`**。
+脚本将按照以下时序全自动并线拉起所有组件（你会看到多个黑色命令台窗口同时工作）：
 
-[pipeline]
-default_preset = "default"                # 默认使用的预设名称
+1. **SoVITS API (监听 9880 端口)**：调用你的 GPT-SoVITS 目录环境，启动底层语音引擎 API。
+2. **TTS Adapter (监听 8070 端口)**：待 SoVITS API 存活后，拉起本适配器并建立与 NachoBot 核心（默认 8000 端口）的双向 WebSocket 隧道。
+3. **Control API (监听 9872 端口)**：承载高级配置控制的额外端口。
+4. **NachoBot 主服务 + NapCat 适配器**：启动主脑逻辑处理区，随后连入 QQ/Bilibili。
 
-[pipeline.platform_presets]               # 平台特定的预设配置
-platform1 = "preset1"
-platform2 = "preset2"
-```
-
-## 路径与文件请自行填写
-- `configs/base.toml`：`api_base` 如有变更请改；`gpt_weights` / `sovits_weights` 请填写你本地的权重路径（可用相对路径，如 `configs/xxx.pth`）。
-- `configs/gpt-sovits.toml`：各 `presets` 下的 `ref_audio_path` / 模型名需与你的实际文件一致。
-- `start_tts.bat`：更新 `SOVITS_DIR` 到你的 GPT-SoVITS 目录；如目录结构不同，调整 `BASE_DIR`/`ADAPTER_DIR`/`NAPCAT_SRC`。
-- 如果你使用其他启动脚本（如仓库外部的 ttslaunch），同样需要把 GPT-SoVITS 与适配器目录、权重路径指向你本地的位置。
-
-## 内置其他服务商配置
-请参考[官方文档](https://docs.mai-mai.org/manual/adapters/tts/)使用。
-
-## 使用方法
-
-1. 启动服务：
-
-```bash
-python maimbot_pipeline.py
-```
-
-2. 将 adapter 的目标路由填写为本项目服务器配置，将本项目的路由配置填写为 NachoBot core 的服务器配置
-
-## 注意事项
-
-- 确保已正确配置 GPT-SoVITS 模型路径等各项参数
-- 参考音频和提示文本对语音质量有重要影响
-- 流式模式适合长文本实时合成，非流式模式适合短文本高质量合成
-
-## 开源协议
-
-本项目遵循 MIT 协议开源。
+如遇 TTS 模块报错或静音，请检查是否是 `.ckpt` 或 `.pth` 文件路径缺失，或是端口 `9880/8070` 被系统中其他程序意外占用。
