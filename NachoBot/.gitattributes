@@ -1,3 +1,5 @@
 *.bat text eol=crlf
 *.cmd text eol=crlf
 NachoLauncher.bat text eol=crlf working-tree-encoding=GBK
+plugins/bilibili_video_sender_plugin/ffmpeg/doc/** linguist-documentation
+plugins/bilibili_video_sender_plugin/ffmpeg/doc/** linguist-vendored

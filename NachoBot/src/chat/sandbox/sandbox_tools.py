@@ -21,7 +21,17 @@ class ReadFileTool(BaseTool):
             return {"error": "[Error: No chat context found. Cannot access sandbox.]"}
 
         stream_id = chat_stream.stream_id
-        user_id = chat_stream.user_info.user_id
+
+        # 从消息上下文获取真实发送者（群聊中 chat_stream.user_info 可能是流创建者）
+        user_id = ""
+        if chat_stream.context:
+            msg_info = chat_stream.context.message.message_info
+            if msg_info.sender_info and msg_info.sender_info.user_id:
+                user_id = str(msg_info.sender_info.user_id)
+            elif msg_info.user_info and msg_info.user_info.user_id:
+                user_id = str(msg_info.user_info.user_id)
+        if not user_id:
+            user_id = str(chat_stream.user_info.user_id)
 
         # Security Check
         is_admin = str(user_id) in global_config.advanced.admins
@@ -56,7 +66,17 @@ class ListFilesTool(BaseTool):
             return {"error": "[Error: No chat context found. Cannot access sandbox.]"}
 
         stream_id = chat_stream.stream_id
-        user_id = chat_stream.user_info.user_id
+
+        # 从消息上下文获取真实发送者（群聊中 chat_stream.user_info 可能是流创建者）
+        user_id = ""
+        if chat_stream.context:
+            msg_info = chat_stream.context.message.message_info
+            if msg_info.sender_info and msg_info.sender_info.user_id:
+                user_id = str(msg_info.sender_info.user_id)
+            elif msg_info.user_info and msg_info.user_info.user_id:
+                user_id = str(msg_info.user_info.user_id)
+        if not user_id:
+            user_id = str(chat_stream.user_info.user_id)
 
         # Security Check
         is_admin = str(user_id) in global_config.advanced.admins
@@ -90,7 +110,17 @@ class WriteFileTool(BaseTool):
             return {"error": "[Error: No chat context found. Cannot access sandbox.]"}
 
         stream_id = chat_stream.stream_id
-        user_id = chat_stream.user_info.user_id
+
+        # 从消息上下文获取真实发送者（群聊中 chat_stream.user_info 可能是流创建者）
+        user_id = ""
+        if chat_stream.context:
+            msg_info = chat_stream.context.message.message_info
+            if msg_info.sender_info and msg_info.sender_info.user_id:
+                user_id = str(msg_info.sender_info.user_id)
+            elif msg_info.user_info and msg_info.user_info.user_id:
+                user_id = str(msg_info.user_info.user_id)
+        if not user_id:
+            user_id = str(chat_stream.user_info.user_id)
 
         # Security Check
         is_admin = str(user_id) in global_config.advanced.admins
