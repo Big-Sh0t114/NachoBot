@@ -1195,6 +1195,13 @@ class BilibiliAdapter:
 
         if summary:
             try:
+                # [FIX] Include template_info so screen messages don't clobber
+                # last_messages with a template-less entry, which causes HFC
+                # to fall back to the wrong replyer_prompt.
+                template_info = await self._get_template_info(
+                    room_id, user_id, "screen_update"
+                )
+
                 screen_msg_info = BaseMessageInfo(
                     platform="bilibili.live",
                     message_id=f"screen_{uuid.uuid4().hex[:8]}",
@@ -1214,6 +1221,7 @@ class BilibiliAdapter:
                         accept_format=ACCEPT_FORMAT,
                     ),
                     additional_config={"room_id": room_id},
+                    template_info=template_info,
                 )
                 screen_message = MessageBase(
                     message_info=screen_msg_info,
@@ -1617,6 +1625,10 @@ class BilibiliAdapter:
             "source": "mic_asr",
         }
 
+        # [FIX] Include template_info so mic messages don't clobber
+        # last_messages with a template-less entry (same fix as push_screen_update)
+        template_info = await self._get_template_info(room_id, "2146014839", text)
+
         message_info = BaseMessageInfo(
             platform="bilibili.live",
             message_id=f"mic_{int(time.time() * 1000)}",
@@ -1624,7 +1636,7 @@ class BilibiliAdapter:
             user_info=UserInfo(
                 platform="bilibili.live",
                 user_id="2146014839",
-                user_nickname="主人",
+                user_nickname="甘油三酯",
             ),
             group_info=GroupInfo(
                 platform="bilibili.live",
@@ -1635,7 +1647,7 @@ class BilibiliAdapter:
                 content_format=["text"],
                 accept_format=ACCEPT_FORMAT,
             ),
-            template_info=None,
+            template_info=template_info,
             additional_config=additional_config,
         )
 

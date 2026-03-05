@@ -410,9 +410,14 @@ model_list = ["waifubot-search","gemini-2.5-flash#search"]
 temperature = 0.2
 max_tokens = 800
 
-[model_task_config.replyer] # 首要回复模型，还用于表达器和表达方式学习
+[model_task_config.replyer0] # 默认回复模型组（原 replyer），还用于表达器和表达方式学习
 model_list = ["claude-sonnet-4-5-20250929","gemini-2.5-flash"]
 temperature = 0.5                        
+max_tokens = 800
+
+[model_task_config.replyer1] # 备用回复模型组，可通过 #switch_rpygroup 切换
+model_list = []
+temperature = 0.5
 max_tokens = 800
 
 [model_task_config.advanced_replyer] # 高级模式回复模型组（可选，未配置则回退replyer）

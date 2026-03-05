@@ -223,7 +223,7 @@ class PrivateReplyer:
             from src.plugin_system.core.events_manager import events_manager
 
             if not from_plugin:
-                continue_flag, modified_message = await events_manager.handle_mai_events(
+                continue_flag, modified_message = await events_manager.handle_nacho_events(
                     EventType.POST_LLM, None, prompt, None, stream_id=stream_id
                 )
                 if not continue_flag:
@@ -244,7 +244,7 @@ class PrivateReplyer:
                 llm_response.reasoning = reasoning_content
                 llm_response.model = model_name
                 llm_response.tool_calls = tool_call
-                continue_flag, modified_message = await events_manager.handle_mai_events(
+                continue_flag, modified_message = await events_manager.handle_nacho_events(
                     EventType.AFTER_LLM, None, prompt, llm_response, stream_id=stream_id
                 )
                 if not from_plugin and not continue_flag:

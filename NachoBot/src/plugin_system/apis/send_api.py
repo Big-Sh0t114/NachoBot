@@ -189,6 +189,7 @@ async def _send_to_target(
         if message_segment.type == "text":
             text_data = str(message_segment.data)
             if _should_suppress_text_reply(text_data):
+                logger.warning(f"[SendAPI] 过滤前信息: {text_data}")
                 logger.error("[SendAPI] 检测到可疑回复模板，已替换为 Filtered")
                 message_segment = Seg(type="text", data="Filtered")
                 text_data = "Filtered"
@@ -516,6 +517,17 @@ async def custom_reply_set_to_stream(
         show_log: 是否显示日志
     """
     if _should_suppress_reply_set(reply_set):
+        texts = []
+        for rc in reply_set.reply_data:
+            if rc.content_type == ReplyContentType.TEXT:
+                texts.append(str(rc.content))
+            elif rc.content_type == ReplyContentType.HYBRID:
+                if isinstance(rc.content, list):
+                    for sub in rc.content:
+                        if sub.content_type == ReplyContentType.TEXT:
+                            texts.append(str(sub.content))
+        pre_filtered = " ".join(texts)
+        logger.warning(f"[SendAPI] 过滤前信息: {pre_filtered}")
         logger.error("[SendAPI] 检测到可疑回复模板，已替换为 Filtered")
         return await text_to_stream(
             text="Filtered",

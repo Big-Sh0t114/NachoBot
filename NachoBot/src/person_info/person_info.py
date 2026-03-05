@@ -705,14 +705,20 @@ class PersonInfoManager:
             qv_name_prompt += f"\n\n以下是你和这个用户的近期对话记录：\n{request}\n"
 
         qv_name_prompt += f"\n请根据对话记录，判断你（{bot_name}）在对话中是怎么称呼这个用户的。"
+        qv_name_prompt += "\n**【严格提取规则】**："
+        qv_name_prompt += "\n1. 只能提取**你（bot）对该用户的称呼**。"
         qv_name_prompt += (
-            "\n提取你对这个用户使用的称呼/昵称。如果对话中没有明确的称呼，请根据用户的平台昵称给出一个简短自然的称呼。"
+            "\n2. **绝对不能**提取用户对你的称呼（例如用户叫你“猫猫”、“小笨猫”等，这些是你的名字，不是用户的！）。"
         )
+        qv_name_prompt += f"\n3. **不要**直接把用户的平台昵称「{user_nickname}」作为提取结果返回，除非你在对话中确实就是这么连名带姓叫ta的。"
+        qv_name_prompt += "\n4. 如果你在对话中使用了特定的爱称、尊称或简称（如“姐姐大人”、“欧尼酱”、“主人”、“宝宝”等），请优先提取这些作为昵称。"
+        qv_name_prompt += f"\n5. 如果对话中你完全没有使用任何明确的称呼指代该用户，请直接返回原昵称「{old_nickname or user_nickname}」。"
+
         qv_name_prompt += "\n请用json格式输出，不要输出其他内容："
         qv_name_prompt += """
 {
-    "nickname": "你对该用户的称呼",
-    "reason": "依据"
+    "nickname": "你对该用户的有效称呼",
+    "reason": "提取依据（说明是谁在哪句话里称呼谁）"
 }"""
 
         try:

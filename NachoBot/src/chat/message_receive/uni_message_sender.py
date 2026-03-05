@@ -123,7 +123,7 @@ class UniversalMessageSender:
             from src.plugin_system.core.events_manager import events_manager
             from src.plugin_system.base.component_types import EventType
 
-            continue_flag, modified_message = await events_manager.handle_mai_events(
+            continue_flag, modified_message = await events_manager.handle_nacho_events(
                 EventType.POST_SEND_PRE_PROCESS, message=message, stream_id=chat_id
             )
             if not continue_flag:
@@ -138,7 +138,7 @@ class UniversalMessageSender:
 
             await message.process()
 
-            continue_flag, modified_message = await events_manager.handle_mai_events(
+            continue_flag, modified_message = await events_manager.handle_nacho_events(
                 EventType.POST_SEND, message=message, stream_id=chat_id
             )
             if not continue_flag:
@@ -151,6 +151,7 @@ class UniversalMessageSender:
                     message.processed_plain_text = modified_message.plain_text
 
             if _should_suppress_text_reply(message.processed_plain_text or ""):
+                logger.warning(f"[{chat_id}] 过滤前信息: {message.processed_plain_text}")
                 logger.error(f"[{chat_id}] 检测到可疑回复模板，已替换为 Filtered")
                 filtered_segment = Seg(type="text", data="Filtered")
                 if message.reply and getattr(message.reply.message_info, "message_id", None):
@@ -175,7 +176,7 @@ class UniversalMessageSender:
             if not sent_msg:
                 return False
 
-            continue_flag, modified_message = await events_manager.handle_mai_events(
+            continue_flag, modified_message = await events_manager.handle_nacho_events(
                 EventType.AFTER_SEND, message=message, stream_id=chat_id
             )
             if not continue_flag:
