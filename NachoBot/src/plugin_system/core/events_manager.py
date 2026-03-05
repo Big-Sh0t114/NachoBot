@@ -63,7 +63,7 @@ class EventsManager:
         self._handler_mapping[handler_name] = handler_class
         return self._insert_event_handler(handler_class, handler_info)
 
-    async def handle_mai_events(
+    async def handle_nacho_events(
         self,
         event_type: EventType,
         message: Optional[MessageRecv | MessageSending] = None,

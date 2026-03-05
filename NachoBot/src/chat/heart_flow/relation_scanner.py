@@ -44,30 +44,40 @@ def init_prompt():
 
     Prompt(
         """\
-以下是用户 "{person_name}" 的近期发言：
+以下是一段近期包含你（bot）和多个用户的聊天记录：
 ----------------------
-{user_messages}
+[CHAT_CONTEXT_PLACEHOLDER]
 ----------------------
 
-请分析上述发言，提取其中包含的用户个人信息、偏好、习惯、身份、经历、态度或其他可记忆的印象点。
+你需要关注以下目标用户列表（按平台与ID）：
+[TARGET_USERS_PLACEHOLDER]
 
-**提取规则**：
-- 只提取**明确表达**的信息，不要推测
-- 每条印象用**一句简短的话**概括
-- 如果没有可提取的信息，返回空数组
+请分析上述聊天记录，针对列出的每个目标用户，提取其中包含的个人信息、偏好、习惯、身份、经历、态度或其他可记忆的印象点，并判断你在对话中是怎么称呼该用户的。
 
-请严格用 JSON 格式输出，不要输出任何其他内容：
-{{
-    "impressions": [
-        "印象1",
-        "印象2"
-    ]
-}}
+**【印象提取规则】**：
+1. 只提取**明确表达**的信息，不要推测。
+2. 每条印象用**一句简短的话**概括。
+3. 如果针对某个用户没有可提取的印象，该用户的 impressions 数组为空。
 
-如果没有可提取的印象，输出：
-{{
-    "impressions": []
-}}
+**【称呼/昵称提取规则】**：
+1. 只能提取**你（bot）对该用户的称呼**。
+2. **绝对不能**提取用户对你的称呼（这些是你的名字，不是用户的！）。
+3. **不要**直接把用户的原平台昵称作为提取结果返回，除非你确实就是这么连名带姓叫ta的。
+4. 如果你在对话中使用了特定的爱称、尊称或简称（如“姐姐大人”、“欧尼酱”、“主人”、“宝宝”等），请优先提取这些作为昵称。
+5. 如果对话中你完全没有对该用户使用任何称呼，或者没有你的回复，请将 nickname 字段留空 ("")。
+
+请严格用 JSON 格式输出，返回一个包含所有目标用户提取结果的列表，不要输出任何额外解释：
+[
+    {
+        "platform": "平台名",
+        "user_id": "用户ID",
+        "nickname": "你对该用户的有效称呼（如果没有明确称呼请留空）",
+        "impressions": [
+            "印象1",
+            "印象2"
+        ]
+    }
+]
 """,
         "relation_scanner_extract",
     )
@@ -146,9 +156,7 @@ class RelationScanner:
         self._user_cooldown = 600  # 同一用户 10 分钟内不重复扫描
 
         # LLM
-        self.scanner_llm = LLMRequest(
-            model_set=model_config.model_task_config.utils_small, request_type="relation_scanner"
-        )
+        self.scanner_llm = LLMRequest(model_set=model_config.model_task_config.replyer, request_type="relation_scanner")
 
         # 后台循环
         self._periodic_task: Optional[asyncio.Task] = None
@@ -252,8 +260,8 @@ class RelationScanner:
             except Exception:
                 continue
 
-        # 对每个用户独立处理
-        processed_count = 0
+        # 对每个用户独立处理计数并筛选目标用户
+        target_users = []
         for (platform, user_id), messages in user_messages.items():
             # 少于等于 2 条发言，跳过
             if len(messages) <= 2:
@@ -265,31 +273,34 @@ class RelationScanner:
             if current_time - last_scanned < self._user_cooldown:
                 continue
 
-            # 处理该用户
-            try:
-                await self._process_user_messages(platform, user_id, messages, new_messages)
+            # 加入处理目标
+            person = Person(platform=platform, user_id=user_id)
+            if person.is_known:
+                target_users.append(
+                    {
+                        "platform": platform,
+                        "user_id": user_id,
+                        "person_id": person.person_id,
+                        "orig_nickname": messages[-1].user_info.user_nickname if messages else f"用户{user_id}",
+                    }
+                )
                 self._recently_scanned_users[person_key] = current_time
-                processed_count += 1
-            except Exception as e:
-                logger.error(f"{self.log_prefix} 处理用户 {platform}:{user_id} 失败: {e}", exc_info=True)
 
-        if processed_count > 0:
-            logger.info(f"{self.log_prefix} 关系扫描完成 | 处理了 {processed_count} 个用户")
-
-    async def _process_user_messages(self, platform: str, user_id: str, messages: list, all_messages: list = None):
-        """处理单个用户的消息，提取印象并写入记忆"""
-
-        # 获取 Person
-        person = Person(platform=platform, user_id=user_id)
-        if not person.is_known:
-            logger.debug(f"{self.log_prefix} 用户 {platform}:{user_id} 未注册，跳过")
+        if not target_users:
             return
 
-        person_name = person.person_name or f"用户{user_id}"
+        try:
+            await self._process_full_context(target_users, new_messages)
+            logger.info(f"{self.log_prefix} 关系扫描完成 | 处理了 {len(target_users)} 个用户")
+        except Exception as e:
+            logger.error(f"{self.log_prefix} 处理上下文失败: {e}", exc_info=True)
 
-        # 构建用户发言文本
-        user_text = build_readable_messages(
-            messages,
+    async def _process_full_context(self, target_users: list, all_messages: list):
+        """处理完整的对话上下文，为指定的多个目标用户提取印象和称呼"""
+
+        # 构建完整聊天文本
+        chat_text = build_readable_messages(
+            all_messages,
             replace_bot_name=True,
             timestamp_mode="normal_no_YMD",
             read_mark=0.0,
@@ -297,78 +308,79 @@ class RelationScanner:
             show_actions=False,
         )
 
-        if not user_text.strip():
+        if not chat_text.strip():
             return
 
-        # Step 1: 调用 LLM 提取印象
-        prompt = await global_prompt_manager.format_prompt(
-            "relation_scanner_extract",
-            person_name=person_name,
-            user_messages=user_text,
-        )
+        # 构建目标用户列表说明
+        target_users_desc = ""
+        for user in target_users:
+            target_users_desc += f"- 平台: {user['platform']}, ID: {user['user_id']}, 原昵称: {user['orig_nickname']}\n"
+
+        # Step 1: 调用 LLM 批量提取印象和称呼
+        prompt_template = await global_prompt_manager.get_prompt_async("relation_scanner_extract")
+        prompt = prompt_template.template
+        prompt = prompt.replace("[CHAT_CONTEXT_PLACEHOLDER]", chat_text)
+        prompt = prompt.replace("[TARGET_USERS_PLACEHOLDER]", target_users_desc)
 
         response, _ = await self.scanner_llm.generate_response_async(prompt=prompt)
         if not response or not response.strip():
             return
 
-        # 解析印象列表
+        # 解析用户提取结果列表
         try:
-            data = json.loads(repair_json(response))
-            impressions = data.get("impressions", [])
+            results = json.loads(repair_json(response))
+            if not isinstance(results, list):
+                logger.warning(f"{self.log_prefix} 提取结果不是列表格式: raw={response[:200]}")
+                return
         except Exception as e:
             logger.warning(f"{self.log_prefix} 解析印象提取结果失败: {e}, raw={response[:200]}")
             return
 
-        if not impressions:
-            logger.debug(f"{self.log_prefix} 用户 {person_name} 近期发言无可提取印象")
-            return
-
-        logger.info(f"{self.log_prefix} 用户 {person_name} 提取到 {len(impressions)} 条印象")
-
-        # Step 2: 对每条印象执行分类 + 更新
-        for impression in impressions[:5]:  # 最多处理 5 条
-            if not isinstance(impression, str) or not impression.strip():
+        # Step 2: 遍历每个提取的目标用户执行更新
+        for user_data in results:
+            if not isinstance(user_data, dict):
                 continue
-            try:
-                await self._categorize_and_store(person, impression.strip())
-            except Exception as e:
-                logger.error(f"{self.log_prefix} 存储印象失败: {e}", exc_info=True)
 
-        # 用完整对话（含 bot 回复）更新 nickname
-        if all_messages:
-            try:
-                full_conversation = build_readable_messages(
-                    all_messages,
-                    replace_bot_name=True,
-                    timestamp_mode="normal_no_YMD",
-                    read_mark=0.0,
-                    truncate=True,
-                    show_actions=False,
-                )
-                if full_conversation.strip():
-                    # 从消息列表获取用户最新的平台昵称和群名片
-                    latest_nickname = ""
-                    cardname = ""
-                    for msg in reversed(messages):
-                        try:
-                            latest_nickname = msg.user_info.user_nickname or ""
-                            cardname = getattr(msg.user_info, "user_cardname", "") or ""
-                            if latest_nickname:
-                                break
-                        except Exception:
-                            pass
+            platform = str(user_data.get("platform", ""))
+            user_id = str(user_data.get("user_id", ""))
+            impressions = user_data.get("impressions", [])
+            extracted_nickname = user_data.get("nickname", "")
 
-                    asyncio.create_task(
-                        person_info_manager.qv_person_name(
-                            person_id=person.person_id,
-                            user_nickname=latest_nickname,
-                            user_cardname=cardname,
-                            user_avatar="",
-                            request=full_conversation[:1000],
-                        )
+            if not platform or not user_id:
+                continue
+
+            # 使用 Person 对象，如果不存在会自动关联或返回
+            person = Person(platform=platform, user_id=user_id)
+            if not person.is_known:
+                continue
+
+            person_name = person.person_name or f"用户{user_id}"
+
+            # 更新记忆点
+            if impressions and isinstance(impressions, list):
+                logger.info(f"{self.log_prefix} 用户 {person_name}({user_id}) 提取到 {len(impressions)} 条印象")
+                for impression in impressions[:5]:  # 最多处理 5 条
+                    if not isinstance(impression, str) or not impression.strip():
+                        continue
+                    try:
+                        await self._categorize_and_store(person, impression.strip())
+                    except Exception as e:
+                        logger.error(f"{self.log_prefix} 存储印象失败: {e}", exc_info=True)
+            else:
+                logger.debug(f"{self.log_prefix} 用户 {person_name}({user_id}) 无可提取印象")
+
+            # 更新昵称（如果有提取出明确的新的对话昵称）
+            if extracted_nickname and isinstance(extracted_nickname, str):
+                extracted_nickname = extracted_nickname.strip()
+                old_nickname = person.nickname or person.person_name
+                # 与现有昵称不同，且不是空串时才更新
+                if extracted_nickname and extracted_nickname != old_nickname:
+                    logger.info(
+                        f"{self.log_prefix} 更新用户 {person_name}({user_id}) 对话昵称：{old_nickname} -> {extracted_nickname}"
                     )
-            except Exception as e:
-                logger.error(f"{self.log_prefix} 更新用户 {person_name} 昵称失败: {e}", exc_info=True)
+                    person.nickname = extracted_nickname
+                    person.sync_to_database()
+                    person_info_manager.person_nickname_list[person.person_id] = extracted_nickname
 
     async def _categorize_and_store(self, person: Person, impression: str):
         """对一条印象进行分类并存储（复用 BuildRelationAction 的逻辑）"""

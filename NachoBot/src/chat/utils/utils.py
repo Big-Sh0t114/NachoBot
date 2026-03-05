@@ -308,6 +308,12 @@ def process_llm_response(text: str, enable_splitter: bool = True, enable_chinese
     else:
         protected_text = text
         kaomoji_mapping = {}
+
+    # 清除 LLM 幻觉生成的回复头部格式
+    protected_text = re.sub(r"\[回复.*?\].*?说[：:]\s*", "", protected_text)
+    # 使用正常的转义字符 \n 处理换行，不要有真正的换行符
+    protected_text = re.sub(r"\[回复.*?(?:消息|说)[：:].*?(?:\n|$)", "", protected_text)
+
     # 提取被 () 或 [] 或 （）包裹且包含中文的内容
     pattern = re.compile(r"[(\[（](?=.*[一-鿿]).*?[)\]）]")
     _extracted_contents = pattern.findall(protected_text)  # 在保护后的文本上查找

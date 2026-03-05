@@ -32,6 +32,7 @@ from src.chat.utils.chat_message_builder import (
     get_raw_msg_before_timestamp_with_chat,
 )
 from src.chat.heart_flow.relation_scanner import RelationScanner
+from src.chat.memory_system.memory_activator import MemoryActivator
 
 if TYPE_CHECKING:
     from src.common.data_models.database_data_model import DatabaseMessages
@@ -103,8 +104,9 @@ class BrainChatting:
 
         self.more_plan = False
 
-        # 关系扫描器
+        # 关系扫描器与记忆激活器
         self.relation_scanner = RelationScanner(chat_id=self.stream_id)
+        self.memory_activator = MemoryActivator()
 
     async def start(self):
         """检查是否需要启动主循环，如果未激活则启动。"""
@@ -335,7 +337,7 @@ class BrainChatting:
                     message_id_list=message_id_list,
                     interest=global_config.personality.interest,
                 )
-                continue_flag, modified_message = await events_manager.handle_mai_events(
+                continue_flag, modified_message = await events_manager.handle_nacho_events(
                     EventType.ON_PLAN, None, prompt_info[0], None, self.chat_stream.stream_id
                 )
                 if not continue_flag:
@@ -544,6 +546,17 @@ class BrainChatting:
             logger.info(f"{self.log_prefix} 从思考到回复，共有{new_message_count}条新消息，使用引用回复")
 
         if send_api._should_suppress_reply_set(reply_set):
+            texts = []
+            for rc in reply_set.reply_data:
+                if rc.content_type == ReplyContentType.TEXT:
+                    texts.append(str(rc.content))
+                elif rc.content_type == ReplyContentType.HYBRID:
+                    if isinstance(rc.content, list):
+                        for sub in rc.content:
+                            if sub.content_type == ReplyContentType.TEXT:
+                                texts.append(str(sub.content))
+            pre_filtered = " ".join(texts)
+            logger.warning(f"{self.log_prefix} 过滤前信息: {pre_filtered}")
             logger.error(f"{self.log_prefix} 检测到可疑回复模板，已替换为 Filtered")
             await send_api.text_to_stream(
                 text="Filtered",
