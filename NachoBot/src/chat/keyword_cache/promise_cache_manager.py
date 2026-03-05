@@ -80,13 +80,13 @@ class PromiseCacheManager:
                 formatted = self._format_cache(kw, cache)
                 if formatted:
                     hits.append(formatted)
-                    self._logger.info(f"[promise_cache] 注入片段 chat={chat_id} kw={kw} file={cache.get('file_path', '')}")
+                    self._logger.info(
+                        f"[promise_cache] 注入片段 chat={chat_id} kw={kw} file={cache.get('file_path', '')}"
+                    )
             self._start_new_capture(chat_id, kw, message)
         return hits
 
-    def collect_snippets_for_messages(
-        self, chat_id: str, messages: Iterable[DatabaseMessages]
-    ) -> List[str]:
+    def collect_snippets_for_messages(self, chat_id: str, messages: Iterable[DatabaseMessages]) -> List[str]:
         """根据消息列表检测关键词并返回对应缓存片段，用于构建回复上下文。"""
         cfg = global_config.promise_cache
         if not (cfg.enable and cfg.keywords):
@@ -106,7 +106,9 @@ class PromiseCacheManager:
                 formatted = self._format_cache(kw, cache)
                 if formatted:
                     snippets.append(formatted)
-                    self._logger.info(f"[promise_cache] 注入片段 chat={chat_id} kw={kw} file={cache.get('file_path', '')}")
+                    self._logger.info(
+                        f"[promise_cache] 注入片段 chat={chat_id} kw={kw} file={cache.get('file_path', '')}"
+                    )
         return snippets
 
     def _append_to_active_captures(self, chat_id: str, record: dict) -> None:
@@ -168,9 +170,7 @@ class PromiseCacheManager:
         os.makedirs(cache_dir, exist_ok=True)
         date_str = time.strftime("%Y%m%d")
         session_code = self._get_session_identifier(message)
-        file_path = os.path.join(
-            cache_dir, f"{date_str}_{session_code}_{int(time.time())}.json"
-        )
+        file_path = os.path.join(cache_dir, f"{date_str}_{session_code}_{int(time.time())}.json")
         capture = {
             "chat_id": chat_id,
             "keyword": keyword,

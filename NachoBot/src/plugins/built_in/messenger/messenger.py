@@ -25,6 +25,7 @@ from src.person_info.person_info import (
     Person,
 )
 from src.chat.message_receive.chat_stream import get_chat_manager
+from src.chat.advanced.advanced_manager import advanced_manager
 from src.plugin_system.apis import send_api, message_api
 from src.plugin_system.base.base_events_handler import BaseEventHandler
 from src.plugin_system.base.component_types import EventType, NachoMessages
@@ -37,6 +38,9 @@ RELAY_PATTERN = re.compile(
     r"|(?:跟|和|给|替我跟|替我给|替我和).{1,10}(?:说|问|讲|传话|转告|带话)"
     r"|(?:告诉|转告|问).{1,10}一下"
 )
+
+# 管理员直达指令: #convey_<QQ号> <内容>
+CONVEY_PATTERN = re.compile(r"^#convey_(\d+)\s+(.+)", re.DOTALL)
 
 
 class MessengerEventHandler(BaseEventHandler):
@@ -78,6 +82,11 @@ class MessengerEventHandler(BaseEventHandler):
         actual_text = re.sub(r"\[回复.*?\](?:，说：\s*)?", "", text).strip()
         if not actual_text:
             return True, True, None, None, None
+
+        # ===== 管理员 #convey 指令 =====
+        convey_match = CONVEY_PATTERN.match(actual_text)
+        if convey_match:
+            return await self._handle_convey_command(message, convey_match)
 
         # 正则预筛选 - 快速跳过无关消息
         if not RELAY_PATTERN.search(actual_text):
@@ -161,6 +170,61 @@ class MessengerEventHandler(BaseEventHandler):
         )
 
         logger.info(f"[信使] 转告完成: {source_name} -> {matched_name}: {content[:30]}...")
+        return True, True, None, None, None
+
+    async def _handle_convey_command(
+        self, message: NachoMessages, match: re.Match
+    ) -> Tuple[bool, bool, Optional[str], None, Optional[NachoMessages]]:
+        """处理管理员 #convey_<QQ号> <message> 指令
+
+        注入到目标私聊的 extra_info 以 bot 自己的思考形式呈现，
+        而非转告格式。
+        """
+        target_qq = match.group(1)
+        convey_content = match.group(2).strip()
+
+        # 权限检查
+        source_info = message.message_base_info or {}
+        source_user_id = source_info.get("user_id", "")
+        source_platform = source_info.get("platform", "")
+
+        if not advanced_manager.is_allowed(source_user_id):
+            logger.debug(f"[信使] #convey 权限不足: {source_user_id}")
+            return True, True, None, None, None
+
+        stream_id = message.stream_id or ""
+
+        # 直接通过 QQ号 计算私聊 stream_id
+        key = f"qq_{target_qq}_private"
+        target_stream_id = hashlib.md5(key.encode()).hexdigest()
+
+        # 验证 stream 存在
+        chat_manager = get_chat_manager()
+        target_stream = chat_manager.get_stream(target_stream_id)
+        if not target_stream:
+            logger.info(f"[信使] #convey 未找到目标私聊: QQ={target_qq}")
+            await send_api.text_to_stream(
+                f"没有和 QQ:{target_qq} 私聊过，无法发送...(´-ω-`)",
+                stream_id,
+            )
+            return True, True, None, None, None
+
+        # 注入消息 —— 以 bot 自己的思考形式，不带转告标识
+        thought_text = (
+            f"你现在想主动跟对方说一句话或者问他们一个问题。"
+            f"你想说/问的内容是：'{convey_content}'。"
+            f"请用你自己的语气自然地将这句话发送给对方。"
+        )
+        await self._inject_convey_message(target_stream_id, thought_text, source_platform)
+
+        # 回复管理员
+        target_name = target_stream.user_info.user_nickname if target_stream.user_info else target_qq
+        await send_api.text_to_stream(
+            f"已向{target_name}发送消息~",
+            stream_id,
+        )
+
+        logger.info(f"[信使] #convey 完成: QQ={target_qq}, 内容: {convey_content[:30]}...")
         return True, True, None, None, None
 
     async def _extract_relay_info(self, text: str, stream_id: str = "") -> Tuple[str, str]:
@@ -422,3 +486,76 @@ class MessengerEventHandler(BaseEventHandler):
         # 在独立任务中执行，不阻塞当前事件处理器
         asyncio.create_task(_do_inject())
         logger.info(f"[信使] 已调度注入任务到 stream: {target_stream_id}")
+
+    async def _inject_convey_message(self, target_stream_id: str, thought_text: str, platform: str):
+        """以 bot 自己的思考形式注入消息到目标私聊
+
+        与 _inject_trigger_message 不同，extra_info 不包含转告标识，
+        LLM 会认为这是自己的想法而自然表达。
+        """
+
+        async def _do_convey():
+            try:
+                await asyncio.sleep(0.3)
+
+                from src.chat.message_receive.message import MessageRecv
+
+                chat_manager = get_chat_manager()
+                target_stream = chat_manager.get_stream(target_stream_id)
+                if not target_stream:
+                    logger.error(f"[信使] convey 注入失败: 找不到目标 stream: {target_stream_id}")
+                    return
+
+                # 确保 context 存在
+                if not target_stream.context:
+                    msg_time = time.time()
+                    dummy_data = {
+                        "message_info": {
+                            "platform": platform or target_stream.platform,
+                            "message_id": f"convey_ctx_{int(msg_time * 1000)}",
+                            "time": msg_time,
+                            "group_info": None,
+                            "user_info": {
+                                "platform": platform or target_stream.platform,
+                                "user_id": target_stream.user_info.user_id,
+                                "user_nickname": target_stream.user_info.user_nickname,
+                                "user_cardname": "",
+                            },
+                            "additional_config": {},
+                            "format_info": {"content_format": "", "accept_format": ""},
+                            "template_info": {"template_items": {}},
+                        },
+                        "raw_message": "",
+                        "processed_plain_text": "",
+                    }
+                    ctx_msg = MessageRecv(dummy_data)
+                    target_stream.set_context(ctx_msg)
+
+                from src.plugin_system.apis import generator_api
+
+                success, llm_response = await generator_api.generate_reply(
+                    chat_stream=target_stream,
+                    extra_info=thought_text,
+                    reply_reason="主动发起对话",
+                    request_type="messenger.convey_reply",
+                )
+
+                if success and llm_response and llm_response.reply_set:
+                    for reply_item in llm_response.reply_set.reply_data:
+                        if reply_item.content and reply_item.content_type.value == "text":
+                            await send_api.text_to_stream(
+                                text=reply_item.content,
+                                stream_id=target_stream_id,
+                            )
+                    logger.info(f"[信使] convey 回复已发送到 stream: {target_stream_id}")
+                else:
+                    logger.warning(f"[信使] convey 回复生成失败或为空，stream: {target_stream_id}")
+
+            except Exception as e:
+                logger.error(f"[信使] convey 注入失败: {e}")
+                import traceback
+
+                traceback.print_exc()
+
+        asyncio.create_task(_do_convey())
+        logger.info(f"[信使] 已调度 convey 任务到 stream: {target_stream_id}")

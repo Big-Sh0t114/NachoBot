@@ -23,15 +23,15 @@ class ChatAnalysisUtils:
     # Emoji 正则表达式（完整Unicode范围）
     EMOJI_PATTERN = re.compile(
         "["
-        "\U0001F600-\U0001F64F"  # emoticons
-        "\U0001F300-\U0001F5FF"  # symbols & pictographs
-        "\U0001F680-\U0001F6FF"  # transport & map symbols
-        "\U0001F1E0-\U0001F1FF"  # flags
-        "\U00002702-\U000027B0"
-        "\U000024C2-\U0001F251"
-        "\U0001F900-\U0001F9FF"  # supplemental symbols
+        "\U0001f600-\U0001f64f"  # emoticons
+        "\U0001f300-\U0001f5ff"  # symbols & pictographs
+        "\U0001f680-\U0001f6ff"  # transport & map symbols
+        "\U0001f1e0-\U0001f1ff"  # flags
+        "\U00002702-\U000027b0"
+        "\U000024c2-\U0001f251"
+        "\U0001f900-\U0001f9ff"  # supplemental symbols
         "]+",
-        flags=re.UNICODE
+        flags=re.UNICODE,
     )
 
     @staticmethod
@@ -117,9 +117,7 @@ class ChatAnalysisUtils:
 
     @staticmethod
     async def analyze_user_titles(
-        messages: List[dict],
-        user_stats: Dict,
-        get_config: Callable = None
+        messages: List[dict], user_stats: Dict, get_config: Callable = None
     ) -> Optional[List[Dict]]:
         """使用 LLM 分析群友称号
 
@@ -134,7 +132,8 @@ class ChatAnalysisUtils:
         try:
             # 只分析发言 >= 配置的最小发言数的用户
             active_users = {
-                uid: stats for uid, stats in user_stats.items()
+                uid: stats
+                for uid, stats in user_stats.items()
                 if stats["message_count"] >= AnalysisConfig.MIN_MESSAGES_FOR_TITLE
             }
 
@@ -143,11 +142,9 @@ class ChatAnalysisUtils:
 
             # 构建用户数据文本
             users_text = []
-            for user_id, stats in sorted(
-                active_users.items(),
-                key=lambda x: x[1]["message_count"],
-                reverse=True
-            )[:AnalysisConfig.MAX_USERS_FOR_TITLE]:  # 使用配置的最大用户数
+            for user_id, stats in sorted(active_users.items(), key=lambda x: x[1]["message_count"], reverse=True)[
+                : AnalysisConfig.MAX_USERS_FOR_TITLE
+            ]:  # 使用配置的最大用户数
                 night_messages = sum(stats["hours"][h] for h in range(0, 6))
                 avg_chars = stats["char_count"] / stats["message_count"] if stats["message_count"] > 0 else 0
                 emoji_ratio = stats["emoji_count"] / stats["message_count"] if stats["message_count"] > 0 else 0
@@ -206,10 +203,7 @@ class ChatAnalysisUtils:
             return []
 
     @staticmethod
-    async def analyze_golden_quotes(
-        messages: List[dict],
-        get_config: Callable = None
-    ) -> Optional[List[Dict]]:
+    async def analyze_golden_quotes(messages: List[dict], get_config: Callable = None) -> Optional[List[Dict]]:
         """使用 LLM 提取群聊金句（群圣经）
 
         Args:
@@ -232,25 +226,21 @@ class ChatAnalysisUtils:
 
                 # 清理 @ 提及格式（如 @理理<123456> → 去掉整个提及部分）
                 # 使用正则移除 @用户名<数字> 格式
-                text = re.sub(r'@[^<\s]+<\d+>\s*', '', text)
+                text = re.sub(r"@[^<\s]+<\d+>\s*", "", text)
                 text = text.strip()
 
-                if (AnalysisConfig.MIN_QUOTE_LENGTH <= len(text) <= AnalysisConfig.MAX_QUOTE_LENGTH
-                    and not text.startswith(("http", "www", "/"))):
-                    interesting_messages.append({
-                        "sender": display_name,
-                        "time": time_str,
-                        "content": text
-                    })
+                if AnalysisConfig.MIN_QUOTE_LENGTH <= len(
+                    text
+                ) <= AnalysisConfig.MAX_QUOTE_LENGTH and not text.startswith(("http", "www", "/")):
+                    interesting_messages.append({"sender": display_name, "time": time_str, "content": text})
 
             if not interesting_messages:
                 return []
 
             # 构建消息文本
-            messages_text = "\n".join([
-                f"[{msg['time']}] {msg['sender']}: {msg['content']}"
-                for msg in interesting_messages
-            ])
+            messages_text = "\n".join(
+                [f"[{msg['time']}] {msg['sender']}: {msg['content']}" for msg in interesting_messages]
+            )
 
             # 构建 prompt
             prompt = f"""从群聊记录中挑选3-5句最有趣的金句。
@@ -301,9 +291,7 @@ class ChatAnalysisUtils:
 
     @staticmethod
     async def analyze_depression_index(
-        messages: List[dict],
-        user_stats: Dict,
-        get_config: Callable = None
+        messages: List[dict], user_stats: Dict, get_config: Callable = None
     ) -> Optional[List[Dict]]:
         """使用 LLM 分析群友炫压抑指数
 
@@ -318,7 +306,8 @@ class ChatAnalysisUtils:
         try:
             # 只分析发言 >= 配置的最小发言数的用户
             active_users = {
-                uid: stats for uid, stats in user_stats.items()
+                uid: stats
+                for uid, stats in user_stats.items()
                 if stats["message_count"] >= AnalysisConfig.MIN_MESSAGES_FOR_TITLE
             }
 
@@ -348,12 +337,12 @@ class ChatAnalysisUtils:
 
             # 构建用户发言样本文本
             users_sample = []
-            for user_id in sorted(user_messages.keys(), key=lambda uid: active_users[uid]["message_count"], reverse=True):
+            for user_id in sorted(
+                user_messages.keys(), key=lambda uid: active_users[uid]["message_count"], reverse=True
+            ):
                 nickname = active_users[user_id]["nickname"]
                 sample_texts = user_messages[user_id][:10]  # 提供10条样本
-                users_sample.append(
-                    f"【{nickname}】\n" + "\n".join(f"  - {text[:60]}" for text in sample_texts)
-                )
+                users_sample.append(f"【{nickname}】\n" + "\n".join(f"  - {text[:60]}" for text in sample_texts))
 
             users_info = "\n\n".join(users_sample)
 
@@ -424,8 +413,8 @@ class ChatAnalysisUtils:
 
             # 验证数据类型和长度
             name = str(item["name"])[:50]  # 限制长度
-            title = str(item["title"])[:AnalysisConfig.MAX_TITLE_LENGTH]
-            reason = str(item["reason"])[:AnalysisConfig.MAX_REASON_LENGTH]
+            title = str(item["title"])[: AnalysisConfig.MAX_TITLE_LENGTH]
+            reason = str(item["reason"])[: AnalysisConfig.MAX_REASON_LENGTH]
 
             if not name or not title or not reason:
                 continue
@@ -438,12 +427,14 @@ class ChatAnalysisUtils:
                         user_id = uid
                         break
 
-            validated.append({
-                "name": name,
-                "title": title,
-                "reason": reason,
-                "user_id": user_id  # 添加 user_id 字段
-            })
+            validated.append(
+                {
+                    "name": name,
+                    "title": title,
+                    "reason": reason,
+                    "user_id": user_id,  # 添加 user_id 字段
+                }
+            )
 
         return validated
 
@@ -470,25 +461,23 @@ class ChatAnalysisUtils:
             # 验证数据类型和长度
             content = str(item["content"])[:200]  # 限制长度
             sender = str(item["sender"])[:50]
-            reason = str(item["reason"])[:AnalysisConfig.MAX_REASON_LENGTH]
+            reason = str(item["reason"])[: AnalysisConfig.MAX_REASON_LENGTH]
 
             # 清理 @ 提及格式（如 @理理<123456> → 去掉整个提及部分）
-            content = re.sub(r'@[^<\s]+<\d+>\s*', '', content)
+            content = re.sub(r"@[^<\s]+<\d+>\s*", "", content)
             content = content.strip()
 
             if not content or not sender or not reason:
                 continue
 
-            validated.append({
-                "content": content,
-                "sender": sender,
-                "reason": reason
-            })
+            validated.append({"content": content, "sender": sender, "reason": reason})
 
         return validated
 
     @staticmethod
-    def _validate_depression_index(data: List[Dict[str, Any]], user_stats: Dict[str, Dict] = None) -> List[Dict[str, Any]]:
+    def _validate_depression_index(
+        data: List[Dict[str, Any]], user_stats: Dict[str, Dict] = None
+    ) -> List[Dict[str, Any]]:
         """验证并清理炫压抑指数数据
 
         Args:
@@ -529,20 +518,13 @@ class ChatAnalysisUtils:
                         user_id = uid
                         break
 
-            validated.append({
-                "name": name,
-                "rank": rank,
-                "comment": comment,
-                "user_id": user_id
-            })
+            validated.append({"name": name, "rank": rank, "comment": comment, "user_id": user_id})
 
         return validated[:4]  # 只返回前4个
 
     @staticmethod
     async def analyze_user_profile(
-        messages: List[dict],
-        user_name: str,
-        get_config: Callable = None
+        messages: List[dict], user_name: str, get_config: Callable = None
     ) -> Optional[Dict[str, Any]]:
         """分析单个用户的个人画像
 
@@ -617,12 +599,12 @@ class ChatAnalysisUtils:
             words_freq = Counter()
             for text in all_texts:
                 # 简单分词（按空格和标点）
-                words = re.findall(r'[\u4e00-\u9fff]+|[a-zA-Z]+', text)
+                words = re.findall(r"[\u4e00-\u9fff]+|[a-zA-Z]+", text)
                 words_freq.update([w for w in words if len(w) >= 2])
-            top_words = ', '.join([w for w, _ in words_freq.most_common(5)])
+            top_words = ", ".join([w for w, _ in words_freq.most_common(5)])
 
             # 互动特征（简单判断）
-            question_count = sum(1 for text in all_texts if '?' in text or '？' in text)
+            question_count = sum(1 for text in all_texts if "?" in text or "？" in text)
             question_ratio = question_count / total_messages if total_messages > 0 else 0
 
             # 构建 prompt
@@ -637,7 +619,7 @@ class ChatAnalysisUtils:
 
 时间特征：
 - 时段分布：{time_distribution}
-- 最活跃时段：{', '.join([f'{h}点' for h in active_hours_list[:3]])}
+- 最活跃时段：{", ".join([f"{h}点" for h in active_hours_list[:3]])}
 
 内容特征：
 - 高频词：{top_words}
@@ -751,7 +733,19 @@ class ChatAnalysisUtils:
                 return None
 
             # 验证必需字段
-            required_fields = ["tags", "active_time", "fun_score", "fun_comment", "topic_leadership", "topic_comment", "rank_title", "rank_desc", "mood", "mood_score", "mood_reason"]
+            required_fields = [
+                "tags",
+                "active_time",
+                "fun_score",
+                "fun_comment",
+                "topic_leadership",
+                "topic_comment",
+                "rank_title",
+                "rank_desc",
+                "mood",
+                "mood_score",
+                "mood_reason",
+            ]
             if not all(key in data for key in required_fields):
                 logger.warning(f"用户画像数据缺少必需字段: {data}")
                 return None
@@ -803,7 +797,15 @@ class ChatAnalysisUtils:
 
             mood_reason = str(data.get("mood_reason", ""))[:50]  # 限制为50字符（约25汉字）
 
-            if not tags or not active_time or not fun_comment or not topic_comment or not rank_title or not rank_desc or not mood_reason:
+            if (
+                not tags
+                or not active_time
+                or not fun_comment
+                or not topic_comment
+                or not rank_title
+                or not rank_desc
+                or not mood_reason
+            ):
                 logger.warning("用户画像数据字段为空")
                 return None
 
@@ -818,7 +820,7 @@ class ChatAnalysisUtils:
                 "rank_desc": rank_desc,
                 "mood": mood,
                 "mood_score": mood_score,
-                "mood_reason": mood_reason
+                "mood_reason": mood_reason,
             }
 
         except Exception as e:
@@ -827,203 +829,60 @@ class ChatAnalysisUtils:
 
     @staticmethod
     def _parse_llm_json_object(result: str) -> Optional[Dict[str, Any]]:
-        """解析 LLM 返回的 JSON 对象（非数组）
-
-        Args:
-            result: LLM 返回的原始结果
-
-        Returns:
-            解析后的字典，失败返回 None
-        """
+        """解析 LLM 返回的 JSON 对象（非数组）"""
         try:
-            # 去除可能的 markdown 代码块标记
-            result = result.strip()
-            if result.startswith("```"):
-                parts = result.split("```")
-                if len(parts) >= 2:
-                    result = parts[1]
-                    if result.startswith("json"):
-                        result = result[4:]
-            result = result.strip()
+            import json_repair
 
-            # 尝试提取JSON对象部分（从第一个 { 到最后一个 }）
-            start_idx = result.find('{')
-            end_idx = result.rfind('}')
-
-            if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-                result = result[start_idx:end_idx + 1]
-
-            # 尝试直接解析
-            data = json.loads(result)
-
-            # 验证返回的是字典
-            if not isinstance(data, dict):
-                logger.warning(f"LLM返回非字典数据: {type(data)}")
-                return None
-
-            return data
-
-        except json.JSONDecodeError as e:
-            logger.warning(f"解析 JSON 对象失败: {e}, 尝试清理后重试")
-            try:
-                result_cleaned = result
-                # 移除 emoji
-                result_cleaned = ChatAnalysisUtils.EMOJI_PATTERN.sub('', result_cleaned)
-
-                # 再次提取JSON对象部分
-                start_idx = result_cleaned.find('{')
-                end_idx = result_cleaned.rfind('}')
-
-                if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-                    result_cleaned = result_cleaned[start_idx:end_idx + 1]
-
-                # 修复中文字符间的异常空格
-                result_cleaned = re.sub(r'([\u4e00-\u9fff])\s+([\u4e00-\u9fff])', r'\1\2', result_cleaned)
-
-                data = json.loads(result_cleaned)
-
-                if not isinstance(data, dict):
-                    return None
-
-                logger.info("成功通过清理解析JSON对象")
+            data = json_repair.loads(result)
+            if isinstance(data, dict):
                 return data
-            except Exception as e2:
-                try:
-                    result_repaired = ChatAnalysisUtils._repair_json_like(result_cleaned)
-                    data = json.loads(result_repaired)
-
-                    if not isinstance(data, dict):
-                        return None
-
-                    logger.info("成功通过清理和修复解析JSON对象")
-                    return data
-                except Exception as e3:
-                    logger.error(f"清理后仍然失败: {e2}")
-                    logger.debug(f"修复后的内容（前500字符）: {result_repaired[:500] if 'result_repaired' in locals() else 'N/A'}")
-                    logger.error(f"修复后仍然失败: {e3}")
-                    return None
+            if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
+                return data[0]
         except Exception as e:
-            logger.error(f"解析JSON对象时发生错误: {e}")
-            return None
+            logger.warning(f"json_repair 解析对象失败: {e}")
+
+        # Fallback to standard json parsing
+        try:
+            start_idx = result.find("{")
+            end_idx = result.rfind("}")
+            if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                result_cleaned = result[start_idx : end_idx + 1]
+            else:
+                result_cleaned = result
+            data = json.loads(result_cleaned)
+            if isinstance(data, dict):
+                return data
+        except json.JSONDecodeError as e:
+            logger.error(f"解析 JSON 对象失败: {e}")
+            logger.debug(f"原始LLM输出: {result[:500]}")
+        return None
 
     @staticmethod
     def _parse_llm_json(result: str) -> List[Dict[str, Any]]:
-        """解析 LLM 返回的 JSON（带 emoji 清理 fallback）
-
-        Args:
-            result: LLM 返回的原始结果
-
-        Returns:
-            解析后的列表，失败返回空列表
-        """
+        """解析 LLM 返回的 JSON 列表"""
         try:
-            # 去除可能的 markdown 代码块标记
-            result = result.strip()
-            if result.startswith("```"):
-                parts = result.split("```")
-                if len(parts) >= 2:
-                    result = parts[1]
-                    if result.startswith("json"):
-                        result = result[4:]
-            result = result.strip()
+            import json_repair
 
-            # 尝试提取JSON数组部分（从第一个 [ 到最后一个 ]）
-            # 这可以处理LLM在JSON后添加额外说明文本的情况
-            start_idx = result.find('[')
-            end_idx = result.rfind(']')
-
-            if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-                result = result[start_idx:end_idx + 1]
-
-            # 尝试直接解析
-            data = json.loads(result)
-
-            # 验证返回的是列表
-            if not isinstance(data, list):
-                logger.warning(f"LLM返回非列表数据: {type(data)}")
-                return []
-
-            # 验证列表元素是字典
-            if data and not all(isinstance(item, dict) for item in data):
-                logger.warning("LLM返回的列表包含非字典元素")
-                return []
-
-            return data
-
-        except json.JSONDecodeError as e:
-            logger.warning(f"解析 JSON 失败: {e}, 尝试清理emoji和修复格式后重试")
-            logger.debug(f"原始LLM输出（前500字符）: {result[:500]}")
-            # 只有解析失败时才尝试清理和修复
-            try:
-                result_cleaned = result
-                # 1. 移除emoji
-                result_cleaned = ChatAnalysisUtils.EMOJI_PATTERN.sub('', result_cleaned)
-
-                # 2. 再次提取JSON数组部分
-                start_idx = result_cleaned.find('[')
-                end_idx = result_cleaned.rfind(']')
-
-                if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-                    result_cleaned = result_cleaned[start_idx:end_idx + 1]
-
-                # 3. 尝试修复中文字符间的异常空格（可能是emoji清理或LLM输出导致）
-                # 保留JSON结构中的必要空格，只清理中文字符、数字、标点间的多余空格
-                result_cleaned = re.sub(r'([\u4e00-\u9fff])\s+([\u4e00-\u9fff])', r'\1\2', result_cleaned)
-                result_cleaned = re.sub(r'([\u4e00-\u9fff])\s+([\d])', r'\1\2', result_cleaned)
-                result_cleaned = re.sub(r'([\d])\s+([\u4e00-\u9fff])', r'\1\2', result_cleaned)
-
-                data = json.loads(result_cleaned)
-
-                if not isinstance(data, list):
-                    logger.warning(f"清理后的数据类型错误: {type(data)}")
-                    return []
-                if data and not all(isinstance(item, dict) for item in data):
-                    logger.warning("清理后的列表包含非字典元素")
-                    return []
-
-                logger.info("成功通过清理和修复解析JSON")
+            data = json_repair.loads(result)
+            if isinstance(data, list) and all(isinstance(item, dict) for item in data):
                 return data
-            except Exception as e2:
-                try:
-                    result_repaired = ChatAnalysisUtils._repair_json_like(result_cleaned)
-                    data = json.loads(result_repaired)
-
-                    if not isinstance(data, list):
-                        logger.warning(f"清理后的数据类型错误: {type(data)}")
-                        return []
-                    if data and not all(isinstance(item, dict) for item in data):
-                        logger.warning("清理后的列表包含非字典元素")
-                        return []
-
-                    logger.info("成功通过清理和修复解析JSON")
-                    return data
-                except Exception as e3:
-                    logger.error(f"清理emoji和修复格式后仍然失败: {e2}")
-                    logger.debug(f"清理后的内容（前500字符）: {result_cleaned[:500] if 'result_cleaned' in locals() else 'N/A'}")
-                    logger.debug(f"修复后的内容（前500字符）: {result_repaired[:500] if 'result_repaired' in locals() else 'N/A'}")
-                    logger.error(f"修复后仍然失败: {e3}")
-                    return []
+            elif isinstance(data, dict):
+                return [data]
         except Exception as e:
-            logger.error(f"解析JSON时发生未预期错误: {e}")
-            return []
+            logger.warning(f"json_repair 解析列表失败: {e}")
 
-    @staticmethod
-    def _repair_json_like(text: str) -> str:
-        """修复常见的 LLM JSON 格式错误（缺失逗号、智能引号、尾随逗号）"""
-        cleaned = text
-        cleaned = cleaned.replace("“", "\"").replace("”", "\"").replace("‘", "'").replace("’", "'")
-
-        # 去除尾随逗号
-        cleaned = re.sub(r',\s*([}\]])', r'\1', cleaned)
-
-        # 缺失逗号：值后紧接下一个 key
-        cleaned = re.sub(
-            r'("([^"\\]|\\.)*"|\btrue\b|\bfalse\b|\bnull\b|-?\d+(?:\.\d+)?)(\s*)(?="[^"]+"\s*:)',
-            r'\1,\3',
-            cleaned,
-        )
-
-        # 缺失逗号：数组元素或对象结束后紧接新元素
-        cleaned = re.sub(r'(\}|\])(\s*)(?=\{|\[|")', r'\1,\2', cleaned)
-
-        return cleaned
+        # Fallback to standard json parsing
+        try:
+            start_idx = result.find("[")
+            end_idx = result.rfind("]")
+            if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                result_cleaned = result[start_idx : end_idx + 1]
+            else:
+                result_cleaned = result
+            data = json.loads(result_cleaned)
+            if isinstance(data, list) and all(isinstance(item, dict) for item in data):
+                return data
+        except json.JSONDecodeError as e:
+            logger.error(f"解析 JSON 列表失败: {e}")
+            logger.debug(f"原始LLM输出: {result[:500]}")
+        return []

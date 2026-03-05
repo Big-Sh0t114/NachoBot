@@ -11,7 +11,7 @@ from src.manager.local_store_manager import local_storage
 
 logger = get_logger("remote")
 
-TELEMETRY_SERVER_URL = "http://hyybuth.xyz:10058"
+TELEMETRY_SERVER_URL = ""
 """遥测服务地址"""
 
 

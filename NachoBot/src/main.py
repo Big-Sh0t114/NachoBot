@@ -64,8 +64,13 @@ class MainSystem:
         # 添加遥测心跳任务
         await async_task_manager.add_task(TelemetryHeartBeatTask())
 
-        # 高级模式挂机检测
+        # 添加高级模式挂机检测
         await async_task_manager.add_task(AdvancedIdleTimeoutTask())
+
+        # 添加图谱记忆沉淀器
+        from src.chat.memory_system.memory_accumulator import MemoryAccumulator
+
+        await async_task_manager.add_task(MemoryAccumulator())
 
         # 启动API服务器
         # start_api_server()
@@ -118,7 +123,7 @@ class MainSystem:
         from src.plugin_system.core.events_manager import events_manager
         from src.plugin_system.base.component_types import EventType
 
-        await events_manager.handle_mai_events(event_type=EventType.ON_START)
+        await events_manager.handle_nacho_events(event_type=EventType.ON_START)
         # logger.info("已触发 ON_START 事件")
 
         # 恢复待执行的预约提醒

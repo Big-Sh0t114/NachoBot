@@ -1109,7 +1109,9 @@ class ParahippocampalGyrus:
 
         # 3. 过滤掉包含禁用关键词的topic
         filtered_topics = [
-            topic for topic in topics if all(keyword not in topic for keyword in global_config.memory.memory_ban_words)
+            topic
+            for topic in topics
+            if all(keyword not in topic for keyword in global_config.message_receive.ban_words)
         ]
 
         logger.debug(f"过滤后话题: {filtered_topics}")

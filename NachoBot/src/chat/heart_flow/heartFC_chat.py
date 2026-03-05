@@ -107,7 +107,7 @@ class HeartFChatting:
         # 跟踪连续 no_reply 次数，用于动态调整阈值
         self.consecutive_no_reply_count = 0
 
-        # 聊天内容概括器
+        # 聊天内容概括器与关系扫描器
         self.chat_history_summarizer = ChatHistorySummarizer(chat_id=self.stream_id)
         self.relation_scanner = RelationScanner(chat_id=self.stream_id)
 
@@ -400,7 +400,7 @@ class HeartFChatting:
                     message_id_list=message_id_list,
                     interest=global_config.personality.interest,
                 )
-                continue_flag, modified_message = await events_manager.handle_mai_events(
+                continue_flag, modified_message = await events_manager.handle_nacho_events(
                     EventType.ON_PLAN, None, prompt_info[0], None, self.chat_stream.stream_id
                 )
                 if not continue_flag:
@@ -659,6 +659,17 @@ class HeartFChatting:
             logger.info(f"{self.log_prefix} 从思考到回复，共有{new_message_count}条新消息，使用引用回复")
 
         if send_api._should_suppress_reply_set(reply_set):
+            texts = []
+            for rc in reply_set.reply_data:
+                if rc.content_type == ReplyContentType.TEXT:
+                    texts.append(str(rc.content))
+                elif rc.content_type == ReplyContentType.HYBRID:
+                    if isinstance(rc.content, list):
+                        for sub in rc.content:
+                            if sub.content_type == ReplyContentType.TEXT:
+                                texts.append(str(sub.content))
+            pre_filtered = " ".join(texts)
+            logger.warning(f"{self.log_prefix} 过滤前信息: {pre_filtered}")
             logger.error(f"{self.log_prefix} 检测到可疑回复模板，已替换为 Filtered")
             await send_api.text_to_stream(
                 text="Filtered",
@@ -812,15 +823,24 @@ class HeartFChatting:
                         # Logic to allow tools for Bilibili Comments while keeping disabled for Live Danmu
                         # even if reasoning says "Bilibili Live Bypass: Direct Reply"
                         current_enable_tool = global_config.tool.enable_tool
+                        current_enable_typo = (
+                            global_config.chinese_typo.enable if hasattr(global_config, "chinese_typo") else True
+                        )
                         if action_planner_info.reasoning == "Bilibili Live Bypass: Direct Reply":
                             current_enable_tool = False
-                            # Check if it is a comment section (re-enable tools)
+                            current_enable_typo = False
+                            # Check if it is a comment section (re-enable tools and typo)
                             if (
                                 getattr(self.chat_stream, "group_info", None)
                                 and self.chat_stream.group_info.group_id
                                 and str(self.chat_stream.group_info.group_id).startswith("comment:")
                             ):
                                 current_enable_tool = global_config.tool.enable_tool
+                                current_enable_typo = (
+                                    global_config.chinese_typo.enable
+                                    if hasattr(global_config, "chinese_typo")
+                                    else True
+                                )
 
                         success, llm_response = await generator_api.generate_reply(
                             chat_stream=self.chat_stream,
@@ -829,6 +849,7 @@ class HeartFChatting:
                             chosen_actions=chosen_action_plan_infos,
                             reply_reason=action_planner_info.reasoning or "",
                             enable_tool=current_enable_tool,
+                            enable_chinese_typo=current_enable_typo,
                             request_type="replyer",
                             from_plugin=False,
                             extra_info=injection_text,

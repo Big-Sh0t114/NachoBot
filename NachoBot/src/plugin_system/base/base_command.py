@@ -389,3 +389,45 @@ class BaseCommand(ABC):
             description=cls.command_description,
             command_pattern=cls.command_pattern,
         )
+
+
+class SwitchRpyGroupCommand(BaseCommand):
+    """管理员指令：切换全局默认回复模型组
+
+    用法: #switch_rpygroup <0|1>
+    - 0: 切换到 replyer0（默认组）
+    - 1: 切换到 replyer1（备用组）
+    """
+
+    command_name: str = "switch_rpygroup"
+    command_description: str = "切换全局默认回复模型组（管理员）"
+    command_pattern: str = r"(?i)^#switch_rpygroup\s+(?P<group>[01])$"
+
+    async def execute(self) -> Tuple[bool, Optional[str], bool]:
+        # 权限检查：仅管理员可用
+        from src.chat.advanced.advanced_manager import advanced_manager
+
+        user_info = getattr(getattr(self.message, "message_info", None), "user_info", None)
+        user_id = str(user_info.user_id) if user_info and getattr(user_info, "user_id", None) else None
+
+        if not user_id or not advanced_manager.is_allowed(user_id):
+            logger.debug(f"[switch_rpygroup] 权限不足: {user_id}")
+            return True, None, True
+
+        group = int(self.matched_groups.get("group", "0"))
+
+        from src.config.config import model_config
+
+        success = model_config.model_task_config.switch_replyer_group(group)
+
+        if success:
+            active_replyer = model_config.model_task_config.replyer
+            model_names = ", ".join(active_replyer.model_list) if active_replyer.model_list else "（空）"
+            reply_text = f"已切换默认回复模型组为 replyer{group}\n当前模型列表: {model_names}"
+            await self.send_text(reply_text, storage_message=False)
+            logger.info(f"[switch_rpygroup] 管理员 {user_id} 切换为 replyer{group}")
+        else:
+            await self.send_text(f"切换失败，replyer{group} 未配置或不可用。", storage_message=False)
+            logger.warning(f"[switch_rpygroup] 切换到 replyer{group} 失败")
+
+        return True, None, True

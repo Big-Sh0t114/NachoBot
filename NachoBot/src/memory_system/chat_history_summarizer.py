@@ -32,7 +32,7 @@ def is_bot_self(platform: str, user_id: str) -> bool:
     try:
         from src.config.config import global_config
 
-        bot_account_str = str(global_config.bot_account)
+        bot_account_str = str(global_config.bot.qq_account)
         if str(user_id) == bot_account_str:
             return True
         if hasattr(global_config, "bilibili") and hasattr(global_config.bilibili, "bilibili_bot_account"):
@@ -392,11 +392,11 @@ class ChatHistorySummarizer:
             should_check = True
             logger.info(f"{self.log_prefix} 触发检查条件: 消息数量达到 {message_count} 条（阈值: 100条）")
 
-        # 条件2: 距离上一次检查 > 3600 * 8 秒（8小时）且消息数量 >= 20 条，触发一次检查
-        elif time_since_last_check > 3600 * 8 and message_count >= 20:
+        # 条件2: 距离上一次检查 > 3600 * 3 秒（3小时）且消息数量 >= 20 条，触发一次检查
+        elif time_since_last_check > 3600 * 3 and message_count >= 20:
             should_check = True
             logger.info(
-                f"{self.log_prefix} 触发检查条件: 距上次检查 {time_str}（阈值: 8小时）且消息数量达到 {message_count} 条（阈值: 20条）"
+                f"{self.log_prefix} 触发检查条件: 距上次检查 {time_str}（阈值: 3小时）且消息数量达到 {message_count} 条（阈值: 20条）"
             )
 
         if should_check:

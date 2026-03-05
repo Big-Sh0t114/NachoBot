@@ -54,10 +54,10 @@ class LLMRequest:
         self.task_name = request_type
         self.model_for_task = model_set
         self.request_type = request_type
-        self.model_usage: Dict[str, Tuple[int, int, int]] = {
-            model: (0, 0, 0) for model in self.model_for_task.model_list
+        self.model_usage: Dict[str, Tuple[int, int, int, float]] = {
+            model: (0, 0, 0, 0.0) for model in self.model_for_task.model_list
         }
-        """模型使用量记录，用于进行负载均衡，对应为(total_tokens, penalty, usage_penalty)，惩罚值是为了能在某个模型请求不给力或正在被使用的时候进行调整"""
+        """模型使用量记录，用于进行负载均衡，对应为(total_tokens, penalty, usage_penalty, last_penalty_time)"""
 
     async def generate_response_for_image(
         self,
@@ -282,8 +282,14 @@ class LLMRequest:
 
         client = client_registry.get_client_class_instance(api_provider, force_new=force_new_client)
         logger.debug(f"选择请求模型: {model_info.name}")
-        total_tokens, penalty, usage_penalty = self.model_usage[model_info.name]
-        self.model_usage[model_info.name] = (total_tokens, penalty, usage_penalty + 1)
+
+        total_tokens, penalty, usage_penalty, last_penalty_time = self.model_usage[model_info.name]
+
+        # 恢复惩罚分数：如果距离上次加罚分已经过了5分钟（300秒），则清零penalty
+        if penalty > 0 and time.time() - last_penalty_time > 300:
+            penalty = 0
+
+        self.model_usage[model_info.name] = (total_tokens, penalty, usage_penalty + 1, last_penalty_time)
         return model_info, api_provider, client
 
     async def _attempt_request_on_model(
@@ -427,8 +433,10 @@ class LLMRequest:
             except ModelAttemptFailed as e:
                 last_exception = e.original_exception or e
                 logger.warning(f"模型 '{model_info.name}' 尝试失败，切换到下一个模型。原因: {e}")
-                total_tokens, penalty, usage_penalty = self.model_usage[model_info.name]
-                self.model_usage[model_info.name] = (total_tokens, penalty + 1, usage_penalty)
+
+                total_tokens, penalty, usage_penalty, _ = self.model_usage[model_info.name]
+                self.model_usage[model_info.name] = (total_tokens, penalty + 1, usage_penalty, time.time())
+
                 failed_models_this_request.add(model_info.name)
 
                 if isinstance(last_exception, RespNotOkException) and last_exception.status_code == 400:
@@ -436,9 +444,9 @@ class LLMRequest:
                     raise last_exception from e
 
             finally:
-                total_tokens, penalty, usage_penalty = self.model_usage[model_info.name]
+                total_tokens, penalty, usage_penalty, last_penalty_time = self.model_usage[model_info.name]
                 if usage_penalty > 0:
-                    self.model_usage[model_info.name] = (total_tokens, penalty, usage_penalty - 1)
+                    self.model_usage[model_info.name] = (total_tokens, penalty, usage_penalty - 1, last_penalty_time)
 
         logger.error(f"所有 {max_attempts} 个模型均尝试失败。")
         if last_exception:

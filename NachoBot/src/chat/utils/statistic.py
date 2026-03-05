@@ -334,7 +334,7 @@ class StatisticOutputTask(AsyncTask):
 
                         request_type = record.request_type or "unknown"
                         user_id = record.user_id or "unknown"  # user_id is TextField, already string
-                        model_name = record.model_name or "unknown"
+                        model_name = record.model_assign_name or record.model_name or "unknown"
 
                         # 提取模块名：如果请求类型包含"."，取第一个"."之前的部分
                         module_name = request_type.split(".")[0] if "." in request_type else request_type

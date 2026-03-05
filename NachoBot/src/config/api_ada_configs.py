@@ -1,7 +1,10 @@
 from dataclasses import dataclass, field
 from typing import Optional
 
+from src.common.logger import get_logger
 from .config_base import ConfigBase
+
+logger = get_logger("api_ada_configs")
 
 
 @dataclass
@@ -103,8 +106,8 @@ class ModelTaskConfig(ConfigBase):
     utils_small: TaskConfig
     """组件小模型配置"""
 
-    replyer: TaskConfig
-    """normal_chat首要回复模型模型配置"""
+    replyer0: TaskConfig
+    """默认回复模型组（原 replyer）"""
 
     vlm: TaskConfig
     """视觉语言模型配置"""
@@ -130,6 +133,9 @@ class ModelTaskConfig(ConfigBase):
     lpmm_qa: TaskConfig
     """LPMM问答模型配置"""
 
+    replyer1: TaskConfig = field(default_factory=TaskConfig)
+    """备用回复模型组（可选）"""
+
     advanced_replyer: TaskConfig = field(default_factory=TaskConfig)
     """高级模式回复模型配置（可选，缺省回退到默认参数）"""
 
@@ -147,6 +153,39 @@ class ModelTaskConfig(ConfigBase):
 
     bilibili_vlm: TaskConfig = field(default_factory=TaskConfig)
     """Bilibili 直播画面识别专用配置"""
+
+    _active_replyer_group: int = field(default=0, repr=False, init=False)
+    """当前激活的 replyer 组编号（0 或 1），运行时状态"""
+
+    def __post_init__(self):
+        # 初始化 replyer 别名，指向当前激活的组（默认 replyer0）
+        self.replyer = self.replyer0
+
+    def switch_replyer_group(self, group: int) -> bool:
+        """切换全局默认回复模型组
+
+        Args:
+            group: 目标组编号（0 或 1）
+
+        Returns:
+            是否切换成功
+        """
+        if group == 0:
+            self.replyer = self.replyer0
+            self._active_replyer_group = 0
+            logger.info("已切换默认回复模型组为 replyer0")
+            return True
+        elif group == 1:
+            if not self.replyer1.model_list:
+                logger.warning("replyer1 未配置模型列表，切换失败")
+                return False
+            self.replyer = self.replyer1
+            self._active_replyer_group = 1
+            logger.info("已切换默认回复模型组为 replyer1")
+            return True
+        else:
+            logger.warning(f"无效的 replyer 组编号: {group}")
+            return False
 
     def get_task(self, task_name: str) -> TaskConfig:
         """获取指定任务的配置"""

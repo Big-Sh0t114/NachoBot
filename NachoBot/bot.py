@@ -159,7 +159,7 @@ async def graceful_shutdown():  # sourcery skip: use-named-expression
         from src.plugin_system.base.component_types import EventType
 
         # 触发 ON_STOP 事件
-        await events_manager.handle_mai_events(event_type=EventType.ON_STOP)
+        await events_manager.handle_nacho_events(event_type=EventType.ON_STOP)
 
         # 停止所有异步任务
         await async_task_manager.stop_and_wait_all_tasks()

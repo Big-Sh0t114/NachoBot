@@ -387,7 +387,7 @@ class ChatBot:
             group_info = message.message_info.group_info
             user_info = message.message_info.user_info
 
-            continue_flag, modified_message = await events_manager.handle_mai_events(
+            continue_flag, modified_message = await events_manager.handle_nacho_events(
                 EventType.ON_MESSAGE_PRE_PROCESS, message
             )
             if not continue_flag:
@@ -438,7 +438,7 @@ class ChatBot:
                 logger.info(f"命令处理完成，跳过后续消息处理: {cmd_result}")
                 return
 
-            continue_flag, modified_message = await events_manager.handle_mai_events(EventType.ON_MESSAGE, message)
+            continue_flag, modified_message = await events_manager.handle_nacho_events(EventType.ON_MESSAGE, message)
             if not continue_flag:
                 return
             if modified_message and modified_message._modify_flags.modify_plain_text:
