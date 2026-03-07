@@ -301,6 +301,14 @@ def process_llm_response(text: str, enable_splitter: bool = True, enable_chinese
     if not global_config.response_post_process.enable_response_post_process:
         return [text]
 
+    # 清除 LLM 幻觉生成的回复头部格式（必须在颜文字保护之前执行，否则会被protect_kaomoji误判为颜文字）
+    # 匹配标准闭合格式：例如 "[回复 永恒的康斯坦丁：喵喵喵 ]，说："
+    text = re.sub(r"\[回复[^\]]*\](?:[，,\s]*(?:说|消息)[：:])?\s*", "", text)
+    # 匹配未闭合格式（跨行或延伸到行尾）：例如 "[回复 某人：..."
+    text = re.sub(r"\[回复.*?(?:说|消息)[：:]\s*", "", text)
+    # 对于极特殊的漏网之鱼：开头的 "[回复 某人的消息：" （不带说）
+    text = re.sub(r"^\[回复.*?消息[：:]\s*", "", text)
+
     # 先保护颜文字
     if global_config.response_splitter.enable_kaomoji_protection:
         protected_text, kaomoji_mapping = protect_kaomoji(text)
@@ -308,11 +316,6 @@ def process_llm_response(text: str, enable_splitter: bool = True, enable_chinese
     else:
         protected_text = text
         kaomoji_mapping = {}
-
-    # 清除 LLM 幻觉生成的回复头部格式
-    protected_text = re.sub(r"\[回复.*?\].*?说[：:]\s*", "", protected_text)
-    # 使用正常的转义字符 \n 处理换行，不要有真正的换行符
-    protected_text = re.sub(r"\[回复.*?(?:消息|说)[：:].*?(?:\n|$)", "", protected_text)
 
     # 提取被 () 或 [] 或 （）包裹且包含中文的内容
     pattern = re.compile(r"[(\[（](?=.*[一-鿿]).*?[)\]）]")

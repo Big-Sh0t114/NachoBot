@@ -59,35 +59,51 @@ echo ==== RUN %date% %time% ==== >> "%SETUP_LOG%"
 
 REM ===== 选择系统 Python（创建 venv 时用）=====
 set "PY_BOOT="
-where py >nul 2>&1 && py -3.10 -V >nul 2>&1 && set "PY_BOOT=py -3.10"
+where py >nul 2>&1 && py -3.11 -V >nul 2>&1 && set "PY_BOOT=py -3.11"
 if not defined PY_BOOT (
   where python >nul 2>&1 && python -V >nul 2>&1 && set "PY_BOOT=python"
 )
 if not defined PY_BOOT (
-  echo [FATAL] 未找到可用的 Python（py -3.10 / python）。>> "%SETUP_LOG%"
-  echo [FATAL] 未找到可用的 Python（请安装 Python 3.10+ 后重试）。
+  echo [FATAL] 未找到可用的 Python（py -3.11 / python）。>> "%SETUP_LOG%"
+  echo [FATAL] 未找到可用的 Python（请安装 Python 3.11+ 后重试）。
   set "TTS_RC=1"
   goto :TTS_FAIL
 )
 
-REM ===== 自动创建/修复 venv 并安装依赖 =====
-if not exist "%PY_ADAPTER%" (
-  echo [INFO] 创建 venv ... >> "%SETUP_LOG%"
-  cd /d "%ADAPTER_DIR%"
-  %PY_BOOT% -m venv .venv >> "%SETUP_LOG%" 2>&1
+REM ===== 检查并安装 uv (全局前置) =====
+where uv >nul 2>&1
+if errorlevel 1 (
+  echo [INFO] 未检测到 uv，正在自动下载安装... >> "%SETUP_LOG%"
+  powershell -NoProfile -ExecutionPolicy ByPass -Command "irm https://astral.sh/uv/install.ps1 | iex"
+  if errorlevel 1 (
+    echo [ERROR] uv 自动安装失败，请手动安装（pip install uv）后重试。>> "%SETUP_LOG%"
+    echo [ERROR] uv 自动安装失败。
+    set "TTS_RC=1"
+    goto :TTS_FAIL
+  )
+  set "PATH=%USERPROFILE%\.local\bin;%USERPROFILE%\.cargo\bin;%PATH%"
+  where uv >nul 2>&1
+  if errorlevel 1 (
+    echo [ERROR] uv 已成功安装但无法在当前会话中定位。>> "%SETUP_LOG%"
+    set "TTS_RC=1"
+    goto :TTS_FAIL
+  )
+  echo [OK] uv 自动安装并配置完成！>> "%SETUP_LOG%"
+)
+
+REM ===== 自动创建/修复 venv 并安装依赖 (基于 uv) =====
+echo [INFO] 使用 uv 同步依赖 ... >> "%SETUP_LOG%"
+cd /d "%ADAPTER_DIR%"
+uv sync >> "%SETUP_LOG%" 2>&1
+if errorlevel 1 (
+  echo [WARN] uv sync 失败，尝试 fallback: uv venv + pip install ... >> "%SETUP_LOG%"
+  if not exist ".venv" uv venv >> "%SETUP_LOG%" 2>&1
+  uv pip install -r requirements.txt >> "%SETUP_LOG%" 2>&1
   if errorlevel 1 (
     set "TTS_RC=1"
     goto :TTS_FAIL
   )
-) else (
-  echo [OK] venv 存在：%PY_ADAPTER% >> "%SETUP_LOG%"
 )
-
-echo [INFO] 升级 pip ... >> "%SETUP_LOG%"
-"%PY_ADAPTER%" -s -m pip install --upgrade pip >> "%SETUP_LOG%" 2>&1
-
-echo [INFO] 安装/补全依赖 (from requirements.txt) ... >> "%SETUP_LOG%"
-"%PY_ADAPTER%" -s -m pip install -r "%ADAPTER_DIR%\requirements.txt" >> "%SETUP_LOG%" 2>&1
 
 REM ===== 选择 SoVITS 启动文件 =====
 set "API_FILE=%SOVITS_DIR%\api_v2.py"
@@ -141,7 +157,7 @@ echo [OK] SoVITS 已就绪，启动 Adapter ...
 REM ===== 窗口 2：Adapter（可见，强制使用 venv；PYTHONPATH 指向 本项目+Napcat 源码）=====
 REM ★ 修改点：python 增加 -s；继承隔离环境与代理
 start "TTS Adapter (%PORT_ADAPTER%)" cmd /k ^
-  "chcp 65001>nul && set PYTHONPATH=%ADAPTER_DIR%;%ADAPTER_DIR%\tts_src;%NAPCAT_SRC%;%NAPCAT_DIR% && cd /d %ADAPTER_DIR% && echo [CMD] %PY_ADAPTER% -s main.py && %PY_ADAPTER% -s main.py"
+  "chcp 65001>nul && set PYTHONPATH=%ADAPTER_DIR%;%ADAPTER_DIR%\tts_src;%NAPCAT_SRC%;%NAPCAT_DIR% && cd /d %ADAPTER_DIR% && echo [CMD] uv run python main.py && uv run python main.py"
 
 REM ===== 等待 Adapter 端口（最多 30 秒，不通过也继续）=====
 set "READY="
@@ -158,7 +174,7 @@ echo [OK] Adapter 阶段完成，启动 Control ...
 REM ===== 窗口 3：Control（可见，同样使用 venv + PYTHONPATH）=====
 REM ★ 修改点：python 增加 -s；继承隔离环境与代理
 start "Control API (%PORT_CONTROL%)" cmd /k ^
-  "chcp 65001>nul && set PYTHONPATH=%ADAPTER_DIR%;%ADAPTER_DIR%\tts_src;%NAPCAT_SRC%;%NAPCAT_DIR% && cd /d %ADAPTER_DIR% && echo [CMD] %PY_ADAPTER% -s -m tts_src.plugins.GPT_Sovits.api_server && %PY_ADAPTER% -s -m tts_src.plugins.GPT_Sovits.api_server"
+  "chcp 65001>nul && set PYTHONPATH=%ADAPTER_DIR%;%ADAPTER_DIR%\tts_src;%NAPCAT_SRC%;%NAPCAT_DIR% && cd /d %ADAPTER_DIR% && echo [CMD] uv run python -m tts_src.plugins.GPT_Sovits.api_server && uv run python -m tts_src.plugins.GPT_Sovits.api_server"
 
 echo.
 echo ✅ 已打开三个实时日志窗口：
@@ -199,6 +215,25 @@ set "ADAPTER_PORT=8095"
 set "NAPCAT_SHELL_DIR=%ROOT%NapCat.Shell"
 set "NAPCAT_SHELL_BAT=launcher-user.bat"
 
+REM ===== 检查并安装 uv =====
+where uv >nul 2>&1
+if errorlevel 1 (
+  echo [INFO] 未检测到 uv，正在自动下载安装...
+  powershell -NoProfile -ExecutionPolicy ByPass -Command "irm https://astral.sh/uv/install.ps1 | iex"
+  if errorlevel 1 (
+    echo [ERROR] uv 自动安装失败，请手动安装（pip install uv）后重试。
+    exit /b 1
+  )
+  REM 追加常见的 uv 安装路径到当前会话 PATH，确保能在当前窗口立即使用
+  set "PATH=%USERPROFILE%\.local\bin;%USERPROFILE%\.cargo\bin;%PATH%"
+  where uv >nul 2>&1
+  if errorlevel 1 (
+    echo [ERROR] uv 已成功安装但无法在当前会话中定位，请完全关闭终端后重试。
+    exit /b 1
+  )
+  echo [OK] uv 自动安装并配置完成！
+)
+
 set "PYTHON_CMD=uv run python"
 set "MAX_WAIT=60"        REM 每步最多等 60 秒
 set "ALIGN_WAIT=0"       REM 每步就绪后对齐等待 0 秒
@@ -206,7 +241,17 @@ REM =====================
 
 
 
-REM ---- 0) 预清理（已根据需求移除） ----
+REM ---- 0) 预同步依赖（uv sync）----
+echo.
+echo ▶ 同步 NachoBot 依赖 ...
+cd /d "%NACHOBOT_DIR%"
+uv sync
+if errorlevel 1 echo [WARN] NachoBot uv sync 失败，请检查 pyproject.toml。
+
+echo ▶ 同步 NachoBot-Napcat-Adapter 依赖 ...
+cd /d "%ADAPTER_DIR%"
+uv sync
+if errorlevel 1 echo [WARN] Napcat Adapter uv sync 失败，请检查 pyproject.toml。
 
 REM ---- 1) 启动 NachoBot（新窗口）并等待 8000 ----
 if not exist "%NACHOBOT_DIR%\%NACHOBOT_MAIN%" (

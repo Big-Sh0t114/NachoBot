@@ -4,9 +4,10 @@ import logging
 import queue
 import pygame
 from typing import Optional, Any, Callable
+import site
 
 # Ensure user site-packages is at position 0 for highest priority
-user_site = r"c:\users\bigsh0t\appdata\roaming\python\python310\site-packages"
+user_site = site.getusersitepackages()
 print(f"[renderer.py MODULE] Adding user_site to sys.path[0]: {user_site}")
 if user_site in sys.path:
     sys.path.remove(user_site)
@@ -148,7 +149,11 @@ class Live2DRenderer:
             #    pygame.GL_CONTEXT_PROFILE_MASK, pygame.GL_CONTEXT_PROFILE_CORE
             # )
 
-            if not self.antialiasing:
+            if self.antialiasing:
+                self.logger.info("[Live2D] Anti-Aliasing Enabled (MSAA=4)")
+                pygame.display.gl_set_attribute(pygame.GL_MULTISAMPLEBUFFERS, 1)
+                pygame.display.gl_set_attribute(pygame.GL_MULTISAMPLESAMPLES, 4)
+            else:
                 self.logger.info("[Live2D] Anti-Aliasing Disabled (MSAA=0)")
                 pygame.display.gl_set_attribute(pygame.GL_MULTISAMPLEBUFFERS, 0)
                 pygame.display.gl_set_attribute(pygame.GL_MULTISAMPLESAMPLES, 0)

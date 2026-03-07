@@ -1,0 +1,16 @@
+[project]
+name = "nachobotkoishiadapter"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp>=3.13.3",
+    "cryptography>=41.0.0",
+    "fastapi>=0.135.1",
+    "httpx>=0.28.1",
+    "starlette>=0.52.1",
+    "tomlkit>=0.14.0",
+    "uvicorn>=0.41.0",
+    "websockets>=16.0",
+]

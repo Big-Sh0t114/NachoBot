@@ -62,6 +62,11 @@ class AdapterConfig:
     live_gift_reaction_prompt: str
     live_room_prompts: Dict[int, Dict[str, Any]]
     live_host_room_id: Optional[int]
+
+    # === 新增的主人 ID 和 名字 字段 ===
+    live_master_user_id: str
+    live_master_user_name: str
+
     screen_manual_enable: bool
     screen_manual_duration_seconds: int
     screen_manual_user_ids: List[str]
@@ -464,6 +469,13 @@ def load_config(path: Path) -> AdapterConfig:
         live_gift_reaction_prompt=str(live.get("gift_reaction_prompt", "") or ""),
         live_room_prompts=room_prompts,
         live_host_room_id=host_room_id,
+        # === 动态加载主人的配置（支持 live_master_xxx 或者 master_xxx 的写法） ===
+        live_master_user_id=str(
+            live.get("live_master_user_id", live.get("master_user_id", "2146014839"))
+        ),
+        live_master_user_name=str(
+            live.get("live_master_user_name", live.get("master_user_name", "主人"))
+        ),
         screen_manual_enable=manual_enable,
         screen_manual_duration_seconds=max(60, manual_duration_minutes * 60),
         screen_manual_user_ids=manual_user_ids,

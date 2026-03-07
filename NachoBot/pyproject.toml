@@ -64,6 +64,12 @@ dependencies = [
     "pyjwt>=2.11.0",
     "pywin32>=311",
     "sse-starlette>=3.0.3",
+    "brotli>=1.2.0",
+    "qrcode>=8.2",
+    "mss>=10.1.0",
+    "pygame>=2.6.1",
+    "sounddevice>=0.5.5",
+    "live2d-py>=0.6.1.1",
 ]
 
 

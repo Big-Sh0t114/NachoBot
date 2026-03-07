@@ -1,21 +1,63 @@
 @echo off
-setlocal
+setlocal EnableExtensions
+chcp 65001 >nul
+title Launch NachoBot Discord
+set "PYTHONNOUSERSITE=1"
 
-set "BASE_DIR=%~dp0"
+set "ROOT=%~dp0"
+set "NACHOBOT_DIR=%ROOT%NachoBot"
+set "KOISHI_DIR=%ROOT%koishi-app"
+set "KOISHI_ADAPTER_DIR=%ROOT%NachoBot-Koishi-Adapter"
+set "DISCORD_ADAPTER_DIR=%ROOT%NachoBot-DiscordVC-Adapter"
 
-rem ---- Start Koishi in a new window ----
-echo Starting Koishi...
-start "Koishi" cmd /k "cd /d ""%BASE_DIR%koishi-app"" && set HTTPS_PROXY=http://127.0.0.1:7897 && set HTTP_PROXY=http://127.0.0.1:7897 && npm start"
+REM ===== check and install uv =====
+where uv >nul 2>&1
+if errorlevel 1 (
+  echo [INFO] uv not found, auto installing...
+  powershell -NoProfile -ExecutionPolicy ByPass -Command "irm https://astral.sh/uv/install.ps1 | iex"
+  if errorlevel 1 (
+    echo [ERROR] uv install failed. Please install manually using pip install uv.
+    pause
+    exit /b 1
+  )
+  set "PATH=%USERPROFILE%\.local\bin;%USERPROFILE%\.cargo\bin;%PATH%"
+  where uv >nul 2>&1
+  if errorlevel 1 (
+    echo [ERROR] uv installed but not found in PATH. Please restart terminal.
+    pause
+    exit /b 1
+  )
+  echo [OK] uv installed!
+)
 
-rem ---- Wait for Koishi to bring up server-onebot ----
+REM ===== sync deps =====
+echo [SYNC] NachoBot-Koishi-Adapter ...
+cd /d "%KOISHI_ADAPTER_DIR%"
+uv sync
+if errorlevel 1 echo [WARN] Koishi Adapter uv sync failed.
+
+echo [SYNC] NachoBot-DiscordVC-Adapter ...
+cd /d "%DISCORD_ADAPTER_DIR%"
+uv sync
+if errorlevel 1 echo [WARN] DiscordVC Adapter uv sync failed.
+
+REM ===== start Koishi =====
+echo.
+echo [START] Koishi ...
+start "Koishi" cmd /k "cd /d ""%KOISHI_DIR%"" && set HTTPS_PROXY=http://127.0.0.1:7897 && set HTTP_PROXY=http://127.0.0.1:7897 && npm start"
+
+REM ===== wait for Koishi =====
 timeout /t 5 /nobreak >nul
 
-rem ---- Start NachoBot-Koishi-Adapter in a new window ----
-echo Starting NachoBot-Koishi-Adapter...
-start "NachoBot-Koishi-Adapter" cmd /k "cd /d ""%BASE_DIR%NachoBot-Koishi-Adapter"" && python main.py"
+REM ===== start NachoBot-Koishi-Adapter =====
+echo [START] NachoBot-Koishi-Adapter ...
+start "NachoBot-Koishi-Adapter" cmd /k "cd /d ""%KOISHI_ADAPTER_DIR%"" && uv run python main.py"
 
-rem ---- Start NachoBot-DiscordVC-Adapter in a new window ----
-echo Starting NachoBot-DiscordVC-Adapter...
-start "NachoBot-DiscordVC-Adapter" cmd /k "cd /d ""%BASE_DIR%NachoBot-DiscordVC-Adapter"" && python main.py"
+REM ===== start NachoBot-DiscordVC-Adapter =====
+echo [START] NachoBot-DiscordVC-Adapter ...
+start "NachoBot-DiscordVC-Adapter" cmd /k "cd /d ""%DISCORD_ADAPTER_DIR%"" && uv run python main.py"
 
+echo.
+echo [DONE] Launch sequence complete.
+echo.
 endlocal
