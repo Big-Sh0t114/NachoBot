@@ -59,32 +59,33 @@ NachoBot 是在上游 **MaiBot 0.10.3 Beta** 基础上研发的角色扮演聊�
 
 ---
 
-#### 核心配置
+## 核心配置
+0. **安装 python 3.11或以上版本（3.13除外），并下载 [GPT-SoVITS](https://www.yuque.com/baicaigongchang1145haoyuangong/ib3g1e/dkxgpiy9zb96hob4) 和 [Napcat Shell.](https://github.com/NapNeko/NapCatQQ) ，确保 Napcat Shell. 放置在根目录下**
+   - Discord侧服务还需额外安装Node.js
 1. **拉取代码后，先复制/编辑主干配置**
    - 从 `template/` 中复制 `bot_config_template.toml` 和 `model_config_template.toml` 到 `config/`，并删除 `_template` 后缀。
    - `config/bot_config.toml`：填写 `qq_account`、按需设置人设、表达学习、权限白名单等。
    - `config/model_config.toml`：为各 `api_providers` 填入你的 `api_key`，按需调整模型映射。
-     *(提示：所有密钥/账号均已清空占位，需使用你自己的值。默认第三方模型拉取启航 API 以及硅基流动。)*
    - **插件配置**：直接运行 bot 后会自动生成所有插件的默认配置文件模板，自行填写配置后重启 bot 即可。
 
 2. **自动依赖安装与环境启动**
-   - 本项目已实现**一键启动与依赖自动管理**。
-   - 打开根目录下的 `launchbot.bat` 脚本，找到第 36 行的 `SOVITS_DIR` 变量，配置为你本地 GPT-SoVITS 的绝对路径。(如不使用语音可忽略)
+   - 本项目已实现*一键启动与依赖自动管理*。
+   - 记事本打开根目录下的 `launchbot.bat` 脚本，找到第 36 行的 `SOVITS_DIR` 变量，配置为你本地 GPT-SoVITS 的绝对路径。
    - 双击运行 `launchbot.bat` 即可全自动安装依赖并拉起所有底层组件。
 
-#### Bilibili配置
+## Bilibili配置
 - 从项目根目录 `config-save/` 中复制 `config-biliadapter.toml` 移动至 `NachoBot-Bilbili-Adapter` 目录中，删除 `-biliadapter.toml` 后缀。
 - cmd 运行 `python qr_login.py` 扫描二维码。
 - `config.toml`：填写直播间 id / 违禁词等。
-- 双击 `launch_bili.bat` 运行适配器。
+- 使用Live2d相关功能需前往Live2d官方网站下载 [Live2d Cubism SDK](https://www.live2d.com/zh-CHS/cubism/download/editor/)，从中提取出 `Live2DCubismCore.dll` 放入Bilibili-Adapter根目录下
 
-#### Discord配置
+## Discord配置
 - 从项目根目录 `config-save/` 中复制 `koishi.yml` 移动至 `koishi-app/` 目录中。
+- 移除 `NachoBot-DiscordVC-Adapter` 目录下的 `config.toml.example` 文件的 `.example` 后缀并配置文件。
 - 双击 `koishi-app/launch Koishi.bat` 启动 Koishi，在 webUI 中填写自己的 Discord Bot token 和 self id。
-- 双击 `launch_koishi_adapter.bat` 运行适配器。
 - 复制 DiscordVC-Adapter 中的 `config.toml.example`，并重命名为 `config.toml`，填写相关配置。
 
-#### TTS配置
+## TTS配置
 *详见TTS适配器文档*
 
 ``保持所有终端运行！！！在全平台服务跑起来的情况下应该是有6+3+1个终端窗口在运行``
@@ -93,7 +94,7 @@ NachoBot 是在上游 **MaiBot 0.10.3 Beta** 基础上研发的角色扮演聊�
 - 请勿将真实密钥、Cookie、个人账号信息提交到仓库；部署前在本地/环境变量中填充。
 - 本项目会调用第三方模型/服务；使用时需遵守各自的服务条款与隐私政策。
 
-###### 贡献与致谢
+##### 贡献与致谢
 - 上游：MaiBot 项目团队贡献者与插件制作者。
 - Napcat / GPT-SoVITS / Koishi 团队。
 - 贡献方式：遵循 GPLv3；提交 PR 前请先清理私密信息，并保持对上游的致谢与链接。

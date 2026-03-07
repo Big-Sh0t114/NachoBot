@@ -72,9 +72,10 @@ class Live2DController:
         if self.loop and self.adapter:
             config = self.adapter.config
             room_id = config.live_host_room_id
-            # Use specific User ID for Master (same as Microphone input) to avoid being treated as self-talk
-            user_id = "2146014839"
-            user_name = "主人"
+
+            # 修复：从配置文件动态读取 Master 信息，避免硬编码，并提供默认后备值
+            user_id = getattr(config, "live_master_user_id", "1")
+            user_name = getattr(config, "live_master_user_name", "主人")
 
             if not room_id:
                 self.logger.warning("Cannot poke: Host Room ID not configured.")
@@ -108,10 +109,11 @@ class Live2DController:
                 # Ensure user site-packages is in path for live2d-py
                 # CRITICAL: Always force it to position 0 for highest priority
                 import sys
+                import site
 
-                user_site = (
-                    r"c:\users\bigsh0t\appdata\roaming\python\python310\site-packages"
-                )
+                # 修复：使用 site 模块动态获取当前用户的 site-packages 路径
+                user_site = site.getusersitepackages()
+
                 # Remove if exists, then insert at position 0
                 if user_site in sys.path:
                     sys.path.remove(user_site)

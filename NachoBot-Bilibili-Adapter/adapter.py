@@ -23,7 +23,7 @@ _nachobot_path = _root_dir / "NachoBot"
 if _nachobot_path.exists() and str(_nachobot_path) not in sys.path:
     sys.path.insert(0, str(_nachobot_path))
 
-from live2d.controller import Live2DController
+from live2d_render.controller import Live2DController
 from model_client import get_model_client
 from src.chat.message_receive.message import MessageRecv
 
