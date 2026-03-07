@@ -1,3 +1,6 @@
+3/8
+    修改Bilibili Adapter下Live2d文件夹名称
+    重写启动脚本
 3/2~3/5
     持续修复已发现的bug
 2/28
