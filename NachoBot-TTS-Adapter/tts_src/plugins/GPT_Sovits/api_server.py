@@ -33,13 +33,18 @@ async def startup_event():
         logger.error(f"TTS Model initialization failed: {e}")
         print(f"TTS 模型加载失败，TTS 功能将不可用。错误: {e}")
 
-    print("[Florence-2] 正在预加载 VLM 模型 ...")
-    await asyncio.to_thread(load_florence2)
-    print("[Florence-2] VLM 模型加载完成")
+    if os.environ.get("DISABLE_VLM_ASR") == "1":
+        print("[System] DISABLE_VLM_ASR is set to 1. Skipping VLM (Florence-2) and ASR (FunASR) preloading.")
+        logger.info("DISABLE_VLM_ASR is set. VLM and ASR preloading skipped.")
+        return
 
-    print("[FunASR] 正在预加载 ASR 模型 ...")
+    print("[Florence-2] Preloading VLM model ...")
+    await asyncio.to_thread(load_florence2)
+    print("[Florence-2] VLM model loaded")
+
+    print("[FunASR] Preloading ASR model ...")
     await asyncio.to_thread(load_funasr)
-    print("[FunASR] ASR 模型加载完成")
+    print("[FunASR] ASR model loaded")
 
 
 # ==================== 模型加载接口 ====================
