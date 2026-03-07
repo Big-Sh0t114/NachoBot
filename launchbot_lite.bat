@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions
 chcp 65001 >nul
-title Launch TTS + NachoBot
+title Launch NachoBot Lite
 set "FINAL_RC=0"
 set "ROOT=%~dp0"
 
@@ -24,6 +24,8 @@ setlocal EnableDelayedExpansion
 title TTS Launch
 chcp 65001 >nul
 set "TTS_RC=0"
+
+set "DISABLE_VLM_ASR=1"
 
 set "BASE_DIR=%ROOT%"
 set "ADAPTER_DIR=%BASE_DIR%NachoBot-TTS-Adapter"
