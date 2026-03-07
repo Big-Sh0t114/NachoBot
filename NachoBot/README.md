@@ -60,18 +60,22 @@ NachoBot 是在上游 **MaiBot 0.10.3 Beta** 基础上研发的角色扮演聊�
 ---
 
 ## 核心配置
-0. **安装 python 3.11或以上版本（3.13除外），并下载 [GPT-SoVITS](https://www.yuque.com/baicaigongchang1145haoyuangong/ib3g1e/dkxgpiy9zb96hob4) 和 [Napcat Shell.](https://github.com/NapNeko/NapCatQQ) ，确保 Napcat Shell. 放置在根目录下**
+0. **安装 python 3.11或以上版本（3.14除外），并下载 [GPT-SoVITS](https://www.yuque.com/baicaigongchang1145haoyuangong/ib3g1e/dkxgpiy9zb96hob4) 和 [Napcat Shell.](https://github.com/NapNeko/NapCatQQ) ，确保 Napcat Shell. 放置在根目录下**
    - Discord侧服务还需额外安装Node.js
+   
 1. **拉取代码后，先复制/编辑主干配置**
    - 从 `template/` 中复制 `bot_config_template.toml` 和 `model_config_template.toml` 到 `config/`，并删除 `_template` 后缀。
    - `config/bot_config.toml`：填写 `qq_account`、按需设置人设、表达学习、权限白名单等。
    - `config/model_config.toml`：为各 `api_providers` 填入你的 `api_key`，按需调整模型映射。
-   - **插件配置**：直接运行 bot 后会自动生成所有插件的默认配置文件模板，自行填写配置后重启 bot 即可。
+   - 进入 `NachoBot-Napcat-Adapter` 目录，从 `template/` 中复制 `template_config.toml` 到 `NachoBot-Napcat-Adapter` 目录下，并删除 `template_` 前缀。
 
 2. **自动依赖安装与环境启动**
    - 本项目已实现*一键启动与依赖自动管理*。
    - 记事本打开根目录下的 `launchbot.bat` 脚本，找到第 36 行的 `SOVITS_DIR` 变量，配置为你本地 GPT-SoVITS 的绝对路径。
    - 双击运行 `launchbot.bat` 即可全自动安装依赖并拉起所有底层组件。
+
+3. **插件配置**
+   - 初次完成启动流程后，会在所有插件目录下生成各自的 `config.toml` 配置文件，自行填写后重启bot。
 
 ## Bilibili配置
 - 从项目根目录 `config-save/` 中复制 `config-biliadapter.toml` 移动至 `NachoBot-Bilbili-Adapter` 目录中，删除 `-biliadapter.toml` 后缀。
@@ -89,6 +93,7 @@ NachoBot 是在上游 **MaiBot 0.10.3 Beta** 基础上研发的角色扮演聊�
 *详见TTS适配器文档*
 
 ``保持所有终端运行！！！在全平台服务跑起来的情况下应该是有6+3+1个终端窗口在运行``
+``launchbot_lite.bat 是轻量启动脚本，不包含本地 VLM/ASR 服务，为电脑性能较差用户提供``
 
 ##### 安全与隐私提示
 - 请勿将真实密钥、Cookie、个人账号信息提交到仓库；部署前在本地/环境变量中填充。

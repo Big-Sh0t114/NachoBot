@@ -43,6 +43,7 @@ config/bot_config.toml
 config/bot_config.toml.bak
 config/lpmm_config.toml
 config/lpmm_config.toml.bak
+!config/.gitkeep
 src/mais4u/config/s4u_config.toml
 src/mais4u/config/old
 template/compare/bot_config_template.toml
