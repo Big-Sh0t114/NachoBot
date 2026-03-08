@@ -104,3 +104,61 @@ def init_replyer_prompt():
 """,
         "file_edit_prompt",
     )
+
+    Prompt(
+        """{knowledge_prompt}{memory_retrieval}{relation_info_block}{tool_info_block}{extra_info_block}
+{expression_habits_block}
+
+你正在和{sender_name}聊天，这是你们之前聊的内容:
+{time_block}
+{dialogue_prompt}
+
+{actions_before_now_block}
+
+**可用的动作池**
+reply
+动作描述：进行回复，你必须在JSON的"text"字段中填入回复内容。
+{{
+    "action": "reply",
+    "text": "你的回复内容",
+    "reason": "回复的原因"
+}}
+
+no_reply
+动作描述：等待，保持沉默。
+{{
+    "action": "no_reply",
+    "reason": "保持沉默的原因"
+}}
+
+make_appoint
+动作描述：设定定时提醒。
+{{
+    "action": "make_appoint",
+    "remind_time": "提醒时间",
+    "remind_content": "提醒内容",
+    "reason": "设定提醒的原因"
+}}
+
+cancel_appoint
+动作描述：取消定时提醒。
+{{
+    "action": "cancel_appoint",
+    "remind_content": "取消内容",
+    "reason": "取消的原因"
+}}
+
+{action_options_text}
+
+{reply_target_block}。
+{identity}
+请通过分析聊天记录，决定下一步动作并给出回复。
+1. 如果选择 reply，请在 JSON 的 "text" 字段给出日常且口语化的回复，尽量简短。
+   **!!!绝对禁止!!!**：在 "text" 字段中包含任何 JSON 结构、动作名称、或者类似于 `( "reason": ... )` 的额外说明。该字段只能包含发送给对方的话。
+2. 你可以同时选择多个动作（如 reply 和一个插件动作），每个动作都要单独用 ```json 包裹。
+3. {keywords_reaction_prompt}
+{reply_style}
+{moderation_prompt}
+请以 JSON 格式输出你的选择。如果包含回复，请务必放在 "text" 字段中。所有内部思考理由请严格只写在 "reason" 字段。""",
+        "brain_integrated_prompt",
+    )
