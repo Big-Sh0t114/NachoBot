@@ -16,6 +16,7 @@ platform = "qq"
 qq_account = " " # QQ账号
 nickname = "NachoBot" # 昵称
 alias_names = ['人机', '机器人', 'AI', 'Bot'] # 别名
+integrated_plan = true # 集成规划开关，打开可提高响应速度和智力，但会增加开销
 sandbox_whitelist = [] # 沙盒白名单列表
 
 [personality]

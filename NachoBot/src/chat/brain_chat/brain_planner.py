@@ -17,19 +17,30 @@ from src.chat.utils.chat_message_builder import (
     build_readable_actions,
     get_actions_by_timestamp_with_chat,
     build_readable_messages_with_id,
+    build_readable_messages,
     get_raw_msg_before_timestamp_with_chat,
+    replace_user_references,
 )
+from src.chat.utils.prompt_injection_guard import guard_user_content
+from src.chat.utils.context_builder import build_tool_info, build_relation_info, build_lpmm_knowledge_info
+from src.memory_system.memory_retrieval import build_memory_retrieval_prompt
 from src.chat.utils.utils import get_chat_type_and_target_info
 from src.chat.planner_actions.action_manager import ActionManager
 from src.chat.message_receive.chat_stream import get_chat_manager
 from src.plugin_system.base.component_types import ActionInfo, ComponentType, ActionActivationType
 from src.plugin_system.core.component_registry import component_registry
+import os
+import tomlkit
+import asyncio
+from src.plugin_system.core.tool_use import ToolExecutor
+from src.chat.utils.web_search import WebSearchManager
+from src.chat.utils.url_fetcher import UrlContentFetcher
 
 if TYPE_CHECKING:
     from src.common.data_models.info_data_model import TargetPersonInfo
     from src.common.data_models.database_data_model import DatabaseMessages
 
-logger = get_logger("planner")
+logger = get_logger("replyer")
 
 install(extra_lines=3)
 
@@ -171,18 +182,78 @@ class BrainPlanner:
         self.chat_id = chat_id
         self.log_prefix = f"[{get_chat_manager().get_stream_name(chat_id) or chat_id}]"
         self.action_manager = action_manager
-        # LLM规划器配置
-        self.planner_llm = LLMRequest(
+        
+        self.integrated_llm = LLMRequest(
+            model_set=model_config.model_task_config.replyer, request_type="integrated_planner"
+        )  # 整合后的规划器使用回复器模型
+        self.separated_llm = LLMRequest(
             model_set=model_config.model_task_config.planner, request_type="planner"
-        )  # 用于动作规划
+        )  # 独立规划器使用各自的模型
 
         self.last_obs_time_mark = 0.0
+
+        # 初始化独立工具执行器，专用于集成规划模式
+        self.tool_executor = ToolExecutor(
+            chat_id=self.chat_id,
+            enable_cache=True,
+            cache_ttl=3,
+            exclude_prefix="mcp",
+            model_set=model_config.model_task_config.tool_use,
+        )
+        self.mcp_executor = ToolExecutor(
+            chat_id=self.chat_id,
+            enable_cache=True,
+            cache_ttl=3,
+            model_set=model_config.model_task_config.mcp,
+            include_prefix="mcp",
+            prompt_template="mcp_tool_executor_prompt",
+        )
+        self.web_search_manager = WebSearchManager(chat_id=chat_id, enable_cache=True, cache_ttl=2)
+        self.url_fetcher = UrlContentFetcher()
+
+    @property
+    def planner_llm(self) -> LLMRequest:
+        return self.integrated_llm if global_config.bot.integrated_plan else self.separated_llm
 
     def _check_sandbox_permission(self, user_id: str) -> bool:
         """Check if user has permission to use sandbox features"""
         is_admin = str(user_id) in global_config.advanced.admins
         is_whitelisted = str(user_id) in global_config.bot.sandbox_whitelist
         return is_admin or is_whitelisted
+
+    def _check_mcp_permission(self, user_id: str) -> bool:
+        """检查当前用户是否有权限使用 MCP 工具 (集成自 PrivateGenerator)"""
+        try:
+            if not user_id:
+                return False
+
+            config_path = os.path.join(os.getcwd(), "plugins", "MaiBot_MCPBridgePlugin", "config.toml")
+            if not os.path.exists(config_path):
+                return False
+
+            with open(config_path, "r", encoding="utf-8") as f:
+                doc = tomlkit.load(f)
+
+            plugin_config = doc.get("plugin", {})
+            if not plugin_config.get("enabled", True):
+                return False
+
+            permissions = doc.get("permissions", {})
+            quick_allow_users_str = permissions.get("quick_allow_users", "")
+            default_mode = permissions.get("perm_default_mode", "deny_all")
+
+            allow_users = {u.strip() for u in quick_allow_users_str.strip().split("\n") if u.strip()}
+
+            is_allowed = user_id in allow_users
+            if is_allowed:
+                return True
+
+            if default_mode == "deny_all":
+                return False
+            return True
+        except Exception as e:
+            logger.debug(f"{self.log_prefix}MCP Permission Check Failed: {e}")
+            return False
 
     def find_message_by_id(
         self, message_id: str, message_id_list: List[Tuple[str, "DatabaseMessages"]]
@@ -215,7 +286,14 @@ class BrainPlanner:
         try:
             action = action_json.get("action", "no_action")
             reasoning = action_json.get("reason", "未提供原因")
-            action_data = {key: value for key, value in action_json.items() if key not in ["action", "reason"]}
+            reply_text = action_json.get("text", "")  # 获取整合后的回复文本
+            if reply_text:
+                # 极其防御性的处理：如果 LLM 抽风在 text 里塞了 JSON 结构或 reason
+                # 常见错误： "text": "回复内容( \"reason\": \"...\" )" 或 "text": "回复内容", "reason": "..."
+                for stop_v in ['"reason":', "'reason':", '\"reason\":', "( \"reason\":", "(\"reason\":"]:
+                    if stop_v in reply_text:
+                        reply_text = reply_text.split(stop_v)[0].strip().rstrip('(').rstrip(',').rstrip('"').rstrip("'").strip()
+            action_data = {key: value for key, value in action_json.items() if key not in ["action", "reason", "text"]}
             # 非no_action动作需要target_message_id
             latest_user_message = _pick_latest_user_message(message_id_list)
             target_message = None
@@ -263,6 +341,7 @@ class BrainPlanner:
                     action_data=action_data,
                     action_message=target_message,
                     available_actions=available_actions_dict,
+                    reply_text=reply_text,
                 )
             )
 
@@ -298,10 +377,12 @@ class BrainPlanner:
         context_size = global_config.chat.get_max_context_size(is_group_chat=is_group_chat)
 
         # 获取聊天上下文
+        # 如果是私聊，使用完整的120条限制；如果是群聊，使用0.6倍限制以节省token
+        limit = context_size if not is_group_chat else int(context_size * 0.6)
         message_list_before_now = get_raw_msg_before_timestamp_with_chat(
             chat_id=self.chat_id,
             timestamp=time.time(),
-            limit=int(context_size * 0.6),
+            limit=limit,
         )
         if message_list_before_now:
             latest_message = message_list_before_now[-1]
@@ -365,15 +446,25 @@ class BrainPlanner:
 
         logger.debug(f"{self.log_prefix}过滤后有{len(filtered_actions)}个可用动作")
 
-        # 构建包含所有动作的提示词
-        prompt, message_id_list = await self.build_planner_prompt(
-            is_group_chat=is_group_chat,
-            chat_target_info=chat_target_info,
-            current_available_actions=filtered_actions,
-            chat_content_block=chat_content_block,
-            message_id_list=message_id_list,
-            interest=global_config.personality.interest,
-        )
+        # 构建包含所有动作和回复上下文的提示词
+        if global_config.bot.integrated_plan:
+            prompt, message_id_list = await self.build_integrated_planner_prompt(
+                is_group_chat=is_group_chat,
+                chat_target_info=chat_target_info,
+                current_available_actions=filtered_actions,
+                chat_content_block=chat_content_block,
+                message_id_list=message_id_list,
+                interest=global_config.personality.interest,
+            )
+        else:
+            prompt, message_id_list = await self.build_planner_prompt(
+                is_group_chat=is_group_chat,
+                chat_target_info=chat_target_info,
+                current_available_actions=filtered_actions,
+                message_id_list=message_id_list,
+                chat_content_block=chat_content_block,
+                interest=global_config.personality.interest,
+            )
 
         # 调用LLM获取决策
         actions = await self._execute_main_planner(
@@ -466,6 +557,148 @@ class BrainPlanner:
             logger.error(f"构建 Planner 提示词时出错: {e}")
             logger.error(traceback.format_exc())
             return "构建 Planner Prompt 时出错", []
+
+    async def build_integrated_planner_prompt(
+        self,
+        is_group_chat: bool,
+        chat_target_info: Optional["TargetPersonInfo"],
+        current_available_actions: Dict[str, ActionInfo],
+        message_id_list: List[Tuple[str, "DatabaseMessages"]],
+        chat_content_block: str = "",
+        interest: str = "",
+    ) -> tuple[str, List[Tuple[str, "DatabaseMessages"]]]:
+        """构建整合了动作和回复的提示词"""
+        try:
+            # 获取最近执行过的动作
+            actions_before_now = get_actions_by_timestamp_with_chat(
+                chat_id=self.chat_id,
+                timestamp_start=time.time() - 600,
+                timestamp_end=time.time(),
+                limit=6,
+            )
+            actions_before_now_block = build_readable_actions(actions=actions_before_now)
+            if actions_before_now_block:
+                actions_before_now_block = f"你刚刚选择并执行过的action是：\n{actions_before_now_block}"
+            else:
+                actions_before_now_block = ""
+
+            sender_name = "对方"
+            if chat_target_info:
+                sender_name = chat_target_info.person_name or chat_target_info.user_nickname or "对方"
+
+            # 构建动作选项块
+            action_options_block = await self._build_action_options_block(current_available_actions)
+
+            # 情绪和人格
+            # from src.mood.mood_manager import mood_manager
+
+            # if global_config.mood.enable_mood:
+            #     chat_mood = mood_manager.get_mood_by_chat_id(self.chat_id)
+            #     mood_prompt = chat_mood.mood_state 
+
+            # 取最后一条相关的消息文本作为 target，用于触发工具和记忆
+            target = ""
+            if len(message_id_list) > 0:
+                last_msg = message_id_list[-1][1]
+                target = last_msg.processed_plain_text
+                target = replace_user_references(target, global_config.bot.platform, replace_bot_name=True)
+                target = re.sub(r"\\[picid:[^\\]]+\\]", "[图片]", target)
+                target, _, _ = guard_user_content(target, sender_name)
+            
+            # 使用更短的上下文来检索工具和记忆，避免由于上下文过长导致的检索噪音
+            short_context_size = int(global_config.chat.get_max_context_size(is_group_chat) * 0.33)
+            message_list_before_short = get_raw_msg_before_timestamp_with_chat(
+                chat_id=self.chat_id,
+                timestamp=time.time(),
+                limit=short_context_size,
+            )
+            chat_talking_prompt_short = build_readable_messages(
+                message_list_before_short,
+                replace_bot_name=True,
+                timestamp_mode="relative",
+                read_mark=0.0,
+                show_actions=True,
+            )
+
+            # --- 下面使用 gathered 异步加载上下文所需信息 ---
+            user_info = chat_target_info if chat_target_info else None
+            
+            task_results = await asyncio.gather(
+                build_relation_info(chat_talking_prompt_short, sender_name, user_info=user_info),
+                build_memory_retrieval_prompt(
+                    message=chat_talking_prompt_short, sender=sender_name, target=target, chat_stream=get_chat_manager().get_stream(self.chat_id)
+                ),
+                build_tool_info(
+                    chat_history=chat_talking_prompt_short,
+                    sender=sender_name,
+                    target=target,
+                    url_fetcher=self.url_fetcher,
+                    web_search_manager=self.web_search_manager,
+                    tool_executor=self.tool_executor,
+                    mcp_executor=self.mcp_executor,
+                    has_mcp_permission=self._check_mcp_permission(user_info.user_id if user_info and user_info.user_id else ""),
+                    enable_tool=global_config.tool.enable_tool,
+                ),
+                build_lpmm_knowledge_info(
+                    message=chat_talking_prompt_short, sender=sender_name, target=target, tool_executor=self.tool_executor
+                ),
+            )
+            
+            relation_info_block = task_results[0]
+            memory_retrieval_block = task_results[1]
+            tool_info_block = task_results[2]
+            knowledge_prompt_block = task_results[3]
+            
+            bot_name = global_config.bot.nickname
+            bot_nickname = (
+                f",也有人叫你{','.join(global_config.bot.alias_names)}" if global_config.bot.alias_names else ""
+            )
+            prompt_personality = f"{global_config.personality.personality};"
+            identity = f"你的名字是{bot_name}{bot_nickname}，你{prompt_personality}"
+
+            # 其他块
+            time_block = f"当前时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            moderation_prompt_block = "请不要输出违法违规内容，不要输出色情，暴力，政治相关内容，如有敏感内容，请规避。"
+
+            # 习惯
+            from src.chat.express.expression_selector import expression_selector
+
+            use_expression, _, _ = global_config.expression.get_expression_config_for_chat(self.chat_id)
+            expression_habits_block = ""
+            if use_expression:
+                selected_expressions, _ = await expression_selector.select_suitable_expressions_llm(
+                    self.chat_id, chat_content_block, max_num=8
+                )
+                if selected_expressions:
+                    style_habits = [f"当{expr['situation']}时，使用 {expr['style']}" for expr in selected_expressions]
+                    expression_habits_block = "在回复时,你可以参考以下的语言习惯，不要生硬使用：\n" + "\n".join(style_habits)
+
+            # 获取整合模板并填充
+            planner_prompt_template = await global_prompt_manager.get_prompt_async("brain_integrated_prompt")
+            prompt = planner_prompt_template.format(
+                knowledge_prompt=knowledge_prompt_block,
+                memory_retrieval=memory_retrieval_block,
+                relation_info_block=relation_info_block,
+                tool_info_block=tool_info_block,
+                extra_info_block="",
+                expression_habits_block=expression_habits_block,
+                sender_name=sender_name,
+                time_block=time_block,
+                dialogue_prompt=chat_content_block,
+                actions_before_now_block=actions_before_now_block,
+                action_options_text=action_options_block,
+                reply_target_block=f"你正在和 {sender_name} 聊天",
+                identity=identity,
+                reply_style=global_config.personality.private_plan_style,
+                keywords_reaction_prompt="",
+                moderation_prompt=moderation_prompt_block,
+            )
+
+            return prompt, message_id_list
+        except Exception as e:
+            logger.error(f"构建整合提示词时出错: {e}")
+            logger.error(traceback.format_exc())
+            return "构建 Integrated Prompt 时出错", []
 
     def get_necessary_info(self) -> Tuple[bool, Optional["TargetPersonInfo"], Dict[str, ActionInfo]]:
         """
@@ -574,14 +807,11 @@ class BrainPlanner:
             # 调用LLM
             llm_content, (reasoning_content, _, _) = await self.planner_llm.generate_response_async(prompt=prompt)
 
-            # logger.info(f"{self.log_prefix}规划器原始提示词: {prompt}")
-            # logger.info(f"{self.log_prefix}规划器原始响应: {llm_content}")
+            logger.info(f"{self.log_prefix}规划器原始提示词: {prompt}")
+            logger.info(f"{self.log_prefix}规划器原始响应: {llm_content}")
 
-            if global_config.debug.show_prompt:
-                logger.info(f"{self.log_prefix}规划器原始提示词: {prompt}")
-                logger.info(f"{self.log_prefix}规划器原始响应: {llm_content}")
-                if reasoning_content:
-                    logger.info(f"{self.log_prefix}规划器推理: {reasoning_content}")
+            if reasoning_content:
+                logger.info(f"{self.log_prefix}规划器推理: {reasoning_content}")
             else:
                 logger.debug(f"{self.log_prefix}规划器原始提示词: {prompt}")
                 logger.debug(f"{self.log_prefix}规划器原始响应: {llm_content}")
@@ -654,10 +884,9 @@ class BrainPlanner:
 
         for match in matches:
             try:
-                # 清理可能的注释和格式问题
-                json_str = re.sub(r"//.*?\n", "\n", match)  # 移除单行注释
-                json_str = re.sub(r"/\*.*?\*/", "", json_str, flags=re.DOTALL)  # 移除多行注释
-                if json_str := json_str.strip():
+                # 清理可能的格式问题，不再使用不安全的正则移除注释，以免误伤类似 (///ω///) 的内容
+                # json_repair 库原生支持处理 JSON 中的多行和单行注释
+                if json_str := match.strip():
                     json_obj = json.loads(repair_json(json_str))
                     if isinstance(json_obj, dict):
                         json_objects.append(json_obj)

@@ -695,6 +695,28 @@ class BrainChatting:
                                     if getattr(action, "action_type", "") != "tts_action"
                                 ]
 
+                        # 整合模式：如果 planner 已经生成了回复，直接使用
+                        if action_planner_info.reply_text:
+                            logger.info(f"{self.log_prefix} 使用集成生成的回复内容")
+                            # 将文本转换为 ReplySetModel
+                            from src.plugin_system.apis.generator_api import process_human_text
+                            response_set = process_human_text(action_planner_info.reply_text, enable_splitter=True, enable_chinese_typo=True)
+                            if response_set:
+                                loop_info, reply_text, _ = await self._send_and_store_reply(
+                                    response_set=response_set,
+                                    action_message=action_planner_info.action_message,  # type: ignore
+                                    cycle_timers=cycle_timers,
+                                    thinking_id=thinking_id,
+                                    actions=chosen_action_plan_infos,
+                                    selected_expressions=None, # 集成模式暂不单独选表情，或由 planner 决定
+                                )
+                                return {
+                                    "action_type": action_planner_info.action_type,
+                                    "success": True,
+                                    "reply_text": reply_text,
+                                    "loop_info": loop_info,
+                                }
+
                         success, llm_response = await generator_api.generate_reply(
                             chat_stream=self.chat_stream,
                             reply_message=action_planner_info.action_message,

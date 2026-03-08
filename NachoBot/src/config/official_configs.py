@@ -29,6 +29,9 @@ class BotConfig(ConfigBase):
 
     alias_names: list[str] = field(default_factory=lambda: [])
     """别名列表"""
+    
+    integrated_plan: bool = True
+    """集成规划开关（设为false则回退至分离的planner/replyer模式）"""
 
     sandbox_whitelist: list[str] = field(default_factory=lambda: [])
     """沙盒白名单列表"""
