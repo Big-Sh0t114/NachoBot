@@ -1,5 +1,6 @@
 3/8
     修改Bilibili Adapter下Live2d文件夹名称
+    增加私聊集成模式，由replyer直接选择动作
     重写启动脚本
 3/2~3/5
     持续修复已发现的bug
