@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://readme-typing-svg.demolab.com?font=Fira+Code&weight=800&size=65&pause=1000&color=87CEEB&center=true&vCenter=true&width=600&height=100&lines=我的存在，由你定义;NachoBot;你的一言，我的一切;NachoBot" alt="Typing SVG" />
+  <img src="https://readme-typing-svg.demolab.com?font=Noto+Sans+SC&weight=800&size=65&pause=1000&color=87CEEB&center=true&vCenter=true&width=600&height=100&lines=%E6%88%91%E7%9A%84%E5%AD%98%E5%9C%A8%EF%BC%8C%E7%94%B1%E4%BD%A0%E5%AE%9A%E4%B9%89;NachoBot;%E4%BD%A0%E7%9A%84%E4%B8%80%E8%A8%80%EF%BC%8C%E6%88%91%E7%9A%84%E4%B8%80%E5%88%87;NachoBot" alt="NachoBot Typing SVG" />
 </div>
 
 ---
