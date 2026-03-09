@@ -420,6 +420,11 @@ model_list = []
 temperature = 0.5
 max_tokens = 800
 
+[model_task_config.replyer2] # 备用回复模型组2
+model_list = []
+temperature = 0.5
+max_tokens = 800
+
 [model_task_config.advanced_replyer] # 高级模式回复模型组（可选，未配置则回退replyer）
 # 在此填写高级模式使用的模型名称列表
 model_list = ["grok-4.1-thinking","grok-4-fast-expert","grok-4-fast","grok-3"]

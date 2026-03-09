@@ -52,15 +52,18 @@ logger = get_logger("replyer")
 
 
 class DefaultReplyer:
+    @property
+    def express_model(self) -> LLMRequest:
+        model_set = model_config.model_task_config.replyer
+        if getattr(self, "request_type", "replyer") == "file_edit":
+            model_set = getattr(model_config.model_task_config, "file_edit", model_set)
+        return LLMRequest(model_set=model_set, request_type=getattr(self, "request_type", "replyer"))
+
     def __init__(
         self,
         chat_stream: ChatStream,
         request_type: str = "replyer",
     ):
-        model_set = model_config.model_task_config.replyer
-        if request_type == "file_edit":
-            model_set = getattr(model_config.model_task_config, "file_edit", model_set)
-        self.express_model = LLMRequest(model_set=model_set, request_type=request_type)
         self.request_type = request_type
         self.chat_stream = chat_stream
         self.is_group_chat, self.chat_target_info = get_chat_type_and_target_info(self.chat_stream.stream_id)
@@ -1508,12 +1511,17 @@ class AdvancedGroupReplyer(DefaultReplyer):
     支持独立模型组（model_task_config.advanced_replyer），可通过配置开关。
     """
 
-    def __init__(self, *args, **kwargs):
-        kwargs.setdefault("request_type", "advanced_replyer")
-        super().__init__(*args, **kwargs)
+    @property
+    def express_model(self) -> LLMRequest:
         if getattr(global_config.advanced, "use_advanced_replyer", True):
             advanced_model_set = getattr(model_config.model_task_config, "advanced_replyer", None)
             model_set = advanced_model_set or model_config.model_task_config.replyer
-            self.express_model = LLMRequest(
-                model_set=model_set, request_type=kwargs.get("request_type", "advanced_replyer")
-            )
+        else:
+            model_set = model_config.model_task_config.replyer
+            if getattr(self, "request_type", "advanced_replyer") == "file_edit":
+                model_set = getattr(model_config.model_task_config, "file_edit", model_set)
+        return LLMRequest(model_set=model_set, request_type=getattr(self, "request_type", "advanced_replyer"))
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("request_type", "advanced_replyer")
+        super().__init__(*args, **kwargs)

@@ -52,15 +52,18 @@ logger = get_logger("replyer")
 
 
 class PrivateReplyer:
+    @property
+    def express_model(self) -> LLMRequest:
+        model_set = model_config.model_task_config.replyer
+        if getattr(self, "request_type", "replyer") == "file_edit":
+            model_set = getattr(model_config.model_task_config, "file_edit", model_set)
+        return LLMRequest(model_set=model_set, request_type=getattr(self, "request_type", "replyer"))
+
     def __init__(
         self,
         chat_stream: ChatStream,
         request_type: str = "replyer",
     ):
-        model_set = model_config.model_task_config.replyer
-        if request_type == "file_edit":
-            model_set = getattr(model_config.model_task_config, "file_edit", model_set)
-        self.express_model = LLMRequest(model_set=model_set, request_type=request_type)
         self.request_type = request_type
         self.chat_stream = chat_stream
         self.is_group_chat, self.chat_target_info = get_chat_type_and_target_info(self.chat_stream.stream_id)

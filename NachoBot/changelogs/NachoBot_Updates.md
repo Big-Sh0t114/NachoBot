@@ -1,3 +1,6 @@
+3/9
+    Live2d表情切换接入普通模式直播间
+    修复私聊集成模式带来的 replyer group cache 问题
 3/8
     修改Bilibili Adapter下Live2d文件夹名称
     增加私聊集成模式，由replyer直接选择动作
@@ -5,7 +8,7 @@
 3/2~3/5
     持续修复已发现的bug
 2/28
-    增加可热切换的replyer组别0/1
+    增加可通过指令热切换的replyer组别
 2/26
     轻量化仓库，移除冗余文件，重写README文件，优化仓库观感
 2/25
