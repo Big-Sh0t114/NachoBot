@@ -1,105 +1,69 @@
-# NachoBot (基于 MaiBot 0.10.3 Beta)
+<div align="center">
+  <img src="https://readme-typing-svg.demolab.com?font=Fira+Code&weight=800&size=65&pause=1000&color=87CEEB&center=true&vCenter=true&width=600&height=100&lines=我的存在，由你定义;NachoBot;你的一言，我的一切;NachoBot" alt="Typing SVG" />
+</div>
 
-NachoBot 是在上游 **MaiBot 0.10.3 Beta** 基础上研发的角色扮演聊天机器人，保留了上游插件体系与架构，可以直接沿用上游项目的 [麦麦插件商店](https://plugins.maibot.chat/)。本文档帮助你快速了解本项目、配置要点，以及如何溯源到上游项目。
+---
+<div align="center">
+   <p><b>一个具备长时记忆与多模态感知能力的多平台 AI 虚拟生命</b></p>
+  
+  <p>
+    <img src="https://img.shields.io/badge/Platform-QQ%20%7C%20Discord%20%7C%20Bilibili-orange.svg?style=flat-square" alt="Platforms" />
+    <img src="https://img.shields.io/badge/Framework-NapCat%20%7C%20Koishi-green.svg?style=flat-square" alt="Frameworks" />
+    <img src="https://img.shields.io/badge/Language-Python_3.11%2B-yellow.svg?style=flat-square" alt="Language" />
+  </p>
+</div>
+<div align="center">
+<img src="./NachoBot/docs/Nachobot.png" alt="NachoBot 立绘" width="550" />
 
-## 项目背景与溯源
-- 上游项目：[MaiBot](https://github.com/MaiM-with-u/)，版本基线 0.10.3 Beta。
-- 许可证：沿用 MaiBot 的 GPLv3；请遵守本仓库的 `LICENSE` 以及各插件/第三方组件的许可证。
-- 主要差异：见下文。
+## ✨ 这是什么？
 
-### NachoBot 核心变动
-- 包含截至 0.10.3 Beta 的大部分原版内容。
-- 精选插件的整合与兼容性修复。
-- 角色扮演向的多轮对话与记忆管理。
-- 防注入系统，为角色设定保驾护航。
-- #help 菜单帮助你理清所有的指令。
-- TTS 菜单支持双语种指令无缝切换。
-- 更智能的情景注入系统，给角色人设释放空间。
-- 誓约系统让笨蛋 bot 记住你们单独会话中的每一个约定。
-- Napcat 适配器的定时心跳检测，异常自动断线促进重连。
-- 原版插件体系兼容 [麦麦插件商店](https://plugins.maibot.chat/)。
-- 生成回复前智能检测信息时效需求并选择性联网生成回复。
-- 可选的高级模式（独立模型组回复，默认为 Grok4/3）。
-- 自动抓取解析信息中的 URL 并将内容整合注入给 LLM。
-- 大量原创插件/预设内容，为了更好的角色扮演而生。
-- 修改核心对 notice 消息的处理逻辑，现在会回复“戳一戳”消息。
-- 引入伪 Agent 系统沙盒，bot 可自主阅读、编辑并下发文件。
-- 增加跨用户记忆检索，bot 可在其他用户会话中搜索到目标用户记忆（如存在）。
-- 升级长时记忆系统，通过历史对话摘要持续迭代角色记忆。
-- 添加预约系统，用户可以指定时间让 bot 提醒自己事情。
-- 支持 QQ、Discord、Bilibili 等多平台同时接入。
-- 可客制化的群聊/私聊设置。
-- 更多小细节等你发现。
+**NachoBot** 赋予了 AI 大语言模型一个完整的虚拟灵魂。<br>采用“核心+多适配器”的设计理念，它可以化身为 Bilibili 直播间的虚拟主播、Discord 语音频道的陪玩伙伴，或是活跃在 QQ 群里的赛博老婆。
 
-### Discord 平台改动
-- 适配了 Discord 内的语音发送，格式由 QQ 的 silk 变为 ogg。
-- 通过配置 DiscordVC-Adapter，实现 Discord 语音频道自由发言。
-- 翻译 #help 菜单中有效指令至英语。
-- 适配了 slash commands。
-- 适配了沙盒系统。
-
-### Bilibili 平台改动
-- 支持私聊/评论区本楼回复/评论区@回复/直播间弹幕回复
-- 禁用了 bilibili_video_sender_plugin 以避免从系统通知中错误抓取视频url
-- 评论区回复加入防刷屏，限制同一用户在相同评论区中的最多会话轮数
-- 过滤掉了 TTS 信息（戳一戳仍会触发并报错，但对使用无影响）
-- 将 emoji 调整为图片类型发送以兼容b站私聊
-- 额外的过滤器
-- 支持对不同直播间客制相互独立的 prompt
-- 支持直播间 TTS 回复/语音识别/字幕生成/屏幕捕捉/Live2D
-- 设计了直播间专用的独立指令系统
-- 设计了可选的 Bilibili 直播的虚拟主播回复模式，根据弹幕数量弹性生成思维链，但效果欠佳
-
-### 多模态本地服务 (Control API)
-本仓库架构内建启用了本地化的多模态识别与控制服务（通常随 TTS 适配器的 `9872` 端口启动）。这赋予了 bot 低延迟和本地免费的扩展处理能力：
-- **ASR (语音识别)**：解析跨平台（如 Discord）语音通话信息为文本。
-- **VLM (视觉大模型)**：配合沙盒与前台系统处理包含图像的用户消息。
-- **TTS (语音管理)**：串接 GPT-SoVITS 及动态加载语音模型策略。
-*首次运行可能涉及较大体积的本地模型下载或冷启动加载，请耐心关注后台终端进度。*
+🧠 **进化版长时记忆与誓约系统**：能够跨越时间和会话记住你们的约定（誓约系统），甚至通过历史摘要持续迭代角色记忆<br>
+👁️ **全本地多模态感知 (ASR & VLM)**：内置本地视觉大模型和语音识别，它能看懂你发的图片，听懂 Discord 里的语音<br>
+🎭 **伪 Agent 沙盒环境**：赋予 Bot 极高的自由度，支持自主阅读、编辑文件并下发任务，且配备了防注入系统守护人设<br>
+🌐 **多平台无缝并行**：同时兼容 *Bilibili 直播/评论区*、*Discord 语音/频道* 以及基于 Napcat 的 *QQ 生态*<br>
+✉️ **信使/预约插件**：允许 AI 大语言模型通过分析用户需求自主决定向其他用户传话或定时提醒用户的功能<br>
+🎙️ **深度集成 GPT-SoVITS**：支持双语种指令无缝切换，带来极致自然的角色专属语音体验<br>
+🎨 **B 站直播间专属定制**：支持弹幕互动、屏幕捕捉，甚至联动 Live2D 模型进行虚拟直播
 
 ---
 
-## 核心配置
-0. **安装 python 3.11或以上版本（3.14除外），并下载 [GPT-SoVITS](https://www.yuque.com/baicaigongchang1145haoyuangong/ib3g1e/dkxgpiy9zb96hob4) 和 [Napcat Shell.](https://github.com/NapNeko/NapCatQQ) ，确保 Napcat Shell. 放置在根目录下**
-   - Discord侧服务还需额外安装Node.js
+## 🗺️ 项目架构与导航
 
-1. **拉取代码后，先复制/编辑主干配置**
-   - 从 `template/` 中复制 `bot_config_template.toml` 和 `model_config_template.toml` 到 `config/`，并删除 `_template` 后缀。
-   - `config/bot_config.toml`：填写 `qq_account`、按需设置人设、表达学习、权限白名单等。
-   - `config/model_config.toml`：为各 `api_providers` 填入你的 `api_key`，按需调整模型映射。
-   - 进入 `NachoBot-Napcat-Adapter` 目录，从 `template/` 中复制 `template_config.toml` 到 `NachoBot-Napcat-Adapter` 目录下，并删除 `template_` 前缀。
+这是一个由“核心大脑”和多个“感官/平台适配器”组成的复杂系统
 
-2. **自动依赖安装与环境启动**
-   - 本项目已实现*一键启动与依赖自动管理*。
-   - 记事本打开根目录下的 `launchbot.bat` 脚本，找到第 36 行的 `SOVITS_DIR` 变量，配置为你本地 GPT-SoVITS 的绝对路径。
-   - 双击运行 `launchbot.bat` 即可全自动安装依赖并拉起所有底层组件。
+### 🧠 1. 核心引擎
+负责大语言模型接入、记忆管理、指令解析与全局配置
+👉 **[NachoBot 核心模块详解与基础安装](./NachoBot/README.md)**
 
-3. **插件配置**
-   - 初次完成启动流程后，会在所有插件目录下生成各自的 `config.toml` 配置文件，自行填写后重启bot。
+### 🔌 2. 平台通讯适配器
+选择你想要接入的平台进行配置：
+📺 **[Bilibili 适配器](./NachoBot-Bilibili-Adapter)**：直播间弹幕互动、扫码登录、Live2D 联动配置<br>
+🎮 **[Discord 适配器](./NachoBot-DiscordVC-Adapter)**：Slash 指令、语音频道发言<br>
+🐱 **[NapCat (QQ) 适配器](./NachoBot-Napcat-Adapter)**：QQ 消息收发与心跳重连机制<br>
+🌐 **[Koishi 框架](./koishi-app)**：Discord 接入的底层依赖与插件管理
 
-## Bilibili配置
-- 从项目根目录 `config-save/` 中复制 `config-biliadapter.toml` 移动至 `NachoBot-Bilbili-Adapter` 目录中，删除 `-biliadapter.toml` 后缀。
-- cmd 运行 `python qr_login.py` 扫描二维码。
-- `config.toml`：填写直播间 id / 违禁词等。
-- 使用Live2d相关功能需前往Live2d官方网站下载 [Live2d Cubism SDK](https://www.live2d.com/zh-CHS/cubism/download/editor/)，从中提取出 `Live2DCubismCore.dll` 放入Bilibili-Adapter根目录下
+### 🗣️ 3. 感知与表现层
+🎵 **[TTS 适配器](./NachoBot-TTS-Adapter)**：文本转语音服务配置与多模态（VLM/ASR）本地服务启动
 
-## Discord配置
-- 从项目根目录 `config-save/` 中复制 `koishi.yml` 移动至 `koishi-app/` 目录中。
-- 移除 `NachoBot-DiscordVC-Adapter` 目录下的 `config.toml.example` 文件的 `.example` 后缀并配置文件。
-- 双击 `koishi-app/launch Koishi.bat` 启动 Koishi，在 webUI 中填写自己的 Discord Bot token 和 self id。
-- 复制 DiscordVC-Adapter 中的 `config.toml.example`，并重命名为 `config.toml`，填写相关配置。
+---
 
-## TTS配置
-*详见TTS适配器文档*
+## 🚀 一键启动
 
-``保持所有终端运行！！！在全平台服务跑起来的情况下应该是有6+3+1个终端窗口在运行``
-``launchbot_lite.bat 是轻量启动脚本，不包含本地 VLM/ASR 服务，为电脑性能较差用户提供``
+当你已经在各个子目录中**完成了繁琐的配置文件填写**，并准备好 GPT-SoVITS、Node.js、Python 3.11+ 等环境后，本项目提供了一套极为优雅的启动方案。
 
-##### 安全与隐私提示
-- 请勿将真实密钥、Cookie、个人账号信息提交到仓库；部署前在本地/环境变量中填充。
-- 本项目会调用第三方模型/服务；使用时需遵守各自的服务条款与隐私政策。
+在根目录双击运行以下脚本，即可全自动安装依赖并拉起所需的所有服务窗口：
 
-##### 贡献与致谢
-- 上游：MaiBot 项目团队贡献者与插件制作者。
-- Napcat / GPT-SoVITS / Koishi 团队。
-- 贡献方式：遵循 GPLv3；提交 PR 前请先清理私密信息，并保持对上游的致谢与链接。
+🟢 `launchbot.bat` —— **完全体启动** (包含本地 VLM/ASR 多模态服务，需较高配置)<br>
+🟡 `launchbot_lite.bat` —— **轻量化启动** (关闭本地多模态服务，适合低配电脑或纯文本调试)<br>
+🔵 `launch_bilibili.bat` —— **B站侧服务启动**<br>
+🟣 `launch_discord.bat` —— **Discord侧服务启动**
+
+> **⚠️ 注意：** 在全平台完全体运行的状态下，你将会看到多达 10 个（6+3+1）终端窗口同时工作。请保持它们在后台运行！
+
+---
+
+## 📜 致谢与许可
+
+本项目基于 GPLv3 许可证开源。特别鸣谢 [MaiBot 项目团队](https://github.com/MaiM-with-u/)、Napcat、GPT-SoVITS 以及 Koishi 团队为开源社区做出的杰出贡献！
