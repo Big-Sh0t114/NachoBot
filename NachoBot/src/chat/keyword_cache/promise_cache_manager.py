@@ -24,7 +24,9 @@ class PromiseCacheManager:
         self._idle_task: Optional[asyncio.Task] = None
         self._idle_seconds = 180
         self._scan_lock: Optional[asyncio.Lock] = None
-        self._summary_model = LLMRequest(
+    @property
+    def _summary_model(self) -> LLMRequest:
+        return LLMRequest(
             model_set=model_config.model_task_config.replyer,
             request_type="promise_cache_summary",
         )
@@ -94,7 +96,8 @@ class PromiseCacheManager:
 
         keywords_to_fetch: Set[str] = set()
         for msg in messages:
-            if getattr(msg, "chat_id", None) and getattr(msg, "chat_id") != chat_id:
+            msg_chat_id = getattr(msg, "chat_id", None)
+            if msg_chat_id and msg_chat_id != chat_id:
                 continue  # 只处理当前会话，避免串流
             text = self._extract_text(msg)
             keywords_to_fetch.update(self._match_keywords(text))

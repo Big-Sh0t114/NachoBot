@@ -155,12 +155,13 @@ class RelationScanner:
         self._recently_scanned_users: Dict[str, float] = {}
         self._user_cooldown = 600  # 同一用户 10 分钟内不重复扫描
 
-        # LLM
-        self.scanner_llm = LLMRequest(model_set=model_config.model_task_config.replyer, request_type="relation_scanner")
-
         # 后台循环
         self._periodic_task: Optional[asyncio.Task] = None
         self._running = False
+
+    @property
+    def scanner_llm(self) -> LLMRequest:
+        return LLMRequest(model_set=model_config.model_task_config.replyer, request_type="relation_scanner")
 
     def _get_chat_display_name(self) -> str:
         try:

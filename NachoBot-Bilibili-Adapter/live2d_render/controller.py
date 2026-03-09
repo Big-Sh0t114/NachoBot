@@ -211,6 +211,9 @@ class Live2DController:
                 elif event_type == "body_action":
                     # Body Action (Motion)
                     self.command_queue.put_nowait(("body_action", content))
+                elif event_type == "emotion":
+                    # Emotion Expression (Live2D)
+                    self.command_queue.put_nowait(("emotion", content))
                 else:
                     self.logger.warning(f"Unknown Live2D event type: {event_type}")
             except Exception as e:

@@ -22,6 +22,8 @@ class ChatMood:
             "anger": 1,
             "sorrow": 1,
             "fear": 1,
+            "shy": 1,
+            "disgust": 1,
         }
         self.regression_count: int = 0
         self.last_change_time: float = 0
@@ -56,7 +58,7 @@ class ChatMood:
                 response = response.split("```")[1].split("```")[0]
 
             data = json.loads(response)
-            required_keys = {"joy", "anger", "sorrow", "fear"}
+            required_keys = {"joy", "anger", "sorrow", "fear", "shy", "disgust"}
             if not required_keys.issubset(data.keys()):
                 return None
 
@@ -132,6 +134,8 @@ class ChatMood:
                 anger=self.mood_values["anger"],
                 sorrow=self.mood_values["sorrow"],
                 fear=self.mood_values["fear"],
+                shy=self.mood_values["shy"],
+                disgust=self.mood_values["disgust"],
             )
             resp = await self._call_llm(prompt)
             if resp:
@@ -160,6 +164,8 @@ class ChatMood:
             "anger": mood_values.get("anger", 1),
             "sorrow": mood_values.get("sorrow", 1),
             "fear": mood_values.get("fear", 1),
+            "shy": mood_values.get("shy", 1),
+            "disgust": mood_values.get("disgust", 1),
         }
         await self.manager.controller.send_live2d_event("emotion", emotion_data)
 
@@ -180,7 +186,7 @@ class MoodManager:
             "change_mood_prompt_vtb",
         )
         Prompt(
-            """{chat_talking_prompt}\n以上是直播间里正在进行的对话\n\n{indentify_block}\n你刚刚的情绪状态是：{mood_state}\n具体来说，从1-10分，你的情绪状态是：\n喜(Joy): {joy}\n怒(Anger): {anger}\n哀(Sorrow): {sorrow}\n惧(Fear): {fear}\n\n现在，发送了消息，引起了你的注意，你对其进行了阅读和思考。请基于对话内容，评估你新的情绪状态。\n请以JSON格式输出你新的情绪状态，包含"喜怒哀惧"四个维度，每个维度的取值范围为1-10。\n键值请使用英文: "joy", "anger", "sorrow", "fear".\n例如: {{"joy": 5, "anger": 1, "sorrow": 1, "fear": 1}}\n不要输出任何其他内容，只输出JSON。\n""",
+            """{chat_talking_prompt}\n以上是直播间里正在进行的对话\n\n{indentify_block}\n你刚刚的情绪状态是：{mood_state}\n具体来说，从1-10分，你的情绪状态是：\n喜(Joy): {joy}\n怒(Anger): {anger}\n哀(Sorrow): {sorrow}\n惧(Fear): {fear}\n害羞(Shy): {shy}\n厌恶(disgust): {disgust}\n\n现在，发送了消息，引起了你的注意，你对其进行了阅读和思考。请基于对话内容，评估你新的情绪状态。\n请以JSON格式输出你新的情绪状态，包含"喜、怒、哀、惧、害羞、厌恶"六个维度，每个维度的取值范围为1-10。\n键值请使用英文: "joy", "anger", "sorrow", "fear", "shy", "disgust".\n例如: {{"joy": 5, "anger": 1, "sorrow": 1, "fear": 1, "shy": 1, "disgust": 1}}\n不要输出任何其他内容，只输出JSON。\n""",
             "change_mood_numerical_prompt",
         )
         # Add others as needed

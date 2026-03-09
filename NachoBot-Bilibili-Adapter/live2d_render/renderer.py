@@ -909,9 +909,9 @@ class Live2DRenderer:
                 self.target_x = 0.3
                 self.target_y = 0.5
             elif cmd_data == "start_replying":
-                # Look straight down while replying/speaking
+                # Look straight ahead (or slightly down) while replying/speaking
                 self.target_x = 0.0
-                self.target_y = -0.7
+                self.target_y = 0.0
             elif cmd_data == "finish_reply":
                 # Back to Center/Camera
                 self.target_x = 0.0
@@ -944,6 +944,16 @@ class Live2DRenderer:
                     )
 
         elif cmd_type == "emotion":
+            expr_map = {
+                "joy": "f01",  # Standard Smile
+                "anger": "angry",  # Custom angry
+                "sorrow": "f04",  # Standard Sorrow
+                "fear": "f02",  # Standard Surprise/Fear
+                "shy": "shy",
+                "disgust": "disgust",
+                "angry": "angry",
+                "normal": "normal",
+            }
             # Handle emotion dict: {"joy": 5, "anger": 1, ...}
             if isinstance(cmd_data, dict):
                 # Find strongest emotion
@@ -953,12 +963,6 @@ class Live2DRenderer:
                 # Only set expression if intensity is high enough
                 if value >= 3:
                     # Map to standard Live2D expression names (adjust as needed for specific model)
-                    expr_map = {
-                        "joy": "f01",  # Standard Smile
-                        "anger": "f03",  # Standard Anger
-                        "sorrow": "f04",  # Standard Sorrow
-                        "fear": "f02",  # Standard Surprise/Fear
-                    }
                     if strongest in expr_map:
                         expr_name = expr_map[strongest]
                         self.logger.info(
@@ -966,7 +970,13 @@ class Live2DRenderer:
                         )
                         self.model.SetExpression(expr_name)
                     else:
-                        self.model.SetExpression("f01")  # Default smile
+                        self.model.SetExpression("")  # Default to empty/none
+            elif isinstance(cmd_data, str):
+                expr_name = expr_map.get(cmd_data, cmd_data)
+                self.logger.info(
+                    f"[Live2D] Setting Emotion (String): {cmd_data} -> {expr_name}"
+                )
+                self.model.SetExpression(expr_name)
 
         elif cmd_type == "speaking":
             self.is_speaking = bool(cmd_data)

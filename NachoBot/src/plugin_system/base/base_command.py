@@ -394,14 +394,15 @@ class BaseCommand(ABC):
 class SwitchRpyGroupCommand(BaseCommand):
     """管理员指令：切换全局默认回复模型组
 
-    用法: #switch_rpygroup <0|1>
+    用法: #switch_rpygroup <0|1|2>
     - 0: 切换到 replyer0（默认组）
-    - 1: 切换到 replyer1（备用组）
+    - 1: 切换到 replyer1（备用组1）
+    - 2: 切换到 replyer2（备用组2）
     """
 
     command_name: str = "switch_rpygroup"
     command_description: str = "切换全局默认回复模型组（管理员）"
-    command_pattern: str = r"(?i)^#switch_rpygroup\s+(?P<group>[01])$"
+    command_pattern: str = r"(?i)^#switch_rpygroup\s+(?P<group>[012])$"
 
     async def execute(self) -> Tuple[bool, Optional[str], bool]:
         # 权限检查：仅管理员可用

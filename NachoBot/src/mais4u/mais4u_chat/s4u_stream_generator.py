@@ -2,7 +2,7 @@ import asyncio
 import random
 from typing import AsyncGenerator, Tuple
 
-from src.llm_models.utils_model import LLMRequest, RequestType
+from src.llm_models.utils_model import LLMRequest
 from src.llm_models.payload_content.message import MessageBuilder
 from src.config.config import model_config
 from src.chat.message_receive.message import MessageRecvS4U
@@ -16,10 +16,11 @@ logger = get_logger("s4u_stream_generator")
 
 
 class S4UStreamGenerator:
-    def __init__(self):
-        # 使用LLMRequest替代AsyncOpenAIClient
-        self.llm_request = LLMRequest(model_set=model_config.model_task_config.replyer, request_type="s4u_replyer")
+    @property
+    def llm_request(self) -> LLMRequest:
+        return LLMRequest(model_set=model_config.model_task_config.replyer, request_type="s4u_replyer")
 
+    def __init__(self):
         self.current_model_name = "unknown model"
         self.partial_response = ""
 
