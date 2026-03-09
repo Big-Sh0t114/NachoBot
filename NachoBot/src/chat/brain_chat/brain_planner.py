@@ -182,10 +182,7 @@ class BrainPlanner:
         self.chat_id = chat_id
         self.log_prefix = f"[{get_chat_manager().get_stream_name(chat_id) or chat_id}]"
         self.action_manager = action_manager
-        
-        self.integrated_llm = LLMRequest(
-            model_set=model_config.model_task_config.replyer, request_type="integrated_planner"
-        )  # 整合后的规划器使用回复器模型
+
         self.separated_llm = LLMRequest(
             model_set=model_config.model_task_config.planner, request_type="planner"
         )  # 独立规划器使用各自的模型
@@ -213,7 +210,11 @@ class BrainPlanner:
 
     @property
     def planner_llm(self) -> LLMRequest:
-        return self.integrated_llm if global_config.bot.integrated_plan else self.separated_llm
+        if global_config.bot.integrated_plan:
+            return LLMRequest(
+                model_set=model_config.model_task_config.replyer, request_type="integrated_planner"
+            )
+        return self.separated_llm
 
     def _check_sandbox_permission(self, user_id: str) -> bool:
         """Check if user has permission to use sandbox features"""
@@ -287,12 +288,6 @@ class BrainPlanner:
             action = action_json.get("action", "no_action")
             reasoning = action_json.get("reason", "未提供原因")
             reply_text = action_json.get("text", "")  # 获取整合后的回复文本
-            if reply_text:
-                # 极其防御性的处理：如果 LLM 抽风在 text 里塞了 JSON 结构或 reason
-                # 常见错误： "text": "回复内容( \"reason\": \"...\" )" 或 "text": "回复内容", "reason": "..."
-                for stop_v in ['"reason":', "'reason':", '\"reason\":', "( \"reason\":", "(\"reason\":"]:
-                    if stop_v in reply_text:
-                        reply_text = reply_text.split(stop_v)[0].strip().rstrip('(').rstrip(',').rstrip('"').rstrip("'").strip()
             action_data = {key: value for key, value in action_json.items() if key not in ["action", "reason", "text"]}
             # 非no_action动作需要target_message_id
             latest_user_message = _pick_latest_user_message(message_id_list)
@@ -529,7 +524,7 @@ class BrainPlanner:
                 pending_text = "无待执行预约"
 
             # 其他信息
-            moderation_prompt_block = "请不要输出违法违规内容，不要输出色情，暴力，政治相关内容，如有敏感内容，请规避。"
+            moderation_prompt_block = "请不要输出违法违规内容，不要输出暴力，政治相关内容，如有敏感内容，请规避。"
             time_block = f"当前时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             bot_name = global_config.bot.nickname
             bot_nickname = (
@@ -594,7 +589,7 @@ class BrainPlanner:
 
             # if global_config.mood.enable_mood:
             #     chat_mood = mood_manager.get_mood_by_chat_id(self.chat_id)
-            #     mood_prompt = chat_mood.mood_state 
+            #     mood_prompt = chat_mood.mood_state
 
             # 取最后一条相关的消息文本作为 target，用于触发工具和记忆
             target = ""
@@ -604,7 +599,7 @@ class BrainPlanner:
                 target = replace_user_references(target, global_config.bot.platform, replace_bot_name=True)
                 target = re.sub(r"\\[picid:[^\\]]+\\]", "[图片]", target)
                 target, _, _ = guard_user_content(target, sender_name)
-            
+
             # 使用更短的上下文来检索工具和记忆，避免由于上下文过长导致的检索噪音
             short_context_size = int(global_config.chat.get_max_context_size(is_group_chat) * 0.33)
             message_list_before_short = get_raw_msg_before_timestamp_with_chat(
@@ -622,11 +617,14 @@ class BrainPlanner:
 
             # --- 下面使用 gathered 异步加载上下文所需信息 ---
             user_info = chat_target_info if chat_target_info else None
-            
+
             task_results = await asyncio.gather(
                 build_relation_info(chat_talking_prompt_short, sender_name, user_info=user_info),
                 build_memory_retrieval_prompt(
-                    message=chat_talking_prompt_short, sender=sender_name, target=target, chat_stream=get_chat_manager().get_stream(self.chat_id)
+                    message=chat_talking_prompt_short,
+                    sender=sender_name,
+                    target=target,
+                    chat_stream=get_chat_manager().get_stream(self.chat_id),
                 ),
                 build_tool_info(
                     chat_history=chat_talking_prompt_short,
@@ -636,19 +634,24 @@ class BrainPlanner:
                     web_search_manager=self.web_search_manager,
                     tool_executor=self.tool_executor,
                     mcp_executor=self.mcp_executor,
-                    has_mcp_permission=self._check_mcp_permission(user_info.user_id if user_info and user_info.user_id else ""),
+                    has_mcp_permission=self._check_mcp_permission(
+                        user_info.user_id if user_info and user_info.user_id else ""
+                    ),
                     enable_tool=global_config.tool.enable_tool,
                 ),
                 build_lpmm_knowledge_info(
-                    message=chat_talking_prompt_short, sender=sender_name, target=target, tool_executor=self.tool_executor
+                    message=chat_talking_prompt_short,
+                    sender=sender_name,
+                    target=target,
+                    tool_executor=self.tool_executor,
                 ),
             )
-            
+
             relation_info_block = task_results[0]
             memory_retrieval_block = task_results[1]
             tool_info_block = task_results[2]
             knowledge_prompt_block = task_results[3]
-            
+
             bot_name = global_config.bot.nickname
             bot_nickname = (
                 f",也有人叫你{','.join(global_config.bot.alias_names)}" if global_config.bot.alias_names else ""
@@ -658,7 +661,7 @@ class BrainPlanner:
 
             # 其他块
             time_block = f"当前时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-            moderation_prompt_block = "请不要输出违法违规内容，不要输出色情，暴力，政治相关内容，如有敏感内容，请规避。"
+            moderation_prompt_block = "请不要输出违法违规内容，不要输出暴力，政治相关内容，如有敏感内容，请规避。"
 
             # 习惯
             from src.chat.express.expression_selector import expression_selector
@@ -671,7 +674,9 @@ class BrainPlanner:
                 )
                 if selected_expressions:
                     style_habits = [f"当{expr['situation']}时，使用 {expr['style']}" for expr in selected_expressions]
-                    expression_habits_block = "在回复时,你可以参考以下的语言习惯，不要生硬使用：\n" + "\n".join(style_habits)
+                    expression_habits_block = "在回复时,你可以参考以下的语言习惯，不要生硬使用：\n" + "\n".join(
+                        style_habits
+                    )
 
             # 获取整合模板并填充
             planner_prompt_template = await global_prompt_manager.get_prompt_async("brain_integrated_prompt")

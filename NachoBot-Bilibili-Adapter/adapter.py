@@ -2206,6 +2206,9 @@ class BilibiliAdapter:
         text = _extract_plain_text(seg).strip()
         if not text:
             return
+
+        # 解析统一的JSON表情
+        text = self._extract_json_emotion_from_text(text)
         comment_target = self._resolve_comment_target(message)
         if comment_target:
             await self._send_comment_reply_from_context(comment_target, text)
@@ -2539,8 +2542,40 @@ class BilibiliAdapter:
             return
         self.logger.warning(f"Unknown command: {command_name}")
 
+    def _extract_json_emotion_from_text(self, text: str) -> str:
+        """尝试解析回复中的JSON表情指令，触发Live2D并返回原始回复文本。"""
+        start_idx = text.find("{")
+        end_idx = text.rfind("}")
+        if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
+            try:
+                json_str = text[start_idx : end_idx + 1]
+                data = json.loads(json_str, strict=False)
+                parsed_text = ""
+                if "reply" in data and data["reply"]:
+                    parsed_text = str(data["reply"])
+                emotion = data.get("emotion")
+
+                if (
+                    emotion
+                    and emotion in ["normal", "shy", "disgust", "angry"]
+                    and self.live2d_controller
+                ):
+                    try:
+                        asyncio.create_task(
+                            self.live2d_controller.send_live2d_event("emotion", emotion)
+                        )
+                        self.logger.info(f"Dispatched Live2D emotion event: {emotion}")
+                    except Exception as e:
+                        self.logger.error(f"Failed to dispatch Live2D emotion: {e}")
+
+                return parsed_text if parsed_text else text
+            except Exception as e:
+                self.logger.debug(f"JSON parsing failed (fallback to raw): {e}")
+        return text
+
     async def _handle_comment_reply(self, args: Dict[str, Any]) -> None:
-        text = _strip_emoji(str(args.get("message") or "")).strip()
+        raw_msg = str(args.get("message") or "")
+        text = _strip_emoji(self._extract_json_emotion_from_text(raw_msg)).strip()
         if not text:
             self.logger.warning("Empty comment reply text")
             return
@@ -2578,7 +2613,9 @@ class BilibiliAdapter:
             self.logger.error(f"Comment reply error: {exc}")
 
     async def _handle_live_reply(self, args: Dict[str, Any]) -> None:
-        text = _strip_emoji(str(args.get("message") or "")).strip()
+        raw_message = str(args.get("message") or "")
+        text = self._extract_json_emotion_from_text(raw_message)
+        text = _strip_emoji(text).strip()
 
         # Strip invisible characters like zero-width space (\u200b)
         # This allows the replyer to output specific invisible chars to signal "no reply"
@@ -2661,7 +2698,8 @@ class BilibiliAdapter:
     async def _handle_private_send(
         self, args: Dict[str, Any], message: Optional[MessageBase]
     ) -> None:
-        text = _strip_emoji(str(args.get("message") or "")).strip()
+        raw_msg = str(args.get("message") or "")
+        text = _strip_emoji(self._extract_json_emotion_from_text(raw_msg)).strip()
         if not text:
             return
         talker_id = args.get("talker_id")

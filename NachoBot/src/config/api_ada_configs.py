@@ -134,7 +134,10 @@ class ModelTaskConfig(ConfigBase):
     """LPMM问答模型配置"""
 
     replyer1: TaskConfig = field(default_factory=TaskConfig)
-    """备用回复模型组（可选）"""
+    """备用回复模型组1（可选）"""
+
+    replyer2: TaskConfig = field(default_factory=TaskConfig)
+    """备用回复模型组2（可选）"""
 
     advanced_replyer: TaskConfig = field(default_factory=TaskConfig)
     """高级模式回复模型配置（可选，缺省回退到默认参数）"""
@@ -182,6 +185,14 @@ class ModelTaskConfig(ConfigBase):
             self.replyer = self.replyer1
             self._active_replyer_group = 1
             logger.info("已切换默认回复模型组为 replyer1")
+            return True
+        elif group == 2:
+            if not self.replyer2.model_list:
+                logger.warning("replyer2 未配置模型列表，切换失败")
+                return False
+            self.replyer = self.replyer2
+            self._active_replyer_group = 2
+            logger.info("已切换默认回复模型组为 replyer2")
             return True
         else:
             logger.warning(f"无效的 replyer 组编号: {group}")

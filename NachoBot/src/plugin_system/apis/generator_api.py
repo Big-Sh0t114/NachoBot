@@ -142,6 +142,18 @@ async def generate_reply(
             return False, None
         reply_set: Optional[ReplySetModel] = None
         if content := llm_response.content:
+            text_for_json_check = content.strip()
+            start_idx = text_for_json_check.find("{")
+            end_idx = text_for_json_check.rfind("}")
+            if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
+                try:
+                    import json
+
+                    _ = json.loads(text_for_json_check[start_idx : end_idx + 1], strict=False)
+                    # If it's valid JSON, disable the splitter so the adapter receives the full JSON intact
+                    enable_splitter = False
+                except Exception:
+                    pass
             reply_set = process_human_text(content, enable_splitter, enable_chinese_typo)
         llm_response.reply_set = reply_set
         logger.debug(f"[GeneratorAPI] 回复生成成功，生成了 {len(reply_set) if reply_set else 0} 个回复项")
@@ -212,6 +224,17 @@ async def rewrite_reply(
         )
         reply_set: Optional[ReplySetModel] = None
         if success and llm_response and (content := llm_response.content):
+            text_for_json_check = content.strip()
+            start_idx = text_for_json_check.find("{")
+            end_idx = text_for_json_check.rfind("}")
+            if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
+                try:
+                    import json
+
+                    _ = json.loads(text_for_json_check[start_idx : end_idx + 1], strict=False)
+                    enable_splitter = False
+                except Exception:
+                    pass
             reply_set = process_human_text(content, enable_splitter, enable_chinese_typo)
         llm_response.reply_set = reply_set
         if success:

@@ -1,11 +1,10 @@
 from src.chat.message_receive.chat_stream import get_chat_manager
 import time
-from src.chat.utils.prompt_builder import Prompt, global_prompt_manager
+from src.chat.utils.prompt_builder import Prompt
 from src.llm_models.utils_model import LLMRequest
 from src.config.config import model_config
 from src.chat.message_receive.message import MessageRecvS4U
 from src.mais4u.mais4u_chat.s4u_msg_processor import S4UMessageProcessor
-from src.mais4u.mais4u_chat.internal_manager import internal_manager
 from src.common.logger import get_logger
 
 logger = get_logger(__name__)
@@ -58,7 +57,9 @@ class MaiThinking:
         self.sender = ""
         self.target = ""
 
-        self.thinking_model = LLMRequest(model_set=model_config.model_task_config.replyer, request_type="thinking")
+    @property
+    def thinking_model(self) -> LLMRequest:
+        return LLMRequest(model_set=model_config.model_task_config.replyer, request_type="thinking")
 
     async def do_think_before_response(self):
         pass
