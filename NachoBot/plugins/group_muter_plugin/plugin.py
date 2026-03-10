@@ -314,7 +314,7 @@ class GroupMuterPlugin(BasePlugin):
                 choices=["whitelist", "blacklist"]
             ),
             "list": ConfigField(
-                type=list, default=["2146014839"], description="拥有权限的用户QQ号列表"
+                type=list, default=[], description="拥有权限的用户QQ号列表"
             ),
         },
     }

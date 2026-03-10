@@ -1,5 +1,3 @@
-"""Main BilibiliAdapter class for Bilibili live streaming integration."""
-
 import asyncio
 import json
 import logging
@@ -70,7 +68,8 @@ from mic_capture import MicCaptureWorker, MicConfig  # noqa: E402
 # from live_streamer import LiveStreamerController, PriorityEvent  # noqa: E402
 
 # Try to import TTS model
-tts_adapter_path = Path(r"C:\Users\BigSh0t\Nacho-with-u\NachoBot-TTS-Adapter")
+# 修复：动态获取相对路径，替换硬编码的绝对路径
+tts_adapter_path = _root_dir / "NachoBot-TTS-Adapter"
 TTSModel = None
 _tts_import_error = None
 
@@ -1625,9 +1624,13 @@ class BilibiliAdapter:
             "source": "mic_asr",
         }
 
+        # 修复：从配置动态读取主人的 ID 和名字，消除硬编码
+        master_user_id = str(getattr(self.config, "live_master_user_id", "2146014839"))
+        master_user_name = str(getattr(self.config, "live_master_user_name", "主人"))
+
         # [FIX] Include template_info so mic messages don't clobber
         # last_messages with a template-less entry (same fix as push_screen_update)
-        template_info = await self._get_template_info(room_id, "2146014839", text)
+        template_info = await self._get_template_info(room_id, master_user_id, text)
 
         message_info = BaseMessageInfo(
             platform="bilibili.live",
@@ -1635,8 +1638,8 @@ class BilibiliAdapter:
             time=time.time(),
             user_info=UserInfo(
                 platform="bilibili.live",
-                user_id="2146014839",
-                user_nickname="甘油三酯",
+                user_id=master_user_id,
+                user_nickname=master_user_name,
             ),
             group_info=GroupInfo(
                 platform="bilibili.live",
@@ -1910,10 +1913,9 @@ class BilibiliAdapter:
             if "<JP>" not in reply_prompt and "<ZH>" not in reply_prompt:
                 tts_instruction = (
                     "\n\n非常重要：请必须同时输出中文回复和对应的日文翻译（用于语音播放），格式严格如下：\n"
-                    "<JP>日文翻译内容</JP><ZH>中文原本意思</ZH>\n"
+                    "<JP>日本語翻訳</JP><ZH>中文原本意思</ZH>\n"
                     "例如：\n"
                     "<JP>こんにちは、ご飯を食べましたか？</JP><ZH>你好呀，吃过饭了吗？</ZH>\n"
-                    "只输出上述XML格式，不要输出其他多余内容(包括前后缀，冒号和引号，括号，表情包等)。"
                 )
                 self.logger.debug(
                     f"Appending TTS instruction to prompt for room {room_id}"
