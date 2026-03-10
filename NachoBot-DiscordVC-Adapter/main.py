@@ -1,10 +1,11 @@
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
 
 # Add dependency path if needed, though usually handled by venv
-sys.path.append(str(Path(__file__).parent))
+sys.path.append(str(Path(__file__).resolve().parent))
 
 from config import load_config
 from adapter import DiscordAdapter
@@ -20,11 +21,13 @@ def setup_logging(level: str = "INFO") -> logging.Logger:
 
 
 async def main():
-    config_path = Path(__file__).parent / "config.toml"
+    current_dir = Path(__file__).resolve().parent
+    config_path = current_dir / "config.toml"
+
     if not config_path.exists():
         # Fallback to example if not found (or error out)
         # For first run, user needs to rename example
-        example_path = Path(__file__).parent / "config.toml.example"
+        example_path = current_dir / "config.toml.example"
         if example_path.exists():
             print(f"Please copy {example_path} to {config_path} and configure it.")
             return
@@ -41,21 +44,18 @@ async def main():
     logger = setup_logging(config.log_level)
 
     # Auto-configure FFmpeg if found in shared NachoBot plugins
-    # Try multiple common locations
+    # Dynamically resolve based on the sibling directory structure
+    project_root = current_dir.parent
     possible_ffmpeg_paths = [
-        # User reported path
-        Path(
-            r"C:\Users\BigSh0t\Nacho-with-u\NachoBot\plugins\bilibili_video_sender_plugin\ffmpeg"
-        ),
-        # Relative path attempt
-        Path(__file__).parent.parent
+        # Relative path attempt 1: Sibling NachoBot directory
+        project_root
         / "NachoBot"
         / "plugins"
         / "bilibili_video_sender_plugin"
         / "ffmpeg",
+        # Relative path attempt 2: Local adapter directory (just in case)
+        current_dir / "ffmpeg",
     ]
-
-    import os
 
     for p in possible_ffmpeg_paths:
         if p.exists() and p.is_dir():
