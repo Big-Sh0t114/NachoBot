@@ -8,13 +8,23 @@ from src.chat.utils.chat_message_builder import (
 )
 from src.chat.message_receive.message import MessageRecv
 
-# Hiyori Model Motions
+# Motion Group mapping: LLM选择的动作名称 → Live2D Motion Group 名称
+# 所有动作通过 StartRandomMotion(group, priority) 安全播放
+# 每个 Motion Group 下有 2-3 个随机变体，自动随机抽取
 DEFAULT_BODY_CODE = {
     "待机/放松": "Idle",
-    "点头/同意": "Tap",
-    "摇头/否定": "Flick",
-    "惊讶/身体前倾": "Tap@Body",
-    "大幅度动作/躲避": "Flick@Body",
+    "点头/同意": "Nod",
+    "连续点头/非常赞同": "Nod",
+    "摇头/否定": "Shake",
+    "转身向左/看左边": "TurnLeft",
+    "转身向右/看右边": "TurnRight",
+    "身体前倾/好奇/仔细看": "LeanForward",
+    "身体后仰/惊讶/吓一跳": "LeanBack",
+    "身体晃动/开心/兴奋": "Sway",
+    "歪头/疑惑/思考": "TiltHead",
+    "害羞/移开视线/不好意思": "LookAway",
+    "轻拍/打招呼": "Tap",
+    "大动作/躲避/甩头": "Flick",
     "一般": "Idle",
 }
 
@@ -51,11 +61,13 @@ class ChatAction:
         return await model_client._call_task_model("utils_small", prompt)
 
     async def send_action_update(self):
-        # 1. Send Body Action
+        # 1. Send Body Action via StartRandomMotion (crash-safe)
         body_code = DEFAULT_BODY_CODE.get(self.body_action, "")
-        # Only send if valid and NOT Idle (Idle is handled automatically by Live2D loop)
         if body_code and body_code != "Idle":
-            await self.manager.controller.send_live2d_event("body_action", body_code)
+            # Use random_motion event type for StartRandomMotion
+            await self.manager.controller.send_live2d_event(
+                "random_motion", {"group": body_code, "priority": 3}
+            )
 
         # 2. Send Head/Gaze Action
         gaze_data = HEAD_DIRECTION_MAP.get(self.head_action, None)
@@ -170,9 +182,11 @@ class ActionManager:
 
 请分析最新的聊天内容，判断你是否需要改变动作或视线方向。
 原则：
-1. **多保持当前状态或归位**：如果没有明确的指令或强烈的情绪触发，请保持“待机/放松”和“Center”。
+1. **多保持当前状态或归位**：如果没有明确的指令或强烈的情绪触发，请保持"待机/放松"和"Center"。
 2. **不要频繁乱动**：动作应该自然且有意义，不要每一句话都触发大动作。
-3. **视线控制**：只有在被要求“看左边”、“看右边”等，或者有明显空间指向性时才改变视线。否则保持“Center”。
+3. **视线控制**：只有在被要求"看左边"、"看右边"等，或者有明显空间指向性时才改变视线。否则保持"Center"。
+4. **情绪匹配**：根据对话情绪选择合适动作。开心时可以晃动，疑惑时可以歪头，同意时可以点头。
+5. **动作自然**：动作应该符合对话情境，比如被夸奖时"害羞/移开视线"，看到有趣的东西时"身体前倾/好奇"。
 
 身体动作可选：
 {all_actions}

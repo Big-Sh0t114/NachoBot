@@ -45,10 +45,6 @@ class RandomMotionManager:
                 # Only perform random motion if the controller is in "idle" mode
                 if (
                     hasattr(self.controller, "current_mode")
-                    and hasattr(self.controller, "is_dragging")
-                    and hasattr(self.controller, "is_speaking")
-                    and not self.controller.is_dragging
-                    and not self.controller.is_speaking
                     and self.controller.current_mode == "idle"
                 ):
                     # Randomly select a motion type
@@ -57,8 +53,9 @@ class RandomMotionManager:
 
                     if roll < 0.60:
                         # Gaze
-                        x = random.uniform(-1.0, 1.0)
-                        y = random.uniform(-1.0, 1.0)
+                        # Subtle gaze shift (avoid extreme angles)
+                        x = random.uniform(-0.4, 0.4)
+                        y = random.uniform(-0.25, 0.25)
                         await self.controller.send_live2d_event(
                             "auto_gaze", {"x": x, "y": y}
                         )
@@ -67,10 +64,10 @@ class RandomMotionManager:
                         )
 
                     elif roll < 0.80:
-                        # Native Motion: Tap
+                        # Pout (嘟嘴, no mouth opening)
                         await self.controller.send_live2d_event(
                             "random_motion",
-                            {"group": "Tap", "priority": 3},
+                            {"group": "Pout", "priority": 3},
                         )
 
                     elif roll < 0.90:
@@ -80,8 +77,15 @@ class RandomMotionManager:
                             {"group": "Flick", "priority": 3},
                         )
 
+                    elif roll < 0.95:
+                        # SwayBig (hiyori_m02) - Lowered frequency
+                        await self.controller.send_live2d_event(
+                            "random_motion",
+                            {"group": "SwayBig", "priority": 3},
+                        )
+
                     else:
-                        # Native Motion: Body Action
+                        # Native Motion: Body Action (Tap@Body)
                         await self.controller.send_live2d_event(
                             "random_motion",
                             {"group": "Tap@Body", "priority": 3},
