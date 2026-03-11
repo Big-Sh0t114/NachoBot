@@ -2544,8 +2544,23 @@ class BilibiliAdapter:
             return
         self.logger.warning(f"Unknown command: {command_name}")
 
+    # Action name -> Live2D Motion Group mapping
+    _ACTION_TO_MOTION_GROUP = {
+        "待机/放松": "Idle",
+        "点头/同意": "Nod",
+        "摇头/否定": "Shake",
+        "转身向左/看左边": "TurnLeft",
+        "转身向右/看右边": "TurnRight",
+        "身体前倾/好奇/仔细看": "LeanForward",
+        "身体后仰/惊讶/吓一跳": "LeanBack",
+        "身体晃动/开心/兴奋": "Sway",
+        "歪头/疑惑/思考": "TiltHead",
+        "害羞/移开视线/不好意思": "LookAway",
+        "一般": "",
+    }
+
     def _extract_json_emotion_from_text(self, text: str) -> str:
-        """尝试解析回复中的JSON表情指令，触发Live2D并返回原始回复文本。"""
+        """尝试解析回复中的JSON表情+动作指令，触发Live2D并返回原始回复文本。"""
         start_idx = text.find("{")
         end_idx = text.rfind("}")
         if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
@@ -2569,6 +2584,24 @@ class BilibiliAdapter:
                         self.logger.info(f"Dispatched Live2D emotion event: {emotion}")
                     except Exception as e:
                         self.logger.error(f"Failed to dispatch Live2D emotion: {e}")
+
+                # Parse action field for Live2D motion control
+                action = data.get("action")
+                if action and self.live2d_controller:
+                    motion_group = self._ACTION_TO_MOTION_GROUP.get(action, "")
+                    if motion_group and motion_group != "Idle":
+                        try:
+                            asyncio.create_task(
+                                self.live2d_controller.send_live2d_event(
+                                    "random_motion",
+                                    {"group": motion_group, "priority": 3},
+                                )
+                            )
+                            self.logger.info(
+                                f"Dispatched Live2D action: {action} -> {motion_group}"
+                            )
+                        except Exception as e:
+                            self.logger.error(f"Failed to dispatch Live2D action: {e}")
 
                 return parsed_text if parsed_text else text
             except Exception as e:

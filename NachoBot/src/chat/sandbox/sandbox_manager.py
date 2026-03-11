@@ -30,6 +30,10 @@ class Sandbox:
         self.base_dir = Path(base_dir)
         self.session_dir = self.base_dir / chat_id
         self.files: Dict[str, FileRecord] = {}
+        
+        # Cache for recently read files to provide context to LLM
+        self.recent_reads: Dict[str, str] = {}
+        self.max_recent_reads = 3
 
         # Ensure directory exists
         self._ensure_dir()
@@ -83,17 +87,39 @@ class Sandbox:
         return [f.name for f in self.session_dir.iterdir() if f.is_file()]
 
     def read_file(self, filename: str) -> Optional[str]:
-        """Read text file content"""
+        """Read text file content and store it in recent reads cache"""
         file_path = self.session_dir / filename
         if not file_path.exists():
             return None
         try:
             with open(file_path, "r", encoding="utf-8") as f:
-                return f.read()
+                content = f.read()
+                
+                # Update recent reads cache
+                self.recent_reads[filename] = content
+                # Keep only the latest `max_recent_reads` items
+                if len(self.recent_reads) > self.max_recent_reads:
+                    # Remove the oldest item (first inserted)
+                    oldest_key = next(iter(self.recent_reads))
+                    del self.recent_reads[oldest_key]
+                    
+                return content
         except UnicodeDecodeError:
             return "[Error: Binary file or non-utf8 encoding]"
         except Exception as e:
             return f"[Error reading file: {e}]"
+            
+    def get_recent_reads_context(self) -> str:
+        """Get formatted context from recently read files"""
+        if not self.recent_reads:
+            return ""
+            
+        context_parts = ["【沙盒上下文 (最近读取的文件内容)】"]
+        for filename, content in self.recent_reads.items():
+            context_parts.append(f"--- {filename} ---")
+            context_parts.append(content)
+            
+        return "\n".join(context_parts)
 
     def write_file(self, filename: str, content: str) -> str:
         """Write text content to a file"""
