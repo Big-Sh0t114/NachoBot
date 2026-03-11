@@ -222,6 +222,16 @@ class ToolExecutor:
                     + rule_addition
                     + "\n\n【系统强制指令】：你必须且只能使用提供的文件工具（如 write_file）输出最终内容。绝对不要仅在回复中输出纯文本代码片段！"
                 )
+                
+                # Fetch recent reads context from sandbox and inject it
+                from src.chat.sandbox.sandbox_manager import sandbox_manager
+                if hasattr(self, "chat_stream") and self.chat_stream:
+                    sandbox = sandbox_manager.get_sandbox(self.chat_stream.stream_id)
+                    recent_context = sandbox.get_recent_reads_context()
+                    if recent_context:
+                        file_edit_prompt += f"\n\n{recent_context}"
+                        logger.info(f"{self.log_prefix} 已成功附加最近读取的文件上下文。")
+                        
                 logger.info(f"{self.log_prefix} 工具执行器已动态切换模型: {file_edit_model_set.model_list}")
                 logger.info(f"{self.log_prefix} ------------- file_edit 模型原始 Prompt 开始 -------------")
                 logger.info(f"\n{file_edit_prompt}")

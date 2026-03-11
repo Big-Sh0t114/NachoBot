@@ -84,7 +84,10 @@ def caption_image(image_bytes: bytes, task: str = "<MORE_DETAILED_CAPTION>") -> 
 
     load_model()
 
-    image = Image.open(BytesIO(image_bytes)).convert("RGB")
+    image = Image.open(BytesIO(image_bytes))
+    if getattr(image, "is_animated", False):
+        image.seek(0)
+    image = image.convert("RGB")
     dtype = torch.float16 if _device == "cuda" else torch.float32
 
     inputs = _processor(text=task, images=image, return_tensors="pt")
