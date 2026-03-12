@@ -1174,6 +1174,12 @@ class PrivateReplyer:
             if not global_config.lpmm_knowledge.enable:
                 logger.debug("LPMM知识库未启用，跳过获取知识库内容")
                 return ""
+            
+            # Bypass LPMM for real-time platforms (Bilibili Live, Discord VC)
+            if hasattr(self, "chat_stream") and getattr(self.chat_stream, "platform", None) in ["bilibili", "discord_vc"]:
+                logger.debug(f"{self.chat_stream.platform} 直播/语音环境，跳过LPMM检索")
+                return ""
+
             time_now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
             bot_name = global_config.bot.nickname

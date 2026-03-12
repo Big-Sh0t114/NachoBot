@@ -376,6 +376,55 @@ class BilibiliAdapter:
             self.audio_player.on_start = _on_audio_start
             self.audio_player.on_stop = _on_audio_stop
 
+        self._last_active_time = time.time()
+        self._next_idle_target = self._get_next_idle_interval()
+
+    def _get_next_idle_interval(self) -> float:
+        import random
+        min_sec = max(10, self.config.idle_tts_min_seconds)
+        max_sec = max(min_sec, self.config.idle_tts_max_seconds)
+        return random.uniform(min_sec, max_sec)
+
+    def _reset_idle_timer(self) -> None:
+        self._last_active_time = time.time()
+        self._next_idle_target = self._get_next_idle_interval()
+
+    async def _idle_tts_loop(self) -> None:
+        import random
+        if not self.config.idle_tts_enable or not self.config.idle_tts_texts:
+            return
+        self.logger.info(f"Idle TTS loop started. Min: {self.config.idle_tts_min_seconds}s, Max: {self.config.idle_tts_max_seconds}s")
+        while True:
+            await asyncio.sleep(2.0)
+            if self.audio_player.is_playing:
+                self._reset_idle_timer()
+                continue
+            idle_duration = time.time() - self._last_active_time
+            if idle_duration > self._next_idle_target:
+                text = random.choice(self.config.idle_tts_texts)
+                self.logger.info(f"Idle time ({idle_duration:.1f}s) reached target ({self._next_idle_target:.1f}s). Triggering preset TTS.")
+                self._reset_idle_timer()
+                if not self._ensure_tts_model():
+                    continue
+                try:
+                    parsed_text, emotion, action = self._extract_json_emotion_from_text(text)
+                    text_jp, text_zh = self._parse_bilingual_response(parsed_text)
+                    display_text = text_zh if text_zh else parsed_text
+                    tts_text = text_jp if text_jp else parsed_text
+                    self._update_subtitle(display_text)
+                    cleaned_tts_text = _clean_text_for_tts(tts_text)
+                    if self.live2d_controller:
+                        await self.live2d_controller.on_start_replying()
+                        self._execute_extracted_live2d_action(emotion, action)
+                        if not action:
+                            asyncio.create_task(self.live2d_controller.send_live2d_event("random_motion", {"group": "Idle", "priority": 3}))
+                    audio_data = await self.tts_model.tts(text=cleaned_tts_text, platform=self.config.platform)
+                    await self._play_audio(audio_data)
+                    if self.live2d_controller:
+                        await self.live2d_controller.on_reply_finished()
+                except Exception as e:
+                    self.logger.error(f"Failed to generate/play idle TTS: {e}")
+
     def _ensure_tts_model(self) -> bool:
         """Ensure TTS model is initialized if available."""
         if self.tts_model:
@@ -424,6 +473,7 @@ class BilibiliAdapter:
         # Event Queue and Gift Aggregation
         tasks.append(self._process_event_queue())
         tasks.append(self._gift_flush_loop())
+        tasks.append(self._idle_tts_loop())
 
         # [DEPRECATED] Live Streamer mode moved to mais4u
         # for controller in self._live_streamer_controllers.values():
@@ -2209,31 +2259,43 @@ class BilibiliAdapter:
         if not text:
             return
 
-        # 解析统一的JSON表情
-        text = self._extract_json_emotion_from_text(text)
+        original_text = text
+        # 解析统一的JSON表情 (仅用于判断和非直播回复)
+        text, emotion, action = self._extract_json_emotion_from_text(original_text)
+        
         comment_target = self._resolve_comment_target(message)
         if comment_target:
+            # 对于非直播间回复，立刻执行动作
+            if self.live2d_controller:
+                self._execute_extracted_live2d_action(emotion, action)
             await self._send_comment_reply_from_context(comment_target, text)
             return
+
         room_id = self._resolve_room_id(message)
         if room_id is not None:
             reply_dmid = _find_reply_id(seg)
             reply_mid = ""
             if reply_dmid:
                 reply_mid = self._lookup_reply_mid(room_id, reply_dmid)
+            # 将包含 JSON 的原始文本交给 _handle_live_reply 处理，让其与 TTS 同步
             await self._handle_live_reply(
                 {
-                    "message": text,
+                    "message": original_text,
                     "room_id": room_id,
                     "reply_mid": reply_mid or "",
                     "reply_dmid": reply_dmid or "",
                 }
             )
             return
+
         private_target = self._resolve_private_target(message)
         if private_target:
+            # 对于非直播间回复，立刻执行动作
+            if self.live2d_controller:
+                self._execute_extracted_live2d_action(emotion, action)
             await self._send_private_message(private_target, text)
             return
+
         self.logger.warning("Missing room_id for outgoing danmu")
 
     def _resolve_room_id(self, message: MessageBase) -> Optional[int]:
@@ -2453,10 +2515,15 @@ class BilibiliAdapter:
                         audio_data = await self.tts_model.tts(
                             text=cleaned_tts_text, platform=self.config.platform
                         )
-                        # Hook Live2D: Start Replying (look down while speaking)
+                        # Execute buffered LLM action and emotion right before starting audio playback
                         if self.live2d_controller:
                             try:
                                 await self.live2d_controller.on_start_replying()
+                                
+                                emotion = metadata.get("emotion")
+                                action = metadata.get("action")
+                                self._execute_extracted_live2d_action(emotion, action)
+                                
                             except Exception as e:
                                 self.logger.error(f"Live2D reply hook error: {e}")
 
@@ -2481,6 +2548,9 @@ class BilibiliAdapter:
             if self.live2d_controller:
                 try:
                     await self.live2d_controller.on_start_replying()
+                    emotion = metadata.get("emotion")
+                    action = metadata.get("action")
+                    self._execute_extracted_live2d_action(emotion, action)
                 except Exception as e:
                     self.logger.error(f"Live2D reply hook error: {e}")
 
@@ -2507,6 +2577,9 @@ class BilibiliAdapter:
             if self.live2d_controller:
                 try:
                     await self.live2d_controller.on_start_replying()
+                    emotion = metadata.get("emotion")
+                    action = metadata.get("action")
+                    self._execute_extracted_live2d_action(emotion, action)
                 except Exception as e:
                     self.logger.error(f"Live2D reply hook error: {e}")
 
@@ -2559,58 +2632,70 @@ class BilibiliAdapter:
         "一般": "",
     }
 
-    def _extract_json_emotion_from_text(self, text: str) -> str:
-        """尝试解析回复中的JSON表情+动作指令，触发Live2D并返回原始回复文本。"""
+    def _execute_extracted_live2d_action(self, emotion: Optional[str], action: Optional[str]) -> None:
+        """从 _extract_json_emotion_from_text 提取出的指令执行 Live2D 事件"""
+        ctrl = self.live2d_controller
+        if not ctrl:
+            return
+            
+        if emotion and emotion in ["normal", "shy", "disgust", "angry"]:
+            try:
+                asyncio.create_task(
+                    ctrl.send_live2d_event("emotion", emotion)
+                )
+                self.logger.info(f"Dispatched Live2D emotion event: {emotion}")
+            except Exception as e:
+                self.logger.error(f"Failed to dispatch Live2D emotion: {e}")
+
+        if action:
+            motion_group = self._ACTION_TO_MOTION_GROUP.get(action, "")
+            if motion_group and motion_group != "Idle":
+                try:
+                    asyncio.create_task(
+                        ctrl.send_live2d_event(
+                            "random_motion",
+                            {"group": motion_group, "priority": 3},
+                        )
+                    )
+                    self.logger.info(
+                        f"Dispatched Live2D action: {action} -> {motion_group}"
+                    )
+                except Exception as e:
+                    self.logger.error(f"Failed to dispatch Live2D action: {e}")
+                    
+    def _extract_json_emotion_from_text(self, text: str) -> Tuple[str, Optional[str], Optional[str]]:
+        """尝试解析回复中的JSON表情+动作指令，返回(解析后文本, emotion, action)。"""
         start_idx = text.find("{")
         end_idx = text.rfind("}")
+        parsed_text = ""
+        emotion = None
+        action = None
+        
         if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
             try:
                 json_str = text[start_idx : end_idx + 1]
                 data = json.loads(json_str, strict=False)
-                parsed_text = ""
+                
                 if "reply" in data and data["reply"]:
                     parsed_text = str(data["reply"])
                 emotion = data.get("emotion")
-
-                if (
-                    emotion
-                    and emotion in ["normal", "shy", "disgust", "angry"]
-                    and self.live2d_controller
-                ):
-                    try:
-                        asyncio.create_task(
-                            self.live2d_controller.send_live2d_event("emotion", emotion)
-                        )
-                        self.logger.info(f"Dispatched Live2D emotion event: {emotion}")
-                    except Exception as e:
-                        self.logger.error(f"Failed to dispatch Live2D emotion: {e}")
-
-                # Parse action field for Live2D motion control
                 action = data.get("action")
-                if action and self.live2d_controller:
-                    motion_group = self._ACTION_TO_MOTION_GROUP.get(action, "")
-                    if motion_group and motion_group != "Idle":
-                        try:
-                            asyncio.create_task(
-                                self.live2d_controller.send_live2d_event(
-                                    "random_motion",
-                                    {"group": motion_group, "priority": 3},
-                                )
-                            )
-                            self.logger.info(
-                                f"Dispatched Live2D action: {action} -> {motion_group}"
-                            )
-                        except Exception as e:
-                            self.logger.error(f"Failed to dispatch Live2D action: {e}")
-
-                return parsed_text if parsed_text else text
+                
+                return parsed_text if parsed_text else text, emotion, action
             except Exception as e:
                 self.logger.debug(f"JSON parsing failed (fallback to raw): {e}")
-        return text
+                
+        return text, None, None
+
 
     async def _handle_comment_reply(self, args: Dict[str, Any]) -> None:
         raw_msg = str(args.get("message") or "")
-        text = _strip_emoji(self._extract_json_emotion_from_text(raw_msg)).strip()
+        text, emotion, action = self._extract_json_emotion_from_text(raw_msg)
+        text = _strip_emoji(text).strip()
+        
+        if self.live2d_controller:
+            self._execute_extracted_live2d_action(emotion, action)
+
         if not text:
             self.logger.warning("Empty comment reply text")
             return
@@ -2649,7 +2734,7 @@ class BilibiliAdapter:
 
     async def _handle_live_reply(self, args: Dict[str, Any]) -> None:
         raw_message = str(args.get("message") or "")
-        text = self._extract_json_emotion_from_text(raw_message)
+        text, emotion, action = self._extract_json_emotion_from_text(raw_message)
         text = _strip_emoji(text).strip()
 
         # Strip invisible characters like zero-width space (\u200b)
@@ -2699,7 +2784,15 @@ class BilibiliAdapter:
                     "reply_mid": reply_mid,
                     "reply_dmid": reply_dmid,
                     "start_time": time.time(),
+                    "emotion": emotion,
+                    "action": action,
                 }
+            elif emotion or action:
+                # Update with latest actions if we're mid-buffer
+                if emotion:
+                    self._tts_metadata[room_id]["emotion"] = emotion
+                if action:
+                    self._tts_metadata[room_id]["action"] = action
 
             # Reset timer
             if room_id in self._tts_timer:
@@ -2718,6 +2811,7 @@ class BilibiliAdapter:
         if self.live2d_controller:
             try:
                 await self.live2d_controller.on_start_replying()
+                self._execute_extracted_live2d_action(emotion, action)
             except Exception as e:
                 self.logger.error(f"Live2D reply hook error: {e}")
 
@@ -2734,7 +2828,12 @@ class BilibiliAdapter:
         self, args: Dict[str, Any], message: Optional[MessageBase]
     ) -> None:
         raw_msg = str(args.get("message") or "")
-        text = _strip_emoji(self._extract_json_emotion_from_text(raw_msg)).strip()
+        text, emotion, action = self._extract_json_emotion_from_text(raw_msg)
+        text = _strip_emoji(text).strip()
+        
+        if self.live2d_controller:
+            self._execute_extracted_live2d_action(emotion, action)
+            
         if not text:
             return
         talker_id = args.get("talker_id")
@@ -3295,6 +3394,7 @@ class BilibiliAdapter:
         Push message to event queue with priority.
         Priority: 10 (High) -> 40 (Low)
         """
+        self._reset_idle_timer()
         try:
             timestamp = time.time()
             # Queue item: (priority, timestamp, seq, message)

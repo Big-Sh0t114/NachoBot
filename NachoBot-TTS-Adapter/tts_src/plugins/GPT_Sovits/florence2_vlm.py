@@ -84,10 +84,20 @@ def caption_image(image_bytes: bytes, task: str = "<MORE_DETAILED_CAPTION>") -> 
 
     load_model()
 
-    image = Image.open(BytesIO(image_bytes))
-    if getattr(image, "is_animated", False):
-        image.seek(0)
-    image = image.convert("RGB")
+    raw_image = Image.open(BytesIO(image_bytes))
+    if getattr(raw_image, "is_animated", False):
+        raw_image.seek(0)
+    
+    # 处理透明通道并去除可能导致底层 C 库崩溃的动图元数据
+    if raw_image.mode in ('RGBA', 'LA') or (raw_image.mode == 'P' and 'transparency' in raw_image.info):
+        image = Image.new('RGB', raw_image.size, (255, 255, 255))
+        image.paste(raw_image.convert("RGBA"), mask=raw_image.convert("RGBA").split()[3])
+    else:
+        image = raw_image.convert("RGB")
+    
+    # 强制深拷贝并清空元数据，彻底阻断与原动图文件的内存联系
+    image = image.copy()
+    image.info.clear()
     dtype = torch.float16 if _device == "cuda" else torch.float32
 
     inputs = _processor(text=task, images=image, return_tensors="pt")
