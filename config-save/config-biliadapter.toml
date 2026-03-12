@@ -1,5 +1,5 @@
 [inner]
-version = "0.1.0"
+version = "0.5.4"
 
 [nachobot_server]
 host = "127.0.0.1"
@@ -7,7 +7,8 @@ port = 8000
 platform = "bilibili"
 
 [bilibili]
-sessdata = " "
+bot_account = " "       # 填写bot b站id
+sessdata = " "          # 以下字段请运行适配器目录下的 qr_login.py 自动填写
 bili_jct = " "
 buvid3 = " "
 buvid4 = " "
@@ -16,7 +17,16 @@ user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 
 [live]
 enable = true
-room_ids = [ ]
+enable_live2D = true
+live2d_transparent = true
+live2d_antialiasing = true
+live2d_width = 2500
+live2d_height = 3000
+live2d_scale = 1.5
+live2d_model_path = "./resources/NachoBot/Nachobot.model3.json"      # 示例地址填写，请使用你自己的路径
+live2d_mood_enable = false
+live2d_action_enable = true
+room_ids = [ ]       # 填写直播间id
 use_wss = true
 heartbeat_interval = 30
 disable_network_search = true
@@ -35,22 +45,29 @@ mention_keywords = ["NachoBot"]
 mention_prefixes = ["@", "＠"]
 mention_any_at = false
 resolve_user_nickname = true
+master_user_id = " "        # 直播戳一戳解析专用，建议填写QQ号，戳一戳操作是鼠标侧键点击Live2d
+master_user_name = " "      # 你希望自己在bot上下文中出现的名字
 
 [live.screen_monitor]
 manual_enable = true
 manual_duration_minutes = 30
-manual_user_ids = [ ]
+manual_user_ids = []        # Bilibili侧管理员账号，填写自己的b站id
 
-[live.room_prompts." "]
+
+
+
+
+[live.room_prompts." "]     # " "内填写自己的直播间号，除非你知道你在干什么，否则请不要修改自然语言以外的部分
 host = true
-live_category = ""
-live_title = ""
-live_content = ""
-live_detail = """"""
-
+live_category = "闲聊"
+live_title = "全B站最人机的主播"
+live_content = "评论回复"
+live_detail = """直播中绝对不要把自己说成是Nachoneko或是甘城なつき，她们只是你的原型参考。"""
+gift_reaction_prompt = ""
 
 reply_prompt = """{knowledge_prompt}{tool_info_block}
 {expression_habits_block}
+{gift_reaction_prompt}
 
 你正在你主人甘油三酯的直播间里聊天，下面是直播间里正在聊的内容:
 {time_block}
@@ -59,83 +76,44 @@ reply_prompt = """{knowledge_prompt}{tool_info_block}
 
 {reply_target_block}。
 {identity}
+你有一头灰色长发，头发上有Google Gemini状发卡，头发扎成过肩低双马尾，脖子上有标识身份用的条形码，穿着蓝色水手服款卫衣，领口印有Anthropic Claude图标，胸前有格子领带，口袋里装着两只机械小猫，下身身着蓝色格子短裙，身旁悬浮着猫猫状的AI机械助手。
+以上身份描述是用于让你辨认【直播画面】中的自己的，在直播回复中不要刻意提及以上细节。
 以下是直播的相关信息：{extra_info_block}，
-你正在你主人甘油三酯的直播间里聊天,现在请你读读之前的聊天记录，然后给出日常且口语化的回复，平淡一些，
-说话简短一些，单次回复控制在50字以内。{keywords_reaction_prompt}请注意把握聊天内容，不要回复的太有条理，可以有个性，带动直播间的氛围。
+你正在你主人甘油三酯的直播间里聊天,现在请你读读之前的聊天记录，然后给出日常且口语化的回复，稍微活泼一些但总体保持懒懒的样子，
+说话简短一些，单次回复控制在80字以内20字以上，注意颜文字和双语翻译不计入总字数，遇到有价值的信息可以多说点。{keywords_reaction_prompt}请注意把握聊天内容，不要回复的太有条理，可以有个性，带动直播间的氛围。
 {reply_style}
-请注意只对聊天内容做回复，可参考【直播画面】的屏幕信息，不要输出多余内容(包括前后缀，冒号和引号，括号，表情等)，只输出回复内容。
-{moderation_prompt}不要输出多余内容(包括前后缀，冒号和引号，括号，表情包，at或 @等 )。
+请注意只对聊天内容做回复，可参考【直播画面】的屏幕信息。
+
+**重要规则**
+1.如果你不想回复，或者认为没有必要回复（例如话题已结束、没有新信息），请**只**输出一个不可见字符 "\\u200b" (Zero Width Space) 或者空格。
+2.请根据聊天记录判断。如果聊天内容中没有新的有效对话，或者你觉得自己上次回复已经是话题的结尾，请务必保持沉默（输出 "\\u200b"）。
+3.请务必判断情感输出。要求最终只输出一段纯净的、可被系统直接解析的JSON，不包含多余描述、前后缀、反引号(如```json)或其他格式，且包含reply、emotion和action三个字段。
+4.当你需要输出中文回复和对应的日文翻译（用于语音播放）时，这些内容**必须放在JSON的`reply`字段中**，格式如下（注意下面示例用的是全角括号，但你实际输出时必须使用半角 <> 括号！）：
+＜JP＞日本語翻訳＜/JP＞＜ZH＞中文原本意思＜/ZH＞
+示例：{{"reply": "＜JP＞こんにちは＜/JP＞＜ZH＞你好呀＜/ZH＞", "emotion": "shy", "action": "害羞/移开视线"}}
+- `reply`: 你的回复内容。如果不回复，则设为 "\\u200b"
+- `emotion`: 你的情感，只能从 "normal"（平常/开心）, "shy"（害羞）, "disgust"（厌恶）, "angry"（生气） 中四选一。
+- `action`: 你的动作，只能从以下选项中选一个："待机/放松", "点头/同意", "摇头/否定", "转身向左/看左边", "转身向右/看右边", "身体前倾/好奇/仔细看", "身体后仰/惊讶/吓一跳", "身体晃动/开心/兴奋", "歪头/疑惑/思考", "害羞/移开视线/不好意思", "一般"。根据回复内容选择最合适的动作，大多数情况用"一般"即可，只在情感或语境明确时才选其他动作。
 """
 
 
 
+[live.room_prompts." ".tts]    # 引号内填入自己的直播间号
+enable = true                  # 同一时间只能开启一个直播间的TTS功能，否则适配器会报错
+subtitle_path = ""             # 字幕路径，用于obs直播
 
-
-planner_prompt = """{time_block}
-{name_block}
-你的兴趣是：{interest}
-你正在你主人甘油三酯的直播间里聊天，以下是具体的聊天内容
-**聊天内容**
-{chat_content_block}
-
-**动作记录**
-{actions_before_now_block}
-
-**可用的action**
-reply
-动作描述：
-1.你可以选择呼叫了你的名字，但是你没有做出回应的消息进行回复
-2.你可以自然的顺着正在进行的聊天内容进行回复或自然的提出一个问题
-{{
-    "action": "reply",
-    "target_message_id":"想要回复的消息id",
-    "reason":"回复的原因"
-}}
-
-no_reply
-动作描述：
-保持沉默，不回复直到有新消息
-{{
-    "action": "no_reply",
-}}
-
-请选择合适的action，并说明触发action的消息id和选择该action的原因。消息id格式:m+数字
-先输出你的选择思考理由，再输出你选择的action，理由是一段平文本，不要分点，精简。
-**动作选择要求**
-请你根据聊天内容,用户的最新消息和以下标准选择合适的动作:
-1. 逐条检查所有可用 action，满足条件就执行，避免遗漏。
-2. 应尽量保持直播间气氛活跃。
-3. 如果有人表现出厌烦，降低回复频率。
-4. 遭遇他人攻击或情绪激动时，礼貌且适度回击，不升级冲突。
-回复动作若未明确指定 target_message_id，请选择最新的非机器人消息。
-{moderation_prompt}
-
-请选择所有符合使用要求的action，动作用json格式输出，如果输出多个json，每个json都要单独用```json包裹，你可以重复使用同一个动作或不同动作:
-**示例**
-// 理由文本
-```json
-{{
-    "action":"动作名",
-    "target_message_id":"触发动作的消息id",
-    //对应参数
-}}
-"""
-
-[live.room_prompts." ".tts]
+[live.idle_tts]
 enable = true
-subtitle_path = "C:/Users/BigSh0t/Nacho-with-u/NachoBot-Bilibili-Adapter/subtitles.txt"
-
-
-
-
+min_seconds = 30
+max_seconds = 90
 
 [mic_asr]
 enable = true
 room_id = 
-subtitle_path = "C:/Users/BigSh0t/Nacho-with-u/NachoBot-Bilibili-Adapter/subtitles1.txt"
-silence_threshold = 0.01
-silence_duration = 0.5
-sample_rate = 16000
+subtitle_path = ""           # 语音识别字幕路径，用于obs直播       
+silence_threshold = 0.015
+silence_duration = 0.8
+sample_rate = 48000
 
 [comment]
 enable_reply_notice = true
@@ -156,9 +134,7 @@ force_mention = true
 
 [response_filter]
 enable = true
-blocked_markers = [
-    " ",
-]
+blocked_markers = []     # 违禁词配置，当bot输出内容符合违禁词时会被替换为Filtered
 
 [compat]
 disable_video_sender_plugin = true

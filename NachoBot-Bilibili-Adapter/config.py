@@ -67,6 +67,15 @@ class AdapterConfig:
     live_master_user_id: str
     live_master_user_name: str
 
+    idle_tts_enable: bool
+    idle_tts_min_seconds: int
+    idle_tts_max_seconds: int
+    idle_tts_texts: List[str]
+
+    idle_tts_enable: bool
+    idle_tts_min_seconds: int
+    idle_tts_max_seconds: int
+    idle_tts_texts: List[str]
     screen_manual_enable: bool
     screen_manual_duration_seconds: int
     screen_manual_user_ids: List[str]
@@ -281,6 +290,37 @@ def load_config(path: Path) -> AdapterConfig:
     debug = data.get("debug", {})
     mic_asr = data.get("mic_asr") or {}
     screen_monitor = live.get("screen_monitor", {}) or {}
+    idle_tts = live.get("idle_tts", {})
+    idle_tts_texts = []
+    idle_tts_file = idle_tts.get("file", "idle_texts.json")
+    if idle_tts_file:
+        file_path = Path(__file__).parent / idle_tts_file
+        if file_path.exists():
+            try:
+                import json
+                with open(file_path, "r", encoding="utf-8") as f:
+                    if file_path.suffix == ".json":
+                        data = json.load(f)
+                        if isinstance(data, list):
+                            for item in data:
+                                if isinstance(item, dict):
+                                    idle_tts_texts.append(json.dumps(item, ensure_ascii=False))
+                                else:
+                                    idle_tts_texts.append(str(item).strip())
+                    else:
+                        for line in f:
+                            line = line.strip()
+                            if line and not line.startswith("#"):
+                                idle_tts_texts.append(line)
+            except Exception as e:
+                pass
+
+    idle_tts_texts_raw = idle_tts.get("texts", [])
+    if isinstance(idle_tts_texts_raw, list):
+        for x in idle_tts_texts_raw:
+            val = str(x).strip()
+            if val and val not in idle_tts_texts:
+                idle_tts_texts.append(val)
 
     sessions_raw = private_message.get("sessions", []) or []
     sessions: List[PrivateSessionConfig] = []
@@ -476,6 +516,10 @@ def load_config(path: Path) -> AdapterConfig:
         live_master_user_name=str(
             live.get("live_master_user_name", live.get("master_user_name", "主人"))
         ),
+        idle_tts_enable=bool(idle_tts.get("enable", False)),
+        idle_tts_min_seconds=int(idle_tts.get("min_seconds", 60)),
+        idle_tts_max_seconds=int(idle_tts.get("max_seconds", 180)),
+        idle_tts_texts=idle_tts_texts,
         screen_manual_enable=manual_enable,
         screen_manual_duration_seconds=max(60, manual_duration_minutes * 60),
         screen_manual_user_ids=manual_user_ids,
