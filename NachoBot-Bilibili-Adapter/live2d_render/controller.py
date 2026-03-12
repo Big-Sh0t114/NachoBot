@@ -175,10 +175,14 @@ class Live2DController:
     async def on_start_replying(self):
         if self.watching_manager:
             await self.watching_manager.on_start_replying()
+        if self.action_manager:
+            await self.action_manager.on_start_replying()
 
     async def on_reply_finished(self):
         if self.watching_manager:
             await self.watching_manager.on_reply_finished()
+        if self.action_manager:
+            await self.action_manager.on_reply_finished()
 
     def set_speaking(self, speaking: bool):
         """Set the speaking state for lip sync animation."""

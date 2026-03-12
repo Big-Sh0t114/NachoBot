@@ -51,6 +51,7 @@ class ChatAction:
         self.body_action = "一般"
         self.head_action = "Center"
         self.last_change_time = 0
+        self.pending_action_update = False
 
     async def _call_llm(self, prompt: str) -> Optional[str]:
         # Helper to call LLM via Controller -> Adapter -> ModelClient
@@ -150,16 +151,42 @@ class ChatAction:
                     updated = True
 
                 if updated:
-                    await self.send_action_update()
+                    self.pending_action_update = True
                     self.last_change_time = message_time
                     self.manager.logger.info(
-                        f"[Action] Updated: Body={self.body_action}, Head={self.head_action}"
+                        f"[Action] Updated: Body={self.body_action}, Head={self.head_action} (Pending TTS Sync)"
                     )
 
             except Exception as e:
                 self.manager.logger.error(
                     f"Failed to parse action response: {e}, resp: {response}"
                 )
+
+    async def on_start_replying(self):
+        if self.pending_action_update:
+            await self.send_action_update()
+            self.pending_action_update = False
+            self.manager.logger.info(
+                "[Action] Dispatched pending action update on TTS playback start"
+            )
+
+    async def on_reply_finished(self):
+        # Default back to Idle and Center after speaking
+        self.body_action = "一般"
+        self.head_action = "Center"
+        
+        # We also need to forcibly dispatch these to the renderer to break out of single-motion locks
+        # Only dispatch gaze to Center. For body, Live2D v3 bindings may get stuck on the last frame of a non-looping Priority 3 motion
+        # "Idle" is special cased to invoke the base idle group
+        if self.manager.controller:
+            await self.manager.controller.send_live2d_event(
+                "random_motion", {"group": "Idle", "priority": 3}
+            )
+            gaze_data = HEAD_DIRECTION_MAP.get("Center", None)
+            if gaze_data:
+                await self.manager.controller.send_live2d_event("auto_gaze", gaze_data)
+                
+        self.manager.logger.info("[Action] Reply finished, reset to Body=Idle, Head=Center")
 
 
 class ActionManager:
@@ -222,3 +249,12 @@ class ActionManager:
 
         action = self.get_action_state_by_chat_id(chat_id)
         await action.update_action_by_message(message)
+
+    async def on_start_replying(self, chat_id="live_room"):
+        action = self.get_action_state_by_chat_id(chat_id)
+        await action.on_start_replying()
+
+    async def on_reply_finished(self, chat_id="live_room"):
+        action = self.get_action_state_by_chat_id(chat_id)
+        await action.on_reply_finished()
+
