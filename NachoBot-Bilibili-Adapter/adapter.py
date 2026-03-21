@@ -38,7 +38,6 @@ from bili_src.core.config import (  # noqa: E402
     _resolve_vlm_model_config_list,
 )
 from bili_src.core.utils import (  # noqa: E402
-    _clean_text_for_tts,
     _guard_command_segment,
     _mask_urls,
     _strip_emoji,
@@ -228,65 +227,6 @@ class BilibiliAdapter:
             tts_import_error=_tts_import_error,
         )
 
-    async def _idle_tts_loop(self) -> None:
-        import random
-        if not self.config.idle_tts_enable or not self.config.idle_tts_texts:
-            return
-        self.logger.info(f"Idle TTS loop started. Min: {self.config.idle_tts_min_seconds}s, Max: {self.config.idle_tts_max_seconds}s")
-        while True:
-            await asyncio.sleep(2.0)
-            if self.audio_player.is_playing:
-                self._reset_idle_timer()
-                continue
-            idle_duration = time.time() - self._last_active_time
-            if idle_duration > self._next_idle_target:
-                text = random.choice(self.config.idle_tts_texts)
-                self.logger.info(f"Idle time ({idle_duration:.1f}s) reached target ({self._next_idle_target:.1f}s). Triggering preset TTS.")
-                self._reset_idle_timer()
-                if not self._ensure_tts_model():
-                    continue
-                try:
-                    parsed_text, emotion, action = self._extract_json_emotion_from_text(text)
-                    text_jp, text_zh = self._parse_bilingual_response(parsed_text)
-                    display_text = text_zh if text_zh else parsed_text
-                    tts_text = text_jp if text_jp else parsed_text
-                    self._update_subtitle(display_text)
-                    cleaned_tts_text = _clean_text_for_tts(tts_text)
-                    # 1. 先等待 TTS 语音生成完毕（这通常需要几秒钟）
-                    audio_data = await self.tts_model.tts(text=cleaned_tts_text, platform=self.config.platform)
-                    
-                    # 2. 在语音即将入队播放前，再触发表情和动作，确保与声音同步
-                    if self.live2d_controller:
-                        await self.live2d_controller.on_start_replying()
-                        self._execute_extracted_live2d_action(emotion, action)
-                        if not action:
-                            asyncio.create_task(self.live2d_controller.send_live2d_event("random_motion", {"group": "Idle", "priority": 3}))
-                            
-                    # 3. 推入播放队列
-                    await self._play_audio(audio_data)
-                    # 注意：千万不要在这里调 on_reply_finished()！
-                    # 因为底层 AudioPlayer 播放完毕后会自动触发 _on_audio_stop() 来处理完毕状态
-                except Exception as e:
-                    self.logger.error(f"Failed to generate/play idle TTS: {e}")
-
-    def _ensure_tts_model(self) -> bool:
-        """Ensure TTS model is initialized if available."""
-        if self.tts_model:
-            return True
-
-        if TTSModel:
-            try:
-                self.tts_model = TTSModel()
-                self.logger.info("TTS Model initialized successfully")
-                return True
-            except Exception as e:
-                self.logger.error(f"Failed to initialize TTS Model: {e}")
-                return False
-        else:
-            self.logger.error(
-                f"TTS enabled but TTSModel not available: {_tts_import_error}"
-            )
-            return False
 
     # ========== Run and Control Methods ==========
 
@@ -317,7 +257,7 @@ class BilibiliAdapter:
         # Event Queue and Gift Aggregation
         tasks.append(self.event_manager.event_consumer_loop())
         tasks.append(self.event_manager.gift_flush_loop())
-        tasks.append(self._idle_tts_loop())
+        tasks.append(self.tts_manager.idle_tts_loop())
 
         # [DEPRECATED] Live Streamer mode moved to mais4u
         # for controller in self._live_streamer_controllers.values():
