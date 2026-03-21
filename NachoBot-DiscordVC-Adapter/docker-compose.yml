@@ -1,0 +1,15 @@
+services:
+  discord-adapter:
+    container_name: nacho-bot-discord-adapter
+    build: .
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./config.toml:/discord-adapter/config.toml  # 配置文件
+    restart: always
+    networks:
+      - nacho_bot
+
+networks:
+  nacho_bot:
+    external: true

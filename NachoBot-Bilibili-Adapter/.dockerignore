@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+logs/
+.git/
+.gitignore
+*.dll
+resources/
+qr_login.png
+subtitles.txt
+subtitles1.txt
+config.toml
+uv.lock
+*.pyc
