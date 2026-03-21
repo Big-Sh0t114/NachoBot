@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+.git/
+.gitignore
+config.toml
+uv.lock
+*.pyc

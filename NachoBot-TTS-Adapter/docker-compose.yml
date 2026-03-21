@@ -1,0 +1,16 @@
+services:
+  tts-adapter:
+    container_name: nacho-bot-tts-adapter
+    build: .
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./configs:/nachobot_tts_adapter/configs  # 配置文件
+      - ./logs:/nachobot_tts_adapter/logs        # 日志持久化
+    restart: always
+    networks:
+      - nacho_bot
+
+networks:
+  nacho_bot:
+    external: true

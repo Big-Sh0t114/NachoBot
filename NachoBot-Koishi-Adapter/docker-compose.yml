@@ -1,0 +1,15 @@
+services:
+  koishi-adapter:
+    container_name: nacho-bot-koishi-adapter
+    build: .
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./config.toml:/koishi-adapter/config.toml  # 配置文件
+    restart: always
+    networks:
+      - nacho_bot
+
+networks:
+  nacho_bot:
+    external: true
