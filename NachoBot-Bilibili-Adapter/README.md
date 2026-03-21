@@ -54,3 +54,29 @@
 
 ## 指令用法
 参见 `command_args.md`。
+
+---
+
+## Docker 部署
+
+本适配器支持 Docker 容器化部署。
+
+### 前置准备
+
+确保已经创建了 NachoBot 的共享外部网络：
+
+```bash
+docker network create nacho_bot
+```
+
+### 启动服务
+
+```bash
+# 在本目录下执行
+docker compose up -d
+```
+
+### Docker 注意事项
+- **屏幕监控**：本适配器的 Docker 镜像已内置 `Xvfb`（虚拟帧缓冲），因此即使在无显示设备的 Linux 服务器上，也能正常运行依赖于屏幕渲染（mss 截屏 / Live2D）的功能。
+- **配置文件**：容器会通过挂载使用宿主机的 `config.toml`、`resources/`、`logs/` 等路径，修改配置后重启容器即可生效。
+- **核心连接**：确保 `NachoBot` 核心服务已启动在 `nacho_bot` 网络中，且 `config.toml` 里的 `nachobot_server.host` 设置为 `core`（或宿主机IP）。

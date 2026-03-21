@@ -1,5 +1,6 @@
 3/21
     完全重构Bilibili Adapter  
+    增加各平台适配器的docker部署文件
 3/18
     修复上舰事件无法解析price字段的问题
 3/12

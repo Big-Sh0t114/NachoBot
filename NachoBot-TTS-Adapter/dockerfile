@@ -1,24 +1,31 @@
-FROM python:3.13.2-slim-bookworm
+FROM python:3.13-slim-bookworm
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 # 设置工作目录
 WORKDIR /nachobot_tts_adapter
 
-# 将当前目录下的文件复制到容器的工作目录中
-COPY . .
+# 安装本地 ncnk_message 包
+COPY ncnk_message /ncnk_message
+RUN uv pip install --system -e /ncnk_message
 
 # 安装依赖
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt pyproject.toml ./
+RUN uv pip install --system --upgrade pip
+RUN uv pip install --system -r requirements.txt
+
+# 复制项目代码
+COPY . .
 
 # 创建配置目录并从模板复制默认配置
 RUN mkdir -p /nachobot_tts_adapter/configs && \
     cp /nachobot_tts_adapter/template_configs/base_template.toml /nachobot_tts_adapter/configs/base.toml && \
     cp /nachobot_tts_adapter/template_configs/gpt-sovits_template.toml /nachobot_tts_adapter/configs/gpt-sovits.toml
 
-# 暴露端口（如果需要的话，根据你的api_v2.py实际情况调整）
+# 暴露端口
 EXPOSE 8070
 
 # 定义可以被映射的卷
-VOLUME ["/NachoBot-TTS-Adapter/configs"]
+VOLUME ["/nachobot_tts_adapter/configs"]
 
 # 运行应用
 CMD ["python", "main.py"]

@@ -1,0 +1,22 @@
+services:
+  bilibili-adapter:
+    container_name: nacho-bot-bilibili-adapter
+    build: .
+    environment:
+      - TZ=Asia/Shanghai
+      # 使用 Xvfb 虚拟帧缓冲启动（屏幕监控所需）
+      - DISPLAY=:99
+    volumes:
+      - ./config.toml:/bilibili-adapter/config.toml           # 配置文件
+      - ./resources:/bilibili-adapter/resources                 # Live2D 模型等资源
+      - ./Live2DCubismCore.dll:/bilibili-adapter/Live2DCubismCore.dll  # Live2D SDK
+      - ./proxy.json:/bilibili-adapter/proxy.json               # 代理配置
+      - ./idle_texts.json:/bilibili-adapter/idle_texts.json     # 闲聊文本
+      - ./logs:/bilibili-adapter/logs                           # 日志持久化
+    restart: always
+    networks:
+      - nacho_bot
+
+networks:
+  nacho_bot:
+    external: true

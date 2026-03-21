@@ -75,3 +75,22 @@ speed_factor = 1.0                       # 生成语速
 4. **NachoBot 主服务 + NapCat 适配器**：启动主脑逻辑处理区，随后连入 QQ/Bilibili。
 
 如遇 TTS 模块报错或静音，请检查是否是 `.ckpt` 或 `.pth` 文件路径缺失，或是端口 `9880/8070` 被系统中其他程序意外占用。
+
+---
+
+## Docker 部署
+
+本适配器同样支持独立 Docker 部署（目前仅容器化**适配器**部分，**GPT-SoVITS 本身仍需在宿主机或单独服务中运行**）。
+
+### 启动方式
+
+```bash
+# 在本目录下执行
+docker compose up -d
+```
+
+### Docker 注意事项
+- 本容器依赖外部的 `nacho_bot` Docker 网络。若未创建请先执行 `docker network create nacho_bot`。
+- **连接至 GPT-SoVITS API**：在 `configs/base.toml` 中，`[plugins.GPT_Sovits].api_base` 默认是指向 `127.0.0.1:9874`。如果你在 Docker 中运行，且 GPT-SoVITS 在宿主机上，请将此处的 IP 改为宿主机的局域网 IP，或者修改为 `host.docker.internal`。
+- **模型文件路径**：`configs/base.toml` 和 `configs/gpt-sovits.toml` 中指定的模型路径（`.ckpt`, `.pth`, `.wav`）**必须是基于容器内的路径**（即挂载后的路径，通常位于 `/nachobot_tts_adapter/configs/` 下）。
+- 容器会自动挂载 `./configs` 目录和 `./logs` 目录。修改配置后重启容器生效。

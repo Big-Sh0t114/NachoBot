@@ -1,3 +1,4 @@
+# 使用前请先创建外部网络: docker network create nacho_bot
 services:
   adapters:
     container_name: nacho-bot-adapters
@@ -75,4 +76,4 @@ volumes:
   site-packages:
 networks:
   nacho_bot:
-    driver: bridge
+    external: true

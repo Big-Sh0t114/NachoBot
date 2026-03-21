@@ -95,6 +95,55 @@ NachoBot 是在上游 **MaiBot 0.10.3 Beta** 基础上研发的角色扮演聊�
 ``保持所有终端运行！！！在全平台服务跑起来的情况下应该是有6+3+1个终端窗口在运行``
 ``launchbot_lite.bat 是轻量启动脚本，不包含本地 VLM/ASR 服务，为电脑性能较差用户提供``
 
+---
+
+## Docker 部署
+
+NachoBot 支持 Docker 容器化部署，各适配器可按需独立启动。
+
+### 前置准备
+
+```bash
+# 创建共享外部网络（仅需首次执行）
+docker network create nacho_bot
+```
+
+### 启动核心服务
+
+```bash
+cd NachoBot
+docker compose up -d
+```
+
+核心服务包含：`core`（NachoBot 主进程）、`adapters`（Napcat 适配器）、`napcat`（QQ 协议端）、`sqlite-web`（数据库管理）。
+
+### 按需启动平台适配器
+
+每个适配器目录下都有独立的 `docker-compose.yml`，可按需启动：
+
+```bash
+# Bilibili 直播适配器（含屏幕监控/Live2D）
+cd NachoBot-Bilibili-Adapter && docker compose up -d
+
+# Discord 语音频道适配器
+cd NachoBot-DiscordVC-Adapter && docker compose up -d
+
+# Koishi 适配器（Discord 文字频道等）
+cd NachoBot-Koishi-Adapter && docker compose up -d
+
+# TTS 语音合成适配器
+cd NachoBot-TTS-Adapter && docker compose up -d
+```
+
+### Docker 注意事项
+
+- **网络**：所有服务通过 `nacho_bot` 外部网络互相通信。容器间使用服务名（如 `core`、`tts-adapter`）作为主机名，配置文件中的 `127.0.0.1` 需替换为对应服务名。
+- **配置持久化**：各适配器通过卷挂载持久化 `config.toml` 等配置文件，修改配置后重启容器即可生效。
+- **FFmpeg**：DiscordVC 适配器的 Docker 镜像已内置 FFmpeg，无需额外安装。
+- **Xvfb**：Bilibili 适配器的 Docker 镜像已内置 Xvfb 虚拟帧缓冲，支持容器内屏幕监控。
+
+---
+
 ##### 安全与隐私提示
 - 请勿将真实密钥、Cookie、个人账号信息提交到仓库；部署前在本地/环境变量中填充。
 - 本项目会调用第三方模型/服务；使用时需遵守各自的服务条款与隐私政策。
