@@ -11,12 +11,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from danmu_buffer import DanmuBuffer, DanmuEntry
-from model_client import get_model_client
+from bili_src.live.danmu_buffer import DanmuBuffer, DanmuEntry
+from bili_src.core.model_client import get_model_client
 
 if TYPE_CHECKING:
     from adapter import BilibiliAdapter
-    from config import LiveStreamerConfig
+    from bili_src.core.config import LiveStreamerConfig
 
 
 class ShortTermMemory:

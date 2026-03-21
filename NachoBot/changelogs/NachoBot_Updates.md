@@ -1,3 +1,7 @@
+3/21
+    完全重构Bilibili Adapter  
+3/18
+    修复上舰事件无法解析price字段的问题
 3/12
     修复沙盒模式read_file工具缓存不持久问题
     增加Live2d动作

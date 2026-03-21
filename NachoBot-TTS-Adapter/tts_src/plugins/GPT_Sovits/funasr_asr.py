@@ -77,10 +77,29 @@ def load_model():
             model_dir = model_id
 
         try:
+            try:
+                from tts_config import TTSBaseConfig
+            except ImportError:
+                from .tts_config import TTSBaseConfig
+            import torch
+            config_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "configs", "gpt-sovits.toml")
+            try:
+                config = TTSBaseConfig(config_path)
+                config_device = config.tts.device.asr
+            except Exception as e:
+                logger.warning("[FunASR] Failed to read device from config (%s), defaulting to cuda:0", e)
+                config_device = "cuda:0"
+                
+            if "cuda" in config_device and not torch.cuda.is_available():
+                logger.warning("[FunASR] CUDA is not available, falling back to CPU")
+                _device = "cpu"
+            else:
+                _device = config_device
+
             _model = AutoModel(
                 model=model_dir,
                 trust_remote_code=True,
-                device="cuda:0",
+                device=_device,
                 disable_update=True,
                 hub="hf",
             )

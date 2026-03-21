@@ -16,7 +16,7 @@ import asyncio
 import logging
 from pathlib import Path
 
-from config import AdapterConfig, load_config
+from bili_src.core.config import AdapterConfig, load_config
 
 BUILD_TAG = "bilibili-adapter-v2.0-modular"
 

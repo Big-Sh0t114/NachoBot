@@ -122,7 +122,12 @@ class BrainChatting:
 
             self._loop_task = asyncio.create_task(self._main_chat_loop())
             self._loop_task.add_done_callback(self._handle_loop_completion)
-            await self.relation_scanner.start()
+            
+            # 暂时停用群聊关系扫描
+            # await self.relation_scanner.start()
+            if not getattr(self.chat_stream, "group_info", None):
+                await self.relation_scanner.start()
+
             logger.info(f"{self.log_prefix} BrainChatting 启动完成")
 
         except Exception as e:
@@ -999,7 +1004,7 @@ class BrainChatting:
         matches = appointment_scheduler.cancel_by_content(
             chat_id=self.stream_id,
             user_id=user_id,
-            content_query=remind_content,
+            remind_content=remind_content,
         )
 
         if not matches:

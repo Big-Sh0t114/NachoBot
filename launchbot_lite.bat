@@ -82,11 +82,19 @@ uv sync >> "%SETUP_LOG%" 2>&1
 set "API_FILE=%SOVITS_DIR%\api_v2.py"
 if not exist "%API_FILE%" set "API_FILE=%SOVITS_DIR%\api.py"
 
+REM ── 从 gpt-sovits.toml 读取 TTS 目标显卡 ──
+set "TTS_GPU_ID=0"
+set "TTS_TOML=%ADAPTER_DIR%\configs\gpt-sovits.toml"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ADAPTER_DIR%\get_gpu_id.ps1" -TomlPath "%TTS_TOML%" > "%TEMP%\_gpu_id.txt" 2>nul
+set /p TTS_GPU_ID=<"%TEMP%\_gpu_id.txt"
+del "%TEMP%\_gpu_id.txt" 2>nul
+echo [INFO] TTS (SoVITS) will use GPU: %TTS_GPU_ID%
+
 echo.
 echo ========== Start SoVITS / Adapter / Control ==========
 echo.
 
-start "SoVITS API (%PORT_SOVITS%)" cmd /k "chcp 65001>nul && set PYTHONPATH=%SOVITS_DIR%;%SOVITS_DIR%\GPT_SoVITS && cd /d %SOVITS_DIR% && %PY_GPT% -s %API_FILE% --port %PORT_SOVITS%"
+start "SoVITS API (%PORT_SOVITS%)" cmd /k "chcp 65001>nul && set CUDA_VISIBLE_DEVICES=%TTS_GPU_ID% && set PYTHONPATH=%SOVITS_DIR%;%SOVITS_DIR%\GPT_SoVITS && cd /d %SOVITS_DIR% && %PY_GPT% -s %API_FILE% --port %PORT_SOVITS%"
 
 set "READY="
 for /l %%I in (1,1,60) do (

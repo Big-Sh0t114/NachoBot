@@ -130,7 +130,11 @@ class HeartFChatting:
 
             # 启动聊天内容概括器的后台定期检查循环
             await self.chat_history_summarizer.start()
-            await self.relation_scanner.start()
+            
+            # 暂时停用群聊关系扫描
+            # await self.relation_scanner.start()
+            if not getattr(self.chat_stream, "group_info", None):
+                await self.relation_scanner.start()
 
             logger.info(f"{self.log_prefix} HeartFChatting 启动完成")
 
