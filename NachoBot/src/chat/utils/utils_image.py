@@ -173,7 +173,7 @@ class ImageManager:
             """
 
             # 使用较低温度确保输出稳定
-            emotion_llm = LLMRequest(model_set=model_config.model_task_config.utils, request_type="emoji")
+            emotion_llm = LLMRequest(model_set=model_config.model_task_config.utils_small, request_type="emoji")
             emotion_result, _ = await emotion_llm.generate_response_async(emotion_prompt, temperature=0.3)
 
             if not emotion_result:

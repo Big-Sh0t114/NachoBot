@@ -161,7 +161,7 @@ class RelationScanner:
 
     @property
     def scanner_llm(self) -> LLMRequest:
-        return LLMRequest(model_set=model_config.model_task_config.replyer, request_type="relation_scanner")
+        return LLMRequest(model_set=model_config.model_task_config.utils, request_type="relation_scanner")
 
     def _get_chat_display_name(self) -> str:
         try:

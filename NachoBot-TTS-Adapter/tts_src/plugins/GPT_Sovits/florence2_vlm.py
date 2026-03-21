@@ -51,8 +51,22 @@ def load_model():
         model_id = "microsoft/Florence-2-large"
         logger.info("[Florence-2] Loading model: %s ...", model_id)
 
-        _device = "cuda" if torch.cuda.is_available() else "cpu"
-        dtype = torch.float16 if _device == "cuda" else torch.float32
+        from .tts_config import TTSBaseConfig
+        config_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "configs", "gpt-sovits.toml")
+        try:
+            config = TTSBaseConfig(config_path)
+            config_device = config.tts.device.vlm
+        except Exception as e:
+            logger.warning("[Florence-2] Failed to read device from config (%s), defaulting to cuda", e)
+            config_device = "cuda"
+
+        if "cuda" in config_device and not torch.cuda.is_available():
+            logger.warning("[Florence-2] CUDA is not available, falling back to CPU")
+            _device = "cpu"
+        else:
+            _device = config_device
+
+        dtype = torch.float16 if "cuda" in _device else torch.float32
 
         # Apply the patch context explicitly during loading
         with patch("transformers.dynamic_module_utils.get_imports", fixed_get_imports):
@@ -98,7 +112,7 @@ def caption_image(image_bytes: bytes, task: str = "<MORE_DETAILED_CAPTION>") -> 
     # 强制深拷贝并清空元数据，彻底阻断与原动图文件的内存联系
     image = image.copy()
     image.info.clear()
-    dtype = torch.float16 if _device == "cuda" else torch.float32
+    dtype = torch.float16 if _device and "cuda" in str(_device) else torch.float32
 
     inputs = _processor(text=task, images=image, return_tensors="pt")
 
@@ -108,10 +122,10 @@ def caption_image(image_bytes: bytes, task: str = "<MORE_DETAILED_CAPTION>") -> 
     # Move to device and cast dtype (except input_ids which are Long)
     # Florence-2 inputs typically include: 'pixel_values', 'input_ids', 'attention_mask'
     for k, v in inputs.items():
-        if k == "input_ids" or k == "attention_mask":
-            inputs[k] = v.to(_device)
+        if v.dtype == torch.float32 or v.dtype == torch.float64:
+            inputs[k] = v.to(_device, dtype=dtype)
         else:
-            inputs[k] = v.to(_device, dtype)
+            inputs[k] = v.to(_device)
 
     with torch.no_grad():
         generated_ids = _model.generate(

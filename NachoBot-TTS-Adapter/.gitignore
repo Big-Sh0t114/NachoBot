@@ -17,3 +17,7 @@ FunAudioLLM/
 SenseVoiceSmall/
 Florence-2-large/
 hub/
+tts_src/plugins/GPT_Sovits/api_server.py.bak
+tts_src/plugins/GPT_Sovits/qwen35_vlm.py
+pyproject.toml.bak
+requirements.txt.bak

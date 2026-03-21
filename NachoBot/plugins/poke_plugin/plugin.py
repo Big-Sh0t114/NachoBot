@@ -242,8 +242,9 @@ class ActivePokeAction(BaseAction):
                     user_id = await self.napcat_get_group_member_id_by_name(poke_keywords, group_id)
             else:
                 user_id = await self.napcat_get_user_id_by_name(poke_keywords)
-            # group_id 仍为空时，尝试通过数据库群列表接口获取
-            if not group_id:
+            # group_id 仍为空时，仅在群聊上下文中尝试通过数据库群列表接口获取
+            # 私聊场景下不需要 group_id，跳过查找以避免 group_info 表不存在的报错
+            if not group_id and self.in_group:
                 group_id = await self.napcat_get_group_id_by_name(poke_keywords)
 
         # Napcat未查到user_id时，降级用core属性

@@ -29,6 +29,23 @@ class TTSModels:
 
 
 @dataclass
+class DeviceConfig:
+    tts: str
+    vlm: str
+    asr: str
+    vlm_backend: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "DeviceConfig":
+        return cls(
+            tts=data.get("tts", "cuda:0"),
+            vlm=data.get("vlm", "cuda:0"),
+            asr=data.get("asr", "cuda:0"),
+            vlm_backend=data.get("vlm_backend", "qwen35"),
+        )
+
+
+@dataclass
 class TTSConfig:
     host: str
     port: int
@@ -42,14 +59,17 @@ class TTSConfig:
     sample_steps: int
     super_sampling: bool
     models: TTSModels
+    device: DeviceConfig
     media_type: str = field(default="wav")
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "TTSConfig":
         models_data = data.pop("models", {})
+        device_data = data.pop("device", {})
         return cls(
-            **{k: v for k, v in data.items() if k != "models"},
+            **{k: v for k, v in data.items() if k not in ("models", "device")},
             models=TTSModels.from_dict(models_data),
+            device=DeviceConfig.from_dict(device_data),
         )
 
 

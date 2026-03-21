@@ -123,6 +123,8 @@ class VlmModelConfig:
     timeout: int
     temperature: float
     client_type: str
+    max_retry: int = 2
+    retry_interval: float = 5.0
 
 
 @dataclass
@@ -569,26 +571,14 @@ def setup_logging(level: str) -> logging.Logger:
     return logger
 
 
-def _resolve_vlm_model_config(
-    model_config_path: Path, logger: logging.Logger
+def _resolve_single_vlm_model(
+    model_name: str,
+    models: list,
+    providers: list,
+    vlm_config: dict,
+    logger: logging.Logger,
 ) -> Optional[VlmModelConfig]:
-    if not model_config_path.exists():
-        logger.warning("Model config not found: %s", model_config_path)
-        return None
-    try:
-        data = _load_toml(model_config_path)
-    except Exception as exc:
-        logger.warning("Failed to load model config: %s", exc)
-        return None
-    task_config = data.get("model_task_config", {}) or {}
-    # Prefer bilibili_vlm (local Florence-2) over the generic vlm section
-    vlm_config = task_config.get("bilibili_vlm") or task_config.get("vlm", {}) or {}
-    model_list = vlm_config.get("model_list", []) or []
-    if not model_list:
-        logger.warning("model_task_config.vlm.model_list is empty")
-        return None
-    model_name = str(model_list[0])
-    models = data.get("models", []) or []
+    """Resolve a single model name to a VlmModelConfig. Returns None on failure."""
     selected_model = None
     for item in models:
         if str(item.get("name") or "") == model_name:
@@ -604,7 +594,6 @@ def _resolve_vlm_model_config(
         return None
     model_identifier = str(selected_model.get("model_identifier") or model_name)
     provider_name = str(selected_model.get("api_provider") or "")
-    providers = data.get("api_providers", []) or []
     provider = None
     for item in providers:
         if str(item.get("name") or "") == provider_name:
@@ -620,6 +609,8 @@ def _resolve_vlm_model_config(
     api_key = str(provider.get("api_key") or "")
     client_type = str(provider.get("client_type") or "openai")
     timeout = int(provider.get("timeout") or 30)
+    max_retry = int(provider.get("max_retry") or 2)
+    retry_interval = float(provider.get("retry_interval") or 5.0)
     max_tokens = int(vlm_config.get("max_tokens") or 800)
     temperature = float(vlm_config.get("temperature") or 0.2)
     return VlmModelConfig(
@@ -630,4 +621,44 @@ def _resolve_vlm_model_config(
         timeout=timeout,
         temperature=temperature,
         client_type=client_type,
+        max_retry=max_retry,
+        retry_interval=retry_interval,
     )
+
+
+def _resolve_vlm_model_config_list(
+    model_config_path: Path, logger: logging.Logger
+) -> List[VlmModelConfig]:
+    """Resolve ALL models in bilibili_vlm.model_list to a list of VlmModelConfig."""
+    if not model_config_path.exists():
+        logger.warning("Model config not found: %s", model_config_path)
+        return []
+    try:
+        data = _load_toml(model_config_path)
+    except Exception as exc:
+        logger.warning("Failed to load model config: %s", exc)
+        return []
+    task_config = data.get("model_task_config", {}) or {}
+    vlm_config = task_config.get("bilibili_vlm") or task_config.get("vlm", {}) or {}
+    model_list = vlm_config.get("model_list", []) or []
+    if not model_list:
+        logger.warning("model_task_config.vlm.model_list is empty")
+        return []
+    models = data.get("models", []) or []
+    providers = data.get("api_providers", []) or []
+    configs: List[VlmModelConfig] = []
+    for name in model_list:
+        cfg = _resolve_single_vlm_model(str(name), models, providers, vlm_config, logger)
+        if cfg:
+            configs.append(cfg)
+        else:
+            logger.warning("Skipping unresolvable VLM model: %s", name)
+    return configs
+
+
+def _resolve_vlm_model_config(
+    model_config_path: Path, logger: logging.Logger
+) -> Optional[VlmModelConfig]:
+    """Backward-compatible wrapper: returns the first resolved VLM config."""
+    configs = _resolve_vlm_model_config_list(model_config_path, logger)
+    return configs[0] if configs else None

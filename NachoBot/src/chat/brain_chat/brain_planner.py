@@ -211,9 +211,7 @@ class BrainPlanner:
     @property
     def planner_llm(self) -> LLMRequest:
         if global_config.bot.integrated_plan:
-            return LLMRequest(
-                model_set=model_config.model_task_config.replyer, request_type="integrated_planner"
-            )
+            return LLMRequest(model_set=model_config.model_task_config.replyer, request_type="integrated_planner")
         return self.separated_llm
 
     def _check_sandbox_permission(self, user_id: str) -> bool:
