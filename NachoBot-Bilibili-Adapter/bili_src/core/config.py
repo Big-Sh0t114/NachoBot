@@ -296,7 +296,8 @@ def load_config(path: Path) -> AdapterConfig:
     idle_tts_texts = []
     idle_tts_file = idle_tts.get("file", "idle_texts.json")
     if idle_tts_file:
-        file_path = Path(__file__).parent / idle_tts_file
+        # Resolve to project root: bili_src/core/config.py -> parents[2] is NachoBot-Bilibili-Adapter
+        file_path = Path(__file__).resolve().parents[2] / idle_tts_file
         if file_path.exists():
             try:
                 import json

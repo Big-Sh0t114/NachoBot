@@ -516,7 +516,7 @@ class LiveRoomWorker:
         if cmd == "HEARTBEAT_REPLY":
             return
 
-        self.logger.info(f"Received command: {cmd}")
+        self.logger.debug(f"Received command: {cmd}")
 
         if cmd.startswith("DANMU_MSG"):
             await self._handle_danmu_event(payload)
