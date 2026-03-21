@@ -228,6 +228,31 @@ class BilibiliAdapter:
         )
 
 
+    async def _resolve_user_nickname(self, user_id: str) -> str:
+        """Resolve a user's nickname from cache or Bilibili API."""
+        now = time.time()
+        if user_id in self._user_name_cache:
+            name, t = self._user_name_cache[user_id]
+            # Use 3600 for successful names, and 300s for fallback user_ids
+            cache_duration = self._user_name_cache_seconds if name != user_id else 300
+            if now - t < cache_duration:
+                return name
+        
+        try:
+            uid_int = int(user_id)
+            info = await self.api.get_user_info(uid_int)
+            data = info.get("data", {})
+            name = data.get("name")
+            if name:
+                self._user_name_cache[user_id] = (name, now)
+                return name
+        except Exception as e:
+            self.logger.debug(f"Failed to resolve user_id {user_id}: {e}")
+            
+        # Cache the failure to prevent rate limit spam
+        self._user_name_cache[user_id] = (user_id, now)
+        return user_id
+
     # ========== Run and Control Methods ==========
 
     async def run(self) -> None:
