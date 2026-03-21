@@ -237,7 +237,11 @@ class TTSManager:
             self.logger.error(f"Failed to update subtitle: {e}")
 
     async def idle_tts_loop(self) -> None:
-        if not self.config.idle_tts_enable or not self.config.idle_tts_texts:
+        if not self.config.idle_tts_enable:
+            self.logger.warning("Idle TTS loop aborted: idle_tts.enable is False in config.")
+            return
+        if not self.config.idle_tts_texts:
+            self.logger.warning("Idle TTS loop aborted: idle_tts_texts list is empty (failed to load json?).")
             return
         self.logger.info(f"Idle TTS loop started. Min: {self.config.idle_tts_min_seconds}s, Max: {self.config.idle_tts_max_seconds}s")
         while True:
@@ -247,17 +251,22 @@ class TTSManager:
                 continue
             idle_duration = time.time() - self._last_active_time
             if idle_duration > self._next_idle_target:
-                text = random.choice(self.config.idle_tts_texts)
+                idle_item = random.choice(self.config.idle_tts_texts)
                 self.logger.info(f"Idle time ({idle_duration:.1f}s) reached target ({self._next_idle_target:.1f}s). Triggering preset TTS.")
                 self.reset_idle_timer()
                 if not self.ensure_tts_model():
                     continue
                 try:
-                    parsed_text = text
-                    emotion = None
-                    action = None
-                    if self.extract_json_emotion:
-                        parsed_text, emotion, action = self.extract_json_emotion(text)
+                    if isinstance(idle_item, dict):
+                        parsed_text = idle_item.get("reply", str(idle_item))
+                        emotion = idle_item.get("emotion")
+                        action = idle_item.get("action")
+                    else:
+                        parsed_text = str(idle_item)
+                        emotion = None
+                        action = None
+                        if self.extract_json_emotion:
+                            parsed_text, emotion, action = self.extract_json_emotion(parsed_text)
                     
                     text_jp, text_zh = self.parse_bilingual_response(parsed_text)
                     display_text = text_zh if text_zh else parsed_text
@@ -276,7 +285,7 @@ class TTSManager:
                             pass # Can handle this inside execute logic
                             
                     if audio_data:
-                        self.audio_player.play(audio_data)
+                        await asyncio.to_thread(self.audio_player.play, audio_data)
                 except Exception as e:
                     self.logger.error(f"Failed to generate/play idle TTS: {e}")
 

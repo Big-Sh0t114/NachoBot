@@ -73,19 +73,19 @@ class AudioPlayer:
                     self.logger.info("Audio playback interrupted!")
                     self._stop_sound()
                     self.interrupted_audio = self.current_audio  # Save current
-                    self.current_audio = None
                 except asyncio.TimeoutError:
                     # Finished playing naturally
                     pass
-
-                self.current_audio = None
-                self.is_playing = False
-                if self.on_stop:
-                    if asyncio.iscoroutinefunction(self.on_stop):
-                        asyncio.create_task(self.on_stop())
-                    else:
-                        self.on_stop()
-                self.stop_event.clear()  # Reset for next
+                finally:
+                    # Guarantee state reset even if exception occurs
+                    self.current_audio = None
+                    self.is_playing = False
+                    if self.on_stop:
+                        if asyncio.iscoroutinefunction(self.on_stop):
+                            asyncio.create_task(self.on_stop())
+                        else:
+                            self.on_stop()
+                    self.stop_event.clear()  # Reset for next
 
             except Exception as e:
                 self.logger.error(f"AudioPlayer loop error: {e}")
