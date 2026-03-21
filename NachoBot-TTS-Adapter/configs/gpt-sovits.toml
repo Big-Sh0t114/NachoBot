@@ -38,7 +38,7 @@ vlm = "cuda:1"   # VLM使用的设备
 # 预设角色配置示例
 [tts.models.presets.default]
 name = "默认角色"
-gpt_model = "17.ckpt"
+gpt_model = "ncnk.ckpt"
 sovits_model = "ncnk_fin.pth"
 ref_audio_path = "default.wav" # 参考音频路径
 aux_ref_audio_paths = []                   # 辅助参考音频路径列表
@@ -49,7 +49,7 @@ speed_factor = 1.0                         # 语速控制
 
 [tts.models.presets.custom1]
 name = "NachoChan"
-gpt_model = "17.ckpt"
+gpt_model = "ncnk.ckpt"
 sovits_model = "ncnk_fin.pth"
 ref_audio_path = "sexual.wav"
 aux_ref_audio_paths = []                                              # 辅助参考音频路径列表

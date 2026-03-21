@@ -472,7 +472,7 @@ class TTSAction(BaseAction):
 class TTSSwitchCommand(BaseCommand):
     """处理#lang_switch命令"""
 
-    command_name: str = "tts_lang_switch"
+    command_name: str = "lang_switch"
     command_description: str = "切换TTS在中文/日文间的语种"
     command_pattern: str = r"(?P<lang_switch>^#lang_switch$)"
 
@@ -513,7 +513,7 @@ class TTSSwitchCommand(BaseCommand):
             action_done=True,
             thinking_id=None,
             action_data=record_data,
-            action_name="tts_lang_switch",
+            action_name="lang_switch",
         )
 
         return True, confirmation or "语言已切换", True
