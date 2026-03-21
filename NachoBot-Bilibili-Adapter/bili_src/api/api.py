@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 import aiohttp
 
 if TYPE_CHECKING:
-    from config import AdapterConfig
+    from bili_src.core.config import AdapterConfig
 
 
 class WbiSigner:

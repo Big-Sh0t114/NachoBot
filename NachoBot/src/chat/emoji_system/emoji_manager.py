@@ -383,7 +383,7 @@ class EmojiManager:
 
         self.vlm = LLMRequest(model_set=model_config.model_task_config.vlm, request_type="emoji")
         self.llm_emotion_judge = LLMRequest(
-            model_set=model_config.model_task_config.utils, request_type="emoji"
+            model_set=model_config.model_task_config.utils_small, request_type="emoji"
         )  # 更高的温度，更少的token（后续可以根据情绪来调整温度）
 
         self.emoji_num = 0

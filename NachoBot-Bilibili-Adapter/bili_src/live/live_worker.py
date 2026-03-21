@@ -15,16 +15,16 @@ from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 import brotli
 import websockets
 
-from config import (
+from bili_src.core.config import (
     AdapterConfig,
     _load_proxy_pool,
     _check_proxy_list,
     _proxy_dicts_to_urls,
 )
-from utils import _normalize_text
+from bili_src.core.utils import _normalize_text
 
 if TYPE_CHECKING:
-    from api import BilibiliApi
+    from bili_src.api.api import BilibiliApi
     from adapter import BilibiliAdapter
 
 
@@ -115,9 +115,9 @@ class LiveRoomWorker:
         self.logger.info(f"Screen Push Loop started for room {self.room_id}")
         while not self._stop_event.is_set():
             try:
-                # Interval: 15 seconds (adjust as needed)
+                # Interval: 30 seconds
                 # Ensure we don't spam if VLM is slow, but VLM call awaits, so it's serial.
-                await asyncio.sleep(15)
+                await asyncio.sleep(30)
                 if self._stop_event.is_set():
                     break
 

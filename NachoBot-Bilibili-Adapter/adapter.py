@@ -1,19 +1,13 @@
 import asyncio
 import json
 import logging
-import os
 import re
 import sys
-import tempfile
 import time
 import uuid
-import winsound
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Deque
-import queue
-import wave
-import io
-import itertools
+from typing import Any, Dict, List, Optional, Tuple
+
 
 # Add NachoBot path for ncnk_message module
 _root_dir = Path(__file__).resolve().parents[1]
@@ -21,9 +15,7 @@ _nachobot_path = _root_dir / "NachoBot"
 if _nachobot_path.exists() and str(_nachobot_path) not in sys.path:
     sys.path.insert(0, str(_nachobot_path))
 
-from live2d_render.controller import Live2DController
-from model_client import get_model_client
-from src.chat.message_receive.message import MessageRecv
+
 
 from ncnk_message import (  # noqa: E402
     BaseMessageInfo,
@@ -38,32 +30,24 @@ from ncnk_message import (  # noqa: E402
     UserInfo,
 )
 
-from config import (  # noqa: E402
+from bili_src.core.config import (  # noqa: E402
     AdapterConfig,
     AsrModelConfig,
     PrivateSessionConfig,
-    VlmModelConfig,
     _resolve_asr_model_config,
-    _resolve_vlm_model_config,
+    _resolve_vlm_model_config_list,
 )
-from utils import (  # noqa: E402
-    BILIBILI_DANMU_MAX_LENGTH,
+from bili_src.core.utils import (  # noqa: E402
     _clean_text_for_tts,
-    _decode_image_base64,
-    _extract_image_base64,
-    _extract_plain_text,
-    _find_reply_id,
     _guard_command_segment,
     _mask_urls,
-    _normalize_text,
-    _split_bilibili_text,
     _strip_emoji,
-    _URL_RE,
 )
-from api import BilibiliApi  # noqa: E402
-from live_worker import LiveRoomWorker  # noqa: E402
-from screen_monitor import ScreenMonitor  # noqa: E402
-from mic_capture import MicCaptureWorker, MicConfig  # noqa: E402
+from bili_src.api.api import BilibiliApi  # noqa: E402
+from bili_src.live.live_worker import LiveRoomWorker  # noqa: E402
+from bili_src.live.screen_monitor import ScreenMonitor  # noqa: E402
+from bili_src.audio.mic_capture import MicCaptureWorker, MicConfig  # noqa: E402
+from bili_src.audio.audio_player import AudioPlayer  # noqa: E402
 # [DEPRECATED] Live Streamer mode moved to mais4u
 # from live_streamer import LiveStreamerController, PriorityEvent  # noqa: E402
 
@@ -87,138 +71,8 @@ else:
 
 ACCEPT_FORMAT = ["text", "reply", "command"]
 ACCEPT_FORMAT_PRIVATE = ["text", "image", "emoji", "reply", "command"]
-COMMENT_REPLY_LIMIT = 10
-COMMENT_LIMIT_FALLBACK_TEXT = "NachoBot有点口渴了哦，先休息一下啦~"
+
 BILIBILI_DANMU_SEND_DELAY_SECONDS = 0.8
-
-
-class AudioPlayer:
-    """
-    Manages audio playback with support for queuing, interruption, and resuming.
-    Uses winsound for playback and calculates duration for timing.
-    """
-
-    def __init__(self, logger: logging.Logger, on_start=None, on_stop=None):
-        self.logger = logger
-        self.on_start = on_start
-        self.on_stop = on_stop
-        self.queue: Deque[bytes] = queue.deque()
-        self.current_audio: Optional[bytes] = None
-        self.interrupted_audio: Optional[bytes] = None
-        self.is_playing = False
-        self.is_paused = False
-        self.stop_event = asyncio.Event()  # Set when stopped/interrupted
-        self.play_task: Optional[asyncio.Task] = None
-        self._loop = None
-
-    def start(self):
-        """Start the playback loop."""
-        if self.play_task and not self.play_task.done():
-            return
-        self._loop = asyncio.get_running_loop()
-        self.stop_event.clear()
-        self.play_task = self._loop.create_task(self._playback_loop())
-        self.logger.info("AudioPlayer started")
-
-    async def _playback_loop(self):
-        while True:
-            try:
-                if self.is_paused:
-                    await asyncio.sleep(0.1)
-                    continue
-
-                if not self.queue:
-                    await asyncio.sleep(0.1)
-                    continue
-
-                # Get next audio
-                audio_data = self.queue.popleft()
-                self.current_audio = audio_data
-                self.is_playing = True
-
-                # Calculate duration
-                duration = self._get_wav_duration(audio_data)
-                # self.logger.debug(f"Playing audio segment ({duration:.2f}s)")
-
-                # Play (Async)
-                if self.on_start:
-                    if asyncio.iscoroutinefunction(self.on_start):
-                        asyncio.create_task(self.on_start())
-                    else:
-                        self.on_start()
-                self._play_sound(audio_data)
-
-                # Wait for duration (or interruption)
-                # We wait for duration, checking stop_event periodically or using wait_for
-                try:
-                    await asyncio.wait_for(self.stop_event.wait(), timeout=duration)
-                    # If we got here, stop_event was set (Interrupted!)
-                    self.logger.info("Audio playback interrupted!")
-                    self._stop_sound()
-                    self.interrupted_audio = self.current_audio  # Save current
-                    self.current_audio = None
-                except asyncio.TimeoutError:
-                    # Finished playing naturally
-                    pass
-
-                self.current_audio = None
-                self.is_playing = False
-                if self.on_stop:
-                    if asyncio.iscoroutinefunction(self.on_stop):
-                        asyncio.create_task(self.on_stop())
-                    else:
-                        self.on_stop()
-                self.stop_event.clear()  # Reset for next
-
-            except Exception as e:
-                self.logger.error(f"AudioPlayer loop error: {e}")
-                await asyncio.sleep(1)
-
-    def _play_sound(self, audio_data: bytes):
-        try:
-            # Save to temp
-            temp_path = os.path.join(tempfile.gettempdir(), "nachobot_tts_player.wav")
-            with open(temp_path, "wb") as f:
-                f.write(audio_data)
-            winsound.PlaySound(temp_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
-        except Exception as e:
-            self.logger.error(f"Winsound play error: {e}")
-
-    def _stop_sound(self):
-        try:
-            winsound.PlaySound(None, winsound.SND_PURGE)
-        except Exception:
-            pass
-
-    def _get_wav_duration(self, audio_data: bytes) -> float:
-        try:
-            with io.BytesIO(audio_data) as f:
-                with wave.open(f, "rb") as wav_file:
-                    frames = wav_file.getnframes()
-                    rate = wav_file.getframerate()
-                    return frames / float(rate)
-        except Exception:
-            return 2.0  # Fallback
-
-    def play(self, audio_data: bytes):
-        """Add audio to queue."""
-        self.queue.append(audio_data)
-
-    def stop_and_pause(self):
-        """Stop current playback immediately and pause."""
-        self.is_paused = True
-        self.stop_event.set()  # Signal loop to stop waiting
-        self.logger.info("AudioPlayer stopped and paused.")
-
-    def resume(self):
-        """Resume playback, re-queueing interrupted audio."""
-        if self.interrupted_audio:
-            self.logger.info("Resuming interrupted audio...")
-            self.queue.appendleft(self.interrupted_audio)
-            self.interrupted_audio = None
-        self.is_paused = False
-        self.stop_event.clear()  # Ensure clear
-        self.logger.info("AudioPlayer resumed.")
 
 
 class BilibiliAdapter:
@@ -256,8 +110,7 @@ class BilibiliAdapter:
         self._screen_manual_state: Optional[bool] = None
         self._screen_manual_until: float = 0.0
         self._danmu_cache: Dict[int, Dict[str, str]] = {}
-        self._reply_seen: List[str] = []
-        self._reply_seen_set: set[str] = set()
+
         self._dm_last_seqno: Dict[Tuple[int, int], int] = {}
         self._last_private_session: Optional[PrivateSessionConfig] = None
         self._private_session_by_group: Dict[str, PrivateSessionConfig] = {}
@@ -265,26 +118,28 @@ class BilibiliAdapter:
         self._auto_private_sessions_ts: float = 0.0
         self._user_name_cache: Dict[str, Tuple[str, float]] = {}
         self._user_name_cache_seconds = 3600
-        self._comment_context: Dict[str, Dict[str, Any]] = {}
-        self._comment_bootstrap_done = False
-        self._comment_reply_state: Dict[Tuple[str, str], Dict[str, Any]] = {}
+
         # Store config path for persistence
         self.config_path = config_path
         self._self_danmu_ids: Dict[int, Dict[str, float]] = {}
 
-        # TTS Buffering
-        self._tts_buffer: Dict[int, List[str]] = {}
-        self._tts_timer: Dict[int, asyncio.Task] = {}
-        self._tts_metadata: Dict[int, Dict[str, Any]] = {}
-        self._tts_manual_overrides: Dict[int, bool] = {}
+
 
         # Event Serialization & Aggregation
-        self._event_queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
-        self._seq_counter = itertools.count()
+        from bili_src.live.event_manager import EventManager
+        self.event_manager = EventManager(self.config, self.logger, self)
 
-        # Gift Aggregation: (room_id, user_id, gift_name) -> {'count': int, 'price': int, 'timestamp': float, 'user_name': str}
-        self._gift_buffer: Dict[Tuple[int, str, str], Dict[str, Any]] = {}
-        self._last_gift_time: Dict[Tuple[int, str, str], float] = {}
+        # Outgoing Message Dispatch
+        from bili_src.live.outgoing_handler import OutgoingHandler
+        self.outgoing_handler = OutgoingHandler(self.config, self.logger, self)
+
+        # Comment Handler
+        from bili_src.chat.comment_handler import CommentHandler
+        self.comment_handler = CommentHandler(self.config, self.logger, self)
+        
+        # Private Message Handler
+        from bili_src.chat.private_handler import PrivateHandler
+        self.private_handler = PrivateHandler(self.config, self.logger, self)
 
         # Initialize Mic Capture Worker
         self.mic_worker: Optional[MicCaptureWorker] = None
@@ -313,31 +168,13 @@ class BilibiliAdapter:
         self._live_status_cache: Dict[int, Tuple[int, float]] = {}
         self._live_status_cache_seconds = 20
         if self._screen_host_room_id is not None:
-            monitor_config = self._load_vlm_model_config()
-            if monitor_config:
-                self._screen_monitor = ScreenMonitor(monitor_config, logger)
+            monitor_configs = self._load_vlm_model_configs()
+            if monitor_configs:
+                self._screen_monitor = ScreenMonitor(monitor_configs, logger)
             else:
                 self.logger.warning("Screen monitor disabled: VLM config unavailable")
         else:
             self.logger.info("Screen monitor disabled: host room not configured")
-
-        # Initialize TTS (Lazy Load)
-        self.tts_model: Optional["TTSModel"] = None
-        self.tts_enable = False
-        self.subtitle_path = "subtitles.txt"
-
-        # Check config once, but defer model loading
-        if self.config.live_room_prompts:
-            for room_cfg in self.config.live_room_prompts.values():
-                if room_cfg.get("tts", {}).get("enable"):
-                    self.tts_enable = True
-                    self.subtitle_path = room_cfg.get("tts", {}).get(
-                        "subtitle_path", "subtitles.txt"
-                    )
-                    break
-
-        if self.tts_enable:
-            self._ensure_tts_model()
 
         # Initialize AudioPlayer
         self.audio_player = AudioPlayer(logger)
@@ -356,38 +193,40 @@ class BilibiliAdapter:
 
         # Initialize ModelClient (for Live2D)
         self.model_client = None
-        self.live2d_controller = None
         if self.config.live_live2d_enable:
             _nachobot_path = Path(__file__).resolve().parents[1] / "NachoBot"
+            from bili_src.core.model_client import get_model_client
             self.model_client = get_model_client(_nachobot_path, self.logger)
-            self.live2d_controller = Live2DController(self, self.logger)
 
-            # Wire AudioPlayer callbacks to Live2D lip sync
+        from bili_src.live2d.live2d_manager import Live2DManager
+        self.live2d_manager = Live2DManager(self.config, self.logger, self)
+
+        if self.live2d_manager.controller:
             def _on_audio_start():
-                if self.live2d_controller:
-                    self.live2d_controller.set_speaking(True)
+                self.live2d_manager.controller.set_speaking(True)
 
             def _on_audio_stop():
-                if self.live2d_controller:
-                    self.live2d_controller.set_speaking(False)
-                    # Reset gaze to center after audio finishes
-                    asyncio.ensure_future(self.live2d_controller.on_reply_finished())
+                self.live2d_manager.controller.set_speaking(False)
+                # Reset gaze to center after audio finishes
+                asyncio.ensure_future(self.live2d_manager.controller.on_reply_finished())
 
             self.audio_player.on_start = _on_audio_start
             self.audio_player.on_stop = _on_audio_stop
 
-        self._last_active_time = time.time()
-        self._next_idle_target = self._get_next_idle_interval()
-
-    def _get_next_idle_interval(self) -> float:
-        import random
-        min_sec = max(10, self.config.idle_tts_min_seconds)
-        max_sec = max(min_sec, self.config.idle_tts_max_seconds)
-        return random.uniform(min_sec, max_sec)
-
-    def _reset_idle_timer(self) -> None:
-        self._last_active_time = time.time()
-        self._next_idle_target = self._get_next_idle_interval()
+        from bili_src.audio.tts_manager import TTSManager
+        self.tts_manager = TTSManager(
+            config=self.config,
+            logger=self.logger,
+            config_path=self.config_path,
+            audio_player=self.audio_player,
+            send_danmu_callback=self.outgoing_handler._send_danmu,
+            live2d_start_reply_callback=self.live2d_manager.controller.on_start_replying if self.live2d_manager.controller else None,
+            live2d_finish_reply_callback=self.live2d_manager.controller.on_reply_finished if self.live2d_manager.controller else None,
+            live2d_execute_action_callback=self.live2d_manager.execute_extracted_live2d_action,
+            extract_json_emotion_callback=self.live2d_manager.extract_json_emotion_from_text,
+            tts_model_class=TTSModel,
+            tts_import_error=_tts_import_error,
+        )
 
     async def _idle_tts_loop(self) -> None:
         import random
@@ -413,15 +252,20 @@ class BilibiliAdapter:
                     tts_text = text_jp if text_jp else parsed_text
                     self._update_subtitle(display_text)
                     cleaned_tts_text = _clean_text_for_tts(tts_text)
+                    # 1. 先等待 TTS 语音生成完毕（这通常需要几秒钟）
+                    audio_data = await self.tts_model.tts(text=cleaned_tts_text, platform=self.config.platform)
+                    
+                    # 2. 在语音即将入队播放前，再触发表情和动作，确保与声音同步
                     if self.live2d_controller:
                         await self.live2d_controller.on_start_replying()
                         self._execute_extracted_live2d_action(emotion, action)
                         if not action:
                             asyncio.create_task(self.live2d_controller.send_live2d_event("random_motion", {"group": "Idle", "priority": 3}))
-                    audio_data = await self.tts_model.tts(text=cleaned_tts_text, platform=self.config.platform)
+                            
+                    # 3. 推入播放队列
                     await self._play_audio(audio_data)
-                    if self.live2d_controller:
-                        await self.live2d_controller.on_reply_finished()
+                    # 注意：千万不要在这里调 on_reply_finished()！
+                    # 因为底层 AudioPlayer 播放完毕后会自动触发 _on_audio_stop() 来处理完毕状态
                 except Exception as e:
                     self.logger.error(f"Failed to generate/play idle TTS: {e}")
 
@@ -448,8 +292,8 @@ class BilibiliAdapter:
 
     async def run(self) -> None:
         await self.api.start()
-        if self.live2d_controller:
-            await self.live2d_controller.start()
+        if self.live2d_manager:
+            await self.live2d_manager.start()
         tasks = [self.router.run()]
         if self.config.live_enable:
             for room_id in self.config.room_ids:
@@ -460,19 +304,19 @@ class BilibiliAdapter:
         else:
             self.logger.info("Live adapter disabled by config")
         if self.config.enable_reply_notice:
-            tasks.append(self._comment_notice_loop())
+            tasks.append(self.comment_handler.comment_notice_loop())
         if self.config.private_enable and (
             self.config.private_sessions or self.config.private_auto_sessions
         ):
-            tasks.append(self._private_message_loop())
+            tasks.append(self.private_handler.private_message_loop())
 
         if self.mic_worker:
             tasks.append(self._run_mic_worker_forever())
             tasks.append(self._mic_control_loop())
 
         # Event Queue and Gift Aggregation
-        tasks.append(self._process_event_queue())
-        tasks.append(self._gift_flush_loop())
+        tasks.append(self.event_manager.event_consumer_loop())
+        tasks.append(self.event_manager.gift_flush_loop())
         tasks.append(self._idle_tts_loop())
 
         # [DEPRECATED] Live Streamer mode moved to mais4u
@@ -539,115 +383,20 @@ class BilibiliAdapter:
 
             await asyncio.sleep(5)
 
-    def _load_vlm_model_config(self) -> Optional[VlmModelConfig]:
+    def _load_vlm_model_configs(self) -> list:
         root_dir = Path(__file__).resolve().parents[1]
         model_config_path = root_dir / "NachoBot" / "config" / "model_config.toml"
-        return _resolve_vlm_model_config(model_config_path, self.logger)
+        return _resolve_vlm_model_config_list(model_config_path, self.logger)
 
     def _load_asr_model_config(self) -> Optional[AsrModelConfig]:
         root_dir = Path(__file__).resolve().parents[1]
         model_config_path = root_dir / "NachoBot" / "config" / "model_config.toml"
         return _resolve_asr_model_config(model_config_path, self.logger)
 
-    # ========== TTS Methods ==========
-
-    def _parse_bilingual_response(self, text: str) -> Tuple[str, str]:
-        if not text:
-            return "", ""
-
-        # Use findall to capture all occurrences (handling recurrent tags in buffered text)
-        jp_matches = re.findall(r"<JP>(.*?)</JP>", text, re.DOTALL)
-        zh_matches = re.findall(r"<ZH>(.*?)</ZH>", text, re.DOTALL)
-
-        text_jp = "".join(m.strip() for m in jp_matches if m.strip())
-        text_zh = "".join(m.strip() for m in zh_matches if m.strip())
-
-        if not text_jp and not text_zh:
-            self.logger.warning(
-                f"Failed to parse bilingual tags. Original text: {repr(text[:100])}..."
-            )
-            cleaned = re.sub(r"</?[A-Z]{2}>", "", text).strip()
-            return "", cleaned
-
-        return text_jp, text_zh
-
-    def _repair_unbalanced_tags(
-        self, text: str, open_zh: int, close_zh: int, open_jp: int, close_jp: int
-    ) -> str:
-        """
-        Repair unbalanced bilingual tags in text.
-
-        Strategy:
-        1. If only closing tags exist (0 open, N close) - remove all closing tags
-        2. If only opening tags exist (N open, 0 close) - add closing tags at end
-        3. If mismatch count - try to balance by adding/removing tags
-
-        Args:
-            text: Text with potentially unbalanced tags
-            open_zh: Count of <ZH> tags
-            close_zh: Count of </ZH> tags
-            open_jp: Count of <JP> tags
-            close_jp: Count of </JP> tags
-
-        Returns:
-            Repaired text with balanced or removed tags
-        """
-        repaired = text
-
-        # Handle ZH tags
-        if open_zh == 0 and close_zh > 0:
-            # Missing opening tags - remove orphaned closing tags
-            self.logger.warning(
-                f"Removing {close_zh} orphaned </ZH> closing tag(s) without opening tags"
-            )
-            repaired = repaired.replace("</ZH>", "")
-        elif close_zh == 0 and open_zh > 0:
-            # Missing closing tags - add them at the end
-            self.logger.warning(f"Adding {open_zh} missing </ZH> closing tag(s)")
-            repaired = repaired + "</ZH>" * open_zh
-
-        # Handle JP tags
-        if open_jp == 0 and close_jp > 0:
-            # Missing opening tags - remove orphaned closing tags
-            self.logger.warning(
-                f"Removing {close_jp} orphaned </JP> closing tag(s) without opening tags"
-            )
-            repaired = repaired.replace("</JP>", "")
-        elif close_jp == 0 and open_jp > 0:
-            # Missing closing tags - add them at the end
-            self.logger.warning(f"Adding {open_jp} missing </JP> closing tag(s)")
-            repaired = repaired + "</JP>" * open_jp
-
-        if repaired != text:
-            self.logger.info(
-                f"Tag repair applied: {repr(text[:50])} -> {repr(repaired[:50])}"
-            )
-
-        return repaired
-
     async def _on_speech_start(self):
         """Callback when user starts speaking."""
         # Stop audio player immediately
         self.audio_player.stop_and_pause()
-
-    async def _play_audio(self, audio_data: bytes) -> None:
-        if not audio_data:
-            return
-        # Add to player queue
-        self.audio_player.play(audio_data)
-
-    def _update_subtitle(self, text: str, subtitle_path: str = None) -> None:
-        if not text:
-            return
-
-        target_path = subtitle_path or self.subtitle_path
-
-        try:
-            with open(target_path, "w", encoding="utf-8-sig") as f:
-                f.write(text)
-            self.logger.info(f"Subtitle updated: {target_path}")
-        except Exception as e:
-            self.logger.error(f"Failed to update subtitle: {e}")
 
     # ========== Danmu Cache and Filter Methods ==========
 
@@ -699,80 +448,7 @@ class BilibiliAdapter:
 
         return text
 
-    @staticmethod
-    def _normalize_image_url(url: str) -> str:
-        if not url:
-            return ""
-        if url.startswith("//"):
-            return f"https:{url}"
-        return url
 
-    def _extract_private_image_url(self, content: Any) -> str:
-        image_keys = (
-            "url",
-            "image_url",
-            "img_url",
-            "image",
-            "img",
-            "src",
-            "origin_url",
-            "original_url",
-            "preview",
-            "cover",
-            "thumb",
-            "pic",
-            "pic_url",
-            "picture",
-            "photo",
-            "face",
-            "raw_url",
-        )
-
-        def scan(value: Any) -> str:
-            if isinstance(value, str):
-                candidate = value.strip()
-                if candidate.startswith(("http://", "https://", "//")):
-                    return candidate
-                match = _URL_RE.search(candidate)
-                return match.group(0) if match else ""
-            if isinstance(value, dict):
-                for key in image_keys:
-                    if key in value:
-                        found = scan(value.get(key))
-                        if found:
-                            return found
-                for item in value.values():
-                    found = scan(item)
-                    if found:
-                        return found
-            if isinstance(value, list):
-                for item in value:
-                    found = scan(item)
-                    if found:
-                        return found
-            return ""
-
-        content_value: Any = content
-        if isinstance(content, str):
-            trimmed = content.strip()
-            if trimmed.startswith("{") or trimmed.startswith("["):
-                try:
-                    content_value = json.loads(trimmed)
-                except json.JSONDecodeError:
-                    content_value = content
-        url = scan(content_value)
-        return self._normalize_image_url(url)
-
-    async def _download_private_image(self, url: str) -> Optional[str]:
-        if not url:
-            return None
-        try:
-            return await self.api.fetch_base64(url)
-        except Exception as exc:
-            self.logger.warning(
-                "Private image download failed: url=%s error=%s", url, exc
-            )
-            return None
 
     # ========== Live Status and Screen Methods ==========
 
@@ -813,6 +489,17 @@ class BilibiliAdapter:
         ):
             return None
         return await self._screen_monitor.maybe_analyze(message_text)
+
+    def _get_cached_screen_summary(self, room_id: int) -> Optional[str]:
+        """Return cached screen summary without triggering VLM. Non-blocking."""
+        if not self._screen_monitor:
+            return None
+        if not self._screen_host_room_id or room_id != self._screen_host_room_id:
+            return None
+        manual_state = self._get_screen_manual_state()
+        if manual_state is False:
+            return None
+        return self._screen_monitor.get_cached_summary()
 
     @staticmethod
     def _inject_screen_summary(prompt: str, summary: str) -> str:
@@ -907,121 +594,6 @@ class BilibiliAdapter:
         self.logger.info("Mic capture %s by user_id=%s", action, user_id)
         return True
 
-    def _handle_tts_manual_command(
-        self,
-        room_id: int,
-        user_id: str,
-        text: str,
-        user_name: str,
-    ) -> bool:
-        command = text.strip().lower()
-        if command not in ("#tts_on", "#tts_off"):
-            return False
-
-        # Permission check: Owner or Manual Users
-        allowed = False
-        if str(user_id) == str(self.config.dede_user_id):
-            allowed = True
-        elif self._screen_manual_user_ids and str(user_id) in [
-            str(uid) for uid in self._screen_manual_user_ids
-        ]:
-            allowed = True
-
-        if not allowed:
-            self.logger.warning(
-                "TTS manual command rejected: room_id=%s user_id=%s user_name=%s",
-                room_id,
-                user_id,
-                user_name,
-            )
-            return True
-
-        enable = command == "#tts_on"
-        self._tts_manual_overrides[room_id] = enable
-
-        # Update Config (Best Effort for consistency)
-        if self.config.live_room_prompts and room_id in self.config.live_room_prompts:
-            room_config = self.config.live_room_prompts[room_id]
-            if "tts" not in room_config:
-                room_config["tts"] = {}
-            room_config["tts"]["enable"] = enable
-
-        action = "Enabled" if enable else "Disabled"
-        self.logger.info(
-            "TTS %s manually by user_id=%s (Room: %s)", action, user_id, room_id
-        )
-
-        # Persist to config file
-        if self.config_path:
-            try:
-                self._save_tts_config(room_id, enable)
-            except Exception as e:
-                self.logger.error(f"Failed to persist TTS config: {e}")
-
-        return True
-
-    def _save_tts_config(self, room_id: int, enable: bool) -> None:
-        """Save TTS enable state to config.toml using tomlkit (preserves comments)."""
-        try:
-            import tomlkit
-        except ImportError:
-            self.logger.error("tomlkit not installed, cannot persist config")
-            return
-
-        if not self.config_path or not self.config_path.exists():
-            self.logger.warning("Config path not set or file missing, skip persist")
-            return
-
-        try:
-            with open(self.config_path, "r", encoding="utf-8") as f:
-                doc = tomlkit.load(f)
-
-            # Navigate: live -> room_prompts -> "<room_id>" -> tts -> enable
-            live_sec = doc.get("live")
-            if not live_sec:
-                self.logger.warning("Config missing [live] section, skip persist")
-                return
-
-            prompts = live_sec.get("room_prompts")
-            if not prompts:
-                self.logger.warning("Config missing [live.room_prompts], skip persist")
-                return
-
-            str_room_id = str(room_id)
-            room_conf = prompts.get(str_room_id)
-            if not room_conf:
-                self.logger.warning(
-                    f"Room {room_id} not in config room_prompts, skip persist"
-                )
-                return
-
-            # Ensure tts sub-table exists
-            if "tts" not in room_conf:
-                room_conf["tts"] = tomlkit.table()
-
-            room_conf["tts"]["enable"] = enable
-
-            with open(self.config_path, "w", encoding="utf-8") as f:
-                tomlkit.dump(doc, f)
-
-            self.logger.info(
-                f"Persisted TTS config for room {room_id}: enable={enable}"
-            )
-        except Exception as e:
-            self.logger.error(f"Error persisting TTS config: {e}")
-            raise
-
-    def _is_tts_enabled(self, room_id: int) -> bool:
-        # 1. Check Manual Override
-        if room_id in self._tts_manual_overrides:
-            return self._tts_manual_overrides[room_id]
-
-        # 2. Check Configuration
-        if self.config.live_room_prompts:
-            room_pts = self.config.live_room_prompts.get(room_id, {})
-            return bool(room_pts.get("tts", {}).get("enable", False))
-
-        return False
 
     async def _get_template_info(
         self, room_id: int, user_id: str, prompt_text: str
@@ -1029,7 +601,7 @@ class BilibiliAdapter:
         """
         Helper to resolve template info for live events (Gift/SC/Guard).
         """
-        screen_summary = await self._get_screen_summary(room_id, user_id, prompt_text)
+        screen_summary = self._get_cached_screen_summary(room_id)
         reply_prompt, _ = self._resolve_live_prompts(room_id)
 
         if screen_summary:
@@ -1046,7 +618,7 @@ class BilibiliAdapter:
         # Check if TTS is enabled to generate a distinct template name
         # This prevents prompt caching issues when hot-switching
         template_suffix = ""
-        if self._is_tts_enabled(room_id):
+        if self.tts_manager.is_tts_enabled(room_id):
             template_suffix = "_tts"
 
         return TemplateInfo(
@@ -1279,7 +851,7 @@ class BilibiliAdapter:
                     raw_message=None,
                 )
                 # Priority 5 (Higher than Mic/SC) to ensure context update first
-                self._push_to_event_queue(5, screen_message)
+                self.event_manager.push_to_event_queue(5, screen_message)
                 self.logger.info(
                     f"Screen Info sent to Core for room {room_id} (Summary length: {len(summary)})"
                 )
@@ -1303,7 +875,13 @@ class BilibiliAdapter:
             return
         if self._handle_mic_manual_command(room_id, user_id, text, user_name):
             return
-        if self._handle_tts_manual_command(room_id, user_id, text, user_name):
+        if self.tts_manager.handle_tts_manual_command(
+            room_id,
+            user_id,
+            text,
+            user_name,
+            allowed_user_ids=set(str(uid) for uid in getattr(self.config, "screen_manual_user_ids", []))
+        ):
             return
         if self._handle_screen_manual_command(room_id, user_id, text, user_name):
             return
@@ -1335,17 +913,8 @@ class BilibiliAdapter:
         #         f"[LiveStreamer] Danmu routed to buffer: {user_name}: {text[:30]}..."
         #     )
         #     return  # Don't process through normal path
-        screen_summary = await self._get_screen_summary(room_id, user_id, text)
+        # Use cached screen summary (non-blocking) — fresh VLM runs in _screen_push_loop
         template_info = await self._get_template_info(room_id, user_id, text)
-
-        # [NEW] Send Screen Info to Core Key Update
-        if screen_summary:
-            try:
-                await self.push_screen_update(
-                    room_id, user_id, user_name, timestamp, screen_summary
-                )
-            except Exception as e:
-                self.logger.error(f"Failed to send screen info: {e}")
         if template_info:
             # Info logged inside _get_template_info
             pass
@@ -1413,7 +982,7 @@ class BilibiliAdapter:
         )
 
         # Hook Live2D: Message Received
-        if self.live2d_controller:
+        if self.live2d_manager.controller:
             try:
                 # Construct a minimal MessageRecv compatible dict
                 # We need to map adapter's data to MessageRecv structure
@@ -1424,6 +993,7 @@ class BilibiliAdapter:
                     "processed_plain_text": processed_text,
                 }
                 # For dependencies like chat_stream, we rely on managers to handle missing streams or use chat_id from msg_info
+                from src.chat.message_receive.message import MessageRecv
                 msg_recv = MessageRecv(msg_dict)
 
                 # Inject chat_stream mock if needed by MoodManager?
@@ -1436,7 +1006,7 @@ class BilibiliAdapter:
 
                 msg_recv.chat_stream = MockStream(room_id)
 
-                await self.live2d_controller.on_message_received(msg_recv)
+                await self.live2d_manager.controller.on_message_received(msg_recv)
             except Exception as e:
                 self.logger.error(f"Live2D hook error: {e}")
 
@@ -1462,7 +1032,7 @@ class BilibiliAdapter:
         if guard_level > 0 or is_mentioned:
             priority = 20
 
-        self._push_to_event_queue(priority, message)
+        self.event_manager.push_to_event_queue(priority, message)
 
     async def handle_incoming_gift(
         self,
@@ -1482,17 +1052,17 @@ class BilibiliAdapter:
         # Buffer small gifts (< 20 CNY total value) to prevent spam
         if price * num < 20:
             key = (room_id, user_id, gift_name)
-            if key not in self._gift_buffer:
-                self._gift_buffer[key] = {
+            if key not in self.event_manager.gift_buffer:
+                self.event_manager.gift_buffer[key] = {
                     "count": 0,
                     "price": price,  # Unit price
                     "timestamp": timestamp,
                     "user_name": user_name,
                 }
-            self._gift_buffer[key]["count"] += num
-            self._gift_buffer[key]["price"] = price
-            self._gift_buffer[key]["timestamp"] = timestamp  # Update to latest
-            self._last_gift_time[key] = time.time()  # Update act time
+            self.event_manager.gift_buffer[key]["count"] += num
+            self.event_manager.gift_buffer[key]["price"] = price
+            self.event_manager.gift_buffer[key]["timestamp"] = timestamp  # Update to latest
+            self.event_manager.last_gift_time[key] = time.time()  # Update act time
             return
 
         # Build prompt using helper
@@ -1551,7 +1121,7 @@ class BilibiliAdapter:
         )
 
         # Push to Queue (Priority 20 for High Value Gifts)
-        self._push_to_event_queue(20, message)
+        self.event_manager.push_to_event_queue(20, message)
 
     async def _handle_mic_recognition(self, text: str) -> None:
         if not text:
@@ -1617,7 +1187,7 @@ class BilibiliAdapter:
         )
 
         # High priority to ensure immediate reaction
-        self._push_to_event_queue(20, message)
+        self.event_manager.push_to_event_queue(20, message)
 
     async def _call_asr_api(self, wav_data: bytes) -> Optional[str]:
         import aiohttp
@@ -1713,8 +1283,8 @@ class BilibiliAdapter:
             message_segment=Seg(type="text", data=processed_text),
             raw_message=None,
         )
-        # Push to Queue (Priority 10 for Mic Command)
-        self._push_to_event_queue(10, message)
+        # Bypass queue for immediate core processing
+        asyncio.create_task(self._send_to_nachobot(message))
 
     async def handle_incoming_superchat(
         self,
@@ -1799,8 +1369,8 @@ class BilibiliAdapter:
             ),
         )
 
-        # Push to Queue (Priority 10 for SuperChat)
-        self._push_to_event_queue(10, message)
+        # Bypass queue for immediate core processing
+        asyncio.create_task(self._send_to_nachobot(message))
 
     async def handle_incoming_guard(
         self,
@@ -1811,6 +1381,8 @@ class BilibiliAdapter:
         user_name: str,
         timestamp: float,
         guard_level: int = 3,
+        price: int = 0,
+        **kwargs
     ) -> None:
         self.logger.info(
             f"Guard: [{room_id}] {user_name}({user_id}) became {guard_name} (Level: {guard_level}) - PATCHED_VERIFIED"
@@ -1889,8 +1461,8 @@ class BilibiliAdapter:
             ),
         )
 
-        # Push to Queue (Priority 10 for Guard)
-        self._push_to_event_queue(10, message)
+        # Bypass queue for immediate core processing
+        asyncio.create_task(self._send_to_nachobot(message))
 
     # ========== Prompt Resolution ==========
 
@@ -1942,7 +1514,7 @@ class BilibiliAdapter:
                 reply_prompt, live_plan_block
             )
 
-        tts_enable = self._is_tts_enabled(room_id)
+        tts_enable = self.tts_manager.is_tts_enabled(room_id)
         tts_config = {}
         if room_prompts:
             tts_config = room_prompts.get("tts", {})
@@ -1988,338 +1560,13 @@ class BilibiliAdapter:
         )
         return reply_prompt, planner_prompt
 
-    # ========== Comment Notice Loop ==========
 
-    async def _comment_notice_loop(self) -> None:
-        while True:
-            reply_items: List[Dict[str, Any]] = []
-            at_items: List[Dict[str, Any]] = []
-            try:
-                reply_items = await self.api.get_reply_notifications(
-                    self.config.comment_max_items
-                )
-            except Exception as exc:
-                self.logger.warning(f"Reply notice fetch error: {exc}")
-                self.logger.debug(f"Reply notice fetch error: {exc}")
-            try:
-                at_items = await self.api.get_at_notifications(
-                    self.config.comment_max_items
-                )
-            except Exception as exc:
-                self.logger.debug(f"At notice fetch error: {exc}")
-            if reply_items or at_items:
-                self.logger.info(
-                    "Comment notices: reply=%s at=%s",
-                    len(reply_items),
-                    len(at_items),
-                )
-            else:
-                self.logger.info("Comment notices: 0")
-            if not self._comment_bootstrap_done:
-                for item in reply_items:
-                    self._track_notice_key(self._notice_key("reply", item))
-                for item in at_items:
-                    self._track_notice_key(self._notice_key("at", item))
-                self._comment_bootstrap_done = True
-            else:
-                await self._handle_reply_notifications(reply_items, source="reply")
-                await self._handle_reply_notifications(at_items, source="at")
-            await asyncio.sleep(self.config.comment_poll_interval)
-
-    def _notice_key(self, source: str, item: Dict[str, Any]) -> str:
-        notify_id = str(item.get("id") or "")
-        if not notify_id:
-            return ""
-        return f"{source}:{notify_id}"
-
-    def _track_notice_key(self, notify_key: str) -> bool:
-        if not notify_key or notify_key in self._reply_seen_set:
-            return False
-        self._reply_seen_set.add(notify_key)
-        self._reply_seen.append(notify_key)
-        if len(self._reply_seen) > 500:
-            old = self._reply_seen.pop(0)
-            self._reply_seen_set.discard(old)
-        return True
-
-    def _is_at_me(self, at_details: Any) -> bool:
-        if not self.config.dede_user_id:
-            return False
-        if not isinstance(at_details, list):
-            return False
-        for detail in at_details:
-            if not isinstance(detail, dict):
-                continue
-            if str(detail.get("mid") or "") == self.config.dede_user_id:
-                return True
-        return False
-
-    @staticmethod
-    def _build_comment_reply_target_from_item(
-        comment_type: Any,
-        comment_oid: Any,
-        reply_item: Dict[str, Any],
-    ) -> Optional[Tuple[int, int, Optional[int], Optional[int]]]:
-        try:
-            comment_type_int = int(comment_type)
-            comment_oid_int = int(comment_oid)
-        except (TypeError, ValueError):
-            return None
-
-        root = None
-        parent = None
-        for value in (
-            reply_item.get("root_id"),
-            reply_item.get("source_id"),
-            reply_item.get("target_id"),
-        ):
-            if value not in (None, "", 0):
-                try:
-                    root = int(value)
-                    break
-                except (TypeError, ValueError):
-                    continue
-        for value in (
-            reply_item.get("source_id"),
-            reply_item.get("target_id"),
-            reply_item.get("root_id"),
-        ):
-            if value not in (None, "", 0):
-                try:
-                    parent = int(value)
-                    break
-                except (TypeError, ValueError):
-                    continue
-        return comment_type_int, comment_oid_int, root, parent
-
-    async def _handle_reply_notifications(
-        self, items: List[Dict[str, Any]], source: str
-    ) -> None:
-        if not items:
-            return
-        for item in items:
-            notify_id = str(item.get("id") or "")
-            if not notify_id:
-                continue
-            notify_key = self._notice_key(source, item)
-            if not self._track_notice_key(notify_key):
-                continue
-
-            user = item.get("user") or {}
-            reply_item = item.get("item") or {}
-            user_id = str(user.get("mid") or "")
-            user_name = str(user.get("nickname") or user_id)
-            if (
-                self.config.comment_resolve_user_nickname
-                and user_id
-                and (not user_name or user_name == user_id)
-            ):
-                user_name = await self._resolve_user_nickname(user_id)
-            business_id = reply_item.get("business_id")
-            subject_id = reply_item.get("subject_id")
-            content = (
-                reply_item.get("source_content")
-                or reply_item.get("target_reply_content")
-                or reply_item.get("root_reply_content")
-                or reply_item.get("title")
-                or ""
-            )
-            at_details = reply_item.get("at_details") or []
-            is_at_me = self._is_at_me(at_details)
-            if source == "at" and self.config.dede_user_id and not is_at_me:
-                self.logger.debug("At notice without bot mention: id=%s", notify_id)
-            group_id = f"comment:{business_id}:{subject_id}"
-            self._remember_comment_context(
-                group_id=group_id,
-                comment_type=business_id,
-                comment_oid=subject_id,
-                root_id=reply_item.get("root_id"),
-                source_id=reply_item.get("source_id"),
-                target_id=reply_item.get("target_id"),
-            )
-            state_key = (group_id, user_id)
-            state = self._comment_reply_state.get(
-                state_key, {"count": 0, "silenced": False, "fallback_sent": False}
-            )
-            if state.get("silenced"):
-                continue
-            if state.get("count", 0) >= COMMENT_REPLY_LIMIT:
-                if not state.get("fallback_sent"):
-                    target = self._build_comment_reply_target_from_item(
-                        business_id, subject_id, reply_item
-                    )
-                    if target:
-                        await self._send_comment_reply_from_context(
-                            target, COMMENT_LIMIT_FALLBACK_TEXT
-                        )
-                    else:
-                        self.logger.warning(
-                            "Comment fallback reply skipped: invalid target group_id=%s user_id=%s",
-                            group_id,
-                            user_id,
-                        )
-                    state["fallback_sent"] = True
-                state["silenced"] = True
-                self._comment_reply_state[state_key] = state
-                continue
-            now_ts = time.time()
-            reply_time = float(item.get("reply_time") or now_ts)
-            message_info = BaseMessageInfo(
-                platform=self.config.platform,
-                message_id=notify_id,
-                time=now_ts,
-                user_info=UserInfo(
-                    platform=self.config.platform,
-                    user_id=user_id,
-                    user_nickname=user_name,
-                ),
-                group_info=GroupInfo(
-                    platform=self.config.platform,
-                    group_id=group_id,
-                    group_name=group_id,
-                ),
-                format_info=FormatInfo(
-                    content_format=["text"],
-                    accept_format=ACCEPT_FORMAT,
-                ),
-                additional_config=self._build_comment_notice_config(
-                    business_id=business_id,
-                    subject_id=subject_id,
-                    reply_item=reply_item,
-                    source=source,
-                    is_at_me=is_at_me,
-                    reply_time=reply_time,
-                ),
-            )
-            message = MessageBase(
-                message_info=message_info,
-                message_segment=Seg(type="text", data=str(content)),
-                raw_message=json.dumps(item, ensure_ascii=True),
-            )
-            await self._send_to_nachobot(message)
-            state["count"] = int(state.get("count", 0)) + 1
-            self._comment_reply_state[state_key] = state
-
-    def _build_comment_notice_config(
-        self,
-        business_id: Any,
-        subject_id: Any,
-        reply_item: Dict[str, Any],
-        source: str,
-        is_at_me: bool,
-        reply_time: float,
-    ) -> Dict[str, Any]:
-        config: Dict[str, Any] = {
-            "comment_type": business_id,
-            "comment_oid": subject_id,
-            "root_id": reply_item.get("root_id"),
-            "source_id": reply_item.get("source_id"),
-            "target_id": reply_item.get("target_id"),
-            "uri": reply_item.get("uri"),
-            "notice_source": source,
-            "reply_time": reply_time,
-        }
-        if (
-            self.config.comment_force_mention
-            or source == "reply"
-            or source == "at"
-            or is_at_me
-        ):
-            config["is_mentioned"] = 1.0
-        return config
 
     # ========== Handle From NachoBot ==========
 
     async def handle_from_nachobot(self, raw_message_base_dict: dict) -> None:
-        message = MessageBase.from_dict(raw_message_base_dict)
-        self.logger.info(
-            "Incoming from NachoBot: platform=%s group_id=%s user_id=%s",
-            message.message_info.platform,
-            getattr(message.message_info.group_info, "group_id", None),
-            getattr(message.message_info.user_info, "user_id", None),
-        )
-        seg = message.message_segment
-        if seg.type == "command":
-            await self._handle_command(message)
-            return
-
-        image_data = _extract_image_base64(seg)
-        if image_data:
-            private_target = self._resolve_private_target(message)
-            if private_target:
-                await self._send_private_image(private_target, image_data)
-                text = _extract_plain_text(seg).strip()
-                if text:
-                    await self._send_private_message(private_target, text)
-            else:
-                self.logger.warning("Image message unsupported for non-private target")
-            return
-
-        text = _extract_plain_text(seg).strip()
-        if not text:
-            return
-
-        original_text = text
-        # 解析统一的JSON表情 (仅用于判断和非直播回复)
-        text, emotion, action = self._extract_json_emotion_from_text(original_text)
+        await self.outgoing_handler.handle_from_nachobot(raw_message_base_dict)
         
-        comment_target = self._resolve_comment_target(message)
-        if comment_target:
-            # 对于非直播间回复，立刻执行动作
-            if self.live2d_controller:
-                self._execute_extracted_live2d_action(emotion, action)
-            await self._send_comment_reply_from_context(comment_target, text)
-            return
-
-        room_id = self._resolve_room_id(message)
-        if room_id is not None:
-            reply_dmid = _find_reply_id(seg)
-            reply_mid = ""
-            if reply_dmid:
-                reply_mid = self._lookup_reply_mid(room_id, reply_dmid)
-            # 将包含 JSON 的原始文本交给 _handle_live_reply 处理，让其与 TTS 同步
-            await self._handle_live_reply(
-                {
-                    "message": original_text,
-                    "room_id": room_id,
-                    "reply_mid": reply_mid or "",
-                    "reply_dmid": reply_dmid or "",
-                }
-            )
-            return
-
-        private_target = self._resolve_private_target(message)
-        if private_target:
-            # 对于非直播间回复，立刻执行动作
-            if self.live2d_controller:
-                self._execute_extracted_live2d_action(emotion, action)
-            await self._send_private_message(private_target, text)
-            return
-
-        self.logger.warning("Missing room_id for outgoing danmu")
-
-    def _resolve_room_id(self, message: MessageBase) -> Optional[int]:
-        group_info = message.message_info.group_info
-        if group_info and group_info.group_id:
-            try:
-                return int(group_info.group_id)
-            except ValueError:
-                return None
-        additional = message.message_info.additional_config or {}
-        room_id = additional.get("room_id")
-        if room_id is None:
-            return None
-        try:
-            return int(room_id)
-        except ValueError:
-            return None
-
-    def _lookup_reply_mid(self, room_id: int, reply_dmid: str) -> str:
-        cache = self._danmu_cache.get(room_id) or {}
-        return str(cache.get(reply_dmid) or "")
-
-    # ========== Sending Danmu ==========
-
     async def _send_danmu(
         self,
         room_id: int,
@@ -2327,66 +1574,7 @@ class BilibiliAdapter:
         reply_mid: Optional[str],
         reply_dmid: Optional[str],
     ) -> None:
-        text = self._filter_outgoing_text(text)
-
-        # Check if TTS is enabled for this room
-        max_len = BILIBILI_DANMU_MAX_LENGTH
-        if self._is_tts_enabled(room_id):
-            max_len = 9999
-
-        segments = _split_bilibili_text(text, max_length=max_len)
-        if not segments:
-            self.logger.warning("Empty danmu after splitting")
-            return
-        self.logger.info(
-            "Send danmu: room_id=%s reply_mid=%s reply_dmid=%s text=%s",
-            room_id,
-            reply_mid or "",
-            reply_dmid or "",
-            text,
-        )
-        for idx, segment in enumerate(segments):
-            segment_reply_mid = reply_mid if idx == 0 else None
-            segment_reply_dmid = reply_dmid if idx == 0 else None
-            try:
-                resp = await self.api.send_danmu(
-                    room_id=room_id,
-                    message=segment,
-                    reply_mid=segment_reply_mid or None,
-                    reply_dmid=segment_reply_dmid or None,
-                )
-                if (resp or {}).get("code") != 0:
-                    self.logger.warning(f"Danmu send failed: {resp}")
-                else:
-                    dmid = None
-                    data = (resp or {}).get("data", {})
-                    if isinstance(data, dict):
-                        dmid = data.get("dmid") or data.get("dmid_str")
-                    self._remember_self_danmu(
-                        room_id, str(dmid) if dmid else "", segment
-                    )
-                    self.logger.info("Danmu send ok")
-            except Exception as exc:
-                self.logger.error(f"Danmu send error: {exc}")
-            if idx < len(segments) - 1:
-                await asyncio.sleep(BILIBILI_DANMU_SEND_DELAY_SECONDS)
-
-    def _remember_self_danmu(self, room_id: int, message_id: str, text: str) -> None:
-        now = time.time()
-        if message_id:
-            room_cache = self._self_danmu_ids.setdefault(room_id, {})
-            room_cache[message_id] = now
-            if len(room_cache) > 500:
-                for msg_id, ts in list(room_cache.items()):
-                    if now - ts > 30:
-                        room_cache.pop(msg_id, None)
-        room_texts = self._self_danmu_texts.setdefault(room_id, [])
-        if text:
-            room_texts.append((text, now))
-        if len(room_texts) > 200:
-            self._self_danmu_texts[room_id] = [
-                item for item in room_texts if now - item[1] <= 30
-            ]
+        await self.outgoing_handler._send_danmu(room_id, text, reply_mid, reply_dmid)
 
     def is_self_danmu(
         self,
@@ -2395,464 +1583,15 @@ class BilibiliAdapter:
         message_id: str,
         text: str,
     ) -> bool:
-        if (
-            (not self.config.live_allow_self_danmu)
-            and self.config.dede_user_id
-            and user_id
-        ):
-            if str(user_id) == str(self.config.dede_user_id):
-                return True
-        now = time.time()
-        room_cache = self._self_danmu_ids.get(room_id, {})
-        if message_id and message_id in room_cache:
-            return True
-        room_texts = self._self_danmu_texts.get(room_id, [])
-        if text:
-            window = 2.5 if len(text.strip()) <= 2 else 6.0
-            for sent_text, ts in list(room_texts):
-                if now - ts > 30:
-                    continue
-                if sent_text == text and (now - ts) <= window:
-                    return True
-        return False
+        return self.outgoing_handler.is_self_danmu(room_id, user_id, message_id, text)
 
-    async def _wait_and_process_tts(self, room_id: int, delay: float = 0.5) -> None:
-        """Helper to wait and trigger processing."""
-        try:
-            await asyncio.sleep(delay)
-            await self._process_buffered_live_reply(room_id)
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            self.logger.error(f"TTS timer error: {e}")
 
-    async def _process_buffered_live_reply(self, room_id: int) -> None:
-        """Process buffered messages for a room after delay."""
-        try:
-            buffer = self._tts_buffer.get(room_id)
-            if not buffer:
-                return
-
-            # Combine text parts
-            # Use empty string join based on verification for bilingual text
-            full_text = "".join(buffer)
-
-            # Smart Buffering: Check for unbalanced tags
-            open_zh = full_text.count("<ZH>")
-            close_zh = full_text.count("</ZH>")
-            open_jp = full_text.count("<JP>")
-            close_jp = full_text.count("</JP>")
-
-            is_balanced = (open_zh == close_zh) and (open_jp == close_jp)
-
-            # Debug log for smart buffering
-            self.logger.info(
-                f"SmartBuffering Check: balanced={is_balanced} (ZH:{open_zh}/{close_zh} JP:{open_jp}/{close_jp}) "
-                f"len={len(full_text)} content={repr(full_text[:100])}..."
-            )
-
-            metadata = self._tts_metadata.get(room_id, {})
-            start_time = metadata.get("start_time", 0)
-            elapsed = time.time() - start_time
-
-            # If unbalanced data and we haven't waited too long (e.g., 8s), extend wait
-            if not is_balanced and elapsed < 8.0:
-                self.logger.info(
-                    f"Buffered TTS text unbalanced (ZH:{open_zh}/{close_zh} JP:{open_jp}/{close_jp}), extending wait... (elapsed={elapsed:.1f}s)"
-                )
-                self._tts_timer[room_id] = asyncio.create_task(
-                    self._wait_and_process_tts(room_id, delay=1.0)
-                )
-                return
-
-            # If still unbalanced after timeout, attempt to repair tags
-            if not is_balanced:
-                self.logger.warning(
-                    f"TTS buffer timeout with unbalanced tags (ZH:{open_zh}/{close_zh} JP:{open_jp}/{close_jp}). Attempting repair..."
-                )
-                full_text = self._repair_unbalanced_tags(
-                    full_text, open_zh, close_zh, open_jp, close_jp
-                )
-
-            # Proceed to flush
-            self._tts_buffer[room_id] = []
-
-            # Clear timer reference
-            self._tts_timer.pop(room_id, None)
-
-            # Clear metadata
-            self._tts_metadata.pop(room_id, None)
-
-            reply_mid = metadata.get("reply_mid")
-            reply_dmid = metadata.get("reply_dmid")
-
-            self.logger.info(
-                f"Processing buffered TTS reply for room {room_id}: {full_text[:50]}..."
-            )
-
-            room_config = self.config.live_room_prompts.get(room_id, {})
-            tts_config = room_config.get("tts", {})
-
-            # Always parse bilingual text first
-            text_jp, text_zh = self._parse_bilingual_response(full_text)
-            display_text = text_zh if text_zh else full_text
-            msg_to_send = text_zh if text_zh else full_text
-
-            if self.tts_model or (
-                tts_config and tts_config.get("enable") and self._ensure_tts_model()
-            ):
-                tts_text = text_jp if text_jp else ""
-
-                subtitle_path = str(tts_config.get("subtitle_path") or "subtitles.txt")
-                self._update_subtitle(display_text, subtitle_path=subtitle_path)
-
-                if tts_text:
-                    cleaned_tts_text = _clean_text_for_tts(tts_text)
-                    self.logger.info(
-                        f"TTS Generating for room {room_id}: {cleaned_tts_text}"
-                    )
-                    try:
-                        audio_data = await self.tts_model.tts(
-                            text=cleaned_tts_text, platform=self.config.platform
-                        )
-                        # Execute buffered LLM action and emotion right before starting audio playback
-                        if self.live2d_controller:
-                            try:
-                                await self.live2d_controller.on_start_replying()
-                                
-                                emotion = metadata.get("emotion")
-                                action = metadata.get("action")
-                                self._execute_extracted_live2d_action(emotion, action)
-                                
-                            except Exception as e:
-                                self.logger.error(f"Live2D reply hook error: {e}")
-
-                        await self._play_audio(audio_data)
-                        self.logger.info(f"TTS Played successfully for room {room_id}")
-                        return
-                    except Exception as e:
-                        self.logger.error(f"TTS generation failed: {e}")
-                        self.logger.info("Fallback to sending danmu due to TTS error")
-                else:
-                    self.logger.warning(
-                        f"TTS enabled for room {room_id} but no Japanese text parsed. Sending raw text as danmu."
-                    )
-
-            # Fallback Logic (TTS failed or disabled)
-            # Ensure message length is safe for Danmu (40 chars max for Bilibili, check utils.BILIBILI_DANMU_MAX_LENGTH)
-            # If msg_to_send is too long, truncate it.
-            # Using _strip_emoji or _clean_text_for_tts might be good if it's very messy.
-            # But mostly we just want to avoid the "raw XML" being sent.
-
-            # Hook Live2D: Start Replying (look down while sending)
-            if self.live2d_controller:
-                try:
-                    await self.live2d_controller.on_start_replying()
-                    emotion = metadata.get("emotion")
-                    action = metadata.get("action")
-                    self._execute_extracted_live2d_action(emotion, action)
-                except Exception as e:
-                    self.logger.error(f"Live2D reply hook error: {e}")
-
-            # Send Danmu (Truncated if needed, but simple slicing is safer than crash)
-            # Use split logic if available, or just first segment.
-            # Here we just take first 30 chars to be safe.
-            safe_danmu_text = msg_to_send
-            if len(safe_danmu_text) > 30:
-                safe_danmu_text = safe_danmu_text[:30] + "..."
-
-            await self._send_danmu(
-                room_id, safe_danmu_text, reply_mid or None, reply_dmid or None
-            )
-
-            # Hook Live2D: Reply Finished (back to center)
-            if self.live2d_controller:
-                try:
-                    await self.live2d_controller.on_reply_finished()
-                except Exception as e:
-                    self.logger.error(f"Live2D reply hook error: {e}")
-            return
-
-            # Hook Live2D: Start Replying (look down while sending)
-            if self.live2d_controller:
-                try:
-                    await self.live2d_controller.on_start_replying()
-                    emotion = metadata.get("emotion")
-                    action = metadata.get("action")
-                    self._execute_extracted_live2d_action(emotion, action)
-                except Exception as e:
-                    self.logger.error(f"Live2D reply hook error: {e}")
-
-            await self._send_danmu(
-                room_id, full_text, reply_mid or None, reply_dmid or None
-            )
-
-            # Hook Live2D: Reply Finished (back to center)
-            if self.live2d_controller:
-                try:
-                    await self.live2d_controller.on_reply_finished()
-                except Exception as e:
-                    self.logger.error(f"Live2D reply hook error: {e}")
-
-        except Exception as e:
-            self.logger.error(f"Error processing buffered TTS reply: {e}")
-            self._tts_buffer.pop(room_id, None)
-            self._tts_metadata.pop(room_id, None)
 
     # ========== Command Handlers ==========
 
-    async def _handle_command(self, message: MessageBase) -> None:
-        seg = message.message_segment
-        command_data = seg.data if isinstance(seg.data, dict) else {}
-        command_name = str(command_data.get("name") or "")
-        args = command_data.get("args") or {}
-        if command_name == "BILI_COMMENT_REPLY":
-            await self._handle_comment_reply(args)
-            return
-        if command_name == "BILI_LIVE_REPLY":
-            await self._handle_live_reply(args)
-            return
-        if command_name == "BILI_PRIVATE_SEND":
-            await self._handle_private_send(args, message)
-            return
-        self.logger.warning(f"Unknown command: {command_name}")
-
-    # Action name -> Live2D Motion Group mapping
-    _ACTION_TO_MOTION_GROUP = {
-        "待机/放松": "Idle",
-        "点头/同意": "Nod",
-        "摇头/否定": "Shake",
-        "转身向左/看左边": "TurnLeft",
-        "转身向右/看右边": "TurnRight",
-        "身体前倾/好奇/仔细看": "LeanForward",
-        "身体后仰/惊讶/吓一跳": "LeanBack",
-        "身体晃动/开心/兴奋": "Sway",
-        "歪头/疑惑/思考": "TiltHead",
-        "害羞/移开视线/不好意思": "LookAway",
-        "一般": "",
-    }
-
-    def _execute_extracted_live2d_action(self, emotion: Optional[str], action: Optional[str]) -> None:
-        """从 _extract_json_emotion_from_text 提取出的指令执行 Live2D 事件"""
-        ctrl = self.live2d_controller
-        if not ctrl:
-            return
-            
-        if emotion and emotion in ["normal", "shy", "disgust", "angry"]:
-            try:
-                asyncio.create_task(
-                    ctrl.send_live2d_event("emotion", emotion)
-                )
-                self.logger.info(f"Dispatched Live2D emotion event: {emotion}")
-            except Exception as e:
-                self.logger.error(f"Failed to dispatch Live2D emotion: {e}")
-
-        if action:
-            motion_group = self._ACTION_TO_MOTION_GROUP.get(action, "")
-            if motion_group and motion_group != "Idle":
-                try:
-                    asyncio.create_task(
-                        ctrl.send_live2d_event(
-                            "random_motion",
-                            {"group": motion_group, "priority": 3},
-                        )
-                    )
-                    self.logger.info(
-                        f"Dispatched Live2D action: {action} -> {motion_group}"
-                    )
-                except Exception as e:
-                    self.logger.error(f"Failed to dispatch Live2D action: {e}")
-                    
-    def _extract_json_emotion_from_text(self, text: str) -> Tuple[str, Optional[str], Optional[str]]:
-        """尝试解析回复中的JSON表情+动作指令，返回(解析后文本, emotion, action)。"""
-        start_idx = text.find("{")
-        end_idx = text.rfind("}")
-        parsed_text = ""
-        emotion = None
-        action = None
-        
-        if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
-            try:
-                json_str = text[start_idx : end_idx + 1]
-                data = json.loads(json_str, strict=False)
-                
-                if "reply" in data and data["reply"]:
-                    parsed_text = str(data["reply"])
-                emotion = data.get("emotion")
-                action = data.get("action")
-                
-                return parsed_text if parsed_text else text, emotion, action
-            except Exception as e:
-                self.logger.debug(f"JSON parsing failed (fallback to raw): {e}")
-                
-        return text, None, None
 
 
-    async def _handle_comment_reply(self, args: Dict[str, Any]) -> None:
-        raw_msg = str(args.get("message") or "")
-        text, emotion, action = self._extract_json_emotion_from_text(raw_msg)
-        text = _strip_emoji(text).strip()
-        
-        if self.live2d_controller:
-            self._execute_extracted_live2d_action(emotion, action)
 
-        if not text:
-            self.logger.warning("Empty comment reply text")
-            return
-        text = self._filter_outgoing_text(text)
-        try:
-            comment_type = int(args.get("type"))
-            oid = int(args.get("oid"))
-        except (TypeError, ValueError):
-            self.logger.warning("Invalid comment reply args")
-            return
-        root = args.get("root")
-        parent = args.get("parent")
-        root_id = int(root) if root not in (None, "", 0) else None
-        parent_id = int(parent) if parent not in (None, "", 0) else None
-        self.logger.info(
-            "Send comment reply: type=%s oid=%s root=%s parent=%s",
-            comment_type,
-            oid,
-            root_id,
-            parent_id,
-        )
-        try:
-            resp = await self.api.send_comment_reply(
-                comment_type=comment_type,
-                oid=oid,
-                message=text,
-                root=root_id,
-                parent=parent_id,
-            )
-            if (resp or {}).get("code") != 0:
-                self.logger.warning(f"Comment reply failed: {resp}")
-            else:
-                self.logger.info("Comment reply ok")
-        except Exception as exc:
-            self.logger.error(f"Comment reply error: {exc}")
-
-    async def _handle_live_reply(self, args: Dict[str, Any]) -> None:
-        raw_message = str(args.get("message") or "")
-        text, emotion, action = self._extract_json_emotion_from_text(raw_message)
-        text = _strip_emoji(text).strip()
-
-        # Strip invisible characters like zero-width space (\u200b)
-        # This allows the replyer to output specific invisible chars to signal "no reply"
-        if text:
-            # Common invisible characters: \u200b (Zero Width Space), \u200c, \u200d, \ufeff
-            # Also strip literal "\u200b" string if the LLM outputs it as text
-            text = (
-                text.replace("\u200b", "")
-                .replace("\\u200b", "")
-                .replace("\\u200B", "")
-                .replace("\ufeff", "")
-                .strip()
-            )
-
-        text = self._filter_outgoing_text(text)
-        if not text:
-            return
-
-        if len(text) <= 2 and all("\u4e00" <= c <= "\u9fff" for c in text):
-            self.logger.debug(f"Skipping typo correction message: {text}")
-            return
-        try:
-            room_id = int(args.get("room_id"))
-        except (TypeError, ValueError):
-            self.logger.warning("Invalid room_id for live reply")
-            return
-        reply_mid = str(args.get("reply_mid") or "")
-        reply_dmid = str(args.get("reply_dmid") or "")
-
-        room_config = self.config.live_room_prompts.get(room_id, {})
-        tts_config = room_config.get("tts", {})
-        tts_enable = self._is_tts_enabled(room_id)
-
-        self.logger.info(
-            f"TTS Debug: room_id={room_id}, tts_enable={tts_enable}, tts_model={self.tts_model is not None}"
-        )
-
-        if tts_enable:
-            # Buffer the text
-            buffer = self._tts_buffer.setdefault(room_id, [])
-            buffer.append(text)
-
-            # Save metadata if this is the start of a buffer
-            if room_id not in self._tts_metadata:
-                self._tts_metadata[room_id] = {
-                    "reply_mid": reply_mid,
-                    "reply_dmid": reply_dmid,
-                    "start_time": time.time(),
-                    "emotion": emotion,
-                    "action": action,
-                }
-            elif emotion or action:
-                # Update with latest actions if we're mid-buffer
-                if emotion:
-                    self._tts_metadata[room_id]["emotion"] = emotion
-                if action:
-                    self._tts_metadata[room_id]["action"] = action
-
-            # Reset timer
-            if room_id in self._tts_timer:
-                self._tts_timer[room_id].cancel()
-
-            # Start new timer (0.5s)
-            self._tts_timer[room_id] = asyncio.create_task(
-                self._wait_and_process_tts(room_id)
-            )
-            return
-
-        # Original non-TTS logic below
-        # (Actually, we can just execute the immediate logic here if not TTS)
-
-        # Hook Live2D: Start Replying (look down while sending)
-        if self.live2d_controller:
-            try:
-                await self.live2d_controller.on_start_replying()
-                self._execute_extracted_live2d_action(emotion, action)
-            except Exception as e:
-                self.logger.error(f"Live2D reply hook error: {e}")
-
-        await self._send_danmu(room_id, text, reply_mid or None, reply_dmid or None)
-
-        # Hook Live2D: Reply Finished (back to center)
-        if self.live2d_controller:
-            try:
-                await self.live2d_controller.on_reply_finished()
-            except Exception as e:
-                self.logger.error(f"Live2D reply hook error: {e}")
-
-    async def _handle_private_send(
-        self, args: Dict[str, Any], message: Optional[MessageBase]
-    ) -> None:
-        raw_msg = str(args.get("message") or "")
-        text, emotion, action = self._extract_json_emotion_from_text(raw_msg)
-        text = _strip_emoji(text).strip()
-        
-        if self.live2d_controller:
-            self._execute_extracted_live2d_action(emotion, action)
-            
-        if not text:
-            return
-        talker_id = args.get("talker_id")
-        session_type = args.get("session_type")
-        target = None
-        if talker_id not in (None, "", 0):
-            try:
-                target = PrivateSessionConfig(
-                    talker_id=int(talker_id),
-                    session_type=int(session_type or 1),
-                )
-            except (TypeError, ValueError):
-                target = None
-        if target is None and message is not None:
-            target = self._resolve_private_target(message)
-        if target is None:
-            self.logger.warning("Missing private message target")
-            return
-        await self._send_private_message(target, text)
 
     async def _send_to_nachobot(self, message: MessageBase) -> None:
         self.logger.info(
@@ -2912,651 +1651,7 @@ class BilibiliAdapter:
             additional_config=additional_config,
         )
 
-    async def _private_message_loop(self) -> None:
-        while True:
-            try:
-                await self._poll_private_messages()
-            except Exception as exc:
-                self.logger.warning(f"Private message loop error: {exc}")
-            await asyncio.sleep(self.config.private_poll_interval)
 
-    async def _get_private_sessions(self) -> List[PrivateSessionConfig]:
-        sessions: Dict[Tuple[int, int], PrivateSessionConfig] = {
-            (item.session_type, item.talker_id): item
-            for item in self.config.private_sessions
-        }
-        if not self.config.private_auto_sessions:
-            return list(sessions.values())
-
-        now = time.time()
-        refresh_seconds = max(5, self.config.private_auto_session_refresh_seconds)
-        if (
-            not self._auto_private_sessions
-            or (now - self._auto_private_sessions_ts) >= refresh_seconds
-        ):
-            auto_sessions: Dict[Tuple[int, int], PrivateSessionConfig] = {}
-            for session_type in self.config.private_auto_session_types:
-                resp = await self.api.get_sessions(
-                    session_type=session_type,
-                    size=self.config.private_auto_session_size,
-                )
-                if isinstance(resp, dict) and resp.get("code") not in (None, 0):
-                    self.logger.warning(
-                        "Session list failed: session_type=%s code=%s message=%s",
-                        session_type,
-                        resp.get("code"),
-                        resp.get("message") or resp.get("msg"),
-                    )
-                    continue
-                data = (resp or {}).get("data", {})
-                session_list = data.get("session_list") or []
-                if not isinstance(session_list, list):
-                    continue
-                for item in session_list:
-                    if not isinstance(item, dict):
-                        continue
-                    try:
-                        talker_id = int(item.get("talker_id") or 0)
-                        item_type = int(item.get("session_type") or session_type)
-                    except (TypeError, ValueError):
-                        continue
-                    if item_type not in (1, 2):
-                        continue
-                    if not talker_id:
-                        continue
-                    auto_sessions[(item_type, talker_id)] = PrivateSessionConfig(
-                        talker_id=talker_id,
-                        session_type=item_type,
-                    )
-            self._auto_private_sessions = list(auto_sessions.values())
-            self._auto_private_sessions_ts = now
-
-        for item in self._auto_private_sessions:
-            sessions.setdefault((item.session_type, item.talker_id), item)
-        return list(sessions.values())
-
-    async def _poll_private_messages(self) -> None:
-        sessions = await self._get_private_sessions()
-        if not sessions:
-            self.logger.debug("Private polling: no sessions")
-            return
-        self.logger.debug("Private polling: %s sessions", len(sessions))
-        for session in sessions:
-            key = (session.session_type, session.talker_id)
-            last_seqno = self._dm_last_seqno.get(key)
-            resp = await self.api.fetch_session_msgs(
-                talker_id=session.talker_id,
-                session_type=session.session_type,
-                size=20,
-                begin_seqno=last_seqno,
-            )
-            if isinstance(resp, dict) and resp.get("code") not in (None, 0):
-                self.logger.warning(
-                    "Private poll failed: talker_id=%s session_type=%s code=%s message=%s",
-                    session.talker_id,
-                    session.session_type,
-                    resp.get("code"),
-                    resp.get("message") or resp.get("msg"),
-                )
-            data = (resp or {}).get("data", {})
-            messages = data.get("messages") or []
-            max_seqno = data.get("max_seqno")
-            if max_seqno is None:
-                continue
-            if last_seqno is None:
-                self._dm_last_seqno[key] = int(max_seqno)
-                continue
-            if not messages:
-                if int(max_seqno) > last_seqno:
-                    self._dm_last_seqno[key] = int(max_seqno)
-                continue
-            await self._emit_private_messages(session=session, messages=messages)
-            self._dm_last_seqno[key] = int(max_seqno)
-
-    async def _emit_private_messages(
-        self,
-        session: PrivateSessionConfig,
-        messages: Iterable[Dict[str, Any]],
-    ) -> None:
-        messages_list = list(messages)
-        if messages_list:
-            self.logger.info(
-                "Private messages: talker_id=%s session_type=%s count=%s",
-                session.talker_id,
-                session.session_type,
-                len(messages_list),
-            )
-        for msg in reversed(messages_list):
-            sender_uid = str(msg.get("sender_uid") or "")
-            if (
-                sender_uid
-                and self.config.dede_user_id
-                and sender_uid == str(self.config.dede_user_id)
-            ):
-                continue
-            msg_type = int(msg.get("msg_type") or 0)
-            content = msg.get("content")
-            content_text = ""
-            segment: Optional[Seg] = None
-            content_format = ["text"]
-            image_url = ""
-            if msg_type in (2, 6):
-                image_url = self._extract_private_image_url(content)
-                if image_url:
-                    image_base64 = await self._download_private_image(image_url)
-                    if image_base64:
-                        segment = Seg(type="image", data=image_base64)
-                        content_format = ["image"]
-                if segment is None:
-                    content_text = (
-                        self._parse_private_content(msg_type, content) or "[image]"
-                    )
-            else:
-                content_text = self._parse_private_content(msg_type, content)
-
-            if segment is None:
-                if not content_text:
-                    continue
-                segment = Seg(type="text", data=content_text)
-            message_id = str(
-                msg.get("msg_key") or msg.get("msg_seqno") or uuid.uuid4().hex
-            )
-            now_ts = time.time()
-            msg_time = float(msg.get("timestamp") or now_ts)
-            group_id = f"dm:{session.session_type}:{session.talker_id}"
-            self._remember_private_session(group_id, session)
-            sender_name = await self._resolve_user_nickname(
-                sender_uid or str(session.talker_id)
-            )
-            additional_config = {
-                "session_type": session.session_type,
-                "talker_id": session.talker_id,
-                "msg_type": msg_type,
-                "msg_seqno": msg.get("msg_seqno"),
-                "message_time": msg_time,
-            }
-            if image_url:
-                additional_config["image_url"] = image_url
-            if self.config.private_force_mention:
-                additional_config["is_mentioned"] = 1.0
-            message_info = BaseMessageInfo(
-                platform=self.config.platform,
-                message_id=message_id,
-                time=now_ts,
-                user_info=UserInfo(
-                    platform=self.config.platform,
-                    user_id=sender_uid or str(session.talker_id),
-                    user_nickname=sender_name,
-                ),
-                group_info=None,
-                format_info=FormatInfo(
-                    content_format=content_format,
-                    accept_format=ACCEPT_FORMAT_PRIVATE,
-                ),
-                additional_config=additional_config,
-            )
-            message = MessageBase(
-                message_info=message_info,
-                message_segment=segment,
-                raw_message=json.dumps(msg, ensure_ascii=False),
-            )
-            await self._send_to_nachobot(message)
-
-    def _remember_private_session(
-        self, group_id: str, session: PrivateSessionConfig
-    ) -> None:
-        self._private_session_by_group[group_id] = session
-        self._last_private_session = session
-
-    def _remember_comment_context(
-        self,
-        group_id: str,
-        comment_type: Optional[int],
-        comment_oid: Optional[int],
-        root_id: Any,
-        source_id: Any,
-        target_id: Any,
-    ) -> None:
-        if not group_id:
-            return
-        self._comment_context[group_id] = {
-            "comment_type": comment_type,
-            "comment_oid": comment_oid,
-            "root_id": root_id,
-            "source_id": source_id,
-            "target_id": target_id,
-            "ts": time.time(),
-        }
-
-    @staticmethod
-    def _parse_comment_group_id(group_id: str) -> Optional[Tuple[int, int]]:
-        if not group_id or not group_id.startswith("comment:"):
-            return None
-        parts = group_id.split(":")
-        if len(parts) != 3:
-            return None
-        try:
-            return int(parts[1]), int(parts[2])
-        except ValueError:
-            return None
-
-    def _resolve_comment_target(
-        self, message: MessageBase
-    ) -> Optional[Tuple[int, int, Optional[int], Optional[int]]]:
-        group_info = message.message_info.group_info
-        group_id = group_info.group_id if group_info else None
-        if not group_id:
-            return None
-        parsed = self._parse_comment_group_id(group_id)
-        if not parsed:
-            return None
-        comment_type, comment_oid = parsed
-        context = self._comment_context.get(group_id, {})
-        root_id = context.get("root_id")
-        source_id = context.get("source_id")
-        target_id = context.get("target_id")
-        root = None
-        parent = None
-        for value in (root_id, source_id, target_id):
-            if value not in (None, "", 0):
-                try:
-                    root = int(value)
-                    break
-                except (TypeError, ValueError):
-                    continue
-        for value in (source_id, target_id, root_id):
-            if value not in (None, "", 0):
-                try:
-                    parent = int(value)
-                    break
-                except (TypeError, ValueError):
-                    continue
-        return comment_type, comment_oid, root, parent
-
-    async def _send_comment_reply_from_context(
-        self,
-        target: Tuple[int, int, Optional[int], Optional[int]],
-        text: str,
-    ) -> None:
-        text = self._filter_outgoing_text(text)
-        comment_type, oid, root_id, parent_id = target
-        self.logger.info(
-            "Send comment reply: type=%s oid=%s root=%s parent=%s",
-            comment_type,
-            oid,
-            root_id,
-            parent_id,
-        )
-        try:
-            resp = await self.api.send_comment_reply(
-                comment_type=comment_type,
-                oid=oid,
-                message=text,
-                root=root_id,
-                parent=parent_id,
-            )
-            if (resp or {}).get("code") != 0:
-                self.logger.warning(f"Comment reply failed: {resp}")
-            else:
-                self.logger.info("Comment reply ok")
-        except Exception as exc:
-            self.logger.error(f"Comment reply error: {exc}")
-
-    async def _resolve_user_nickname(self, user_id: str) -> str:
-        if not user_id:
-            return ""
-        cached = self._user_name_cache.get(user_id)
-        now = time.time()
-        if cached and (now - cached[1]) < self._user_name_cache_seconds:
-            return cached[0]
-        try:
-            mid = int(user_id)
-        except ValueError:
-            return user_id
-        try:
-            resp = await self.api.get_user_info(mid)
-        except Exception as exc:
-            self.logger.warning(f"User info fetch failed: mid={mid} error={exc}")
-            return user_id
-        name = (resp or {}).get("data", {}).get("name") or user_id
-        self._user_name_cache[user_id] = (str(name), now)
-        return str(name)
-
-    def _resolve_private_target(
-        self, message: MessageBase
-    ) -> Optional[PrivateSessionConfig]:
-        group_info = message.message_info.group_info
-        if group_info and group_info.group_id:
-            parsed = self._parse_private_group_id(group_info.group_id)
-            if parsed:
-                return parsed
-        additional = message.message_info.additional_config or {}
-        talker_id = additional.get("talker_id")
-        session_type = additional.get("session_type")
-        if talker_id not in (None, "", 0):
-            try:
-                return PrivateSessionConfig(
-                    talker_id=int(talker_id),
-                    session_type=int(session_type or 1),
-                )
-            except (TypeError, ValueError):
-                pass
-        user_info = message.message_info.user_info
-        if user_info and user_info.user_id:
-            try:
-                return PrivateSessionConfig(
-                    talker_id=int(user_info.user_id),
-                    session_type=int(session_type or 1),
-                )
-            except (TypeError, ValueError):
-                pass
-        return self._last_private_session
-
-    @staticmethod
-    def _parse_private_group_id(group_id: str) -> Optional[PrivateSessionConfig]:
-        if not group_id or not group_id.startswith("dm:"):
-            return None
-        parts = group_id.split(":")
-        if len(parts) != 3:
-            return None
-        try:
-            session_type = int(parts[1])
-            talker_id = int(parts[2])
-        except ValueError:
-            return None
-        return PrivateSessionConfig(talker_id=talker_id, session_type=session_type)
-
-    @staticmethod
-    def _parse_private_content(msg_type: int, content: Any) -> str:
-        if msg_type == 1 and content:
-            text = ""
-            if isinstance(content, dict):
-                text = str(
-                    content.get("content")
-                    or content.get("text")
-                    or content.get("title")
-                    or ""
-                )
-            elif isinstance(content, str):
-                try:
-                    data = json.loads(content)
-                    if isinstance(data, dict):
-                        text = str(
-                            data.get("content")
-                            or data.get("text")
-                            or data.get("title")
-                            or ""
-                        )
-                    elif isinstance(data, str):
-                        text = data
-                except Exception:
-                    text = content
-            text = _normalize_text(text)
-            return _strip_emoji(text).strip()
-        if msg_type in (2, 6):
-            return "[image]"
-        return ""
-
-    async def _send_private_message(
-        self, session: PrivateSessionConfig, text: str
-    ) -> None:
-        self.logger.info(
-            "Send private message: talker_id=%s session_type=%s text=%s",
-            session.talker_id,
-            session.session_type,
-            text,
-        )
-        try:
-            safe_text = _normalize_text(text)
-            safe_text = self._filter_outgoing_text(safe_text)
-            if not safe_text:
-                return
-            max_attempts = 3
-            for attempt in range(1, max_attempts + 1):
-                try:
-                    resp = await self.api.send_private_message(
-                        talker_id=session.talker_id,
-                        session_type=session.session_type,
-                        message=safe_text,
-                    )
-                except Exception as exc:
-                    if attempt < max_attempts:
-                        self.logger.warning(
-                            "Private message send failed (attempt %s/%s): %s",
-                            attempt,
-                            max_attempts,
-                            exc,
-                        )
-                        await asyncio.sleep(0.6 * attempt)
-                        continue
-                    raise
-                if (resp or {}).get("code") != 0:
-                    self.logger.warning(f"Private message failed: {resp}")
-                    return
-                self.logger.info("Private message ok")
-                return
-        except Exception as exc:
-            self.logger.error(f"Private message error: {exc}")
-
-    async def _send_private_image(
-        self, session: PrivateSessionConfig, image_base64: str
-    ) -> None:
-        image_bytes, image_format = _decode_image_base64(image_base64)
-        if not image_bytes:
-            self.logger.warning("Private image send failed: invalid image data")
-            return
-        try:
-            upload_resp = await self.api.upload_dynamic_image(
-                image_bytes=image_bytes,
-                image_format=image_format,
-                category="daily",
-            )
-        except Exception as exc:
-            self.logger.error("Private image upload error: %s", exc)
-            return
-        data = (upload_resp or {}).get("data", {})
-        image_url = str(data.get("image_url") or "")
-        if not image_url:
-            self.logger.warning("Private image upload missing url: %s", upload_resp)
-            return
-        content: Dict[str, Any] = {"url": image_url}
-        if data.get("image_height"):
-            content["height"] = data.get("image_height")
-        if data.get("image_width"):
-            content["width"] = data.get("image_width")
-        if data.get("img_size"):
-            content["size"] = data.get("img_size")
-        if image_format:
-            content["imageType"] = image_format
-        self.logger.info(
-            "Send private image: talker_id=%s session_type=%s url=%s",
-            session.talker_id,
-            session.session_type,
-            image_url,
-        )
-        try:
-            resp = await self.api.send_private_image_message(
-                talker_id=session.talker_id,
-                session_type=session.session_type,
-                content=content,
-            )
-            if isinstance(resp, dict) and resp.get("code") not in (None, 0):
-                self.logger.warning(f"Private image failed: {resp}")
-            else:
-                self.logger.info("Private image ok")
-        except Exception as exc:
-            self.logger.error(f"Private image error: {exc}")
 
     # ========== Event Serialization & Gift Aggregation ==========
 
-    def _push_to_event_queue(self, priority: int, message: MessageBase) -> None:
-        """
-        Push message to event queue with priority.
-        Priority: 10 (High) -> 40 (Low)
-        """
-        self._reset_idle_timer()
-        try:
-            timestamp = time.time()
-            # Queue item: (priority, timestamp, seq, message)
-            # Tuple comparison sorts by priority asc, then timestamp asc, then seq (unique int)
-            count = next(self._seq_counter)
-            self._event_queue.put_nowait((priority, timestamp, count, message))
-        except Exception as e:
-            self.logger.error(f"Failed to push to event queue: {e}")
-
-    async def _process_event_queue(self) -> None:
-        """
-        Background loop to consume events and send to Core sequentially.
-        """
-        self.logger.info("Event serialization queue started.")
-        while True:
-            try:
-                # Get next highest priority event
-                priority, timestamp, count, message = await self._event_queue.get()
-
-                # Send to Core
-                try:
-                    await self._send_to_nachobot(message)
-                except Exception as e:
-                    self.logger.error(f"Failed to send event to core: {e}")
-
-                # Yield slightly to allow other tasks
-                await asyncio.sleep(0.01)
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                self.logger.error(f"Event processing loop error: {e}")
-                await asyncio.sleep(1)
-
-    async def _gift_flush_loop(self) -> None:
-        """
-        Check gift buffer for idle streams and flush them.
-        """
-        self.logger.info("Gift aggregation loop started.")
-        debounce_seconds = 2.0
-        while True:
-            try:
-                await asyncio.sleep(1.0)
-                now = time.time()
-                keys_to_flush = []
-
-                # Identify keys ready to flush
-                for key, last_ts in list(self._last_gift_time.items()):
-                    if now - last_ts >= debounce_seconds:
-                        keys_to_flush.append(key)
-
-                # Flush them
-                for key in keys_to_flush:
-                    if key in self._gift_buffer:
-                        data = self._gift_buffer.pop(key)
-                        del self._last_gift_time[key]
-
-                        count = data["count"]
-                        gift_name = key[2]
-                        room_id = key[0]
-                        user_id = key[1]
-                        user_name = data["user_name"]
-                        timestamp = data["timestamp"]
-                        price = data["price"] * count  # Total price
-
-                        # Build aggregated message logic
-                        # We need to construct the message here.
-                        # Ideally, reusing handle_incoming_gift logic but bypassing buffering.
-                        # Or better, construct MessageBase here.
-
-                        self.logger.info(
-                            f"Flushing aggregated gift: {gift_name} x{count} from {user_name}"
-                        )
-
-                        prompt_text = f"送出了 {gift_name} x{count}"
-                        template_info = await self._get_template_info(
-                            room_id, user_id, prompt_text
-                        )
-
-                        additional_config = {}
-                        additional_config["is_mentioned"] = 1.0
-
-                        message_info = BaseMessageInfo(
-                            platform=self.config.platform,
-                            message_id=str(uuid.uuid4()),
-                            time=timestamp,
-                            user_info=UserInfo(
-                                platform=self.config.platform,
-                                user_id=user_id,
-                                user_nickname=user_name,
-                            ),
-                            group_info=GroupInfo(
-                                platform=self.config.platform,
-                                group_id=str(room_id),
-                                group_name=str(room_id),
-                            ),
-                            format_info=FormatInfo(
-                                content_format=["text"],
-                                accept_format=ACCEPT_FORMAT,
-                            ),
-                            template_info=template_info,
-                            additional_config=additional_config,
-                        )
-
-                        # Segments
-                        # Adjust gift segment to reflect total count
-                        gift_segment = Seg(type="gift", data=f"{gift_name}:{count}")
-                        text_segment = Seg(type="text", data=prompt_text)
-
-                        message = MessageBase(
-                            message_info=message_info,
-                            message_segment=Seg(
-                                type="seglist", data=[gift_segment, text_segment]
-                            ),
-                            raw_message=json.dumps(
-                                {
-                                    "type": "gift",
-                                    "gift_name": gift_name,
-                                    "num": count,
-                                    "price": price,
-                                    "room_id": room_id,
-                                },
-                                ensure_ascii=True,
-                            ),
-                        )
-
-                        # Push to Queue (Priority 30 for Gifts)
-                        self._push_to_event_queue(30, message)
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                self.logger.error(f"Gift flush loop error: {e}")
-                await asyncio.sleep(1)
-
-    def _parse_bilingual_response(self, text: str) -> tuple[str, str]:
-        """
-        Parse bilingual text with tags.
-        Input format examples:
-        - <JP>JP</JP><ZH>ZH</ZH>
-        - <ZH>CN</ZH><JP>JP</JP>
-        - RawText (treated as ZH)
-        """
-        text_jp = []
-        text_zh = []
-
-        # Extract JP parts
-        jp_parts = re.findall(r"<JP>(.*?)</JP>", text, re.DOTALL)
-        if jp_parts:
-            text_jp.extend(jp_parts)
-            # Remove JP parts from text
-            text = re.sub(r"<JP>.*?</JP>", "", text, flags=re.DOTALL)
-
-        # Extract ZH parts
-        zh_parts = re.findall(r"<ZH>(.*?)</ZH>", text, re.DOTALL)
-        if zh_parts:
-            text_zh.extend(zh_parts)
-            text = re.sub(r"<ZH>.*?</ZH>", "", text, flags=re.DOTALL)
-
-        # Treat remaining text as ZH (cleanup)
-        remaining = text.strip()
-        if remaining:
-            text_zh.append(remaining)
-
-        return "".join(text_jp), "".join(text_zh)

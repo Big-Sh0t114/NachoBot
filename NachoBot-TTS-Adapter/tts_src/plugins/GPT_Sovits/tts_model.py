@@ -3,7 +3,10 @@ import aiohttp
 from typing import Dict, Any, List
 from pathlib import Path
 from tts_src.plugins.base_tts_model import BaseTTSModel
-from .tts_config import TTSBaseConfig, TTSPreset
+try:
+    from tts_config import TTSBaseConfig, TTSPreset
+except ImportError:
+    from .tts_config import TTSBaseConfig, TTSPreset
 
 response_error_status_list = [
     400,  # Bad Request
