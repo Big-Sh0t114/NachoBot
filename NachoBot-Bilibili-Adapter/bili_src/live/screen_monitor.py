@@ -27,6 +27,7 @@ class ScreenMonitor:
         self._last_attempt = 0.0
         self._last_summary: Optional[str] = None
         self._lock = asyncio.Lock()
+        self._disabled_models = set()
 
     # Backward-compatible: accept single config as well
     @classmethod
@@ -135,6 +136,9 @@ class ScreenMonitor:
         last_error: Optional[str] = None
 
         for idx, config in enumerate(self.configs):
+            if config.model in getattr(self, "_disabled_models", set()):
+                continue
+
             if config.client_type != "openai":
                 self.logger.warning(
                     "Unsupported VLM client_type: %s (model: %s), skipping",
@@ -224,6 +228,16 @@ class ScreenMonitor:
                             )
                             return None  # Hard error → try next model
                         data = await resp.json(content_type=None)
+            except getattr(aiohttp, "ClientConnectorError", Exception) as exc:
+                self.logger.warning(
+                    "VLM model [%d] '%s' connection failed: %s. Blacklisting model.",
+                    model_index,
+                    config.model,
+                    exc,
+                )
+                if hasattr(self, "_disabled_models"):
+                    self._disabled_models.add(config.model)
+                return None
             except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
                 retries_left -= 1
                 self.logger.warning(
