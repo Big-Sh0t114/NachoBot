@@ -285,7 +285,7 @@ class TTSManager:
                             pass # Can handle this inside execute logic
                             
                     if audio_data:
-                        await asyncio.to_thread(self.audio_player.play, audio_data)
+                        await asyncio.to_thread(self.audio_player.play_idle, audio_data)
                 except Exception as e:
                     self.logger.error(f"Failed to generate/play idle TTS: {e}")
 
@@ -390,6 +390,7 @@ class TTSManager:
                                 self.logger.error(f"Live2D reply hook error: {e}")
 
                         if audio_data:
+                            self.audio_player.interrupt_idle()
                             self.audio_player.play(audio_data)
                         self.logger.info(f"TTS Played successfully for room {room_id}")
                         return

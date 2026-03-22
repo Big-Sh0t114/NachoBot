@@ -19,10 +19,11 @@ class AudioPlayer:
         self.logger = logger
         self.on_start = on_start
         self.on_stop = on_stop
-        self.queue: Deque[bytes] = queue.deque()
+        self.queue: Deque[tuple[bytes, bool]] = queue.deque() # (audio_data, is_idle)
         self.current_audio: Optional[bytes] = None
         self.interrupted_audio: Optional[bytes] = None
         self.is_playing = False
+        self._is_idle_audio = False
         self.is_paused = False
         self.stop_event = asyncio.Event()  # Set when stopped/interrupted
         self.play_task: Optional[asyncio.Task] = None
@@ -49,13 +50,14 @@ class AudioPlayer:
                     continue
 
                 # Get next audio
-                audio_data = self.queue.popleft()
+                audio_data, is_idle = self.queue.popleft()
                 self.current_audio = audio_data
                 self.is_playing = True
+                self._is_idle_audio = is_idle
 
                 # Calculate duration
                 duration = self._get_wav_duration(audio_data)
-                # self.logger.debug(f"Playing audio segment ({duration:.2f}s)")
+                # self.logger.debug(f"Playing audio segment ({duration:.2f}s), idle: {is_idle}")
 
                 # Play (Async)
                 if self.on_start:
@@ -80,6 +82,7 @@ class AudioPlayer:
                     # Guarantee state reset even if exception occurs
                     self.current_audio = None
                     self.is_playing = False
+                    self._is_idle_audio = False
                     if self.on_stop:
                         if asyncio.iscoroutinefunction(self.on_stop):
                             asyncio.create_task(self.on_stop())
@@ -118,8 +121,22 @@ class AudioPlayer:
             return 2.0  # Fallback
 
     def play(self, audio_data: bytes):
-        """Add audio to queue."""
-        self.queue.append(audio_data)
+        """Add normal audio to queue."""
+        self.queue.append((audio_data, False))
+
+    def play_idle(self, audio_data: bytes):
+        """Add idle audio to queue."""
+        self.queue.append((audio_data, True))
+
+    def interrupt_idle(self):
+        """Immediately stop playback if the current audio is idle, and remove all queued idle audio."""
+        # 1. Remove all pending idle audio from the queue
+        self.queue = queue.deque([(data, is_idle) for (data, is_idle) in self.queue if not is_idle])
+        
+        # 2. If currently playing an idle audio, interrupt it
+        if self.is_playing and self._is_idle_audio:
+            self.logger.info("Interrupting currently playing idle audio for a normal reply.")
+            self.stop_event.set()
 
     def stop_and_pause(self):
         """Stop current playback immediately and pause."""
@@ -128,10 +145,14 @@ class AudioPlayer:
         self.logger.info("AudioPlayer stopped and paused.")
 
     def resume(self):
-        """Resume playback, re-queueing interrupted audio."""
+        """Resume playback, re-queueing interrupted audio.
+           Note: Interrupted audio may be idle audio, but usually resume() isn't mixing with idle interruption 
+           logic directly. If needed, interrupted_audio could also store the is_idle flag.
+           For now we assume it's normal audio or we don't care.
+        """
         if self.interrupted_audio:
             self.logger.info("Resuming interrupted audio...")
-            self.queue.appendleft(self.interrupted_audio)
+            self.queue.appendleft((self.interrupted_audio, False))
             self.interrupted_audio = None
         self.is_paused = False
         self.stop_event.clear()  # Ensure clear
