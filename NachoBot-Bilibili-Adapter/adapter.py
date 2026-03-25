@@ -16,7 +16,6 @@ if _nachobot_path.exists() and str(_nachobot_path) not in sys.path:
     sys.path.insert(0, str(_nachobot_path))
 
 
-
 from ncnk_message import (  # noqa: E402
     BaseMessageInfo,
     FormatInfo,
@@ -122,22 +121,24 @@ class BilibiliAdapter:
         self.config_path = config_path
         self._self_danmu_ids: Dict[int, Dict[str, float]] = {}
 
-
-
         # Event Serialization & Aggregation
         from bili_src.live.event_manager import EventManager
+
         self.event_manager = EventManager(self.config, self.logger, self)
 
         # Outgoing Message Dispatch
         from bili_src.live.outgoing_handler import OutgoingHandler
+
         self.outgoing_handler = OutgoingHandler(self.config, self.logger, self)
 
         # Comment Handler
         from bili_src.chat.comment_handler import CommentHandler
+
         self.comment_handler = CommentHandler(self.config, self.logger, self)
-        
+
         # Private Message Handler
         from bili_src.chat.private_handler import PrivateHandler
+
         self.private_handler = PrivateHandler(self.config, self.logger, self)
 
         # Initialize Mic Capture Worker
@@ -195,38 +196,47 @@ class BilibiliAdapter:
         if self.config.live_live2d_enable:
             _nachobot_path = Path(__file__).resolve().parents[1] / "NachoBot"
             from bili_src.core.model_client import get_model_client
+
             self.model_client = get_model_client(_nachobot_path, self.logger)
 
         from bili_src.live2d.live2d_manager import Live2DManager
+
         self.live2d_manager = Live2DManager(self.config, self.logger, self)
 
         if self.live2d_manager.controller:
+
             def _on_audio_start():
                 self.live2d_manager.controller.set_speaking(True)
 
             def _on_audio_stop():
                 self.live2d_manager.controller.set_speaking(False)
                 # Reset gaze to center after audio finishes
-                asyncio.ensure_future(self.live2d_manager.controller.on_reply_finished())
+                asyncio.ensure_future(
+                    self.live2d_manager.controller.on_reply_finished()
+                )
 
             self.audio_player.on_start = _on_audio_start
             self.audio_player.on_stop = _on_audio_stop
 
         from bili_src.audio.tts_manager import TTSManager
+
         self.tts_manager = TTSManager(
             config=self.config,
             logger=self.logger,
             config_path=self.config_path,
             audio_player=self.audio_player,
             send_danmu_callback=self.outgoing_handler._send_danmu,
-            live2d_start_reply_callback=self.live2d_manager.controller.on_start_replying if self.live2d_manager.controller else None,
-            live2d_finish_reply_callback=self.live2d_manager.controller.on_reply_finished if self.live2d_manager.controller else None,
+            live2d_start_reply_callback=self.live2d_manager.controller.on_start_replying
+            if self.live2d_manager.controller
+            else None,
+            live2d_finish_reply_callback=self.live2d_manager.controller.on_reply_finished
+            if self.live2d_manager.controller
+            else None,
             live2d_execute_action_callback=self.live2d_manager.execute_extracted_live2d_action,
             extract_json_emotion_callback=self.live2d_manager.extract_json_emotion_from_text,
             tts_model_class=TTSModel,
             tts_import_error=_tts_import_error,
         )
-
 
     async def _resolve_user_nickname(self, user_id: str) -> str:
         """Resolve a user's nickname from cache or Bilibili API."""
@@ -234,10 +244,10 @@ class BilibiliAdapter:
         if user_id in self._user_name_cache:
             name, t = self._user_name_cache[user_id]
             # Use 3600 for successful names, and 300s for fallback user_ids
-            cache_duration = self._user_name_cache_seconds if name != user_id else 300
+            cache_duration = self._user_name_cache_seconds if name != user_id else 150
             if now - t < cache_duration:
                 return name
-        
+
         try:
             uid_int = int(user_id)
             info = await self.api.get_user_info(uid_int)
@@ -248,7 +258,7 @@ class BilibiliAdapter:
                 return name
         except Exception as e:
             self.logger.debug(f"Failed to resolve user_id {user_id}: {e}")
-            
+
         # Cache the failure to prevent rate limit spam
         self._user_name_cache[user_id] = (user_id, now)
         return user_id
@@ -413,8 +423,6 @@ class BilibiliAdapter:
 
         return text
 
-
-
     # ========== Live Status and Screen Methods ==========
 
     async def _get_live_status(self, room_id: int) -> Optional[int]:
@@ -558,7 +566,6 @@ class BilibiliAdapter:
         action = "force enabled" if enable else "force disabled"
         self.logger.info("Mic capture %s by user_id=%s", action, user_id)
         return True
-
 
     async def _get_template_info(
         self, room_id: int, user_id: str, prompt_text: str
@@ -845,7 +852,9 @@ class BilibiliAdapter:
             user_id,
             text,
             user_name,
-            allowed_user_ids=set(str(uid) for uid in getattr(self.config, "screen_manual_user_ids", []))
+            allowed_user_ids=set(
+                str(uid) for uid in getattr(self.config, "screen_manual_user_ids", [])
+            ),
         ):
             return
         if self._handle_screen_manual_command(room_id, user_id, text, user_name):
@@ -959,6 +968,7 @@ class BilibiliAdapter:
                 }
                 # For dependencies like chat_stream, we rely on managers to handle missing streams or use chat_id from msg_info
                 from src.chat.message_receive.message import MessageRecv
+
                 msg_recv = MessageRecv(msg_dict)
 
                 # Inject chat_stream mock if needed by MoodManager?
@@ -1026,7 +1036,9 @@ class BilibiliAdapter:
                 }
             self.event_manager.gift_buffer[key]["count"] += num
             self.event_manager.gift_buffer[key]["price"] = price
-            self.event_manager.gift_buffer[key]["timestamp"] = timestamp  # Update to latest
+            self.event_manager.gift_buffer[key]["timestamp"] = (
+                timestamp  # Update to latest
+            )
             self.event_manager.last_gift_time[key] = time.time()  # Update act time
             return
 
@@ -1347,7 +1359,7 @@ class BilibiliAdapter:
         timestamp: float,
         guard_level: int = 3,
         price: int = 0,
-        **kwargs
+        **kwargs,
     ) -> None:
         self.logger.info(
             f"Guard: [{room_id}] {user_name}({user_id}) became {guard_name} (Level: {guard_level}) - PATCHED_VERIFIED"
@@ -1525,13 +1537,11 @@ class BilibiliAdapter:
         )
         return reply_prompt, planner_prompt
 
-
-
     # ========== Handle From NachoBot ==========
 
     async def handle_from_nachobot(self, raw_message_base_dict: dict) -> None:
         await self.outgoing_handler.handle_from_nachobot(raw_message_base_dict)
-        
+
     async def _send_danmu(
         self,
         room_id: int,
@@ -1550,13 +1560,7 @@ class BilibiliAdapter:
     ) -> bool:
         return self.outgoing_handler.is_self_danmu(room_id, user_id, message_id, text)
 
-
-
     # ========== Command Handlers ==========
-
-
-
-
 
     async def _send_to_nachobot(self, message: MessageBase) -> None:
         self.logger.info(
@@ -1616,7 +1620,4 @@ class BilibiliAdapter:
             additional_config=additional_config,
         )
 
-
-
     # ========== Event Serialization & Gift Aggregation ==========
-
