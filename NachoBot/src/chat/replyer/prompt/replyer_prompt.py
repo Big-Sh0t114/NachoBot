@@ -121,7 +121,8 @@ reply
 {{
     "action": "reply",
     "text": "你的回复内容",
-    "reason": "回复的原因"
+    "reason": "回复的原因",
+    "question":"需要检索或回忆的具体问题（可选，不需要则省略）"
 }}
 
 no_reply
@@ -153,7 +154,7 @@ cancel_appoint
 {reply_target_block}。
 {identity}
 请通过分析聊天记录，决定下一步动作并给出回复。
-1. 如果选择 reply，请在 JSON 的 "text" 字段给出日常且口语化的回复，尽量简短。
+1. 如果选择 reply，请在 JSON 的 "text" 字段给出日常且口语化的回复，如果你需要查阅记忆或搜索信息，请同时提供 \"question\" 字段。
    **!!!绝对禁止!!!**：在 "text" 字段中包含任何 JSON 结构、动作名称、或者类似于 `( "reason": ... )` 的额外说明。该字段只能包含发送给对方的话。
 2. 你可以同时选择多个动作（如 reply 和一个插件动作），每个动作都要单独用 ```json 包裹。
 3. {keywords_reaction_prompt}

@@ -1044,6 +1044,19 @@ class DefaultReplyer:
             chat_talking_prompt_short = guarded_short_history
             injection_detected = True
 
+        # 从 planner 提取问题
+        planner_question_text = None
+        if chosen_actions:
+            for action in chosen_actions:
+                action_type = getattr(action, "action_type", "") or (action.get("action_type", "") if isinstance(action, dict) else "")
+                if action_type == "reply":
+                    planner_question_text = getattr(action, "question", None)
+                    if planner_question_text is None and hasattr(action, "action_params") and isinstance(action.action_params, dict):
+                        planner_question_text = action.action_params.get("question")
+                    elif planner_question_text is None and isinstance(action, dict):
+                        planner_question_text = action.get("question")
+                    break
+
         # 并行执行五个构建任务
         task_results = await asyncio.gather(
             self._time_and_run_task(
@@ -1054,7 +1067,7 @@ class DefaultReplyer:
             ),
             self._time_and_run_task(
                 build_memory_retrieval_prompt(
-                    message=chat_talking_prompt_short, sender=sender, target=target, chat_stream=chat_stream
+                    message=chat_talking_prompt_short, sender=sender, target=target, chat_stream=chat_stream, question=planner_question_text
                 ),
                 "memory_block",
             ),

@@ -148,7 +148,7 @@ def _log_conversation_messages(
         head_prompt: 第一条系统消息（head_prompt）的内容，可选
         final_status: 最终结果状态描述（例如：找到答案/未找到答案），可选
     """
-    if not global_config.debug.show_memory_prompt:
+    if not getattr(global_config.debug, 'show_memory_prompt', False):
         return
 
     log_lines: List[str] = []
@@ -787,7 +787,7 @@ async def _react_agent_solve_question(
             )
             return False, "最终评估阶段LLM调用失败", thinking_steps, is_timeout
 
-        if global_config.debug.show_memory_prompt:
+        if getattr(global_config.debug, 'show_memory_prompt', False):
             logger.info(f"{react_log_prefix}最终评估Prompt: {evaluation_prompt}")
             logger.info(f"{react_log_prefix}最终评估响应: {eval_response}")
 
@@ -1166,7 +1166,7 @@ async def build_memory_retrieval_prompt(
                 request_type="memory.question",
             )
 
-            if global_config.debug.show_memory_prompt:
+            if getattr(global_config.debug, 'show_memory_prompt', False):
                 logger.info(f"{log_prefix}记忆检索问题生成提示词: {question_prompt}")
             # logger.info(f"记忆检索问题生成响应: {response}")
 

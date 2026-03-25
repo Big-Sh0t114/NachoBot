@@ -20,6 +20,7 @@ class Message:
         role: RoleType,
         content: str | list[tuple[str, str] | str],
         tool_call_id: str | None = None,
+        tool_calls: list | None = None,
     ):
         """
         初始化消息对象
@@ -28,6 +29,7 @@ class Message:
         self.role: RoleType = role
         self.content: str | list[tuple[str, str] | str] = content
         self.tool_call_id: str | None = tool_call_id
+        self.tool_calls: list | None = tool_calls
 
 
 class MessageBuilder:
@@ -35,6 +37,14 @@ class MessageBuilder:
         self.__role: RoleType = RoleType.User
         self.__content: list[tuple[str, str] | str] = []
         self.__tool_call_id: str | None = None
+        self.__tool_calls: list | None = None
+
+    def set_tool_calls(self, tool_calls: list) -> "MessageBuilder":
+        """
+        设置模型生成的工具调用列表
+        """
+        self.__tool_calls = tool_calls
+        return self
 
     def set_role(self, role: RoleType = RoleType.User) -> "MessageBuilder":
         """
@@ -108,17 +118,22 @@ class MessageBuilder:
         构建消息对象
         :return: Message对象
         """
-        if len(self.__content) == 0:
-            raise ValueError("内容不能为空")
+        if len(self.__content) == 0 and not self.__tool_calls:
+            raise ValueError("内容不能为空（除非包含工具调用）")
         if self.__role == RoleType.Tool and self.__tool_call_id is None:
             raise ValueError("Tool角色的工具调用ID不能为空")
 
-        return Message(
-            role=self.__role,
-            content=(
+        content_val = ""
+        if self.__content:
+            content_val = (
                 self.__content[0]
                 if (len(self.__content) == 1 and isinstance(self.__content[0], str))
                 else self.__content
-            ),
+            )
+
+        return Message(
+            role=self.__role,
+            content=content_val,
             tool_call_id=self.__tool_call_id,
+            tool_calls=self.__tool_calls,
         )
