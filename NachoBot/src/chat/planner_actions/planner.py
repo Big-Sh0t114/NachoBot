@@ -75,15 +75,7 @@ def init_prompt():
 {actions_before_now_block}
 
 **可用的action**
-reply
-动作描述：
-1.你可以选择呼叫了你的名字，但是你没有做出回应的消息进行回复
-2.你可以自然的顺着正在进行的聊天内容进行回复或自然的提出一个问题
-{{
-    "action": "reply",
-    "target_message_id":"想要回复的消息id",
-    "reason":"回复的原因"
-}}
+{reply_action_description}
 
 no_reply
 动作描述：
@@ -427,6 +419,11 @@ class ActionPlanner:
             # 构建聊天上下文描述
             chat_context_description = "你现在正在一个群聊中"
 
+            if is_group_chat:
+                reply_action_description = '''reply\n动作描述：\n1.你可以选择呼叫了你的名字，但是你没有做出回应的消息进行回复\n2.你可以自然的顺着正在进行的聊天内容进行回复或自然的提出一个问题\n{\n    "action": "reply",\n    "target_message_id":"想要回复的消息id",\n    "reason":"回复的原因"\n}'''
+            else:
+                reply_action_description = '''reply\n动作描述：\n1.你可以自然的顺着正在进行的聊天内容进行回复\n2.如果你需要检索过去的记忆、了解某人、查资料来更好地回复，请生成一个具体的问题\n{\n    "action": "reply",\n    "target_message_id":"想要回复的消息id",\n    "reason":"回复的原因",\n    "question":"需要检索或回忆的具体问题（可选，不需要则省略）"\n}'''
+
             # 构建动作选项块（若动作有参数，这里展示）
             action_options_block = await self._build_action_options_block(current_available_actions)
             advanced_on = advanced_manager.is_on(get_chat_manager().get_stream(self.chat_id))
@@ -502,6 +499,7 @@ class ActionPlanner:
                 plan_style=global_config.personality.plan_style,
                 gift_reaction_prompt=global_config.personality.gift_reaction_prompt,
                 pending_appointments=pending_text,
+                reply_action_description=reply_action_description,
             )
             if tts_lang_note:
                 prompt += tts_lang_note

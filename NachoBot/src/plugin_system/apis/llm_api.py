@@ -10,7 +10,8 @@
 from typing import Tuple, Dict, List, Any, Optional, Callable
 from src.common.logger import get_logger
 from src.llm_models.payload_content.tool_option import ToolCall
-from src.llm_models.utils_model import LLMRequest
+from src.llm_models.payload_content.message import Message
+from src.llm_models.utils_model import LLMRequest, RequestType
 from src.config.config import model_config
 from src.config.api_ada_configs import TaskConfig
 
@@ -115,6 +116,57 @@ async def generate_with_model_with_tools(
             prompt, tools=tool_options, temperature=temperature, max_tokens=max_tokens
         )
         return True, response, reasoning_content, model_name, tool_call
+
+    except Exception as e:
+        error_msg = f"生成内容时出错: {str(e)}"
+        logger.error(f"[LLMAPI] {error_msg}")
+        return False, error_msg, "", "", None
+
+
+async def generate_with_model_with_tools_by_message_factory(
+    message_factory: Callable[[Any], List[Message]],
+    model_config: TaskConfig,
+    tool_options: List[Dict[str, Any]] | None = None,
+    request_type: str = "plugin.generate",
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+) -> Tuple[bool, str, str, str, List[ToolCall] | None]:
+    """使用指定的 message_factory 和工具调用生成内容，主要用于 ReAct 等需要精准控制多轮消息的场景
+
+    Args:
+        message_factory: 生成消息列表的工厂函数
+        model_config: 模型配置
+        tool_options: 工具选项列表
+        request_type: 请求类型标识
+        temperature: 温度参数
+        max_tokens: 最大token数
+
+    Returns:
+        Tuple[bool, str, str, str, List[ToolCall] | None]: (是否成功, 生成的内容, 推理过程, 模型名称, 工具调用)
+    """
+    try:
+        model_name_list = model_config.model_list
+        logger.info(f"[LLMAPI] 使用模型集合 {model_name_list} (message_factory模式) 生成内容")
+
+        llm_request = LLMRequest(model_set=model_config, request_type=request_type)
+        tool_built = llm_request._build_tool_options(tool_options)
+
+        response, model_info = await llm_request._execute_request(
+            request_type=RequestType.RESPONSE,
+            message_factory=message_factory,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tool_options=tool_built,
+        )
+
+        content = response.content or ""
+        reasoning_content = response.reasoning_content or ""
+        tool_calls = response.tool_calls
+        if not reasoning_content and content:
+            content, extracted_reasoning = llm_request._extract_reasoning(content)
+            reasoning_content = extracted_reasoning
+            
+        return True, content, reasoning_content, model_info.name, tool_calls
 
     except Exception as e:
         error_msg = f"生成内容时出错: {str(e)}"

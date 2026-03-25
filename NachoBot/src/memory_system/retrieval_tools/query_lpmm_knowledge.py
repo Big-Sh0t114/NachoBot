@@ -39,7 +39,7 @@ async def query_lpmm_knowledge(query: str, limit: int = 5) -> str:
             logger.debug("LPMM知识库未初始化，跳过查询")
             return "LPMM知识库未初始化"
 
-        knowledge_info = await qa_manager.get_knowledge(content, limit=limit_value)
+        knowledge_info = await qa_manager.get_knowledge(content)
         logger.debug(f"LPMM知识库查询结果: {knowledge_info}")
 
         if knowledge_info:
