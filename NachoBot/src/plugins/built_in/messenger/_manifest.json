@@ -1,8 +1,8 @@
 {
     "manifest_version": 1,
     "name": "信使插件 (Messenger)",
-    "version": "1.0.0",
-    "description": "转告消息插件 - 当用户请求转告时，自动将消息转发到目标用户的私聊",
+    "version": "2.0.0",
+    "description": "转告消息插件 - 通过 planner 动作池，当用户请求转告时，自动将消息转发到目标用户的私聊",
     "author": {
         "name": "BigSh0t",
         "url": "https://github.com/BigSh0t"
@@ -25,12 +25,17 @@
     "locales_path": "_locales",
     "plugin_info": {
         "is_built_in": true,
-        "plugin_type": "event_handler",
+        "plugin_type": "action",
         "components": [
             {
-                "type": "event_handler",
-                "name": "messenger_handler",
-                "description": "监听消息并处理转告请求"
+                "type": "action",
+                "name": "messenger_relay",
+                "description": "帮忙向指定用户转告/传话"
+            },
+            {
+                "type": "command",
+                "name": "convey",
+                "description": "管理员向目标用户私聊发送消息"
             }
         ]
     }

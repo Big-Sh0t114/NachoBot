@@ -5,7 +5,7 @@ from src.plugin_system import BasePlugin, register_plugin, ComponentInfo
 from src.plugin_system.base.config_types import ConfigField
 
 # 导入组件
-from src.plugins.built_in.messenger.messenger import MessengerEventHandler
+from src.plugins.built_in.messenger.messenger import MessengerRelayAction, ConveyCommand
 
 from src.common.logger import get_logger
 
@@ -16,7 +16,8 @@ logger = get_logger("messenger_plugin")
 class MessengerPlugin(BasePlugin):
     """信使插件
 
-    系统内置插件，当用户请求转告时，自动将消息转发到目标用户的私聊，并触发 LLM 思考。
+    系统内置插件，当用户请求转告时，通过 planner 动作池选择转告动作，
+    自动将消息转发到目标用户的私聊，并触发 LLM 思考。
 
     注意：插件基本信息优先从_manifest.json文件中读取
     """
@@ -52,5 +53,6 @@ class MessengerPlugin(BasePlugin):
     def get_plugin_components(self) -> List[Tuple[ComponentInfo, Type]]:
         """返回插件包含的组件列表"""
         components = []
-        components.append((MessengerEventHandler.get_handler_info(), MessengerEventHandler))
+        components.append((MessengerRelayAction.get_action_info(), MessengerRelayAction))
+        components.append((ConveyCommand.get_command_info(), ConveyCommand))
         return components
