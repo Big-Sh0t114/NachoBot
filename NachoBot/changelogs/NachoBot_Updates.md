@@ -1,3 +1,5 @@
+3/31
+    修复Bilibili侧Websocket信息阻塞问题
 3/28
     修改Messenger插件，将传话动作加入动作池由LLM判断，减少误判率
 3/24
