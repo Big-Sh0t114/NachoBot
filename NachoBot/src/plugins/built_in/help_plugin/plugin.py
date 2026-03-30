@@ -53,7 +53,7 @@ class HelpCommand(BaseCommand):
         skip_names: Optional[set[str]] = None,
     ) -> Dict[str, List[Tuple[str, str]]]:
         """收集当前可用的命令信息，并按权限分组"""
-        skip_names = skip_names or set()
+        skip_names = (skip_names or set()) | {"convey"}
         enabled_commands = component_registry.get_enabled_components_by_type(ComponentType.COMMAND)
         disabled_commands = (
             set(global_announcement_manager.get_disabled_chat_commands(stream_id)) if stream_id else set()

@@ -416,7 +416,7 @@ class LiveRoomWorker:
                     payload = json.loads(body.decode("utf-8"))
                 except json.JSONDecodeError:
                     continue
-                await self._handle_event(payload)
+                asyncio.create_task(self._handle_event(payload))
             elif op == 8 and not self._authed:
                 try:
                     payload = json.loads(body.decode("utf-8"))
