@@ -430,11 +430,34 @@ class HeartFChatting:
                         logger.info(f"{self.log_prefix} [HFC] No non-bot message found, skipping reply")
                         return True
 
+                    # Build pending danmaku summary when multiple messages accumulated
+                    bypass_extra_info = ""
+                    if recent_messages_list and len(recent_messages_list) > 1:
+                        danmaku_lines = []
+                        for msg in recent_messages_list:
+                            if str(msg.user_info.user_id) == bot_id:
+                                continue
+                            nick = getattr(msg.user_info, "user_nickname", None) or str(msg.user_info.user_id)
+                            text = getattr(msg, "processed_plain_text", "") or ""
+                            if text:
+                                danmaku_lines.append(f"{nick}: {text}")
+                        if len(danmaku_lines) > 1:
+                            summary = "\n".join(danmaku_lines)
+                            bypass_extra_info = (
+                                f"[弹幕堆积提示] 以下是最近堆积的 {len(danmaku_lines)} 条弹幕，"
+                                "请在回复时综合考虑这些弹幕的内容，尽量涵盖多条弹幕而不只是最新的一条：\n"
+                                f"{summary}\n"
+                                "[弹幕堆积提示结束]"
+                            )
+                            logger.info(
+                                f"{self.log_prefix} [HFC] Bypass: {len(danmaku_lines)} pending danmaku detected"
+                            )
+
                     action_to_use_info = [
                         ActionPlannerInfo(
                             action_type="reply",
                             reasoning="Bilibili Live Bypass: Direct Reply",
-                            action_data={},
+                            action_data={"bypass_extra_info": bypass_extra_info} if bypass_extra_info else {},
                             action_message=target_msg,
                             available_actions=available_actions,
                         )
@@ -823,6 +846,11 @@ class HeartFChatting:
                         injection_text = injection_manager.build_injection_text(
                             chat_id=self.chat_stream.stream_id, message_text=message_text_for_injection
                         )
+
+                        # Inject pending danmaku summary from Bilibili/DiscordVC bypass
+                        bypass_extra = (action_planner_info.action_data or {}).get("bypass_extra_info", "")
+                        if bypass_extra:
+                            injection_text = f"{bypass_extra}\n{injection_text}" if injection_text else bypass_extra
 
                         # Logic to allow tools for Bilibili Comments while keeping disabled for Live Danmu
                         # even if reasoning says "Bilibili Live Bypass: Direct Reply"

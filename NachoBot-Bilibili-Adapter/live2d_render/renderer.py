@@ -54,8 +54,6 @@ class Live2DRenderer:
 
         # Screen config
         self.display: Optional[pygame.Surface] = None
-        self.width = 800
-        self.height = 600
 
         # Tweening System
         self.active_tweens = []  # List of active tweens
