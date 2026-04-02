@@ -24,22 +24,29 @@ async def message_recv(server_connection: Server.ServerConnection):
     asyncio.create_task(notice_handler.set_server_connection(server_connection))
     await nc_message_sender.set_server_connection(server_connection)
     asyncio.create_task(connection_watchdog(server_connection))
-    async for raw_message in server_connection:
-        last_message_time = time.time()
-        try:
-            logger.debug(f"{raw_message[:1500]}..." if (len(raw_message) > 1500) else raw_message)
-            decoded_raw_message: dict = json.loads(raw_message)
-            post_type = decoded_raw_message.get("post_type")
-            if post_type in ["meta_event", "message", "notice"]:
-                await message_queue.put(decoded_raw_message)
-            elif post_type is None:
-                await put_response(decoded_raw_message)
-            else:
-                logger.warning(f"未知的 post_type: {post_type}")
-        except json.JSONDecodeError as exc:
-            logger.error(f"JSON 解码失败，跳过本条消息: {exc}")
-        except Exception as exc:
-            logger.exception(f"接收消息处理异常，跳过本条消息: {exc}")
+    try:
+        async for raw_message in server_connection:
+            last_message_time = time.time()
+            try:
+                logger.debug(f"{raw_message[:1500]}..." if (len(raw_message) > 1500) else raw_message)
+                decoded_raw_message: dict = json.loads(raw_message)
+                post_type = decoded_raw_message.get("post_type")
+                if post_type in ["meta_event", "message", "notice"]:
+                    await message_queue.put(decoded_raw_message)
+                elif post_type is None:
+                    await put_response(decoded_raw_message)
+                else:
+                    logger.warning(f"未知的 post_type: {post_type}")
+            except json.JSONDecodeError as exc:
+                logger.error(f"JSON 解码失败，跳过本条消息: {exc}")
+            except Exception as exc:
+                logger.exception(f"接收消息处理异常，跳过本条消息: {exc}")
+    except Server.exceptions.ConnectionClosedError:
+        logger.warning("与 Napcat 的 WebSocket 连接异常断开 (通常是 Napcat 超时重置)。已捕获异常，等待客户端重新连接...")
+    except Server.exceptions.ConnectionClosedOK:
+        logger.info("与 Napcat 的 WebSocket 连接已正常关闭。")
+    except Exception as e:
+        logger.error(f"message_recv 发生严重未处理异常: {e}")
 
 
 async def message_process():
