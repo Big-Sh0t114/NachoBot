@@ -336,6 +336,10 @@ def update_config():
     """更新bot_config.toml配置文件"""
     _update_config_generic("bot_config", "bot_config_template")
 
+def update_topics_config():
+    """更新topics_config.toml配置文件"""
+    _update_config_generic("topics_config", "topics_config_template")
+
 
 def update_model_config():
     """更新model_config.toml配置文件"""
@@ -428,17 +432,32 @@ class APIAdapterConfig(ConfigBase):
         return self.api_providers_dict[provider_name]
 
 
-def load_config(config_path: str) -> Config:
+def load_config(config_path: str, topics_config_path: Optional[str] = None) -> Config:
     """
     加载配置文件
     Args:
         config_path: 配置文件路径
+        topics_config_path: 额外的主题配置文件路径
     Returns:
         Config对象
     """
     # 读取配置文件
     with open(config_path, "r", encoding="utf-8") as f:
-        config_data = tomlkit.load(f)
+        config_data = dict(tomlkit.load(f))
+        
+    # 如果有分离的topics配置文件，则合并进来
+    if topics_config_path and os.path.exists(topics_config_path):
+        with open(topics_config_path, "r", encoding="utf-8") as f:
+            topics_data = dict(tomlkit.load(f))
+            
+        if "injections" not in config_data:
+            config_data["injections"] = {}
+        
+        # 兼容 [topics] 和 [injections.topics] 两种写法
+        if "injections" in topics_data and "topics" in topics_data["injections"]:  # type: ignore
+            config_data["injections"]["topics"] = topics_data["injections"]["topics"]  # type: ignore
+        elif "topics" in topics_data:
+            config_data["injections"]["topics"] = topics_data["topics"]
 
     # 创建Config对象
     try:
@@ -471,9 +490,13 @@ def api_ada_load_config(config_path: str) -> APIAdapterConfig:
 # 获取配置文件路径
 logger.info(f"NachoCore当前版本: {MMC_VERSION}")
 update_config()
+update_topics_config()
 update_model_config()
 
 logger.info("正在品鉴配置文件...")
-global_config = load_config(config_path=os.path.join(CONFIG_DIR, "bot_config.toml"))
+global_config = load_config(
+    config_path=os.path.join(CONFIG_DIR, "bot_config.toml"),
+    topics_config_path=os.path.join(CONFIG_DIR, "topics_config.toml")
+)
 model_config = api_ada_load_config(config_path=os.path.join(CONFIG_DIR, "model_config.toml"))
 logger.info("非常的新鲜，非常的美味！")
