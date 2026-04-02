@@ -25,13 +25,19 @@ class ChatWatching:
         if self.manager and self.manager.controller:
             await self.manager.controller.send_live2d_event("state", "start_viewing")
 
-        # Simulate thinking after a short delay
-        await asyncio.sleep(5.0)
-        if self.manager and self.manager.controller:
-            await self.manager.controller.send_live2d_event("state", "start_thinking")
+        # Simulate thinking after a short delay (non-blocking)
+        asyncio.create_task(self._delayed_start_thinking(5.0))
 
-        # Auto-reset if no reply comes within 15 seconds (e.g., no_reply)
-        self._schedule_gaze_timeout(15.0)
+    async def _delayed_start_thinking(self, delay: float):
+        """Background task: wait then transition to thinking state."""
+        try:
+            await asyncio.sleep(delay)
+            if self.manager and self.manager.controller:
+                await self.manager.controller.send_live2d_event("state", "start_thinking")
+            # Auto-reset if no reply comes within 15 seconds
+            self._schedule_gaze_timeout(15.0)
+        except asyncio.CancelledError:
+            pass
 
     def _schedule_gaze_timeout(self, timeout_seconds: float):
         self._cancel_gaze_timeout()

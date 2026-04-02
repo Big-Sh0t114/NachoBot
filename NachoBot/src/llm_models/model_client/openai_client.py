@@ -69,10 +69,13 @@ def _convert_messages(messages: list[Message]) -> list[ChatCompletionMessagePara
                             }
                         )
                     else:
+                        img_type = item[0].lower()
+                        if img_type == "jpg":
+                            img_type = "jpeg"
                         content.append(
                             {
                                 "type": "image_url",
-                                "image_url": {"url": f"data:image/{item[0].lower()};base64,{item[1]}"},
+                                "image_url": {"url": f"data:image/{img_type};base64,{item[1]}"},
                             }
                         )
                 elif isinstance(item, str):

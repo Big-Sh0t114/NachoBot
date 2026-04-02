@@ -1,3 +1,4 @@
+import asyncio
 import json
 import uuid
 import websockets as Server
@@ -17,6 +18,7 @@ class NCMessageSender:
     async def send_message_to_napcat(self, action: str, params: dict) -> dict:
         request_uuid = str(uuid.uuid4())
         payload = json.dumps({"action": action, "params": params, "echo": request_uuid})
+        await asyncio.sleep(0.5)  # 限制发送频率，防止 Napcat 堵塞
         await self.server_connection.send(payload)
         try:
             response = await get_response(request_uuid)
