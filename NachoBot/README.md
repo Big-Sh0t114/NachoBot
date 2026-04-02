@@ -64,7 +64,7 @@ NachoBot 是在上游 **MaiBot 0.10.3 Beta** 基础上研发的角色扮演聊�
    - Discord侧服务还需额外安装Node.js
    
 1. **拉取代码后，先复制/编辑主干配置**
-   - 从 `template/` 中复制 `bot_config_template.toml` 和 `model_config_template.toml` 到 `config/`，并删除 `_template` 后缀。
+   - 从 `template/` 中复制 `bot_config_template.toml`、`model_config_template.toml`、`topics_config_template.toml` 到 `config/`，并删除 `_template` 后缀。
    - `config/bot_config.toml`：填写 `qq_account`、按需设置人设、表达学习、权限白名单等。
    - `config/model_config.toml`：为各 `api_providers` 填入你的 `api_key`，按需调整模型映射。
    - 进入 `NachoBot-Napcat-Adapter` 目录，从 `template/` 中复制 `template_config.toml` 到 `NachoBot-Napcat-Adapter` 目录下，并删除 `template_` 前缀。

@@ -99,19 +99,35 @@ def caption_image(image_bytes: bytes, task: str = "<MORE_DETAILED_CAPTION>") -> 
     load_model()
 
     raw_image = Image.open(BytesIO(image_bytes))
+
+    # ── 处理动图：提取第一帧为独立静态图 ──────────────────────────
     if getattr(raw_image, "is_animated", False):
         raw_image.seek(0)
-    
-    # 处理透明通道并去除可能导致底层 C 库崩溃的动图元数据
-    if raw_image.mode in ('RGBA', 'LA') or (raw_image.mode == 'P' and 'transparency' in raw_image.info):
-        image = Image.new('RGB', raw_image.size, (255, 255, 255))
-        image.paste(raw_image.convert("RGBA"), mask=raw_image.convert("RGBA").split()[3])
+        # 在全新的 RGB 画布上渲染第一帧，彻底脱离动图源
+        # 不对动图 Image 对象直接调用 convert()，避免 PIL 访问
+        # 动画帧序列 / 调色板 / 透明度等元数据时触发 C 层崩溃
+        frame = raw_image.copy()          # 复制当前帧的像素
+        image = Image.new("RGB", frame.size, (255, 255, 255))
+        try:
+            image.paste(frame, mask=frame.convert("RGBA").split()[3])
+        except Exception:
+            # 如果 alpha 提取失败（某些 GIF 无透明通道），直接粘贴
+            image.paste(frame.convert("RGB"))
+        del frame
+    elif raw_image.mode in ("RGBA", "LA") or (
+        raw_image.mode == "P" and "transparency" in raw_image.info
+    ):
+        # 静态图但带透明通道
+        rgba = raw_image.convert("RGBA")
+        image = Image.new("RGB", rgba.size, (255, 255, 255))
+        image.paste(rgba, mask=rgba.split()[3])
     else:
         image = raw_image.convert("RGB")
-    
-    # 强制深拷贝并清空元数据，彻底阻断与原动图文件的内存联系
+
+    # 强制深拷贝并清空元数据，彻底阻断与原文件的内存联系
     image = image.copy()
     image.info.clear()
+    raw_image.close()
     dtype = torch.float16 if _device and "cuda" in str(_device) else torch.float32
 
     inputs = _processor(text=task, images=image, return_tensors="pt")
