@@ -1164,7 +1164,7 @@ requires-dist = [
     { name = "torch", index = "https://download.pytorch.org/whl/cu118" },
     { name = "torchaudio", index = "https://download.pytorch.org/whl/cu118" },
     { name = "torchvision", index = "https://download.pytorch.org/whl/cu118" },
-    { name = "transformers", specifier = "==4.44.2" },
+    { name = "transformers", specifier = "==4.51.3" },
     { name = "uvicorn", specifier = ">=0.41.0" },
     { name = "websockets", specifier = ">=12.0" },
 ]
