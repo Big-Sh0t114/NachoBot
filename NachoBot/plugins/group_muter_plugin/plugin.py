@@ -19,6 +19,7 @@ from src.common.logger import get_logger
 
 logger = get_logger("group_muter_plugin")
 
+
 # --- 核心状态管理器 ---
 class MuteStatus:
     _mute_until: Dict[str, Optional[float]] = {}
@@ -79,9 +80,9 @@ class MuteStatus:
             remaining = int(mute_end_time - now)
             end_str = time.strftime("%H:%M:%S", time.localtime(mute_end_time))
             display_name = cls._group_names.get(key, key)
-            logger.info(
-                f"[{display_name}] 处于静音模式，剩余 {remaining} 秒，将在 {end_str} 结束。")
+            logger.info(f"[{display_name}] 处于静音模式，剩余 {remaining} 秒，将在 {end_str} 结束。")
             cls._last_summary_log_time[key] = now
+
 
 # --- 事件处理器 (核心拦截逻辑) ---
 class MuteEventInterceptor(BaseEventHandler):
@@ -91,7 +92,9 @@ class MuteEventInterceptor(BaseEventHandler):
     weight = 10000
     intercept_message = True
 
-    async def execute(self, message: Optional[NachoMessages]) -> Tuple[bool, bool, Optional[str], Optional[CustomEventHandlerResult], Optional[NachoMessages]]:
+    async def execute(
+        self, message: Optional[NachoMessages]
+    ) -> Tuple[bool, bool, Optional[str], Optional[CustomEventHandlerResult], Optional[NachoMessages]]:
         if not message:
             return True, True, None, None, None
 
@@ -99,16 +102,14 @@ class MuteEventInterceptor(BaseEventHandler):
             return True, True, "非群聊消息，放行", None, None
 
         info = message.message_base_info
-        platform, group_id = str(info.get("platform", "")), str(
-            info.get("group_id", ""))
+        platform, group_id = str(info.get("platform", "")), str(info.get("group_id", ""))
 
         # 检查是否处于静音状态
         if not platform or not group_id or not MuteStatus.is_muted(platform, group_id):
             return True, True, "非静音群聊，放行", None, None
 
         user_id = str(info.get("user_id", ""))
-        is_admin = GroupMuterPlugin.check_permission(
-            user_id, self.plugin_config)
+        is_admin = GroupMuterPlugin.check_permission(user_id, self.plugin_config)
 
         # 如果不是管理员，拦截消息
         if not is_admin:
@@ -117,7 +118,9 @@ class MuteEventInterceptor(BaseEventHandler):
 
         # 检查关键词唤醒
         unmute_keywords = self.get_config("mute.unmute_keywords", [])
-        if self.get_config("mute.enable_unmute", True) and _is_keyword_in_text(message.plain_text or "", unmute_keywords):
+        if self.get_config("mute.enable_unmute", True) and _is_keyword_in_text(
+            message.plain_text or "", unmute_keywords
+        ):
             return True, True, "管理员解除指令，放行给Command处理", None, None
 
         # 检查@唤醒
@@ -129,13 +132,14 @@ class MuteEventInterceptor(BaseEventHandler):
         MuteStatus.log_summary(platform, group_id)
         return True, False, "静音中，管理员普通消息已拦截", None, None
 
+
 # --- 命令组件 ---
 class MuteCommand(BaseCommand):
     command_name = "mute"
     command_description = "进入静音模式，格式：#mute_<秒数> 或 #mute_true（永久）"
     command_pattern = ""
 
-    async def execute(self) -> Tuple[bool, Optional[str], int]:
+    async def execute(self) -> Tuple[bool, Optional[str], bool]:
         group_info = None
         if self.message.chat_stream:
             group_info = self.message.chat_stream.group_info
@@ -144,14 +148,15 @@ class MuteCommand(BaseCommand):
         if not group_info:
             if self.is_force_command():
                 await self.send_text("缺少群信息，无法执行该命令。")
-                return False, "missing group info", 1
-            return False, "私聊禁言吗，有点意思", 1
+                return False, "missing group info", True
+            await self.send_text("(´• ω •`)?")
+            return False, "私聊禁言吗，有点意思", True
 
         user_id = str(self.message.chat_stream.user_info.user_id)
         if not self.is_force_command() and not GroupMuterPlugin.check_permission(user_id, self.plugin_config):
             logger.warning(f"用户 {user_id} 尝试执行静音命令失败：权限不足。")
             await self.send_text("这是只有主人才能做到的事情哦~")
-            return False, "权限不足", 2
+            return False, "权限不足", True
 
         platform = self.message.chat_stream.platform
         group_id = str(group_info.group_id)
@@ -174,13 +179,13 @@ class MuteCommand(BaseCommand):
                 duration_seconds = fallback_duration
             else:
                 await self.send_text("静音时长需要写成 #mute_<秒数>，或使用 #mute_true 设置永久静音。")
-                return False, "invalid duration", 2
+                return False, "invalid duration", True
 
         MuteStatus.set_mute(platform, group_id, duration_seconds, group_name)
         await self.send_text("Zzz..")
         if duration_seconds is None:
-            return True, f"已为群聊 {group_name or group_id} 开启永久静音模式。", 2
-        return True, f"已为群聊 {group_name or group_id} 开启静音模式，持续 {duration_seconds} 秒。", 2
+            return True, f"已为群聊 {group_name or group_id} 开启永久静音模式。", True
+        return True, f"已为群聊 {group_name or group_id} 开启静音模式，持续 {duration_seconds} 秒。", True
 
 
 class MuteDefaultCommand(BaseCommand):
@@ -188,7 +193,7 @@ class MuteDefaultCommand(BaseCommand):
     command_description = "进入静音模式（默认 300 秒），格式：#mute"
     command_pattern = ""
 
-    async def execute(self) -> Tuple[bool, Optional[str], int]:
+    async def execute(self) -> Tuple[bool, Optional[str], bool]:
         group_info = None
         if self.message.chat_stream:
             group_info = self.message.chat_stream.group_info
@@ -197,8 +202,9 @@ class MuteDefaultCommand(BaseCommand):
         if not group_info:
             if self.is_force_command():
                 await self.send_text("缺少群信息，无法执行该命令。")
-                return False, "missing group info", 1
-            return False, "私聊禁言吗，有点意思", 1
+                return False, "missing group info", True
+            await self.send_text("(´• ω •`)?")
+            return False, "私聊禁言吗，有点意思", True
 
         platform = self.message.chat_stream.platform
         group_id = str(group_info.group_id)
@@ -210,7 +216,7 @@ class MuteDefaultCommand(BaseCommand):
 
         MuteStatus.set_mute(platform, group_id, duration_seconds, group_name)
         await self.send_text("Zzz..")
-        return True, f"已为群聊 {group_name or group_id} 开启静音模式，持续 {duration_seconds} 秒。", 2
+        return True, f"已为群聊 {group_name or group_id} 开启静音模式，持续 {duration_seconds} 秒。", True
 
 
 class UnmuteCommand(BaseCommand):
@@ -218,7 +224,7 @@ class UnmuteCommand(BaseCommand):
     command_description = "解除静音模式"
     command_pattern = ""
 
-    async def execute(self) -> Tuple[bool, Optional[str], int]:
+    async def execute(self) -> Tuple[bool, Optional[str], bool]:
         group_info = None
         if self.message.chat_stream:
             group_info = self.message.chat_stream.group_info
@@ -227,20 +233,22 @@ class UnmuteCommand(BaseCommand):
         if not group_info:
             if self.is_force_command():
                 await self.send_text("缺少群信息，无法执行该命令。")
-                return False, "missing group info", 1
-            return False, "该命令仅在群聊中有效。", 1
+                return False, "missing group info", True
+            await self.send_text("该命令仅在群聊中有效。")
+            return False, "该命令仅在群聊中有效。", True
 
         user_id = str(self.message.chat_stream.user_info.user_id)
         if not self.is_force_command() and not GroupMuterPlugin.check_permission(user_id, self.plugin_config):
             logger.warning(f"用户 {user_id} 尝试执行解除静音命令失败：权限不足。")
-            return False, "权限不足", 2
+            return False, "权限不足", True
 
         platform = self.message.chat_stream.platform
         group_id = str(group_info.group_id)
         group_name = group_info.group_name
 
         MuteStatus.clear_mute(platform, group_id)
-        return True, None, 2
+        return True, None, True
+
 
 # --- 日志过滤器 ---
 class GroupMuterLogFilter(logging.Filter):
@@ -269,6 +277,7 @@ class GroupMuterLogFilter(logging.Filter):
     def remove_group(cls, group_name: Optional[str]):
         cls.muted_group_names.discard(group_name)
 
+
 # --- 注册插件 ---
 @register_plugin
 class GroupMuterPlugin(BasePlugin):
@@ -282,7 +291,7 @@ class GroupMuterPlugin(BasePlugin):
     config_section_descriptions: Dict[str, str] = {
         "plugin": "插件基本设置",
         "mute": "静音功能相关配置",
-        "user_control": "权限控制"
+        "user_control": "权限控制",
     }
 
     config_schema: Dict = {
@@ -295,27 +304,16 @@ class GroupMuterPlugin(BasePlugin):
             "duration_seconds": ConfigField(
                 type=int, default=300, description="命令未指定时的默认静音时长（秒），用于 #mute"
             ),
-            "mute_keywords": ConfigField(
-                type=list, default=["#mute_true"], description="触发静音的关键词列表"
-            ),
-            "unmute_keywords": ConfigField(
-                type=list, default=["#mute_false"], description="解除静音的关键词列表"
-            ),
-            "enable_unmute": ConfigField(
-                type=bool, default=True, description="是否启用 '解除静音' 关键词指令"
-            ),
-            "at_mention_break": ConfigField(
-                type=bool, default=True, description="管理员@麦麦时是否自动解除静音"
-            ),
+            "mute_keywords": ConfigField(type=list, default=["#mute_true"], description="触发静音的关键词列表"),
+            "unmute_keywords": ConfigField(type=list, default=["#mute_false"], description="解除静音的关键词列表"),
+            "enable_unmute": ConfigField(type=bool, default=True, description="是否启用 '解除静音' 关键词指令"),
+            "at_mention_break": ConfigField(type=bool, default=True, description="管理员@麦麦时是否自动解除静音"),
         },
         "user_control": {
             "list_type": ConfigField(
-                type=str, default="whitelist", description="权限列表类型",
-                choices=["whitelist", "blacklist"]
+                type=str, default="whitelist", description="权限列表类型", choices=["whitelist", "blacklist"]
             ),
-            "list": ConfigField(
-                type=list, default=[], description="拥有权限的用户QQ号列表"
-            ),
+            "list": ConfigField(type=list, default=[], description="拥有权限的用户QQ号列表"),
         },
     }
 
@@ -341,13 +339,15 @@ class GroupMuterPlugin(BasePlugin):
         MuteDefaultCommand.command_pattern = rf"^{mention_prefix}#mute\s*$"
         if self.get_config("mute.enable_unmute", True):
             unmute_pattern = "|".join(re.escape(k) for k in unmute_kws if k.strip())
-            UnmuteCommand.command_pattern = rf"^{mention_prefix}(?:{unmute_pattern})\s*$" if unmute_kws else "__NEVER_MATCH__"
+            UnmuteCommand.command_pattern = (
+                rf"^{mention_prefix}(?:{unmute_pattern})\s*$" if unmute_kws else "__NEVER_MATCH__"
+            )
         else:
             UnmuteCommand.command_pattern = r"__NEVER_MATCH__"
 
     @staticmethod
     def check_permission(user_id: str, config: Optional[Dict]) -> bool:
-        """ 权限检查函数 """
+        """权限检查函数"""
         if not user_id or not config:
             return False
 
@@ -378,6 +378,7 @@ class GroupMuterPlugin(BasePlugin):
             unmute_info.metadata["permission"] = "admin"
             components.append((unmute_info, UnmuteCommand))
         return components
+
 
 # --- 全局辅助函数 ---
 def _is_keyword_in_text(text: str, keywords: List[str]) -> bool:
@@ -410,7 +411,7 @@ def is_bot_mentioned(message: NachoMessages) -> bool:
 
             # 检查 QQ 特有的 '@<昵称:QQ号>' 格式
             elif segment.type == "text":
-                pattern = rf'@<[^:]+:{re.escape(bot_qq)}>'
+                pattern = rf"@<[^:]+:{re.escape(bot_qq)}>"
                 if re.search(pattern, str(segment.data)):
                     return True
 

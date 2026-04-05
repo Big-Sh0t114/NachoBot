@@ -8,8 +8,6 @@ try:
 except ImportError:  # pragma: no cover
     import toml  # type: ignore
 
-BUILD_TAG = "koishi-adapter-build-2026-01-15"
-
 
 @dataclass
 class AdapterConfig:

@@ -1,5 +1,5 @@
 import asyncio
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from src.common.logger import get_logger
 from src.config.config import global_config
 from src.chat.utils.url_fetcher import extract_urls
@@ -16,7 +16,8 @@ async def build_tool_info(
     tool_executor: Any,
     mcp_executor: Any,
     has_mcp_permission: bool,
-    enable_tool: bool = True
+    enable_tool: bool = True,
+    chat_id: Optional[str] = None,
 ) -> str:
     """构建工具信息块 (从 PrivateGenerator 移植)
 
@@ -156,9 +157,23 @@ async def build_tool_info(
                 logger.info("获取到网页解析结果")
 
             return tool_info_str
-        else:
-            logger.debug("未获取到任何工具结果")
-            return ""
+
+        # 即使没有其他工具结果，也检查是否有沙盒文件概述需要注入
+        if chat_id:
+            try:
+                from src.chat.sandbox.sandbox_manager import sandbox_manager
+                sandbox = sandbox_manager.get_sandbox(chat_id)
+                file_summaries_text = sandbox.get_active_summaries()
+                if file_summaries_text:
+                    logger.info(f"[context_builder] 已注入沙盒文件概述 (chat_id={chat_id})")
+                    sandbox.tick_summaries()
+                    return file_summaries_text
+                sandbox.tick_summaries()
+            except Exception as e:
+                logger.debug(f"获取沙盒文件概述失败: {e}")
+
+        logger.debug("未获取到任何工具结果")
+        return ""
 
     except Exception as e:
         logger.error(f"工具信息获取失败: {e}")

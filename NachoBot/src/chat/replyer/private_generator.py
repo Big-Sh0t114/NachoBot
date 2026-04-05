@@ -929,6 +929,19 @@ class PrivateReplyer:
             # ADVANCED_PROMPT_INJECTION: 破甲提示词注入
             advanced_prompt_block = global_config.advanced.prompt.strip()
             extra_info_block_parts.append(f"[高级模式提示]\n{advanced_prompt_block}")
+
+        # 注入沙盒文件概述 (read_file 后 LLM 生成的概要，持续 3 轮)
+        try:
+            from src.chat.sandbox.sandbox_manager import sandbox_manager
+            sandbox = sandbox_manager.get_sandbox(chat_id)
+            file_summaries_text = sandbox.get_active_summaries()
+            if file_summaries_text:
+                extra_info_block_parts.append(file_summaries_text)
+                logger.info(f"已注入沙盒文件概述到 replyer prompt (chat_id={chat_id})")
+            sandbox.tick_summaries()
+        except Exception as e:
+            logger.debug(f"获取沙盒文件概述失败: {e}")
+
         extra_info_block = "\n".join(extra_info_block_parts)
 
         time_block = f"当前时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
