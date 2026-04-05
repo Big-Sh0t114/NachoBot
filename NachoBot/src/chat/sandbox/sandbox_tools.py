@@ -50,7 +50,49 @@ class ReadFileTool(BaseTool):
         if content is None:
             return {"error": f"File '{filename}' not found in sandbox."}
 
+        # 异步触发 LLM 概括文件内容，存入 sandbox 供后续 replyer 注入
+        import asyncio
+        asyncio.create_task(self._summarize_and_store(sandbox, filename, content))
+
         return {"content": content}
+
+    @staticmethod
+    async def _summarize_and_store(sandbox, filename: str, content: str):
+        """Use tool_use model to generate a concise summary of the file content"""
+        from src.common.logger import get_logger
+        from src.config.config import model_config
+        from src.llm_models.utils_model import LLMRequest
+
+        _logger = get_logger("sandbox_tools")
+        try:
+            # 截断过长内容以适配模型上下文 (tool_use 通常支持 32k)
+            max_content_len = 15000
+            truncated = content[:max_content_len]
+            if len(content) > max_content_len:
+                truncated += f"\n... (内容已截断，原始长度: {len(content)} 字符)"
+
+            summary_prompt = (
+                f"请概括以下文件的内容，用简洁的中文描述（200字以内），"
+                f"重点说明文件的类型、结构、关键内容和用途。\n\n"
+                f"文件名: {filename}\n"
+                f"文件内容:\n{truncated}"
+            )
+
+            llm = LLMRequest(
+                model_set=model_config.model_task_config.tool_use,
+                request_type="file_summary",
+            )
+            summary_text, _ = await llm.generate_response_async(
+                prompt=summary_prompt, max_tokens=512
+            )
+
+            if summary_text and summary_text.strip():
+                sandbox.add_file_summary(filename, summary_text.strip(), rounds=3)
+                _logger.info(f"[ReadFileTool] 文件概述生成成功: {filename} -> {summary_text[:80]}...")
+            else:
+                _logger.warning(f"[ReadFileTool] 文件概述生成为空: {filename}")
+        except Exception as e:
+            _logger.error(f"[ReadFileTool] 文件概述生成失败: {filename}, 错误: {e}")
 
 
 class ListFilesTool(BaseTool):

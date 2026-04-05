@@ -11,7 +11,7 @@ for candidate in ("NachoBot", "NachoBot-Napcat-Adapter", "NachoBot-TTS-Adapter")
         if candidate_str not in sys.path:
             sys.path.insert(0, candidate_str)
 
-from config import load_config, setup_logging, BUILD_TAG
+from config import load_config, setup_logging
 from adapter import KoishiOneBotAdapter
 
 
@@ -19,7 +19,6 @@ async def main() -> None:
     config_path = Path(__file__).parent / "config.toml"
     config = load_config(config_path)
     logger = setup_logging(config.log_level)
-    logger.info(f"Adapter build tag: {BUILD_TAG}")
     adapter = KoishiOneBotAdapter(config, logger)
     await adapter.run()
 
