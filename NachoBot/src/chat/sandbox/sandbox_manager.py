@@ -19,6 +19,15 @@ class FileRecord:
     is_temp: bool = True  # Whether to auto-clean
 
 
+@dataclass
+class FileSummaryEntry:
+    """Stores a summarized description of a read file with a TTL (rounds remaining)"""
+
+    filename: str
+    summary: str
+    remaining_rounds: int = 3
+
+
 class Sandbox:
     """
     Manages a temporary directory for a specific chat session.
@@ -34,6 +43,9 @@ class Sandbox:
         # Cache for recently read files to provide context to LLM
         self.recent_reads: Dict[str, str] = {}
         self.max_recent_reads = 3
+
+        # LLM-generated file summaries with TTL (injected into replyer prompt)
+        self.file_summaries: Dict[str, FileSummaryEntry] = {}
 
         # Ensure directory exists
         self._ensure_dir()
@@ -120,6 +132,36 @@ class Sandbox:
             context_parts.append(content)
             
         return "\n".join(context_parts)
+
+    def add_file_summary(self, filename: str, summary: str, rounds: int = 3):
+        """Store an LLM-generated summary with a TTL of `rounds` conversation cycles"""
+        self.file_summaries[filename] = FileSummaryEntry(
+            filename=filename, summary=summary, remaining_rounds=rounds
+        )
+        logger.info(f"[Sandbox:{self.chat_id}] 已存储文件概述: {filename} (有效轮次: {rounds})")
+
+    def get_active_summaries(self) -> str:
+        """Return formatted text of all active (remaining_rounds > 0) file summaries"""
+        active = [entry for entry in self.file_summaries.values() if entry.remaining_rounds > 0]
+        if not active:
+            return ""
+
+        parts = ["【沙盒文件概述】以下是你之前读取过的文件的内容概要，请在回复时参考："]
+        for entry in active:
+            parts.append(f"--- {entry.filename} (剩余 {entry.remaining_rounds} 轮) ---")
+            parts.append(entry.summary)
+        return "\n".join(parts)
+
+    def tick_summaries(self):
+        """Decrement remaining_rounds for all summaries and prune expired ones"""
+        expired = []
+        for filename, entry in self.file_summaries.items():
+            entry.remaining_rounds -= 1
+            if entry.remaining_rounds <= 0:
+                expired.append(filename)
+        for filename in expired:
+            del self.file_summaries[filename]
+            logger.debug(f"[Sandbox:{self.chat_id}] 文件概述已过期并移除: {filename}")
 
     def write_file(self, filename: str, content: str) -> str:
         """Write text content to a file"""

@@ -1,3 +1,6 @@
+4/6
+    修改了沙盒模式下文件内容对replyer组的注入逻辑
+    修复了group_muter_plugin私聊下不发送信息的bug
 4/2
     更新依赖
     分离injection_topics为单独配置文件
