@@ -47,6 +47,11 @@ class MessengerPlugin(BasePlugin):
                 default=0.4,
                 description="名称匹配最低相似度阈值（0-1）",
             ),
+            "confirmation_timeout": ConfigField(
+                type=int,
+                default=60,
+                description="转发确认等待超时（秒）",
+            ),
         },
     }
 
