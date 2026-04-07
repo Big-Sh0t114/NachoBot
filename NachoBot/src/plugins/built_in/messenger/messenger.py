@@ -22,7 +22,7 @@ from src.person_info.person_info import (
 )
 from src.chat.message_receive.chat_stream import get_chat_manager
 from src.chat.advanced.advanced_manager import advanced_manager
-from src.plugin_system.apis import send_api
+from src.plugin_system.apis import send_api, message_api
 from src.plugin_system.base.base_action import BaseAction, ActionActivationType
 from src.plugin_system.base.base_command import BaseCommand
 
@@ -44,7 +44,9 @@ class MessengerRelayAction(BaseAction):
 
     # 动作基本信息
     action_name = "messenger_relay"
-    action_description = "帮忙向指定用户转告/传话/询问，将消息传达到对方的私聊。当用户让你去问某人、告诉某人、转告某人时，必须选择此动作"
+    action_description = (
+        "帮忙向指定用户转告/传话/询问，将消息传达到对方的私聊。当用户让你去问某人、告诉某人、转告某人时，必须选择此动作"
+    )
 
     # 动作参数 - planner LLM 在选择此动作时填写
     action_parameters = {
@@ -111,6 +113,36 @@ class MessengerRelayAction(BaseAction):
         target_person = Person(person_id=matched_person_id)
         bot_target_name = target_person.person_name or matched_name
 
+        # Step 2.5: 获取目标QQ号并发送确认消息
+        target_record = PersonInfoModel.get_or_none(PersonInfoModel.person_id == matched_person_id)
+        target_qq = target_record.user_id if target_record else "未知"
+
+        confirm_msg = f"你要转告的对象是「{matched_name}」({target_qq}) 吗？\n"
+        await self.send_text(confirm_msg)
+
+        # 等待用户确认
+        timeout = int(self.get_config("components.confirmation_timeout", 60))
+        confirm_start = time.time()
+        got_reply, _ = await self.wait_for_new_message(timeout=timeout)
+        if not got_reply:
+            await self.send_text("等待确认超时，已取消转告~")
+            return True, "转告确认超时"
+
+        # 获取用户回复并解析意图
+        messages = message_api.get_messages_by_time_in_chat(
+            self.chat_id, confirm_start, time.time(), limit=1, limit_mode="latest", filter_mai=True
+        )
+        if not messages:
+            await self.send_text("没有收到回复，已取消转告~")
+            return True, "未收到确认回复"
+
+        reply_text = (messages[0].processed_plain_text or "").strip()
+        intent = self._extract_confirmation_intent(reply_text)
+
+        if intent != "confirm":
+            await self.send_text("已取消转告~(´-ω-`)")
+            return True, "用户取消或无法识别确认意图"
+
         # Step 3: 构造通知文本并注入消息触发 LLM 思考
         notice_text = f"[转告] {source_name}让你帮忙转告{bot_target_name}：{content}"
         await self._inject_trigger_message(target_stream_id, notice_text, self.platform or "qq")
@@ -130,6 +162,21 @@ class MessengerRelayAction(BaseAction):
 
         logger.info(f"[信使] 转告完成: {source_name} -> {matched_name}: {content[:30]}...")
         return True, f"已转告给{matched_name}"
+
+    @staticmethod
+    def _extract_confirmation_intent(text: str) -> Optional[str]:
+        """解析用户确认回复的意图"""
+        CONFIRM_WORDS = r"^(是|对|确认|好|嗯|ok|yes|y|确定|没错|可以|行)$"
+        REFUSE_WORDS = r"^(不|否|取消|算了|no|n|不是|不对|错了|别|停)$"
+
+        text = text.strip().lower()
+        if not text:
+            return None
+        if re.match(CONFIRM_WORDS, text, re.IGNORECASE):
+            return "confirm"
+        if re.match(REFUSE_WORDS, text, re.IGNORECASE):
+            return "refuse"
+        return None
 
     def _find_target_person(self, name: str, threshold: float = 0.4) -> Tuple[Optional[str], str]:
         """双向模糊匹配目标用户
