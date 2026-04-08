@@ -475,6 +475,10 @@ class HeartFChatting:
                 if action.action_type in _reply_equivalent:
                     has_reply = True
                     break
+                action_info = available_actions.get(action.action_type)
+                if action_info and "reply" in (action_info.associated_types or []):
+                    has_reply = True
+                    break
 
             if not has_reply and force_reply_message:
                 action_to_use_info.append(
