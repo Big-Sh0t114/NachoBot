@@ -1153,7 +1153,9 @@ class DefaultReplyer:
 
                 screen_info_content = screen_manager.get_screen()
                 if screen_info_content:
-                    extra_info_block_parts.append(f"【屏幕画面】\n{screen_info_content}")
+                    extra_info_block_parts.append(
+                        f"【屏幕画面】\n{screen_info_content}\n可参考【直播画面】的屏幕信息。"
+                    )
             except Exception:
                 pass
 

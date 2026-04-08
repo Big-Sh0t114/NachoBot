@@ -37,6 +37,12 @@ class ScreenManager:
         self.now_screen = screen_str
         self._save_screen(screen_str)
 
+    def clear_screen(self):
+        """显式清除屏幕缓存（用于 #screen_off 场景）"""
+        self.now_screen = ""
+        self._save_screen("")
+        logger.info("[ScreenManager] Screen cache cleared.")
+
     def get_screen(self):
         # Always reload from cache
         self.now_screen = self._load_screen()
