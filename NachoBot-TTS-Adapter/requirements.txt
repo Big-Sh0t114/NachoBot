@@ -22,7 +22,7 @@ cryptography>=41.0.0
 torch
 torchvision
 torchaudio
-transformers==4.51.3
+transformers==5.0.0rc3
 einops
 timm
 Pillow
