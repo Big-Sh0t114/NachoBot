@@ -525,6 +525,15 @@ class BilibiliAdapter:
             # Permanent off until next command or restart
             self._screen_manual_until = float("inf")
 
+            # Clear cached screen data so prompt builders stop injecting stale content
+            if self._screen_monitor:
+                self._screen_monitor._last_summary = None
+
+            # Push empty screen update to clear the core's ScreenManager cache
+            asyncio.ensure_future(
+                self._push_empty_screen_update(room_id)
+            )
+
         action = "enabled" if enable else "permanently disabled"
         self.logger.info(
             "Screen monitor manual %s for %s seconds by user_id=%s",
@@ -762,6 +771,46 @@ class BilibiliAdapter:
             return True  # Still consume the message so it doesn't loop as normal chat
 
         return False
+
+    async def _push_empty_screen_update(self, room_id: int) -> None:
+        """Push empty screen content to Core to clear the ScreenManager cache."""
+        try:
+            template_info = await self._get_template_info(
+                room_id, "0", "screen_clear"
+            )
+            screen_msg_info = BaseMessageInfo(
+                platform="bilibili.live",
+                message_id=f"screen_clear_{uuid.uuid4().hex[:8]}",
+                time=time.time(),
+                user_info=UserInfo(
+                    platform="bilibili.live",
+                    user_id="0",
+                    user_nickname="System",
+                ),
+                group_info=GroupInfo(
+                    platform="bilibili.live",
+                    group_id=str(room_id),
+                    group_name=str(room_id),
+                ),
+                format_info=FormatInfo(
+                    content_format=["text"],
+                    accept_format=ACCEPT_FORMAT,
+                ),
+                additional_config={"room_id": room_id},
+                template_info=template_info,
+            )
+            screen_message = MessageBase(
+                message_info=screen_msg_info,
+                message_segment=Seg(type="screen", data=""),
+                raw_message=None,
+            )
+            self.event_manager.push_to_event_queue(5, screen_message)
+            self.logger.info(
+                "Pushed empty screen update to clear Core cache for room %s",
+                room_id,
+            )
+        except Exception as e:
+            self.logger.error("Failed to push empty screen update: %s", e)
 
     async def push_screen_update(
         self,

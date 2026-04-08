@@ -126,6 +126,11 @@ class LiveRoomWorker:
                 # However, maybe check if adapter has VLM enabled?
                 # _get_screen_summary checks config internally.
 
+                # Skip push if screen is manually disabled (#screen_off)
+                manual_state = self.adapter._get_screen_manual_state()
+                if manual_state is False:
+                    continue
+
                 await self.adapter.push_screen_update(
                     self.room_id, timestamp=time.time()
                 )

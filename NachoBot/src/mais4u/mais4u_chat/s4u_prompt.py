@@ -35,7 +35,6 @@ def init_prompt():
 你现在正在你主人甘油三酯的Bilibili直播间内作为虚拟主播进行聊天
 
 你可以看见用户发送的弹幕，礼物和superchat
-你可以看见你主人当前的电脑屏幕，目前屏幕的内容是:
 {screen_info}
 
 {relation_info_block}
@@ -106,7 +105,6 @@ def init_prompt():
 
 当前时间：{time_block}
 
-你可以看见你主人当前的电脑屏幕，目前屏幕的内容是:
 {screen_info}
 
 直播间有点安静，利用屏幕上的视觉信息来打破沉默。
@@ -356,7 +354,12 @@ class PromptBuilder:
 
         sc_info = self.build_sc_info(message)
 
-        screen_info = screen_manager.get_screen_str()
+        # 仅当屏幕内容非空时注入，#screen_off 后不浪费 token
+        raw_screen = screen_manager.get_screen()
+        if raw_screen:
+            screen_info = f"你可以看见你主人当前的电脑屏幕，目前屏幕的内容是:\n{raw_screen}"
+        else:
+            screen_info = ""
 
         internal_state = internal_manager.get_internal_state()
 
@@ -421,7 +424,12 @@ class PromptBuilder:
         主播模式：构建屏幕自言自语 prompt（无有效弹幕时使用）
         """
         expression_habits_block = await self.build_expression_habits(chat_stream, "直播间有点安静", "观众")
-        screen_info = screen_manager.get_screen_str()
+        # 仅当屏幕内容非空时注入
+        raw_screen = screen_manager.get_screen()
+        if raw_screen:
+            screen_info = f"你可以看见你主人当前的电脑屏幕，目前屏幕的内容是:\n{raw_screen}"
+        else:
+            screen_info = ""
         time_block = f"当前时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         mood = mood_manager.get_mood_by_chat_id(chat_stream.stream_id)
 
@@ -438,7 +446,7 @@ class PromptBuilder:
             "s4u_screen_talk_prompt",
             identity=identity,
             expression_habits_block=expression_habits_block,
-            screen_info=screen_info if screen_info else "（无法看到屏幕内容）",
+            screen_info=screen_info,
             time_block=time_block,
             mood_state=mood.mood_state,
         )

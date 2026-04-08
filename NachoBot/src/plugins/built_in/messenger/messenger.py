@@ -54,6 +54,9 @@ class MessengerRelayAction(BaseAction):
         "content": "要转述的具体内容",
     }
 
+    # 声明此动作自带回复语义，阻止 heart_flow 自动强加 reply 动作
+    associated_types = ["reply"]
+
     # 使用条件 - 指导 planner LLM 何时选择此动作
     action_require = [
         "当用户让你帮忙联系、询问、转告、传话、带话给某个人时，必须选择此动作",
@@ -117,26 +120,45 @@ class MessengerRelayAction(BaseAction):
         target_record = PersonInfoModel.get_or_none(PersonInfoModel.person_id == matched_person_id)
         target_qq = target_record.user_id if target_record else "未知"
 
-        confirm_msg = f"你要转告的对象是「{matched_name}」({target_qq}) 吗？\n"
+        confirm_msg = f"你要转告的对象是「{matched_name}」(QQ: {target_qq}) 吗？\n"
         await self.send_text(confirm_msg)
 
-        # 等待用户确认
+        # 等待用户确认 — 自定义轮询，以发送确认消息后的时间为基准
         timeout = int(self.get_config("components.confirmation_timeout", 60))
         confirm_start = time.time()
-        got_reply, _ = await self.wait_for_new_message(timeout=timeout)
+        logger.info(f"[信使] 等待用户确认转告目标: {matched_name} (timeout={timeout}s, baseline={confirm_start})")
+
+        got_reply = False
+        reply_text = ""
+        wait_start = asyncio.get_event_loop().time()
+
+        while True:
+            elapsed = asyncio.get_event_loop().time() - wait_start
+            if elapsed > timeout:
+                logger.info(f"[信使] 等待确认超时 ({timeout}s)")
+                break
+
+            # 仅检测 confirm_start 之后的用户消息（排除 bot 自身）
+            user_messages = message_api.get_messages_by_time_in_chat(
+                self.chat_id,
+                confirm_start,
+                time.time(),
+                limit=1,
+                limit_mode="latest",
+                filter_mai=True,
+            )
+            if user_messages:
+                reply_text = (user_messages[0].processed_plain_text or "").strip()
+                got_reply = True
+                logger.info(f"[信使] 收到用户确认回复: {reply_text}")
+                break
+
+            await asyncio.sleep(1.0)
+
         if not got_reply:
             await self.send_text("等待确认超时，已取消转告~")
             return True, "转告确认超时"
 
-        # 获取用户回复并解析意图
-        messages = message_api.get_messages_by_time_in_chat(
-            self.chat_id, confirm_start, time.time(), limit=1, limit_mode="latest", filter_mai=True
-        )
-        if not messages:
-            await self.send_text("没有收到回复，已取消转告~")
-            return True, "未收到确认回复"
-
-        reply_text = (messages[0].processed_plain_text or "").strip()
         intent = self._extract_confirmation_intent(reply_text)
 
         if intent != "confirm":
@@ -144,8 +166,9 @@ class MessengerRelayAction(BaseAction):
             return True, "用户取消或无法识别确认意图"
 
         # Step 3: 构造通知文本并注入消息触发 LLM 思考
-        notice_text = f"[转告] {source_name}让你帮忙转告{bot_target_name}：{content}"
-        await self._inject_trigger_message(target_stream_id, notice_text, self.platform or "qq")
+        await self._inject_trigger_message(
+            target_stream_id, source_name, bot_target_name, content, self.platform or "qq"
+        )
 
         # 记录转告来源（供目标用户回复时解析代词）
         MessengerRelayAction._relay_source_cache[target_stream_id] = source_name
@@ -165,17 +188,22 @@ class MessengerRelayAction(BaseAction):
 
     @staticmethod
     def _extract_confirmation_intent(text: str) -> Optional[str]:
-        """解析用户确认回复的意图"""
-        CONFIRM_WORDS = r"^(是|对|确认|好|嗯|ok|yes|y|确定|没错|可以|行)$"
-        REFUSE_WORDS = r"^(不|否|取消|算了|no|n|不是|不对|错了|别|停)$"
+        """解析用户确认回复的意图
+
+        使用前缀匹配，容忍用户输入多余字符（如"是d"、"好的"、"确认吧"）。
+        否定词优先检测，避免"不是"被"是"误匹配。
+        """
+        REFUSE_PATTERN = r"^(不是|不对|不行|不要|不用|错了|取消|算了|别|停|否|no\b|n\b)"
+        CONFIRM_PATTERN = r"^(是|对|确认|好|嗯|ok\b|yes\b|y\b|true\b|确定|没错|可以|行)"
 
         text = text.strip().lower()
         if not text:
             return None
-        if re.match(CONFIRM_WORDS, text, re.IGNORECASE):
-            return "confirm"
-        if re.match(REFUSE_WORDS, text, re.IGNORECASE):
+        # 否定优先：避免 "不是" 被 "是" 前缀误匹配
+        if re.match(REFUSE_PATTERN, text, re.IGNORECASE):
             return "refuse"
+        if re.match(CONFIRM_PATTERN, text, re.IGNORECASE):
+            return "confirm"
         return None
 
     def _find_target_person(self, name: str, threshold: float = 0.4) -> Tuple[Optional[str], str]:
@@ -290,7 +318,9 @@ class MessengerRelayAction(BaseAction):
             logger.error(f"[信使] 查找私聊 stream_id 失败: {e}")
             return None
 
-    async def _inject_trigger_message(self, target_stream_id: str, notice_text: str, platform: str):
+    async def _inject_trigger_message(
+        self, target_stream_id: str, source_name: str, bot_target_name: str, content: str, platform: str
+    ):
         """直接用 generator_api 生成转告回复并发送到目标私聊
 
         不存储假的用户消息（否则 LLM 会误以为是目标用户在说话），
@@ -338,6 +368,8 @@ class MessengerRelayAction(BaseAction):
                 # 直接生成回复，通过 extra_info 传递转告内容
                 from src.plugin_system.apis import generator_api
 
+                notice_text = f"[转告] {source_name}让你帮忙转告{bot_target_name}：{content}"
+
                 success, llm_response = await generator_api.generate_reply(
                     chat_stream=target_stream,
                     extra_info=f"你现在需要帮忙转告一条消息给对方。转告内容如下：{notice_text}\n请你自然地将这条转告消息传达给对方。",
@@ -346,12 +378,11 @@ class MessengerRelayAction(BaseAction):
                 )
 
                 if success and llm_response and llm_response.reply_set:
-                    for reply_item in llm_response.reply_set.reply_data:
-                        if reply_item.content and reply_item.content_type.value == "text":
-                            await send_api.text_to_stream(
-                                text=reply_item.content,
-                                stream_id=target_stream_id,
-                            )
+                    await send_api.custom_reply_set_to_stream(
+                        reply_set=llm_response.reply_set,
+                        stream_id=target_stream_id,
+                        typing=True,
+                    )
                     logger.info(f"[信使] 已生成并发送转告回复到 stream: {target_stream_id}")
                 else:
                     logger.warning(f"[信使] 回复生成失败或为空，stream: {target_stream_id}")
@@ -496,12 +527,11 @@ class ConveyCommand(BaseCommand):
                 )
 
                 if success and llm_response and llm_response.reply_set:
-                    for reply_item in llm_response.reply_set.reply_data:
-                        if reply_item.content and reply_item.content_type.value == "text":
-                            await send_api.text_to_stream(
-                                text=reply_item.content,
-                                stream_id=target_stream_id,
-                            )
+                    await send_api.custom_reply_set_to_stream(
+                        reply_set=llm_response.reply_set,
+                        stream_id=target_stream_id,
+                        typing=True,
+                    )
                     logger.info(f"[信使] convey 回复已发送到 stream: {target_stream_id}")
                 else:
                     logger.warning(f"[信使] convey 回复生成失败或为空，stream: {target_stream_id}")

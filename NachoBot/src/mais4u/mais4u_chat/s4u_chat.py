@@ -953,8 +953,8 @@ class S4UChat:
         from .s4u_prompt import prompt_builder
         from .screen_manager import screen_manager
 
-        # 检查是否有屏幕内容可用
-        screen_info = screen_manager.get_screen_str()
+        # 检查是否有屏幕内容可用（使用 get_screen 而非 get_screen_str，后者在屏幕关闭时仍返回非空回退文本）
+        screen_info = screen_manager.get_screen()
         if not screen_info:
             logger.debug(f"[{self.stream_name}] 无屏幕内容可用，跳过自言自语")
             return
