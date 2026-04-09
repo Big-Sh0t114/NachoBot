@@ -156,52 +156,53 @@ class TTSPipeline:
 
     async def _buffer_queue_handler(self, group_id: str) -> None:
         """处理每个群/用户的缓冲队列，合成语音并发送"""
-        message_text, latest_message_obj = await self.text_buffer_dict[group_id].get()
-        self.text_buffer_dict[group_id].task_done()
-        if not message_text or not latest_message_obj:
-            logger.warning("数据为空，跳过处理")
-            await self.cleanup_task(group_id)
-            return
-        text: str = message_text.strip()
-        logger.info(f"[聊天: {group_id}]将合成文本: {text}")
-        message = latest_message_obj
-        text_lang = None
-        if message.message_info.additional_config:
-            text_lang = message.message_info.additional_config.get(
-                "tts_language"
-            ) or message.message_info.additional_config.get("text_lang")
-        new_seg = await self.get_voice_no_stream(text, message.message_info.platform, text_lang=text_lang)
         try:
-            if not new_seg:
-                logger.warning("语音消息为空，跳过发送")
-                await self.cleanup_task(group_id)
-                return
-            if not message.message_info.format_info:
-                message.message_info.format_info = FormatInfo(
-                    content_format=[],
-                    accept_format=[],
-                )
-            message.message_segment = new_seg
-            message.message_info.format_info.content_format = ["voice"]
-            if not message.message_info.additional_config:
-                message.message_info.additional_config = {}
-            message.message_info.additional_config["original_text"] = text
-            if text_lang:
-                message.message_info.additional_config["text_lang"] = text_lang
-                message.message_info.additional_config["tts_language"] = text_lang
-            logger.debug(
-                f"TTS->Napcat 即将发送: platform={message.message_info.platform}, formats={message.message_info.format_info.content_format}"
-            )
-            ok = await self.server.send_message(message)
-            logger.info(
-                f"TTS->Napcat send: platform={message.message_info.platform}, ok={ok}, formats={message.message_info.format_info.content_format}"
-            )
-            if not ok:
-                logger.warning("send_message 返回 False，检查平台映射或连接状态")
-        except Exception as exc:
-            logger.exception(f"TTS->Napcat 发送异常: {exc}")
-        await self.cleanup_task(group_id)
-        return
+            while not self.text_buffer_dict[group_id].empty():
+                message_text, latest_message_obj = await self.text_buffer_dict[group_id].get()
+                try:
+                    if not message_text or not latest_message_obj:
+                        logger.warning("数据为空，跳过处理")
+                        continue
+                    text: str = message_text.strip()
+                    logger.info(f"[聊天: {group_id}]将合成文本: {text}")
+                    message = latest_message_obj
+                    text_lang = None
+                    if message.message_info.additional_config:
+                        text_lang = message.message_info.additional_config.get(
+                            "tts_language"
+                        ) or message.message_info.additional_config.get("text_lang")
+                    new_seg = await self.get_voice_no_stream(text, message.message_info.platform, text_lang=text_lang)
+                    if not new_seg:
+                        logger.warning("语音消息为空，跳过发送")
+                        continue
+                    if not message.message_info.format_info:
+                        message.message_info.format_info = FormatInfo(
+                            content_format=[],
+                            accept_format=[],
+                        )
+                    message.message_segment = new_seg
+                    message.message_info.format_info.content_format = ["voice"]
+                    if not message.message_info.additional_config:
+                        message.message_info.additional_config = {}
+                    message.message_info.additional_config["original_text"] = text
+                    if text_lang:
+                        message.message_info.additional_config["text_lang"] = text_lang
+                        message.message_info.additional_config["tts_language"] = text_lang
+                    logger.debug(
+                        f"TTS->Napcat 即将发送: platform={message.message_info.platform}, formats={message.message_info.format_info.content_format}"
+                    )
+                    ok = await self.server.send_message(message)
+                    logger.info(
+                        f"TTS->Napcat send: platform={message.message_info.platform}, ok={ok}, formats={message.message_info.format_info.content_format}"
+                    )
+                    if not ok:
+                        logger.warning("send_message 返回 False，检查平台映射或连接状态")
+                except Exception as exc:
+                    logger.exception(f"TTS->Napcat 发送异常: {exc}")
+                finally:
+                    self.text_buffer_dict[group_id].task_done()
+        finally:
+            await self.cleanup_task(group_id)
 
     async def cleanup_task(self, group_id: str):
         task = self.buffer_task_dict.pop(group_id)

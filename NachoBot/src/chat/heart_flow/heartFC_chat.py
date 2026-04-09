@@ -113,6 +113,51 @@ class HeartFChatting:
 
         self.no_reply_until_call = False
 
+        # 用户屏蔽列表: {user_id: 过期时间戳}
+        self.blocked_users: Dict[str, float] = {}
+
+    def _is_user_blocked(self, user_id: str) -> bool:
+        """检查用户是否在屏蔽列表中且未过期"""
+        if user_id not in self.blocked_users:
+            return False
+        if time.time() > self.blocked_users[user_id]:
+            del self.blocked_users[user_id]
+            logger.info(f"{self.log_prefix} 用户 {user_id} 的屏蔽已到期，已自动解除")
+            return False
+        return True
+
+    def _filter_blocked_users(self, messages: List["DatabaseMessages"]) -> List["DatabaseMessages"]:
+        """从消息列表中过滤掉被屏蔽用户的消息"""
+        if not self.blocked_users:
+            return messages
+        # 清理过期条目
+        now = time.time()
+        expired = [uid for uid, exp in self.blocked_users.items() if now > exp]
+        for uid in expired:
+            del self.blocked_users[uid]
+            logger.info(f"{self.log_prefix} 用户 {uid} 的屏蔽已到期，已自动解除")
+        if not self.blocked_users:
+            return messages
+        return [msg for msg in messages if not self._is_user_blocked(str(msg.user_info.user_id))]
+
+    def _resolve_user_id_by_nickname(self, nickname: str) -> Optional[str]:
+        """通过昵称从最近消息中查找用户的真实QQ号"""
+        try:
+            recent_messages = get_raw_msg_before_timestamp_with_chat(
+                chat_id=self.stream_id,
+                timestamp=time.time(),
+                limit=100,
+            )
+            for msg in recent_messages:
+                user_nickname = msg.user_info.user_nickname or ""
+                user_cardname = msg.user_info.user_cardname or ""
+                user_id = str(msg.user_info.user_id)
+                if nickname == user_nickname or nickname == user_cardname:
+                    return user_id
+        except Exception as e:
+            logger.error(f"{self.log_prefix} 通过昵称解析QQ号失败: {e}")
+        return None
+
     async def start(self):
         """检查是否需要启动主循环，如果未激活则启动。"""
 
@@ -192,6 +237,9 @@ class HeartFChatting:
             filter_mai=True,
             filter_command=True,
         )
+
+        # 过滤被屏蔽用户的消息
+        recent_messages_list = self._filter_blocked_users(recent_messages_list)
 
         if len(recent_messages_list) >= 1:
             # !处理no_reply_until_call逻辑
@@ -380,6 +428,8 @@ class HeartFChatting:
                     timestamp=time.time(),
                     limit=int(context_size * 0.6),
                 )
+                # 过滤被屏蔽用户的消息
+                message_list_before_now = self._filter_blocked_users(message_list_before_now)
                 promise_snippets = []
                 if not self.chat_stream.group_info:  # 群聊不启用誓言缓存
                     promise_snippets = promise_cache_manager.collect_snippets_for_messages(
@@ -822,6 +872,15 @@ class HeartFChatting:
                     self.no_reply_until_call = True
                     return {"action_type": "no_reply_until_call", "success": True, "reply_text": "", "command": ""}
 
+                elif action_planner_info.action_type == "block_user":
+                    return await self._handle_block_user(
+                        action_planner_info,
+                        chosen_action_plan_infos,
+                        thinking_id,
+                        available_actions,
+                        cycle_timers,
+                    )
+
                 elif action_planner_info.action_type == "make_appoint":
                     return await self._handle_make_appoint(
                         action_planner_info,
@@ -1219,3 +1278,95 @@ class HeartFChatting:
         )
 
         return {"action_type": "cancel_appoint", "success": cancel_success, "reply_text": reply_text}
+
+    async def _handle_block_user(
+        self,
+        action_planner_info: ActionPlannerInfo,
+        chosen_action_plan_infos: List[ActionPlannerInfo],
+        thinking_id: str,
+        available_actions: Dict[str, ActionInfo],
+        cycle_timers: Dict[str, float],
+    ):
+        """处理 block_user 动作：屏蔽指定用户15分钟"""
+        action_data = action_planner_info.action_data or {}
+        # 兼容旧版本的 target_qq 参数
+        target_name = str(action_data.get("target_name", action_data.get("target_qq", "")))
+
+        if not target_name:
+            logger.warning(f"{self.log_prefix} block_user 缺少 target_name 参数")
+            return {"action_type": "block_user", "success": False, "reply_text": ""}
+
+        # 始终通过昵称解析QQ号，以免用户的名称正好是纯数字
+        resolved_id = self._resolve_user_id_by_nickname(target_name)
+        if resolved_id:
+            logger.info(
+                f"{self.log_prefix} block_user 将用户 '{target_name}' 解析为 QQ号 {resolved_id}"
+            )
+            target_user_id = resolved_id
+        else:
+            logger.warning(
+                f"{self.log_prefix} block_user 无法将 '{target_name}' 解析为有效的QQ号"
+            )
+            return {"action_type": "block_user", "success": False, "reply_text": ""}
+
+        # 仅群聊可用
+        if not self.chat_stream.group_info:
+            logger.warning(f"{self.log_prefix} block_user 仅适用于群聊")
+            return {"action_type": "block_user", "success": False, "reply_text": ""}
+
+        # 不能屏蔽自己
+        bot_id = str(global_config.bot.qq_account)
+        if target_user_id == bot_id:
+            logger.warning(f"{self.log_prefix} 不能屏蔽自己")
+            return {"action_type": "block_user", "success": False, "reply_text": ""}
+
+        # 添加到屏蔽列表，15分钟
+        block_duration = 15 * 60  # 15分钟
+        self.blocked_users[target_user_id] = time.time() + block_duration
+        logger.info(f"{self.log_prefix} 已屏蔽用户 {target_user_id}，持续15分钟")
+
+        # 生成确认回复
+        confirm_extra_info = (
+            f"[用户屏蔽] 你已屏蔽该用户({target_name})的消息，持续15分钟。"
+            f"在此期间你将看不到该用户的任何消息。你需要告知该用户你刚刚屏蔽了他的消息。"
+        )
+
+        reply_text = ""
+        try:
+            success, llm_response = await generator_api.generate_reply(
+                chat_stream=self.chat_stream,
+                reply_message=action_planner_info.action_message,
+                available_actions=available_actions,
+                chosen_actions=chosen_action_plan_infos,
+                reply_reason=action_planner_info.reasoning or "",
+                request_type="replyer",
+                from_plugin=False,
+                extra_info=confirm_extra_info,
+            )
+            if success and llm_response and llm_response.reply_set:
+                _, reply_text, _ = await self._send_and_store_reply(
+                    response_set=llm_response.reply_set,
+                    action_message=action_planner_info.action_message,
+                    cycle_timers=cycle_timers,
+                    thinking_id=thinking_id,
+                    actions=chosen_action_plan_infos,
+                    selected_expressions=llm_response.selected_expressions,
+                )
+            else:
+                reply_text = ""
+        except Exception as e:
+            logger.error(f"{self.log_prefix} block_user 回复生成异常: {e}")
+            reply_text = ""
+
+        # 存储 action info
+        await database_api.store_action_info(
+            chat_stream=self.chat_stream,
+            action_build_into_prompt=True,
+            action_prompt_display=f"你屏蔽了用户(QQ:{target_user_id})的消息，持续15分钟",
+            action_done=True,
+            thinking_id=thinking_id,
+            action_data={"target_qq": target_user_id, "duration": block_duration},
+            action_name="block_user",
+        )
+
+        return {"action_type": "block_user", "success": True, "reply_text": reply_text}
