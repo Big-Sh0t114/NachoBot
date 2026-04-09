@@ -1,3 +1,5 @@
+4/9
+    新增block_user动作，用于临时屏蔽用户
 4/8
     优化Bilibili直播间screen_info注入
     修复信使插件上次更新产生的bug

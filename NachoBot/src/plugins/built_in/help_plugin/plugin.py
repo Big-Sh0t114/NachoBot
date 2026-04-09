@@ -188,13 +188,26 @@ class HelpCommand(BaseCommand):
             public_entries.append((diary_view_pattern, desc))
             existing_patterns.add(diary_view_pattern)
 
-        # 管理员指令：手工加入 #adv_check
+        # 管理员指令：手工加入 #adv_check 和 #unban_<QQ号>
         if show_admin and user_id and advanced_manager.is_admin(user_id):
             adv_check_pattern = "#adv_check"
             if adv_check_pattern not in existing_patterns and adv_check_pattern not in disabled_commands:
                 desc = "查看开启高级模式的用户列表" + self._scope_suffix("adv_check", adv_check_pattern)
                 admin_entries.append((adv_check_pattern, desc))
                 existing_patterns.add(adv_check_pattern)
+
+            unban_pattern = "#unban_<QQ号>"
+            if unban_pattern not in existing_patterns and unban_pattern not in disabled_commands:
+                desc = "立即解除指定用户的屏蔽(管理员专用)" + self._scope_suffix("unban", unban_pattern)
+                admin_entries.append((unban_pattern, desc))
+                existing_patterns.add(unban_pattern)
+                
+        # 始终可见的手工全局命令：#check_blocked_user
+        check_blocked_pattern = "#check_blocked_user"
+        if check_blocked_pattern not in existing_patterns and check_blocked_pattern not in disabled_commands:
+            desc = "查看当前被屏蔽的用户及剩余时间" + self._scope_suffix("check_blocked_user", check_blocked_pattern)
+            public_entries.append((check_blocked_pattern, desc))
+            existing_patterns.add(check_blocked_pattern)
 
     def _is_diary_command_enabled(self) -> bool:
         """检测日记插件命令是否开启"""
