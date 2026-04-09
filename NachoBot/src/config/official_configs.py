@@ -36,6 +36,9 @@ class BotConfig(ConfigBase):
     sandbox_whitelist: list[str] = field(default_factory=lambda: [])
     """沙盒白名单列表"""
 
+    llm_block: bool = True
+    """是否启用LLM自主屏蔽用户功能（群聊中屏蔽垃圾/骚扰信息发送者）"""
+
 
 @dataclass
 class PersonalityConfig(ConfigBase):

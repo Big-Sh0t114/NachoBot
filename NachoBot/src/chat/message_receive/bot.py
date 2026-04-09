@@ -181,6 +181,83 @@ class ChatBot:
                     await send_api.text_to_stream(reply_text, message.chat_stream.stream_id)
                     return True, reply_text, False
 
+                if stripped == "#check_blocked_user":
+                    if message.chat_stream and message.chat_stream.group_info:
+                        message.is_command = True
+                        if force_requested:
+                            _apply_command_text()
+                        stream_id = message.chat_stream.stream_id
+                        from src.chat.heart_flow.heartflow import heartflow
+                        from src.chat.heart_flow.heartFC_chat import HeartFChatting
+
+                        hfc = heartflow.heartflow_chat_list.get(stream_id)
+                        if not hfc or not isinstance(hfc, HeartFChatting):
+                            await send_api.text_to_stream(
+                                "当前聊天没有活跃的心流实例或不支持屏蔽功能。",
+                                stream_id,
+                            )
+                            return True, "no heartflow", False
+                        # 清理过期条目
+                        now = time.time()
+                        expired = [uid for uid, exp in hfc.blocked_users.items() if now > exp]
+                        for uid in expired:
+                            del hfc.blocked_users[uid]
+                        if not hfc.blocked_users:
+                            await send_api.text_to_stream("当前没有被屏蔽的用户", stream_id)
+                            return True, "no blocked users", False
+                        lines = ["当前被屏蔽的用户："]
+                        for user_id_str, expire_time in hfc.blocked_users.items():
+                            remaining = expire_time - now
+                            if remaining <= 0:
+                                continue
+                            minutes = int(remaining // 60)
+                            seconds = int(remaining % 60)
+                            lines.append(f"- QQ: {user_id_str}，剩余 {minutes}分{seconds}秒")
+                        if len(lines) == 1:
+                            await send_api.text_to_stream("当前没有被屏蔽的用户", stream_id)
+                            return True, "no blocked users", False
+                        await send_api.text_to_stream("\n".join(lines), stream_id)
+                        return True, "blocked users listed", False
+
+                # #unban_<QQ号>: 管理员立即解除指定用户的屏蔽
+                unban_match = re.match(r"^#unban_(\d+)$", stripped)
+                if unban_match:
+                    if message.chat_stream and message.chat_stream.group_info:
+                        message.is_command = True
+                        if force_requested:
+                            _apply_command_text()
+                        target_qq = unban_match.group(1)
+                        if not advanced_manager.is_admin(user_id):
+                            await send_api.text_to_stream(
+                                "只有管理员才能使用此指令哦~(´-ω-`)",
+                                message.chat_stream.stream_id,
+                            )
+                            return True, "not admin", False
+                        stream_id = message.chat_stream.stream_id
+                        from src.chat.heart_flow.heartflow import heartflow
+                        from src.chat.heart_flow.heartFC_chat import HeartFChatting
+
+                        hfc = heartflow.heartflow_chat_list.get(stream_id)
+                        if not hfc or not isinstance(hfc, HeartFChatting):
+                            await send_api.text_to_stream(
+                                "当前聊天没有活跃的心流实例。",
+                                stream_id,
+                            )
+                            return True, "no heartflow", False
+                        if target_qq in hfc.blocked_users:
+                            del hfc.blocked_users[target_qq]
+                            await send_api.text_to_stream(
+                                f"已解除对用户 {target_qq} 的屏蔽。",
+                                stream_id,
+                            )
+                            return True, f"unblocked {target_qq}", False
+                        else:
+                            await send_api.text_to_stream(
+                                f"用户 {target_qq} 当前未被屏蔽。",
+                                stream_id,
+                            )
+                            return True, "not blocked", False
+
             # 使用新的组件注册中心查找命令
             command_result = component_registry.find_command_by_text(command_text)
             if command_result:
