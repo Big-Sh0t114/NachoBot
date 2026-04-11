@@ -442,8 +442,6 @@ class LiveRoomWorker:
         user_id = str(data.get("uid") or "")
 
         timestamp = time.time()
-        if data.get("timestamp"):
-            timestamp = self._safe_get_float(data["timestamp"], timestamp)
 
         coin_type = str(data.get("coin_type") or "")
         total_coin = self._safe_get_int(data.get("total_coin"), 0)
@@ -477,8 +475,6 @@ class LiveRoomWorker:
         price = self._safe_get_int(data.get("price"), 0)
 
         timestamp = time.time()
-        if data.get("ts"):
-            timestamp = self._safe_get_float(data["ts"], timestamp)
 
         await self.adapter.handle_incoming_superchat(
             room_id=self.room_id,
@@ -499,8 +495,6 @@ class LiveRoomWorker:
         gift_name = str(data.get("gift_name") or "舰长")
 
         timestamp = time.time()
-        if data.get("start_time"):
-            timestamp = self._safe_get_float(data["start_time"], timestamp)
 
         price_coin = self._safe_get_int(data.get("price"), 0)
         price = price_coin // 1000
@@ -605,7 +599,7 @@ class LiveRoomWorker:
             text=message_text,
             user_id=user_id,
             user_name=user_name,
-            timestamp=timestamp_ms / 1000 if timestamp_ms else time.time(),
+            timestamp=time.time(),
             reply_mid=reply_mid,
             reply_dmid=reply_dmid,
             is_mentioned=is_mentioned,
