@@ -465,7 +465,7 @@ max_tokens = 800
 model_list = ["waifubot-view","Florence-2"]
 max_tokens = 800
 
-[model_task_config.bilibili_vlm] # Bilibili 直播画面识别（本地 Qwen3.5）
+[model_task_config.bilibili_vlm] # Bilibili 直播画面识别
 model_list = ["Florence-2"]
 max_tokens = 114514
 

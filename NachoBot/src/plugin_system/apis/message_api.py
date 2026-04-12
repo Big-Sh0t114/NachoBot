@@ -100,9 +100,13 @@ def get_messages_by_time_in_chat(
         raise ValueError("chat_id 必须是字符串类型")
     if filter_mai:
         return filter_mai_messages(
-            get_raw_msg_by_timestamp_with_chat(chat_id, start_time, end_time, limit, limit_mode, filter_command)
+            get_raw_msg_by_timestamp_with_chat(
+                chat_id, start_time, end_time, limit, limit_mode, filter_command=filter_command
+            )
         )
-    return get_raw_msg_by_timestamp_with_chat(chat_id, start_time, end_time, limit, limit_mode, filter_command)
+    return get_raw_msg_by_timestamp_with_chat(
+        chat_id, start_time, end_time, limit, limit_mode, filter_command=filter_command
+    )
 
 
 def get_messages_by_time_in_chat_inclusive(
@@ -142,11 +146,11 @@ def get_messages_by_time_in_chat_inclusive(
     if filter_mai:
         return filter_mai_messages(
             get_raw_msg_by_timestamp_with_chat_inclusive(
-                chat_id, start_time, end_time, limit, limit_mode, filter_command
+                chat_id, start_time, end_time, limit, limit_mode, filter_command=filter_command
             )
         )
     return get_raw_msg_by_timestamp_with_chat_inclusive(
-        chat_id, start_time, end_time, limit, limit_mode, filter_command
+        chat_id, start_time, end_time, limit, limit_mode, filter_command=filter_command
     )
 
 
@@ -265,7 +269,7 @@ def get_messages_before_time(timestamp: float, limit: int = 0, filter_mai: bool 
 
 
 def get_messages_before_time_in_chat(
-    chat_id: str, timestamp: float, limit: int = 0, filter_mai: bool = False
+    chat_id: str, timestamp: float, limit: int = 0, filter_mai: bool = False, filter_command: bool = False
 ) -> List[DatabaseMessages]:
     """
     获取指定聊天中指定时间戳之前的消息
@@ -275,6 +279,7 @@ def get_messages_before_time_in_chat(
         timestamp: 时间戳
         limit: 限制返回的消息数量，0为不限制
         filter_mai: 是否过滤自身的消息，默认为False
+        filter_command: 是否过滤命令消息，默认为False
 
     Returns:
         List[Dict[str, Any]]: 消息列表
@@ -291,8 +296,12 @@ def get_messages_before_time_in_chat(
     if not isinstance(chat_id, str):
         raise ValueError("chat_id 必须是字符串类型")
     if filter_mai:
-        return filter_mai_messages(get_raw_msg_before_timestamp_with_chat(chat_id, timestamp, limit))
-    return get_raw_msg_before_timestamp_with_chat(chat_id, timestamp, limit)
+        return filter_mai_messages(
+            get_raw_msg_before_timestamp_with_chat(
+                chat_id, timestamp, limit, filter_command=filter_command
+            )
+        )
+    return get_raw_msg_before_timestamp_with_chat(chat_id, timestamp, limit, filter_command=filter_command)
 
 
 def get_messages_before_time_for_users(
@@ -320,7 +329,12 @@ def get_messages_before_time_for_users(
 
 
 def get_recent_messages(
-    chat_id: str, hours: float = 24.0, limit: int = 100, limit_mode: str = "latest", filter_mai: bool = False
+    chat_id: str,
+    hours: float = 24.0,
+    limit: int = 100,
+    limit_mode: str = "latest",
+    filter_mai: bool = False,
+    filter_command: bool = False,
 ) -> List[DatabaseMessages]:
     """
     获取指定聊天中最近一段时间的消息
@@ -331,6 +345,7 @@ def get_recent_messages(
         limit: 限制返回的消息数量，默认100条
         limit_mode: 当limit>0时生效，'earliest'表示获取最早的记录，'latest'表示获取最新的记录
         filter_mai: 是否过滤自身的消息，默认为False
+        filter_command: 是否过滤命令消息，默认为False
 
     Returns:
         List[Dict[str, Any]]: 消息列表
@@ -349,8 +364,14 @@ def get_recent_messages(
     now = time.time()
     start_time = now - hours * 3600
     if filter_mai:
-        return filter_mai_messages(get_raw_msg_by_timestamp_with_chat(chat_id, start_time, now, limit, limit_mode))
-    return get_raw_msg_by_timestamp_with_chat(chat_id, start_time, now, limit, limit_mode)
+        return filter_mai_messages(
+            get_raw_msg_by_timestamp_with_chat(
+                chat_id, start_time, now, limit, limit_mode, filter_command=filter_command
+            )
+        )
+    return get_raw_msg_by_timestamp_with_chat(
+        chat_id, start_time, now, limit, limit_mode, filter_command=filter_command
+    )
 
 
 # =============================================================================

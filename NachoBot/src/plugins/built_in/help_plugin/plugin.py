@@ -138,6 +138,10 @@ class HelpCommand(BaseCommand):
         manual = [
             ("#adv_on", "开启高级模式（会禁用绝大多数功能只保留基础回复）"),
             ("#adv_off", "关闭高级模式"),
+            (
+                "#bind_<平台>_<平台id/Discord昵称>",
+                "绑定对应平台的账号，例如 #bind_bilibili_114514 或 #bind_discord_💛甘油三酯💛",
+            ),
         ]
         extras: List[Tuple[str, str]] = []
         for pattern, desc in manual:
@@ -201,7 +205,7 @@ class HelpCommand(BaseCommand):
                 desc = "立即解除指定用户的屏蔽(管理员专用)" + self._scope_suffix("unban", unban_pattern)
                 admin_entries.append((unban_pattern, desc))
                 existing_patterns.add(unban_pattern)
-                
+
         # 始终可见的手工全局命令：#check_blocked_user
         check_blocked_pattern = "#check_blocked_user"
         if check_blocked_pattern not in existing_patterns and check_blocked_pattern not in disabled_commands:
