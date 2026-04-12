@@ -261,7 +261,7 @@ class ChatBot:
 
                 # ========== 多平台账号绑定拦截 ==========
                 # 1. 拦截发起绑定指令：#bind_平台_账号
-                bind_match = re.match(r"^#bind_([a-zA-Z0-9]+)_([a-zA-Z0-9_]+)$", stripped)
+                bind_match = re.match(r"^#bind_([a-zA-Z0-9]+)_(.+)$", stripped)
                 if bind_match:
                     message.is_command = True
                     target_platform = bind_match.group(1)
@@ -322,7 +322,7 @@ class ChatBot:
                         return True, "bind failed", False
 
                 # 3. 拦截解除绑定指令：#unbind_平台_账号
-                unbind_match = re.match(r"^#unbind_([a-zA-Z0-9]+)_([a-zA-Z0-9_]+)$", stripped)
+                unbind_match = re.match(r"^#unbind_([a-zA-Z0-9]+)_(.+)$", stripped)
                 if unbind_match:
                     message.is_command = True
                     if force_requested:

@@ -142,6 +142,10 @@ class HelpCommand(BaseCommand):
                 "#bind_<平台>_<平台id/Discord昵称>",
                 "绑定对应平台的账号，例如 #bind_bilibili_114514 或 #bind_discord_💛甘油三酯💛",
             ),
+            (
+                "#unbind_<平台>_<平台id/Discord昵称>",
+                "管理员强制解绑指定账号所在的所有关联身份",
+            ),
         ]
         extras: List[Tuple[str, str]] = []
         for pattern, desc in manual:
@@ -177,7 +181,17 @@ class HelpCommand(BaseCommand):
             if display_pattern in existing_patterns or pattern in disabled_commands:
                 continue
             desc = desc + self._scope_suffix(display_pattern, display_pattern)
-            whitelist_entries.append((display_pattern, desc))
+
+            # 根据指令特性进行分类
+            if "unbind_" in pattern:
+                if show_admin and user_id and advanced_manager.is_admin(user_id):
+                    admin_entries.append((display_pattern, desc))
+            elif "bind_" in pattern:
+                public_entries.append((display_pattern, desc))
+            else:
+                # 默认内建未注册指令（高级模式开关等）视为白名单
+                whitelist_entries.append((display_pattern, desc))
+
             existing_patterns.add(display_pattern)
 
         # 日记命令：仅展示所有人可用的 #diary_view，隐藏管理员子命令
@@ -251,6 +265,9 @@ class HelpCommand(BaseCommand):
             return "#adv_off"
         if "advanced_check" in pattern or "#adv_check" in pattern:
             return "#adv_check"
+
+        if "<" in pattern and ">" in pattern:
+            return pattern
 
         tag_match = re.search(r"#\w[\w_]*", pattern)
         if tag_match:
