@@ -285,13 +285,21 @@ def get_raw_msg_before_timestamp(timestamp: float, limit: int = 0) -> List[Datab
     return find_messages(message_filter=filter_query, sort=sort_order, limit=limit)
 
 
-def get_raw_msg_before_timestamp_with_chat(chat_id: str, timestamp: float, limit: int = 0) -> List[DatabaseMessages]:
+def get_raw_msg_before_timestamp_with_chat(
+    chat_id: str, timestamp: float, limit: int = 0, filter_bot=False, filter_command=False
+) -> List[DatabaseMessages]:
     """获取指定时间戳之前的消息，按时间升序排序，返回消息列表
     limit: 限制返回的消息数量，0为不限制
     """
     filter_query = {"chat_id": chat_id, "time": {"$lt": timestamp}}
     sort_order = [("time", 1)]
-    return find_messages(message_filter=filter_query, sort=sort_order, limit=limit)
+    return find_messages(
+        message_filter=filter_query,
+        sort=sort_order,
+        limit=limit,
+        filter_bot=filter_bot,
+        filter_command=filter_command,
+    )
 
 
 def get_raw_msg_before_timestamp_with_users(

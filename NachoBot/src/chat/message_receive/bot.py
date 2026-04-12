@@ -22,6 +22,7 @@ from src.mais4u.mais4u_chat.s4u_msg_processor import S4UMessageProcessor
 from src.person_info.person_info import Person
 from src.chat.keyword_cache import promise_cache_manager
 from src.mais4u.s4u_config import s4u_config_main
+from src.person_info.bind_manager import bind_manager  # 导入多平台绑定管理器
 
 # 定义日志配置
 
@@ -257,6 +258,88 @@ class ChatBot:
                                 stream_id,
                             )
                             return True, "not blocked", False
+
+                # ========== 多平台账号绑定拦截 ==========
+                # 1. 拦截发起绑定指令：#bind_平台_账号
+                bind_match = re.match(r"^#bind_([a-zA-Z0-9]+)_([a-zA-Z0-9_]+)$", stripped)
+                if bind_match:
+                    message.is_command = True
+                    target_platform = bind_match.group(1)
+                    target_user_id = bind_match.group(2)
+
+                    # 从 message 中获取当前用户的 person_id
+                    from src.person_info.person_info import get_person_id
+
+                    current_person_id = get_person_id(message.message_info.platform, user_id)
+
+                    # 生成验证码
+                    result = bind_manager.request_bind(current_person_id, target_platform, target_user_id)
+
+                    if result == "ERR_ALREADY_BOUND":
+                        reply_text = (
+                            f"✨ 账号 {target_platform}:{target_user_id} 已经与当前身份绑定过啦，无需重复绑定哦~"
+                        )
+                        await send_api.text_to_stream(reply_text, message.chat_stream.stream_id)
+                        return True, "already bound", False
+
+                    if result == "ERR_TARGET_TAKEN":
+                        reply_text = f"绑定失败：账号 {target_platform}:{target_user_id} 已经被其他身份占用了。如需解绑请联系管理员。"
+                        await send_api.text_to_stream(reply_text, message.chat_stream.stream_id)
+                        return True, "target taken", False
+
+                    if result == "ERR_PLATFORM_CONFLICT":
+                        reply_text = (
+                            f"绑定失败：身份冲突啦！当前操作会导致同一个身份下出现多个同一平台的账号，这是不被允许的哦~"
+                        )
+                        await send_api.text_to_stream(reply_text, message.chat_stream.stream_id)
+                        return True, "platform conflict", False
+
+                    auth_code = result
+                    reply_text = (
+                        f"绑定请求已生成。\n"
+                        f"请在 5 分钟内，使用你的 {target_platform} 账号（{target_user_id}）\n"
+                        f"向我发送以下验证码（忽略大小写）：\n\n"
+                        f"{auth_code}\n\n"
+                        f"完成验证后，该平台的数据与记忆将与当前账号自动互通。"
+                    )
+                    await send_api.text_to_stream(reply_text, message.chat_stream.stream_id)
+                    return True, "bind request created", False
+
+                # 2. 拦截验证码提交：<平台>-<5位数字>
+                # 容错处理：过滤掉可能的不可见字符（如 Bilibili 的零宽空格）
+                code_match = re.search(r"([a-zA-Z]+-\d{5})", stripped)
+                if code_match:
+                    clean_code = code_match.group(1)
+                    success, msg = bind_manager.confirm_bind(message.message_info.platform, user_id, clean_code)
+                    if success:
+                        message.is_command = True
+                        await send_api.text_to_stream(msg, message.chat_stream.stream_id)
+                        return True, "bind confirmed", False
+                    else:
+                        # 只要格式匹配，就认为尝试提交验证码，拦截并提示错误
+                        message.is_command = True
+                        await send_api.text_to_stream(msg, message.chat_stream.stream_id)
+                        return True, "bind failed", False
+
+                # 3. 拦截解除绑定指令：#unbind_平台_账号
+                unbind_match = re.match(r"^#unbind_([a-zA-Z0-9]+)_([a-zA-Z0-9_]+)$", stripped)
+                if unbind_match:
+                    message.is_command = True
+                    if force_requested:
+                        _apply_command_text()
+                    if not advanced_manager.is_admin(user_id):
+                        await send_api.text_to_stream(
+                            "只有管理员才能使用解绑指令哦~(´-ω-`)",
+                            message.chat_stream.stream_id,
+                        )
+                        return True, "unbind not admin", False
+
+                    target_platform = unbind_match.group(1)
+                    target_user_id = unbind_match.group(2)
+                    success, msg = bind_manager.admin_unbind(target_platform, target_user_id)
+
+                    await send_api.text_to_stream(msg, message.chat_stream.stream_id)
+                    return True, "unbind executed", False
 
             # 使用新的组件注册中心查找命令
             command_result = component_registry.find_command_by_text(command_text)
