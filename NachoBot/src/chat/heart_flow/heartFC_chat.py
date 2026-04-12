@@ -174,7 +174,8 @@ class HeartFChatting:
             self._loop_task.add_done_callback(self._handle_loop_completion)
 
             # 启动聊天内容概括器的后台定期检查循环
-            await self.chat_history_summarizer.start()
+            if getattr(self.chat_stream, "platform", "") not in ("bilibili", "bilibili.live"):
+                await self.chat_history_summarizer.start()
             
             # 暂时停用群聊关系扫描
             # await self.relation_scanner.start()
@@ -427,6 +428,7 @@ class HeartFChatting:
                     chat_id=self.stream_id,
                     timestamp=time.time(),
                     limit=int(context_size * 0.6),
+                    filter_command=True,
                 )
                 # 过滤被屏蔽用户的消息
                 message_list_before_now = self._filter_blocked_users(message_list_before_now)

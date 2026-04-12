@@ -298,6 +298,44 @@ class PersonInfo(BaseModel):
         table_name = "person_info"
 
 
+class PersonBinding(BaseModel):
+    """
+    多平台账号绑定表，用于将不同平台的 user_id 映射到同一个 person_id。
+    
+    普通映射行: platform='qq'/'bilibili'/'discord' 等, platform_user_id=用户ID
+    聚合行:     platform='__merged__', platform_user_id=聚合组ID,
+               merged_ids 存储所有成员的原始 person_id,
+               merged_memory 存储合并后的记忆点 JSON
+    """
+    person_id = TextField(index=True)  # 关联到主用户表的 person_id
+    platform = TextField()  # 平台，例如 'discord', 'qq', 'bilibili', '__merged__'
+    platform_user_id = TextField()  # 对应平台的用户ID（聚合行存聚合组ID）
+    merged_ids = TextField(null=True)  # 仅聚合行: 逗号分隔的所有成员原始 person_id
+    merged_memory = TextField(null=True)  # 仅聚合行: 整合后的记忆点 JSON
+
+    class Meta:
+        table_name = "person_bindings"
+        # 建立联合唯一索引，确保同一个平台的同一个账号不会被重复绑定
+        indexes = (
+            (('platform', 'platform_user_id'), True),
+        )
+
+
+class BindRequest(BaseModel):
+    """
+    跨平台绑定验证请求表，持久化存储待验证的绑定请求。
+    解决多进程/多适配器环境下内存缓存不共享的问题。
+    """
+    auth_code = TextField(unique=True, index=True)  # 验证码（小写）
+    req_person_id = TextField()  # 发起绑定的用户 person_id
+    target_platform = TextField()  # 目标平台
+    target_user_id = TextField()  # 目标平台用户ID
+    expire_time = FloatField()  # 过期时间戳
+    display_code = TextField()  # 验证码显示格式
+
+    class Meta:
+        table_name = "bind_requests"
+
 class GroupInfo(BaseModel):
     """
     用于存储群组信息数据的模型。
@@ -422,6 +460,8 @@ def create_tables():
                 ImageDescriptions,
                 OnlineTime,
                 PersonInfo,
+                PersonBinding,  # 添加多平台绑定表
+                BindRequest,  # 跨平台绑定验证请求表
                 Expression,
                 GraphNodes,  # 添加图节点表
                 GraphEdges,  # 添加图边表
@@ -451,6 +491,8 @@ def initialize_database(sync_constraints=False):
         ImageDescriptions,
         OnlineTime,
         PersonInfo,
+        PersonBinding,
+        BindRequest,
         Expression,
         GraphNodes,
         GraphEdges,
@@ -550,6 +592,7 @@ def sync_field_constraints():
         ImageDescriptions,
         OnlineTime,
         PersonInfo,
+        PersonBinding,
         Expression,
         GraphNodes,
         GraphEdges,
@@ -736,6 +779,7 @@ def check_field_constraints():
         ImageDescriptions,
         OnlineTime,
         PersonInfo,
+        PersonBinding,
         Expression,
         GraphNodes,
         GraphEdges,

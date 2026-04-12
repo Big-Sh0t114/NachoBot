@@ -292,6 +292,7 @@ class BrainChatting:
                 chat_id=self.stream_id,
                 timestamp=time.time(),
                 limit=int(context_size * 0.6),
+                filter_command=True,
             )
             promise_snippets = promise_cache_manager.collect_snippets_for_messages(
                 self.stream_id, message_list_before_now

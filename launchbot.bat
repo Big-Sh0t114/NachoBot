@@ -1,6 +1,8 @@
 @echo off
 setlocal EnableExtensions
 chcp 65001 >nul
+set "PYTHONPATH="
+set "PYTHONHOME="
 title Launch TTS + NachoBot
 set "FINAL_RC=0"
 set "ROOT=%~dp0"
@@ -49,23 +51,6 @@ if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
 set "SETUP_LOG=%LOG_DIR%\boot_setup.log"
 echo ==== RUN %date% %time% ==== >> "%SETUP_LOG%"
 
-set "PY_BOOT="
-where py >nul 2>&1
-if not errorlevel 1 (
-  py -3.11 -V >nul 2>&1
-  if not errorlevel 1 set "PY_BOOT=py -3.11"
-)
-if not defined PY_BOOT (
-  where python >nul 2>&1
-  if not errorlevel 1 set "PY_BOOT=python"
-)
-if not defined PY_BOOT (
-  echo [FATAL] No available Python found. >> "%SETUP_LOG%"
-  echo [FATAL] No available Python found.
-  set "TTS_RC=1"
-  goto :TTS_FAIL
-)
-
 where uv >nul 2>&1
 if errorlevel 1 (
   echo [INFO] uv not detected, installing... >> "%SETUP_LOG%"
@@ -73,9 +58,15 @@ if errorlevel 1 (
   set "PATH=%USERPROFILE%\.local\bin;%USERPROFILE%\.cargo\bin;%PATH%"
 )
 
-echo [INFO] Syncing dependencies... >> "%SETUP_LOG%"
+echo [INFO] Syncing dependencies (Locking Python 3.11~3.13)... >> "%SETUP_LOG%"
 cd /d "%ADAPTER_DIR%"
-uv sync --python 3.11 >> "%SETUP_LOG%" 2>&1
+uv sync --python ">=3.11,<=3.13" >> "%SETUP_LOG%" 2>&1
+if errorlevel 1 (
+  echo [FATAL] uv sync failed. Please check Python installation. >> "%SETUP_LOG%"
+  echo [FATAL] uv sync failed.
+  set "TTS_RC=1"
+  goto :TTS_FAIL
+)
 
 set "API_FILE=%SOVITS_DIR%\api_v2.py"
 if not exist "%API_FILE%" set "API_FILE=%SOVITS_DIR%\api.py"
@@ -109,10 +100,10 @@ goto :TTS_FAIL
 :TTS_SOVITS_READY
 echo [OK] SoVITS ready.
 
-start "TTS Adapter (%PORT_ADAPTER%)" cmd /k "chcp 65001>nul && set PYTHONPATH=%ADAPTER_DIR%;%ADAPTER_DIR%\tts_src;%NAPCAT_SRC%;%NAPCAT_DIR% && cd /d %ADAPTER_DIR% && uv run python main.py"
+start "TTS Adapter (%PORT_ADAPTER%)" cmd /k "chcp 65001>nul && cd /d %ADAPTER_DIR% && uv run python main.py"
 
 echo [OK] Starting Control...
-start "Control API (%PORT_CONTROL%)" cmd /k "chcp 65001>nul && set PYTHONPATH=%ADAPTER_DIR%;%ADAPTER_DIR%\tts_src;%NAPCAT_SRC%;%NAPCAT_DIR% && cd /d %ADAPTER_DIR% && uv run python -m tts_src.plugins.GPT_Sovits.api_server"
+start "Control API (%PORT_CONTROL%)" cmd /k "chcp 65001>nul && cd /d %ADAPTER_DIR% && uv run python -m tts_src.plugins.GPT_Sovits.api_server"
 
 echo.
 echo All modules started.
@@ -148,11 +139,11 @@ set "MAX_WAIT=60"
 
 echo --- Syncing NachoBot...
 cd /d "%NACHOBOT_DIR%"
-uv sync
+uv sync --python ">=3.11,<=3.13"
 
 echo --- Syncing Adapter...
 cd /d "%ADAPTER_DIR%"
-uv sync
+uv sync --python ">=3.11,<=3.13"
 
 if exist "%NACHOBOT_DIR%\%NACHOBOT_MAIN%" (
   echo --- Start NachoBot...

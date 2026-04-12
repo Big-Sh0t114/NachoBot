@@ -10,7 +10,7 @@ from typing import Union, Optional
 
 from src.common.logger import get_logger
 from src.common.database.database import db
-from src.common.database.database_model import PersonInfo
+from src.common.database.database_model import PersonInfo, PersonBinding
 from src.llm_models.utils_model import LLMRequest
 from src.config.config import global_config, model_config
 
@@ -23,10 +23,24 @@ relation_selection_model = LLMRequest(
 
 
 def get_person_id(platform: str, user_id: Union[int, str]) -> str:
-    """获取唯一id"""
+    """获取唯一id (支持多平台绑定)"""
     if "-" in platform:
         platform = platform.split("-")[1]
-    components = [platform, str(user_id)]
+    user_id_str = str(user_id)
+
+    try:
+        # 1. 优先查询绑定表
+        binding = PersonBinding.get_or_none(
+            PersonBinding.platform == platform,
+            PersonBinding.platform_user_id == user_id_str
+        )
+        if binding:
+            return binding.person_id
+    except Exception as e:
+        logger.warning(f"查询绑定表时出错，可能表还未初始化: {e}")
+
+    # 2. 如果没有查到，使用传统的 MD5 方式生成默认的 person_id
+    components = [platform, user_id_str]
     key = "_".join(components)
     return hashlib.md5(key.encode()).hexdigest()
 
@@ -44,11 +58,24 @@ def get_person_id_by_person_name(person_name: str) -> str:
 def is_person_known(person_id: str = None, user_id: str = None, platform: str = None, person_name: str = None) -> bool:  # type: ignore
     if person_id:
         person = PersonInfo.get_or_none(PersonInfo.person_id == person_id)
-        return person.is_known if person else False
+        if person:
+            return person.is_known
+        # ── 多平台绑定：person_id 可能是聚合组 ID ──
+        try:
+            from src.person_info.bind_manager import bind_manager
+            merged_row = bind_manager._get_merged_row_for_person(person_id)
+            if merged_row and merged_row.merged_ids:
+                primary_info = bind_manager._get_primary_info(
+                    [x.strip() for x in merged_row.merged_ids.split(",")]
+                )
+                if primary_info:
+                    return primary_info.is_known
+        except Exception:
+            pass
+        return False
     elif user_id and platform:
         person_id = get_person_id(platform, user_id)
-        person = PersonInfo.get_or_none(PersonInfo.person_id == person_id)
-        return person.is_known if person else False
+        return is_person_known(person_id=person_id)
     elif person_name:
         person_id = get_person_id_by_person_name(person_name)
         person = PersonInfo.get_or_none(PersonInfo.person_id == person_id)
@@ -433,10 +460,28 @@ class Person:
         return result
 
     def load_from_database(self):
-        """从数据库加载个人信息数据"""
+        """从数据库加载个人信息数据（支持多平台绑定聚合行）"""
         try:
             # 查询数据库中的记录
             record = PersonInfo.get_or_none(PersonInfo.person_id == self.person_id)
+
+            # ── 多平台绑定：如果 person_id 是聚合组 ID，没有直接的 PersonInfo ──
+            # 则从聚合行的成员中找到最优的基底 PersonInfo 来加载
+            if not record:
+                try:
+                    from src.person_info.bind_manager import bind_manager, MERGED_PLATFORM
+                    from src.common.database.database_model import PersonBinding
+                    merged_row = PersonBinding.get_or_none(
+                        PersonBinding.platform == MERGED_PLATFORM,
+                        PersonBinding.person_id == self.person_id
+                    )
+                    if merged_row and merged_row.merged_ids:
+                        # 从成员中找最优的基底信息
+                        record = bind_manager._get_primary_info(
+                            [x.strip() for x in merged_row.merged_ids.split(",")]
+                        )
+                except Exception as e:
+                    logger.debug(f"查找聚合组基底信息时出错: {e}")
 
             if record:
                 self.user_id = record.user_id or ""
@@ -462,6 +507,16 @@ class Person:
                 else:
                     self.memory_points = []
 
+                # ── 多平台绑定：优先使用聚合行的记忆 ──
+                try:
+                    from src.person_info.bind_manager import bind_manager
+                    merged_memory = bind_manager.get_merged_memory_for_person(self.person_id)
+                    if merged_memory is not None:
+                        self.memory_points = merged_memory
+                        logger.debug(f"用户 {self.person_id} 使用聚合绑定记忆 ({len(merged_memory)} 条)")
+                except Exception as e:
+                    logger.debug(f"检查聚合记忆时出错（不影响正常加载）: {e}")
+
                 logger.debug(f"已从数据库加载用户 {self.person_id} 的信息")
             else:
                 self.sync_to_database()
@@ -472,11 +527,27 @@ class Person:
             # 出错时保持默认值
 
     def sync_to_database(self):
-        """将所有属性同步回数据库"""
+        """将所有属性同步回数据库（支持多平台绑定聚合行）"""
         if not self.is_known:
             return
         try:
+            # ── 多平台绑定：如果属于绑定组，记忆写入聚合行 ──
+            memory_written_to_merged = False
+            try:
+                from src.person_info.bind_manager import bind_manager
+                memory_written_to_merged = bind_manager.update_merged_memory(
+                    self.person_id, self.memory_points
+                )
+                if memory_written_to_merged:
+                    logger.debug(f"用户 {self.person_id} 的记忆已写入聚合行")
+            except Exception as e:
+                logger.debug(f"更新聚合记忆时出错（不影响正常保存）: {e}")
+
             # 准备数据
+            memory_json = json.dumps(
+                [point for point in self.memory_points if point is not None], ensure_ascii=False
+            ) if self.memory_points else json.dumps([], ensure_ascii=False)
+
             data = {
                 "person_id": self.person_id,
                 "is_known": self.is_known,
@@ -488,12 +559,12 @@ class Person:
                 "know_times": self.know_times,
                 "know_since": self.know_since,
                 "last_know": self.last_know,
-                "memory_points": json.dumps(
-                    [point for point in self.memory_points if point is not None], ensure_ascii=False
-                )
-                if self.memory_points
-                else json.dumps([], ensure_ascii=False),
             }
+
+            # 如果记忆没有写入聚合行，则正常写入 PersonInfo
+            # 如果已写入聚合行，PersonInfo 中保留原始记忆不更新
+            if not memory_written_to_merged:
+                data["memory_points"] = memory_json
 
             # 检查记录是否存在
             record = PersonInfo.get_or_none(PersonInfo.person_id == self.person_id)
@@ -506,9 +577,15 @@ class Person:
                 record.save()
                 logger.debug(f"已同步用户 {self.person_id} 的信息到数据库")
             else:
-                # 创建新记录
-                PersonInfo.create(**data)
-                logger.debug(f"已创建用户 {self.person_id} 的信息到数据库")
+                # 如果记忆已写入聚合行（说明 person_id 是聚合组 ID），
+                # 不需要创建 PersonInfo 空记录
+                if memory_written_to_merged:
+                    logger.debug(f"用户 {self.person_id} 是聚合组ID，跳过创建 PersonInfo")
+                else:
+                    # 创建新记录时总是写入记忆
+                    data["memory_points"] = memory_json
+                    PersonInfo.create(**data)
+                    logger.debug(f"已创建用户 {self.person_id} 的信息到数据库")
 
         except Exception as e:
             logger.error(f"同步用户 {self.person_id} 信息到数据库时出错: {e}")
@@ -615,9 +692,45 @@ class PersonInfoManager:
                 db.execute_sql("PRAGMA cache_size = -64000")  # 64MB缓存
                 db.execute_sql("PRAGMA temp_store = memory")  # 临时存储在内存中
                 db.execute_sql("PRAGMA mmap_size = 268435456")  # 256MB内存映射
-            db.create_tables([PersonInfo], safe=True)
+            db.create_tables([PersonInfo, PersonBinding], safe=True)
+            
+            # --- 热迁移逻辑：将老用户的单平台账号写入绑定表 ---
+            self._migrate_old_bindings()
+            
         except Exception as e:
-            logger.error(f"数据库连接或 PersonInfo 表创建失败: {e}")
+            logger.error(f"数据库连接或 PersonInfo/PersonBinding 表创建失败: {e}")
+
+    def _migrate_old_bindings(self):
+        """将老的 PersonInfo 中的 platform 和 user_id 迁移到 PersonBinding 中"""
+        try:
+            # 检查是否已经迁移过（如果绑定表是空的，说明可能需要迁移）
+            if PersonBinding.select().count() == 0:
+                logger.info("检测到 PersonBinding 表为空，开始执行旧用户数据热迁移...")
+                migrated_count = 0
+                for person in PersonInfo.select().where(PersonInfo.platform.is_null(False), PersonInfo.user_id.is_null(False)):
+                    # 忽略无效数据
+                    if not person.platform or not person.user_id:
+                        continue
+                    
+                    # 如果带有 '-'，处理一下 platform 逻辑以保持与 get_person_id 一致
+                    plat = person.platform.split("-")[1] if "-" in person.platform else person.platform
+                    uid_str = str(person.user_id)
+                    
+                    # 插入绑定表
+                    try:
+                        PersonBinding.create(
+                            person_id=person.person_id,
+                            platform=plat,
+                            platform_user_id=uid_str
+                        )
+                        migrated_count += 1
+                    except Exception as e:
+                        # 可能是重复数据导致 unique 约束报错，忽略即可
+                        logger.debug(f"迁移用户 {person.person_id} 时跳过: {e}")
+                
+                logger.info(f"旧用户数据热迁移完成，共迁移 {migrated_count} 条记录。")
+        except Exception as e:
+            logger.error(f"执行旧用户数据热迁移时出错: {e}")
 
         # 初始化时读取所有person_name和nickname
         try:
