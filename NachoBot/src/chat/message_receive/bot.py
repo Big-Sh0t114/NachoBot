@@ -265,7 +265,9 @@ class ChatBot:
                 if bind_match:
                     message.is_command = True
                     target_platform = bind_match.group(1)
-                    target_user_id = bind_match.group(2)
+                    # 从原始大小写文本中提取 target_user_id，避免 .lower() 破坏标识符大小写
+                    original_bind_match = re.match(r"^#bind_([a-zA-Z0-9]+)_(.+)$", command_text.strip(), re.IGNORECASE)
+                    target_user_id = original_bind_match.group(2) if original_bind_match else bind_match.group(2)
 
                     # 从 message 中获取当前用户的 person_id
                     from src.person_info.person_info import get_person_id
@@ -335,7 +337,9 @@ class ChatBot:
                         return True, "unbind not admin", False
 
                     target_platform = unbind_match.group(1)
-                    target_user_id = unbind_match.group(2)
+                    # 从原始大小写文本中提取 target_user_id
+                    original_unbind_match = re.match(r"^#unbind_([a-zA-Z0-9]+)_(.+)$", command_text.strip(), re.IGNORECASE)
+                    target_user_id = original_unbind_match.group(2) if original_unbind_match else unbind_match.group(2)
                     success, msg = bind_manager.admin_unbind(target_platform, target_user_id)
 
                     await send_api.text_to_stream(msg, message.chat_stream.stream_id)

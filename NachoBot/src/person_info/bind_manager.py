@@ -56,7 +56,8 @@ class BindManager:
     def _resolve_user_id(target_platform: str, identifier: str) -> str:
         """
         尝试将用户输入的标识符解析为真实的 user_id。
-        默认将输入作为 UID 处理。只有当输入包含非数字字符时，才严格作为 person_name 进行查找匹配。
+        默认将输入作为 UID 处理。只有当输入包含非数字字符时，
+        才依次尝试按 person_name、nickname 进行查找匹配。
         """
         identifier = str(identifier).strip()
 
@@ -64,7 +65,7 @@ class BindManager:
         if identifier.isdigit():
             return identifier
 
-        # 如果不是纯数字，则严格作为 person_name 查找匹配的 user_id
+        # 1. 首先按 person_name（NachoBot 内部名称）查找
         person = PersonInfo.get_or_none(
             PersonInfo.platform.startswith(target_platform), PersonInfo.person_name == identifier
         )
@@ -72,8 +73,31 @@ class BindManager:
             logger.info(f"成功将 person_name '{identifier}' 解析为真实 UID: {person.user_id}")
             return person.user_id
 
-        # 如果作为 person_name 没找到，仍然返回原输入
+        # 2. 再按 nickname（平台显示昵称）查找，用户更可能输入的是平台昵称
+        person = PersonInfo.get_or_none(
+            PersonInfo.platform.startswith(target_platform), PersonInfo.nickname == identifier
+        )
+        if person and person.user_id:
+            logger.info(f"成功将 nickname '{identifier}' 解析为真实 UID: {person.user_id}")
+            return person.user_id
+
+        # 3. 大小写不敏感的模糊匹配（适用于 Discord 等大小写敏感的平台昵称）
+        try:
+            from src.common.database.database_model import _peewee
+            fn = _peewee.fn
+            person = PersonInfo.get_or_none(
+                PersonInfo.platform.startswith(target_platform),
+                fn.LOWER(PersonInfo.nickname) == identifier.lower()
+            )
+            if person and person.user_id:
+                logger.info(f"成功将 nickname '{identifier}'（大小写不敏感）解析为真实 UID: {person.user_id}")
+                return person.user_id
+        except Exception as e:
+            logger.debug(f"大小写不敏感匹配时出错: {e}")
+
+        # 如果都没找到，仍然返回原输入
         # （可能会导致后续查不到已有绑定或绑定失败，属于预期内的校验拒绝）
+        logger.warning(f"无法将标识符 '{identifier}' 解析为平台 '{target_platform}' 的真实 UID，将原样使用")
         return identifier
 
     def generate_auth_code(self, target_platform: str) -> str:
@@ -326,6 +350,11 @@ class BindManager:
         核心原则：不修改任何 PersonInfo 行，仅操作 PersonBinding 表。
         """
         auth_code_lower = auth_code.strip().lower()
+
+        import re
+        if not re.match(r"^[a-z0-9_.]+-\d{5}$", auth_code_lower):
+            return False, ""
+
         bind_info = BindRequest.get_or_none(BindRequest.auth_code == auth_code_lower)
 
         if not bind_info:
@@ -366,10 +395,12 @@ class BindManager:
 
                 # 4. 收集所有需要聚合的原始 person_id
                 all_original_ids = set()
+                old_group_ids = set()  # 记录需要清理的旧 group_id
 
                 # 如果请求者已经在某个聚合组中，收集组内所有成员
                 existing_merged = self._get_merged_row_for_person(requester_person_id)
                 if existing_merged and existing_merged.merged_ids:
+                    old_group_ids.add(existing_merged.person_id)
                     for mid in existing_merged.merged_ids.split(","):
                         all_original_ids.add(mid.strip())
                     # 删除旧的聚合行，准备创建新的
@@ -388,11 +419,28 @@ class BindManager:
                 # 如果提交者也已经在某个聚合组中，也收集其组内成员
                 submitter_merged = self._get_merged_row_for_person(submitter_original_pid)
                 if submitter_merged and submitter_merged.merged_ids:
+                    old_group_ids.add(submitter_merged.person_id)
                     for mid in submitter_merged.merged_ids.split(","):
                         all_original_ids.add(mid.strip())
                     submitter_merged.delete_instance()
                 else:
                     all_original_ids.add(submitter_original_pid)
+
+                # 4.5 恢复旧聚合组成员的映射行到原始 person_id
+                # 删除旧聚合行后，成员的映射行 person_id 仍指向旧 group_id，
+                # 需要先恢复为原始值，_build_merged_group 才能正确匹配并更新它们
+                for old_gid in old_group_ids:
+                    orphaned_rows = list(
+                        PersonBinding.select().where(
+                            PersonBinding.person_id == old_gid,
+                            PersonBinding.platform != MERGED_PLATFORM,
+                        )
+                    )
+                    for row in orphaned_rows:
+                        original_pid = self._compute_original_person_id(row.platform, row.platform_user_id)
+                        row.person_id = original_pid
+                        row.save()
+                        logger.debug(f"恢复映射行: {row.platform}:{row.platform_user_id} -> {original_pid}")
 
                 all_original_ids = list(all_original_ids)
 
