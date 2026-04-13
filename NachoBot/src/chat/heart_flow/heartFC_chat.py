@@ -428,7 +428,6 @@ class HeartFChatting:
                     chat_id=self.stream_id,
                     timestamp=time.time(),
                     limit=int(context_size * 0.6),
-                    filter_command=True,
                 )
                 # 过滤被屏蔽用户的消息
                 message_list_before_now = self._filter_blocked_users(message_list_before_now)
