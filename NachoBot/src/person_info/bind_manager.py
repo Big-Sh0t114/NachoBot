@@ -84,10 +84,10 @@ class BindManager:
         # 3. 大小写不敏感的模糊匹配（适用于 Discord 等大小写敏感的平台昵称）
         try:
             from src.common.database.database_model import _peewee
+
             fn = _peewee.fn
             person = PersonInfo.get_or_none(
-                PersonInfo.platform.startswith(target_platform),
-                fn.LOWER(PersonInfo.nickname) == identifier.lower()
+                PersonInfo.platform.startswith(target_platform), fn.LOWER(PersonInfo.nickname) == identifier.lower()
             )
             if person and person.user_id:
                 logger.info(f"成功将 nickname '{identifier}'（大小写不敏感）解析为真实 UID: {person.user_id}")
@@ -349,13 +349,15 @@ class BindManager:
 
         核心原则：不修改任何 PersonInfo 行，仅操作 PersonBinding 表。
         """
-        auth_code_lower = auth_code.strip().lower()
-
         import re
-        if not re.match(r"^[a-z0-9_.]+-\d{5}$", auth_code_lower):
+
+        # 转为小写，并清除所有空白字符(含空格换行)以及常见的零宽不可见字符(应对Bilibili防拦截注入)
+        auth_code_clean = re.sub(r"[\s\u200b\u200c\u200d\u200e\u200f\ufeff]+", "", auth_code.lower())
+
+        if not re.match(r"^(qq|bilibili|discord)-\d{5}$", auth_code_clean):
             return False, ""
 
-        bind_info = BindRequest.get_or_none(BindRequest.auth_code == auth_code_lower)
+        bind_info = BindRequest.get_or_none(BindRequest.auth_code == auth_code_clean)
 
         if not bind_info:
             return False, "验证码无效或已过期。"
@@ -505,6 +507,69 @@ class BindManager:
         except Exception as e:
             logger.error(f"拆分解绑失败: {e}")
             return False, "系统错误，拆分解绑失败。"
+
+    def check_binding(self, person_id: str) -> str:
+        """
+        查询指定 person_id 的跨平台绑定状态。
+
+        Returns:
+            格式化的绑定状态文本
+        """
+        # 查找当前用户所在的聚合行
+        merged_row = self._get_merged_row_for_person(person_id)
+
+        if not merged_row or not merged_row.merged_ids:
+            # 没有跨平台绑定，查询当前账号自身平台信息
+            binding = PersonBinding.get_or_none(
+                PersonBinding.person_id == person_id, PersonBinding.platform != MERGED_PLATFORM
+            )
+            if binding:
+                return f"当前账号（{binding.platform}:{binding.platform_user_id}）未与其他平台绑定。"
+            return "当前账号未与其他平台绑定。"
+
+        # 有跨平台绑定，列出所有关联的平台账号
+        member_ids = [x.strip() for x in merged_row.merged_ids.split(",")]
+        group_id = merged_row.person_id
+        lines = ["✨ 当前你的绑定账号："]
+
+        # 收集所有指向该聚合组的映射行
+        mapping_rows = list(
+            PersonBinding.select().where(
+                PersonBinding.person_id == group_id,
+                PersonBinding.platform != MERGED_PLATFORM,
+            )
+        )
+
+        # 建立 original_pid -> mapping_row 的索引
+        pid_to_mapping = {}
+        for row in mapping_rows:
+            original_pid = self._compute_original_person_id(row.platform, row.platform_user_id)
+            pid_to_mapping[original_pid] = row
+
+        for mid in member_ids:
+            mapping = pid_to_mapping.get(mid)
+
+            # 如果映射行没有通过 group_id 找到，尝试直接查找
+            if not mapping:
+                for row in PersonBinding.select().where(PersonBinding.platform != MERGED_PLATFORM):
+                    if self._compute_original_person_id(row.platform, row.platform_user_id) == mid:
+                        mapping = row
+                        break
+
+            if mapping:
+                # 尝试获取 person_name 或 nickname
+                info = PersonInfo.get_or_none(PersonInfo.person_id == mid)
+                display_name = ""
+                if info:
+                    name = info.person_name or info.nickname or ""
+                    if name:
+                        display_name = f"（{name}）"
+                lines.append(f"  · {mapping.platform}: {mapping.platform_user_id}{display_name}")
+            else:
+                lines.append(f"  · 未知平台: {mid[:8]}...")
+
+        lines.append(f"共 {len(member_ids)} 个平台账号互通。")
+        return "\n".join(lines)
 
     # ──────────────────────────────────────────────────────────────
     #  针对 Person 类的查询接口

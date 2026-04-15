@@ -49,7 +49,7 @@ def init_memory_retrieval_prompt():
     # 第一步：问题生成prompt
     Prompt(
         """
-你的名字是{bot_name}。现在是{time_now}。
+你的名字是{bot_name}{bot_nickname}，你{prompt_personality}。现在是{time_now}。
 群里正在进行的聊天内容：
 {chat_history}
 
@@ -90,7 +90,8 @@ def init_memory_retrieval_prompt():
 
     # 第二步：ReAct Agent prompt（使用function calling，要求先思考再行动）
     Prompt(
-        """你的名字是{bot_name}。现在是{time_now}。
+        """
+你的名字是{bot_name}{bot_nickname}，你{prompt_personality}。现在是{time_now}。
 你正在参与聊天，你需要搜集信息来回答问题，帮助你参与聊天。
 当前需要解答的问题：{question}
 已收集的信息：
@@ -113,7 +114,8 @@ def init_memory_retrieval_prompt():
 
     # 额外，如果最后一轮迭代：ReAct Agent prompt（使用function calling，要求先思考再行动）
     Prompt(
-        """你的名字是{bot_name}。现在是{time_now}。
+        """
+你的名字是{bot_name}{bot_nickname}，你{prompt_personality}。现在是{time_now}。
 你正在参与聊天，你需要根据搜集到的信息判断问题是否可以回答问题。
 
 当前问题：{question}
@@ -148,7 +150,7 @@ def _log_conversation_messages(
         head_prompt: 第一条系统消息（head_prompt）的内容，可选
         final_status: 最终结果状态描述（例如：找到答案/未找到答案），可选
     """
-    if not getattr(global_config.debug, 'show_memory_prompt', False):
+    if not getattr(global_config.debug, "show_memory_prompt", False):
         return
 
     log_lines: List[str] = []
@@ -242,8 +244,10 @@ async def _react_agent_solve_question(
         # 获取工具注册器
         tool_registry = get_tool_registry()
 
-        # 获取bot_name
+        # 获取bot信息
         bot_name = global_config.bot.nickname
+        bot_nickname = global_config.bot.nickname
+        prompt_personality = global_config.personality.personality
 
         # 获取当前时间
         time_now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
@@ -322,6 +326,8 @@ async def _react_agent_solve_question(
             first_head_prompt = await global_prompt_manager.format_prompt(
                 "memory_retrieval_react_prompt_head",
                 bot_name=bot_name,
+                bot_nickname=bot_nickname,
+                prompt_personality=prompt_personality,
                 time_now=time_now,
                 question=question,
                 collected_info=initial_collected_info,
@@ -757,6 +763,8 @@ async def _react_agent_solve_question(
         evaluation_prompt = await global_prompt_manager.format_prompt(
             "memory_retrieval_react_final_prompt",
             bot_name=bot_name,
+            bot_nickname=bot_nickname,
+            prompt_personality=prompt_personality,
             time_now=time_now,
             question=question,
             collected_info=collected_info if collected_info else "暂无信息",
@@ -787,7 +795,7 @@ async def _react_agent_solve_question(
             )
             return False, "最终评估阶段LLM调用失败", thinking_steps, is_timeout
 
-        if getattr(global_config.debug, 'show_memory_prompt', False):
+        if getattr(global_config.debug, "show_memory_prompt", False):
             logger.info(f"{react_log_prefix}最终评估Prompt: {evaluation_prompt}")
             logger.info(f"{react_log_prefix}最终评估响应: {eval_response}")
 
@@ -1122,10 +1130,20 @@ async def build_memory_retrieval_prompt(
         stream_name = chat_stream.stream_id
     log_prefix = f"[{stream_name}] " if stream_name else ""
 
+    platform = getattr(chat_stream, "platform", None)
+    is_group_chat = bool(getattr(chat_stream, "group_info", None))
+    
+    # Bypass Memory Retrieval for real-time platforms (Bilibili Live Group, Discord VC)
+    if (is_group_chat and platform in ["bilibili", "bilibili.live"]) or platform == "discord_vc":
+        logger.debug(f"{log_prefix}{platform} 直播/语音环境，跳过记忆检索")
+        return ""
+
     logger.info(f"{log_prefix}检测是否需要回忆，元消息：{message[:30]}...，消息长度: {len(message)}")
     try:
         time_now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         bot_name = global_config.bot.nickname
+        bot_nickname = global_config.bot.nickname
+        prompt_personality = global_config.personality.personality
         chat_id = chat_stream.stream_id
 
         # 获取最近查询历史（最近10分钟内的查询，用于避免重复查询）
@@ -1153,6 +1171,8 @@ async def build_memory_retrieval_prompt(
             question_prompt = await global_prompt_manager.format_prompt(
                 "memory_retrieval_question_prompt",
                 bot_name=bot_name,
+                bot_nickname=bot_nickname,
+                prompt_personality=prompt_personality,
                 time_now=time_now,
                 chat_history=message,
                 recent_query_history=recent_query_history,
@@ -1166,7 +1186,7 @@ async def build_memory_retrieval_prompt(
                 request_type="memory.question",
             )
 
-            if getattr(global_config.debug, 'show_memory_prompt', False):
+            if getattr(global_config.debug, "show_memory_prompt", False):
                 logger.info(f"{log_prefix}记忆检索问题生成提示词: {question_prompt}")
             # logger.info(f"记忆检索问题生成响应: {response}")
 

@@ -143,6 +143,10 @@ class HelpCommand(BaseCommand):
                 "绑定对应平台的账号，例如 #bind_bilibili_114514 或 #bind_discord_💛甘油三酯💛",
             ),
             (
+                "#check_binding",
+                "查看当前账号的跨平台绑定状态",
+            ),
+            (
                 "#unbind_<平台>_<平台id/Discord昵称>",
                 "管理员强制解绑指定账号所在的所有关联身份",
             ),
@@ -186,7 +190,7 @@ class HelpCommand(BaseCommand):
             if "unbind_" in pattern:
                 if show_admin and user_id and advanced_manager.is_admin(user_id):
                     admin_entries.append((display_pattern, desc))
-            elif "bind_" in pattern:
+            elif "bind" in pattern:
                 public_entries.append((display_pattern, desc))
             else:
                 # 默认内建未注册指令（高级模式开关等）视为白名单
@@ -240,25 +244,17 @@ class HelpCommand(BaseCommand):
         if not pattern:
             return pattern
 
-        # 针对已知命令做映射，避免看到正则符号
+        # 针对已知非标命令做映射，避免过度解析
         if "lang_switch" in pattern:
             return "#lang_switch"
         if "mus_rand" in pattern:
             return "#mus_rand"
         if "点歌|播放|来首" in pattern:
             return "点歌/播放/来首 + 关键词"
-        if "diary_generate_all" in pattern:
-            return "#diary_generate_all"
-        if "diary_generate" in pattern:
-            return "#diary_generate"
-        if "diary_list" in pattern:
-            return "#diary_list"
-        if "diary_view" in pattern:
-            return "#diary_view"
-        if "diary_debug" in pattern:
-            return "#diary_debug"
-        if "diary_help" in pattern:
-            return "#diary_help"
+        if "diary_" in pattern:
+            tag_match = re.search(r"#diary_\w+", pattern)
+            if tag_match:
+                return tag_match.group(0)
         if "advanced_enable" in pattern or "#adv_on" in pattern:
             return "#adv_on"
         if "advanced_disable" in pattern or "#adv_off" in pattern:
@@ -266,24 +262,37 @@ class HelpCommand(BaseCommand):
         if "advanced_check" in pattern or "#adv_check" in pattern:
             return "#adv_check"
 
-        if "<" in pattern and ">" in pattern:
+        # 如果 pattern 包含手动指定的参数标记如 <平台> (且不是正则命名分组)，则保留
+        if "<" in pattern and ">" in pattern and "(?P<" not in pattern:
             return pattern
 
-        tag_match = re.search(r"#\w[\w_]*", pattern)
-        if tag_match:
-            return tag_match.group(0)
-
         cleaned = pattern
+        
+        # 核心逻辑：将命名分组 (?P<name>...) 提取为 [name]
+        cleaned = re.sub(r"\(\?P<([^>]+)>.*?\)", r"[\1]", cleaned)
+        
+        # 移除正则元字符：忽略大小写标记、非捕获分组标记
         cleaned = cleaned.replace("(?i)", "")
-        cleaned = re.sub(r"\(\?P<[^>]+>", "(", cleaned)
-        cleaned = cleaned.replace("?:", "")
-        cleaned = re.sub(r"^\s*\^\\s*|\^\s*", "", cleaned)
-        cleaned = re.sub(r"\\s*\$\s*$|\$\s*$", "", cleaned)
-        cleaned = cleaned.strip("^$")
-        cleaned = cleaned.replace(r"\s*", " ")
-        cleaned = cleaned.replace(r"\s+", " ")
+        cleaned = cleaned.replace("(?:", "")
+        
+        # 移除闭合括号及可选标记 ( )?
+        cleaned = re.sub(r"\)\??", "", cleaned)
+        
+        # 移除其余正则符号：锚点、非转义的括号、量词等
+        cleaned = re.sub(r"[\^\$]", "", cleaned)
+        cleaned = cleaned.replace("(", "").replace(")", "")
+        
+        # 转换空白符号
+        cleaned = re.sub(r"\\s\+", " ", cleaned)
+        cleaned = re.sub(r"\\s\*", "", cleaned)
+        
+        # 移除转义斜杠
         cleaned = cleaned.replace("\\", "")
+        
+        # 逻辑分支符号转换
         cleaned = cleaned.replace("|", "/")
+        
+        # 规范化空格：将多个连续空格转换为单个，并去除首尾空白
         cleaned = re.sub(r"\s{2,}", " ", cleaned)
         return cleaned.strip()
 
