@@ -308,20 +308,18 @@ class ChatBot:
                     return True, "bind request created", False
 
                 # 2. 拦截验证码提交：<平台>-<5位数字>
-                # 容错处理：过滤掉可能的不可见字符（如 Bilibili 的零宽空格）
-                code_match = re.search(r"([a-zA-Z]+-\d{5})", stripped)
-                if code_match:
-                    clean_code = code_match.group(1)
-                    success, msg = bind_manager.confirm_bind(message.message_info.platform, user_id, clean_code)
-                    if success:
-                        message.is_command = True
-                        await send_api.text_to_stream(msg, message.chat_stream.stream_id)
-                        return True, "bind confirmed", False
-                    else:
-                        # 只要格式匹配，就认为尝试提交验证码，拦截并提示错误
-                        message.is_command = True
-                        await send_api.text_to_stream(msg, message.chat_stream.stream_id)
-                        return True, "bind failed", False
+                # 把文本清洗和严格匹配交给 bind_manager 处理
+                success, msg = bind_manager.confirm_bind(message.message_info.platform, user_id, stripped)
+                if success:
+                    message.is_command = True
+                    await send_api.text_to_stream(msg, message.chat_stream.stream_id)
+                    return True, "bind confirmed", False
+                elif msg != "":
+                    # 如果返回了具体的错误提示（说明格式完全正确，但是验证码不对/过期）才拦截
+                    message.is_command = True
+                    await send_api.text_to_stream(msg, message.chat_stream.stream_id)
+                    return True, "bind failed", False
+                # 如果 msg == ""，说明完全不符合验证码格式（如 SB-114514），直接放行，当作普通消息
 
                 # 3. 拦截解除绑定指令：#unbind_平台_账号
                 unbind_match = re.match(r"^#unbind_([a-zA-Z0-9]+)_(.+)$", stripped)
@@ -344,6 +342,16 @@ class ChatBot:
 
                     await send_api.text_to_stream(msg, message.chat_stream.stream_id)
                     return True, "unbind executed", False
+
+                # 4. 拦截查询绑定状态指令：#check_binding
+                if stripped == "#check_binding":
+                    message.is_command = True
+                    from src.person_info.person_info import get_person_id
+
+                    current_person_id = get_person_id(message.message_info.platform, user_id)
+                    reply_text = bind_manager.check_binding(current_person_id)
+                    await send_api.text_to_stream(reply_text, message.chat_stream.stream_id)
+                    return True, "check binding", False
 
             # 使用新的组件注册中心查找命令
             command_result = component_registry.find_command_by_text(command_text)
