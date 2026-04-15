@@ -52,21 +52,52 @@ async def build_tool_info(
             except Exception as e:
                 logger.debug(f"URL解析失败: {e}")
 
+        # === 并行执行：搜索 + 工具判定 ===
         search_info = ""
         search_url_info = ""
+        tool_results: List[Dict[str, Any]] = []
+
+        # 构建并行任务列表
+        parallel_tasks = {}
+
+        # 1. 搜索任务（仅在无 URL 时触发）
         if not urls:
             logger.info("未检测到URL，尝试联网搜索判定")
-            try:
-                search_info = await web_search_manager.build_search_info(
-                    chat_history=chat_history,
-                    sender=sender,
-                    target=target,
-                    bot_name=global_config.bot.nickname,
-                )
-            except Exception as e:
-                logger.debug(f"联网搜索信息获取失败: {e}")
-            if search_info:
+            parallel_tasks["search"] = web_search_manager.build_search_info(
+                chat_history=chat_history,
+                sender=sender,
+                target=target,
+                bot_name=global_config.bot.nickname,
+            )
+
+        # 2. 标准工具 (Standard)
+        parallel_tasks["standard_tool"] = tool_executor.execute_from_chat_message(
+            sender=sender, target_message=target, chat_history=chat_history, return_details=False
+        )
+
+        # 3. MCP工具 (High-Intelligence) - 仅在权限校验通过时执行
+        if has_mcp_permission:
+            parallel_tasks["mcp_tool"] = mcp_executor.execute_from_chat_message(
+                sender=sender, target_message=target, chat_history=chat_history, return_details=False
+            )
+        else:
+            logger.info("用户无 MCP 权限，跳过 MCP 执行器 (Cached)")
+
+        # 并行执行所有任务
+        task_keys = list(parallel_tasks.keys())
+        task_coros = list(parallel_tasks.values())
+        raw_results = await asyncio.gather(*task_coros, return_exceptions=True)
+        results_map = dict(zip(task_keys, raw_results))
+
+        # 处理搜索结果
+        if "search" in results_map:
+            search_res = results_map["search"]
+            if isinstance(search_res, Exception):
+                logger.debug(f"联网搜索信息获取失败: {search_res}")
+            elif search_res:
+                search_info = search_res
                 logger.info("联网搜索已返回结果")
+                # 搜索结果 URL 抓取（限制为最多 1 个 URL，HTTP 优先）
                 search_urls = []
                 seen_urls = set()
                 for url in extract_urls(search_info):
@@ -74,7 +105,7 @@ async def build_tool_info(
                         continue
                     seen_urls.add(url)
                     search_urls.append(url)
-                    if len(search_urls) >= 3:
+                    if len(search_urls) >= 1:
                         break
                 if search_urls:
                     logger.info("开始抓取搜索结果正文")
@@ -85,34 +116,9 @@ async def build_tool_info(
             else:
                 logger.info("联网搜索未触发或无结果")
 
-        tool_results: List[Dict[str, Any]] = []
-        try:
-            # 并行执行两个工具执行器
-            tasks = []
-
-            # 1. 标准工具 (Standard)
-            tasks.append(
-                tool_executor.execute_from_chat_message(
-                    sender=sender, target_message=target, chat_history=chat_history, return_details=False
-                )
-            )
-
-            # 2. MCP工具 (High-Intelligence) - 仅在权限校验通过时执行
-            if has_mcp_permission:
-                tasks.append(
-                    mcp_executor.execute_from_chat_message(
-                        sender=sender, target_message=target, chat_history=chat_history, return_details=False
-                    )
-                )
-            else:
-                logger.info("用户无 MCP 权限，跳过 MCP 执行器 (Cached)")
-
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            standard_res = results[0]
-            mcp_res = results[1] if has_mcp_permission and len(results) > 1 else None
-
-            # 处理 Standard 结果
+        # 处理 Standard 工具结果
+        standard_res = results_map.get("standard_tool")
+        if standard_res is not None:
             if isinstance(standard_res, Exception):
                 logger.error(f"Standard 工具执行器失败: {standard_res}")
             else:
@@ -120,16 +126,15 @@ async def build_tool_info(
                 if t_res:
                     tool_results.extend(t_res)
 
-            # 处理 MCP 结果
-            if mcp_res:
-                if isinstance(mcp_res, Exception):
-                    logger.error(f"MCP 工具执行器失败: {mcp_res}")
-                else:
-                    t_res, _, _ = mcp_res
-                    if t_res:
-                        tool_results.extend(t_res)
-        except Exception as e:
-            logger.error(f"工具执行器失败，跳过工具结果: {e}")
+        # 处理 MCP 工具结果
+        mcp_res = results_map.get("mcp_tool")
+        if mcp_res is not None:
+            if isinstance(mcp_res, Exception):
+                logger.error(f"MCP 工具执行器失败: {mcp_res}")
+            else:
+                t_res, _, _ = mcp_res
+                if t_res:
+                    tool_results.extend(t_res)
 
         if tool_results or search_info or url_info:
             tool_info_str = "以下是你获取到的实时信息：\n"

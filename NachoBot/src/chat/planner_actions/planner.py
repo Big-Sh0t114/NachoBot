@@ -687,6 +687,15 @@ class ActionPlanner:
             f"{self.log_prefix}规划器决定执行{len(actions)}个动作: {' '.join([a.action_type for a in actions])}"
         )
 
+        # 防止规划器抽风：当 reply 动作数量 >= 3 时，强制回退为单个 reply
+        reply_actions = [a for a in actions if a.action_type == "reply"]
+        if len(reply_actions) >= 3:
+            logger.warning(
+                f"{self.log_prefix}规划器异常：选择了{len(reply_actions)}个reply动作，强制回退为1个reply"
+            )
+            non_reply_actions = [a for a in actions if a.action_type != "reply"]
+            actions = non_reply_actions + [reply_actions[0]]
+
         if advanced_on:
             actions = [a for a in actions if a.action_type == "reply"]
             if not actions:

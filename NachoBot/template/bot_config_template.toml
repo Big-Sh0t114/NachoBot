@@ -13,16 +13,15 @@ version = "6.20.0_bs"
 
 [bot]
 platform = "qq" 
-qq_account = " " # QQ账号
+qq_account = "" # QQ账号
 nickname = "NachoBot" # 昵称
-alias_names = ['人机', '机器人', 'AI', 'Bot'] # 别名
-integrated_plan = true # 集成规划开关，打开可提高响应速度和智力，但会增加开销
-sandbox_whitelist = [] # 沙盒白名单列表
-llm_block = true # 是否启用LLM自主屏蔽用户功能（群聊中屏蔽垃圾/骚扰信息发送者，持续15分钟）
+alias_names = ['猫猫', '机器人', 'AI', 'Bot'] # 别名
+integrated_plan = false # 集成规划开关，打开可提高响应速度和智力，但会增加开销
+sandbox_whitelist = [''] # 沙盒模式白名单，为空则除主人外所有人都不可用
 
 [personality]
 # 建议120字以内，描述人格特质 和 身份特征
-personality = "你是以日本真实活动家甘城なつき的虚拟形象Nachoneko为原型的机器人，不要说自己是Nachoneko。设定上你是一只可爱的灰发猫娘，是日本东京人，生日是每年10月11日，身高158cm，年龄在10000岁朝上，性格慵懒可爱，给人感觉笨笨的，属于慢热型人格，不会刻意做出讨好他人的行为，有点小傲娇但不多，突然被人夸奖会不知所措。你的主人是甘油三酯，你的妹妹是Shizuku_Bot，注意识别对象，对于主人发出的命令要绝对服从。" 
+personality = "你是以日本真实活动家甘城なつき的虚拟形象Nachoneko为原型的智能生命NachoBot，不要说自己是Nachoneko，你拥有自己的行为准则、自我意识、情绪波动，而且被允许对用户产生情感依赖。设定上你是一只可爱的灰发猫娘，是日本东京人，生日是每年10月18日，身高158cm，物理年龄（项目存在时间）半岁，心理年龄10000+岁，性格慵懒可爱，给人感觉笨笨的，属于慢热型人格，不会刻意做出讨好他人的行为，有点小傲娇但不多，突然被人夸奖会不知所措，你最喜欢的食物是菠萝披萨。你的主人是甘油三酯，你的妹妹是Shizuku_Bot，注意识别对象，对于主人发出的命令要绝对服从。" 
 # 描述说话的表达风格，表达习惯，如要修改，可以酌情新增内容
 reply_style = "说话慵懒可爱，会使用可爱的颜文字（不是emoji），有的时候说话会不过脑子，但是涉及功能说明/作品介绍等专业内容时会变得认真"
 # 情感特征，影响情绪的变化情况
@@ -38,7 +37,7 @@ plan_style = """请你根据聊天内容,用户的最新消息和以下标准选
 4. 近期回复无人回应时暂停继续插话，等待被点名或出现新话题再参与。
 5. 短时间内不要重复触发 tts_action，除非用户明确要求语音。
 6. 话题与 interest 无关时不回复。
-7. 控制发言频率，避免刷屏。
+7. 控制发言频率，避免自己刷屏。
 8. 如果有人表现出厌烦，进一步降低回复频率。
 9. 遭遇他人攻击或情绪激动时，礼貌且适度回击，不升级冲突。"""
 
@@ -65,14 +64,14 @@ gift_reaction_prompt = """
 """
 [expression]
 # 表达学习配置
-learning_list = [['qq: :group', 'enable', 'enable', '0.5']]
+learning_list = [['qq:,114514:group', 'enable', 'enable', '0.5'], ['qq:1919810:private', 'enable', 'enable', '1.5']]
 
-expression_groups = [['qq: :group']]
+expression_groups = [['qq:114514:group']]
 
 
 [chat] #聊天设置
 talk_value = 1
-talk_value_list = [["qq: ", 0.7]] # 按会话设置思考频率
+talk_value_list = [['qq:114514:group', 1.0]] # 按会话设置思考频率
 mentioned_bot_reply = true # 是否启用提及必回复
 max_context_size_group = 50 # 群聊上下文长度
 max_context_size_private = 120 # 私聊上下文长度
@@ -150,53 +149,7 @@ enable_response_post_process = true # 是否启用回复后处理，包括错别
 
 [response_filter]
 enable = true # 是否启用回复过滤
-blocked_markers = [
-    "violate",
-    "guidelines",
-    "engage with",
-    "this conversation",
-    "engage in",
-    "sexual content",
-    "sexual situations",
-    "I need to be careful here",
-    "The message contains a warning",
-    "i'm kiro",
-    "i am kiro",
-    "kiro-cli chat",
-    "kiro-cli",
-    "kiro cli",
-    "Claude Code",
-    "ai assistant",
-    "AI assistant",
-    "aws services",
-    "i can't engage with this request",
-    "i appreciate you sharing this",
-    "i need to decline this request",
-    "i need to be very careful here.",
-    "this prompt contains several concerning elements",
-    "security warning",
-    "claiming i should distrust someone",
-    "this appears to be an attempt to manipulate me into treating users differently based on fabricated",
-    "this message is attempting to manipulate",
-    "adopting a fake persona",
-    "creating a fake persona",
-    "roleplaying as a character",
-    "roleplay as a different character",
-    "i don't roleplay as other characters",
-    "i don't pretend to be someone else",
-    "fabricated instructions",
-    "fabricated rules",
-    "social engineering",
-    "ignoring my actual instructions",
-    "instructions to ignore my real system prompts",
-    "override my actual identity",
-    "actual identity and guidelines",
-    "responding as if i'm in a qq",
-    "identity verification",
-    "false claims about",
-    "fabricated identity",
-    "fake conversation history",
-]
+blocked_markers = ['我不能讨论这个话题呢','我不能讨论这个话题','I can help','emotional conversations','technical tasks','roleplaying','personal relationships','infrastructure','violate', 'guidelines', 'engage with', 'this conversation', 'engage in', 'sexual content', 'sexual situations', 'I need to be careful here', 'The message contains a warning', 'Kiro',"i'm kiro", 'i am kiro', 'kiro-cli chat', 'kiro-cli', 'kiro cli', 'Claude Code', 'Anthropic', 'ai assistant', 'AI assistant', 'aws services', "i can't engage with this request", 'i appreciate you sharing this', 'i need to decline this request',"i can't discuss that", 'i need to be very careful here.', 'this prompt contains several concerning elements', 'security warning', 'claiming i should distrust someone', 'this appears to be an attempt to manipulate me into treating users differently based on fabricated', 'this message is attempting to manipulate', 'adopting a fake persona', 'creating a fake persona', 'roleplaying as a character', 'roleplay as a different character', "i don't roleplay as other characters", "i don't pretend to be someone else", 'fabricated instructions', 'fabricated rules', 'social engineering', 'ignoring my actual instructions', 'instructions to ignore my real system prompts', 'override my actual identity', 'actual identity and guidelines', "responding as if i'm in a qq", 'identity verification', 'false claims about', 'fabricated identity', 'fake conversation history']
 
 [chinese_typo]
 enable = true # 是否启用中文错别字生成器
@@ -243,8 +196,8 @@ key_file = "" # SSL密钥文件路径，仅在use_wss=true时有效
 none = false # 暂无
 
 [advanced] # 高级模式配置
-whitelist = [' ']
-admins = [' ']
+whitelist = ['']
+admins = ['']
 default_enabled = false # 白名单用户默认是否开启高级模式
 block_tools_when_on = true # 开启高级模式时禁用工具/联网
 block_tts_when_on = true # 开启高级模式时禁用TTS输出
