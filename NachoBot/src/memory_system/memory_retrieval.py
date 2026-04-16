@@ -49,8 +49,8 @@ def init_memory_retrieval_prompt():
     # 第一步：问题生成prompt
     Prompt(
         """
-你的名字是{bot_name}{bot_nickname}，你{prompt_personality}。现在是{time_now}。
-群里正在进行的聊天内容：
+你的名字是{bot_name}{bot_nickname}。现在是{time_now}。
+你现在正在聊天，以下是具体的聊天内容：
 {chat_history}
 
 {recent_query_history}
@@ -91,7 +91,7 @@ def init_memory_retrieval_prompt():
     # 第二步：ReAct Agent prompt（使用function calling，要求先思考再行动）
     Prompt(
         """
-你的名字是{bot_name}{bot_nickname}，你{prompt_personality}。现在是{time_now}。
+你的名字是{bot_name}{bot_nickname}。现在是{time_now}。
 你正在参与聊天，你需要搜集信息来回答问题，帮助你参与聊天。
 当前需要解答的问题：{question}
 已收集的信息：
@@ -115,7 +115,7 @@ def init_memory_retrieval_prompt():
     # 额外，如果最后一轮迭代：ReAct Agent prompt（使用function calling，要求先思考再行动）
     Prompt(
         """
-你的名字是{bot_name}{bot_nickname}，你{prompt_personality}。现在是{time_now}。
+你的名字是{bot_name}{bot_nickname}。现在是{time_now}。
 你正在参与聊天，你需要根据搜集到的信息判断问题是否可以回答问题。
 
 当前问题：{question}
@@ -1132,7 +1132,7 @@ async def build_memory_retrieval_prompt(
 
     platform = getattr(chat_stream, "platform", None)
     is_group_chat = bool(getattr(chat_stream, "group_info", None))
-    
+
     # Bypass Memory Retrieval for real-time platforms (Bilibili Live Group, Discord VC)
     if (is_group_chat and platform in ["bilibili", "bilibili.live"]) or platform == "discord_vc":
         logger.debug(f"{log_prefix}{platform} 直播/语音环境，跳过记忆检索")
