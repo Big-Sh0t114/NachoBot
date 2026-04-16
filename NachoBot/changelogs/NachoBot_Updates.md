@@ -1,3 +1,5 @@
+4/16
+    直播间重新加入基于replyer react的联网查询功能
 4/15
     添加了#check_bind指令，用于用户查看当前账号绑定状态
     修复了偶发情况下planner错误输出多个reply动作并导致引发replyer重复回复的问题

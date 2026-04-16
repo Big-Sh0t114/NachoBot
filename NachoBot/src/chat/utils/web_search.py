@@ -113,6 +113,41 @@ class WebSearchManager:
         logger.info(f"联网搜索结果: {self._truncate_for_log(formatted)}")
         return formatted
 
+    async def execute_search_direct(self, query: str, chat_history: str = "") -> str:
+        """直接执行搜索，跳过判定步骤。用于两阶段回复架构中 Pass 2。
+
+        Args:
+            query: 搜索关键词
+            chat_history: 聊天历史（可选，用于上下文）
+
+        Returns:
+            str: 格式化的搜索结果，如果无结果则返回空字符串
+        """
+        if not query or not query.strip():
+            return ""
+        if not self._search_enabled:
+            if not self._warned_disabled:
+                logger.warning("联网搜索未启用：model_task_config.web_search 为空或未配置")
+                self._warned_disabled = True
+            return ""
+
+        query = query.strip()
+        logger.info(f"直接搜索 (Pass 2): query={query}")
+
+        if cached := self._get_cache(query):
+            logger.info("直接搜索命中缓存")
+            return cached
+
+        results = await self._search(query, chat_history)
+        if not results:
+            logger.info(f"直接搜索无结果: query={query}")
+            return ""
+
+        formatted = self._format_results(query, results, "bilibili_live_pass2")
+        self._set_cache(query, formatted)
+        logger.info(f"直接搜索结果: {self._truncate_for_log(formatted)}")
+        return formatted
+
     async def _decide_need_search(
         self, chat_history: str, sender: str, target: str, bot_name: str
     ) -> Optional[Dict[str, Any]]:
