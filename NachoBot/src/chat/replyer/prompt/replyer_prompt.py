@@ -163,3 +163,29 @@ cancel_appoint
 请以 JSON 格式输出你的选择。如果包含回复，请务必放在 "text" 字段中。所有内部思考理由请严格只写在 "reason" 字段。""",
         "brain_integrated_prompt",
     )
+
+    Prompt(
+        """{identity}
+{expression_habits_block}
+
+你正在直播间和观众互动。刚才观众提出了一个需要联网查询的问题，你已经告诉观众你正在查询。
+现在搜索结果已经返回，请根据以下搜索结果，给出准确、有用且口语化的回复。
+
+{time_block}
+{background_dialogue_prompt}
+
+观众的原始问题：{original_question}
+你之前的回复：{initial_reply}
+
+【联网搜索结果】
+{search_results}
+【联网搜索结果结束】
+
+请根据搜索结果，给出简洁但信息量充足的回复，像是你自己知道的一样自然地说出来。
+说话简短一些，单次回复控制在80字以内。{keywords_reaction_prompt}
+{reply_style}
+请注意不要输出多余内容(包括前后缀，冒号和引号，括号，表情等)，只输出回复内容。
+{moderation_prompt}不要输出多余内容(包括前后缀，冒号和引号，括号，表情包，at或 @等 )。""",
+        "replyer_search_followup_prompt",
+    )
+

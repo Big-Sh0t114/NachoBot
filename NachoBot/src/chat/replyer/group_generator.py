@@ -1161,6 +1161,30 @@ class DefaultReplyer:
             except Exception:
                 pass
 
+            # 检查是否在适配器中被禁用了工具 (由 live_disable_network_search 控制)
+            disable_tools = False
+            if reply_message and hasattr(reply_message, "additional_config") and isinstance(reply_message.additional_config, dict):
+                disable_tools = reply_message.additional_config.get("disable_tools", False)
+
+            # 注入联网搜索能力提示 (仅 Bilibili Live 群聊弹幕区，排除评论区，且未禁用网络搜索)
+            if (
+                is_group_chat 
+                and not disable_tools
+                and not (
+                    chat_stream.group_info
+                    and getattr(chat_stream.group_info, "group_id", None)
+                    and str(chat_stream.group_info.group_id).startswith("comment:")
+                )
+            ):
+                extra_info_block_parts.append(
+                    "[联网搜索能力] 如果你认为需要联网实时查询才能回答当前问题"
+                    "（如实时新闻、价格、天气、特定事实查询等），"
+                    '请在你的回复中设置 "web_search" 字段为 true，并在 "search_query" 字段填入搜索关键词。'
+                    "同时在回复文本中写一段简短的话告诉观众你正在查询。"
+                    "如果不需要搜索，不需要包含这些字段。"
+                    "[联网搜索能力结束]"
+                )
+
         if extra_info:
             extra_info_block_parts.append(
                 f"以下是你在回复时需要参考的信息，现在请你阅读以下内容，进行决策\n{extra_info}\n以上是你在回复时需要参考的信息，现在请你阅读以下内容，进行决策"
