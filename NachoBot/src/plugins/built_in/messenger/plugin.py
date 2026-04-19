@@ -19,7 +19,6 @@ class MessengerPlugin(BasePlugin):
     系统内置插件，当用户请求转告时，通过 planner 动作池选择转告动作，
     自动将消息转发到目标用户的私聊，并触发 LLM 思考。
 
-    注意：插件基本信息优先从_manifest.json文件中读取
     """
 
     # 插件基本信息

@@ -587,7 +587,9 @@ class DefaultReplyer:
             parallel_tasks = {}
 
             # 1. 搜索任务（仅在无 URL、非 TTS 模式、工具未禁用时触发）
-            if not tts_mcp_only and not urls and not tools_disabled:
+            # 对于Bilibili直播间，由其两阶段搜索逻辑自行处理搜索，此处跳过判定以降低延迟
+            is_bilibili = getattr(self.chat_stream, "platform", "") in ("bilibili", "bilibili.live")
+            if not tts_mcp_only and not urls and not tools_disabled and not is_bilibili:
                 logger.info("未检测到URL，尝试联网搜索判定")
                 parallel_tasks["search"] = self.web_search_manager.build_search_info(
                     chat_history=chat_history,
