@@ -359,7 +359,8 @@ class HeartFChatting:
             debug_prompt = await global_prompt_manager.get_prompt_async("brain_planner_prompt")
             logger.debug(f"{self.log_prefix} [HFC] Resolved brain_planner_prompt preview: {str(debug_prompt)[:50]}...")
 
-            await self.expression_learner.trigger_learning_for_chat()
+            # 使用后台任务触发学习，避免阻塞当前主流程（尤其避免LLM拥堵时阻塞发起思考）
+            asyncio.create_task(self.expression_learner.trigger_learning_for_chat())
 
             cycle_timers, thinking_id = self.start_cycle()
             logger.info(f"{self.log_prefix} 开始第{self._cycle_counter}次思考")

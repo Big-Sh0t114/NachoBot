@@ -1,3 +1,6 @@
+4/19
+    优化expression_selecter提示词
+    修复launchbot_lite.bat的编码问题
 4/16
     直播间重新加入基于replyer react的联网查询功能
 4/15

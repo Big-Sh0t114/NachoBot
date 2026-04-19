@@ -17,14 +17,21 @@ logger = get_logger("expression_selector")
 
 def init_prompt():
     expression_evaluation_prompt = """
-以下是正在进行的聊天内容：
+[任务说明]
+你现在是一个内部评估系统，负责从备选列表中选择最符合当前语境的“表达情境”。
+注意：本任务【不是】聊天回复生成！请【绝对不要】输出任何回复内容（reply）、情绪（emotion）等字段。你的唯一任务是输出一个包含情境编号的JSON。
+
+[聊天上下文]
 {chat_observe_info}
 
-你的名字是{bot_name}{target_message}
+[上下文补充]
+机器人的名字是{bot_name}
+{target_message}
 
-以下是可选的表达情境：
+[可选的表达情境]
 {all_situations}
 
+[选择要求]
 请你分析聊天内容的语境、情绪、话题类型，从上述情境中选择最适合当前聊天情境的，最多{max_num}个情境。
 考虑因素包括：
 1. 聊天的情绪氛围（轻松、严肃、幽默等）
@@ -32,13 +39,12 @@ def init_prompt():
 3. 情境与当前语境的匹配度
 {target_message_extra_block}
 
-请以JSON格式输出，只需要输出选中的情境编号：
+[输出格式]
+请严格以JSON格式输出，只需要选中的情境编号数组。不要包含任何markdown代码块（如```json）、不要包含任何其他字段（不要reply！）。
 例如：
 {{
-    "selected_situations": [2, 3, 5, 7, 19]
+    "selected_situations": [2, 3, 5, 7]
 }}
-
-请严格按照JSON格式输出，不要包含其他内容：
 """
     Prompt(expression_evaluation_prompt, "expression_evaluation_prompt")
 
@@ -242,7 +248,7 @@ class ExpressionSelector:
         all_situations_str = "\n".join(all_situations)
 
         if target_message:
-            target_message_str = f"，现在你想要回复消息：{target_message}"
+            target_message_str = f"目标回复内容参考：{target_message}"
             target_message_extra_block = "4.考虑你要回复的目标消息"
         else:
             target_message_str = ""
@@ -280,12 +286,14 @@ class ExpressionSelector:
             if isinstance(result, str):
                 result = json.loads(result)
 
-            if not isinstance(result, dict) or "selected_situations" not in result:
+            if isinstance(result, list):
+                selected_indices = result
+            elif isinstance(result, dict) and "selected_situations" in result:
+                selected_indices = result["selected_situations"]
+            else:
                 logger.error("LLM返回格式错误")
                 logger.info(f"LLM返回结果: \n{content}")
                 return [], []
-
-            selected_indices = result["selected_situations"]
 
             # 根据索引获取完整的表达方式
             valid_expressions: List[Dict[str, Any]] = []

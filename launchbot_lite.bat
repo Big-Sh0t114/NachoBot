@@ -73,7 +73,7 @@ if errorlevel 1 (
 set "API_FILE=%SOVITS_DIR%\api_v2.py"
 if not exist "%API_FILE%" set "API_FILE=%SOVITS_DIR%\api.py"
 
-REM ── 从 gpt-sovits.toml 读取 TTS 目标显卡 ──
+REM -- Read GPU ID from gpt-sovits.toml --
 set "TTS_GPU_ID=0"
 set "TTS_TOML=%ADAPTER_DIR%\configs\gpt-sovits.toml"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%ADAPTER_DIR%\get_gpu_id.ps1" -TomlPath "%TTS_TOML%" > "%TEMP%\_gpu_id.txt" 2>nul
