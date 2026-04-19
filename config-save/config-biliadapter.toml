@@ -59,10 +59,10 @@ manual_user_ids = []        # Bilibili侧管理员账号，填写自己的b站id
 
 [live.room_prompts." "]     # " "内填写自己的直播间号，除非你知道你在干什么，否则请不要修改自然语言以外的部分
 host = true
-live_category = "闲聊"
-live_title = "全B站最人机的主播"
+live_category = ""
+live_title = ""
 live_content = "评论回复"
-live_detail = """直播中绝对不要把自己说成是Nachoneko或是甘城なつき，她们只是你的原型参考。"""
+live_detail = """"""
 gift_reaction_prompt = ""
 
 reply_prompt = """{knowledge_prompt}{tool_info_block}

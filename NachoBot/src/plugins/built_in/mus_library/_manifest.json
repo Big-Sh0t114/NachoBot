@@ -3,9 +3,20 @@
   "name": "Mus Library (内置点歌播放器)",
   "version": "0.1.0",
   "description": "内置音乐库点歌并以语音播放，支持随机播放。",
-  "author": { "name": "Big_Sh0t" },
-  "keywords": ["music", "audio", "silk", "onebot", "command"],
-  "categories": ["Audio", "Entertainment"],
+  "author": {
+    "name": "Big-Sh0t114"
+  },
+  "keywords": [
+    "music",
+    "audio",
+    "silk",
+    "onebot",
+    "command"
+  ],
+  "categories": [
+    "Audio",
+    "Entertainment"
+  ],
   "license": "GPL-v3.0-or-later",
   "plugin_info": {
     "is_built_in": true,

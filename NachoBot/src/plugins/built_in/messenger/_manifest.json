@@ -4,14 +4,14 @@
     "version": "2.0.0",
     "description": "转告消息插件 - 通过 planner 动作池，当用户请求转告时，自动将消息转发到目标用户的私聊",
     "author": {
-        "name": "BigSh0t",
-        "url": "https://github.com/BigSh0t"
+        "name": "Big-Sh0t114",
+        "url": "https://github.com/Big-Sh0t114"
     },
     "license": "GPL-v3.0-or-later",
     "host_application": {
         "min_version": "0.10.0"
     },
-    "repository_url": "https://github.com/BigSh0t/Nacho-with-u",
+    "repository_url": "https://github.com/Big-Sh0t114/NachoBot",
     "keywords": [
         "转告",
         "传话",
