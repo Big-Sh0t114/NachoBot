@@ -7,7 +7,6 @@ backup_files
 .ruff_cache
 /.venv
 /logs
-base.toml
 *.ckpt
 ncnk_fin.pth
 # Local Models

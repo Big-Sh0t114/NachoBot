@@ -1,0 +1,27 @@
+[server]
+host = "127.0.0.1"
+port = 8070
+
+[routes]
+qq = "http://127.0.0.1:8000/ws" 
+discord = "http://127.0.0.1:8000/ws"
+# nonebot-qq = "default"
+
+[probability]
+voice_probability = 1.0 # 使用语音的概率
+
+[enabled_tts] # 启用的TTS模块，请与各插件的目录名称一致
+enabled = ["GPT_Sovits"]
+
+[tts_base_config]
+stream_mode = false  # 是否启用流式输出
+post_process = false # 是否启用后处理（现阶段无效）
+
+[debug]
+logging_level = "DEBUG" # 日志级别
+
+[plugins.GPT_Sovits]
+api_base = "http://127.0.0.1:9874" 
+gpt_weights    = "C:/Users/BigSh0t/Nacho-with-u/nachobot_tts_adapter/configs/ncnk.ckpt"
+sovits_weights = "C:/Users/BigSh0t/Nacho-with-u/nachobot_tts_adapter/configs/ncnk_fin.pth" 
+speaker = "NachoChan"
