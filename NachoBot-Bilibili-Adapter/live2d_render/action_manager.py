@@ -16,6 +16,7 @@ DEFAULT_BODY_CODE = {
     "点头/同意": "Nod",
     "连续点头/非常赞同": "Nod",
     "摇头/否定": "Shake",
+    "眨眼/卖萌/Wink": "Wink",
     "转身向左/看左边": "TurnLeft",
     "转身向右/看右边": "TurnRight",
     "身体前倾/好奇/仔细看": "LeanForward",
@@ -174,7 +175,7 @@ class ChatAction:
         # Default back to Idle and Center after speaking
         self.body_action = "一般"
         self.head_action = "Center"
-        
+
         # We also need to forcibly dispatch these to the renderer to break out of single-motion locks
         # Only dispatch gaze to Center. For body, Live2D v3 bindings may get stuck on the last frame of a non-looping Priority 3 motion
         # "Idle" is special cased to invoke the base idle group
@@ -185,8 +186,10 @@ class ChatAction:
             gaze_data = HEAD_DIRECTION_MAP.get("Center", None)
             if gaze_data:
                 await self.manager.controller.send_live2d_event("auto_gaze", gaze_data)
-                
-        self.manager.logger.info("[Action] Reply finished, reset to Body=Idle, Head=Center")
+
+        self.manager.logger.info(
+            "[Action] Reply finished, reset to Body=Idle, Head=Center"
+        )
 
 
 class ActionManager:
@@ -213,7 +216,7 @@ class ActionManager:
 2. **不要频繁乱动**：动作应该自然且有意义，不要每一句话都触发大动作。
 3. **视线控制**：只有在被要求"看左边"、"看右边"等，或者有明显空间指向性时才改变视线。否则保持"Center"。
 4. **情绪匹配**：根据对话情绪选择合适动作。开心时可以晃动，疑惑时可以歪头，同意时可以点头。
-5. **动作自然**：动作应该符合对话情境，比如被夸奖时"害羞/移开视线"，看到有趣的东西时"身体前倾/好奇"。
+5. **动作自然**：动作应该符合对话情境，比如被夸奖时"害羞/移开视线"，看到有趣的东西时"身体前倾/好奇"，有人夸你可爱时"眨眼/卖萌/Wink"。
 
 身体动作可选：
 {all_actions}
@@ -257,4 +260,3 @@ class ActionManager:
     async def on_reply_finished(self, chat_id="live_room"):
         action = self.get_action_state_by_chat_id(chat_id)
         await action.on_reply_finished()
-
