@@ -3,7 +3,6 @@ import logging
 import io
 import time
 import wave
-import audioop
 import numpy as np
 from typing import Optional, Callable
 
@@ -83,15 +82,31 @@ class SilenceDetectingSink(Sink):
 
     @Filters.container
     def write(self, data, user):
-        # logging.getLogger("VoiceHandler").debug(f"Packet from {user} len={len(data)}")
+        # py-cord 2.8+ passes VoiceData objects instead of raw bytes
+        # Extract PCM bytes from VoiceData if needed
+        if hasattr(data, 'pcm'):
+            pcm_data = data.pcm
+        else:
+            pcm_data = data
+
+        if not pcm_data:
+            return
+
+        # py-cord 2.8+ passes User/Member objects instead of integer IDs
+        # Extract the numeric ID for dict keys and downstream callbacks
+        if hasattr(user, 'id'):
+            user = user.id
+
+        # logging.getLogger("VoiceHandler").debug(f"Packet from {user} len={len(pcm_data)}")
         if user not in self.utterance_buffer:
             self.utterance_buffer[user] = bytearray()
             self.is_speaking[user] = False
 
-        # Convert to simple RMS for VAD
+        # Convert to simple RMS for VAD using numpy (audioop is deprecated)
         # We process 20ms chunks usually, data length varies
         try:
-            rms = audioop.rms(data, DISCORD_WIDTH)
+            samples = np.frombuffer(pcm_data, dtype=np.int16)
+            rms = int(np.sqrt(np.mean(samples.astype(np.float64) ** 2))) if len(samples) > 0 else 0
         except Exception:
             rms = 0
 
@@ -119,7 +134,7 @@ class SilenceDetectingSink(Sink):
                 f"Current RMS: {rms} | Threshold: {self.vad_threshold} | Speaking: {self.is_speaking.get(user)}"
             )
 
-        self.utterance_buffer[user].extend(data)
+        self.utterance_buffer[user].extend(pcm_data)
 
     async def _silence_checker(self):
         logging.getLogger("VoiceHandler").info("Silence checker started")

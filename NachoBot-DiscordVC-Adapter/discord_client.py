@@ -203,7 +203,7 @@ class NachoDiscordBot(discord.Bot):
         if not vc:
             return
 
-        if vc.recording:
+        if vc.is_recording():
             return
 
         self.logger.info(f"Starting to listen in guild {guild_id}")

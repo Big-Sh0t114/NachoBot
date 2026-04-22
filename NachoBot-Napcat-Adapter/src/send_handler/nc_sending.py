@@ -8,18 +8,21 @@ from src.response_pool import get_response
 from src.logger import logger
 from src.recv_handler.message_sending import message_send_instance
 
+
 class NCMessageSender:
     def __init__(self):
         self.server_connection: Server.ServerConnection = None
-    
+        self._send_lock = asyncio.Lock()  # 新增全局发送锁
+
     async def set_server_connection(self, connection: Server.ServerConnection):
         self.server_connection = connection
-    
+
     async def send_message_to_napcat(self, action: str, params: dict) -> dict:
         request_uuid = str(uuid.uuid4())
         payload = json.dumps({"action": action, "params": params, "echo": request_uuid})
-        await asyncio.sleep(0.5)  # 限制发送频率，防止 Napcat 堵塞
-        await self.server_connection.send(payload)
+        async with self._send_lock:  # 获取锁，确保同一时刻只有一个发送任务
+            await self.server_connection.send(payload)
+            await asyncio.sleep(0.5)  # 发送后强制等待1秒，彻底杜绝高并发触发风控
         try:
             response = await get_response(request_uuid)
         except TimeoutError:
@@ -29,7 +32,7 @@ class NCMessageSender:
             logger.error(f"发送消息失败: {e}")
             return {"status": "error", "message": str(e)}
         return response
-    
+
     async def message_sent_back(self, message_base: MessageBase, qq_message_id: str) -> None:
         # # 修改 additional_config，添加 echo 字段
         # if message_base.message_info.additional_config is None:
@@ -59,5 +62,6 @@ class NCMessageSender:
             logger.debug("已回送消息ID")
         else:
             logger.error("回送消息ID失败")
+
 
 nc_message_sender = NCMessageSender()

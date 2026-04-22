@@ -1,3 +1,6 @@
+4/22
+    更换了DiscordVC使用的库，使其继续满足最新的Discord协议
+    修复了Napcat中信息并发发送导致被踢下线的问题
 4/19
     优化expression_selecter提示词
     修复launchbot_lite.bat的编码问题

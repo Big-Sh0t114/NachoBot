@@ -4,7 +4,16 @@ import time
 from typing import Any, Dict, Optional
 
 from ncnk_message import MessageBase
-from bili_src.core.utils import _extract_image_base64, _extract_plain_text, _find_reply_id, _strip_emoji, _split_bilibili_text, BILIBILI_DANMU_MAX_LENGTH, BILIBILI_DANMU_SEND_DELAY_SECONDS
+from bili_src.core.utils import (
+    _extract_image_base64,
+    _extract_plain_text,
+    _find_reply_id,
+    _strip_emoji,
+    _split_bilibili_text,
+    BILIBILI_DANMU_MAX_LENGTH,
+    BILIBILI_DANMU_SEND_DELAY_SECONDS,
+)
+
 
 class OutgoingHandler:
     def __init__(self, config: Any, logger: logging.Logger, adapter_ref: Any):
@@ -27,12 +36,18 @@ class OutgoingHandler:
 
         image_data = _extract_image_base64(seg)
         if image_data:
-            private_target = self.adapter.private_handler.resolve_private_target(message)
+            private_target = self.adapter.private_handler.resolve_private_target(
+                message
+            )
             if private_target:
-                await self.adapter.private_handler.send_private_image(private_target, image_data)
+                await self.adapter.private_handler.send_private_image(
+                    private_target, image_data
+                )
                 text = _extract_plain_text(seg).strip()
                 if text:
-                    await self.adapter.private_handler.send_private_message(private_target, text)
+                    await self.adapter.private_handler.send_private_message(
+                        private_target, text
+                    )
             else:
                 self.logger.warning("Image message unsupported for non-private target")
             return
@@ -42,12 +57,16 @@ class OutgoingHandler:
             return
 
         original_text = text
-        text, emotion, action = self.adapter.live2d_manager.extract_json_emotion_from_text(original_text)
-        
+        text, emotion, action = (
+            self.adapter.live2d_manager.extract_json_emotion_from_text(original_text)
+        )
+
         comment_target = self.adapter.comment_handler.resolve_comment_target(message)
         if comment_target:
             self.adapter.live2d_manager.execute_extracted_live2d_action(emotion, action)
-            await self.adapter.comment_handler.send_comment_reply_from_context(comment_target, text)
+            await self.adapter.comment_handler.send_comment_reply_from_context(
+                comment_target, text
+            )
             return
 
         room_id = self._resolve_room_id(message)
@@ -69,7 +88,9 @@ class OutgoingHandler:
         private_target = self.adapter.private_handler.resolve_private_target(message)
         if private_target:
             self.adapter.live2d_manager.execute_extracted_live2d_action(emotion, action)
-            await self.adapter.private_handler.send_private_message(private_target, text)
+            await self.adapter.private_handler.send_private_message(
+                private_target, text
+            )
             return
 
         self.logger.warning("Missing room_id for outgoing danmu")
@@ -112,9 +133,11 @@ class OutgoingHandler:
 
     async def _handle_comment_reply(self, args: Dict[str, Any]) -> None:
         raw_msg = str(args.get("message") or "")
-        text, emotion, action = self.adapter.live2d_manager.extract_json_emotion_from_text(raw_msg)
+        text, emotion, action = (
+            self.adapter.live2d_manager.extract_json_emotion_from_text(raw_msg)
+        )
         text = _strip_emoji(text).strip()
-        
+
         self.adapter.live2d_manager.execute_extracted_live2d_action(emotion, action)
 
         if not text:
@@ -136,7 +159,9 @@ class OutgoingHandler:
 
     async def _handle_live_reply(self, args: Dict[str, Any]) -> None:
         raw_message = str(args.get("message") or "")
-        text, emotion, action = self.adapter.live2d_manager.extract_json_emotion_from_text(raw_message)
+        text, emotion, action = (
+            self.adapter.live2d_manager.extract_json_emotion_from_text(raw_message)
+        )
         text = _strip_emoji(text).strip()
 
         if text:
@@ -180,7 +205,9 @@ class OutgoingHandler:
         if self.adapter.live2d_manager.controller:
             try:
                 await self.adapter.live2d_manager.controller.on_start_replying()
-                self.adapter.live2d_manager.execute_extracted_live2d_action(emotion, action)
+                self.adapter.live2d_manager.execute_extracted_live2d_action(
+                    emotion, action
+                )
             except Exception as e:
                 self.logger.error(f"Live2D reply hook error: {e}")
 
