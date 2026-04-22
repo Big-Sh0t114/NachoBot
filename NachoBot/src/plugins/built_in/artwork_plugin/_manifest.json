@@ -4,10 +4,17 @@
   "version": "0.1.0",
   "description": "当用户想看画时，随机发送本地artwork目录中的图片",
   "author": {
-    "name": "BigSh0t"
+    "name": "Big-Sh0t114"
   },
-  "keywords": ["art", "action", "command"],
-  "categories": ["Picture", "Entertainment"],
+  "keywords": [
+    "art",
+    "action",
+    "command"
+  ],
+  "categories": [
+    "Picture",
+    "Entertainment"
+  ],
   "license": "GPL-v3.0-or-later",
   "host_application": {
     "min_version": "0.10.0"

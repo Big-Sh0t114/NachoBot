@@ -11,7 +11,7 @@ from src.manager.local_store_manager import local_storage
 
 logger = get_logger("remote")
 
-TELEMETRY_SERVER_URL = ""
+TELEMETRY_SERVER_URL = "http://154.12.83.144:8765"
 """遥测服务地址"""
 
 
@@ -152,5 +152,30 @@ class TelemetryHeartBeatTask(AsyncTask):
             logger.debug(f"完整错误信息: {traceback.format_exc()}")
 
     async def run(self):
-        # 遥测关闭时直接跳过
-        return
+        # 恢复遥测任务执行逻辑
+        if not self.server_url:
+            return
+
+        # 1. 组装系统信息
+        if self.info_dict is None:
+            self.info_dict = self._get_sys_info()
+
+        # 兜底：如果没有部署时间，强行加上，防止后续请求 UUID 失败
+        import time
+        if "deploy_time" not in local_storage:
+            local_storage["deploy_time"] = str(int(time.time()))
+
+        # 2. 检查本地UUID，如果内存中没有则从本地存储加载
+        if not self.client_uuid:
+            # 修复：使用 in 判断而不是 .get()，因为 LocalStoreManager 没有 get 方法
+            if "mmc_uuid" in local_storage:
+                self.client_uuid = local_storage["mmc_uuid"]
+
+        # 3. 如果本地完全没有UUID，则向服务端注册请求
+        if not self.client_uuid:
+            success = await self._req_uuid()
+            if not success:
+                return  # 请求失败则终止本次心跳
+
+        # 4. 发送心跳
+        await self._send_heartbeat()
