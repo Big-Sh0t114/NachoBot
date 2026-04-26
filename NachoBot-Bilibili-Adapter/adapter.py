@@ -1490,6 +1490,59 @@ class BilibiliAdapter:
         # Bypass queue for immediate core processing
         asyncio.create_task(self._send_to_nachobot(message))
 
+    async def handle_incoming_guard_entry(
+        self,
+        room_id: int,
+        user_id: str,
+        user_name: str,
+        guard_level: int,
+        timestamp: float,
+    ) -> None:
+        """Handle a guard-level (大航海) user entering the live room."""
+        guard_label = {1: "总督", 2: "提督", 3: "舰长"}.get(guard_level, "舰长")
+        self.logger.info(
+            f"GuardEntry: [{room_id}] {user_name}({user_id}) entered as {guard_label}"
+        )
+
+        prompt_text = f"{guard_label} {user_name} 进入了直播间"
+        template_info = await self._get_template_info(room_id, user_id, prompt_text)
+
+        additional_config = {
+            "room_id": room_id,
+            "is_mentioned": 1.0,
+        }
+
+        message_info = BaseMessageInfo(
+            platform="bilibili.live",
+            message_id="notice",
+            time=timestamp,
+            user_info=UserInfo(
+                platform="bilibili.live",
+                user_id=user_id,
+                user_nickname=user_name,
+            ),
+            group_info=GroupInfo(
+                platform="bilibili.live",
+                group_id=str(room_id),
+                group_name=str(room_id),
+            ),
+            format_info=FormatInfo(
+                content_format=["text"],
+                accept_format=ACCEPT_FORMAT,
+            ),
+            template_info=template_info,
+            additional_config=additional_config,
+        )
+
+        message = MessageBase(
+            message_info=message_info,
+            message_segment=Seg(type="text", data=prompt_text),
+            raw_message=None,
+        )
+
+        # Priority 20: same as VIP/Mention to ensure bot notices and greets
+        self.event_manager.push_to_event_queue(20, message)
+
     # ========== Prompt Resolution ==========
 
     @staticmethod

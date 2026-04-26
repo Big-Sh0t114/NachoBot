@@ -189,6 +189,13 @@ class TTSManager:
         if not text:
             return "", ""
 
+        # Normalize full-width symbols and brackets to standard uppercase tags
+        text = text.replace("＜", "<").replace("＞", ">")
+        text = text.replace("／", "/")
+        text = text.replace("Ｚ", "Z").replace("Ｈ", "H").replace("ｚ", "Z").replace("ｈ", "H")
+        text = text.replace("Ｊ", "J").replace("Ｐ", "P").replace("ｊ", "J").replace("ｐ", "P")
+        text = re.sub(r"[<\[【［](/?)(ZH|JP)[>\]】］]", lambda m: f"<{m.group(1)}{m.group(2).upper()}>", text, flags=re.IGNORECASE)
+
         jp_matches = re.findall(r"<JP>(.*?)</JP>", text, re.DOTALL)
         zh_matches = re.findall(r"<ZH>(.*?)</ZH>", text, re.DOTALL)
 
@@ -299,6 +306,13 @@ class TTSManager:
             self.logger.error(f"TTS timer error: {e}")
 
     def buffer_tts_reply(self, room_id: int, text: str, reply_mid: str, reply_dmid: str, emotion: Optional[str] = None, action: Optional[str] = None):
+        # Normalize full-width symbols and brackets to standard uppercase tags
+        text = text.replace("＜", "<").replace("＞", ">")
+        text = text.replace("／", "/")
+        text = text.replace("Ｚ", "Z").replace("Ｈ", "H").replace("ｚ", "Z").replace("ｈ", "H")
+        text = text.replace("Ｊ", "J").replace("Ｐ", "P").replace("ｊ", "J").replace("ｐ", "P")
+        text = re.sub(r"[<\[【［](/?)(ZH|JP)[>\]】］]", lambda m: f"<{m.group(1)}{m.group(2).upper()}>", text, flags=re.IGNORECASE)
+        
         buffer = self._tts_buffer.setdefault(room_id, [])
         buffer.append(text)
 

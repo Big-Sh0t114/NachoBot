@@ -157,6 +157,9 @@ class ModelTaskConfig(ConfigBase):
     bilibili_vlm: TaskConfig = field(default_factory=TaskConfig)
     """Bilibili 直播画面识别专用配置"""
 
+    bilibili_replyer: TaskConfig = field(default_factory=TaskConfig)
+    """Bilibili 直播间专属独立回复模型组（可选，缺省回退到默认参数）"""
+
     _active_replyer_group: int = field(default=0, repr=False, init=False)
     """当前激活的 replyer 组编号（0 或 1），运行时状态"""
 

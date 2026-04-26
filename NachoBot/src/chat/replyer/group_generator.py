@@ -55,6 +55,18 @@ class DefaultReplyer:
     @property
     def express_model(self) -> LLMRequest:
         model_set = model_config.model_task_config.replyer
+        # 检测是否为 Bilibili 直播间：通过 template_name 以 bilibili_live_ 开头判断
+        try:
+            if self.chat_stream.context:
+                msg = self.chat_stream.context.message
+                if msg and msg.message_info and msg.message_info.template_info:
+                    tpl = msg.message_info.template_info.template_name
+                    if tpl and isinstance(tpl, str) and tpl.startswith("bilibili_live_"):
+                        bili_replyer = getattr(model_config.model_task_config, "bilibili_replyer", None)
+                        if bili_replyer and bili_replyer.model_list:
+                            model_set = bili_replyer
+        except Exception:
+            pass
         if getattr(self, "request_type", "replyer") == "file_edit":
             model_set = getattr(model_config.model_task_config, "file_edit", model_set)
         return LLMRequest(model_set=model_set, request_type=getattr(self, "request_type", "replyer"))
