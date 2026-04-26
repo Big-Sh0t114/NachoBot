@@ -205,6 +205,11 @@ class ModelClient:
         Call the replyer model group.
         Returns the model's response text or None if failed.
         """
+        bili_config = self._task_configs.get("bilibili_replyer")
+        if bili_config and getattr(bili_config, "model_list", None):
+            return await self._call_task_model("bilibili_replyer", prompt)
+        elif "replyer0" in self._task_configs:
+            return await self._call_task_model("replyer0", prompt)
         return await self._call_task_model("replyer", prompt)
 
     async def _call_task_model(self, task_name: str, prompt: str) -> Optional[str]:

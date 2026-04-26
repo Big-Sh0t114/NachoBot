@@ -534,6 +534,11 @@ max_tokens = 800
 model_list = ["Qwen3.5-9B-Uncensored","Florence-2"]
 max_tokens = 114514
 
+[model_task_config.bilibili_replyer] # Bilibili 直播间专属独立回复模型组
+model_list = ["deepseek-v4-pro","claude-sonnet-4-6/polo","Qwen/Qwen3.5-397B-A17B"]
+temperature = 0.5
+max_tokens = 800
+
 [model_task_config.video] # 视频识别模型
 model_list = ["gemini-2.0-flash","gemini-2.5-flash","waifubot-view-video"]
 max_tokens = 4096
