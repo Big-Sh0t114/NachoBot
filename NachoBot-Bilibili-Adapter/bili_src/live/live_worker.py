@@ -527,6 +527,148 @@ class LiveRoomWorker:
             await self._handle_superchat_event(payload)
         elif cmd == "GUARD_BUY":
             await self._handle_guard_event(payload)
+        elif cmd.startswith("INTERACT_WORD"):
+            await self._handle_interact_word_event(payload, cmd)
+
+    async def _handle_interact_word_event(self, payload: Dict[str, Any], cmd: str = "") -> None:
+        """Handle INTERACT_WORD / INTERACT_WORD_V2 events.
+
+        V2 uses protobuf in data.pb (base64); V1 uses plain JSON fields.
+        Only guard-level (大航海) user entries (msg_type=1, privilege>0) are forwarded.
+        """
+        data = payload.get("data") or {}
+        pb_b64 = data.get("pb")
+
+        if pb_b64:
+            # --- V2 protobuf path ---
+            parsed = self._decode_interact_word_pb(pb_b64)
+            if parsed is None:
+                self.logger.warning(
+                    "INTERACT_WORD_V2 protobuf decode failed: room=%s", self.room_id
+                )
+                return
+            uid, uname, msg_type, privilege_type, ts = parsed
+        else:
+            # --- V1 JSON fallback ---
+            uid = str(data.get("uid") or "")
+            uname = str(data.get("uname") or "")
+            msg_type = self._safe_get_int(data.get("msg_type"), 0)
+            privilege_type = self._safe_get_int(data.get("privilege_type"), 0)
+            ts = self._safe_get_float(data.get("timestamp"), time.time())
+
+        # Only process room entries (msg_type=1)
+        if msg_type != 1:
+            return
+
+        # Only process guard-level users (skip regular viewers)
+        if privilege_type <= 0:
+            return
+
+        guard_label = {1: "总督", 2: "提督", 3: "舰长"}.get(privilege_type, "舰长")
+        self.logger.info(
+            "Guard entry: room=%s user=%s(%s) level=%s(%s) -> dispatching",
+            self.room_id,
+            uname,
+            uid,
+            privilege_type,
+            guard_label,
+        )
+
+        await self.adapter.handle_incoming_guard_entry(
+            room_id=self.room_id,
+            user_id=str(uid),
+            user_name=str(uname),
+            guard_level=privilege_type,
+            timestamp=float(ts) if ts else time.time(),
+        )
+
+    @staticmethod
+    def _decode_interact_word_pb(pb_b64: str):
+        """Decode INTERACT_WORD_V2 protobuf.
+
+        Returns (uid, uname, msg_type, privilege_type, timestamp) or None on failure.
+        Protobuf field mapping (community-documented):
+            1:  uid (varint)
+            2:  uname (string)
+            5:  msg_type (varint, 1=enter room)
+            7:  timestamp (varint, seconds)
+            16: privilege_type (varint, 0=none, 1=总督, 2=提督, 3=舰长)
+        """
+        import base64
+
+        try:
+            buf = base64.b64decode(pb_b64)
+        except Exception:
+            return None
+
+        uid = 0
+        uname = ""
+        msg_type = 0
+        privilege_type = 0
+        timestamp = 0
+
+        pos = 0
+        buf_len = len(buf)
+        try:
+            while pos < buf_len:
+                # Read tag
+                tag = 0
+                shift = 0
+                while pos < buf_len:
+                    b = buf[pos]
+                    tag |= (b & 0x7F) << shift
+                    pos += 1
+                    if not (b & 0x80):
+                        break
+                    shift += 7
+                field = tag >> 3
+                wtype = tag & 7
+
+                if wtype == 0:  # varint
+                    val = 0
+                    shift = 0
+                    while pos < buf_len:
+                        b = buf[pos]
+                        val |= (b & 0x7F) << shift
+                        pos += 1
+                        if not (b & 0x80):
+                            break
+                        shift += 7
+                    if field == 1:
+                        uid = val
+                    elif field == 5:
+                        msg_type = val
+                    elif field == 7:
+                        timestamp = val
+                    elif field == 16:
+                        privilege_type = val
+                elif wtype == 2:  # length-delimited
+                    length = 0
+                    shift = 0
+                    while pos < buf_len:
+                        b = buf[pos]
+                        length |= (b & 0x7F) << shift
+                        pos += 1
+                        if not (b & 0x80):
+                            break
+                        shift += 7
+                    val = buf[pos : pos + length]
+                    pos += length
+                    if field == 2:
+                        try:
+                            uname = val.decode("utf-8")
+                        except Exception:
+                            pass
+                elif wtype == 1:  # fixed64
+                    pos += 8
+                elif wtype == 5:  # fixed32
+                    pos += 4
+                else:
+                    break  # Unknown wire type, stop
+        except Exception:
+            pass  # Best-effort: return whatever we parsed so far
+
+        return uid, uname, msg_type, privilege_type, timestamp
 
     async def _handle_danmu_event(self, payload: Dict[str, Any]) -> None:
         info = payload.get("info") or []
