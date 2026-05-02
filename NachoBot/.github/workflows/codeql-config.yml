@@ -1,0 +1,4 @@
+# Replace the 'autobuild' step with your manual build
+- name: Build C++ Code
+  run: |
+    echo "Skipping autobuild for header-only components"
