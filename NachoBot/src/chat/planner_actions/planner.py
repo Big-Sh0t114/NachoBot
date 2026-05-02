@@ -64,15 +64,8 @@ def _pick_latest_user_message(
 def init_prompt():
     Prompt(
         """
-{time_block}
 {name_block}
 你的兴趣是：{interest}
-{chat_context_description}，以下是具体的聊天内容
-**聊天内容**
-{chat_content_block}
-
-**动作记录**
-{actions_before_now_block}
 
 **可用的action**
 {reply_action_description}
@@ -123,14 +116,11 @@ cancel_appoint
 {block_user_action_text}
 {action_options_text}
 
-请选择合适的action，并说明触发action的消息id和选择该action的原因。消息id格式:m+数字
-先输出你的选择思考理由，再输出你选择的action，理由是一段平文本，不要分点，精简。
 **动作选择要求**
 请你根据聊天内容,用户的最新消息和以下标准选择合适的动作:
 {plan_style}
 **重要**：如果用户最新消息中包含"提醒""叫我""闹钟""定时""记得叫""到时候"等词语，并且指定了时间，必须选择make_appoint动作，不要选择reply。
 回复动作若未明确指定 target_message_id，请选择最新的非机器人消息。
-{moderation_prompt}
 
 请选择所有符合使用要求的action，动作用json格式输出，如果输出多个json，每个json都要单独用```json包裹，你可以重复使用同一个动作或不同动作，但是绝对不要重复输出reply:
 **示例**
@@ -150,9 +140,24 @@ cancel_appoint
 }}
 ```
 
+--- 以下为本轮动态上下文 ---
+
+{time_block}
+{chat_context_description}，以下是具体的聊天内容
+**聊天内容**
+{chat_content_block}
+
+**动作记录**
+{actions_before_now_block}
+
+请选择合适的action，并说明触发action的消息id和选择该action的原因。消息id格式:m+数字
+先输出你的选择思考理由，再输出你选择的action，理由是一段平文本，不要分点，精简。
+{moderation_prompt}
+
 """,
         "planner_prompt",
     )
+
 
     Prompt(
         """
