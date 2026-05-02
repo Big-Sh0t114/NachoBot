@@ -1,6 +1,6 @@
 <!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
 <html>
-<!-- Created by GNU Texinfo 7.2, https://www.gnu.org/software/texinfo/ -->
+<!-- Created by , GNU Texinfo 7.1.1 -->
   <head>
     <meta charset="utf-8">
     <title>
@@ -19,7 +19,7 @@
 
 <a name="SEC_Top"></a>
 
-<div class="region-contents" id="SEC_Contents">
+<div class="element-contents" id="SEC_Contents">
 <h2 class="contents-heading">Table of Contents</h2>
 
 <div class="contents">
@@ -44,7 +44,7 @@
     <ul class="toc-numbered-mark">
       <li><a id="toc-Linking-to-FFmpeg-with-Microsoft-Visual-C_002b_002b" href="#Linking-to-FFmpeg-with-Microsoft-Visual-C_002b_002b">4.2.1 Linking to FFmpeg with Microsoft Visual C++</a></li>
     </ul></li>
-    <li><a id="toc-Cross-compilation-for-Windows-with-Linux" href="#Cross-compilation-for-Windows-with-Linux-1">4.3 Cross compilation for Windows with Linux</a></li>
+    <li><a id="toc-Cross-compilation-for-Windows-with-Linux-1" href="#Cross-compilation-for-Windows-with-Linux-1">4.3 Cross compilation for Windows with Linux</a></li>
     <li><a id="toc-Compilation-under-Cygwin" href="#Compilation-under-Cygwin">4.4 Compilation under Cygwin</a></li>
     <li><a id="toc-Crosscompilation-for-Windows-under-Cygwin" href="#Crosscompilation-for-Windows-under-Cygwin">4.5 Crosscompilation for Windows under Cygwin</a></li>
   </ul></li>
@@ -209,7 +209,7 @@ pacman -S mingw-w64-x86_64-nasm mingw-w64-x86_64-gcc mingw-w64-x86_64-SDL2
 <p>To set up a proper environment in MSYS2, you need to run <code class="code">msys_shell.bat</code> from
 the Visual Studio or Intel Compiler command prompt.
 </p>
-<p>Place <code class="code">nasm.exe</code> somewhere in your <code class="code">PATH</code>.
+<p>Place <code class="code">yasm.exe</code> somewhere in your <code class="code">PATH</code>.
 </p>
 <p>Next, make sure any other headers and libs you want to use, such as zlib, are
 located in a spot that the compiler can see. Do so by modifying the <code class="code">LIB</code>
@@ -311,7 +311,7 @@ are stored.
 </li></ol>
 
 <a class="anchor" id="Cross-compilation-for-Windows-with-Linux"></a><a name="Cross-compilation-for-Windows-with-Linux-1"></a>
-<h3 class="section">4.3 Cross compilation for Windows with Linux<span class="pull-right"><a class="anchor hidden-xs" href="#Cross-compilation-for-Windows-with-Linux" aria-hidden="true">#</a> <a class="anchor hidden-xs"href="#toc-Cross-compilation-for-Windows-with-Linux" aria-hidden="true">TOC</a></span></h3>
+<h3 class="section">4.3 Cross compilation for Windows with Linux<span class="pull-right"><a class="anchor hidden-xs" href="#Cross-compilation-for-Windows-with-Linux-1" aria-hidden="true">#</a> <a class="anchor hidden-xs"href="#toc-Cross-compilation-for-Windows-with-Linux-1" aria-hidden="true">TOC</a></span></h3>
 
 <p>You must use the MinGW cross compilation tools available at
 <a class="url" href="http://www.mingw.org/">http://www.mingw.org/</a>.
@@ -352,7 +352,7 @@ following &quot;Devel&quot; ones:
 <a class="uref" href="http://sourceware.org/cygwinports/">Cygwin Ports</a>:
 </p>
 <div class="example">
-<pre class="example-preformatted">libSDL-devel, libgsm-devel, libmp3lame-devel,
+<pre class="example-preformatted">yasm, libSDL-devel, libgsm-devel, libmp3lame-devel,
 speex-devel, libtheora-devel, libxvidcore-devel
 </pre></div>
 

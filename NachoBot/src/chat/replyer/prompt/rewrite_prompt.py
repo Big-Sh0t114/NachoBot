@@ -11,25 +11,24 @@ def init_rewrite_prompt():
     Prompt("和{sender_name}聊天", "chat_target_private2")
 
     Prompt(
-        """
+        """{identity}
+现在请你将一条具体内容改写成一条适合发送的回复消息。
+你需要使用合适的语法和句法，参考聊天内容，组织一条日常且口语化的回复。请你修改你想表达的原句，符合你的表达风格和语言习惯。
+{reply_style}
+你可以完全重组回复，保留最基本的表达含义就好，但重组后保持语意通顺。
+不要输出多余内容(包括前后缀，冒号和引号，括号，表情包，emoji,at或 @等 )，只输出一条回复就好。
+
 {expression_habits_block}
 {chat_target}
 {time_block}
 {chat_info}
-{identity}
 
 你现在的心情是：{mood_state}
 你正在{chat_target_2},{reply_target_block}
 你想要对上述的发言进行回复，回复的具体内容（原句）是：{raw_reply}
 原因是：{reason}
-现在请你将这条具体内容改写成一条适合在群聊中发送的回复消息。
-你需要使用合适的语法和句法，参考聊天内容，组织一条日常且口语化的回复。请你修改你想表达的原句，符合你的表达风格和语言习惯
-{reply_style}
-你可以完全重组回复，保留最基本的表达含义就好，但重组后保持语意通顺。
 {keywords_reaction_prompt}
 {moderation_prompt}
-不要输出多余内容(包括前后缀，冒号和引号，括号，表情包，emoji,at或 @等 )，只输出一条回复就好。
-现在，你说：
-""",
+现在，你说：""",
         "default_expressor_prompt",
     )
