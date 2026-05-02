@@ -1331,14 +1331,18 @@ class HeartFChatting:
             logger.warning(f"{self.log_prefix} block_user 缺少 target_name 参数")
             return {"action_type": "block_user", "success": False, "reply_text": ""}
 
-        # 始终通过昵称解析QQ号，以免用户的名称正好是纯数字
-        resolved_id = self._resolve_user_id_by_nickname(target_name)
-        if resolved_id:
-            logger.info(f"{self.log_prefix} block_user 将用户 '{target_name}' 解析为 QQ号 {resolved_id}")
-            target_user_id = resolved_id
+        # 如果LLM返回的是纯数字（QQ号），直接使用；否则通过昵称解析QQ号
+        if target_name.isdigit():
+            target_user_id = target_name
+            logger.info(f"{self.log_prefix} block_user 直接使用QQ号 {target_user_id}")
         else:
-            logger.warning(f"{self.log_prefix} block_user 无法将 '{target_name}' 解析为有效的QQ号")
-            return {"action_type": "block_user", "success": False, "reply_text": ""}
+            resolved_id = self._resolve_user_id_by_nickname(target_name)
+            if resolved_id:
+                logger.info(f"{self.log_prefix} block_user 将用户 '{target_name}' 解析为 QQ号 {resolved_id}")
+                target_user_id = resolved_id
+            else:
+                logger.warning(f"{self.log_prefix} block_user 无法将 '{target_name}' 解析为有效的QQ号")
+                return {"action_type": "block_user", "success": False, "reply_text": ""}
 
         # 仅群聊可用
         if not self.chat_stream.group_info:

@@ -1,6 +1,6 @@
 <!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
 <html>
-<!-- Created by GNU Texinfo 7.2, https://www.gnu.org/software/texinfo/ -->
+<!-- Created by , GNU Texinfo 7.1.1 -->
   <head>
     <meta charset="utf-8">
     <title>
@@ -19,7 +19,7 @@
 
 <a name="SEC_Top"></a>
 
-<div class="region-contents" id="SEC_Contents">
+<div class="element-contents" id="SEC_Contents">
 <h2 class="contents-heading">Table of Contents</h2>
 
 <div class="contents">
@@ -49,8 +49,7 @@
       <li><a id="toc-OpenCORE-AMR" href="#OpenCORE-AMR">1.18.1 OpenCORE AMR</a></li>
       <li><a id="toc-VisualOn-AMR_002dWB-encoder-library" href="#VisualOn-AMR_002dWB-encoder-library">1.18.2 VisualOn AMR-WB encoder library</a></li>
       <li><a id="toc-Fraunhofer-AAC-library" href="#Fraunhofer-AAC-library">1.18.3 Fraunhofer AAC library</a></li>
-      <li><a id="toc-Fraunhofer-MPEG_002dH-3D-Audio-decoder-library" href="#Fraunhofer-MPEG_002dH-3D-Audio-decoder-library">1.18.4 Fraunhofer MPEG-H 3D Audio decoder library</a></li>
-      <li><a id="toc-LC3-library" href="#LC3-library">1.18.5 LC3 library</a></li>
+      <li><a id="toc-LC3-library" href="#LC3-library">1.18.4 LC3 library</a></li>
     </ul></li>
     <li><a id="toc-OpenH264" href="#OpenH264">1.19 OpenH264</a></li>
     <li><a id="toc-OpenJPEG" href="#OpenJPEG">1.20 OpenJPEG</a></li>
@@ -256,7 +255,7 @@ Then pass <code class="code">--enable-libmp3lame</code> to configure to enable i
 <a name="LCEVCdec"></a>
 <h3 class="section">1.13 LCEVCdec<span class="pull-right"><a class="anchor hidden-xs" href="#LCEVCdec" aria-hidden="true">#</a> <a class="anchor hidden-xs"href="#toc-LCEVCdec" aria-hidden="true">TOC</a></span></h3>
 
-<p>FFmpeg can make use of the liblcevc_dec library for LCEVC enhancement layer
+<p>FFmpeg can make use of the liblcevc_dec library for LCEVC enhacement layer
 decoding on supported bitstreams.
 </p>
 <p>Go to <a class="url" href="https://github.com/v-novaltd/LCEVCdec">https://github.com/v-novaltd/LCEVCdec</a> and follow the instructions
@@ -350,17 +349,8 @@ Then pass <code class="code">--enable-libvo-amrwbenc</code> to configure to enab
 instructions for installing the library.
 Then pass <code class="code">--enable-libfdk-aac</code> to configure to enable it.
 </p>
-<a name="Fraunhofer-MPEG_002dH-3D-Audio-decoder-library"></a>
-<h4 class="subsection">1.18.4 Fraunhofer MPEG-H 3D Audio decoder library<span class="pull-right"><a class="anchor hidden-xs" href="#Fraunhofer-MPEG_002dH-3D-Audio-decoder-library" aria-hidden="true">#</a> <a class="anchor hidden-xs"href="#toc-Fraunhofer-MPEG_002dH-3D-Audio-decoder-library" aria-hidden="true">TOC</a></span></h4>
-
-<p>FFmpeg can make use of the Fraunhofer MPEG-H decoder library for MPEG-H 3DA decoding.
-</p>
-<p>Go to <a class="url" href="https://github.com/Fraunhofer-IIS/mpeghdec">https://github.com/Fraunhofer-IIS/mpeghdec</a> and follow the
-instructions for installing the library.
-Then pass <code class="code">--enable-libmpeghdec --enable-nonfree</code> to configure to enable it.
-</p>
 <a name="LC3-library"></a>
-<h4 class="subsection">1.18.5 LC3 library<span class="pull-right"><a class="anchor hidden-xs" href="#LC3-library" aria-hidden="true">#</a> <a class="anchor hidden-xs"href="#toc-LC3-library" aria-hidden="true">TOC</a></span></h4>
+<h4 class="subsection">1.18.4 LC3 library<span class="pull-right"><a class="anchor hidden-xs" href="#LC3-library" aria-hidden="true">#</a> <a class="anchor hidden-xs"href="#toc-LC3-library" aria-hidden="true">TOC</a></span></h4>
 
 <p>FFmpeg can make use of the Google LC3 library for LC3 decoding &amp; encoding.
 </p>
@@ -672,7 +662,6 @@ library:
 <tr><td width="40%">raw AMR-NB</td><td width="10%"></td><td width="10%">X</td></tr>
 <tr><td width="40%">raw AMR-WB</td><td width="10%"></td><td width="10%">X</td></tr>
 <tr><td width="40%">raw APAC</td><td width="10%"></td><td width="10%">X</td></tr>
-<tr><td width="40%">raw APV</td><td width="10%">X</td><td width="10%">X</td></tr>
 <tr><td width="40%">raw aptX</td><td width="10%">X</td><td width="10%">X</td></tr>
 <tr><td width="40%">raw aptX HD</td><td width="10%">X</td><td width="10%">X</td></tr>
 <tr><td width="40%">raw Bonk</td><td width="10%"></td><td width="10%">X</td></tr>
@@ -685,7 +674,6 @@ library:
 <tr><td width="40%">raw E-AC-3</td><td width="10%">X</td><td width="10%">X</td></tr>
 <tr><td width="40%">raw EVC</td><td width="10%">X</td><td width="10%">X</td></tr>
 <tr><td width="40%">raw FLAC</td><td width="10%">X</td><td width="10%">X</td></tr>
-<tr><td width="40%">raw G.728</td><td width="10%"></td><td width="10%">X</td></tr>
 <tr><td width="40%">raw GSM</td><td width="10%"></td><td width="10%">X</td></tr>
 <tr><td width="40%">raw H.261</td><td width="10%">X</td><td width="10%">X</td></tr>
 <tr><td width="40%">raw H.263</td><td width="10%">X</td><td width="10%">X</td></tr>
@@ -880,7 +868,6 @@ following image formats are supported:
 <tr><td width="40%">Apple Pixlet</td><td width="10%"></td><td width="10%">X</td></tr>
 <tr><td width="40%">Apple ProRes</td><td width="10%">X</td><td width="10%">X</td><td width="40%">fourcc: apch,apcn,apcs,apco,ap4h,ap4x</td></tr>
 <tr><td width="40%">Apple QuickDraw</td><td width="10%"></td><td width="10%">X</td><td width="40%">fourcc: qdrw</td></tr>
-<tr><td width="40%">APV</td><td width="10%"></td><td width="10%">X</td></tr>
 <tr><td width="40%">Argonaut Video</td><td width="10%"></td><td width="10%">X</td><td width="40%">Used in some Argonaut games.</td></tr>
 <tr><td width="40%">Asus v1</td><td width="10%">X</td><td width="10%">X</td><td width="40%">fourcc: ASV1</td></tr>
 <tr><td width="40%">Asus v2</td><td width="10%">X</td><td width="10%">X</td><td width="40%">fourcc: ASV2</td></tr>
@@ -1024,7 +1011,6 @@ following image formats are supported:
 <tr><td width="40%">RealVideo 2.0</td><td width="10%">X</td><td width="10%">X</td></tr>
 <tr><td width="40%">RealVideo 3.0</td><td width="10%"></td><td width="10%">X</td><td width="40%">still far from ideal</td></tr>
 <tr><td width="40%">RealVideo 4.0</td><td width="10%"></td><td width="10%">X</td></tr>
-<tr><td width="40%">RealVideo 6.0</td><td width="10%"></td><td width="10%">X</td></tr>
 <tr><td width="40%">Renderware TXD (TeXture Dictionary)</td><td width="10%"></td><td width="10%">X</td><td width="40%">Texture dictionaries used by the Renderware Engine.</td></tr>
 <tr><td width="40%">RivaTuner Video</td><td width="10%"></td><td width="10%">X</td><td width="40%">fourcc: &rsquo;RTV1&rsquo;</td></tr>
 <tr><td width="40%">RL2 video</td><td width="10%"></td><td width="10%">X</td><td width="40%">used in some games by Entertainment Software Partners</td></tr>
@@ -1120,7 +1106,6 @@ following image formats are supported:
 <tr><td width="40%">ADPCM IMA Duck DK3</td><td width="10%"></td><td width="10%">X</td><td width="40%">Used in some Sega Saturn console games.</td></tr>
 <tr><td width="40%">ADPCM IMA Duck DK4</td><td width="10%"></td><td width="10%">X</td><td width="40%">Used in some Sega Saturn console games.</td></tr>
 <tr><td width="40%">ADPCM IMA Radical</td><td width="10%"></td><td width="10%">X</td></tr>
-<tr><td width="40%">ADPCM IMA Xbox</td><td width="10%"></td><td width="10%">X</td></tr>
 <tr><td width="40%">ADPCM Microsoft</td><td width="10%">X</td><td width="10%">X</td></tr>
 <tr><td width="40%">ADPCM MS IMA</td><td width="10%">X</td><td width="10%">X</td></tr>
 <tr><td width="40%">ADPCM Nintendo Gamecube AFC</td><td width="10%"></td><td width="10%">X</td></tr>
@@ -1128,7 +1113,6 @@ following image formats are supported:
 <tr><td width="40%">ADPCM Nintendo THP</td><td width="10%"></td><td width="10%">X</td></tr>
 <tr><td width="40%">ADPCM Playstation</td><td width="10%"></td><td width="10%">X</td></tr>
 <tr><td width="40%">ADPCM QT IMA</td><td width="10%">X</td><td width="10%">X</td></tr>
-<tr><td width="40%">ADPCM Sanyo</td><td width="10%"></td><td width="10%">X</td></tr>
 <tr><td width="40%">ADPCM SEGA CRI ADX</td><td width="10%">X</td><td width="10%">X</td><td width="40%">Used in Sega Dreamcast games.</td></tr>
 <tr><td width="40%">ADPCM Shockwave Flash</td><td width="10%">X</td><td width="10%">X</td></tr>
 <tr><td width="40%">ADPCM Sound Blaster Pro 2-bit</td><td width="10%"></td><td width="10%">X</td></tr>
@@ -1183,7 +1167,6 @@ following image formats are supported:
 <tr><td width="40%">FLAC (Free Lossless Audio Codec)</td><td width="10%">X</td><td width="10%">IX</td></tr>
 <tr><td width="40%">FTR Voice</td><td width="10%"></td><td width="10%">X</td></tr>
 <tr><td width="40%">G.723.1</td><td width="10%">X</td><td width="10%">X</td></tr>
-<tr><td width="40%">G.728</td><td width="10%"></td><td width="10%">X</td></tr>
 <tr><td width="40%">G.729</td><td width="10%"></td><td width="10%">X</td></tr>
 <tr><td width="40%">GSM</td><td width="10%">E</td><td width="10%">X</td><td width="40%">encoding supported through external library libgsm</td></tr>
 <tr><td width="40%">GSM Microsoft variant</td><td width="10%">E</td><td width="10%">X</td><td width="40%">encoding supported through external library libgsm</td></tr>
@@ -1201,7 +1184,6 @@ following image formats are supported:
 <tr><td width="40%">MP2 (MPEG audio layer 2)</td><td width="10%">IX</td><td width="10%">IX</td><td width="40%">encoding supported also through external library TwoLAME</td></tr>
 <tr><td width="40%">MP3 (MPEG audio layer 3)</td><td width="10%">E</td><td width="10%">IX</td><td width="40%">encoding supported through external library LAME, ADU MP3 and MP3onMP4 also supported</td></tr>
 <tr><td width="40%">MPEG-4 Audio Lossless Coding (ALS)</td><td width="10%"></td><td width="10%">X</td></tr>
-<tr><td width="40%">MPEG-H 3D Audio</td><td width="10%"></td><td width="10%">E</td><td width="40%">decoding supported through external library libmpeghdec</td></tr>
 <tr><td width="40%">MobiClip FastAudio</td><td width="10%"></td><td width="10%">X</td></tr>
 <tr><td width="40%">Musepack SV7</td><td width="10%"></td><td width="10%">X</td></tr>
 <tr><td width="40%">Musepack SV8</td><td width="10%"></td><td width="10%">X</td></tr>

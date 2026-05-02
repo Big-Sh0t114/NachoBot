@@ -1,6 +1,6 @@
 <!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
 <html>
-<!-- Created by GNU Texinfo 7.2, https://www.gnu.org/software/texinfo/ -->
+<!-- Created by , GNU Texinfo 7.1.1 -->
   <head>
     <meta charset="utf-8">
     <title>
@@ -19,7 +19,7 @@
 
 <a name="SEC_Top"></a>
 
-<div class="region-contents" id="SEC_Contents">
+<div class="element-contents" id="SEC_Contents">
 <h2 class="contents-heading">Table of Contents</h2>
 
 <div class="contents">
@@ -29,7 +29,7 @@
   <li><a id="toc-Description" href="#Description">2 Description</a></li>
   <li><a id="toc-Options" href="#Options">3 Options</a>
   <ul class="toc-numbered-mark">
-    <li><a id="toc-Stream-specifiers" href="#Stream-specifiers-1">3.1 Stream specifiers</a></li>
+    <li><a id="toc-Stream-specifiers-1" href="#Stream-specifiers-1">3.1 Stream specifiers</a></li>
     <li><a id="toc-Generic-options" href="#Generic-options">3.2 Generic options</a></li>
     <li><a id="toc-AVOptions" href="#AVOptions">3.3 AVOptions</a></li>
     <li><a id="toc-Main-options" href="#Main-options">3.4 Main options</a></li>
@@ -82,7 +82,7 @@ immediately before the option name (after the leading dash). E.g.
 <p>will load a filtergraph description from the file named <samp class="file">filter.script</samp>.
 </p>
 <a class="anchor" id="Stream-specifiers"></a><a name="Stream-specifiers-1"></a>
-<h3 class="section">3.1 Stream specifiers<span class="pull-right"><a class="anchor hidden-xs" href="#Stream-specifiers" aria-hidden="true">#</a> <a class="anchor hidden-xs"href="#toc-Stream-specifiers" aria-hidden="true">TOC</a></span></h3>
+<h3 class="section">3.1 Stream specifiers<span class="pull-right"><a class="anchor hidden-xs" href="#Stream-specifiers-1" aria-hidden="true">#</a> <a class="anchor hidden-xs"href="#toc-Stream-specifiers-1" aria-hidden="true">TOC</a></span></h3>
 <p>Some options are applied per-stream, e.g. bitrate or codec. Stream specifiers
 are used to precisely specify which stream(s) a given option belongs to.
 </p>
@@ -167,7 +167,7 @@ input files.
 <p>These options are shared amongst the ff* tools.
 </p>
 <dl class="table">
-<dt><samp class="option">-L, -license</samp></dt>
+<dt><samp class="option">-L</samp></dt>
 <dd><p>Show license.
 </p>
 </dd>
@@ -326,12 +326,6 @@ and the &quot;Last message repeated n times&quot; line will be omitted.
 <dd><p>Indicates that log output should add a <code class="code">[level]</code> prefix to each message
 line. This can be used as an alternative to log coloring, e.g. when dumping the
 log to file.
-</p></dd>
-<dt>&lsquo;<samp class="samp">time</samp>&rsquo;</dt>
-<dd><p>Indicates that log lines should be prefixed with time information.
-</p></dd>
-<dt>&lsquo;<samp class="samp">datetime</samp>&rsquo;</dt>
-<dd><p>Indicates that log lines should be prefixed with date and time information.
 </p></dd>
 </dl>
 <p>Flags can also be used alone by adding a &rsquo;+&rsquo;/&rsquo;-&rsquo; prefix to set/reset a single
@@ -594,13 +588,13 @@ exactly, so <code class="command">ffplay</code> will seek to the nearest seek po
 <var class="var">pos</var>.
 </p>
 <p><var class="var">pos</var> must be a time duration specification,
-see <a data-manual="ffmpeg-utils" href="./ffmpeg-utils.html#time-duration-syntax">the Time duration section in the ffmpeg-utils(1) manual</a>.
+see <a data-manual="ffmpeg-utils" href="ffmpeg-utils.html#time-duration-syntax">the Time duration section in the ffmpeg-utils(1) manual</a>.
 </p></dd>
 <dt><samp class="option">-t <var class="var">duration</var></samp></dt>
 <dd><p>Play <var class="var">duration</var> seconds of audio/video.
 </p>
 <p><var class="var">duration</var> must be a time duration specification,
-see <a data-manual="ffmpeg-utils" href="./ffmpeg-utils.html#time-duration-syntax">the Time duration section in the ffmpeg-utils(1) manual</a>.
+see <a data-manual="ffmpeg-utils" href="ffmpeg-utils.html#time-duration-syntax">the Time duration section in the ffmpeg-utils(1) manual</a>.
 </p></dd>
 <dt><samp class="option">-bytes</samp></dt>
 <dd><p>Seek by bytes.

@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import re
+import os
 import sys
 import time
 import uuid
@@ -529,10 +530,9 @@ class BilibiliAdapter:
             if self._screen_monitor:
                 self._screen_monitor._last_summary = None
 
-            # Push empty screen update to clear the core's ScreenManager cache
-            asyncio.ensure_future(
-                self._push_empty_screen_update(room_id)
-            )
+            # Directly clear the core's ScreenManager cache file on disk.
+            # The async message-based approach was unreliable (fire-and-forget could fail silently).
+            self._clear_core_screen_cache()
 
         action = "enabled" if enable else "permanently disabled"
         self.logger.info(
@@ -772,45 +772,39 @@ class BilibiliAdapter:
 
         return False
 
-    async def _push_empty_screen_update(self, room_id: int) -> None:
-        """Push empty screen content to Core to clear the ScreenManager cache."""
+    def _clear_core_screen_cache(self) -> None:
+        """Directly clear the core's ScreenManager cache file on disk.
+
+        This is more reliable than the async message-based approach,
+        which could fail silently if the message never reaches the core.
+        """
         try:
-            template_info = await self._get_template_info(
-                room_id, "0", "screen_clear"
+            # The cache file lives at NachoBot/src/mais4u/mais4u_chat/s4u_screen_cache.txt
+            # relative to the adapter: ../NachoBot/src/mais4u/mais4u_chat/s4u_screen_cache.txt
+            adapter_dir = os.path.dirname(os.path.abspath(__file__))
+            cache_file = os.path.join(
+                adapter_dir,
+                "..",
+                "NachoBot",
+                "src",
+                "mais4u",
+                "mais4u_chat",
+                "s4u_screen_cache.txt",
             )
-            screen_msg_info = BaseMessageInfo(
-                platform="bilibili.live",
-                message_id=f"screen_clear_{uuid.uuid4().hex[:8]}",
-                time=time.time(),
-                user_info=UserInfo(
-                    platform="bilibili.live",
-                    user_id="0",
-                    user_nickname="System",
-                ),
-                group_info=GroupInfo(
-                    platform="bilibili.live",
-                    group_id=str(room_id),
-                    group_name=str(room_id),
-                ),
-                format_info=FormatInfo(
-                    content_format=["text"],
-                    accept_format=ACCEPT_FORMAT,
-                ),
-                additional_config={"room_id": room_id},
-                template_info=template_info,
-            )
-            screen_message = MessageBase(
-                message_info=screen_msg_info,
-                message_segment=Seg(type="screen", data=""),
-                raw_message=None,
-            )
-            self.event_manager.push_to_event_queue(5, screen_message)
-            self.logger.info(
-                "Pushed empty screen update to clear Core cache for room %s",
-                room_id,
-            )
+            cache_file = os.path.abspath(cache_file)
+
+            if os.path.exists(cache_file):
+                with open(cache_file, "w", encoding="utf-8") as f:
+                    f.write("")
+                self.logger.info(
+                    "Cleared core ScreenManager cache file: %s", cache_file
+                )
+            else:
+                self.logger.warning(
+                    "Core ScreenManager cache file not found: %s", cache_file
+                )
         except Exception as e:
-            self.logger.error("Failed to push empty screen update: %s", e)
+            self.logger.error("Failed to clear core screen cache: %s", e)
 
     async def push_screen_update(
         self,
@@ -1625,7 +1619,7 @@ class BilibiliAdapter:
         else:
             # Force disable XML if TTS is off (Circuit Breaker for Context Pollution)
             anti_tts_instruction = (
-                "\n禁止使用<JP><ZH>标签，不要进行日语翻译，只输出中文。"
+                "\n语音已关闭，禁止使用<JP><ZH>标签，不要进行日语翻译，只输出中文。"
             )
             reply_prompt += anti_tts_instruction
 

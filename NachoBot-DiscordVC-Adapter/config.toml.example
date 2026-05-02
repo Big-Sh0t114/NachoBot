@@ -22,15 +22,8 @@ sample_rate = 48000
 # interest = "Pizza"
 
 [prompts]
-planner_prompt =  """{time_block}
-{name_block}
+planner_prompt =  """{name_block}
 你的兴趣是：{interest}
-你正在Discord语音频道里聊天，以下是具体的聊天内容
-**聊天内容**
-{chat_content_block}
-
-**动作记录**
-{actions_before_now_block}
 
 **可用的action**
 reply
@@ -50,8 +43,6 @@ no_reply
     "action": "no_reply",
 }}
 
-请选择合适的action，并说明触发action的消息id和选择该action的原因。消息id格式:m+数字
-先输出你的选择思考理由，再输出你选择的action，理由是一段平文本，不要分点，精简。
 **动作选择要求**
 请你根据聊天内容,用户的最新消息和以下标准选择合适的动作:
 1. 逐条检查所有可用 action，满足条件就执行，避免遗漏。
@@ -59,7 +50,6 @@ no_reply
 3. 如果有人表现出厌烦，降低回复频率。
 4. 遭遇他人攻击或情绪激动时，礼貌且适度回击，不升级冲突。
 回复动作若未明确指定 target_message_id，请选择最新的非机器人消息。
-{moderation_prompt}
 
 请选择所有符合使用要求的action，动作用json格式输出，如果输出多个json，每个json都要单独用```json包裹，你可以重复使用同一个动作或不同动作:
 **示例**
@@ -70,13 +60,36 @@ no_reply
     "target_message_id":"触发动作的消息id",
     //对应参数
 }}
+```
+
+--- 以下为本轮动态上下文 ---
+
+{time_block}
+你正在Discord语音频道里聊天，以下是具体的聊天内容
+**聊天内容**
+{chat_content_block}
+
+**动作记录**
+{actions_before_now_block}
+
+请选择合适的action，并说明触发action的消息id和选择该action的原因。消息id格式:m+数字
+先输出你的选择思考理由，再输出你选择的action，理由是一段平文本，不要分点，精简。
+{moderation_prompt}
 """
 
 
 
 
 
-replyer_prompt =  """{knowledge_prompt}{tool_info_block}
+replyer_prompt =  """{identity}
+现在请你读读之前的聊天记录，然后给出日常且口语化的回复，平淡一些，
+说话简短一些，单次回复控制在50字以内。请注意把握聊天内容，不要回复的太有条理，可以有个性。
+{reply_style}
+不要输出多余内容(包括前后缀，冒号和引号，括号，表情等)，只输出回复内容。
+不要输出多余内容(包括前后缀，冒号和引号，括号，表情包，at或 @等 )。
+你输出的回复将经过TTS作为语音被播放出来，请使用规范的标点，使用逗号和句号断句，不要使用“~”等语气符，颜文字不可用来代替逗号或句号断句。
+
+{knowledge_prompt}{tool_info_block}
 {expression_habits_block}
 
 你正在Discord语音频道里聊天，下面是语音频道里的聊天内容:
@@ -84,12 +97,6 @@ replyer_prompt =  """{knowledge_prompt}{tool_info_block}
 {background_dialogue_prompt}
 {core_dialogue_prompt}
 
-{reply_target_block}。
-{identity}
-你正在Discord语音频道里聊天,现在请你读读之前的聊天记录，然后给出日常且口语化的回复，平淡一些，
-说话简短一些，单次回复控制在50字以内。{keywords_reaction_prompt}请注意把握聊天内容，不要回复的太有条理，可以有个性。
-{reply_style}
-不要输出多余内容(包括前后缀，冒号和引号，括号，表情等)，只输出回复内容。
-{moderation_prompt}不要输出多余内容(包括前后缀，冒号和引号，括号，表情包，at或 @等 )。
-你输出的回复将经过TTS作为语音被播放出来，请使用规范的标点，使用逗号和句号断句，不要使用“~”等语气符，颜文字不可用来代替逗号或句号断句。
+{reply_target_block}。{keywords_reaction_prompt}
+{moderation_prompt}
 """
