@@ -91,9 +91,9 @@ reply_prompt = """{identity}
 {extra_info_block}，
 
 下面是直播间里正在聊的内容:
-{time_block}
 {background_dialogue_prompt}
 {core_dialogue_prompt}
+{time_block}
 
 {reply_target_block}。{keywords_reaction_prompt}
 """
