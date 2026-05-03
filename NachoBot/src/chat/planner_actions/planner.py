@@ -19,6 +19,7 @@ from src.chat.utils.chat_message_builder import (
     get_actions_by_timestamp_with_chat,
     build_readable_messages_with_id,
     get_raw_msg_before_timestamp_with_chat,
+    get_stepped_limit,
 )
 from src.chat.utils.utils import get_chat_type_and_target_info
 from src.chat.planner_actions.action_manager import ActionManager
@@ -142,10 +143,10 @@ cancel_appoint
 
 --- 以下为本轮动态上下文 ---
 
-{time_block}
 {chat_context_description}，以下是具体的聊天内容
 **聊天内容**
 {chat_content_block}
+{time_block}
 
 **动作记录**
 {actions_before_now_block}
@@ -157,7 +158,6 @@ cancel_appoint
 """,
         "planner_prompt",
     )
-
 
     Prompt(
         """
@@ -306,10 +306,12 @@ class ActionPlanner:
         is_group_chat, chat_target_info, current_available_actions = self.get_necessary_info()
         context_size = global_config.chat.get_max_context_size(is_group_chat=is_group_chat)
         # 获取聊天上下文
+        _planner_size = int(context_size * 0.6)
+        _stepped_limit = get_stepped_limit(self.chat_id, time.time(), _planner_size)
         message_list_before_now = get_raw_msg_before_timestamp_with_chat(
             chat_id=self.chat_id,
             timestamp=time.time(),
-            limit=int(context_size * 0.6),
+            limit=_stepped_limit,
         )
         if message_list_before_now:
             latest_message = message_list_before_now[-1]
@@ -695,9 +697,7 @@ class ActionPlanner:
         # 防止规划器抽风：当 reply 动作数量 >= 3 时，强制回退为单个 reply
         reply_actions = [a for a in actions if a.action_type == "reply"]
         if len(reply_actions) >= 3:
-            logger.warning(
-                f"{self.log_prefix}规划器异常：选择了{len(reply_actions)}个reply动作，强制回退为1个reply"
-            )
+            logger.warning(f"{self.log_prefix}规划器异常：选择了{len(reply_actions)}个reply动作，强制回退为1个reply")
             non_reply_actions = [a for a in actions if a.action_type != "reply"]
             actions = non_reply_actions + [reply_actions[0]]
 

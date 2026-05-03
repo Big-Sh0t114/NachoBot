@@ -64,10 +64,10 @@ no_reply
 
 --- 以下为本轮动态上下文 ---
 
-{time_block}
 你正在Discord语音频道里聊天，以下是具体的聊天内容
 **聊天内容**
 {chat_content_block}
+{time_block}
 
 **动作记录**
 {actions_before_now_block}
@@ -93,9 +93,9 @@ replyer_prompt =  """{identity}
 {expression_habits_block}
 
 你正在Discord语音频道里聊天，下面是语音频道里的聊天内容:
-{time_block}
 {background_dialogue_prompt}
 {core_dialogue_prompt}
+{time_block}
 
 {reply_target_block}。{keywords_reaction_prompt}
 {moderation_prompt}
