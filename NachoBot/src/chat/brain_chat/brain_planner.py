@@ -20,6 +20,7 @@ from src.chat.utils.chat_message_builder import (
     build_readable_messages,
     get_raw_msg_before_timestamp_with_chat,
     replace_user_references,
+    get_stepped_limit,
 )
 from src.chat.utils.prompt_injection_guard import guard_user_content
 from src.chat.utils.context_builder import build_tool_info, build_relation_info, build_lpmm_knowledge_info
@@ -151,10 +152,10 @@ cancel_appoint
 
 --- 以下为本轮动态上下文 ---
 
-{time_block}
 {chat_context_description}，以下是具体的聊天内容
 **聊天内容**
 {chat_content_block}
+{time_block}
 
 **动作记录**
 {actions_before_now_block}
@@ -378,10 +379,11 @@ class BrainPlanner:
         # 获取聊天上下文
         # 如果是私聊，使用完整的120条限制；如果是群聊，使用0.6倍限制以节省token
         limit = context_size if not is_group_chat else int(context_size * 0.6)
+        _stepped_limit = get_stepped_limit(self.chat_id, time.time(), limit)
         message_list_before_now = get_raw_msg_before_timestamp_with_chat(
             chat_id=self.chat_id,
             timestamp=time.time(),
-            limit=limit,
+            limit=_stepped_limit,
         )
         if message_list_before_now:
             latest_message = message_list_before_now[-1]
@@ -606,10 +608,11 @@ class BrainPlanner:
 
             # 使用更短的上下文来检索工具和记忆，避免由于上下文过长导致的检索噪音
             short_context_size = int(global_config.chat.get_max_context_size(is_group_chat) * 0.33)
+            _stepped_limit_short = get_stepped_limit(self.chat_id, time.time(), short_context_size)
             message_list_before_short = get_raw_msg_before_timestamp_with_chat(
                 chat_id=self.chat_id,
                 timestamp=time.time(),
-                limit=short_context_size,
+                limit=_stepped_limit_short,
             )
             chat_talking_prompt_short = build_readable_messages(
                 message_list_before_short,
@@ -871,9 +874,7 @@ class BrainPlanner:
         # 防止规划器抽风：当 reply 动作数量 >= 3 时，强制回退为单个 reply
         reply_actions = [a for a in actions if a.action_type == "reply"]
         if len(reply_actions) >= 3:
-            logger.warning(
-                f"{self.log_prefix}规划器异常：选择了{len(reply_actions)}个reply动作，强制回退为1个reply"
-            )
+            logger.warning(f"{self.log_prefix}规划器异常：选择了{len(reply_actions)}个reply动作，强制回退为1个reply")
             non_reply_actions = [a for a in actions if a.action_type != "reply"]
             actions = non_reply_actions + [reply_actions[0]]
 

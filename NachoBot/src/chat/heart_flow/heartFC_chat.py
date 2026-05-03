@@ -31,6 +31,7 @@ from src.mais4u.s4u_config import s4u_config
 from src.chat.utils.chat_message_builder import (
     build_readable_messages_with_id,
     get_raw_msg_before_timestamp_with_chat,
+    get_stepped_limit,
 )
 from src.memory_system.chat_history_summarizer import ChatHistorySummarizer
 from src.chat.heart_flow.relation_scanner import RelationScanner
@@ -426,10 +427,12 @@ class HeartFChatting:
                 is_group_chat, chat_target_info, _ = self.action_planner.get_necessary_info()
                 context_size = global_config.chat.get_max_context_size(is_group_chat=is_group_chat)
 
+                _hf_size = int(context_size * 0.6)
+                _stepped_limit_hf = get_stepped_limit(self.stream_id, time.time(), _hf_size)
                 message_list_before_now = get_raw_msg_before_timestamp_with_chat(
                     chat_id=self.stream_id,
                     timestamp=time.time(),
-                    limit=int(context_size * 0.6),
+                    limit=_stepped_limit_hf,
                 )
                 # 过滤被屏蔽用户的消息
                 message_list_before_now = self._filter_blocked_users(message_list_before_now)
@@ -1618,6 +1621,7 @@ class HeartFChatting:
         from src.chat.utils.chat_message_builder import (
             build_readable_messages,
             get_raw_msg_before_timestamp_with_chat,
+            get_stepped_limit as _get_stepped_limit,
         )
 
         chat_stream = self.chat_stream
@@ -1627,10 +1631,11 @@ class HeartFChatting:
         # 获取背景对话
         background_dialogue_prompt = ""
         try:
+            _bg_stepped_limit = _get_stepped_limit(chat_stream.stream_id, time.time(), context_size)
             messages_before = get_raw_msg_before_timestamp_with_chat(
                 chat_stream.stream_id,
                 time.time(),
-                limit=context_size,
+                limit=_bg_stepped_limit,
             )
             if messages_before:
                 background_dialogue_prompt = build_readable_messages(

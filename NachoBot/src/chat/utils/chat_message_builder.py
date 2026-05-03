@@ -294,6 +294,47 @@ def get_raw_msg_before_timestamp_with_chat(chat_id: str, timestamp: float, limit
     return find_messages(message_filter=filter_query, sort=sort_order, limit=limit)
 
 
+def get_stepped_limit(chat_id: str, timestamp: float, max_size: int, step_divisor: int = 5) -> int:
+    """根据 chat 的总消息数计算阶梯化的 DB 查询 limit，使上下文窗口起点
+    每 step 条消息才移动一次，从而稳定 prompt 前缀以提高 cache 命中率。
+
+    原理：
+    - step = ceil(max_size / step_divisor)
+    - 用 count_messages 获取该 chat 在 timestamp 之前的总消息数 total
+    - 若 total <= max_size，直接返回 total（无需丢弃）
+    - 否则，将需要保留的消息数量化到 [max_size - step + 1, max_size] 区间：
+        keep = max_size - step + 1 + (total - max_size - 1) % step
+      这使得 total 每增加 1，keep 也增加 1，直到 keep == max_size 时
+      下一条消息触发一次阶梯丢弃，keep 跳回 max_size - step + 1。
+    - 窗口起点 = total - keep，在连续 step 条新消息内保持不变。
+
+    Args:
+        chat_id: 聊天 ID
+        timestamp: 时间戳上限
+        max_size: 上下文最大条数
+        step_divisor: 丢弃梯度的分母，默认5表示每次丢弃 1/5
+
+    Returns:
+        量化后的 limit 值，直接传给 get_raw_msg_before_timestamp_with_chat
+    """
+    step = max(1, -(-max_size // step_divisor))
+
+    # 获取该 chat 在 timestamp 之前的总消息数（轻量 COUNT 查询）
+    filter_query = {"chat_id": chat_id, "time": {"$lt": timestamp}}
+    total = count_messages(message_filter=filter_query)
+
+    if total <= max_size:
+        return total  # 消息不足，全部保留
+
+    # 量化：keep 在 [max_size - step + 1, max_size] 之间循环
+    keep = max_size - step + 1 + (total - max_size - 1) % step
+    logger.debug(
+        f"阶梯上下文: chat={chat_id} total={total} keep={keep} "
+        f"(max_size={max_size}, step={step}, 窗口起点=msg#{total - keep + 1})"
+    )
+    return keep
+
+
 def get_raw_msg_before_timestamp_with_users(
     timestamp: float, person_ids: list, limit: int = 0
 ) -> List[DatabaseMessages]:

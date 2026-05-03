@@ -20,9 +20,9 @@ def init_replyer_prompt():
 {expression_habits_block}
 
 你正在qq群里聊天，下面是群里正在聊的内容:
-{time_block}
 {background_dialogue_prompt}
 {core_dialogue_prompt}
+{time_block}
 
 {reply_target_block}。{keywords_reaction_prompt}
 {moderation_prompt}""",
@@ -40,8 +40,8 @@ def init_replyer_prompt():
 {expression_habits_block}
 
 你正在qq群里聊天，下面是群里正在聊的内容:
-{time_block}
 {background_dialogue_prompt}
+{time_block}
 
 你现在想补充说明你刚刚自己的发言内容：{target}，原因是{reason}
 请你根据聊天内容，组织一条新回复。注意，{target} 是刚刚你自己的发言，你要在这基础上进一步发言，请按照你自己的角度来继续进行回复。注意保持上下文的连贯性。{keywords_reaction_prompt}
@@ -62,8 +62,8 @@ def init_replyer_prompt():
 {expression_habits_block}
 
 你正在和{sender_name}聊天，这是你们之前聊的内容:
-{time_block}
 {dialogue_prompt}
+{time_block}
 
 {reply_target_block}。{keywords_reaction_prompt}
 {moderation_prompt}""",
@@ -81,8 +81,8 @@ def init_replyer_prompt():
 {expression_habits_block}
 
 你正在和{sender_name}聊天，这是你们之前聊的内容:
-{time_block}
 {dialogue_prompt}
+{time_block}
 
 你现在想补充说明你刚刚自己的发言内容：{target}，原因是{reason}
 请你根据聊天内容，组织一条新回复。注意，{target} 是刚刚你自己的发言，你要在这基础上进一步发言，请按照你自己的角度来继续进行回复。注意保持上下文的连贯性。{keywords_reaction_prompt}
@@ -103,8 +103,8 @@ def init_replyer_prompt():
 {expression_habits_block}
 
 你正在和用户进行深入的技术协作。
-{time_block}
 {dialogue_prompt}
+{time_block}
 
 {reply_target_block}
 {keywords_reaction_prompt}
@@ -162,8 +162,8 @@ cancel_appoint
 {expression_habits_block}
 
 你正在和{sender_name}聊天，这是你们之前聊的内容:
-{time_block}
 {dialogue_prompt}
+{time_block}
 
 {actions_before_now_block}
 
@@ -179,8 +179,8 @@ cancel_appoint
 你正在直播间和观众互动。刚才观众提出了一个需要联网查询的问题，你已经告诉观众你正在查询。
 现在搜索结果已经返回，请根据以下搜索结果，给出准确、有用且口语化的回复。
 
-{time_block}
 {background_dialogue_prompt}
+{time_block}
 
 观众的原始问题：{original_question}
 你之前的回复：{initial_reply}

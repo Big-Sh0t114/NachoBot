@@ -27,6 +27,7 @@ from src.chat.utils.chat_message_builder import (
     build_readable_messages,
     get_raw_msg_before_timestamp_with_chat,
     replace_user_references,
+    get_stepped_limit,
 )
 from src.chat.express.expression_selector import expression_selector
 
@@ -772,10 +773,12 @@ class PrivateReplyer:
         target, target_injection, _ = guard_user_content(target, sender)
         injection_detected = injection_detected or target_injection
 
+        _now = time.time()
+        _stepped_limit_long = get_stepped_limit(chat_id, _now, context_size)
         message_list_before_now_long = get_raw_msg_before_timestamp_with_chat(
             chat_id=chat_id,
-            timestamp=time.time(),
-            limit=context_size,
+            timestamp=_now,
+            limit=_stepped_limit_long,
         )
 
         dialogue_prompt = build_readable_messages(
@@ -793,10 +796,12 @@ class PrivateReplyer:
         if advanced_on and global_config.advanced.block_tools_when_on:
             enable_tool = False
 
+        _short_size = int(context_size * 0.33)
+        _stepped_limit_short = get_stepped_limit(chat_id, _now, _short_size)
         message_list_before_short = get_raw_msg_before_timestamp_with_chat(
             chat_id=chat_id,
-            timestamp=time.time(),
-            limit=int(context_size * 0.33),
+            timestamp=_now,
+            limit=_stepped_limit_short,
         )
 
         person_list_short: List[Person] = []
@@ -1045,10 +1050,12 @@ class PrivateReplyer:
         else:
             mood_prompt = ""
 
+        _half_size = min(int(context_size * 0.33), 15)
+        _stepped_limit_half = get_stepped_limit(chat_id, time.time(), _half_size)
         message_list_before_now_half = get_raw_msg_before_timestamp_with_chat(
             chat_id=chat_id,
             timestamp=time.time(),
-            limit=min(int(context_size * 0.33), 15),
+            limit=_stepped_limit_half,
         )
         chat_talking_prompt_half = build_readable_messages(
             message_list_before_now_half,
