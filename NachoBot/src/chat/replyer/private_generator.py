@@ -368,7 +368,13 @@ class PrivateReplyer:
             logger.warning(f"未找到用户 {sender} 的ID，跳过信息提取")
             return f"你完全不认识{sender}，不理解ta的相关信息。"
 
-        sender_relation = await person.build_relationship(chat_content)
+        # 直播环境下跳过 LLM 分类选择，仅使用本地字符串匹配
+        # 与 heartFC_chat.py 的 Bypass Planner 条件一致：bilibili 群聊(直播弹幕) + discord_vc
+        # 私聊场景下 bilibili 不跳过（heartFC 仅在 is_group_chat 时 bypass bilibili）
+        _platform = getattr(self.chat_stream, "platform", "")
+        _skip_llm = _platform == "discord_vc"
+
+        sender_relation = await person.build_relationship(chat_content, skip_llm=_skip_llm)
 
         return f"{sender_relation}"
 
@@ -386,6 +392,10 @@ class PrivateReplyer:
         # 检查是否允许在此聊天流中使用表达
         use_expression, _, _ = global_config.expression.get_expression_config_for_chat(self.chat_stream.stream_id)
         if not use_expression:
+            return "", []
+        # 直播环境下跳过表达方式选取（与 heartFC Bypass 条件一致）
+        _platform = getattr(self.chat_stream, "platform", "")
+        if _platform == "discord_vc":
             return "", []
         style_habits = []
         # 使用从处理器传来的选中表达方式

@@ -60,6 +60,22 @@ class MessageHandler:
             bool: 是否允许聊天
         """
         logger.debug(f"群聊id: {group_id}, 用户id: {user_id}")
+
+        # 检查Bot自身是否在该群被禁言，若是则切断链路以减少token消耗
+        if group_id:
+            from .notice_handler import notice_handler
+            import time as _time
+
+            mute_end = notice_handler.self_muted_groups.get(group_id)
+            if mute_end is not None:
+                if _time.time() < mute_end:
+                    logger.warning(f"Bot在群 {group_id} 处于被禁言状态，消息被拦截以减少token消耗")
+                    return False
+                else:
+                    # 禁言已过期，自动清理
+                    del notice_handler.self_muted_groups[group_id]
+                    logger.info(f"Bot在群 {group_id} 的禁言已到期，自动恢复链路")
+
         logger.debug("开始检查聊天白名单/黑名单")
         if group_id:
             if global_config.chat.group_list_type == "whitelist" and group_id not in global_config.chat.group_list:
