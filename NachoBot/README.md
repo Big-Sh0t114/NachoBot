@@ -73,9 +73,12 @@ NachoBot 是在上游 **MaiBot 0.10.3 Beta** 基础上研发的角色扮演聊�
    - 本项目已实现*一键启动与依赖自动管理*。
    - 记事本打开根目录下的 `launchbot.bat` 脚本，找到第 36 行的 `SOVITS_DIR` 变量，配置为你本地 GPT-SoVITS 的绝对路径。
    - 双击运行 `launchbot.bat` 即可全自动安装依赖并拉起所有底层组件。
+   - 前往 `Napcat WebUI(http://127.0.0.1:6099)` 进行网络配置，添加 *Websocket客户端* ，配置URL为 *ws://localhost:8095* 并启用服务。
 
 3. **插件配置**
    - 初次完成启动流程后，会在所有插件目录下生成各自的 `config.toml` 配置文件，自行填写后重启bot。
+   - 日记插件需前往 `Napcat WebUI(http://127.0.0.1:6099)` 进行网络配置，添加 *HTTP服务器* ，默认端口为 *9997并启用CORS和Websocket*
+   - B站视频搬运插件需前往 `Napcat WebUI(http://127.0.0.1:6099)` 进行网络配置，添加 *HTTP服务器* ，默认端口为 *9999*
 
 ## Bilibili配置
 - 从项目根目录 `config-save/` 中复制 `config-biliadapter.toml` 移动至 `NachoBot-Bilbili-Adapter` 目录中，删除 `-biliadapter.toml` 后缀。

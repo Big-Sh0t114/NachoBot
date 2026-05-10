@@ -248,7 +248,7 @@ class ChatBot:
                         if target_qq in hfc.blocked_users:
                             del hfc.blocked_users[target_qq]
                             await send_api.text_to_stream(
-                                f"已解除对用户 {target_qq} 的屏蔽。",
+                                f"已解除对用户 {target_qq} 的屏蔽",
                                 stream_id,
                             )
                             return True, f"unblocked {target_qq}", False
@@ -336,7 +336,9 @@ class ChatBot:
 
                     target_platform = unbind_match.group(1)
                     # 从原始大小写文本中提取 target_user_id
-                    original_unbind_match = re.match(r"^#unbind_([a-zA-Z0-9]+)_(.+)$", command_text.strip(), re.IGNORECASE)
+                    original_unbind_match = re.match(
+                        r"^#unbind_([a-zA-Z0-9]+)_(.+)$", command_text.strip(), re.IGNORECASE
+                    )
                     target_user_id = original_unbind_match.group(2) if original_unbind_match else unbind_match.group(2)
                     success, msg = bind_manager.admin_unbind(target_platform, target_user_id)
 

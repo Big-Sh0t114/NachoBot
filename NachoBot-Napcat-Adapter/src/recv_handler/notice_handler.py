@@ -24,9 +24,30 @@ notice_queue: asyncio.Queue[MessageBase] = asyncio.Queue(maxsize=100)
 unsuccessful_notice_queue: asyncio.Queue[MessageBase] = asyncio.Queue(maxsize=3)
 
 
+def _format_duration(duration_seconds: int) -> str:
+    """将秒数格式化为友好的时长描述"""
+    if duration_seconds < 60:
+        return f"{duration_seconds}秒"
+    minutes = duration_seconds // 60
+    if minutes < 60:
+        return f"{minutes}分钟"
+    hours = minutes // 60
+    remaining_minutes = minutes % 60
+    if hours < 24:
+        if remaining_minutes > 0:
+            return f"{hours}小时{remaining_minutes}分钟"
+        return f"{hours}小时"
+    days = hours // 24
+    remaining_hours = hours % 24
+    if remaining_hours > 0:
+        return f"{days}天{remaining_hours}小时"
+    return f"{days}天"
+
+
 class NoticeHandler:
     banned_list: list[BanUser] = []  # 当前仍在禁言中的用户列表
     lifted_list: list[BanUser] = []  # 已经自然解除禁言
+    self_muted_groups: dict[int, float] = {}  # Bot自身被禁言的群 {group_id: mute_end_timestamp}
 
     def __init__(self):
         self.server_connection: Server.ServerConnection = None
@@ -116,6 +137,15 @@ class NoticeHandler:
                         handled_message, user_info = await self.handle_ban_notify(raw_message, group_id)
                         system_notice = True
                     case NoticeType.GroupBan.lift_ban:
+                        # 预先检测是否是Bot自身被解禁，若是则先清理self_muted_groups
+                        # 否则check_allow_to_chat会因Bot被禁言而拦截此解禁事件，导致链路永远无法恢复
+                        if group_id and group_id in self.self_muted_groups:
+                            lift_user_id = raw_message.get("user_id")
+                            if lift_user_id and lift_user_id != 0:
+                                self_info = await get_self_info(self.server_connection)
+                                if self_info and str(lift_user_id) == str(self_info.get("user_id")):
+                                    del self.self_muted_groups[group_id]
+                                    logger.info(f"检测到Bot在群 {group_id} 的禁言被提前解除，恢复链路")
                         if not await message_handler.check_allow_to_chat(user_id, group_id, True, False):
                             return None
                         logger.info("处理解除群禁言")
@@ -245,7 +275,7 @@ class NoticeHandler:
             logger.error("群ID不能为空，无法处理禁言通知")
             return None, None
 
-        # 计算user_info
+        # 计算operator_info
         operator_id = raw_message.get("operator_id")
         operator_nickname: str = None
         operator_cardname: str = None
@@ -264,13 +294,12 @@ class NoticeHandler:
             user_nickname=operator_nickname,
             user_cardname=operator_cardname,
         )
+        operator_display = operator_cardname or operator_nickname or "QQ用户"
 
         # 计算Seg
         user_id = raw_message.get("user_id")
-        banned_user_info: UserInfo = None
         user_nickname: str = "QQ用户"
         user_cardname: str = None
-        sub_type: str = None
 
         duration = raw_message.get("duration")
         if duration is None:
@@ -278,32 +307,30 @@ class NoticeHandler:
             return None, None
 
         if user_id == 0:  # 为全体禁言
-            sub_type: str = "whole_ban"
             self._ban_operation(group_id)
+            natural_text = f"{operator_display}开启了全体禁言"
         else:  # 为单人禁言
-            # 获取被禁言人的信息
-            sub_type: str = "ban"
             fetched_member_info: dict = await get_member_info(self.server_connection, group_id, user_id)
             if fetched_member_info:
                 user_nickname = fetched_member_info.get("nickname")
                 user_cardname = fetched_member_info.get("card")
-            banned_user_info: UserInfo = UserInfo(
-                platform=global_config.nachobot_server.platform_name,
-                user_id=user_id,
-                user_nickname=user_nickname,
-                user_cardname=user_cardname,
-            )
             self._ban_operation(group_id, user_id, int(time.time() + duration))
 
-        seg_data: Seg = Seg(
-            type="notify",
-            data={
-                "sub_type": sub_type,
-                "duration": duration,
-                "banned_user_info": banned_user_info.to_dict() if banned_user_info else None,
-            },
-        )
+            # 检测Bot自身被禁言
+            self_info: dict = await get_self_info(self.server_connection)
+            if self_info and str(user_id) == str(self_info.get("user_id")):
+                mute_end_time = time.time() + duration
+                self.self_muted_groups[group_id] = mute_end_time
+                logger.warning(
+                    f"Bot自身在群 {group_id} 被禁言 {_format_duration(duration)}，"
+                    f"将自动切断该群到核心的链路直到 {time.strftime('%H:%M:%S', time.localtime(mute_end_time))}"
+                )
 
+            user_display = user_cardname or user_nickname or "QQ用户"
+            formatted_duration = _format_duration(duration)
+            natural_text = f"{operator_display}将{user_display}禁言了{formatted_duration}"
+
+        seg_data: Seg = Seg(type="text", data=natural_text)
         return seg_data, operator_info
 
     async def handle_lift_ban_notify(
@@ -313,7 +340,7 @@ class NoticeHandler:
             logger.error("群ID不能为空，无法处理解除禁言通知")
             return None, None
 
-        # 计算user_info
+        # 计算operator_info
         operator_id = raw_message.get("operator_id")
         operator_nickname: str = None
         operator_cardname: str = None
@@ -332,41 +359,36 @@ class NoticeHandler:
             user_nickname=operator_nickname,
             user_cardname=operator_cardname,
         )
+        operator_display = operator_cardname or operator_nickname or "QQ用户"
 
         # 计算Seg
-        sub_type: str = None
         user_nickname: str = "QQ用户"
         user_cardname: str = None
-        lifted_user_info: UserInfo = None
 
         user_id = raw_message.get("user_id")
         if user_id == 0:  # 全体禁言解除
-            sub_type = "whole_lift_ban"
             self._lift_operation(group_id)
+            natural_text = f"{operator_display}关闭了全体禁言"
         else:  # 单人禁言解除
-            sub_type = "lift_ban"
-            # 获取被解除禁言人的信息
             fetched_member_info: dict = await get_member_info(self.server_connection, group_id, user_id)
             if fetched_member_info:
                 user_nickname = fetched_member_info.get("nickname")
                 user_cardname = fetched_member_info.get("card")
             else:
                 logger.warning("无法获取解除禁言消息发送者的昵称，消息可能会无效")
-            lifted_user_info: UserInfo = UserInfo(
-                platform=global_config.nachobot_server.platform_name,
-                user_id=user_id,
-                user_nickname=user_nickname,
-                user_cardname=user_cardname,
-            )
             self._lift_operation(group_id, user_id)
 
-        seg_data: Seg = Seg(
-            type="notify",
-            data={
-                "sub_type": sub_type,
-                "lifted_user_info": lifted_user_info.to_dict() if lifted_user_info else None,
-            },
-        )
+            # 检测Bot自身被解禁，清理self_muted_groups
+            self_info: dict = await get_self_info(self.server_connection)
+            if self_info and str(user_id) == str(self_info.get("user_id")):
+                if group_id in self.self_muted_groups:
+                    del self.self_muted_groups[group_id]
+                    logger.info(f"Bot自身在群 {group_id} 的禁言已被解除，恢复该群到核心的链路")
+
+            user_display = user_cardname or user_nickname or "QQ用户"
+            natural_text = f"{operator_display}解除了{user_display}的禁言"
+
+        seg_data: Seg = Seg(type="text", data=natural_text)
         return seg_data, operator_info
 
     async def put_notice(self, message_base: MessageBase) -> None:
@@ -469,6 +491,13 @@ class NoticeHandler:
 
     async def auto_lift_detect(self) -> None:
         while True:
+            # 清理self_muted_groups中过期的记录
+            now = time.time()
+            expired_groups = [gid for gid, end_time in self.self_muted_groups.items() if now >= end_time]
+            for gid in expired_groups:
+                del self.self_muted_groups[gid]
+                logger.info(f"Bot自身在群 {gid} 的禁言已到期，自动恢复该群到核心的链路")
+
             if len(self.banned_list) == 0:
                 await asyncio.sleep(5)
                 continue

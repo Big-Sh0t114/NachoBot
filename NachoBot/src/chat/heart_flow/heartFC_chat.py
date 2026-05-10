@@ -128,7 +128,7 @@ class HeartFChatting:
             return False
         return True
 
-    def _filter_blocked_users(self, messages: List["DatabaseMessages"]) -> List["DatabaseMessages"]:
+    def _filter_blocked_users(self, messages: List["DatabaseMessages"], caller: str = "") -> List["DatabaseMessages"]:
         """从消息列表中过滤掉被屏蔽用户的消息"""
         if not self.blocked_users:
             return messages
@@ -140,7 +140,14 @@ class HeartFChatting:
             logger.info(f"{self.log_prefix} 用户 {uid} 的屏蔽已到期，已自动解除")
         if not self.blocked_users:
             return messages
-        return [msg for msg in messages if not self._is_user_blocked(str(msg.user_info.user_id))]
+        logger.debug(
+            f"{self.log_prefix} [block_filter][{caller}] 屏蔽列表: {self.blocked_users}, 待过滤消息数: {len(messages)}"
+        )
+        original_count = len(messages)
+        filtered = [msg for msg in messages if not self._is_user_blocked(str(msg.user_info.user_id))]
+        if original_count != len(filtered):
+            logger.debug(f"{self.log_prefix} [block_filter][{caller}] 已过滤 {original_count - len(filtered)} 条")
+        return filtered
 
     def _resolve_user_id_by_nickname(self, nickname: str) -> Optional[str]:
         """通过昵称从最近消息中查找用户的真实QQ号"""
@@ -241,10 +248,18 @@ class HeartFChatting:
             filter_command=True,
         )
 
-        # 过滤被屏蔽用户的消息
-        recent_messages_list = self._filter_blocked_users(recent_messages_list)
-
         if len(recent_messages_list) >= 1:
+            # 先推进读取时间戳，防止被屏蔽用户的消息不断累积占用循环
+            self.last_read_time = time.time()
+
+            # 再过滤被屏蔽用户的消息
+            recent_messages_list = self._filter_blocked_users(recent_messages_list, caller="loopbody")
+
+            # 过滤后无消息则跳过本轮思考
+            if len(recent_messages_list) == 0:
+                await asyncio.sleep(0.2)
+                return True
+
             # !处理no_reply_until_call逻辑
             if self.no_reply_until_call:
                 for message in recent_messages_list:
@@ -261,8 +276,6 @@ class HeartFChatting:
                     # logger.info(f"{self.log_prefix} 没有提到，继续保持沉默")
                     await asyncio.sleep(1)
                     return True
-
-            self.last_read_time = time.time()
 
             # !此处使at或者提及必定回复
             mentioned_message = None
@@ -435,7 +448,7 @@ class HeartFChatting:
                     limit=_stepped_limit_hf,
                 )
                 # 过滤被屏蔽用户的消息
-                message_list_before_now = self._filter_blocked_users(message_list_before_now)
+                message_list_before_now = self._filter_blocked_users(message_list_before_now, caller="observe")
                 promise_snippets = []
                 if not self.chat_stream.group_info:  # 群聊不启用誓言缓存
                     promise_snippets = promise_cache_manager.collect_snippets_for_messages(
@@ -520,9 +533,16 @@ class HeartFChatting:
                     ]
                 else:
                     with Timer("规划器", cycle_timers):
+                        # 获取当前有效的屏蔽用户ID集合传递给规划器
+                        _active_blocked = (
+                            {uid for uid, exp in self.blocked_users.items() if time.time() <= exp}
+                            if self.blocked_users
+                            else None
+                        )
                         action_to_use_info, _ = await self.action_planner.plan(
                             loop_start_time=self.last_read_time,
                             available_actions=available_actions,
+                            blocked_user_ids=_active_blocked,
                         )
 
             has_reply = False

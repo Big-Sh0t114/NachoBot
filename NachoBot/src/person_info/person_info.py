@@ -590,7 +590,7 @@ class Person:
         except Exception as e:
             logger.error(f"同步用户 {self.person_id} 信息到数据库时出错: {e}")
 
-    async def build_relationship(self, chat_content: str = "", info_type=""):
+    async def build_relationship(self, chat_content: str = "", info_type="", skip_llm: bool = False):
         if not self.is_known:
             return ""
         # 构建points文本
@@ -608,7 +608,7 @@ class Person:
             relevant_points = self.get_relevant_memories(chat_content, max_num=2)
             if relevant_points:
                 points_text = "\n".join(relevant_points)
-            else:
+            elif not skip_llm:
                 prompt = f"""当前聊天内容：
 {chat_content}
 
@@ -636,7 +636,7 @@ class Person:
             relevant_points = self.get_relevant_memories(info_type, max_num=3)
             if relevant_points:
                 points_text = "\n".join(relevant_points)
-            else:
+            elif not skip_llm:
                 prompt = f"""你需要获取用户{self.person_name}的 **{info_type}** 信息。
 
 现有信息类别列表：

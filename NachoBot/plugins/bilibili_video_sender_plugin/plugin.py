@@ -367,11 +367,12 @@ class ProgressBar:
 class BilibiliVideoInfo:
     """基础视频信息。"""
 
-    def __init__(self, aid: int, cid: int, title: str, bvid: Optional[str] = None):
+    def __init__(self, aid: int, cid: int, title: str, bvid: Optional[str] = None, duration: int = 0):
         self.aid = aid
         self.cid = cid
         self.title = title
         self.bvid = bvid
+        self.duration = duration
 
 
 class BilibiliParser:
@@ -474,6 +475,7 @@ class BilibiliParser:
             cid=int(first_page.get("cid")),
             title=str(data.get("title", "")),
             bvid=str(data.get("bvid", "")) or None,
+            duration=int(data.get("duration", 0) or first_page.get("duration", 0)),
         )
 
     @staticmethod
@@ -2294,6 +2296,12 @@ class BilibiliAutoSendHandler(BaseEventHandler):
 
             self._logger.debug("Video info parsed", title=info.title, aid=info.aid, cid=info.cid)
 
+            if info.duration > 600:
+                self._logger.info(
+                    f"Video duration ({info.duration}s) exceeds 10 minutes, discarding before fetching URLs."
+                )
+                return info, [], "视频时长超过10分钟"
+
             urls, status = BilibiliParser.get_play_urls(info.aid, info.cid, config_opts)
             self._logger.debug("Playback URLs fetched", status=status, url_count=len(urls), title=info.title)
 
@@ -2315,6 +2323,9 @@ class BilibiliAutoSendHandler(BaseEventHandler):
         if not urls:
             error_msg = f"解析失败：{status}"
             self._logger.error(error_msg)
+            if status == "视频时长超过10分钟":
+                await self._send_text("视频太长，猫猫搬不动啦        (；´-ω-`)", stream_id)
+                return self._make_return_value(True, True, "视频过长，已丢弃")
             return self._make_return_value(True, True, "解析失败")
 
         self._logger.info(f"Parse successful: {info.title}")
