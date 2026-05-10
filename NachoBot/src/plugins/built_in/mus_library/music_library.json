@@ -466,5 +466,45 @@
       "超深渊带"
     ],
     "file": "audio/超深淵帯.wav"
+  },
+  {
+    "title": "Aqu3ra",
+    "artist": "",
+    "aliases": [
+      "Aqu3ra"
+    ],
+    "file": "audio/Aqu3ra.wav"
+  },
+  {
+    "title": "ClariS",
+    "artist": "",
+    "aliases": [
+      "ClariS"
+    ],
+    "file": "audio/ClariS.wav"
+  },
+  {
+    "title": "Maze No.9",
+    "artist": "",
+    "aliases": [
+      "Maze No.9"
+    ],
+    "file": "audio/Maze No.9.wav"
+  },
+  {
+    "title": "どりーみんチュチュ",
+    "artist": "",
+    "aliases": [
+      "どりーみんチュチュ"
+    ],
+    "file": "audio/どりーみんチュチュ.wav"
+  },
+  {
+    "title": "钩指起誓",
+    "artist": "",
+    "aliases": [
+      "钩指起誓"
+    ],
+    "file": "audio/钩指起誓.wav"
   }
 ]

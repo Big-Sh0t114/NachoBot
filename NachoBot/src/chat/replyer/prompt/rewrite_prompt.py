@@ -18,7 +18,6 @@ def init_rewrite_prompt():
 你可以完全重组回复，保留最基本的表达含义就好，但重组后保持语意通顺。
 不要输出多余内容(包括前后缀，冒号和引号，括号，表情包，emoji,at或 @等 )，只输出一条回复就好。
 
-{expression_habits_block}
 {chat_target}
 {time_block}
 {chat_info}
@@ -28,6 +27,7 @@ def init_rewrite_prompt():
 你想要对上述的发言进行回复，回复的具体内容（原句）是：{raw_reply}
 原因是：{reason}
 {keywords_reaction_prompt}
+{expression_habits_block}
 {moderation_prompt}
 现在，你说：""",
         "default_expressor_prompt",

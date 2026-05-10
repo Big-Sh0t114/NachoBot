@@ -89,14 +89,13 @@ replyer_prompt =  """{identity}
 不要输出多余内容(包括前后缀，冒号和引号，括号，表情包，at或 @等 )。
 你输出的回复将经过TTS作为语音被播放出来，请使用规范的标点，使用逗号和句号断句，不要使用“~”等语气符，颜文字不可用来代替逗号或句号断句。
 
-{knowledge_prompt}{tool_info_block}
-{expression_habits_block}
-
 你正在Discord语音频道里聊天，下面是语音频道里的聊天内容:
 {background_dialogue_prompt}
 {core_dialogue_prompt}
 {time_block}
 
 {reply_target_block}。{keywords_reaction_prompt}
+{knowledge_prompt}{tool_info_block}
+{expression_habits_block}
 {moderation_prompt}
 """

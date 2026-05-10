@@ -297,6 +297,7 @@ class ActionPlanner:
         self,
         available_actions: Dict[str, ActionInfo],
         loop_start_time: float = 0.0,
+        blocked_user_ids: Optional[set] = None,
     ) -> Tuple[List[ActionPlannerInfo], Optional["DatabaseMessages"]]:
         # sourcery skip: use-named-expression
         """
@@ -313,6 +314,12 @@ class ActionPlanner:
             timestamp=time.time(),
             limit=_stepped_limit,
         )
+        # 过滤被屏蔽用户的消息
+        if blocked_user_ids:
+            message_list_before_now = [
+                msg for msg in message_list_before_now
+                if str(msg.user_info.user_id) not in blocked_user_ids
+            ]
         if message_list_before_now:
             latest_message = message_list_before_now[-1]
             if _has_url_message(getattr(latest_message, "processed_plain_text", "") or "") and not _is_bot_message(
