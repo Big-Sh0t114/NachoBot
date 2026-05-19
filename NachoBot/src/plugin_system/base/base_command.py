@@ -391,18 +391,18 @@ class BaseCommand(ABC):
         )
 
 
-class SwitchRpyGroupCommand(BaseCommand):
+class SwitchGpRpyCommand(BaseCommand):
     """管理员指令：切换全局默认回复模型组
 
-    用法: #switch_rpygroup <0|1|2>
+    用法: #switch_gp_rpy <0|1|2>
     - 0: 切换到 replyer0（默认组）
     - 1: 切换到 replyer1（备用组1）
     - 2: 切换到 replyer2（备用组2）
     """
 
-    command_name: str = "switch_rpygroup"
+    command_name: str = "switch_gp_rpy"
     command_description: str = "切换全局默认回复模型组（管理员）"
-    command_pattern: str = r"(?i)^#switch_rpygroup\s+(?P<group>[012])$"
+    command_pattern: str = r"(?i)^#switch_gp_rpy\s+(?P<group>[012])$"
 
     async def execute(self) -> Tuple[bool, Optional[str], bool]:
         # 权限检查：仅管理员可用
@@ -412,7 +412,7 @@ class SwitchRpyGroupCommand(BaseCommand):
         user_id = str(user_info.user_id) if user_info and getattr(user_info, "user_id", None) else None
 
         if not user_id or not advanced_manager.is_allowed(user_id):
-            logger.debug(f"[switch_rpygroup] 权限不足: {user_id}")
+            logger.debug(f"[switch_gp_rpy] 权限不足: {user_id}")
             return True, None, True
 
         group = int(self.matched_groups.get("group", "0"))
@@ -424,11 +424,68 @@ class SwitchRpyGroupCommand(BaseCommand):
         if success:
             active_replyer = model_config.model_task_config.replyer
             model_names = ", ".join(active_replyer.model_list) if active_replyer.model_list else "（空）"
-            reply_text = f"已切换默认回复模型组为 replyer{group}\n当前模型列表: {model_names}"
+            reply_text = f"已切换全局默认回复模型组为 replyer{group}\n当前模型列表: {model_names}"
             await self.send_text(reply_text, storage_message=False)
-            logger.info(f"[switch_rpygroup] 管理员 {user_id} 切换为 replyer{group}")
+            logger.info(f"[switch_gp_rpy] 管理员 {user_id} 切换为 replyer{group}")
         else:
             await self.send_text(f"切换失败，replyer{group} 未配置或不可用。", storage_message=False)
-            logger.warning(f"[switch_rpygroup] 切换到 replyer{group} 失败")
+            logger.warning(f"[switch_gp_rpy] 切换到 replyer{group} 失败")
+
+        return True, None, True
+
+
+class SwitchPrRpyCommand(BaseCommand):
+    """私聊指令：切换当前私聊会话的回复模型组
+
+    用法: #switch_pr_rpy <0|1|2>
+    - 0: 切换到 private_replyer0
+    - 1: 切换到 private_replyer1
+    - 2: 切换到 private_replyer2
+    """
+
+    command_name: str = "switch_pr_rpy"
+    command_description: str = "切换当前私聊会话的回复模型组"
+    command_pattern: str = r"(?i)^#switch_pr_rpy\s+(?P<group>[012])$"
+
+    async def execute(self) -> Tuple[bool, Optional[str], bool]:
+        from src.chat.utils.utils import get_chat_type_and_target_info
+
+        # 确保 message 具有 chat_stream，以获取 stream_id
+        if not hasattr(self.message, "chat_stream") or not self.message.chat_stream:
+            await self.send_text("获取会话信息失败。", storage_message=False)
+            return True, None, True
+
+        stream_id = self.message.chat_stream.stream_id
+
+        # 必须是私聊环境
+        is_group_chat, _ = get_chat_type_and_target_info(stream_id)
+        if is_group_chat:
+            await self.send_text("此指令在群聊不可用哦~(´-ω-`)", storage_message=False)
+            return True, None, True
+
+        group = int(self.matched_groups.get("group", "0"))
+
+        from src.chat.replyer.replyer_manager import replyer_manager
+
+        replyer = replyer_manager.get_replyer(self.message.chat_stream)
+        from src.chat.replyer.private_generator import PrivateReplyer
+
+        if isinstance(replyer, PrivateReplyer):
+            success = replyer.switch_group(group)
+            if success:
+                from src.config.config import model_config
+
+                target_config = getattr(model_config.model_task_config, f"private_replyer{group}", None)
+                if target_config and target_config.model_list:
+                    model_names = ", ".join(target_config.model_list)
+                    reply_text = f"已切换当前私聊模型组为 private_replyer{group}\n当前模型列表: {model_names}"
+                else:
+                    reply_text = f"已切换为 private_replyer{group}（自动回退到默认组或对应的 replyer{group}）"
+
+                await self.send_text(reply_text, storage_message=False)
+            else:
+                await self.send_text("切换私聊模型组失败。", storage_message=False)
+        else:
+            await self.send_text("当前会话无法切换私聊模型组。", storage_message=False)
 
         return True, None, True

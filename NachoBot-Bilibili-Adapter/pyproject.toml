@@ -10,6 +10,7 @@ dependencies = [
     "cryptography>=41.0.0",
     "fastapi>=0.135.1",
     "google-generativeai>=0.8.6",
+    "loguru>=0.7.3",
     "mss>=9.0.1",
     "openai>=2.26.0",
     "pillow>=12.2.0",

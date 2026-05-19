@@ -2,11 +2,15 @@
 
 Pre-loads the FunAudioLLM/SenseVoiceSmall model at startup
 to provide low-latency local speech recognition.
+Independent of any TTS plugin — reads device config from perception.toml.
 """
 
 import logging
 import os
 import threading
+from pathlib import Path
+
+import toml
 
 logger = logging.getLogger("funasr_asr")
 
@@ -14,6 +18,19 @@ logger = logging.getLogger("funasr_asr")
 _model = None
 _lock = threading.Lock()
 _loaded = False
+
+# ── Config path ────────────────────────────────────────────────────────
+_CONFIG_PATH = Path(__file__).parent.parent.parent.parent / "configs" / "perception.toml"
+
+
+def _read_device() -> str:
+    """Read ASR device setting from perception.toml."""
+    try:
+        cfg = toml.load(str(_CONFIG_PATH))
+        return cfg.get("perception", {}).get("device", {}).get("asr", "cuda:0")
+    except Exception as e:
+        logger.warning("[FunASR] Failed to read device from config (%s), defaulting to cuda:0", e)
+        return "cuda:0"
 
 
 def load_model():
@@ -77,19 +94,10 @@ def load_model():
             model_dir = model_id
 
         try:
-            try:
-                from tts_config import TTSBaseConfig
-            except ImportError:
-                from .tts_config import TTSBaseConfig
             import torch
-            config_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "configs", "gpt-sovits.toml")
-            try:
-                config = TTSBaseConfig(config_path)
-                config_device = config.tts.device.asr
-            except Exception as e:
-                logger.warning("[FunASR] Failed to read device from config (%s), defaulting to cuda:0", e)
-                config_device = "cuda:0"
-                
+
+            config_device = _read_device()
+
             if "cuda" in config_device and not torch.cuda.is_available():
                 logger.warning("[FunASR] CUDA is not available, falling back to CPU")
                 _device = "cpu"

@@ -1134,7 +1134,7 @@ async def build_memory_retrieval_prompt(
     is_group_chat = bool(getattr(chat_stream, "group_info", None))
 
     # Bypass Memory Retrieval for real-time platforms (Bilibili Live Group, Discord VC)
-    if (is_group_chat and platform in ["bilibili", "bilibili.live"]) or platform == "discord_vc":
+    if (is_group_chat and platform in ["bilibili", "bilibili.live"]) or platform in {"discord_vc", "universal_vc"}:
         logger.debug(f"{log_prefix}{platform} 直播/语音环境，跳过记忆检索")
         return ""
 

@@ -11,12 +11,24 @@ from config import load_config
 from adapter import DiscordAdapter
 
 
+class CryptoErrorFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if "CryptoError" in record.getMessage() or (record.exc_info and "CryptoError" in str(record.exc_info[0])):
+            return False
+        return True
+
+
 def setup_logging(level: str = "INFO") -> logging.Logger:
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+    
+    # Suppress verbose CryptoError from pycord voice receiver (known harmless issue)
+    discord_voice_logger = logging.getLogger("discord.voice.receive.reader")
+    discord_voice_logger.addFilter(CryptoErrorFilter())
+    
     return logging.getLogger("DiscordVCAdapter")
 
 

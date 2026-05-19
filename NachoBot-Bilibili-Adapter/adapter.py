@@ -60,7 +60,8 @@ if tts_adapter_path.exists():
     if str(tts_adapter_path) not in sys.path:
         sys.path.insert(0, str(tts_adapter_path))
     try:
-        from tts_src.plugins.GPT_Sovits.tts_model import TTSModel
+        from tts_src.utils.tts_resolver import resolve_tts_model_class
+        TTSModel, _tts_import_error = resolve_tts_model_class()
     except ImportError as e:
         _tts_import_error = str(e)
     except Exception as e:

@@ -1,0 +1,39 @@
+[pipeline]
+# pipeline预设配置
+default_preset = "default" # 默认使用的预设名称
+
+# pipeline平台预设映射
+[pipeline.platform_presets]
+qq = "default"       # QQ平台使用default预设
+
+[tts]
+# VoxCPM Gradio WebUI 配置
+host = "127.0.0.1"
+port = 9880
+
+# VoxCPM 模型路径（请修改为你的实际路径）
+model_dir = "path/to/VoxCPM-2.0.2/models/openbmb__VoxCPM2"
+
+# LoRA 权重路径（留空则不使用LoRA）
+lora_weights_path = ""
+
+# 默认生成参数
+cfg_value = 2.0               # CFG 引导强度
+inference_timesteps = 10       # LocDiT 流匹配迭代步数
+denoise = true                 # 是否对参考音频进行降噪增强
+normalize = false              # 是否进行文本规范化
+seed = -1                      # 随机种子，-1 为随机
+
+# 角色预设
+[tts.models]
+[tts.models.presets]
+[tts.models.presets.default]
+name = "默认角色"
+ref_audio_path = ""               # 参考音频路径，留空则为Voice Design模式
+control_instruction = ""              # 可选声音描述
+prompt_text = ""                      # 极致克隆模式的参考音频文本（留空则不启用）
+cfg_value = 2.0
+inference_timesteps = 10
+denoise = true
+normalize = false
+seed = -1

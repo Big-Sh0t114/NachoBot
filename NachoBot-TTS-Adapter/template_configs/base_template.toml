@@ -10,6 +10,7 @@ qq = "http://127.0.0.1:8000/ws" # 或者nonebot-qq
 voice_probability = 0 # 使用语音的概率
 
 [enabled_tts] # 启用的TTS模块，请与各插件的目录名称一致
+# 可选值: "GPT_Sovits" 或 "Vox"（二选一，不可同时启用）
 enabled = ["GPT_Sovits"]
 
 [tts_base_config]
@@ -18,3 +19,6 @@ post_process = false # 是否启用后处理（现阶段无效）
 
 [debug]
 logging_level = "INFO" # 日志级别
+
+[plugins.Vox]
+api_base = "http://127.0.0.1:9880"

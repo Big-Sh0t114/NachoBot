@@ -55,7 +55,8 @@ logger = get_logger("replyer")
 class PrivateReplyer:
     @property
     def express_model(self) -> LLMRequest:
-        model_set = model_config.model_task_config.replyer
+        # 默认使用 active_private_group 对应的私聊模型组（如果没有配置私聊模型组则内部会自动回退到普通 replyer）
+        model_set = model_config.model_task_config.get_private_replyer(self.active_private_group)
         # 检测是否为 Bilibili 直播间：通过 template_name 以 bilibili_live_ 开头判断
         try:
             if self.chat_stream.context:
@@ -79,6 +80,14 @@ class PrivateReplyer:
     ):
         self.request_type = request_type
         self.chat_stream = chat_stream
+        
+        from src.manager.local_store_manager import local_storage
+        key = f"private_replyer_group_{self.chat_stream.stream_id}"
+        saved_group = local_storage[key]
+        if isinstance(saved_group, int) and saved_group in [0, 1, 2]:
+            self.active_private_group = saved_group
+        else:
+            self.active_private_group = 0  # 当前私聊会话激活的模型组编号
         self.is_group_chat, self.chat_target_info = get_chat_type_and_target_info(self.chat_stream.stream_id)
         self.heart_fc_sender = UniversalMessageSender()
         # self.memory_activator = MemoryActivator()
@@ -117,6 +126,31 @@ class PrivateReplyer:
         self.has_mcp_permission = self._check_mcp_permission()
         self.web_search_manager = WebSearchManager(chat_id=self.chat_stream.stream_id, enable_cache=True, cache_ttl=2)
         self.url_fetcher = UrlContentFetcher()
+
+    def switch_group(self, group: int) -> bool:
+        """切换当前私聊会话的回复模型组"""
+        if group not in [0, 1, 2]:
+            logger.warning(f"无效的私聊 replyer 组编号: {group}")
+            return False
+            
+        # 检查对应组是否配置了模型（如果没有，get_private_replyer也会处理回退，但这里我们提前校验以给出明确的反馈）
+        target_config = None
+        if group == 0:
+            target_config = model_config.model_task_config.private_replyer0
+        elif group == 1:
+            target_config = model_config.model_task_config.private_replyer1
+        elif group == 2:
+            target_config = model_config.model_task_config.private_replyer2
+            
+        if target_config and not target_config.model_list:
+            logger.warning(f"私聊 private_replyer{group} 未配置独立模型组，将自动回退到默认组或对应的 replyer{group}")
+
+        self.active_private_group = group
+        from src.manager.local_store_manager import local_storage
+        key = f"private_replyer_group_{self.chat_stream.stream_id}"
+        local_storage[key] = group
+        logger.info(f"私聊会话 {self.chat_stream.stream_id} 已切换模型组为: private_replyer{group}")
+        return True
 
     def _check_mcp_permission(self) -> bool:
         """检查当前用户是否有权限使用 MCP 工具 (前置检查)"""
@@ -372,7 +406,7 @@ class PrivateReplyer:
         # 与 heartFC_chat.py 的 Bypass Planner 条件一致：bilibili 群聊(直播弹幕) + discord_vc
         # 私聊场景下 bilibili 不跳过（heartFC 仅在 is_group_chat 时 bypass bilibili）
         _platform = getattr(self.chat_stream, "platform", "")
-        _skip_llm = _platform == "discord_vc"
+        _skip_llm = _platform in {"discord_vc", "universal_vc"}
 
         sender_relation = await person.build_relationship(chat_content, skip_llm=_skip_llm)
 
@@ -395,7 +429,7 @@ class PrivateReplyer:
             return "", []
         # 直播环境下跳过表达方式选取（与 heartFC Bypass 条件一致）
         _platform = getattr(self.chat_stream, "platform", "")
-        if _platform == "discord_vc":
+        if _platform in {"discord_vc", "universal_vc"}:
             return "", []
         style_habits = []
         # 使用从处理器传来的选中表达方式
@@ -1233,7 +1267,7 @@ class PrivateReplyer:
                 return ""
             
             # Bypass LPMM for real-time platforms (Bilibili Live, Discord VC)
-            if hasattr(self, "chat_stream") and getattr(self.chat_stream, "platform", None) in ["bilibili", "discord_vc"]:
+            if hasattr(self, "chat_stream") and getattr(self.chat_stream, "platform", None) in ["bilibili", "discord_vc", "universal_vc"]:
                 logger.debug(f"{self.chat_stream.platform} 直播/语音环境，跳过LPMM检索")
                 return ""
 
