@@ -1,0 +1,51 @@
+log_level = "INFO"
+
+disable_network_search = true
+
+[capture]
+# Target process to capture audio from.
+# Use EITHER target_pid (exact PID) OR target_process_name (e.g. "VRChat.exe").
+# Leave both empty to capture system-wide audio (loopback mode).
+# target_pid = 12345
+target_process_name = ""
+
+# System-wide capture device (only used when target_process_name is empty).
+# system_capture_device = "Stereo Mix"
+# system_capture_device = "Voicemeeter Out B1"
+
+# VAD (Voice Activity Detection) settings
+vad_threshold = 500         # RMS threshold - lower = more sensitive
+silence_threshold = 0.8     # Seconds of silence before speech is considered ended
+min_speech_duration = 0.3   # Minimum speech duration in seconds
+
+[output]
+# Virtual audio cable output device name.
+#   "CABLE Input"          - VB-Audio Virtual Cable
+#   "VoiceMeeter Input"    - VoiceMeeter
+#   "CABLE Input (VB-Audio Virtual Cable)"  - Full name on some systems
+device_name = "VoiceMeeter Input (VB-Audio VoiceMeeter VAIO)"
+sample_rate = 44100
+
+[nachobot]
+host = "localhost"
+port = 8000
+
+[prompts]
+replyer_prompt = """{identity}
+现在请你读读之前的聊天记录，然后给出日常且口语化的回复，平淡一些，
+说话简短一些，单次回复控制在50字以内。请注意把握聊天内容，不要回复的太有条理，可以有个性。
+{reply_style}
+不要输出多余内容(包括前后缀，冒号和引号，括号，表情等)，只输出回复内容。
+不要输出多余内容(包括前后缀，冒号和引号，括号，表情包，at或 @等 )。
+你输出的回复将经过TTS作为语音被播放出来，请使用规范的标点，使用逗号和句号断句，不要使用"~"等语气符，颜文字不可用来代替逗号或句号断句。
+
+你正在通过语音频道聊天，下面是语音频道里的聊天内容:
+{background_dialogue_prompt}
+{core_dialogue_prompt}
+{time_block}
+
+{reply_target_block}。{keywords_reaction_prompt}
+{knowledge_prompt}{tool_info_block}
+{expression_habits_block}
+{moderation_prompt}
+"""
