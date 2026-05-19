@@ -1,0 +1,23 @@
+[project]
+name = "nachobot-universalvc-adapter"
+version = "0.1.0"
+description = "NachoBot Universal Voice Channel Adapter - ProcTap + Virtual Audio Cable"
+requires-python = ">=3.10"
+dependencies = [
+    "proc-tap",
+    "numpy",
+    "scipy",
+    "aiohttp",
+    "tomlkit",
+    "websockets",
+    "psutil",
+    "sounddevice",
+    "uvicorn",
+    "fastapi",
+    "starlette",
+    "cryptography",
+    "requests",
+    "toml",
+    "pydub",
+    "loguru",
+]
