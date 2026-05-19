@@ -31,17 +31,11 @@ class TTSModels:
 @dataclass
 class DeviceConfig:
     tts: str
-    vlm: str
-    asr: str
-    vlm_backend: str
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "DeviceConfig":
         return cls(
             tts=data.get("tts", "cuda:0"),
-            vlm=data.get("vlm", "cuda:0"),
-            asr=data.get("asr", "cuda:0"),
-            vlm_backend=data.get("vlm_backend", "qwen35"),
         )
 
 

@@ -26,18 +26,15 @@ class TTSHandler:
     def _init_model(self):
         """Initialize the TTS model based on availability."""
         try:
-            # Try importing GPT-Sovits plugin as seen in Bilibili Adapter
-            try:
-                from tts_src.plugins.GPT_Sovits.tts_model import TTSModel
-
-                self.tts_model = TTSModel()
+            from tts_src.utils.tts_resolver import resolve_tts_model_class
+            
+            TTSModelClass, err = resolve_tts_model_class()
+            if TTSModelClass:
+                self.tts_model = TTSModelClass()
                 self.enabled = True
-                self.logger.info("GPT-SoVITS TTS Model initialized successfully.")
-                return
-            except ImportError as e:
-                self.logger.warning(f"Could not import GPT-SoVITS TTS Model. Reason: {e}")
-            except Exception as e:
-                self.logger.warning(f"Error while initializing GPT-SoVITS TTS Model: {e}")
+                self.logger.info(f"TTS Model initialized successfully: {TTSModelClass.__module__}")
+            else:
+                self.logger.warning(f"Could not resolve TTS Model: {err}")
 
         except Exception as e:
             self.logger.error(f"Failed to initialize TTS: {e}")

@@ -1,0 +1,111 @@
+[pipeline]
+# pipeline预设配置
+default_preset = "default" # 默认使用的预设名称
+
+# pipeline平台预设映射
+[pipeline.platform_presets]
+qq = "default"       # QQ平台使用default预设
+discord = "default"  # Discord平台使用default预设
+
+[tts]
+# VoxCPM Gradio WebUI 配置
+host = "127.0.0.1"
+port = 9880
+
+# VoxCPM 模型路径
+model_dir = "C:/Users/BigSh0t/VoxCPM-2.0.2/models/openbmb__VoxCPM2"
+
+# LoRA 权重路径（留空则不使用LoRA）
+lora_weights_path = "C:/Users/BigSh0t/VoxCPM-2.0.2/lora/ncnk"
+
+# 默认生成参数
+cfg_value = 3.0               # CFG 引导强度
+inference_timesteps = 10       # LocDiT 流匹配迭代步数
+denoise = false                # 是否对参考音频进行降噪增强（需要FFmpeg，Windows暂不支持）
+normalize = false              # 是否进行文本规范化
+seed = -1               # 随机种子，-1 为随机
+
+# 文本切句配置（防止长句音色漂移）
+# cut0: 不切分  cut1: 仅句号/问号/感叹号  cut2: +逗号/顿号
+# cut3: +分号/冒号/省略号(默认)  cut4: 按字数强制切  cut5: 标点+字数
+split_method = "cut3"
+max_split_length = 80          # cut4/cut5 模式下每段最大字符数
+segment_gap_ms = 100           # 句间静音间隔（毫秒），0 为不插入
+
+# 角色预设
+[tts.models]
+[tts.models.presets]
+[tts.models.presets.default]
+name = "default"
+ref_audio_path = "default.wav"    # 参考音频路径（与GPT-SoVITS共享），留空则为Voice Design模式
+control_instruction = ""              # 可选声音描述（留空则纯克隆）
+prompt_text = "おはようみんな、ミサイドっていうさ、女の子のゲームをやりたいんだけど"                      # 极致克隆模式的参考音频文本（留空则不启用极致克隆）
+cfg_value = 3.0
+inference_timesteps = 10
+denoise = false
+normalize = false
+seed = 3322597905
+
+[tts.models.presets.angry]
+name = "angry"
+ref_audio_path = "anger.wav"
+control_instruction = ""
+prompt_text = "言うた、嫌だ、いうたさ、切り抜き禁止って言ってんのに、ま、YouTubeじゃないけど、切り抜きされて"
+cfg_value = 3.0
+inference_timesteps = 10
+denoise = false
+normalize = false
+seed = 3322597905
+
+[tts.models.presets.sad]
+name = "sad"
+ref_audio_path = "sad.wav"
+control_instruction = "いつたけなんですよ、ああ、早く走ってください、早く走ってごらぁ！"
+prompt_text = ""
+cfg_value = 3.0
+inference_timesteps = 10
+denoise = false
+normalize = false
+seed = 3322597905
+
+[tts.models.presets.sexual]
+name = "sexual"
+ref_audio_path = "sad.wav"
+control_instruction = "いつたけなんですよ、ああ、早く走ってください、早く走ってごらぁ！"
+prompt_text = ""
+cfg_value = 3.0
+inference_timesteps = 10
+denoise = false
+normalize = false
+seed = 3322597905
+
+# ===== 情感分类系统 =====
+[emotion]
+# 启用情感分类（仅 Vox 生效）
+enabled = true
+
+# 分类模型名称（HuggingFace 模型 ID 或本地路径）
+classifier_model = "MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7"
+
+# 分类器运行设备（"cpu" 或 "cuda:0" 等）
+classifier_device = "cpu"
+
+# 是否使用 FP16 半精度推理（仅 CUDA 设备有效，CPU 自动回退 FP32）
+use_fp16 = true
+
+# 置信度阈值：低于此值时回退到默认情感
+confidence_threshold = 0.6
+
+# 默认情感（分类置信度不足或未命中时使用）
+default_emotion = "平常"
+
+# 可用的情感标签列表（用户可自行增删）
+# 分类器会将文本判定为这些标签之一
+available_tags = ["平常", "生气", "伤心", "sexual"]
+
+# 情感标签到预设名的映射
+[emotion.tag_preset_map]
+平常 = "default"
+生气 = "angry"
+伤心 = "sad"
+sexual = "sexual"

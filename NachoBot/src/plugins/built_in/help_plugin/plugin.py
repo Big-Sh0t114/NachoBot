@@ -5,7 +5,7 @@ from src.common.logger import get_logger
 from src.plugin_system import BaseCommand, BasePlugin, ComponentInfo, register_plugin
 from src.plugin_system.base.component_types import CommandInfo, ComponentType
 from src.plugin_system.base.config_types import ConfigField
-from src.plugin_system.base.base_command import SwitchRpyGroupCommand
+from src.plugin_system.base.base_command import SwitchGpRpyCommand, SwitchPrRpyCommand
 from src.chat.advanced.advanced_manager import advanced_manager
 from src.plugin_system.core.component_registry import component_registry
 from src.plugin_system.core.global_announcement_manager import global_announcement_manager
@@ -123,7 +123,7 @@ class HelpCommand(BaseCommand):
         if name in {"send_post", "send_feed"}:
             return "whitelist"
         # MCP 状态指令：管理员专用，隐藏
-        if name in {"mcp_status_command", "switch_rpygroup"}:
+        if name in {"mcp_status_command", "switch_gp_rpy"}:
             return "admin"
         # 默认公共
         return "public"
@@ -382,5 +382,6 @@ class HelpPlugin(BasePlugin):
         components: List[Tuple[ComponentInfo | CommandInfo, Type]] = []
         components.append((HelpCommand.get_command_info(), HelpCommand))
         components.append((HelpAllCommand.get_command_info(), HelpAllCommand))
-        components.append((SwitchRpyGroupCommand.get_command_info(), SwitchRpyGroupCommand))
+        components.append((SwitchGpRpyCommand.get_command_info(), SwitchGpRpyCommand))
+        components.append((SwitchPrRpyCommand.get_command_info(), SwitchPrRpyCommand))
         return components

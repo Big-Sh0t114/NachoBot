@@ -1,7 +1,7 @@
 """Florence-2-large VLM module for image captioning.
 
-Lazily loads the Microsoft Florence-2-large model on first call
-to avoid slowing down the Control API startup.
+Lazily loads the Microsoft Florence-2-large model on first call.
+Independent of any TTS plugin — reads device config from perception.toml.
 """
 
 import base64
@@ -9,6 +9,9 @@ import logging
 import threading
 import os
 from io import BytesIO
+from pathlib import Path
+
+import toml
 
 logger = logging.getLogger("florence2_vlm")
 
@@ -18,6 +21,19 @@ _processor = None
 _device = None
 _lock = threading.Lock()
 _loaded = False
+
+# ── Config path ────────────────────────────────────────────────────────
+_CONFIG_PATH = Path(__file__).parent.parent.parent.parent / "configs" / "perception.toml"
+
+
+def _read_device() -> str:
+    """Read VLM device setting from perception.toml."""
+    try:
+        cfg = toml.load(str(_CONFIG_PATH))
+        return cfg.get("perception", {}).get("device", {}).get("vlm", "cuda:0")
+    except Exception as e:
+        logger.warning("[Florence-2] Failed to read device from config (%s), defaulting to cuda", e)
+        return "cuda"
 
 
 def load_model():
@@ -51,14 +67,7 @@ def load_model():
         model_id = "microsoft/Florence-2-large"
         logger.info("[Florence-2] Loading model: %s ...", model_id)
 
-        from .tts_config import TTSBaseConfig
-        config_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "configs", "gpt-sovits.toml")
-        try:
-            config = TTSBaseConfig(config_path)
-            config_device = config.tts.device.vlm
-        except Exception as e:
-            logger.warning("[Florence-2] Failed to read device from config (%s), defaulting to cuda", e)
-            config_device = "cuda"
+        config_device = _read_device()
 
         if "cuda" in config_device and not torch.cuda.is_available():
             logger.warning("[Florence-2] CUDA is not available, falling back to CPU")

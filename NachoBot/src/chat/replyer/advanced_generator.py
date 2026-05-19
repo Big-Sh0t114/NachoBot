@@ -15,9 +15,9 @@ class AdvancedPrivateReplyer(PrivateReplyer):
     def express_model(self) -> LLMRequest:
         if getattr(global_config.advanced, "use_advanced_replyer", True):
             advanced_model_set = getattr(model_config.model_task_config, "advanced_replyer", None)
-            model_set = advanced_model_set or model_config.model_task_config.replyer
+            model_set = advanced_model_set or model_config.model_task_config.get_private_replyer(self.active_private_group)
         else:
-            model_set = model_config.model_task_config.replyer
+            model_set = model_config.model_task_config.get_private_replyer(self.active_private_group)
             if getattr(self, "request_type", "advanced_replyer") == "file_edit":
                 model_set = getattr(model_config.model_task_config, "file_edit", model_set)
         return LLMRequest(model_set=model_set, request_type=getattr(self, "request_type", "advanced_replyer"))
