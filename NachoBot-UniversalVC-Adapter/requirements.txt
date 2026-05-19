@@ -1,0 +1,16 @@
+proc-tap
+numpy
+scipy
+aiohttp
+tomlkit
+websockets
+psutil
+sounddevice
+uvicorn
+fastapi
+starlette
+cryptography
+requests
+toml
+pydub
+loguru
