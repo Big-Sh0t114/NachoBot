@@ -485,7 +485,7 @@ class HeartFChatting:
                 # Both need low latency and simple reply/no-reply logic
                 if (
                     is_group_chat and self.chat_stream.platform == "bilibili"
-                ) or self.chat_stream.platform == "discord_vc":
+                ) or self.chat_stream.platform in {"discord_vc", "universal_vc"}:
                     logger.info(f"{self.log_prefix} [HFC] Bypassing Planner for {self.chat_stream.platform}")
                     # Skip bot's own messages to prevent self-reply loops
                     bot_id = str(global_config.bot.qq_account)

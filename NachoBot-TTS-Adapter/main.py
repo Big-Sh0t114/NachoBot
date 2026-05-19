@@ -13,6 +13,12 @@ import importlib
 import toml
 import random
 from pathlib import Path
+import os
+
+# Set global Hugging Face cache directory to avoid re-downloading models in temp folders
+# and set the mirror for faster downloads in China
+os.environ["HF_HOME"] = str(Path(__file__).parent / "models" / "hf_cache")
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
 
 from tts_src.config import Config
@@ -26,6 +32,8 @@ class TTSPipeline:
     tts_list: List[BaseTTSModel] = []
 
     def __init__(self, config_path: str):  # sourcery skip: dict-comprehension
+        self._emotion_classifier = None
+        self._emotion_config = None
         self.config: Config = Config(config_path)
         # 根据配置刷新日志级别
         from tts_src.logger import set_logging_level
@@ -52,7 +60,13 @@ class TTSPipeline:
 
     def import_module(self):
         """动态导入TTS适配"""
-        for tts in self.config.enabled_plugin.enabled:
+        enabled = self.config.enabled_plugin.enabled
+        # 互斥校验：GPT_Sovits 和 Vox 不可同时启用
+        if "GPT_Sovits" in enabled and "Vox" in enabled:
+            raise ValueError(
+                "GPT_Sovits 和 Vox 不可同时启用，请在 base.toml 的 [enabled_tts] 中只选择其一"
+            )
+        for tts in enabled:
             # 动态导入模块
             module_name = f"tts_src.plugins.{tts}"
             try:
@@ -69,9 +83,27 @@ class TTSPipeline:
                 logger.error(f"Unexpected error importing {module_name}: {e}")
                 raise
 
+        # 情感分类器：仅在 Vox 启用且配置了 emotion.enabled 时加载
+        if "Vox" in enabled and self.tts_list:
+            try:
+                vox_model = self.tts_list[0]
+                emotion_cfg = getattr(getattr(vox_model, 'config', None), 'emotion', None)
+                if emotion_cfg and emotion_cfg.enabled:
+                    from tts_src.utils.emotion_classifier import EmotionClassifier
+                    self._emotion_config = emotion_cfg
+                    self._emotion_classifier = EmotionClassifier(
+                        model_name=emotion_cfg.classifier_model,
+                        device=emotion_cfg.classifier_device,
+                        use_fp16=emotion_cfg.use_fp16,
+                    )
+                    logger.info("情感分类系统已在 TTS Adapter 服务端启用（模型将在首次使用时加载）")
+            except Exception as e:
+                logger.warning(f"情感分类器初始化失败，将使用默认预设: {e}")
+
     async def start(self):
         """启动服务器和路由，并导入设定的模块"""
         self.import_module()
+        self._register_http_endpoints()
         py_project_path = Path(__file__).parent / "pyproject.toml"
         toml_data = toml.load(py_project_path)
         logger.info(f"版本信息\n\n当前版本: {toml_data['project']['version']}\n")
@@ -80,6 +112,34 @@ class TTSPipeline:
         self.router_task = asyncio.create_task(self.router.run())
         # 返回任务以便外部可以等待或取消
         return self.server_task, self.router_task
+
+    def _register_http_endpoints(self):
+        """在 WebSocket 服务器的 FastAPI 应用上注册 HTTP 接口"""
+        app = self.server.connection.app
+
+        @app.get("/api/emotion_preset")
+        async def emotion_preset_endpoint(text: str):
+            """情感预设解析接口
+
+            供外部适配器（DiscordVC/Bilibili/UniversalVC）远程调用，
+            无需在适配器侧安装 torch/transformers。
+
+            Returns:
+                {"preset_name": "..."}  — 如果分类器可用且匹配到预设
+                {"preset_name": null}   — 如果分类器不可用或无匹配
+            """
+            preset_name = self._resolve_emotion_preset(text)
+            return {"preset_name": preset_name}
+
+        @app.get("/api/health")
+        async def health_endpoint():
+            return {
+                "status": "ok",
+                "emotion_classifier": self._emotion_classifier is not None,
+                "tts_backends": [type(t).__module__ for t in self.tts_list],
+            }
+
+        logger.info("已注册 HTTP 接口: /api/emotion_preset, /api/health")
 
     async def server_handle(self, message_data: dict):
         """处理服务器收到的消息"""
@@ -208,6 +268,42 @@ class TTSPipeline:
         task = self.buffer_task_dict.pop(group_id)
         task.cancel()
 
+    def _resolve_emotion_preset(self, text: str) -> str | None:
+        """通过情感分类确定使用的预设（仅在服务端运行）
+
+        Returns:
+            preset_name: 匹配的预设名称，或 None 表示使用平台默认
+        """
+        if not self._emotion_classifier or not self._emotion_config:
+            return None
+
+        emotion_cfg = self._emotion_config
+        try:
+            tag, confidence = self._emotion_classifier.classify(
+                text, emotion_cfg.available_tags
+            )
+
+            if confidence < emotion_cfg.confidence_threshold:
+                tag = emotion_cfg.default_emotion
+                logger.info(
+                    f"情感置信度不足 ({confidence:.3f} < {emotion_cfg.confidence_threshold})，"
+                    f"回退默认情感: {tag}"
+                )
+            else:
+                logger.info(f"情感分类结果: {tag} (置信度: {confidence:.3f})")
+
+            # 查找标签对应的预设名
+            preset_name = emotion_cfg.tag_preset_map.get(tag)
+            if preset_name:
+                logger.info(f"情感分类选择预设: {preset_name}")
+                return preset_name
+            else:
+                logger.warning(f"情感 '{tag}' 无有效预设映射，使用平台默认预设")
+                return None
+        except Exception as e:
+            logger.warning(f"情感分类异常，使用平台默认预设: {e}")
+            return None
+
     async def get_voice_no_stream(self, text: str, platform: str, text_lang: str | None = None) -> Seg | None:
         """获取语音消息段"""
         if not self.tts_list:
@@ -216,8 +312,13 @@ class TTSPipeline:
         # tts_class = random.choice(self.tts_list)
         tts_class = self.tts_list[0]
         try:
+            # 服务端情感分类，确定预设名
+            preset_name = self._resolve_emotion_preset(text)
             # 使用非流式TTS
-            audio_data = await tts_class.tts(text=text, platform=platform, text_lang=text_lang)
+            audio_data = await tts_class.tts(text=text, platform=platform, text_lang=text_lang, preset_name=preset_name)
+            if not audio_data:
+                logger.warning("TTS 返回空音频数据，跳过发送")
+                return None
             if self.config.tts_base_config.post_process:
                 # 如果启用了后处理，进行电话语音模拟
                 audio_data = post_process.simulate_telephone_voice(audio_data)
@@ -249,9 +350,10 @@ class TTSPipeline:
         # tts_class = random.choice(self.tts_list)
         tts_class = self.tts_list[0]
         try:
-            audio_stream = await tts_class.tts_stream(text=text, platform=platform, text_lang=text_lang)
-            # 从音频流中读取和处理数据
-            for chunk in audio_stream:
+            # 服务端情感分类，确定预设名
+            preset_name = self._resolve_emotion_preset(text)
+            audio_stream = await tts_class.tts_stream(text=text, platform=platform, text_lang=text_lang, preset_name=preset_name)
+            async def handle_chunk(chunk):
                 if chunk:  # 确保chunk不为空
                     try:
                         # 对音频数据进行base64编码
@@ -276,7 +378,15 @@ class TTSPipeline:
                             logger.exception(f"流式发送异常: {exc}")
                     except Exception as e:
                         logger.error(f"处理音频块时发生错误: {str(e)}")
-                        continue
+
+            # 从音频流中读取和处理数据 (兼容同步和异步迭代器)
+            if hasattr(audio_stream, "__aiter__"):
+                async for chunk in audio_stream:
+                    await handle_chunk(chunk)
+            else:
+                for chunk in audio_stream:
+                    await handle_chunk(chunk)
+            
             logger.info("流式语音消息发送完成")
         except Exception as e:
             logger.error(f"TTS处理过程中发生错误: {str(e)}")

@@ -139,6 +139,15 @@ class ModelTaskConfig(ConfigBase):
     replyer2: TaskConfig = field(default_factory=TaskConfig)
     """备用回复模型组2（可选）"""
 
+    private_replyer0: TaskConfig = field(default_factory=TaskConfig)
+    """私聊默认回复模型组（可选，缺省回退到默认参数）"""
+
+    private_replyer1: TaskConfig = field(default_factory=TaskConfig)
+    """私聊备用回复模型组1（可选）"""
+
+    private_replyer2: TaskConfig = field(default_factory=TaskConfig)
+    """私聊备用回复模型组2（可选）"""
+
     advanced_replyer: TaskConfig = field(default_factory=TaskConfig)
     """高级模式回复模型配置（可选，缺省回退到默认参数）"""
 
@@ -164,8 +173,19 @@ class ModelTaskConfig(ConfigBase):
     """当前激活的 replyer 组编号（0 或 1），运行时状态"""
 
     def __post_init__(self):
-        # 初始化 replyer 别名，指向当前激活的组（默认 replyer0）
-        self.replyer = self.replyer0
+        # 尝试从本地存储加载已激活的全局回复模型组
+        try:
+            from src.manager.local_store_manager import local_storage
+            saved_group = local_storage["global_active_replyer_group"]
+            if isinstance(saved_group, int) and saved_group in [0, 1, 2]:
+                success = self.switch_replyer_group(saved_group)
+                if not success:
+                    self.replyer = self.replyer0
+            else:
+                self.replyer = self.replyer0
+        except Exception as e:
+            logger.warning(f"加载全局模型组状态失败: {e}")
+            self.replyer = self.replyer0
 
     def switch_replyer_group(self, group: int) -> bool:
         """切换全局默认回复模型组
@@ -176,9 +196,12 @@ class ModelTaskConfig(ConfigBase):
         Returns:
             是否切换成功
         """
+        from src.manager.local_store_manager import local_storage
+        
         if group == 0:
             self.replyer = self.replyer0
             self._active_replyer_group = 0
+            local_storage["global_active_replyer_group"] = 0
             logger.info("已切换默认回复模型组为 replyer0")
             return True
         elif group == 1:
@@ -187,6 +210,7 @@ class ModelTaskConfig(ConfigBase):
                 return False
             self.replyer = self.replyer1
             self._active_replyer_group = 1
+            local_storage["global_active_replyer_group"] = 1
             logger.info("已切换默认回复模型组为 replyer1")
             return True
         elif group == 2:
@@ -195,11 +219,31 @@ class ModelTaskConfig(ConfigBase):
                 return False
             self.replyer = self.replyer2
             self._active_replyer_group = 2
+            local_storage["global_active_replyer_group"] = 2
             logger.info("已切换默认回复模型组为 replyer2")
             return True
         else:
             logger.warning(f"无效的 replyer 组编号: {group}")
             return False
+
+    def get_private_replyer(self, group: int = 0) -> TaskConfig:
+        """获取指定组别的私聊回复模型组配置。如果未配置则回退。
+
+        Args:
+            group: 目标私聊组编号（0、1 或 2）
+
+        Returns:
+            TaskConfig: 最终应该使用的模型配置
+        """
+        if group == 0:
+            return self.private_replyer0 if self.private_replyer0.model_list else self.replyer
+        elif group == 1:
+            return self.private_replyer1 if self.private_replyer1.model_list else self.replyer1
+        elif group == 2:
+            return self.private_replyer2 if self.private_replyer2.model_list else self.replyer2
+        else:
+            logger.warning(f"无效的私聊 replyer 组编号: {group}，回退到默认组")
+            return self.replyer
 
     def get_task(self, task_name: str) -> TaskConfig:
         """获取指定任务的配置"""

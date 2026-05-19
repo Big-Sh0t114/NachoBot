@@ -368,7 +368,7 @@ class DefaultReplyer:
         # 直播环境下跳过 LLM 分类选择，仅使用本地字符串匹配
         # 与 heartFC_chat.py 的 Bypass Planner 条件一致：bilibili 群聊(直播弹幕) + discord_vc
         _platform = getattr(self.chat_stream, "platform", "")
-        _skip_llm = _platform in {"bilibili", "discord_vc"}
+        _skip_llm = _platform in {"bilibili", "discord_vc", "universal_vc"}
 
         sender_relation = await person.build_relationship(chat_content, skip_llm=_skip_llm)
         others_relation = ""
@@ -481,7 +481,7 @@ class DefaultReplyer:
             return "", []
         # 直播环境下跳过表达方式选取（与 heartFC Bypass 条件一致）
         _platform = getattr(self.chat_stream, "platform", "")
-        if _platform in {"bilibili", "discord_vc"}:
+        if _platform in {"bilibili", "discord_vc", "universal_vc"}:
             return "", []
         style_habits = []
         # 使用从处理器传来的选中表达方式
@@ -1312,7 +1312,7 @@ class DefaultReplyer:
             # [LOGGING] Log Prompt for Bilibili (Live & Comments) and Discord VC
             should_log = False
             # 1. Always log for Discord VC and Bilibili Live
-            if chat_stream.platform in ["discord_vc", "bilibili.live"]:
+            if chat_stream.platform in ["discord_vc", "universal_vc", "bilibili.live"]:
                 should_log = True
             # 2. For 'bilibili' (Comments), log if it's a group context (not private)
             elif chat_stream.platform == "bilibili":
@@ -1515,7 +1515,7 @@ class DefaultReplyer:
                 return ""
             
             # Bypass LPMM for real-time platforms (Bilibili Live, Discord VC)
-            if hasattr(self, "chat_stream") and getattr(self.chat_stream, "platform", None) in ["bilibili", "discord_vc"]:
+            if hasattr(self, "chat_stream") and getattr(self.chat_stream, "platform", None) in ["bilibili", "discord_vc", "universal_vc"]:
                 logger.debug(f"{self.chat_stream.platform} 直播/语音环境，跳过LPMM检索")
                 return ""
 

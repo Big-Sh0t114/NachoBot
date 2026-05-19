@@ -17,4 +17,5 @@ dependencies = [
     "tomlkit>=0.14.0",
     "uvicorn>=0.41.0",
     "websockets>=16.0",
+    "loguru>=0.7.3",
 ]

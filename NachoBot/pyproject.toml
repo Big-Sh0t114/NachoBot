@@ -70,6 +70,7 @@ dependencies = [
     "pygame>=2.6.1",
     "sounddevice>=0.5.5",
     "live2d-py>=0.6.1.1",
+    "loguru>=0.7.3",
 ]
 
 

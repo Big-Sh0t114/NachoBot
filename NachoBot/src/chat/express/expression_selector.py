@@ -2,6 +2,8 @@ import json
 import time
 import random
 import hashlib
+import asyncio
+import os
 
 from typing import List, Dict, Optional, Any, Tuple
 from json_repair import repair_json
@@ -10,15 +12,21 @@ from src.llm_models.utils_model import LLMRequest
 from src.config.config import global_config, model_config
 from src.common.logger import get_logger
 from src.common.database.database_model import Expression
+from src.common.database.database import db
 from src.chat.utils.prompt_builder import Prompt, global_prompt_manager
+from src.chat.utils.utils import get_embedding, cosine_similarity
 
 logger = get_logger("expression_selector")
+
+# SQLite OperationalError 重试参数
+_MAX_RETRIES = 3
+_RETRY_BASE_DELAY = 0.3  # 秒
 
 
 def init_prompt():
     expression_evaluation_prompt = """
 [任务说明]
-你现在是一个内部评估系统，负责从备选列表中选择最符合当前语境的“表达情境”。
+你现在是一个内部评估系统，负责从备选列表中选择最符合当前语境的"表达情境"。
 注意：本任务【不是】聊天回复生成！请【绝对不要】输出任何回复内容（reply）、情绪（emotion）等字段。你的唯一任务是输出一个包含情境编号的JSON。
 
 [聊天上下文]
@@ -74,11 +82,133 @@ def weighted_sample(population: List[Dict], weights: List[float], k: int) -> Lis
     return selected
 
 
+def _retry_on_locked(func):
+    """装饰器：对 SQLite OperationalError (database is locked) 进行重试"""
+    import functools
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        last_exc = None
+        for attempt in range(_MAX_RETRIES):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                if "database is locked" in str(e) or "locked" in str(e).lower():
+                    last_exc = e
+                    delay = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.1)
+                    logger.warning(
+                        f"SQLite locked (attempt {attempt + 1}/{_MAX_RETRIES}), "
+                        f"retrying in {delay:.2f}s: {e}"
+                    )
+                    time.sleep(delay)
+                else:
+                    raise
+        logger.error(f"SQLite locked after {_MAX_RETRIES} retries, giving up: {last_exc}")
+        raise last_exc  # type: ignore
+
+    return wrapper
+
+
+class EmbeddingCache:
+    """Embedding 向量缓存，使用 dirty flag 延迟批量写入，避免每次 set 都写磁盘"""
+
+    def __init__(self, cache_file="data/expressions/embedding_cache.json"):
+        self.cache_file = cache_file
+        self.cache: Dict[str, Any] = {}
+        self._dirty = False
+        self._load()
+
+    def _load(self):
+        try:
+            if os.path.exists(self.cache_file):
+                with open(self.cache_file, 'r', encoding='utf-8') as f:
+                    self.cache = json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load embedding cache: {e}")
+
+    def save_if_dirty(self):
+        """仅在有未写入变更时才保存到磁盘"""
+        if not self._dirty:
+            return
+        try:
+            os.makedirs(os.path.dirname(self.cache_file), exist_ok=True)
+            with open(self.cache_file, 'w', encoding='utf-8') as f:
+                json.dump(self.cache, f, ensure_ascii=False)
+            self._dirty = False
+        except Exception as e:
+            logger.error(f"Failed to save embedding cache: {e}")
+
+    def get(self, key):
+        return self.cache.get(str(key))
+
+    def set(self, key, vector):
+        self.cache[str(key)] = vector
+        self._dirty = True
+        # 不再立即写盘，由调用方在合适时机调用 save_if_dirty()
+
+
 class ExpressionSelector:
     def __init__(self):
         self.llm_model = LLMRequest(
             model_set=model_config.model_task_config.utils_small, request_type="expression.selector"
         )
+        self.embedding_cache = EmbeddingCache()
+        self._sync_task_started = False
+        self._sync_lock = None
+        # 保护 SQLite 写操作的异步锁，防止并发写入触发 database is locked
+        self._db_write_lock = None
+
+    async def _get_db_write_lock(self) -> asyncio.Lock:
+        """惰性初始化 DB 写锁（必须在事件循环内创建）"""
+        if self._db_write_lock is None:
+            self._db_write_lock = asyncio.Lock()
+        return self._db_write_lock
+
+    async def _start_sync_task_if_needed(self):
+        if not self._sync_task_started:
+            if self._sync_lock is None:
+                self._sync_lock = asyncio.Lock()
+            async with self._sync_lock:
+                if not self._sync_task_started:
+                    asyncio.create_task(self._sync_embeddings_task())
+                    self._sync_task_started = True
+
+    async def _sync_embeddings_task(self):
+        while True:
+            try:
+                # ===== 先一次性读出所有需要的信息，立即释放 DB 连接 =====
+                expr_data_list = []
+                try:
+                    query = Expression.select(
+                        Expression.id, Expression.situation, Expression.style
+                    )
+                    expr_data_list = [
+                        {"id": expr.id, "situation": expr.situation, "style": expr.style}
+                        for expr in query
+                    ]
+                except Exception as e:
+                    logger.error(f"Embedding sync: failed to read expressions: {e}")
+
+                # ===== DB 连接已释放，逐个生成 embedding =====
+                new_embeddings = 0
+                for expr_data in expr_data_list:
+                    if not self.embedding_cache.get(expr_data["id"]):
+                        text = f"当 {expr_data['situation']} 时，使用 {expr_data['style']}"
+                        vector = await get_embedding(text)
+                        if vector:
+                            self.embedding_cache.set(expr_data["id"], vector)
+                            new_embeddings += 1
+                            await asyncio.sleep(0.5)  # 避免触发频率限制
+
+                # 批量写入缓存文件
+                if new_embeddings > 0:
+                    self.embedding_cache.save_if_dirty()
+                    logger.debug(f"Embedding sync: cached {new_embeddings} new embeddings")
+
+            except Exception as e:
+                logger.error(f"Embedding sync task error: {e}")
+
+            await asyncio.sleep(300)  # 每5分钟检查一次
 
     def can_use_expression_for_chat(self, chat_id: str) -> bool:
         """
@@ -143,6 +273,26 @@ class ExpressionSelector:
                 return group_chat_ids
         return [chat_id]
 
+    def get_all_style_expressions(self, chat_id: str) -> List[Dict[str, Any]]:
+        """获取当前聊天流所有相关的表达方式"""
+        related_chat_ids = self.get_related_chat_ids(chat_id)
+        style_query = Expression.select().where(
+            (Expression.chat_id.in_(related_chat_ids)) & (Expression.type == "style")
+        )
+        return [
+            {
+                "id": expr.id,
+                "situation": expr.situation,
+                "style": expr.style,
+                "count": expr.count,
+                "last_active_time": expr.last_active_time,
+                "source_id": expr.chat_id,
+                "type": "style",
+                "create_date": expr.create_date if expr.create_date is not None else expr.last_active_time,
+            }
+            for expr in style_query
+        ]
+
     def get_random_expressions(self, chat_id: str, total_num: int) -> List[Dict[str, Any]]:
         # sourcery skip: extract-duplicate-method, move-assign
         # 支持多chat_id合并抽选
@@ -175,10 +325,39 @@ class ExpressionSelector:
             selected_style = []
         return selected_style
 
-    def update_expressions_count_batch(self, expressions_to_update: List[Dict[str, Any]], increment: float = 0.1):
-        """对一批表达方式更新count值，按chat_id+type分组后一次性写入数据库"""
+    @_retry_on_locked
+    def _do_update_expressions_in_db(self, updates_by_key: Dict, increment: float):
+        """在 db.atomic() 事务中执行实际的 DB 读写，带重试"""
+        to_update = []
+        with db.atomic():
+            for chat_id, expr_type, situation, style in updates_by_key:
+                query = Expression.select().where(
+                    (Expression.chat_id == chat_id)
+                    & (Expression.type == expr_type)
+                    & (Expression.situation == situation)
+                    & (Expression.style == style)
+                )
+                if query.exists():
+                    expr_obj = query.get()
+                    current_count = expr_obj.count
+                    new_count = min(current_count + increment, 5.0)
+                    expr_obj.count = new_count
+                    expr_obj.last_active_time = time.time()
+                    to_update.append(expr_obj)
+                    logger.debug(
+                        f"表达方式激活: 原count={current_count:.3f}, 增量={increment}, 新count={new_count:.3f}"
+                    )
+
+            # 单次批量写入，而不是逐条 save()
+            if to_update:
+                Expression.bulk_update(to_update, fields=[Expression.count, Expression.last_active_time])
+                logger.debug(f"批量更新了 {len(to_update)} 条表达方式记录")
+
+    async def update_expressions_count_batch(self, expressions_to_update: List[Dict[str, Any]], increment: float = 0.1):
+        """对一批表达方式更新count值，通过异步锁串行化写入，避免并发锁冲突"""
         if not expressions_to_update:
             return
+
         updates_by_key = {}
         for expr in expressions_to_update:
             source_id: str = expr.get("source_id")  # type: ignore
@@ -191,23 +370,18 @@ class ExpressionSelector:
             key = (source_id, expr_type, situation, style)
             if key not in updates_by_key:
                 updates_by_key[key] = expr
-        for chat_id, expr_type, situation, style in updates_by_key:
-            query = Expression.select().where(
-                (Expression.chat_id == chat_id)
-                & (Expression.type == expr_type)
-                & (Expression.situation == situation)
-                & (Expression.style == style)
+
+        if not updates_by_key:
+            return
+
+        # 通过异步锁保证同一时刻只有一个协程在写 Expression 表
+        lock = await self._get_db_write_lock()
+        async with lock:
+            # 在线程池中执行同步 DB 操作，避免阻塞事件循环
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None, self._do_update_expressions_in_db, updates_by_key, increment
             )
-            if query.exists():
-                expr_obj = query.get()
-                current_count = expr_obj.count
-                new_count = min(current_count + increment, 5.0)
-                expr_obj.count = new_count
-                expr_obj.last_active_time = time.time()
-                expr_obj.save()
-                logger.debug(
-                    f"表达方式激活: 原count={current_count:.3f}, 增量={increment}, 新count={new_count:.3f} in db"
-                )
 
     async def select_suitable_expressions_llm(
         self,
@@ -224,12 +398,46 @@ class ExpressionSelector:
             logger.debug(f"聊天流 {chat_id} 不允许使用表达，返回空列表")
             return [], []
 
-        # 1. 获取20个随机表达方式（现在按权重抽取）
-        style_exprs = self.get_random_expressions(chat_id, 20)
+        await self._start_sync_task_if_needed()
 
-        if len(style_exprs) < 10:
+        # 获取所有表达方式进行判断
+        all_style_exprs = self.get_all_style_expressions(chat_id)
+
+        if len(all_style_exprs) < 10:
             logger.info(f"聊天流 {chat_id} 表达方式正在积累中")
             return [], []
+
+        # 0. 优先尝试Embedding向量匹配
+        query_vector = None
+        if target_message or chat_info:
+            # 构建查询文本
+            query_text = target_message if target_message else chat_info
+            # 限制查询文本长度，避免超出embedding token限制
+            if len(query_text) > 800:
+                query_text = query_text[-800:]
+            query_vector = await get_embedding(query_text)
+            
+        if query_vector:
+            similarities = []
+            for expr in all_style_exprs:
+                expr_vector = self.embedding_cache.get(expr["id"])
+                if expr_vector:
+                    sim = cosine_similarity(query_vector, expr_vector)
+                    if sim >= 0.75:  # 设定的相似度匹配阈值
+                        similarities.append((sim, expr))
+            
+            if similarities:
+                # 按相似度降序排序
+                similarities.sort(key=lambda x: x[0], reverse=True)
+                top_exprs = [x[1] for x in similarities[:max_num]]
+                selected_ids = [expr["id"] for expr in top_exprs]
+                
+                logger.debug(f"通过Embedding匹配到 {len(top_exprs)} 个表达情境，最高相似度 {similarities[0][0]:.3f}")
+                await self.update_expressions_count_batch(top_exprs, 0.006)
+                return top_exprs, selected_ids
+
+        # 1. 如果匹配不到（或向量生成失败），回退到LLM逻辑并带权重随机抽样
+        style_exprs = self.get_random_expressions(chat_id, 20)
 
         # 2. 构建所有表达方式的索引和情境列表
         all_expressions: List[Dict[str, Any]] = []
@@ -306,7 +514,7 @@ class ExpressionSelector:
 
             # 对选中的所有表达方式，一次性更新count数
             if valid_expressions:
-                self.update_expressions_count_batch(valid_expressions, 0.006)
+                await self.update_expressions_count_batch(valid_expressions, 0.006)
 
             # logger.info(f"LLM从{len(all_expressions)}个情境中选择了{len(valid_expressions)}个")
             return valid_expressions, selected_ids

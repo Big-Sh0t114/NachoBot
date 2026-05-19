@@ -32,13 +32,17 @@ set "ADAPTER_DIR=%BASE_DIR%NachoBot-TTS-Adapter"
 set "NAPCAT_DIR=%BASE_DIR%NachoBot-Napcat-Adapter"
 set "NAPCAT_SRC=%NAPCAT_DIR%\src"
 set "SOVITS_DIR=C:\Users\BigSh0t\GPT-SoVITS\GPT-SoVITS-v2pro-20250604"
+set "VOXCPM_DIR=C:\Users\BigSh0t\VoxCPM-2.0.2"
+set "FFMPEG_BIN=%BASE_DIR%NachoBot\plugins\bilibili_video_sender_plugin\ffmpeg\bin"
 
 set "PORT_SOVITS=9880"
+set "PORT_VOX=9880"
 set "PORT_ADAPTER=8070"
-set "PORT_CONTROL=9872"
+set "PORT_PERCEPTION=9874"
 
 set "PY_GPT=%SOVITS_DIR%\runtime\python.exe"
 set "PY_ADAPTER=%ADAPTER_DIR%\.venv\Scripts\python.exe"
+set "PY_VOX=%VOXCPM_DIR%\.venv\Scripts\python.exe"
 
 set "PYTHONNOUSERSITE=1"
 set "HTTP_PROXY="
@@ -68,6 +72,35 @@ if errorlevel 1 (
   goto :TTS_FAIL
 )
 
+REM -- Read base.toml enabled_tts to decide which TTS engine to start --
+set "TTS_ENGINE=GPT_Sovits"
+set "BASE_TOML=%ADAPTER_DIR%\configs\base.toml"
+for /f "usebackq tokens=*" %%L in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "(Get-Content '%BASE_TOML%' | Select-String 'enabled\s*=').Line"`) do (
+  echo %%L | findstr /i "Vox" >nul
+  if not errorlevel 1 (
+    echo %%L | findstr /r /c:"\"Vox\".*\"GPT_Sovits\"" >nul
+    if not errorlevel 1 (
+      set "TTS_ENGINE=Vox"
+    ) else (
+      echo %%L | findstr /r /c:"\"Vox\"" >nul
+      if not errorlevel 1 (
+        echo %%L | findstr /i "GPT_Sovits" >nul
+        if errorlevel 1 (
+          set "TTS_ENGINE=Vox"
+        )
+      )
+    )
+  )
+)
+echo [INFO] Detected TTS engine: %TTS_ENGINE%
+
+echo.
+echo ========== Start TTS Backend ==========
+echo.
+
+if "%TTS_ENGINE%"=="Vox" goto :START_VOX
+
+REM ---- GPT-SoVITS start logic ----
 set "API_FILE=%SOVITS_DIR%\api_v2.py"
 if not exist "%API_FILE%" set "API_FILE=%SOVITS_DIR%\api.py"
 
@@ -77,10 +110,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%ADAPTER_DIR%\get_gpu_id.ps
 set /p TTS_GPU_ID=<"%TEMP%\_gpu_id.txt"
 del "%TEMP%\_gpu_id.txt" 2>nul
 echo [INFO] TTS (SoVITS) will use GPU: %TTS_GPU_ID%
-
-echo.
-echo ========== Start SoVITS / Adapter / Control ==========
-echo.
 
 start "SoVITS API (%PORT_SOVITS%)" cmd /k "chcp 65001>nul && set CUDA_VISIBLE_DEVICES=%TTS_GPU_ID% && set PYTHONPATH=%SOVITS_DIR%;%SOVITS_DIR%\GPT_SoVITS && cd /d %SOVITS_DIR% && %PY_GPT% -s %API_FILE% --port %PORT_SOVITS%"
 
@@ -99,11 +128,71 @@ goto :TTS_FAIL
 
 :TTS_SOVITS_READY
 echo [OK] SoVITS ready.
+goto :START_ADAPTER_SOVITS
 
+REM ---- VoxCPM API Server start logic ----
+:START_VOX
+echo [INFO] Checking VoxCPM CUDA torch...
+"%PY_VOX%" -c "import torch; exit(0 if torch.cuda.is_available() else 1)" >nul 2>&1
+if errorlevel 1 (
+  echo [INFO] CUDA torch not found, installing cu128 version...
+  cd /d "%VOXCPM_DIR%"
+  uv pip install torch torchaudio --reinstall --index-url https://download.pytorch.org/whl/cu128 >> "%SETUP_LOG%" 2>&1
+  if errorlevel 1 (
+    echo [ERROR] Failed to install CUDA torch for VoxCPM.
+    set "TTS_RC=1"
+    goto :TTS_FAIL
+  )
+  echo [OK] CUDA torch installed.
+) else (
+  echo [OK] CUDA torch already available.
+)
+
+echo [INFO] Starting VoxCPM API Server on port %PORT_VOX%...
+
+set "VOX_API_SCRIPT=%ADAPTER_DIR%\tts_src\plugins\Vox\vox_api_server.py"
+set "VOX_MODEL_DIR=%VOXCPM_DIR%\models\openbmb__VoxCPM2"
+set "VOX_LORA=%VOXCPM_DIR%\lora\ncnk"
+
+REM Use venv python directly to avoid uv run syncing back to CPU torch
+REM Inject FFmpeg DLLs into PATH for ZipEnhancer denoiser (torchcodec)
+start "VoxCPM API (%PORT_VOX%)" cmd /k "chcp 65001>nul && set PATH=%FFMPEG_BIN%;%PATH% && cd /d %VOXCPM_DIR% && %PY_VOX% %VOX_API_SCRIPT% --host 127.0.0.1 --port %PORT_VOX% --model-dir %VOX_MODEL_DIR% --lora-weights %VOX_LORA%"
+
+set "READY="
+for /l %%I in (1,1,150) do (
+  netstat -ano | findstr /r /c:":%PORT_VOX% " | findstr /i LISTENING >nul
+  if not errorlevel 1 (
+    set "READY=1"
+    goto :TTS_VOX_READY
+  )
+  timeout /t 1 /nobreak >nul
+)
+echo [ERROR] VoxCPM timeout.
+set "TTS_RC=1"
+goto :TTS_FAIL
+
+:TTS_VOX_READY
+echo [OK] VoxCPM API ready.
+goto :START_ADAPTER_VOX
+
+REM ---- Adapter for GPT-SoVITS ----
+:START_ADAPTER_SOVITS
 start "TTS Adapter (%PORT_ADAPTER%)" cmd /k "chcp 65001>nul && cd /d %ADAPTER_DIR% && uv run python main.py"
 
-echo [OK] Starting Control...
-start "Control API (%PORT_CONTROL%)" cmd /k "chcp 65001>nul && cd /d %ADAPTER_DIR% && uv run python -m tts_src.plugins.GPT_Sovits.api_server"
+echo [OK] Starting Perception API (VLM + ASR)...
+start "Perception API (%PORT_PERCEPTION%)" cmd /k "chcp 65001>nul && cd /d %ADAPTER_DIR% && uv run python -m tts_src.plugins.Perception.api_server"
+
+echo.
+echo All modules started.
+echo.
+goto :TTS_END
+
+REM ---- Adapter for VoxCPM ----
+:START_ADAPTER_VOX
+start "TTS Adapter (%PORT_ADAPTER%)" cmd /k "chcp 65001>nul && cd /d %ADAPTER_DIR% && uv run python main.py"
+
+echo [OK] Starting Perception API (VLM + ASR)...
+start "Perception API (%PORT_PERCEPTION%)" cmd /k "chcp 65001>nul && cd /d %ADAPTER_DIR% && uv run python -m tts_src.plugins.Perception.api_server"
 
 echo.
 echo All modules started.

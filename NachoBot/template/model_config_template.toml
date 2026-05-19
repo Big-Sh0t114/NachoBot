@@ -7,7 +7,16 @@ version = "1.9.0_bs"
 [[api_providers]] # 阿里 百炼 API服务商配置
 name = "Qhaigc"
 base_url = "https://api-hk.qhaigc.net/v1"
-api_key = " "
+api_key = ""
+client_type = "openai"
+max_retry = 2
+timeout = 30
+retry_interval = 5
+
+[[api_providers]]
+name = "Packy"
+base_url = "https://api-slb.packyapi.com/v1"
+api_key = ""
 client_type = "openai"
 max_retry = 2
 timeout = 30
@@ -16,7 +25,7 @@ retry_interval = 5
 [[api_providers]]
 name = "poloai/c"
 base_url = "https://fast.poloai.top/v1"
-api_key = " "
+api_key = ""
 client_type = "openai"
 max_retry = 2
 timeout = 30
@@ -25,7 +34,7 @@ retry_interval = 5
 [[api_providers]]
 name = "poloai/g"
 base_url = "https://fast.poloai.top/v1"
-api_key = " "
+api_key = ""
 client_type = "openai"
 max_retry = 2
 timeout = 30
@@ -43,24 +52,24 @@ retry_interval = 5
 [[api_providers]] # SiliconFlow的API服务商配置
 name = "SiliconFlow"
 base_url = "https://api.siliconflow.cn/v1"
-api_key = " "
+api_key = ""
 client_type = "openai"
 max_retry = 2
 timeout = 60
 retry_interval = 10
 
 [[api_providers]]
-name = "Google"
-base_url = "https://api.google.com/v1"
-api_key = " "
-client_type = "gemini"
+name = "Deepseek"
+base_url = "https://api.deepseek.com/v1"
+api_key = ""
+client_type = "openai"
 max_retry = 2
 timeout = 30
 retry_interval = 10
 
 [[api_providers]]
 name = "LocalModel"
-base_url = "http://127.0.0.1:9872/v1"
+base_url = "http://127.0.0.1:9874/v1"
 api_key = "fuck"
 client_type = "openai"
 max_retry = 2
@@ -252,11 +261,22 @@ price_in = 2.4
 price_out = 9.6
 
 [[models]]
-model_identifier = "deepseek-r1"
-name = "deepseek-r1"
-api_provider = "Qhaigc"
-price_in = 4
-price_out = 16
+model_identifier = "deepseek-v4-pro"
+name = "deepseek-v4-pro"
+api_provider = "Deepseek"
+price_in = 3
+price_out = 6
+[models.extra_params]
+enable_thinking = false
+
+[[models]]
+model_identifier = "deepseek-v4-flash"
+name = "deepseek-v4-flash"
+api_provider = "Deepseek"
+price_in = 1
+price_out = 2
+[models.extra_params]
+enable_thinking = false
 
 [[models]]
 model_identifier = "Pro/zai-org/GLM-5"
@@ -326,13 +346,26 @@ name = "claude-sonnet-4-6"
 api_provider = "Qhaigc"
 price_in = 3
 price_out = 15
+[models.extra_params]
+enable_thinking = false
 
 [[models]]
 model_identifier = "claude-sonnet-4-6"
 name = "claude-sonnet-4-6/polo"
 api_provider = "poloai/c"
+price_in = 3
+price_out = 15
+[models.extra_params]
+enable_thinking = false
+
+[[models]]
+model_identifier = "claude-sonnet-4-6"
+name = "claude-sonnet-4-6/packy"
+api_provider = "Packy"
 price_in = 2.4
 price_out = 12
+[models.extra_params]
+enable_thinking = false
 
 [[models]]
 model_identifier = "gemini-2.5-pro"
@@ -501,7 +534,7 @@ temperature = 0.2
 max_tokens = 800
 
 [model_task_config.replyer0] # 默认回复模型组（原 replyer），还用于表达器和表达方式学习
-model_list = ["claude-sonnet-4-6/polo","Qwen/Qwen3.5-397B-A17B"]
+model_list = ["deepseek-v4-flash","claude-sonnet-4-6/polo","Qwen/Qwen3.5-397B-A17B"]
 temperature = 0.5                        
 max_tokens = 800
 
@@ -511,12 +544,26 @@ temperature = 0.5
 max_tokens = 800
 
 [model_task_config.replyer2] # 备用回复模型组2
-model_list = ["Qwen3.5-9B-Uncensored","Qwen/Qwen3-8B","Qwen/Qwen3.5-397B-A17B"]
+model_list = ["claude-sonnet-4-6/polo","Qwen/Qwen3.5-397B-A17B"]
+temperature = 0.5
+max_tokens = 800
+
+[model_task_config.private_replyer0] # 私聊默认回复模型组
+model_list = ["deepseek-v4-flash","Qwen/Qwen3.5-397B-A17B"]
+temperature = 0.5
+max_tokens = 800
+
+[model_task_config.private_replyer1] # 私聊备用回复模型组1
+model_list = ["claude-sonnet-4-6/polo","Qwen/Qwen3.5-397B-A17B"]
+temperature = 0.5
+max_tokens = 800
+
+[model_task_config.private_replyer2] # 私聊备用回复模型组2
+model_list = ["deepseek-v4-pro","Qwen/Qwen3.5-397B-A17B"]
 temperature = 0.5
 max_tokens = 800
 
 [model_task_config.advanced_replyer] # 高级模式回复模型组（可选，未配置则回退replyer）
-# 在此填写高级模式使用的模型名称列表
 model_list = ["grok-4.20-beta","grok-4.1-fast","grok-4/p","grok-3/p","grok-4-mini"]
 temperature = 0.5
 max_tokens = 800
@@ -540,7 +587,7 @@ temperature = 0.5
 max_tokens = 800
 
 [model_task_config.video] # 视频识别模型
-model_list = ["gemini-2.0-flash","gemini-2.5-flash","waifubot-view-video"]
+model_list = ["deepseek-v4-flash"]
 max_tokens = 4096
 
 [model_task_config.voice] # 语音识别模型（本地 FunASR）
