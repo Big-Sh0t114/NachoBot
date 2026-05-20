@@ -348,12 +348,20 @@ class DiscordAdapter:
                 self.logger.warning("Text became empty after cleaning, skipping TTS.")
                 return
 
-            # 2. Generate TTS
-            audio_path = await self._generate_tts(cleaned_text)
+            # 分段流式：按句切分，逐句生成并立即送入语音频道
+            try:
+                from tts_src.utils.text_splitter import split_text_for_streaming
+                segments = split_text_for_streaming(cleaned_text)
+            except ImportError:
+                segments = [cleaned_text]
 
-            if audio_path:
-                # 2. Speak
-                await self.bot.speak(guild_id, audio_path)
+            self.logger.info(f"TTS segment stream: {len(segments)} segments")
+
+            for idx, seg_text in enumerate(segments):
+                self.logger.info(f"Generating segment {idx+1}/{len(segments)}: {seg_text}")
+                audio_path = await self._generate_tts(seg_text)
+                if audio_path:
+                    await self.bot.speak(guild_id, audio_path)
 
         except Exception as e:
             self.logger.error(f"Error handling message from NachoBot: {e}")
