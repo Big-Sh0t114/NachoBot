@@ -282,17 +282,26 @@ class TTSManager:
                     self.update_subtitle(display_text)
                     cleaned_tts_text = _clean_text_for_tts(tts_text)
                     
-                    audio_data = await self.tts_model.tts(text=cleaned_tts_text, platform=self.config.platform)
-                    
-                    if self.on_start_replying and self.execute_live2d_action:
-                        await self.on_start_replying()
-                        self.execute_live2d_action(emotion, action)
-                        if not action:
-                            # fallback to idle
-                            pass # Can handle this inside execute logic
-                            
-                    if audio_data:
-                        await asyncio.to_thread(self.audio_player.play_idle, audio_data)
+                    # 分段流式：按句切分，逐句生成并立即送入空闲播放队列
+                    from tts_src.utils.text_splitter import split_text_for_streaming
+                    segments = split_text_for_streaming(cleaned_tts_text)
+                    self.logger.info(f"Idle TTS 分段流式: {len(segments)} 个分段")
+
+                    first_segment = True
+                    for idx, seg_text in enumerate(segments):
+                        self.logger.info(f"Idle TTS 生成第 {idx+1}/{len(segments)} 段: {seg_text}")
+                        audio_data = await self.tts_model.tts(text=seg_text, platform=self.config.platform)
+
+                        if first_segment and audio_data:
+                            first_segment = False
+                            if self.on_start_replying and self.execute_live2d_action:
+                                await self.on_start_replying()
+                                self.execute_live2d_action(emotion, action)
+                                if not action:
+                                    pass
+
+                        if audio_data:
+                            await asyncio.to_thread(self.audio_player.play_idle, audio_data)
                 except Exception as e:
                     self.logger.error(f"Failed to generate/play idle TTS: {e}")
 
@@ -393,19 +402,32 @@ class TTSManager:
                     cleaned_tts_text = _clean_text_for_tts(tts_text)
                     self.logger.info(f"TTS Generating for room {room_id}: {cleaned_tts_text}")
                     try:
-                        audio_data = await self.tts_model.tts(text=cleaned_tts_text, platform=self.config.platform)
-                        if self.on_start_replying and self.execute_live2d_action:
-                            try:
-                                await self.on_start_replying()
-                                emotion = metadata.get("emotion")
-                                action = metadata.get("action")
-                                self.execute_live2d_action(emotion, action)
-                            except Exception as e:
-                                self.logger.error(f"Live2D reply hook error: {e}")
+                        # 分段流式：按句切分文本，逐句生成并立即送入播放队列
+                        from tts_src.utils.text_splitter import split_text_for_streaming
+                        segments = split_text_for_streaming(cleaned_tts_text)
+                        self.logger.info(f"TTS 分段流式: {len(segments)} 个分段")
 
-                        if audio_data:
-                            self.audio_player.interrupt_idle()
-                            self.audio_player.play(audio_data)
+                        first_segment = True
+                        for idx, seg_text in enumerate(segments):
+                            self.logger.info(f"TTS 生成第 {idx+1}/{len(segments)} 段: {seg_text}")
+                            audio_data = await self.tts_model.tts(text=seg_text, platform=self.config.platform)
+
+                            if first_segment and audio_data:
+                                first_segment = False
+                                # 首段音频就绪后触发 Live2D 动作
+                                if self.on_start_replying and self.execute_live2d_action:
+                                    try:
+                                        await self.on_start_replying()
+                                        emotion = metadata.get("emotion")
+                                        action = metadata.get("action")
+                                        self.execute_live2d_action(emotion, action)
+                                    except Exception as e:
+                                        self.logger.error(f"Live2D reply hook error: {e}")
+                                self.audio_player.interrupt_idle()
+
+                            if audio_data:
+                                self.audio_player.play(audio_data)
+
                         self.logger.info(f"TTS Played successfully for room {room_id}")
                         return
                     except Exception as e:
