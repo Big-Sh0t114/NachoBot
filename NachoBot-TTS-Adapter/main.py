@@ -333,7 +333,7 @@ class TTSPipeline:
             return None
 
     async def send_voice_stream(self, message: MessageBase) -> None:
-        """流式发送语音消息"""
+        """流式发送语音消息 (真流式)"""
         platform = message.message_info.platform
         message_text, text_lang = self.process_seg(message.message_segment)
         if not text_lang and message.message_info.additional_config:
@@ -352,7 +352,8 @@ class TTSPipeline:
         try:
             # 服务端情感分类，确定预设名
             preset_name = self._resolve_emotion_preset(text)
-            audio_stream = await tts_class.tts_stream(text=text, platform=platform, text_lang=text_lang, preset_name=preset_name)
+            # 修复 await async generator 的 Bug
+            audio_stream = tts_class.tts_stream(text=text, platform=platform, text_lang=text_lang, preset_name=preset_name)
             async def handle_chunk(chunk):
                 if chunk:  # 确保chunk不为空
                     try:
@@ -379,7 +380,7 @@ class TTSPipeline:
                     except Exception as e:
                         logger.error(f"处理音频块时发生错误: {str(e)}")
 
-            # 从音频流中读取和处理数据 (兼容同步和异步迭代器)
+            # 从音频流中读取和处理数据 (兼容同步 and 异步迭代器)
             if hasattr(audio_stream, "__aiter__"):
                 async for chunk in audio_stream:
                     await handle_chunk(chunk)

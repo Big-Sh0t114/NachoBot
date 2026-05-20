@@ -46,9 +46,9 @@ denoise = false
 normalize = false
 seed = 3322597905
 
-[tts.models.presets.angry]
-name = "angry"
-ref_audio_path = "anger.wav"
+[tts.models.presets.disgust]
+name = "disgust"
+ref_audio_path = "disgust.wav"
 control_instruction = ""
 prompt_text = "言うた、嫌だ、いうたさ、切り抜き禁止って言ってんのに、ま、YouTubeじゃないけど、切り抜きされて"
 cfg_value = 3.0
@@ -57,11 +57,33 @@ denoise = false
 normalize = false
 seed = 3322597905
 
-[tts.models.presets.sad]
-name = "sad"
-ref_audio_path = "sad.wav"
-control_instruction = "いつたけなんですよ、ああ、早く走ってください、早く走ってごらぁ！"
-prompt_text = ""
+[tts.models.presets.caring]
+name = "caring"
+ref_audio_path = "caring.WAV"
+control_instruction = ""
+prompt_text = "おにいるの？今配信中だから構えないよ。満足した？満足した？もういい？あるくんが外で待ってるよ。"
+cfg_value = 3.0
+inference_timesteps = 10
+denoise = false
+normalize = false
+seed = 3322597905
+
+[tts.models.presets.sleepy]
+name = "sleepy"
+ref_audio_path = "sleepy.WAV"
+control_instruction = ""
+prompt_text = "マジで眠い。眠いなって思ってた。まあどうせみんなも寝る時間だろうなって"
+cfg_value = 3.0
+inference_timesteps = 10
+denoise = false
+normalize = false
+seed = 3322597905
+
+[tts.models.presets.happy]
+name = "happy"
+ref_audio_path = "happy.WAV"
+control_instruction = ""
+prompt_text = "おい、お前も飲めよー。(laughter)全然飲んでないじゃんかーって"
 cfg_value = 3.0
 inference_timesteps = 10
 denoise = false
@@ -70,9 +92,9 @@ seed = 3322597905
 
 [tts.models.presets.sexual]
 name = "sexual"
-ref_audio_path = "sad.wav"
-control_instruction = "いつたけなんですよ、ああ、早く走ってください、早く走ってごらぁ！"
-prompt_text = ""
+ref_audio_path = "sad.WAV"
+control_instruction = ""
+prompt_text = "いつたけなんですよ(gasping)。ああ、早く走ってください、早く走ってごらぁ！(moaning)"
 cfg_value = 3.0
 inference_timesteps = 10
 denoise = false
@@ -101,11 +123,14 @@ default_emotion = "平常"
 
 # 可用的情感标签列表（用户可自行增删）
 # 分类器会将文本判定为这些标签之一
-available_tags = ["平常", "生气", "伤心", "sexual"]
+available_tags = ["default", "disgust", "unhappy", "sleepy","caring","happy","sexual"]
 
 # 情感标签到预设名的映射
 [emotion.tag_preset_map]
-平常 = "default"
-生气 = "angry"
-伤心 = "sad"
+default = "default"
+disgust = "disgust"
+unhappy = "unhappy"
+sleepy = "sleepy"
+caring = "caring"
+happy = "happy"
 sexual = "sexual"
