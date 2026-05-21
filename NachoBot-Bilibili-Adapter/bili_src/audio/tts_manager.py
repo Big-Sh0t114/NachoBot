@@ -287,10 +287,17 @@ class TTSManager:
                     segments = split_text_for_streaming(cleaned_tts_text)
                     self.logger.info(f"Idle TTS 分段流式: {len(segments)} 个分段")
 
+                    preset_name = None
+                    if hasattr(self.tts_model, "_resolve_emotion_preset_remote"):
+                        try:
+                            preset_name = await self.tts_model._resolve_emotion_preset_remote(cleaned_tts_text)
+                        except Exception as e:
+                            self.logger.error(f"Failed to resolve emotion preset: {e}")
+
                     first_segment = True
                     for idx, seg_text in enumerate(segments):
                         self.logger.info(f"Idle TTS 生成第 {idx+1}/{len(segments)} 段: {seg_text}")
-                        audio_data = await self.tts_model.tts(text=seg_text, platform=self.config.platform)
+                        audio_data = await self.tts_model.tts(text=seg_text, platform=self.config.platform, preset_name=preset_name, split_method="cut0")
 
                         if first_segment and audio_data:
                             first_segment = False
@@ -407,10 +414,17 @@ class TTSManager:
                         segments = split_text_for_streaming(cleaned_tts_text)
                         self.logger.info(f"TTS 分段流式: {len(segments)} 个分段")
 
+                        preset_name = None
+                        if hasattr(self.tts_model, "_resolve_emotion_preset_remote"):
+                            try:
+                                preset_name = await self.tts_model._resolve_emotion_preset_remote(cleaned_tts_text)
+                            except Exception as e:
+                                self.logger.error(f"Failed to resolve emotion preset: {e}")
+
                         first_segment = True
                         for idx, seg_text in enumerate(segments):
                             self.logger.info(f"TTS 生成第 {idx+1}/{len(segments)} 段: {seg_text}")
-                            audio_data = await self.tts_model.tts(text=seg_text, platform=self.config.platform)
+                            audio_data = await self.tts_model.tts(text=seg_text, platform=self.config.platform, preset_name=preset_name, split_method="cut0")
 
                             if first_segment and audio_data:
                                 first_segment = False

@@ -94,8 +94,14 @@ class TTSModel(BaseTTSModel):
         text: str,
         preset: VoxPreset,
         text_lang: str = None,
+        split_method: str = None,
     ) -> Dict[str, Any]:
-        """构建请求参数（兼容 GPT-SoVITS 风格的 GET 请求）"""
+        """构建请求参数（兼容 GPT-SoVITS 风格的 GET 请求）
+
+        Args:
+            split_method: 覆盖配置文件中的切句方式。适配器外部已切分文本时
+                          可传入 "cut0" 禁止 API Server 重复切句。
+        """
         cfg_value = preset.cfg_value or self.config.vox.cfg_value
         inference_timesteps = preset.inference_timesteps or self.config.vox.inference_timesteps
         denoise = preset.denoise if preset.denoise is not None else self.config.vox.denoise
@@ -124,8 +130,8 @@ class TTSModel(BaseTTSModel):
             "normalize": str(normalize).lower(),
             "media_type": "wav",
             "streaming_mode": "false",
-            # 切句参数
-            "split_method": self.config.vox.split_method,
+            # 切句参数（允许外部覆盖以禁用重复切句）
+            "split_method": split_method or self.config.vox.split_method,
             "max_split_length": self.config.vox.max_split_length,
             "segment_gap_ms": self.config.vox.segment_gap_ms,
         }
@@ -212,7 +218,8 @@ class TTSModel(BaseTTSModel):
             return b""
 
         self._current_preset = preset_name
-        params = self.build_parameters(cleaned_text, preset, text_lang=text_lang)
+        split_method = kwargs.get("split_method")
+        params = self.build_parameters(cleaned_text, preset, text_lang=text_lang, split_method=split_method)
 
         timeout = aiohttp.ClientTimeout(total=120, connect=10)
         async with aiohttp.ClientSession(timeout=timeout) as session:
