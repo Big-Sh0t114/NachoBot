@@ -315,9 +315,16 @@ class UniversalVCAdapter:
 
             self.logger.info(f"TTS segment stream: {len(segments)} segments")
 
+            preset_name = None
+            if self.tts_handler.tts_model and hasattr(self.tts_handler.tts_model, "_resolve_emotion_preset_remote"):
+                try:
+                    preset_name = await self.tts_handler.tts_model._resolve_emotion_preset_remote(cleaned_text)
+                except Exception as e:
+                    self.logger.error(f"Failed to resolve emotion preset: {e}")
+
             for idx, seg_text in enumerate(segments):
                 self.logger.info(f"Generating segment {idx+1}/{len(segments)}: {seg_text}")
-                audio_path = await self.tts_handler.generate_speech(seg_text)
+                audio_path = await self.tts_handler.generate_speech(seg_text, preset_name=preset_name, split_method="cut0")
                 if audio_path:
                     await self.audio_output.play(audio_path)
 

@@ -42,7 +42,7 @@ class TTSHandler:
         except Exception as e:
             self.logger.error(f"Failed to initialize TTS: {e}")
 
-    async def generate_speech(self, text: str) -> Optional[str]:
+    async def generate_speech(self, text: str, preset_name: Optional[str] = None, split_method: Optional[str] = None) -> Optional[str]:
         """
         Generate speech audio file from text.
         Returns the path to the generated WAV file.
@@ -57,7 +57,7 @@ class TTSHandler:
             start = time.time()
             # Enforce Chinese for target text, Japanese for reference audio
             audio_data = await self.tts_model.tts(
-                text=text, platform="universal_vc", text_lang="zh", prompt_lang="ja"
+                text=text, platform="universal_vc", text_lang="zh", prompt_lang="ja", preset_name=preset_name, split_method=split_method
             )
             duration = time.time() - start
             self.logger.info(f"TTS Generation took {duration:.2f}s")

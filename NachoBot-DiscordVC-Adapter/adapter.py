@@ -357,15 +357,22 @@ class DiscordAdapter:
 
             self.logger.info(f"TTS segment stream: {len(segments)} segments")
 
+            preset_name = None
+            if self.tts_handler.tts_model and hasattr(self.tts_handler.tts_model, "_resolve_emotion_preset_remote"):
+                try:
+                    preset_name = await self.tts_handler.tts_model._resolve_emotion_preset_remote(cleaned_text)
+                except Exception as e:
+                    self.logger.error(f"Failed to resolve emotion preset: {e}")
+
             for idx, seg_text in enumerate(segments):
                 self.logger.info(f"Generating segment {idx+1}/{len(segments)}: {seg_text}")
-                audio_path = await self._generate_tts(seg_text)
+                audio_path = await self._generate_tts(seg_text, preset_name=preset_name, split_method="cut0")
                 if audio_path:
                     await self.bot.speak(guild_id, audio_path)
 
         except Exception as e:
             self.logger.error(f"Error handling message from NachoBot: {e}")
 
-    async def _generate_tts(self, text: str) -> Optional[str]:
+    async def _generate_tts(self, text: str, preset_name: Optional[str] = None, split_method: Optional[str] = None) -> Optional[str]:
         """Convert text to speech audio file."""
-        return await self.tts_handler.generate_speech(text)
+        return await self.tts_handler.generate_speech(text, preset_name=preset_name, split_method=split_method)

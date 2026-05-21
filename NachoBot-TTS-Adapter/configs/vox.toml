@@ -119,7 +119,7 @@ use_fp16 = true
 confidence_threshold = 0.6
 
 # 默认情感（分类置信度不足或未命中时使用）
-default_emotion = "平常"
+default_emotion = "default"
 
 # 可用的情感标签列表（用户可自行增删）
 # 分类器会将文本判定为这些标签之一
