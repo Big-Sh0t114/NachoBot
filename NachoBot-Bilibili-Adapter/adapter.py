@@ -887,6 +887,7 @@ class BilibiliAdapter:
         is_mentioned: bool = False,
         guard_level: int = 0,
     ) -> None:
+        self.tts_manager.reset_idle_timer()
         if not text:
             return
         if self._handle_mic_manual_command(room_id, user_id, text, user_name):
@@ -1063,6 +1064,7 @@ class BilibiliAdapter:
         timestamp: float,
         price: int = 0,
     ) -> None:
+        self.tts_manager.reset_idle_timer()
         self.logger.info(
             f"Gift: [{room_id}] {user_name}({user_id}) sent {gift_name} x{num} (Price: {price})"
         )
@@ -1161,6 +1163,7 @@ class BilibiliAdapter:
         user_id: str,
         user_name: str,
     ) -> None:
+        self.tts_manager.reset_idle_timer()
         """
         Handle a poke event (simulated or real).
         """
@@ -1259,6 +1262,7 @@ class BilibiliAdapter:
             return None
 
     async def handle_mic_message(self, room_id: int, text: str) -> None:
+        self.tts_manager.reset_idle_timer()
         additional_config = {
             "room_id": room_id,
             "is_mentioned": 2.0,
@@ -1316,6 +1320,7 @@ class BilibiliAdapter:
         user_name: str,
         timestamp: float,
     ) -> None:
+        self.tts_manager.reset_idle_timer()
         self.logger.info(
             f"SuperChat: [{room_id}] {user_name}({user_id}): {message_text} (Price: {price} CNY)"
         )
@@ -1405,6 +1410,7 @@ class BilibiliAdapter:
         price: int = 0,
         **kwargs,
     ) -> None:
+        self.tts_manager.reset_idle_timer()
         self.logger.info(
             f"Guard: [{room_id}] {user_name}({user_id}) became {guard_name} (Level: {guard_level}) - PATCHED_VERIFIED"
         )
@@ -1493,6 +1499,7 @@ class BilibiliAdapter:
         guard_level: int,
         timestamp: float,
     ) -> None:
+        self.tts_manager.reset_idle_timer()
         """Handle a guard-level (大航海) user entering the live room."""
         guard_label = {1: "总督", 2: "提督", 3: "舰长"}.get(guard_level, "舰长")
         self.logger.info(

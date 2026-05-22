@@ -153,6 +153,8 @@ class PrivateHandler:
                 and sender_uid == str(self.config.dede_user_id)
             ):
                 continue
+            if hasattr(self.adapter, "tts_manager") and self.adapter.tts_manager:
+                self.adapter.tts_manager.reset_idle_timer()
             msg_type = int(msg.get("msg_type") or 0)
             content = msg.get("content")
             content_text = ""
