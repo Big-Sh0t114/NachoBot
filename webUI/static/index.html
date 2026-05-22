@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NachoBot 控制面板</title>
+    <meta name="description" content="NachoBot WebUI Control Panel — 配置填写、一键启动、终端监控、插件配置">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
+    <link rel="shortcut icon" href="/nachobot.ico" type="image/x-icon">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+
+<body>
+    <!-- Sidebar Navigation -->
+    <nav id="sidebar" class="sidebar">
+        <div class="sidebar-header">
+            <h1 class="sidebar-title">NachoBot</h1>
+            <span class="sidebar-subtitle">控制面板</span>
+        </div>
+
+        <ul class="nav-list">
+            <li>
+                <a href="#" class="nav-item active" data-tab="config" id="nav-config">
+                    <span class="nav-icon">📝</span>
+                    <span class="nav-label">配置编辑</span>
+                </a>
+            </li>
+            <li>
+                <a href="#" class="nav-item" data-tab="launcher" id="nav-launcher">
+                    <span class="nav-icon">🚀</span>
+                    <span class="nav-label">一键启动</span>
+                </a>
+            </li>
+            <li>
+                <a href="#" class="nav-item" data-tab="terminal" id="nav-terminal">
+                    <span class="nav-icon">🖥️</span>
+                    <span class="nav-label">终端监控</span>
+                </a>
+            </li>
+            <li>
+                <a href="#" class="nav-item" data-tab="plugins" id="nav-plugins">
+                    <span class="nav-icon">🧩</span>
+                    <span class="nav-label">插件管理</span>
+                </a>
+            </li>
+            <li>
+                <a href="#" class="nav-item" data-tab="database" id="nav-database">
+                    <span class="nav-icon">🗄️</span>
+                    <span class="nav-label">数据管理</span>
+                </a>
+            </li>
+            <li style="display: none;">
+                <a href="#" class="nav-item" data-tab="knowledge" id="nav-knowledge">
+                    <span class="nav-icon">📚</span>
+                    <span class="nav-label">知识库</span>
+                </a>
+            </li>
+        </ul>
+
+        <div class="sidebar-footer">
+            <div class="status-bar" id="status-bar">
+                <div class="status-dot" id="status-dot"></div>
+                <span id="status-text">就绪</span>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content Area -->
+    <main id="main-content" class="main-content">
+        <!-- Config Tab -->
+        <section id="tab-config" class="tab-panel active">
+            <div class="panel-header">
+                <h2>配置编辑器</h2>
+                <p class="panel-desc">管理所有 NachoBot 配置文件</p>
+            </div>
+            <div class="config-layout">
+                <div class="config-sidebar" id="config-tree"></div>
+                <div class="config-editor" id="config-editor">
+                    <div class="editor-placeholder">
+                        <span class="placeholder-icon">📄</span>
+                        <p>选择左侧的配置文件开始编辑</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Launcher Tab -->
+        <section id="tab-launcher" class="tab-panel">
+            <div class="panel-header">
+                <h2>一键启动</h2>
+                <p class="panel-desc">按适配器组管理服务的启动与停止</p>
+            </div>
+            <div class="launcher-grid" id="launcher-grid"></div>
+        </section>
+
+        <!-- Terminal Tab -->
+        <section id="tab-terminal" class="tab-panel">
+            <div class="panel-header">
+                <h2>终端监控</h2>
+                <p class="panel-desc">实时查看各服务的输出日志</p>
+            </div>
+            <div class="terminal-container">
+                <div class="terminal-tabs" id="terminal-tabs"></div>
+                <div class="terminal-toolbar">
+                    <label class="toolbar-item">
+                        <span>日志级别</span>
+                        <select id="log-filter">
+                            <option value="all">全部</option>
+                            <option value="DEBUG">DEBUG</option>
+                            <option value="INFO" selected>INFO</option>
+                            <option value="WARNING">WARNING</option>
+                            <option value="ERROR">ERROR</option>
+                        </select>
+                    </label>
+                    <div class="toolbar-actions">
+                        <label class="toolbar-toggle">
+                            <input type="checkbox" id="auto-scroll" checked>
+                            <span>自动滚动</span>
+                        </label>
+                        <button class="btn-sm" id="btn-clear-log" title="清屏">🗑️ 清屏</button>
+                        <button class="btn-sm" id="btn-export-log" title="导出">📥 导出</button>
+                    </div>
+                </div>
+                <div class="terminal-output" id="terminal-output">
+                    <div class="terminal-placeholder">选择上方的服务标签查看日志</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Plugins Tab -->
+        <section id="tab-plugins" class="tab-panel">
+            <div class="panel-header">
+                <h2>插件管理</h2>
+                <p class="panel-desc">查看和配置 NachoBot 插件</p>
+            </div>
+            <div class="plugins-grid" id="plugins-grid"></div>
+        </section>
+
+        <!-- Database Tab -->
+        <section id="tab-database" class="tab-panel">
+            <div class="panel-header">
+                <h2>数据管理</h2>
+                <p class="panel-desc">浏览和管理 NachoBot 数据库</p>
+            </div>
+            <div class="db-stats" id="db-stats"></div>
+            <div class="db-layout">
+                <div class="db-sidebar" id="db-table-list"></div>
+                <div class="db-main">
+                    <div class="db-toolbar" id="db-toolbar" style="display:none">
+                        <div class="db-search-box">
+                            <input type="text" id="db-search" placeholder="搜索..." class="db-search-input">
+                        </div>
+                        <div class="db-toolbar-info">
+                            <span id="db-table-info"></span>
+                        </div>
+                    </div>
+                    <div class="db-table-container" id="db-table-container">
+                        <div class="editor-placeholder">
+                            <span class="placeholder-icon">🗄️</span>
+                            <p>选择左侧的数据表开始浏览</p>
+                        </div>
+                    </div>
+                    <div class="db-pagination" id="db-pagination" style="display:none"></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Knowledge Tab -->
+        <section id="tab-knowledge" class="tab-panel">
+            <div class="panel-header">
+                <h2>知识库管理</h2>
+                <p class="panel-desc">查看和编辑知识库原始文件（仅在核心未运行时可编辑）</p>
+            </div>
+            <div class="knowledge-stats" id="knowledge-stats"></div>
+            <div class="knowledge-layout">
+                <div class="knowledge-sidebar" id="knowledge-file-list"></div>
+                <div class="knowledge-editor-container" id="knowledge-editor">
+                    <div class="editor-placeholder">
+                        <span class="placeholder-icon">📚</span>
+                        <p>选择左侧的知识库文件开始查看</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- Toast notification container -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <!-- Modal overlay -->
+    <div id="modal-overlay" class="modal-overlay hidden">
+        <div class="modal-card" id="modal-card">
+            <div class="modal-header">
+                <h3 id="modal-title"></h3>
+                <button class="modal-close" id="modal-close">&times;</button>
+            </div>
+            <div class="modal-body" id="modal-body"></div>
+            <div class="modal-footer" id="modal-footer"></div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+    <script src="/static/js/config.js"></script>
+    <script src="/static/js/launcher.js"></script>
+    <script src="/static/js/terminal.js"></script>
+    <script src="/static/js/plugins.js"></script>
+    <script src="/static/js/database.js"></script>
+    <script src="/static/js/knowledge.js"></script>
+</body>
+
+</html>

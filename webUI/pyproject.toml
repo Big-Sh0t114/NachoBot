@@ -1,0 +1,12 @@
+[project]
+name = "nachobot-webui"
+version = "1.0.0"
+description = "NachoBot WebUI Control Panel"
+requires-python = ">=3.11,<=3.13"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "tomlkit>=0.13.0",
+    "psutil>=6.0.0",
+    "pyarrow>=17.0.0",
+]
