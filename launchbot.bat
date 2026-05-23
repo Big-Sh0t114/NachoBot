@@ -154,6 +154,16 @@ set "VOX_API_SCRIPT=%ADAPTER_DIR%\tts_src\plugins\Vox\vox_api_server.py"
 set "VOX_MODEL_DIR=%VOXCPM_DIR%\models\openbmb__VoxCPM2"
 set "VOX_LORA=%VOXCPM_DIR%\lora\ncnk"
 
+set "VOX_TOML=%ADAPTER_DIR%\configs\vox.toml"
+if exist "%VOX_TOML%" (
+  for /f "usebackq tokens=1,* delims==" %%A in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "Write-Output ('VAL=' + (Get-Content '%VOX_TOML%' | Select-String 'model_dir\s*=\s*\x22(.*)\x22').Matches.Groups[1].Value)"`) do (
+    if "%%A"=="VAL" set "VOX_MODEL_DIR=%%B"
+  )
+  for /f "usebackq tokens=1,* delims==" %%A in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "Write-Output ('VAL=' + (Get-Content '%VOX_TOML%' | Select-String 'lora_weights_path\s*=\s*\x22(.*)\x22').Matches.Groups[1].Value)"`) do (
+    if "%%A"=="VAL" set "VOX_LORA=%%B"
+  )
+)
+
 REM Use venv python directly to avoid uv run syncing back to CPU torch
 REM Inject FFmpeg DLLs into PATH for ZipEnhancer denoiser (torchcodec)
 start "VoxCPM API (%PORT_VOX%)" cmd /k "chcp 65001>nul && set PATH=%FFMPEG_BIN%;%PATH% && cd /d %VOXCPM_DIR% && %PY_VOX% %VOX_API_SCRIPT% --host 127.0.0.1 --port %PORT_VOX% --model-dir %VOX_MODEL_DIR% --lora-weights %VOX_LORA%"
