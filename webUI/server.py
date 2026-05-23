@@ -11,11 +11,11 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from config_manager import ConfigManager
-from process_manager import ProcessManager, GROUP_DEFS, SERVICE_DEFS
+from process_manager import ProcessManager
 from plugin_manager import PluginManager
 from db_manager import DatabaseManager
 from knowledge_manager import KnowledgeManager
@@ -98,6 +98,13 @@ async def update_config(file_id: str, body: ConfigUpdate):
         config_mgr._backup(full)
         # Write raw text directly
         full.write_text(body.raw, encoding="utf-8")
+        # Hot-reload configurations & services
+        if file_id == "webui_config":
+            from webui_config import webui_config
+            webui_config.reload()
+
+        from process_manager import _register_services
+        _register_services()
         return {"status": "ok"}
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -410,9 +417,10 @@ async def knowledge_stats():
 # =========================================================================
 
 if __name__ == "__main__":
+    from webui_config import webui_config
     uvicorn.run(
         "server:app",
-        host="127.0.0.1",
-        port=8088,
+        host=webui_config.host,
+        port=webui_config.port,
         log_level="info",
     )
