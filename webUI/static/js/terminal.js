@@ -124,15 +124,17 @@ const TerminalModule = (() => {
         else if (upper.includes('WARNING') || upper.includes('WARN')) level = 'warning';
         else if (upper.includes('DEBUG')) level = 'debug';
 
-        // Check filter
+        const line = document.createElement('div');
+        line.className = `log-line ${level}`;
+
+        // Check filter — hide (not discard) lines below threshold
         const filter = document.getElementById('log-filter').value;
         if (filter !== 'all') {
             const levels = { 'DEBUG': 0, 'INFO': 1, 'WARNING': 2, 'ERROR': 3 };
-            if ((levels[level.toUpperCase()] || 0) < (levels[filter] || 0)) return;
+            if ((levels[level.toUpperCase()] || 0) < (levels[filter] || 0)) {
+                line.style.display = 'none';
+            }
         }
-
-        const line = document.createElement('div');
-        line.className = `log-line ${level}`;
 
         let html = '';
         if (showTag) {
