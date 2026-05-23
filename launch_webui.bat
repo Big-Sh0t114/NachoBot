@@ -24,8 +24,9 @@ if errorlevel 1 (
 )
 
 echo.
-echo [OK] Opening browser at http://127.0.0.1:8088
-start http://127.0.0.1:8088
+for /f "usebackq tokens=*" %%i in (`uv run python -c "from webui_config import webui_config; h = '127.0.0.1' if webui_config.host == '0.0.0.0' else webui_config.host; print(f'http://{h}:{webui_config.port}')"`) do set "WEBUI_URL=%%i"
+echo [OK] Opening browser at %WEBUI_URL%
+start %WEBUI_URL%
 
 echo [INFO] Starting WebUI server...
 uv run python server.py

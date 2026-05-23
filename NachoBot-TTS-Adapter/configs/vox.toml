@@ -16,7 +16,7 @@ port = 9880
 model_dir = "C:/Users/BigSh0t/VoxCPM-2.0.2/models/openbmb__VoxCPM2"
 
 # LoRA 权重路径（留空则不使用LoRA）
-lora_weights_path = "C:/Users/BigSh0t/VoxCPM-2.0.2/lora/ncnk"
+lora_weights_path = "C:/Users/BigSh0t/VoxCPM-2.0.2/lora/ncnk2"
 
 # 默认生成参数
 cfg_value = 3.0               # CFG 引导强度
@@ -44,7 +44,7 @@ cfg_value = 3.0
 inference_timesteps = 10
 denoise = false
 normalize = false
-seed = 3322597905
+seed = 0
 
 [tts.models.presets.disgust]
 name = "disgust"
@@ -55,7 +55,7 @@ cfg_value = 3.0
 inference_timesteps = 10
 denoise = false
 normalize = false
-seed = 3322597905
+seed = 1129745562
 
 [tts.models.presets.caring]
 name = "caring"
@@ -83,23 +83,23 @@ seed = 3322597905
 name = "happy"
 ref_audio_path = "happy.WAV"
 control_instruction = ""
-prompt_text = "おい、お前も飲めよー。(laughter)全然飲んでないじゃんかーって"
+prompt_text = "おい、お前も飲めよー。全然飲んでないじゃんかーって"
 cfg_value = 3.0
 inference_timesteps = 10
 denoise = false
 normalize = false
-seed = 3322597905
+seed = 1157723337
 
-[tts.models.presets.sexual]
-name = "sexual"
+[tts.models.presets.sad]
+name = "sad"
 ref_audio_path = "sad.WAV"
 control_instruction = ""
-prompt_text = "いつたけなんですよ(gasping)。ああ、早く走ってください、早く走ってごらぁ！(moaning)"
+prompt_text = "いつたけなんですよ。ああ、早く走ってください、早く走ってごらぁ！"
 cfg_value = 3.0
 inference_timesteps = 10
 denoise = false
 normalize = false
-seed = 3322597905
+seed = 4238366006
 
 # ===== 情感分类系统 =====
 [emotion]
@@ -123,13 +123,11 @@ default_emotion = "default"
 
 # 可用的情感标签列表（用户可自行增删）
 # 分类器会将文本判定为这些标签之一
-available_tags = ["default","disgust","sleepy","caring","happy","sexual"]
+available_tags = ["default","disgust/unhappy","happy/excited","sad/sexual"]
 
 # 情感标签到预设名的映射
 [emotion.tag_preset_map]
 default = "default"
-disgust = "disgust"
-sleepy = "sleepy"
-caring = "caring"
-happy = "happy"
-sexual = "sexual"
+disgust = "disgust/angry"
+happy = "happy/excited"
+sad = "sad/sexual"

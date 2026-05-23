@@ -34,6 +34,8 @@ CONFIG_REGISTRY: list[dict[str, str]] = [
     {"id": "discord_config",      "group": "Discord 适配器",   "path": "NachoBot-DiscordVC-Adapter/config.toml",    "label": "Discord VC 适配器配置"},
     {"id": "koishi_config",       "group": "Discord 适配器",   "path": "NachoBot-Koishi-Adapter/config.toml",       "label": "Koishi 适配器配置"},
     {"id": "universalvc_config",  "group": "全局语音适配器",    "path": "NachoBot-UniversalVC-Adapter/config.toml",  "label": "UniversalVC 配置"},
+    # WebUI 配置
+    {"id": "webui_config",        "group": "WebUI 配置",       "path": "webUI/webui_config.toml",                   "label": "WebUI 系统配置"},
 ]
 
 # Field names that should be masked in the UI
