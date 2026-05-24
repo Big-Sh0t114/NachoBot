@@ -54,10 +54,16 @@
                     <span class="nav-label">数据管理</span>
                 </a>
             </li>
-            <li style="display: none;">
+            <li>
                 <a href="#" class="nav-item" data-tab="knowledge" id="nav-knowledge">
                     <span class="nav-icon">📚</span>
                     <span class="nav-label">知识库</span>
+                </a>
+            </li>
+            <li>
+                <a href="#" class="nav-item" data-tab="setup" id="nav-setup">
+                    <span class="nav-icon">🧙</span>
+                    <span class="nav-label">部署向导</span>
                 </a>
             </li>
         </ul>
@@ -152,11 +158,10 @@
                 <div class="db-sidebar" id="db-table-list"></div>
                 <div class="db-main">
                     <div class="db-toolbar" id="db-toolbar" style="display:none">
-                        <div class="db-search-box">
-                            <input type="text" id="db-search" placeholder="搜索..." class="db-search-input">
-                        </div>
-                        <div class="db-toolbar-info">
+                        <div class="db-filter-bar" id="db-filter-bar"></div>
+                        <div class="db-toolbar-right">
                             <span id="db-table-info"></span>
+                            <button class="btn-sm db-filter-clear-all" id="db-filter-clear-all" style="display:none" title="清除全部筛选">✕ 清除筛选</button>
                         </div>
                     </div>
                     <div class="db-table-container" id="db-table-container">
@@ -187,6 +192,415 @@
                 </div>
             </div>
         </section>
+
+        <!-- Setup Wizard Tab -->
+        <section id="tab-setup" class="tab-panel">
+            <div class="panel-header">
+                <h2>部署向导</h2>
+                <p class="panel-desc">一键检测环境、生成配置、安装依赖，快速部署 NachoBot</p>
+            </div>
+
+            <!-- Stepper -->
+            <div class="setup-stepper" id="setup-stepper">
+                <div class="step active" data-step="1">
+                    <div class="step-number">1</div>
+                    <div class="step-label">环境检测</div>
+                </div>
+                <div class="step-line"></div>
+                <div class="step" data-step="2">
+                    <div class="step-number">2</div>
+                    <div class="step-label">组件选择</div>
+                </div>
+                <div class="step-line"></div>
+                <div class="step" data-step="3">
+                    <div class="step-number">3</div>
+                    <div class="step-label">配置填写</div>
+                </div>
+                <div class="step-line"></div>
+                <div class="step" data-step="4">
+                    <div class="step-number">4</div>
+                    <div class="step-label">完整性检查</div>
+                </div>
+                <div class="step-line"></div>
+                <div class="step" data-step="5">
+                    <div class="step-number">5</div>
+                    <div class="step-label">部署执行</div>
+                </div>
+            </div>
+
+            <!-- Step Panels -->
+            <div class="setup-panels">
+                <!-- Step 1: Environment Check -->
+                <div class="setup-step-panel active" id="setup-step-1">
+                    <div class="setup-card">
+                        <div class="setup-card-header">
+                            <h3>🔍 环境检测</h3>
+                            <button class="btn btn-outline" id="btn-recheck">重新检测</button>
+                        </div>
+                        <div class="setup-check-list" id="setup-check-list">
+                            <div class="setup-check-placeholder">点击下方按钮开始检测...</div>
+                        </div>
+                    </div>
+                    <div class="setup-card" id="setup-port-card" style="display:none">
+                        <div class="setup-card-header">
+                            <h3>🔌 端口状态</h3>
+                        </div>
+                        <div class="setup-port-list" id="setup-port-list"></div>
+                    </div>
+                    <div class="setup-card" id="setup-config-card" style="display:none">
+                        <div class="setup-card-header">
+                            <h3>📄 配置文件</h3>
+                        </div>
+                        <div class="setup-config-list" id="setup-config-list"></div>
+                    </div>
+                    <div class="setup-nav">
+                        <div></div>
+                        <button class="btn btn-primary" id="setup-next-1">下一步 →</button>
+                    </div>
+                </div>
+
+                <!-- Step 2: Component Selection -->
+                <div class="setup-step-panel" id="setup-step-2">
+                    <div class="setup-card">
+                        <div class="setup-card-header">
+                            <h3>🧩 选择要启用的组件</h3>
+                        </div>
+                        <div class="setup-components">
+                            <div class="component-group">
+                                <div class="component-group-title">核心 (必选)</div>
+                                <label class="component-option checked disabled">
+                                    <input type="checkbox" value="core" checked disabled>
+                                    <div class="component-card">
+                                        <span class="component-icon">🧠</span>
+                                        <div class="component-info">
+                                            <span class="component-name">NachoBot Core</span>
+                                            <span class="component-desc">核心引擎，必须启用</span>
+                                        </div>
+                                    </div>
+                                </label>
+                            </div>
+
+                            <div class="component-group">
+                                <div class="component-group-title">适配器平台</div>
+                                <label class="component-option">
+                                    <input type="checkbox" value="qq" class="setup-component-cb">
+                                    <div class="component-card">
+                                        <span class="component-icon">🐧</span>
+                                        <div class="component-info">
+                                            <span class="component-name">QQ (Napcat)</span>
+                                            <span class="component-desc">通过 NapCat 连接 QQ</span>
+                                        </div>
+                                    </div>
+                                </label>
+                                <label class="component-option">
+                                    <input type="checkbox" value="bilibili" class="setup-component-cb">
+                                    <div class="component-card">
+                                        <span class="component-icon">📺</span>
+                                        <div class="component-info">
+                                            <span class="component-name">Bilibili 直播</span>
+                                            <span class="component-desc">Bilibili 直播间弹幕互动</span>
+                                        </div>
+                                    </div>
+                                </label>
+                                <label class="component-option">
+                                    <input type="checkbox" value="discord" class="setup-component-cb">
+                                    <div class="component-card">
+                                        <span class="component-icon">💬</span>
+                                        <div class="component-info">
+                                            <span class="component-name">Discord (Koishi)</span>
+                                            <span class="component-desc">通过 Koishi 连接 Discord (需要 Node.js)</span>
+                                        </div>
+                                    </div>
+                                </label>
+                                <label class="component-option">
+                                    <input type="checkbox" value="universalvc" class="setup-component-cb">
+                                    <div class="component-card">
+                                        <span class="component-icon">🎤</span>
+                                        <div class="component-info">
+                                            <span class="component-name">全局语音适配器</span>
+                                            <span class="component-desc">VRChat 等应用的语音交互</span>
+                                        </div>
+                                    </div>
+                                </label>
+                            </div>
+
+                            <div class="component-group">
+                                <div class="component-group-title">增强功能</div>
+                                <label class="component-option">
+                                    <input type="checkbox" value="tts" class="setup-component-cb">
+                                    <div class="component-card">
+                                        <span class="component-icon">🎙️</span>
+                                        <div class="component-info">
+                                            <span class="component-name">TTS 语音合成</span>
+                                            <span class="component-desc">GPT-SoVITS / VoxCPM 语音合成</span>
+                                        </div>
+                                    </div>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="setup-nav">
+                        <button class="btn btn-outline" id="setup-prev-2">← 上一步</button>
+                        <button class="btn btn-primary" id="setup-next-2">下一步 →</button>
+                    </div>
+                </div>
+
+                <!-- Step 3: Configuration Form -->
+                <div class="setup-step-panel" id="setup-step-3">
+                    <div class="setup-hint-banner">
+                        <span class="hint-icon">💡</span>
+                        <span>此页面仅包含<strong>必填配置项</strong>，其余选项将使用模板默认值。部署完成后，请前往「<strong>配置编辑</strong>」页面进行更细致的调整。</span>
+                    </div>
+                    <div class="setup-card">
+                        <div class="setup-card-header">
+                            <h3>📝 模型配置</h3>
+                        </div>
+                        <div class="setup-form">
+                            <div class="form-section">
+                                <div class="form-section-title">
+                                    API 服务商
+                                    <button class="btn-add-row" id="btn-add-provider" title="添加服务商">＋</button>
+                                </div>
+                                <p class="form-section-hint">配置 LLM API 服务商，每行一个。点击 ＋ 添加更多</p>
+                                <div id="provider-rows">
+                                    <div class="repeatable-row provider-row">
+                                        <div class="repeatable-row-fields">
+                                            <div class="form-row">
+                                                <label class="form-label">服务商名称</label>
+                                                <input type="text" class="form-input setup-single-value setup-provider-name" placeholder="例如: Qhaigc">
+                                            </div>
+                                            <div class="form-row">
+                                                <label class="form-label">API Base URL</label>
+                                                <input type="text" class="form-input setup-provider-url" placeholder="https://api-hk.qhaigc.net/v1">
+                                            </div>
+                                            <div class="form-row">
+                                                <label class="form-label">API Key</label>
+                                                <div class="form-input-group">
+                                                    <input type="password" class="form-input setup-provider-key" placeholder="sk-...">
+                                                    <button class="btn-icon toggle-pw" title="显示/隐藏">👁</button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="form-section">
+                                <div class="form-section-title">
+                                    模型信息
+                                    <button class="btn-add-row" id="btn-add-model" title="添加模型">＋</button>
+                                </div>
+                                <p class="form-section-hint">配置模型并关联到上方的服务商，每行一个。点击 ＋ 添加更多</p>
+                                <div id="model-rows">
+                                    <div class="repeatable-row model-row">
+                                        <div class="repeatable-row-fields">
+                                            <div class="form-row">
+                                                <label class="form-label">模型标识</label>
+                                                <input type="text" class="form-input setup-single-value setup-model-id" placeholder="例如: deepseek-chat">
+                                            </div>
+                                            <div class="form-row">
+                                                <label class="form-label">模型名称</label>
+                                                <input type="text" class="form-input setup-model-name" placeholder="留空则与标识相同">
+                                            </div>
+                                            <div class="form-row">
+                                                <label class="form-label">所属服务商</label>
+                                                <select class="form-select setup-model-provider">
+                                                    <option value="">— 请先填写服务商 —</option>
+                                                </select>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="form-section">
+                                <div class="form-section-title">模型组分配</div>
+                                <p class="form-section-hint">以下必需模型组将自动使用上方填写的模型，部署后可在「配置编辑」中为每个模型组指定不同模型</p>
+                                <div class="form-row">
+                                    <label class="form-label">replyer0</label>
+                                    <input type="text" class="form-input setup-model-group" id="setup-grp-replyer0" placeholder="自动填入" readonly>
+                                    <span class="form-row-tag">回复</span>
+                                </div>
+                                <div class="form-row">
+                                    <label class="form-label">planner</label>
+                                    <input type="text" class="form-input setup-model-group" id="setup-grp-planner" placeholder="自动填入" readonly>
+                                    <span class="form-row-tag">决策</span>
+                                </div>
+                                <div class="form-row">
+                                    <label class="form-label">utils</label>
+                                    <input type="text" class="form-input setup-model-group" id="setup-grp-utils" placeholder="自动填入" readonly>
+                                    <span class="form-row-tag">组件</span>
+                                </div>
+                                <div class="form-row">
+                                    <label class="form-label">utils_small</label>
+                                    <input type="text" class="form-input setup-model-group" id="setup-grp-utils-small" placeholder="自动填入" readonly>
+                                    <span class="form-row-tag">小模型</span>
+                                </div>
+                                <div class="form-row">
+                                    <label class="form-label">tool_use</label>
+                                    <input type="text" class="form-input setup-model-group" id="setup-grp-tool-use" placeholder="自动填入" readonly>
+                                    <span class="form-row-tag">工具</span>
+                                </div>
+                            </div>
+
+                            <div class="form-section" id="setup-tts-section" style="display:none">
+                                <div class="form-section-title">TTS 语音合成</div>
+                                <div class="form-row">
+                                    <label class="form-label">TTS 引擎</label>
+                                    <select class="form-select" id="setup-tts-engine">
+                                        <option value="GPT_Sovits">GPT-SoVITS</option>
+                                        <option value="Vox">VoxCPM</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="setup-nav">
+                        <button class="btn btn-outline" id="setup-prev-3">← 上一步</button>
+                        <button class="btn btn-primary" id="setup-next-3">下一步 →</button>
+                    </div>
+                </div>
+
+                <!-- Step 4: Integrity Check -->
+                <div class="setup-step-panel" id="setup-step-4">
+                    <div class="setup-hint-banner">
+                        <span class="hint-icon">🔎</span>
+                        <span>请确认以下外部依赖已正确安装。验证通过后方可进入部署。</span>
+                    </div>
+                    <div class="setup-card">
+                        <div class="setup-card-header">
+                            <h3>📦 依赖完整性检查</h3>
+                            <button class="btn btn-outline" id="btn-verify-all">全部验证</button>
+                        </div>
+                        <div class="path-check-list" id="path-check-list">
+                            <!-- NapCat Shell (qq) -->
+                            <div class="path-check-card" id="path-check-napcat" data-type="napcat" style="display:none">
+                                <div class="path-check-header">
+                                    <span class="path-check-icon">🐧</span>
+                                    <div class="path-check-info">
+                                        <span class="path-check-name">NapCat Shell</span>
+                                        <span class="path-check-hint">NapCat Shell 安装目录（包含 launcher-user.bat）</span>
+                                    </div>
+                                    <span class="path-check-status" id="status-napcat"></span>
+                                </div>
+                                <div class="path-check-body">
+                                    <div class="form-input-group">
+                                        <input type="text" class="form-input path-check-input" id="path-napcat" placeholder="例如: C:\NapCat.Shell">
+                                        <button class="btn btn-outline btn-sm btn-verify" data-type="napcat">验证</button>
+                                    </div>
+                                    <div class="path-check-result" id="result-napcat"></div>
+                                    <a class="btn-download" id="dl-napcat" href="https://github.com/NapNeko/NapCatQQ/releases" target="_blank" style="display:none">📥 前往下载 NapCat</a>
+                                </div>
+                            </div>
+
+                            <!-- Node.js (discord) -->
+                            <div class="path-check-card" id="path-check-nodejs" data-type="nodejs" style="display:none">
+                                <div class="path-check-header">
+                                    <span class="path-check-icon">💬</span>
+                                    <div class="path-check-info">
+                                        <span class="path-check-name">Node.js</span>
+                                        <span class="path-check-hint">Discord (Koishi) 适配器需要 Node.js 运行环境</span>
+                                    </div>
+                                    <span class="path-check-status" id="status-nodejs"></span>
+                                </div>
+                                <div class="path-check-body">
+                                    <div class="path-check-auto">系统 PATH 自动检测，无需手动填写路径</div>
+                                    <div class="path-check-result" id="result-nodejs"></div>
+                                    <a class="btn-download" id="dl-nodejs" href="https://nodejs.org/en/download/" target="_blank" style="display:none">📥 前往下载 Node.js</a>
+                                </div>
+                            </div>
+
+                            <!-- Bilibili Live2D DLL -->
+                            <div class="path-check-card" id="path-check-bilibili" data-type="bilibili_dll" style="display:none">
+                                <div class="path-check-header">
+                                    <span class="path-check-icon">📺</span>
+                                    <div class="path-check-info">
+                                        <span class="path-check-name">Live2D Cubism Core</span>
+                                        <span class="path-check-hint">Bilibili 适配器需要 Live2DCubismCore.dll</span>
+                                    </div>
+                                    <span class="path-check-status" id="status-bilibili_dll"></span>
+                                </div>
+                                <div class="path-check-body">
+                                    <div class="path-check-auto">自动检测 NachoBot-Bilibili-Adapter 目录</div>
+                                    <div class="path-check-result" id="result-bilibili_dll"></div>
+                                    <a class="btn-download" id="dl-bilibili_dll" href="https://www.live2d.com/sdk/download/native/" target="_blank" style="display:none">📥 前往下载 Live2D SDK</a>
+                                </div>
+                            </div>
+
+                            <!-- GPT-SoVITS (tts + engine) -->
+                            <div class="path-check-card" id="path-check-sovits" data-type="sovits" style="display:none">
+                                <div class="path-check-header">
+                                    <span class="path-check-icon">🎙️</span>
+                                    <div class="path-check-info">
+                                        <span class="path-check-name">GPT-SoVITS</span>
+                                        <span class="path-check-hint">GPT-SoVITS 安装目录（包含 runtime/python.exe）</span>
+                                    </div>
+                                    <span class="path-check-status" id="status-sovits"></span>
+                                </div>
+                                <div class="path-check-body">
+                                    <div class="form-input-group">
+                                        <input type="text" class="form-input path-check-input" id="path-sovits" placeholder="例如: C:\GPT-SoVITS\GPT-SoVITS-v2pro">
+                                        <button class="btn btn-outline btn-sm btn-verify" data-type="sovits">验证</button>
+                                    </div>
+                                    <div class="path-check-result" id="result-sovits"></div>
+                                    <a class="btn-download" id="dl-sovits" href="https://github.com/RVC-Boss/GPT-SoVITS/releases" target="_blank" style="display:none">📥 前往下载 GPT-SoVITS</a>
+                                </div>
+                            </div>
+
+                            <!-- VoxCPM (tts + engine) -->
+                            <div class="path-check-card" id="path-check-voxcpm" data-type="voxcpm" style="display:none">
+                                <div class="path-check-header">
+                                    <span class="path-check-icon">🎙️</span>
+                                    <div class="path-check-info">
+                                        <span class="path-check-name">VoxCPM</span>
+                                        <span class="path-check-hint">VoxCPM 安装目录（包含 .venv/Scripts/python.exe）</span>
+                                    </div>
+                                    <span class="path-check-status" id="status-voxcpm"></span>
+                                </div>
+                                <div class="path-check-body">
+                                    <div class="form-input-group">
+                                        <input type="text" class="form-input path-check-input" id="path-voxcpm" placeholder="例如: C:\VoxCPM-2.0.2">
+                                        <button class="btn btn-outline btn-sm btn-verify" data-type="voxcpm">验证</button>
+                                    </div>
+                                    <div class="path-check-result" id="result-voxcpm"></div>
+                                    <a class="btn-download" id="dl-voxcpm" href="https://github.com/openbmb/VoxCPM/releases" target="_blank" style="display:none">📥 前往下载 VoxCPM</a>
+                                </div>
+                            </div>
+
+                            <!-- Shown when no checks needed -->
+                            <div class="path-check-none" id="path-check-none" style="display:none">
+                                <span class="path-check-icon">✅</span>
+                                <span>当前选择的组件无需额外的外部依赖检查</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="setup-nav">
+                        <button class="btn btn-outline" id="setup-prev-4">← 上一步</button>
+                        <button class="btn btn-primary" id="setup-next-4" disabled>开始部署 🚀</button>
+                    </div>
+                </div>
+
+                <!-- Step 5: Deployment -->
+                <div class="setup-step-panel" id="setup-step-5">
+                    <div class="setup-card">
+                        <div class="setup-card-header">
+                            <h3>🚀 部署进度</h3>
+                        </div>
+                        <div class="deploy-progress" id="deploy-progress"></div>
+                    </div>
+                    <div class="setup-card">
+                        <div class="setup-card-header">
+                            <h3>📋 安装日志</h3>
+                        </div>
+                        <div class="deploy-log" id="deploy-log"></div>
+                    </div>
+                    <div class="setup-nav">
+                        <button class="btn btn-outline" id="setup-prev-5" disabled>← 上一步</button>
+                        <button class="btn btn-primary" id="setup-finish" disabled>🎉 完成，前往控制面板</button>
+                    </div>
+                </div>
+            </div>
+        </section>
     </main>
 
     <!-- Toast notification container -->
@@ -211,6 +625,7 @@
     <script src="/static/js/plugins.js"></script>
     <script src="/static/js/database.js"></script>
     <script src="/static/js/knowledge.js"></script>
+    <script src="/static/js/setup.js"></script>
 </body>
 
 </html>

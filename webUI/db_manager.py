@@ -128,8 +128,9 @@ class DatabaseManager:
         search: str = "",
         sort_by: str = "id",
         sort_order: str = "desc",
+        filters: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        """Query a table with pagination, search, and sorting."""
+        """Query a table with pagination, column filters, and sorting."""
         conn = _get_conn()
         try:
             tables = self._get_table_names(conn)
@@ -146,15 +147,25 @@ class DatabaseManager:
                 sort_order = "desc"
 
             # Build query
-            where_clause = ""
+            conditions: list[str] = []
             params: list[Any] = []
+
+            # Per-column exact-match filters
+            if filters:
+                for col, val in filters.items():
+                    if col in col_names and val != "":
+                        conditions.append(f"CAST([{col}] AS TEXT) = ?")
+                        params.append(val)
+
+            # Legacy global search (fallback, searches across all text columns)
             if search:
-                # Search across all text columns
                 text_cols = [c["name"] for c in cols if c["type"] in ("TEXT", "")]
                 if text_cols:
-                    conditions = [f"CAST([{c}] AS TEXT) LIKE ?" for c in text_cols]
-                    where_clause = "WHERE " + " OR ".join(conditions)
-                    params = [f"%{search}%"] * len(text_cols)
+                    or_parts = [f"CAST([{c}] AS TEXT) LIKE ?" for c in text_cols]
+                    conditions.append("(" + " OR ".join(or_parts) + ")")
+                    params.extend([f"%{search}%"] * len(text_cols))
+
+            where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
             # Get total count
             count_sql = f"SELECT COUNT(*) FROM [{table}] {where_clause}"
@@ -185,6 +196,29 @@ class DatabaseManager:
                 "total_pages": max(1, (total + page_size - 1) // page_size),
                 "editable": table in EDITABLE_TABLES,
             }
+        finally:
+            conn.close()
+
+    def get_column_values(
+        self,
+        table: str,
+        column: str,
+        limit: int = 200,
+    ) -> list[str]:
+        """Get distinct non-null values for a column (for filter dropdowns)."""
+        conn = _get_conn()
+        try:
+            tables = self._get_table_names(conn)
+            if table not in tables:
+                raise ValueError(f"Table not found: {table}")
+            cols = self._get_columns(conn, table)
+            col_names = [c["name"] for c in cols]
+            if column not in col_names:
+                raise ValueError(f"Column not found: {column}")
+
+            sql = f"SELECT DISTINCT CAST([{column}] AS TEXT) AS val FROM [{table}] WHERE [{column}] IS NOT NULL ORDER BY val LIMIT ?"
+            rows = conn.execute(sql, (limit,)).fetchall()
+            return [r["val"] for r in rows]
         finally:
             conn.close()
 
