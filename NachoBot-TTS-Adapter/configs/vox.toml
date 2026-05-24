@@ -16,7 +16,7 @@ port = 9880
 model_dir = "C:/Users/BigSh0t/VoxCPM-2.0.2/models/openbmb__VoxCPM2"
 
 # LoRA 权重路径（留空则不使用LoRA）
-lora_weights_path = "C:/Users/BigSh0t/VoxCPM-2.0.2/lora/ncnk2"
+lora_weights_path = "C:/Users/BigSh0t/VoxCPM-2.0.2/lora/ncnk3"
 
 # 默认生成参数
 cfg_value = 3.0               # CFG 引导强度
@@ -46,17 +46,6 @@ denoise = false
 normalize = false
 seed = 0
 
-[tts.models.presets.disgust]
-name = "disgust"
-ref_audio_path = "disgust.wav"
-control_instruction = ""
-prompt_text = "言うた、嫌だ、いうたさ、切り抜き禁止って言ってんのに、ま、YouTubeじゃないけど、切り抜きされて"
-cfg_value = 3.0
-inference_timesteps = 10
-denoise = false
-normalize = false
-seed = 1129745562
-
 [tts.models.presets.caring]
 name = "caring"
 ref_audio_path = "caring.WAV"
@@ -79,6 +68,17 @@ denoise = false
 normalize = false
 seed = 3322597905
 
+[tts.models.presets.disgust]
+name = "disgust"
+ref_audio_path = "disgust.wav"
+control_instruction = ""
+prompt_text = "言うた、嫌だ、いうたさ、切り抜き禁止って言ってんのに、ま、YouTubeじゃないけど、切り抜きされて"
+cfg_value = 3.0
+inference_timesteps = 10
+denoise = false
+normalize = false
+seed = 737315733
+
 [tts.models.presets.happy]
 name = "happy"
 ref_audio_path = "happy.WAV"
@@ -88,18 +88,18 @@ cfg_value = 3.0
 inference_timesteps = 10
 denoise = false
 normalize = false
-seed = 1157723337
+seed = 3150204291
 
 [tts.models.presets.sad]
 name = "sad"
 ref_audio_path = "sad.WAV"
 control_instruction = ""
-prompt_text = "いつたけなんですよ。ああ、早く走ってください、早く走ってごらぁ！"
+prompt_text = "いつたけなんですよ。ああ、早く走ってくださいー、早く走ってごらぁ！"
 cfg_value = 3.0
 inference_timesteps = 10
 denoise = false
 normalize = false
-seed = 4238366006
+seed = 1043031635
 
 # ===== 情感分类系统 =====
 [emotion]
@@ -128,6 +128,6 @@ available_tags = ["default","disgust/unhappy","happy/excited","sad/sexual"]
 # 情感标签到预设名的映射
 [emotion.tag_preset_map]
 default = "default"
-disgust = "disgust/angry"
-happy = "happy/excited"
-sad = "sad/sexual"
+"disgust/unhappy" = "disgust"
+"happy/excited" = "happy"
+"sad/sexual" = "sad"

@@ -1,25 +1,25 @@
 /**
  * NachoBot WebUI — Database Module
- * Browse and manage SQLite database tables.
+ * Browse and manage SQLite database tables with per-column filtering.
  */
 
 const DatabaseModule = (() => {
     let tables = [];
     let activeTable = null;
     let currentPage = 1;
-    let currentSearch = '';
     let currentSortBy = 'id';
     let currentSortOrder = 'desc';
-    let searchTimeout = null;
+    /** @type {Record<string, string>} column_name -> filter_value */
+    let activeFilters = {};
+    /** Cache of distinct values per column: { table: { col: string[] } } */
+    let columnValuesCache = {};
 
     function init() {
-        document.getElementById('db-search').addEventListener('input', (e) => {
-            clearTimeout(searchTimeout);
-            searchTimeout = setTimeout(() => {
-                currentSearch = e.target.value;
-                currentPage = 1;
-                loadTableData();
-            }, 400);
+        document.getElementById('db-filter-clear-all').addEventListener('click', () => {
+            activeFilters = {};
+            currentPage = 1;
+            renderFilterBar();
+            loadTableData();
         });
     }
 
@@ -65,14 +65,194 @@ const DatabaseModule = (() => {
             item.addEventListener('click', () => {
                 activeTable = t.name;
                 currentPage = 1;
-                currentSearch = '';
-                document.getElementById('db-search').value = '';
+                activeFilters = {};
+                currentSortBy = 'id';
+                currentSortOrder = 'desc';
                 renderTableList();
+                renderFilterBar();
                 loadTableData();
             });
             container.appendChild(item);
         }
     }
+
+    // ---- Filter bar rendering ----
+
+    function renderFilterBar() {
+        const bar = document.getElementById('db-filter-bar');
+        const clearBtn = document.getElementById('db-filter-clear-all');
+        const keys = Object.keys(activeFilters);
+
+        if (keys.length === 0) {
+            bar.innerHTML = '<span class="db-filter-hint">🔍 点击表头的筛选图标按列筛选</span>';
+            clearBtn.style.display = 'none';
+            return;
+        }
+
+        clearBtn.style.display = 'inline-flex';
+        let html = '';
+        for (const col of keys) {
+            const val = activeFilters[col];
+            html += `<span class="db-filter-tag">
+                <span class="db-filter-tag-col">${escapeHtml(col)}</span>
+                <span class="db-filter-tag-eq">=</span>
+                <span class="db-filter-tag-val">${escapeHtml(val)}</span>
+                <button class="db-filter-tag-remove" data-col="${escapeHtml(col)}" title="移除此筛选">✕</button>
+            </span>`;
+        }
+        bar.innerHTML = html;
+
+        // Bind remove buttons
+        bar.querySelectorAll('.db-filter-tag-remove').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const col = btn.dataset.col;
+                delete activeFilters[col];
+                currentPage = 1;
+                renderFilterBar();
+                loadTableData();
+            });
+        });
+    }
+
+    // ---- Load column distinct values ----
+
+    async function getColumnValues(table, column) {
+        const cacheKey = `${table}.${column}`;
+        if (!columnValuesCache[cacheKey]) {
+            try {
+                columnValuesCache[cacheKey] = await apiGet(`/api/db/tables/${table}/columns/${encodeURIComponent(column)}/values`);
+            } catch (e) {
+                columnValuesCache[cacheKey] = [];
+            }
+        }
+        return columnValuesCache[cacheKey];
+    }
+
+    // ---- Filter dropdown ----
+
+    async function openFilterDropdown(th, colName) {
+        // Close any existing dropdown
+        closeFilterDropdown();
+
+        const values = await getColumnValues(activeTable, colName);
+
+        // Create dropdown
+        const dropdown = document.createElement('div');
+        dropdown.className = 'db-filter-dropdown';
+        dropdown.id = 'db-filter-dropdown-active';
+
+        // Search input for filtering options
+        let html = `<div class="db-filter-dd-search">
+            <input type="text" class="db-filter-dd-input" placeholder="搜索值..." id="dd-search-input">
+        </div>`;
+        html += '<div class="db-filter-dd-options" id="dd-options">';
+
+        if (values.length === 0) {
+            html += '<div class="db-filter-dd-empty">无可用值</div>';
+        } else {
+            for (const v of values) {
+                const isActive = activeFilters[colName] === v;
+                html += `<div class="db-filter-dd-option ${isActive ? 'active' : ''}" data-val="${escapeHtml(v)}">
+                    ${isActive ? '<span class="dd-check">✓</span>' : '<span class="dd-check-empty"></span>'}
+                    <span class="dd-option-text">${escapeHtml(v)}</span>
+                </div>`;
+            }
+        }
+        html += '</div>';
+
+        // Clear filter for this column
+        if (activeFilters[colName] !== undefined) {
+            html += `<div class="db-filter-dd-footer">
+                <button class="db-filter-dd-clear" id="dd-clear-col">清除此列筛选</button>
+            </div>`;
+        }
+
+        dropdown.innerHTML = html;
+
+        // Position dropdown below the th
+        const rect = th.getBoundingClientRect();
+        const scrollContainer = document.querySelector('.db-table-scroll');
+        const scrollRect = scrollContainer ? scrollContainer.getBoundingClientRect() : { left: 0, top: 0 };
+
+        dropdown.style.position = 'fixed';
+        dropdown.style.left = `${rect.left}px`;
+        dropdown.style.top = `${rect.bottom + 4}px`;
+
+        document.body.appendChild(dropdown);
+
+        // Ensure dropdown doesn't overflow the viewport
+        requestAnimationFrame(() => {
+            const ddRect = dropdown.getBoundingClientRect();
+            if (ddRect.right > window.innerWidth) {
+                dropdown.style.left = `${window.innerWidth - ddRect.width - 8}px`;
+            }
+            if (ddRect.bottom > window.innerHeight) {
+                dropdown.style.top = `${rect.top - ddRect.height - 4}px`;
+            }
+        });
+
+        // Bind option clicks
+        dropdown.querySelectorAll('.db-filter-dd-option').forEach(opt => {
+            opt.addEventListener('click', () => {
+                const val = opt.dataset.val;
+                if (activeFilters[colName] === val) {
+                    delete activeFilters[colName];
+                } else {
+                    activeFilters[colName] = val;
+                }
+                currentPage = 1;
+                closeFilterDropdown();
+                renderFilterBar();
+                loadTableData();
+            });
+        });
+
+        // Bind clear button
+        const clearBtn = dropdown.querySelector('#dd-clear-col');
+        if (clearBtn) {
+            clearBtn.addEventListener('click', () => {
+                delete activeFilters[colName];
+                currentPage = 1;
+                closeFilterDropdown();
+                renderFilterBar();
+                loadTableData();
+            });
+        }
+
+        // Bind search
+        const searchInput = dropdown.querySelector('#dd-search-input');
+        if (searchInput) {
+            searchInput.focus();
+            searchInput.addEventListener('input', () => {
+                const query = searchInput.value.toLowerCase();
+                dropdown.querySelectorAll('.db-filter-dd-option').forEach(opt => {
+                    const text = opt.querySelector('.dd-option-text').textContent.toLowerCase();
+                    opt.style.display = text.includes(query) ? '' : 'none';
+                });
+            });
+        }
+
+        // Close on outside click
+        setTimeout(() => {
+            document.addEventListener('click', onOutsideClick);
+        }, 10);
+    }
+
+    function onOutsideClick(e) {
+        const dd = document.getElementById('db-filter-dropdown-active');
+        if (dd && !dd.contains(e.target) && !e.target.classList.contains('db-th-filter-btn')) {
+            closeFilterDropdown();
+        }
+    }
+
+    function closeFilterDropdown() {
+        const dd = document.getElementById('db-filter-dropdown-active');
+        if (dd) dd.remove();
+        document.removeEventListener('click', onOutsideClick);
+    }
+
+    // ---- Data loading ----
 
     async function loadTableData() {
         if (!activeTable) return;
@@ -84,16 +264,20 @@ const DatabaseModule = (() => {
             const params = new URLSearchParams({
                 page: currentPage,
                 size: 50,
-                search: currentSearch,
                 sort_by: currentSortBy,
                 sort_order: currentSortOrder,
             });
+            if (Object.keys(activeFilters).length > 0) {
+                params.set('filters', JSON.stringify(activeFilters));
+            }
             const result = await apiGet(`/api/db/tables/${activeTable}?${params}`);
             renderTable(result);
             renderPagination(result);
 
+            const filterCount = Object.keys(activeFilters).length;
+            const filterInfo = filterCount > 0 ? ` | ${filterCount} 个筛选` : '';
             document.getElementById('db-table-info').textContent =
-                `${result.label} — 共 ${result.total.toLocaleString()} 条${result.editable ? ' (可编辑)' : ' (只读)'}`;
+                `${result.label} — 共 ${result.total.toLocaleString()} 条${result.editable ? ' (可编辑)' : ' (只读)'}${filterInfo}`;
         } catch (e) {
             toast('加载表数据失败: ' + e.message, 'error');
         }
@@ -109,11 +293,19 @@ const DatabaseModule = (() => {
         const cols = result.columns;
         let html = '<div class="db-table-scroll"><table class="db-table"><thead><tr>';
 
-        // Headers
+        // Headers with filter icon
         for (const col of cols) {
             const isSort = col.name === currentSortBy;
             const arrow = isSort ? (currentSortOrder === 'asc' ? ' ▲' : ' ▼') : '';
-            html += `<th class="db-th ${isSort ? 'sorted' : ''}" data-col="${col.name}">${escapeHtml(col.name)}${arrow}</th>`;
+            const hasFilter = activeFilters[col.name] !== undefined;
+            html += `<th class="db-th ${isSort ? 'sorted' : ''} ${hasFilter ? 'filtered' : ''}" data-col="${col.name}">
+                <span class="db-th-content">
+                    <span class="db-th-label">${escapeHtml(col.name)}${arrow}</span>
+                    <button class="db-th-filter-btn ${hasFilter ? 'active' : ''}" data-col="${col.name}" title="筛选 ${col.name}">
+                        <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M1.5 1.5h13l-5 6v5l-3 2v-7z"/></svg>
+                    </button>
+                </span>
+            </th>`;
         }
         if (result.editable) {
             html += '<th class="db-th db-th-actions">操作</th>';
@@ -139,11 +331,12 @@ const DatabaseModule = (() => {
         html += '</tbody></table></div>';
         container.innerHTML = html;
 
-        // Bind sort handlers
-        container.querySelectorAll('.db-th[data-col]').forEach(th => {
-            th.style.cursor = 'pointer';
-            th.addEventListener('click', () => {
-                const col = th.dataset.col;
+        // Bind sort handlers (click on label area)
+        container.querySelectorAll('.db-th-label').forEach(label => {
+            label.style.cursor = 'pointer';
+            label.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const col = label.closest('.db-th').dataset.col;
                 if (currentSortBy === col) {
                     currentSortOrder = currentSortOrder === 'asc' ? 'desc' : 'asc';
                 } else {
@@ -151,6 +344,16 @@ const DatabaseModule = (() => {
                     currentSortOrder = 'asc';
                 }
                 loadTableData();
+            });
+        });
+
+        // Bind filter button handlers
+        container.querySelectorAll('.db-th-filter-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const colName = btn.dataset.col;
+                const th = btn.closest('.db-th');
+                openFilterDropdown(th, colName);
             });
         });
 
@@ -227,6 +430,10 @@ const DatabaseModule = (() => {
             await apiPut(`/api/db/tables/${activeTable}/${rowId}`, { data });
             toast('保存成功', 'success');
             hideModal();
+            // Invalidate cache for this table
+            for (const key of Object.keys(columnValuesCache)) {
+                if (key.startsWith(activeTable + '.')) delete columnValuesCache[key];
+            }
             loadTableData();
         } catch (e) {
             toast('保存失败: ' + e.message, 'error');
@@ -244,6 +451,10 @@ const DatabaseModule = (() => {
                         await apiDelete(`/api/db/tables/${activeTable}/${rowId}`);
                         toast('删除成功', 'success');
                         hideModal();
+                        // Invalidate cache for this table
+                        for (const key of Object.keys(columnValuesCache)) {
+                            if (key.startsWith(activeTable + '.')) delete columnValuesCache[key];
+                        }
                         loadTableData();
                     } catch (e) {
                         toast('删除失败: ' + e.message, 'error');

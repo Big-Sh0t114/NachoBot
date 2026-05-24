@@ -23,6 +23,7 @@ const App = (() => {
         PluginsModule.init();
         DatabaseModule.init();
         KnowledgeModule.init();
+        SetupModule.init();
 
         // Start polling status
         statusInterval = setInterval(pollStatus, 3000);
@@ -46,6 +47,7 @@ const App = (() => {
         if (tab === 'plugins') PluginsModule.refresh();
         if (tab === 'database') DatabaseModule.refresh();
         if (tab === 'knowledge') KnowledgeModule.refresh();
+        if (tab === 'setup') SetupModule.refresh();
     }
 
     // ---- Status Polling ----
