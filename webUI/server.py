@@ -5,6 +5,7 @@ Main entry point: REST API + WebSocket endpoints + static file serving.
 
 import asyncio
 import json
+import logging
 import uvicorn
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -19,6 +20,9 @@ from process_manager import ProcessManager
 from plugin_manager import PluginManager
 from db_manager import DatabaseManager
 from knowledge_manager import KnowledgeManager
+from setup_manager import EnvironmentChecker, ConfigInitializer, DependencyInstaller, PathVerifier
+
+logger = logging.getLogger("webui")
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -295,9 +299,23 @@ async def db_query_table(
     search: str = "",
     sort_by: str = "id",
     sort_order: str = "desc",
+    filters: str = "",
 ):
     try:
-        return db_mgr.query_table(table_name, page, size, search, sort_by, sort_order)
+        filter_dict = None
+        if filters:
+            filter_dict = json.loads(filters)
+        return db_mgr.query_table(table_name, page, size, search, sort_by, sort_order, filter_dict)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.get("/api/db/tables/{table_name}/columns/{column}/values")
+async def db_column_values(table_name: str, column: str):
+    try:
+        return db_mgr.get_column_values(table_name, column)
     except ValueError as e:
         raise HTTPException(404, str(e))
     except Exception as e:
@@ -410,6 +428,122 @@ async def knowledge_create_file(body: KnowledgeFileCreate):
 @app.get("/api/knowledge/stats")
 async def knowledge_stats():
     return knowledge_mgr.get_stats()
+
+
+# =========================================================================
+# Setup Wizard API
+# =========================================================================
+
+
+@app.get("/api/setup/check")
+async def setup_check_env():
+    """Run all environment checks."""
+    return EnvironmentChecker.check_all()
+
+
+@app.get("/api/setup/configs/status")
+async def setup_config_status():
+    """Check which config files exist / are missing."""
+    return ConfigInitializer.get_status()
+
+
+class SetupWizardData(BaseModel):
+    components: list[str] = []
+    core: dict = {}
+    providers: list[dict] = []
+    models: list[dict] = []
+    tts: dict = {}
+    env: dict = {}
+
+
+@app.post("/api/setup/configs/generate")
+async def setup_generate_configs(body: SetupWizardData):
+    """Generate config files from templates using wizard form data."""
+    try:
+        data = body.model_dump()
+        logger.info(
+            "[Setup] generate_configs called: components=%s, providers=%d, models=%d",
+            data.get("components"), len(data.get("providers", [])), len(data.get("models", []))
+        )
+        result = ConfigInitializer.generate_configs(data)
+        logger.info(
+            "[Setup] generate_configs result: generated=%d, errors=%s",
+            len(result.get("generated", [])), result.get("errors", [])
+        )
+        return result
+    except Exception as e:
+        logger.exception("[Setup] generate_configs failed")
+        raise HTTPException(500, str(e))
+
+
+class VerifyPathRequest(BaseModel):
+    type: str
+    path: str = ""
+
+
+@app.post("/api/setup/verify-path")
+async def setup_verify_path(body: VerifyPathRequest):
+    """Verify an external dependency path."""
+    result = PathVerifier.verify_path(body.type, body.path)
+    return result
+
+
+@app.get("/api/setup/deps/tasks")
+async def setup_dep_tasks(components: str = ""):
+    """Return install tasks for selected components."""
+    comp_list = [c.strip() for c in components.split(",") if c.strip()]
+    return DependencyInstaller.get_install_tasks(comp_list)
+
+
+@app.websocket("/ws/setup/install")
+async def ws_setup_install(ws: WebSocket):
+    """
+    WebSocket for real-time dependency installation.
+    Client sends: {"action": "install", "tasks": [{"id":..., "type":..., "name":..., "dir":...}, ...]}
+    Server streams: {"type": "log"|"task_start"|"task_done"|"all_done", ...}
+    """
+    await ws.accept()
+
+    try:
+        raw = await ws.receive_text()
+        msg = json.loads(raw)
+        tasks = msg.get("tasks", [])
+
+        for task in tasks:
+            await ws.send_text(json.dumps({
+                "type": "task_start",
+                "task_id": task["id"],
+                "name": task["name"],
+            }))
+
+            async def on_line(line: str):
+                try:
+                    await ws.send_text(json.dumps({
+                        "type": "log",
+                        "task_id": task["id"],
+                        "line": line,
+                    }))
+                except Exception:
+                    pass
+
+            result = await DependencyInstaller.install(task, callback=on_line)
+
+            await ws.send_text(json.dumps({
+                "type": "task_done",
+                "task_id": task["id"],
+                "status": result["status"],
+                "message": result["message"],
+            }))
+
+        await ws.send_text(json.dumps({"type": "all_done"}))
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        try:
+            await ws.send_text(json.dumps({"type": "error", "message": str(e)}))
+        except Exception:
+            pass
 
 
 # =========================================================================
