@@ -67,7 +67,7 @@ NachoBot 现已配备完善的 **可视化 WebUI 部署向导与后台管理控�
 ### 1. 前置准备
 1. 安装 **Python 3.11+** 环境 (推荐使用 3.11 或 3.12，不要安装 3.14)。
 2. 下载并解压外部组件（如 [GPT-SoVITS 语音引擎](https://www.yuque.com/baicaigongchang1145haoyuangong/ib3g1e/dkxgpiy9zb96hob4)、[NapCatQQ (QQ协议端)](https://github.com/NapNeko/NapCatQQ) 等）。
-3. 如果需要部署 Discord 语音陪玩等服务，请确保系统中已安装 **Node.js**。
+3. 如果需要部署 Discord ，请确保系统中已安装 **Node.js**。
 
 ### 2. 启动 WebUI
 回到项目最外层目录，双击运行以下脚本：

@@ -2,7 +2,7 @@
 name = "NachoBot"
 version = "0.8.1"
 description = "NachoCore 是一个基于大语言模型的可交互智能体"
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.11,<3.13"
 dependencies = [
     "aiohttp>=3.12.14",
     "aiohttp-cors>=0.8.1",
@@ -116,3 +116,7 @@ skip-magic-trailing-comma = false
 
 # 自动检测合适的换行符
 line-ending = "auto"
+
+[tool.uv.extra-build-dependencies]
+rsilk = ["setuptools_rust"]
+

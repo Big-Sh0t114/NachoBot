@@ -269,6 +269,26 @@
 
                 <!-- Step 2: Component Selection -->
                 <div class="setup-step-panel" id="setup-step-2">
+                    <!-- GPU Recommendation Card -->
+                    <div class="setup-card" id="setup-gpu-recommendation-card" style="margin-bottom: 20px;">
+                        <div class="setup-card-header">
+                            <h3>💻 硬件配置推荐方案</h3>
+                        </div>
+                        <div class="setup-gpu-body" style="padding: 20px;">
+                            <div class="gpu-detect-status" style="margin-bottom: 15px; font-size: 0.95rem;">
+                                <strong>当前显卡检测结果：</strong>
+                                <span id="gpu-detect-info" style="color: var(--accent-dark); font-weight: 600;">正在获取硬件信息...</span>
+                            </div>
+                            <div class="gpu-recommend-box" style="background: var(--bg-base); border-radius: var(--radius-md); padding: 15px; border: 1px solid var(--border-light); margin-bottom: 15px;">
+                                <div style="font-weight: 600; margin-bottom: 8px; font-size: 0.95rem;">推荐方案：<span id="gpu-recommend-title" style="color: var(--accent-dark);"></span></div>
+                                <div id="gpu-recommend-desc" style="font-size: 0.85rem; color: var(--text-secondary); line-height: 1.5;"></div>
+                            </div>
+                            <div class="gpu-apply-actions" id="gpu-apply-actions" style="display: flex; gap: 10px;">
+                                <!-- Dynamic buttons will be loaded here -->
+                            </div>
+                        </div>
+                    </div>
+
                     <div class="setup-card">
                         <div class="setup-card-header">
                             <h3>🧩 选择要启用的组件</h3>
@@ -648,6 +668,10 @@
                             <h3>📋 安装日志</h3>
                         </div>
                         <div class="deploy-log" id="deploy-log"></div>
+                    </div>
+                    <div class="setup-hint-banner" id="setup-launch-tip" style="display:none; margin-top: 20px; background: rgba(34, 197, 94, 0.1); border-color: rgba(34, 197, 94, 0.2); color: #166534;">
+                        <span class="hint-icon">💡</span>
+                        <span>部署成功！根据您的硬件配置，推荐在控制面板启动「<strong id="setup-recommended-group"></strong>」服务组。</span>
                     </div>
                     <div class="setup-nav">
                         <button class="btn btn-outline" id="setup-prev-5" disabled>← 上一步</button>
