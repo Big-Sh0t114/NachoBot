@@ -1,10 +1,15 @@
 import os
+import sys
 import traceback
 
 from typing import Dict, List, Optional, Tuple, Type, Any
 from importlib.util import spec_from_file_location, module_from_spec
 from pathlib import Path
 
+# 将兼容层包目录加入 sys.path，保证上游插件运行时能无缝 "import maibot_sdk"
+compat_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "compatibility"))
+if compat_dir not in sys.path:
+    sys.path.insert(0, compat_dir)
 
 from src.common.logger import get_logger
 from src.plugin_system.base.plugin_base import PluginBase
@@ -303,6 +308,30 @@ class PluginManager:
             module = module_from_spec(spec)
             module.__package__ = module_name  # 设置模块包名
             spec.loader.exec_module(module)
+
+            # 检测是否为 V2 插件并生成适配层
+            if hasattr(module, "create_plugin"):
+                logger.info(f"检测到 V2 SDK 兼容插件: {module_name}，正在生成适配层...")
+                from src.plugin_system.core.sdk_adapter import create_adapter_class
+                import json
+                
+                plugin_dir = os.path.dirname(plugin_file)
+                manifest_path = os.path.join(plugin_dir, "_manifest.json")
+                manifest_data = {}
+                if os.path.exists(manifest_path):
+                    try:
+                        with open(manifest_path, "r", encoding="utf-8") as f:
+                            manifest_data = json.load(f)
+                    except Exception as e:
+                        logger.error(f"无法读取 V2 插件 manifest 配置文件: {e}")
+                
+                # 创建动态适配类
+                adapter_cls = create_adapter_class(plugin_dir, manifest_data, module)
+                
+                # 模拟 @register_plugin 注册到插件管理器中
+                self.plugin_classes[adapter_cls.plugin_name] = adapter_cls
+                self.plugin_paths[adapter_cls.plugin_name] = str(Path(plugin_dir).resolve())
+                logger.debug(f"V2 插件适配类已成功注册: {adapter_cls.plugin_name}")
 
             logger.debug(f"插件模块加载成功: {plugin_file}")
             return True

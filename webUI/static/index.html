@@ -144,6 +144,13 @@
                 <h2>插件管理</h2>
                 <p class="panel-desc">查看和配置 NachoBot 插件</p>
             </div>
+            <div class="setup-hint-banner" style="align-items: center; margin-bottom: 24px;">
+                <span class="hint-icon" style="font-size: 1.4rem;">☘</span>
+                <span style="flex: 1; font-size: 0.9rem;">发现更多有趣功能？前往 <strong>麦麦插件商店</strong> 获取海量社区精选插件！</span>
+                <a href="https://plugins.maibot.chat/" target="_blank" rel="noopener noreferrer" class="btn btn-primary" style="text-decoration: none; padding: 8px 18px; border-radius: 20px;">
+                    探索商店 →
+                </a>
+            </div>
             <div class="plugins-grid" id="plugins-grid"></div>
         </section>
 
@@ -161,7 +168,8 @@
                         <div class="db-filter-bar" id="db-filter-bar"></div>
                         <div class="db-toolbar-right">
                             <span id="db-table-info"></span>
-                            <button class="btn-sm db-filter-clear-all" id="db-filter-clear-all" style="display:none" title="清除全部筛选">✕ 清除筛选</button>
+                            <button class="btn-sm db-filter-clear-all" id="db-filter-clear-all" style="display:none"
+                                title="清除全部筛选">✕ 清除筛选</button>
                         </div>
                     </div>
                     <div class="db-table-container" id="db-table-container">
@@ -351,6 +359,30 @@
                         <span class="hint-icon">💡</span>
                         <span>此页面仅包含<strong>必填配置项</strong>，其余选项将使用模板默认值。部署完成后，请前往「<strong>配置编辑</strong>」页面进行更细致的调整。</span>
                     </div>
+
+                    <div class="setup-card" id="setup-bot-section" style="display:none">
+                        <div class="setup-card-header">
+                            <h3>🤖 Bot 基础配置</h3>
+                        </div>
+                        <div class="setup-form">
+                            <div class="form-section">
+                                <div class="form-section-title">QQ 账号配置</div>
+                                <p class="form-section-hint">填写 bot 的 QQ 号和昵称。QQ 号将用于自动配置 NapCat 的 WebSocket 连接，无需手动前往
+                                    NapCat WebUI 设置</p>
+                                <div class="form-row">
+                                    <label class="form-label">QQ 号 <span class="form-required">*</span></label>
+                                    <input type="text" class="form-input" id="setup-qq-account"
+                                        placeholder="例如: 1234567890">
+                                </div>
+                                <div class="form-row">
+                                    <label class="form-label">Bot 昵称</label>
+                                    <input type="text" class="form-input" id="setup-nickname"
+                                        placeholder="例如: NachoBot（留空使用默认值）">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                     <div class="setup-card">
                         <div class="setup-card-header">
                             <h3>📝 模型配置</h3>
@@ -367,16 +399,20 @@
                                         <div class="repeatable-row-fields">
                                             <div class="form-row">
                                                 <label class="form-label">服务商名称</label>
-                                                <input type="text" class="form-input setup-single-value setup-provider-name" placeholder="例如: Qhaigc">
+                                                <input type="text"
+                                                    class="form-input setup-single-value setup-provider-name"
+                                                    placeholder="例如: Qhaigc">
                                             </div>
                                             <div class="form-row">
                                                 <label class="form-label">API Base URL</label>
-                                                <input type="text" class="form-input setup-provider-url" placeholder="https://api-hk.qhaigc.net/v1">
+                                                <input type="text" class="form-input setup-provider-url"
+                                                    placeholder="https://api-hk.qhaigc.net/v1">
                                             </div>
                                             <div class="form-row">
                                                 <label class="form-label">API Key</label>
                                                 <div class="form-input-group">
-                                                    <input type="password" class="form-input setup-provider-key" placeholder="sk-...">
+                                                    <input type="password" class="form-input setup-provider-key"
+                                                        placeholder="sk-...">
                                                     <button class="btn-icon toggle-pw" title="显示/隐藏">👁</button>
                                                 </div>
                                             </div>
@@ -396,11 +432,13 @@
                                         <div class="repeatable-row-fields">
                                             <div class="form-row">
                                                 <label class="form-label">模型标识</label>
-                                                <input type="text" class="form-input setup-single-value setup-model-id" placeholder="例如: deepseek-chat">
+                                                <input type="text" class="form-input setup-single-value setup-model-id"
+                                                    placeholder="例如: deepseek-chat">
                                             </div>
                                             <div class="form-row">
                                                 <label class="form-label">模型名称</label>
-                                                <input type="text" class="form-input setup-model-name" placeholder="留空则与标识相同">
+                                                <input type="text" class="form-input setup-model-name"
+                                                    placeholder="留空则与标识相同">
                                             </div>
                                             <div class="form-row">
                                                 <label class="form-label">所属服务商</label>
@@ -418,27 +456,32 @@
                                 <p class="form-section-hint">以下必需模型组将自动使用上方填写的模型，部署后可在「配置编辑」中为每个模型组指定不同模型</p>
                                 <div class="form-row">
                                     <label class="form-label">replyer0</label>
-                                    <input type="text" class="form-input setup-model-group" id="setup-grp-replyer0" placeholder="自动填入" readonly>
+                                    <input type="text" class="form-input setup-model-group" id="setup-grp-replyer0"
+                                        placeholder="自动填入" readonly>
                                     <span class="form-row-tag">回复</span>
                                 </div>
                                 <div class="form-row">
                                     <label class="form-label">planner</label>
-                                    <input type="text" class="form-input setup-model-group" id="setup-grp-planner" placeholder="自动填入" readonly>
+                                    <input type="text" class="form-input setup-model-group" id="setup-grp-planner"
+                                        placeholder="自动填入" readonly>
                                     <span class="form-row-tag">决策</span>
                                 </div>
                                 <div class="form-row">
                                     <label class="form-label">utils</label>
-                                    <input type="text" class="form-input setup-model-group" id="setup-grp-utils" placeholder="自动填入" readonly>
+                                    <input type="text" class="form-input setup-model-group" id="setup-grp-utils"
+                                        placeholder="自动填入" readonly>
                                     <span class="form-row-tag">组件</span>
                                 </div>
                                 <div class="form-row">
                                     <label class="form-label">utils_small</label>
-                                    <input type="text" class="form-input setup-model-group" id="setup-grp-utils-small" placeholder="自动填入" readonly>
+                                    <input type="text" class="form-input setup-model-group" id="setup-grp-utils-small"
+                                        placeholder="自动填入" readonly>
                                     <span class="form-row-tag">小模型</span>
                                 </div>
                                 <div class="form-row">
                                     <label class="form-label">tool_use</label>
-                                    <input type="text" class="form-input setup-model-group" id="setup-grp-tool-use" placeholder="自动填入" readonly>
+                                    <input type="text" class="form-input setup-model-group" id="setup-grp-tool-use"
+                                        placeholder="自动填入" readonly>
                                     <span class="form-row-tag">工具</span>
                                 </div>
                             </div>
@@ -485,11 +528,14 @@
                                 </div>
                                 <div class="path-check-body">
                                     <div class="form-input-group">
-                                        <input type="text" class="form-input path-check-input" id="path-napcat" placeholder="例如: C:\NapCat.Shell">
+                                        <input type="text" class="form-input path-check-input" id="path-napcat"
+                                            placeholder="例如: C:\NapCat.Shell">
                                         <button class="btn btn-outline btn-sm btn-verify" data-type="napcat">验证</button>
                                     </div>
                                     <div class="path-check-result" id="result-napcat"></div>
-                                    <a class="btn-download" id="dl-napcat" href="https://github.com/NapNeko/NapCatQQ/releases" target="_blank" style="display:none">📥 前往下载 NapCat</a>
+                                    <a class="btn-download" id="dl-napcat"
+                                        href="https://github.com/NapNeko/NapCatQQ/releases" target="_blank"
+                                        style="display:none">📥 前往下载 NapCat</a>
                                 </div>
                             </div>
 
@@ -506,12 +552,14 @@
                                 <div class="path-check-body">
                                     <div class="path-check-auto">系统 PATH 自动检测，无需手动填写路径</div>
                                     <div class="path-check-result" id="result-nodejs"></div>
-                                    <a class="btn-download" id="dl-nodejs" href="https://nodejs.org/en/download/" target="_blank" style="display:none">📥 前往下载 Node.js</a>
+                                    <a class="btn-download" id="dl-nodejs" href="https://nodejs.org/en/download/"
+                                        target="_blank" style="display:none">📥 前往下载 Node.js</a>
                                 </div>
                             </div>
 
                             <!-- Bilibili Live2D DLL -->
-                            <div class="path-check-card" id="path-check-bilibili" data-type="bilibili_dll" style="display:none">
+                            <div class="path-check-card" id="path-check-bilibili" data-type="bilibili_dll"
+                                style="display:none">
                                 <div class="path-check-header">
                                     <span class="path-check-icon">📺</span>
                                     <div class="path-check-info">
@@ -523,7 +571,9 @@
                                 <div class="path-check-body">
                                     <div class="path-check-auto">自动检测 NachoBot-Bilibili-Adapter 目录</div>
                                     <div class="path-check-result" id="result-bilibili_dll"></div>
-                                    <a class="btn-download" id="dl-bilibili_dll" href="https://www.live2d.com/sdk/download/native/" target="_blank" style="display:none">📥 前往下载 Live2D SDK</a>
+                                    <a class="btn-download" id="dl-bilibili_dll"
+                                        href="https://www.live2d.com/sdk/download/native/" target="_blank"
+                                        style="display:none">📥 前往下载 Live2D SDK</a>
                                 </div>
                             </div>
 
@@ -539,11 +589,14 @@
                                 </div>
                                 <div class="path-check-body">
                                     <div class="form-input-group">
-                                        <input type="text" class="form-input path-check-input" id="path-sovits" placeholder="例如: C:\GPT-SoVITS\GPT-SoVITS-v2pro">
+                                        <input type="text" class="form-input path-check-input" id="path-sovits"
+                                            placeholder="例如: C:\GPT-SoVITS\GPT-SoVITS-v2pro">
                                         <button class="btn btn-outline btn-sm btn-verify" data-type="sovits">验证</button>
                                     </div>
                                     <div class="path-check-result" id="result-sovits"></div>
-                                    <a class="btn-download" id="dl-sovits" href="https://github.com/RVC-Boss/GPT-SoVITS/releases" target="_blank" style="display:none">📥 前往下载 GPT-SoVITS</a>
+                                    <a class="btn-download" id="dl-sovits"
+                                        href="https://github.com/RVC-Boss/GPT-SoVITS/releases" target="_blank"
+                                        style="display:none">📥 前往下载 GPT-SoVITS</a>
                                 </div>
                             </div>
 
@@ -559,11 +612,14 @@
                                 </div>
                                 <div class="path-check-body">
                                     <div class="form-input-group">
-                                        <input type="text" class="form-input path-check-input" id="path-voxcpm" placeholder="例如: C:\VoxCPM-2.0.2">
+                                        <input type="text" class="form-input path-check-input" id="path-voxcpm"
+                                            placeholder="例如: C:\VoxCPM-2.0.2">
                                         <button class="btn btn-outline btn-sm btn-verify" data-type="voxcpm">验证</button>
                                     </div>
                                     <div class="path-check-result" id="result-voxcpm"></div>
-                                    <a class="btn-download" id="dl-voxcpm" href="https://github.com/openbmb/VoxCPM/releases" target="_blank" style="display:none">📥 前往下载 VoxCPM</a>
+                                    <a class="btn-download" id="dl-voxcpm"
+                                        href="https://github.com/openbmb/VoxCPM/releases" target="_blank"
+                                        style="display:none">📥 前往下载 VoxCPM</a>
                                 </div>
                             </div>
 
