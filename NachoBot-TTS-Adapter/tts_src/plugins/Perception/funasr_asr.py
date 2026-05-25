@@ -33,6 +33,61 @@ def _read_device() -> str:
         return "cuda:0"
 
 
+def _try_load_model(model_id: str, hub: str, device: str):
+    """Attempt to download and load the model from a specific hub."""
+    from funasr import AutoModel
+
+    if hub == "hf":
+        from huggingface_hub import snapshot_download
+        logger.info("[FunASR] Downloading model from HuggingFace: %s ...", model_id)
+        model_dir = snapshot_download(model_id)
+    elif hub == "ms":
+        from modelscope import snapshot_download as ms_snapshot_download
+        logger.info("[FunASR] Downloading model from ModelScope: %s ...", model_id)
+        model_dir = ms_snapshot_download(model_id)
+    else:
+        raise ValueError(f"Unknown hub: {hub}")
+
+    req_file = os.path.join(model_dir, "requirements.txt")
+    req_bak = os.path.join(model_dir, "requirements.txt.bak")
+    renamed = False
+
+    if os.path.exists(req_file):
+        logger.info("[FunASR] Renaming requirements.txt to bypass auto-install...")
+        if os.path.exists(req_bak):
+            try:
+                os.remove(req_bak)
+            except Exception as e:
+                logger.warning(f"[FunASR] Failed to remove stale backup: {e}")
+        try:
+            os.rename(req_file, req_bak)
+            renamed = True
+        except Exception as e:
+            logger.warning(f"[FunASR] Failed to rename requirements.txt: {e}")
+
+    try:
+        model = AutoModel(
+            model=model_dir,
+            trust_remote_code=False,
+            device=device,
+            disable_update=True,
+            hub=hub,
+        )
+        return model
+    finally:
+        if renamed and os.path.exists(req_bak):
+            try:
+                if os.path.exists(req_file):
+                    try:
+                        os.remove(req_file)
+                    except Exception:
+                        pass
+                os.rename(req_bak, req_file)
+                logger.info("[FunASR] Restored requirements.txt")
+            except Exception as e:
+                logger.warning(f"[FunASR] Failed to restore requirements.txt: {e}")
+
+
 def load_model():
     """Load the SenseVoiceSmall ASR model."""
     global _model, _loaded
@@ -63,67 +118,26 @@ def load_model():
         if _loaded:
             return
 
-        from funasr import AutoModel
-        from huggingface_hub import snapshot_download
+        import torch
 
-        # Use HuggingFace hub (with mirror) instead of ModelScope
-        # ModelScope remote code loading fails with "No module named 'model'"
-        model_id = "FunAudioLLM/SenseVoiceSmall"
-        logger.info("[FunASR] Loading model: %s (hub=hf) ...", model_id)
+        config_device = _read_device()
 
-        # HACK: Manually download first, then rename requirements.txt to prevent
-        # FunASR from trying to pip install dependencies (which hangs/fails due to network).
+        if "cuda" in config_device and not torch.cuda.is_available():
+            logger.warning("[FunASR] CUDA is not available, falling back to CPU")
+            _device = "cpu"
+        else:
+            _device = config_device
+
+        # Try HuggingFace first, fallback to ModelScope
         try:
-            model_dir = snapshot_download(model_id)
-            req_file = os.path.join(model_dir, "requirements.txt")
-            req_bak = os.path.join(model_dir, "requirements.txt.bak")
-
-            if os.path.exists(req_file):
-                logger.info("[FunASR] Renaming requirements.txt to bypass auto-install...")
-                # If backup exists (e.g. from previous crash), remove it first to allow rename
-                if os.path.exists(req_bak):
-                    try:
-                        os.remove(req_bak)
-                    except Exception as e:
-                        logger.warning(f"[FunASR] Failed to remove stale backup: {e}")
-
-                os.rename(req_file, req_bak)
-        except Exception as e:
-            logger.warning("[FunASR] Failed to pre-process model files: %s", e)
-            # Fallback to standard loading if something goes wrong
-            model_dir = model_id
-
-        try:
-            import torch
-
-            config_device = _read_device()
-
-            if "cuda" in config_device and not torch.cuda.is_available():
-                logger.warning("[FunASR] CUDA is not available, falling back to CPU")
-                _device = "cpu"
-            else:
-                _device = config_device
-
-            _model = AutoModel(
-                model=model_dir,
-                trust_remote_code=True,
-                device=_device,
-                disable_update=True,
-                hub="hf",
-            )
-        finally:
-            # Restore requirements.txt
-            if "req_file" in locals() and os.path.exists(req_bak):
-                try:
-                    if os.path.exists(req_file):
-                        try:
-                            os.remove(req_file)
-                        except Exception:
-                            pass
-                    os.rename(req_bak, req_file)
-                    logger.info("[FunASR] Restored requirements.txt")
-                except Exception as e:
-                    logger.warning(f"[FunASR] Failed to restore requirements.txt: {e}")
+            _model = _try_load_model("FunAudioLLM/SenseVoiceSmall", "hf", _device)
+        except Exception as hf_err:
+            logger.warning("[FunASR] Failed to load model from HuggingFace: %s. Falling back to ModelScope...", hf_err)
+            try:
+                _model = _try_load_model("iic/SenseVoiceSmall", "ms", _device)
+            except Exception as ms_err:
+                logger.error("[FunASR] Failed to load model from ModelScope: %s", ms_err)
+                raise ms_err
 
         _loaded = True
         logger.info("[FunASR] Model loaded successfully")
