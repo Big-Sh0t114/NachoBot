@@ -80,7 +80,10 @@ const SetupModule = (() => {
         document.getElementById(`setup-step-${step}`)?.classList.add('active');
 
         // Step-specific actions
-        if (step === 2) updateComponentVisuals();
+        if (step === 2) {
+            updateComponentVisuals();
+            computeGpuRecommendations(envCheckData ? envCheckData.gpu : null);
+        }
         if (step === 3) {
             updateFormVisibility();
             syncProviderDropdowns();
@@ -113,6 +116,9 @@ const SetupModule = (() => {
         list.appendChild(makeCheckItem(data.python));
         list.appendChild(makeCheckItem(data.node));
         list.appendChild(makeCheckItem(data.docker));
+        if (data.gpu) {
+            list.appendChild(makeCheckItem(data.gpu));
+        }
 
         const portCard = document.getElementById('setup-port-card');
         const portList = document.getElementById('setup-port-list');
@@ -177,6 +183,117 @@ const SetupModule = (() => {
             const cb = label.querySelector('input[type="checkbox"]');
             label.classList.toggle('checked', cb.checked);
         });
+    }
+
+    let recommendedLaunchGroup = '核心'; // default recommendation
+
+    function computeGpuRecommendations(gpuData) {
+        const infoEl = document.getElementById('gpu-detect-info');
+        const titleEl = document.getElementById('gpu-recommend-title');
+        const descEl = document.getElementById('gpu-recommend-desc');
+        const actionsEl = document.getElementById('gpu-apply-actions');
+
+        if (!infoEl || !titleEl || !descEl || !actionsEl) return;
+
+        actionsEl.innerHTML = '';
+
+        if (!gpuData) {
+            infoEl.textContent = '未检测到显卡数据';
+            titleEl.textContent = '纯核心 + 平台适配器';
+            descEl.textContent = '未检测到可用 NVIDIA 显卡。推荐不使用任何本地语音或视觉模型，以确保稳定运行。';
+            recommendedLaunchGroup = '核心';
+            createApplyButton('一键应用方案 (不启用本地模型)', () => applyScheme('none'));
+            return;
+        }
+
+        const hasGpu = gpuData.has_gpu;
+        const vramMb = gpuData.vram_mb || 0;
+        const vramGb = vramMb / 1024.0;
+        infoEl.textContent = gpuData.message || (hasGpu ? `${gpuData.gpu_name} (显存: ${vramGb.toFixed(2)} GB)` : '无可用 NVIDIA 显卡');
+
+        if (!hasGpu || vramGb <= 4.0) {
+            // No GPU or VRAM <= 4GB
+            titleEl.textContent = '纯核心 + 平台适配器';
+            descEl.textContent = '系统未检测到 NVIDIA 显卡或可用显存不足 4GB。推荐不启用任何本地模型（仅保留 Core 核心与平台适配器），以避免显存溢出或运行缓慢。';
+            recommendedLaunchGroup = '核心';
+            createApplyButton('一键应用此方案', () => applyScheme('none'));
+        }
+        else if (vramGb > 4.0 && vramGb < 6.0) {
+            // VRAM > 4GB and < 6GB
+            titleEl.textContent = 'gpt lite 方案';
+            descEl.textContent = '检测到可用显存介于 4G 到 6G 之间。推荐使用 gpt lite 方案部署（仅启用 GPT-SoVITS 合成，不启用本地 Florence-2 VLM 视觉与 FunASR 语音识别，以节约显存）。';
+            recommendedLaunchGroup = 'TTS 语音 (LITE)';
+            createApplyButton('一键应用此方案', () => applyScheme('gpt_lite'));
+        }
+        else if (vramGb >= 6.0 && vramGb <= 8.0) {
+            // VRAM in [6GB, 8GB]
+            titleEl.textContent = 'gpt FULL 方案';
+            descEl.textContent = '检测到可用显存介于 6G 到 8G 之间。推荐使用 gpt FULL 方案部署（启用 GPT-SoVITS 语音合成 + Florence-2 视觉大模型 + FunASR 语音识别，满足全功能交互需求）。';
+            recommendedLaunchGroup = 'TTS 语音 (FULL)';
+            createApplyButton('一键应用此方案', () => applyScheme('gpt_full'));
+        }
+        else if (vramGb > 8.0 && vramGb <= 12.0) {
+            // VRAM in (8GB, 12GB]
+            titleEl.textContent = 'gpt FULL 方案 或 vox LITE 方案';
+            descEl.textContent = '检测到可用显存介于 8G 到 12G 之间。您可以选择使用轻量合成但全功能的 gpt FULL 方案，或者尝试使用高质量拟真拟音但消耗较大的 vox LITE 方案（仅使用 VoxCPM 语音合成，不开启视觉和语音识别）。';
+            recommendedLaunchGroup = 'TTS 语音 (FULL)'; 
+            createApplyButton('应用 gpt FULL 方案', () => {
+                recommendedLaunchGroup = 'TTS 语音 (FULL)';
+                applyScheme('gpt_full');
+            });
+            createApplyButton('应用 vox LITE 方案', () => {
+                recommendedLaunchGroup = 'TTS 语音 (LITE)';
+                applyScheme('vox_lite');
+            });
+        }
+        else {
+            // VRAM > 12GB
+            titleEl.textContent = 'Vox Full 方案';
+            descEl.textContent = '检测到可用显存大于 12G。推荐使用极致画质和音质的 Vox Full 方案（VoxCPM 语音合成 + Florence-2 视觉大模型 + FunASR 语音识别，完美释放大显存显卡潜力）。';
+            recommendedLaunchGroup = 'TTS 语音 (FULL)';
+            createApplyButton('一键应用此方案', () => applyScheme('vox_full'));
+        }
+
+        function createApplyButton(text, callback) {
+            const btn = document.createElement('button');
+            btn.className = 'btn btn-primary';
+            btn.textContent = text;
+            btn.style.marginRight = '10px';
+            btn.addEventListener('click', callback);
+            actionsEl.appendChild(btn);
+        }
+    }
+
+    function applyScheme(scheme) {
+        const ttsCb = document.querySelector('.setup-component-cb[value="tts"]');
+        const ttsEngineSelect = document.getElementById('setup-tts-engine');
+
+        if (scheme === 'none') {
+            if (ttsCb) ttsCb.checked = false;
+            toast('已为您选择: 纯核心方案 (不启用本地模型)', 'success');
+        }
+        else if (scheme === 'gpt_lite') {
+            if (ttsCb) ttsCb.checked = true;
+            if (ttsEngineSelect) ttsEngineSelect.value = 'GPT_Sovits';
+            toast('已为您选择: gpt lite 方案 (GPT-SoVITS + LITE 模式)', 'success');
+        }
+        else if (scheme === 'gpt_full') {
+            if (ttsCb) ttsCb.checked = true;
+            if (ttsEngineSelect) ttsEngineSelect.value = 'GPT_Sovits';
+            toast('已为您选择: gpt FULL 方案 (GPT-SoVITS + FULL 模式)', 'success');
+        }
+        else if (scheme === 'vox_lite') {
+            if (ttsCb) ttsCb.checked = true;
+            if (ttsEngineSelect) ttsEngineSelect.value = 'Vox';
+            toast('已为您选择: vox LITE 方案 (VoxCPM + LITE 模式)', 'success');
+        }
+        else if (scheme === 'vox_full') {
+            if (ttsCb) ttsCb.checked = true;
+            if (ttsEngineSelect) ttsEngineSelect.value = 'Vox';
+            toast('已为您选择: Vox Full 方案 (VoxCPM + FULL 模式)', 'success');
+        }
+
+        onComponentToggle();
     }
 
     // ---- Step 3: Config Form (repeatable rows) ----
@@ -631,6 +748,13 @@ const SetupModule = (() => {
         deploying = false;
         document.getElementById('setup-prev-5').disabled = false;
         document.getElementById('setup-finish').disabled = false;
+
+        const launchTip = document.getElementById('setup-launch-tip');
+        const recommendedGroupEl = document.getElementById('setup-recommended-group');
+        if (launchTip && recommendedGroupEl) {
+            recommendedGroupEl.textContent = recommendedLaunchGroup;
+            launchTip.style.display = 'block';
+        }
     }
 
     function installDepsViaWebSocket(tasks, progressDiv, logDiv) {

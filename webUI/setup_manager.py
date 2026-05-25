@@ -67,6 +67,7 @@ class EnvironmentChecker:
             "python": EnvironmentChecker.check_python(),
             "node": EnvironmentChecker.check_node(),
             "docker": EnvironmentChecker.check_docker(),
+            "gpu": EnvironmentChecker.check_gpu(),
             "ports": EnvironmentChecker.check_ports(),
             "configs": EnvironmentChecker.check_configs(),
         }
@@ -264,6 +265,93 @@ class EnvironmentChecker:
                 "component": target.split("/")[0],
             })
         return results
+
+    @staticmethod
+    def check_gpu() -> dict[str, Any]:
+        """Check GPU availability and VRAM size (in MB)."""
+        result = {
+            "status": "ok",
+            "has_gpu": False,
+            "gpu_name": None,
+            "vram_mb": 0.0,
+            "message": "未检测到可用 NVIDIA 显卡"
+        }
+
+        # 1. Try nvidia-smi (reliable for NVIDIA CUDA GPUs)
+        try:
+            out = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=5, shell=True
+            )
+            if out.returncode == 0:
+                lines = [line.strip() for line in out.stdout.strip().split("\n") if line.strip()]
+                gpus = []
+                for line in lines:
+                    parts = line.split(",")
+                    if len(parts) >= 2:
+                        name = parts[0].strip()
+                        try:
+                            vram = float(parts[1].strip())
+                        except ValueError:
+                            vram = 0.0
+                        gpus.append((name, vram))
+                if gpus:
+                    gpus.sort(key=lambda x: x[1], reverse=True)
+                    best_gpu = gpus[0]
+                    result["has_gpu"] = True
+                    result["gpu_name"] = best_gpu[0]
+                    result["vram_mb"] = best_gpu[1]
+                    vram_gb = best_gpu[1] / 1024.0
+                    result["message"] = f"{best_gpu[0]} (显存 {vram_gb:.2f} GB)"
+                    return result
+        except Exception:
+            pass
+
+        # 2. Try wmic path win32_VideoController (fallback to check all GPUs)
+        try:
+            out = subprocess.run(
+                ["wmic", "path", "win32_VideoController", "get", "Name,AdapterRAM"],
+                capture_output=True, text=True, timeout=5, shell=True
+            )
+            if out.returncode == 0:
+                lines = [line.strip() for line in out.stdout.strip().split("\n") if line.strip()]
+                if len(lines) > 1:
+                    gpus = []
+                    header = lines[0].lower()
+                    for line in lines[1:]:
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            try:
+                                if header.startswith("adapterram"):
+                                    ram_str = parts[0]
+                                    name_str = " ".join(parts[1:])
+                                else:
+                                    ram_str = parts[-1]
+                                    name_str = " ".join(parts[:-1])
+
+                                ram_bytes = float(ram_str.strip())
+                                vram_mb = ram_bytes / (1024.0 * 1024.0)
+                                name = name_str.strip()
+                                gpus.append((name, vram_mb))
+                            except ValueError:
+                                pass
+                    if gpus:
+                        gpus.sort(key=lambda x: x[1], reverse=True)
+                        best_gpu = gpus[0]
+                        is_nvidia = "nvidia" in best_gpu[0].lower()
+                        result["has_gpu"] = is_nvidia
+                        result["gpu_name"] = best_gpu[0]
+                        result["vram_mb"] = best_gpu[1]
+                        vram_gb = best_gpu[1] / 1024.0
+                        if is_nvidia:
+                            result["message"] = f"{best_gpu[0]} (显存 {vram_gb:.2f} GB)"
+                        else:
+                            result["message"] = f"{best_gpu[0]} (非 NVIDIA 显卡，显存 {vram_gb:.2f} GB)"
+                        return result
+        except Exception:
+            pass
+
+        return result
 
 
 # =========================================================================
