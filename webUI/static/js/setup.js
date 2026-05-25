@@ -182,8 +182,6 @@ const SetupModule = (() => {
     // ---- Step 3: Config Form (repeatable rows) ----
 
     function updateFormVisibility() {
-        const hasQQ = selectedComponents.includes('qq');
-        document.getElementById('setup-bot-section').style.display = hasQQ ? '' : 'none';
         document.getElementById('setup-tts-section').style.display =
             selectedComponents.includes('tts') ? '' : 'none';
     }
@@ -423,17 +421,15 @@ const SetupModule = (() => {
             return;
         }
 
-        // Check QQ account if qq component selected
-        if (selectedComponents.includes('qq')) {
-            const qqVal = document.getElementById('setup-qq-account')?.value.trim() || '';
-            if (!qqVal) {
-                alert('选择了 QQ 适配器，请填写 bot 的 QQ 号');
-                return;
-            }
-            if (!/^\d{5,12}$/.test(qqVal)) {
-                alert('请填写有效的 QQ 号（5-12位数字）');
-                return;
-            }
+        // Validate QQ account (required for bot_config.toml)
+        const qqVal = document.getElementById('setup-qq-account')?.value.trim() || '';
+        if (!qqVal) {
+            alert('请填写 bot 的 QQ 号（bot_config.toml 必填项）');
+            return;
+        }
+        if (!/^\d{5,12}$/.test(qqVal)) {
+            alert('请填写有效的 QQ 号（5-12位数字）');
+            return;
         }
 
         goToStep(4);

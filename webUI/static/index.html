@@ -360,15 +360,14 @@
                         <span>此页面仅包含<strong>必填配置项</strong>，其余选项将使用模板默认值。部署完成后，请前往「<strong>配置编辑</strong>」页面进行更细致的调整。</span>
                     </div>
 
-                    <div class="setup-card" id="setup-bot-section" style="display:none">
+                    <div class="setup-card" id="setup-bot-section">
                         <div class="setup-card-header">
                             <h3>🤖 Bot 基础配置</h3>
                         </div>
                         <div class="setup-form">
                             <div class="form-section">
                                 <div class="form-section-title">QQ 账号配置</div>
-                                <p class="form-section-hint">填写 bot 的 QQ 号和昵称。QQ 号将用于自动配置 NapCat 的 WebSocket 连接，无需手动前往
-                                    NapCat WebUI 设置</p>
+                                <p class="form-section-hint">填写 bot 的 QQ 号和昵称，将自动写入 bot_config.toml。若选择了 QQ 适配器，QQ 号还将用于自动配置 NapCat 连接</p>
                                 <div class="form-row">
                                     <label class="form-label">QQ 号 <span class="form-required">*</span></label>
                                     <input type="text" class="form-input" id="setup-qq-account"
