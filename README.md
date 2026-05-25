@@ -65,4 +65,4 @@
 
 ## 📜 致谢与许可
 
-本项目基于 GPLv3 许可证开源。特别鸣谢 [MaiBot 项目团队](https://github.com/MaiM-with-u/)、Napcat、GPT-SoVITS 以及 Koishi 团队为开源社区做出的杰出贡献！
+本项目基于 GPLv3 许可证开源。特别鸣谢 [MaiBot 项目团队](https://github.com/Mai-with-u)、Napcat、GPT-SoVITS、 VoxCPM 以及 Koishi 团队为开源社区做出的杰出贡献！
