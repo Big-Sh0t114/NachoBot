@@ -5,7 +5,7 @@ from src.plugin_system import BasePlugin, register_plugin, ComponentInfo
 from src.plugin_system.base.config_types import ConfigField
 
 # 导入组件
-from src.plugins.built_in.messenger.messenger import MessengerRelayAction, ConveyCommand
+from .messenger import MessengerRelayAction, ConveyCommand
 
 from src.common.logger import get_logger
 

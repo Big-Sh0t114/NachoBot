@@ -230,6 +230,16 @@ body {
     margin-bottom: 24px;
 }
 
+.panel-header-with-actions {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.panel-header-actions a {
+    text-decoration: none;
+}
+
 .panel-header h2 {
     font-size: 1.8rem;
     font-weight: 700;
@@ -1870,6 +1880,12 @@ body {
     color: var(--text-secondary);
     padding-top: 8px;
     flex-shrink: 0;
+}
+
+.form-required {
+    color: var(--error, #ef4444);
+    font-weight: 700;
+    margin-left: 2px;
 }
 
 .form-input {

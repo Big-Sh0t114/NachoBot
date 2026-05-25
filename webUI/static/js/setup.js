@@ -182,6 +182,8 @@ const SetupModule = (() => {
     // ---- Step 3: Config Form (repeatable rows) ----
 
     function updateFormVisibility() {
+        const hasQQ = selectedComponents.includes('qq');
+        document.getElementById('setup-bot-section').style.display = hasQQ ? '' : 'none';
         document.getElementById('setup-tts-section').style.display =
             selectedComponents.includes('tts') ? '' : 'none';
     }
@@ -378,7 +380,10 @@ const SetupModule = (() => {
 
         return {
             components: selectedComponents,
-            core: {},
+            core: {
+                qq_account: document.getElementById('setup-qq-account')?.value.trim() || '',
+                nickname: document.getElementById('setup-nickname')?.value.trim() || '',
+            },
             providers,
             models,
             tts: {
@@ -416,6 +421,19 @@ const SetupModule = (() => {
         if (modelIds.length === 0) {
             alert('请至少配置一个模型');
             return;
+        }
+
+        // Check QQ account if qq component selected
+        if (selectedComponents.includes('qq')) {
+            const qqVal = document.getElementById('setup-qq-account')?.value.trim() || '';
+            if (!qqVal) {
+                alert('选择了 QQ 适配器，请填写 bot 的 QQ 号');
+                return;
+            }
+            if (!/^\d{5,12}$/.test(qqVal)) {
+                alert('请填写有效的 QQ 号（5-12位数字）');
+                return;
+            }
         }
 
         goToStep(4);
@@ -556,6 +574,40 @@ const SetupModule = (() => {
             deploying = false;
             document.getElementById('setup-prev-5').disabled = false;
             return;
+        }
+
+        // Phase 1.5: Configure NapCat connection (only if qq selected)
+        if (selectedComponents.includes('qq')) {
+            addProgressItem(progressDiv, 'napcat-config', '🔗 配置 NapCat 连接', 'running');
+            addLogLine(logDiv, '\n[Setup] 正在配置 NapCat WebSocket/HTTP 连接...\n');
+
+            try {
+                const napcatPath = document.getElementById('path-napcat')?.value.trim() || '';
+                const qqAccount = wizardData.core?.qq_account || '';
+                const ncResult = await apiPost('/api/setup/napcat/configure', {
+                    napcat_dir: napcatPath,
+                    qq_account: qqAccount,
+                });
+
+                if (ncResult.errors && ncResult.errors.length) {
+                    updateProgressItem('napcat-config', 'warning',
+                        `⚠️ NapCat 配置完成 (${ncResult.configured.length} 成功, ${ncResult.errors.length} 失败)`);
+                    ncResult.errors.forEach(err => addLogLine(logDiv, `[Setup] ERROR: ${err}\n`));
+                } else if (ncResult.configured.length > 0) {
+                    updateProgressItem('napcat-config', 'done',
+                        `✅ NapCat 配置完成 (${ncResult.configured.join(', ')})`);
+                } else {
+                    updateProgressItem('napcat-config', 'done',
+                        '✅ NapCat 已有配置，无需修改');
+                }
+
+                ncResult.configured.forEach(f => addLogLine(logDiv, `[Setup] 已配置: ${f} (WS客户端 + 日记HTTP + B站视频HTTP)\n`));
+                ncResult.skipped.forEach(f => addLogLine(logDiv, `[Setup] 跳过 (已有配置): ${f}\n`));
+            } catch (e) {
+                updateProgressItem('napcat-config', 'warning', `⚠️ NapCat 配置失败: ${e.message}`);
+                addLogLine(logDiv, `[Setup] WARNING: NapCat 自动配置失败，请手动前往 NapCat WebUI 配置\n`);
+                // Don't block deployment — NapCat config is best-effort
+            }
         }
 
         // Phase 2: Install dependencies
