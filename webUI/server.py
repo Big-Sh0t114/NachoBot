@@ -20,7 +20,7 @@ from process_manager import ProcessManager
 from plugin_manager import PluginManager
 from db_manager import DatabaseManager
 from knowledge_manager import KnowledgeManager
-from setup_manager import EnvironmentChecker, ConfigInitializer, DependencyInstaller, PathVerifier
+from setup_manager import EnvironmentChecker, ConfigInitializer, DependencyInstaller, PathVerifier, NapCatConfigurator
 
 logger = logging.getLogger("webui")
 
@@ -493,6 +493,26 @@ async def setup_dep_tasks(components: str = ""):
     """Return install tasks for selected components."""
     comp_list = [c.strip() for c in components.split(",") if c.strip()]
     return DependencyInstaller.get_install_tasks(comp_list)
+
+
+class NapCatConfigRequest(BaseModel):
+    napcat_dir: str
+    qq_account: str = ""
+
+
+@app.post("/api/setup/napcat/configure")
+async def setup_configure_napcat(body: NapCatConfigRequest):
+    """Auto-configure NapCat onebot11 WebSocket client + HTTP servers."""
+    try:
+        result = NapCatConfigurator.configure(body.napcat_dir, body.qq_account)
+        logger.info(
+            "[Setup] napcat configure: configured=%s, skipped=%s, errors=%s",
+            result["configured"], result["skipped"], result["errors"]
+        )
+        return result
+    except Exception as e:
+        logger.exception("[Setup] napcat configure failed")
+        raise HTTPException(500, str(e))
 
 
 @app.websocket("/ws/setup/install")

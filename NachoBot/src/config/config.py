@@ -56,7 +56,6 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..
 CONFIG_DIR = os.path.join(PROJECT_ROOT, "config")
 TEMPLATE_DIR = os.path.join(PROJECT_ROOT, "template")
 
-# 考虑到，实际上配置文件中的mai_version是不会自动更新的,所以采用硬编码
 # 对该字段的更新，请严格参照语义化版本规范：https://semver.org/lang/zh-CN/
 MMC_VERSION = "0.10.3"
 
@@ -336,6 +335,7 @@ def update_config():
     """更新bot_config.toml配置文件"""
     _update_config_generic("bot_config", "bot_config_template")
 
+
 def update_topics_config():
     """更新topics_config.toml配置文件"""
     _update_config_generic("topics_config", "topics_config_template")
@@ -444,15 +444,15 @@ def load_config(config_path: str, topics_config_path: Optional[str] = None) -> C
     # 读取配置文件
     with open(config_path, "r", encoding="utf-8") as f:
         config_data = dict(tomlkit.load(f))
-        
+
     # 如果有分离的topics配置文件，则合并进来
     if topics_config_path and os.path.exists(topics_config_path):
         with open(topics_config_path, "r", encoding="utf-8") as f:
             topics_data = dict(tomlkit.load(f))
-            
+
         if "injections" not in config_data:
             config_data["injections"] = {}
-        
+
         # 兼容 [topics] 和 [injections.topics] 两种写法
         if "injections" in topics_data and "topics" in topics_data["injections"]:  # type: ignore
             config_data["injections"]["topics"] = topics_data["injections"]["topics"]  # type: ignore
@@ -496,7 +496,7 @@ update_model_config()
 logger.info("正在品鉴配置文件...")
 global_config = load_config(
     config_path=os.path.join(CONFIG_DIR, "bot_config.toml"),
-    topics_config_path=os.path.join(CONFIG_DIR, "topics_config.toml")
+    topics_config_path=os.path.join(CONFIG_DIR, "topics_config.toml"),
 )
 model_config = api_ada_load_config(config_path=os.path.join(CONFIG_DIR, "model_config.toml"))
 logger.info("非常的新鲜，非常的美味！")

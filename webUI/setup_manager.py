@@ -194,8 +194,21 @@ class EnvironmentChecker:
     @staticmethod
     def check_ports() -> list[dict[str, Any]]:
         """Check port availability for all known services."""
+        # Dynamically retrieve current WebUI port
+        try:
+            from webui_config import webui_config
+            webui_port = webui_config.port
+        except Exception:
+            try:
+                from .webui_config import webui_config
+                webui_port = webui_config.port
+            except Exception:
+                webui_port = 8088
+
         results = []
         for name, port in KNOWN_PORTS.items():
+            if name == "WebUI":
+                port = webui_port
             entry = {"name": name, "port": port, "status": "ok", "message": "", "pid": None}
             try:
                 with socket.create_connection(("127.0.0.1", port), timeout=1):
@@ -208,14 +221,27 @@ class EnvironmentChecker:
                         for conn in psutil.net_connections(kind='inet'):
                             if conn.laddr.port == port and conn.status == 'LISTEN':
                                 entry["pid"] = conn.pid
-                                try:
-                                    proc = psutil.Process(conn.pid)
-                                    entry["message"] = f"端口 {port} 被 {proc.name()} (PID:{conn.pid}) 占用"
-                                except Exception:
-                                    entry["message"] = f"端口 {port} 被占用 (PID:{conn.pid})"
+                                if conn.pid == os.getpid():
+                                    entry["status"] = "ok"
+                                    entry["message"] = f"端口 {port} 由当前 WebUI 占用 (正常)"
+                                else:
+                                    try:
+                                        proc = psutil.Process(conn.pid)
+                                        entry["message"] = f"端口 {port} 被 {proc.name()} (PID:{conn.pid}) 占用"
+                                    except Exception:
+                                        entry["message"] = f"端口 {port} 被占用 (PID:{conn.pid})"
                                 break
                     except Exception:
                         pass
+
+                    # Fallback: if it is the WebUI port and we are running the check,
+                    # we are definitely the one listening on it (or it's the current WebUI instance).
+                    if name == "WebUI" and (entry["pid"] is None or entry["pid"] == os.getpid()):
+                        entry["status"] = "ok"
+                        entry["message"] = f"端口 {port} 由当前 WebUI 占用 (正常)"
+                        if entry["pid"] is None:
+                            entry["pid"] = os.getpid()
+
             except (ConnectionRefusedError, OSError, socket.timeout):
                 entry["status"] = "ok"
                 entry["message"] = f"端口 {port} 可用"
@@ -483,6 +509,18 @@ class ConfigInitializer:
 
         changed = False
 
+        # -- bot_config.toml --
+        if "bot_config" in target_rel:
+            core_data = wizard_data.get("core", {})
+            qq_account = core_data.get("qq_account", "")
+            nickname = core_data.get("nickname", "")
+            if qq_account and "bot" in doc:
+                doc["bot"]["qq_account"] = qq_account
+                changed = True
+            if nickname and "bot" in doc:
+                doc["bot"]["nickname"] = nickname
+                changed = True
+
         # -- model_config.toml --
         if "model_config" in target_rel:
             user_providers = wizard_data.get("providers", [])
@@ -735,6 +773,217 @@ class PathVerifier:
             "message": "❌ 未找到 NachoBot-Bilibili-Adapter/Live2DCubismCore.dll",
             "download_url": download_url,
         }
+
+
+# =========================================================================
+# NapCat Configurator — auto-configure onebot11 connections
+# =========================================================================
+
+
+class NapCatConfigurator:
+    """
+    Automatically configure NapCat Shell's onebot11 config files.
+    Adds WebSocket client (NachoBot), diary HTTP server, and bilibili video HTTP server.
+    """
+
+    # Standard WebSocket client entry for NachoBot
+    _WS_CLIENT_ENTRY = {
+        "enable": True,
+        "name": "NachoBot",
+        "url": "ws://localhost:8095",
+        "reportSelfMessage": False,
+        "messagePostFormat": "array",
+        "token": "",
+        "debug": False,
+        "heartInterval": 30000,
+        "reconnectInterval": 30000,
+    }
+
+    # Diary plugin HTTP server entry (README L80)
+    _DIARY_HTTP_ENTRY = {
+        "enable": True,
+        "name": "Diary",
+        "host": "127.0.0.1",
+        "port": 9997,
+        "enableCors": True,
+        "enableWebsocket": True,
+        "messagePostFormat": "array",
+        "token": "",
+        "debug": False,
+    }
+
+    # Bilibili video plugin HTTP server entry (README L81)
+    _BILIBILI_HTTP_ENTRY = {
+        "enable": True,
+        "name": "QZone",
+        "host": "127.0.0.1",
+        "port": 9999,
+        "enableCors": True,
+        "enableWebsocket": True,
+        "messagePostFormat": "array",
+        "token": "",
+        "debug": False,
+    }
+
+    @staticmethod
+    def detect_accounts(napcat_dir: str) -> list[str]:
+        """
+        Scan NapCat config directory for existing onebot11_<QQ>.json files.
+        Returns list of QQ account numbers found.
+        """
+        config_dir = Path(napcat_dir) / "config"
+        if not config_dir.exists():
+            return []
+
+        accounts = []
+        import re
+        pattern = re.compile(r"^onebot11_(\d+)\.json$")
+        for f in config_dir.iterdir():
+            m = pattern.match(f.name)
+            if m:
+                accounts.append(m.group(1))
+        return sorted(accounts)
+
+    @staticmethod
+    def configure(napcat_dir: str, qq_account: str = "") -> dict[str, Any]:
+        """
+        Auto-configure NapCat onebot11 config files.
+
+        Adds:
+          - WebSocket client: ws://localhost:8095 (NachoBot adapter)
+          - HTTP server: port 9997 (diary plugin, CORS + WS)
+          - HTTP server: port 9999 (bilibili video plugin, CORS + WS)
+
+        Args:
+            napcat_dir: Path to NapCat Shell root directory.
+            qq_account: QQ account number. If empty, auto-detect from existing files.
+
+        Returns:
+            {"configured": [...], "skipped": [...], "errors": [...]}
+        """
+
+        config_dir = Path(napcat_dir) / "config"
+        configured = []
+        skipped = []
+        errors = []
+
+        if not config_dir.exists():
+            try:
+                config_dir.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                return {"configured": [], "skipped": [], "errors": [f"无法创建配置目录: {e}"]}
+
+        # Determine target files
+        target_files: list[Path] = []
+
+        if qq_account and qq_account.strip():
+            # Specific QQ account
+            target = config_dir / f"onebot11_{qq_account.strip()}.json"
+            target_files.append(target)
+        else:
+            # Auto-detect: scan for existing onebot11_*.json files
+            import re
+            pattern = re.compile(r"^onebot11_\d+\.json$")
+            for f in config_dir.iterdir():
+                if pattern.match(f.name):
+                    target_files.append(f)
+
+            # Fallback: create default onebot11.json if nothing found
+            if not target_files:
+                target_files.append(config_dir / "onebot11.json")
+
+        for target_path in target_files:
+            try:
+                result = NapCatConfigurator._configure_file(target_path)
+                if result["changed"]:
+                    configured.append(str(target_path.name))
+                else:
+                    skipped.append(str(target_path.name))
+            except Exception as e:
+                errors.append(f"{target_path.name}: {e}")
+
+        return {"configured": configured, "skipped": skipped, "errors": errors}
+
+    @staticmethod
+    def _configure_file(target_path: Path) -> dict[str, bool]:
+        """
+        Configure a single onebot11 JSON file.
+        Creates it from scratch if it doesn't exist.
+        Returns {"changed": bool}.
+        """
+        import json as _json
+
+        if target_path.exists():
+            raw = target_path.read_text(encoding="utf-8")
+            try:
+                doc = _json.loads(raw)
+            except _json.JSONDecodeError:
+                doc = {}
+        else:
+            doc = {}
+
+        changed = False
+
+        # Ensure top-level structure
+        if "network" not in doc:
+            doc["network"] = {}
+            changed = True
+        network = doc["network"]
+
+        # --- WebSocket Clients ---
+        if "websocketClients" not in network:
+            network["websocketClients"] = []
+        ws_clients = network["websocketClients"]
+
+        # Check if NachoBot WS client already exists
+        has_nachobot_ws = any(
+            c.get("url") == "ws://localhost:8095" for c in ws_clients
+        )
+        if not has_nachobot_ws:
+            ws_clients.append(dict(NapCatConfigurator._WS_CLIENT_ENTRY))
+            changed = True
+
+        # --- HTTP Servers ---
+        if "httpServers" not in network:
+            network["httpServers"] = []
+        http_servers = network["httpServers"]
+
+        # Check if diary HTTP server already exists (port 9997)
+        has_diary = any(
+            s.get("port") == 9997 for s in http_servers
+        )
+        if not has_diary:
+            http_servers.append(dict(NapCatConfigurator._DIARY_HTTP_ENTRY))
+            changed = True
+
+        # Check if bilibili video HTTP server already exists (port 9999)
+        has_bilibili = any(
+            s.get("port") == 9999 for s in http_servers
+        )
+        if not has_bilibili:
+            http_servers.append(dict(NapCatConfigurator._BILIBILI_HTTP_ENTRY))
+            changed = True
+
+        # Ensure other standard arrays exist
+        for key in ["httpSseServers", "httpClients", "websocketServers", "plugins"]:
+            if key not in network:
+                network[key] = []
+
+        # Ensure top-level defaults
+        doc.setdefault("musicSignUrl", "")
+        doc.setdefault("enableLocalFile2Url", False)
+        doc.setdefault("parseMultMsg", False)
+
+        if changed:
+            # Backup existing file before writing
+            if target_path.exists():
+                BackupManager.backup(target_path)
+            target_path.write_text(
+                _json.dumps(doc, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+        return {"changed": changed}
 
 
 # =========================================================================

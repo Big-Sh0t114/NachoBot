@@ -1,3 +1,5 @@
+5/25
+    增加了MaiBot-NachoBot插件适配器以实现运行MaiBot v2插件的功能
 5/24
     修复WebUI显示乱码和硬编码问题
 5/22
