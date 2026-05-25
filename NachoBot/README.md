@@ -3,7 +3,7 @@
 NachoBot 是在上游 **MaiBot 0.10.3 Beta** 基础上研发的角色扮演聊天机器人，保留了上游插件体系与架构，可以直接沿用上游项目的 [麦麦插件商店](https://plugins.maibot.chat/)。本文档帮助你快速了解本项目、配置要点，以及如何溯源到上游项目。
 
 ## 项目背景与溯源
-- 上游项目：[MaiBot](https://github.com/MaiM-with-u/)，版本基线 0.10.3 Beta。
+- 上游项目：[MaiBot](https://github.com/Mai-with-u/MaiBot)，版本基线 0.10.3 Beta。
 - 许可证：沿用 MaiBot 的 GPLv3；请遵守本仓库的 `LICENSE` 以及各插件/第三方组件的许可证。
 - 主要差异：见下文。
 
@@ -59,44 +59,75 @@ NachoBot 是在上游 **MaiBot 0.10.3 Beta** 基础上研发的角色扮演聊�
 
 ---
 
-## 核心配置
-0. **安装 python 3.11或以上版本（3.14除外），并下载 [GPT-SoVITS](https://www.yuque.com/baicaigongchang1145haoyuangong/ib3g1e/dkxgpiy9zb96hob4) 和 [Napcat Shell.](https://github.com/NapNeko/NapCatQQ) ，确保 Napcat Shell. 放置在根目录下**
-   - Discord侧服务还需额外安装Node.js
-   
-1. **拉取代码后，先复制/编辑主干配置**
-   - 从 `template/` 中复制 `bot_config_template.toml`、`model_config_template.toml`、`topics_config_template.toml` 到 `config/`，并删除 `_template` 后缀。
-   - `config/bot_config.toml`：填写 `qq_account`、按需设置人设、表达学习、权限白名单等。
-   - `config/model_config.toml`：为各 `api_providers` 填入你的 `api_key`，按需调整模型映射。
-   - 进入 `NachoBot-Napcat-Adapter` 目录，从 `template/` 中复制 `template_config.toml` 到 `NachoBot-Napcat-Adapter` 目录下，并删除 `template_` 前缀。
+## WebUI 可视化一键部署与管理 (推荐)
 
-2. **自动依赖安装与环境启动**
-   - 本项目已实现*一键启动与依赖自动管理*。
-   - 记事本打开根目录下的 `launchbot.bat` 脚本，找到第 36 行的 `SOVITS_DIR` 变量，配置为你本地 GPT-SoVITS 的绝对路径。
-   - 双击运行 `launchbot.bat` 即可全自动安装依赖并拉起所有底层组件。
-   - 前往 `Napcat WebUI(http://127.0.0.1:6099)` 进行网络配置，添加 *Websocket客户端* ，配置URL为 *ws://localhost:8095* 并启用服务。
+NachoBot 现已配备完善的 **可视化 WebUI 部署向导与后台管理控制台**。  
+如果你不希望处理繁琐的命令行、依赖管理和手动配置，推荐直接通过 WebUI 搞定一切。
 
-3. **插件配置**
-   - 初次完成启动流程后，会在所有插件目录下生成各自的 `config.toml` 配置文件，自行填写后重启bot。
-   - 日记插件需前往 `Napcat WebUI(http://127.0.0.1:6099)` 进行网络配置，添加 *HTTP服务器* ，默认端口为 *9997并启用CORS和Websocket*
-   - B站视频搬运插件需前往 `Napcat WebUI(http://127.0.0.1:6099)` 进行网络配置，添加 *HTTP服务器* ，默认端口为 *9999*
+### 1. 前置准备
+1. 安装 **Python 3.11+** 环境 (推荐使用 3.11 或 3.12，不要安装 3.14)。
+2. 下载并解压外部组件（如 [GPT-SoVITS 语音引擎](https://www.yuque.com/baicaigongchang1145haoyuangong/ib3g1e/dkxgpiy9zb96hob4)、[NapCatQQ (QQ协议端)](https://github.com/NapNeko/NapCatQQ) 等）。
+3. 如果需要部署 Discord 语音陪玩等服务，请确保系统中已安装 **Node.js**。
 
-## Bilibili配置
-- 从项目根目录 `config-save/` 中复制 `config-biliadapter.toml` 移动至 `NachoBot-Bilbili-Adapter` 目录中，删除 `-biliadapter.toml` 后缀。
-- cmd 运行 `python qr_login.py` 扫描二维码。
-- `config.toml`：填写直播间 id / 违禁词等。
-- 使用Live2d相关功能需前往Live2d官方网站下载 [Live2d Cubism SDK](https://www.live2d.com/zh-CHS/cubism/download/editor/)，从中提取出 `Live2DCubismCore.dll` 放入Bilibili-Adapter根目录下
+### 2. 启动 WebUI
+回到项目最外层目录，双击运行以下脚本：
+*   **Windows**: 双击运行 **`launch_webui.bat`**。
+*   脚本会全自动检查并配置 `uv` 环境，同步依赖包，并自动在浏览器拉起 WebUI 面板（默认监听端口：`8010`，即 `http://127.0.0.1:8010`）。
 
-## Discord配置
-- 从项目根目录 `config-save/` 中复制 `koishi.yml` 移动至 `koishi-app/` 目录中。
-- 移除 `NachoBot-DiscordVC-Adapter` 目录下的 `config.toml.example` 文件的 `.example` 后缀并配置文件。
-- 双击 `koishi-app/launch Koishi.bat` 启动 Koishi，在 webUI 中填写自己的 Discord Bot token 和 self id。
-- 复制 DiscordVC-Adapter 中的 `config.toml.example`，并重命名为 `config.toml`，填写相关配置。
+### 3. 一键可视化部署向导 (Setup Wizard)
+进入浏览器中的 WebUI 界面，点击 **"一键部署"** 选项卡，按照以下五大步骤进行傻瓜式配置：
 
-## TTS配置
-*详见TTS适配器文档*
+1.  **环境完整性自动检测 (Environment Checker)**：自动评估当前系统的 Python 版本、Node.js 版本以及硬件是否支持 CUDA/显卡加速。
+2.  **外部路径校验 (Path Verifier)**：输入你的外部组件（如 NapCat Shell 目录、GPT-SoVITS 目录、VoxCPM 目录、Live2DCubismCore.dll 等）的绝对物理路径，系统会自动验证组件文件有效性，确保外部依赖无误。
+3.  **多平台组件按需订阅**：勾选你想要启用的平台/模块（如 QQ、Discord、Bilibili、TTS、感知层等）。
+4.  **模型参数可视化生成**：在 UI 界面输入大模型的 API 密钥、选择服务商 (如 OpenAI, Grok 等) 并选定底色人设。系统会自动为你生成并初始化 `bot_config.toml`、`model_config.toml`、`topics_config.toml` 等核心配置文件。
+5.  **一键自动部署 (Auto-Deploy)**：点击“开始部署”。WebUI 将通过实时 WebSocket 日志输出流，全自动在各适配器的虚拟隔离环境内安装所需依赖。
+6.  **NapCat 客户端自动打补丁 (NapCat Configurator)**：只需在 UI 中输入 Bot 账号，系统将全自动将 NapCat 核心配置 (`onebot11_<QQ>.json`) 修改为适配器对接的 WebSocket 和 HTTP 接口，**完全告别手动前往 NapCat 网页控制台配置网络配置的麻烦**。
 
-``保持所有终端运行！！！在全平台服务跑起来的情况下应该是有6+3+1个终端窗口在运行``
-``launchbot_lite.bat 是轻量启动脚本，不包含本地 VLM/ASR 服务，为电脑性能较差用户提供``
+### 4. 后台可视化运维与管理
+部署完成后，你即可在 WebUI 中享受以下强大功能：
+*   **进程控制台 (Process Manager)**：以服务组 (核心组、QQ组、B站组、Discord组) 或单个服务的形式，一键启动或停止所有子服务 (NachoBot 核心、Napcat 适配器、TTS 适配器、VLM/ASR 感知服务端等)，并以**实时滚动日志流**展现运行细节。
+*   **可视化配置编辑器 (Config Manager)**：在浏览器中直接通过高亮文本编辑器微调任何 `.toml` 配置文件，每次修改皆有**自动历史备份**保护。
+*   **智能数据库编辑器 (Database Manager)**：图形化浏览 Bot 的记忆数据库。支持**单列属性条件过滤 (Column Filters)** 与下拉快速刷选，方便定位与擦除 Bot 的特定记忆。
+*   **沙盒与知识库热插拔 (Knowledge Base)**：在线安全地创建、修改与检索 Bot 的长期记忆、誓约 (约定项目) 及沙盒文件 (Bot 运行时修改会将安全锁定，确保核心服务停止时才能执行改动)。
+
+---
+
+## 传统手动配置与启动 (备选)
+
+如果你更习惯使用命令行或者在无头服务器上进行纯文本手动配置，可沿用以下传统方式。
+
+### 1. 主干配置初始化
+*   从 `template/` 中复制 `bot_config_template.toml`、`model_config_template.toml`、`topics_config_template.toml` 到 `config/`，并删除 `_template` 后缀。
+*   `config/bot_config.toml`：填写 `qq_account`、按需设置人设、表达学习、权限白名单等。
+*   `config/model_config.toml`：为各 `api_providers` 填入你的 `api_key`，按需调整模型映射。
+*   进入 `NachoBot-Napcat-Adapter` 目录，从 `template/` 中复制 `template_config.toml` 到 `NachoBot-Napcat-Adapter` 目录下，并删除 `template_` 前缀。
+
+### 2. 自动启动脚本
+*   记事本打开根目录下的 `launchbot.bat` 脚本，找到第 36 行的 `SOVITS_DIR` 变量，配置为你本地 GPT-SoVITS 的绝对路径。
+*   双击运行 `launchbot.bat` 即可全自动安装依赖并拉起所有底层组件。
+*   前往 `Napcat WebUI(http://127.0.0.1:6099)` 进行网络配置，添加 *Websocket客户端* ，配置URL为 *ws://localhost:8095* 并启用服务。
+
+### 3. 平台高级手动配置
+
+#### A. Bilibili 平台配置
+*   从项目根目录 `config-save/` 中复制 `config-biliadapter.toml` 移动至 `NachoBot-Bilbili-Adapter` 目录中，删除 `-biliadapter.toml` 后缀。
+*   进入目录运行 `python qr_login.py` 扫描二维码登录。
+*   修改 `config.toml` 填写直播间 id / 违禁词等。
+*   若要启用 Live2D 虚拟直播联动，需从官方下载 [Live2d Cubism SDK](https://www.live2d.com/zh-CHS/cubism/download/editor/)，提取 `Live2DCubismCore.dll` 并放入 `NachoBot-Bilibili-Adapter` 根目录下。
+
+#### B. Discord 平台配置
+*   从项目根目录 `config-save/` 中复制 `koishi.yml` 移动至 `koishi-app/` 目录中。
+*   移除 `NachoBot-DiscordVC-Adapter` 目录下的 `config.toml.example` 文件的 `.example` 后缀。
+*   双击 `koishi-app/launch Koishi.bat` 启动 Koishi，在 WebUI 中填写自己的 Discord Bot token 和 self id。
+*   复制 `DiscordVC-Adapter` 中的 `config.toml.example` 重命名为 `config.toml`，填写频道对接配置。
+
+#### C. TTS 平台配置
+*   详见 [NachoBot-TTS-Adapter/README.md](../NachoBot-TTS-Adapter/README.md) 获取双语音合成引擎、DeBERTa 情感分析与 VLM/ASR 多模态服务的独立配置方法。
+
+> ** 说明：** 
+> * 保持所有终端运行！在全平台服务跑起来的情况下应该有多达 6+3+1 个终端窗口同时在后台工作。
+> * `launchbot_lite.bat` 是轻量启动脚本，不包含本地 VLM/ASR 多模态服务，为电脑性能较低或不需要多模态的用户准备。
 
 ---
 
@@ -141,7 +172,7 @@ cd NachoBot-TTS-Adapter && docker compose up -d
 ### Docker 注意事项
 
 - **网络**：所有服务通过 `nacho_bot` 外部网络互相通信。容器间使用服务名（如 `core`、`tts-adapter`）作为主机名，配置文件中的 `127.0.0.1` 需替换为对应服务名。
-- **配置持久化**：各适配器通过卷挂载持久化 `config.toml` 等配置文件，修改配置后重启容器即可生效。
+- **配置持久化**：各适配器通过卷挂载持久化 `config.toml` 等配置文件，修改配置后重启容器即可生效.
 - **FFmpeg**：DiscordVC 适配器的 Docker 镜像已内置 FFmpeg，无需额外安装。
 - **Xvfb**：Bilibili 适配器的 Docker 镜像已内置 Xvfb 虚拟帧缓冲，支持容器内屏幕监控。
 
@@ -153,5 +184,5 @@ cd NachoBot-TTS-Adapter && docker compose up -d
 
 ##### 贡献与致谢
 - 上游：MaiBot 项目团队贡献者与插件制作者。
-- Napcat / GPT-SoVITS / Koishi 团队。
+- Napcat / GPT-SoVITS / VoxCPM / Koishi 团队。
 - 贡献方式：遵循 GPLv3；提交 PR 前请先清理私密信息，并保持对上游的致谢与链接。
