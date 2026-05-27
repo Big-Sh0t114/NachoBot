@@ -148,6 +148,9 @@ class ModelTaskConfig(ConfigBase):
     private_replyer2: TaskConfig = field(default_factory=TaskConfig)
     """私聊备用回复模型组2（可选）"""
 
+    private_planner: TaskConfig = field(default_factory=TaskConfig)
+    """私聊专属独立规划模型配置（可选，缺省回退到默认参数/planner）"""
+
     advanced_replyer: TaskConfig = field(default_factory=TaskConfig)
     """高级模式回复模型配置（可选，缺省回退到默认参数）"""
 
@@ -244,6 +247,10 @@ class ModelTaskConfig(ConfigBase):
         else:
             logger.warning(f"无效的私聊 replyer 组编号: {group}，回退到默认组")
             return self.replyer
+
+    def get_private_planner(self) -> TaskConfig:
+        """获取私聊规划模型配置。如果未配置则回退到 planner。"""
+        return self.private_planner if self.private_planner.model_list else self.planner
 
     def get_task(self, task_name: str) -> TaskConfig:
         """获取指定任务的配置"""

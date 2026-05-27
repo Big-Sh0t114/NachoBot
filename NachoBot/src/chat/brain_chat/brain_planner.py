@@ -191,7 +191,7 @@ class BrainPlanner:
         self.action_manager = action_manager
 
         self.separated_llm = LLMRequest(
-            model_set=model_config.model_task_config.planner, request_type="planner"
+            model_set=model_config.model_task_config.get_private_planner(), request_type="planner"
         )  # 独立规划器使用各自的模型
 
         self.last_obs_time_mark = 0.0
