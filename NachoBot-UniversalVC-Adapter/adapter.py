@@ -191,7 +191,10 @@ class UniversalVCAdapter:
         if self.config.prompts.planner_prompt or self.config.prompts.replyer_prompt:
             if TemplateInfo:
                 template_items = {}
-                variables = self.config.prompts.variables
+                variables = self.config.prompts.variables.copy()
+                if "application_name" not in variables:
+                    variables["application_name"] = self.audio_capture.get_application_name()
+
 
                 if self.config.prompts.planner_prompt:
                     p_prompt = self.config.prompts.planner_prompt

@@ -1,3 +1,5 @@
+5/27
+    分离了群聊planner和私聊planner
 5/25
     添加了WebUI部署向导
     增加了MaiBot-NachoBot插件适配器以实现运行MaiBot v2插件的功能

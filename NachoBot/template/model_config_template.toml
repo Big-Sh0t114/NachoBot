@@ -1,49 +1,19 @@
 [inner]
-version = "1.9.0_bs"
+version = "1.10.0_bs"
 
-# 配置文件版本号迭代规则同bot_config.toml
-
+[[api_providers]]  #本地模型配置(FULL模式下自带，无需修改)
+name = "LocalModel"
+base_url = "http://127.0.0.1:9874/v1"
+api_key = "fuck"
+client_type = "openai"
+max_retry = 2
+timeout = 60
+retry_interval = 5
 
 [[api_providers]] # 阿里 百炼 API服务商配置
 name = "Qhaigc"
 base_url = "https://api-hk.qhaigc.net/v1"
 api_key = ""
-client_type = "openai"
-max_retry = 2
-timeout = 30
-retry_interval = 5
-
-[[api_providers]]
-name = "Packy"
-base_url = "https://api-slb.packyapi.com/v1"
-api_key = ""
-client_type = "openai"
-max_retry = 2
-timeout = 30
-retry_interval = 5
-
-[[api_providers]]
-name = "poloai/c"
-base_url = "https://fast.poloai.top/v1"
-api_key = ""
-client_type = "openai"
-max_retry = 2
-timeout = 30
-retry_interval = 5
-
-[[api_providers]]
-name = "poloai/g"
-base_url = "https://fast.poloai.top/v1"
-api_key = ""
-client_type = "openai"
-max_retry = 2
-timeout = 30
-retry_interval = 5
-
-[[api_providers]]
-name = "LocalShim"
-base_url = "http://127.0.0.1:11435/v1"
-api_key = "fuck"                 # 垫片默认不验key
 client_type = "openai"
 max_retry = 2
 timeout = 30
@@ -58,7 +28,7 @@ max_retry = 2
 timeout = 60
 retry_interval = 10
 
-[[api_providers]]
+[[api_providers]]  # Deepseek配置
 name = "Deepseek"
 base_url = "https://api.deepseek.com/v1"
 api_key = ""
@@ -67,56 +37,26 @@ max_retry = 2
 timeout = 30
 retry_interval = 10
 
-[[api_providers]]
-name = "LocalModel"
-base_url = "http://127.0.0.1:9874/v1"
-api_key = "fuck"
+[[api_providers]]  # 本地垫片
+name = "LocalShim"
+base_url = "http://127.0.0.1:11435/v1"
+api_key = "fuck"                 # 垫片默认不验key
 client_type = "openai"
 max_retry = 2
-timeout = 60
+timeout = 30
 retry_interval = 5
 
-[[api_providers]]
-name = "LocalModelLarge"
-base_url = "http://127.0.0.1:11433/v1"
-api_key = "fuck"
-client_type = "openai"
-max_retry = 2
-timeout = 60
-retry_interval = 5
-
-[[models]]
+[[models]]  #本地模型(FULL模式下自带，无需修改)
 model_identifier = "sensevoice-small"
 name = "sensevoice-small"
 api_provider = "LocalModel"
 price_in = 0
 price_out = 0
 
-[[models]]
+[[models]]  #本地模型(FULL模式下自带，无需修改)
 model_identifier = "Florence-2"
 name = "Florence-2"
 api_provider = "LocalModel"
-price_in = 0
-price_out = 0
-
-[[models]]
-model_identifier = "Qwen3.5-9B-Uncensored"
-name = "Qwen3.5-9B-Uncensored"
-api_provider = "LocalModelLarge"
-price_in = 0
-price_out = 0
-
-[[models]]
-model_identifier = "qwen/qwen3-vl-4b"
-name = "qwen/qwen3-vl-4b"
-api_provider = "LocalModelLarge"
-price_in = 0
-price_out = 0
-
-[[models]]
-model_identifier = "qwen3-4b-rpg-roleplay-v2"
-name = "qwen3-4b-rpg-roleplay-v2"
-api_provider = "LocalModelLarge"
 price_in = 0
 price_out = 0
 
@@ -126,25 +66,36 @@ name = "gemini-2.5-pro/shim"
 api_provider = "LocalShim"
 price_in = 3.0
 price_out = 24.0
-[models.extra_params]
+[models.extra_params]  #额外参数控制，具体字段需根据供应商来填
 enable_thinking = false
 thinking_budget_token_limit=100
 
-[[models]]
-model_identifier = "gpt-5"
-name = "gpt-5"
+[[models]]   # 联网模型，模型自身需具备联网能力
+model_identifier = "grok-4.1#search"
+name = "grok-4.1#search"
 api_provider = "Qhaigc"
-price_in = 1.25
-price_out = 10
+price_in = 0.2
+price_out = 0.5
 
 [[models]]
-model_identifier = "gpt-4o-mini"
-name = "gpt-4o-mini"
-api_provider = "Qhaigc"
-price_in = 0.18
-price_out = 0.72
+model_identifier = "deepseek-v4-pro"
+name = "deepseek-v4-pro"
+api_provider = "Deepseek"
+price_in = 3
+price_out = 6
+[models.extra_params]
+enable_thinking = false
 
 [[models]]
+model_identifier = "deepseek-v4-flash"
+name = "deepseek-v4-flash"
+api_provider = "Deepseek"
+price_in = 1
+price_out = 2
+[models.extra_params]
+enable_thinking = false
+
+[[models]]   # 硅基流动提供的一些免费模型，部分可能已过期
 model_identifier = "Qwen/Qwen3-8B"
 name = "Qwen/Qwen3-8B"
 api_provider = "SiliconFlow"
@@ -203,200 +154,6 @@ price_in = 0
 price_out = 0
 
 [[models]]
-model_identifier = "Qwen/Qwen3.5-397B-A17B"
-name = "Qwen/Qwen3.5-397B-A17B"
-api_provider = "SiliconFlow"
-price_in = 1.2
-price_out = 7.2
-[models.extra_params]
-enable_thinking = false
-
-[[models]]
-model_identifier = "grok-3"
-name = "grok-3/p"
-api_provider = "poloai/g"
-price_in = 3
-price_out = 15
-
-[[models]]
-model_identifier = "grok-4"
-name = "grok-4/p"
-api_provider = "poloai/g"
-price_in = 3
-price_out = 15
-
-[[models]]
-model_identifier = "grok-4-mini"
-name = "grok-4-mini"
-api_provider = "Qhaigc"
-price_in = 0.2
-price_out = 0.5
-
-[[models]]
-model_identifier = "grok-4"
-name = "grok-4"
-api_provider = "Qhaigc"
-price_in = 3.6
-price_out = 18
-
-[[models]]
-model_identifier = "grok-4.20-beta"
-name = "grok-4.20-beta"
-api_provider = "Qhaigc"
-price_in = 2
-price_out = 6
-
-[[models]]
-model_identifier = "grok-4.1-fast"
-name = "grok-4.1-fast"
-api_provider = "Qhaigc"
-price_in = 3
-price_out = 3
-
-[[models]]
-model_identifier = "deepseek-chat"
-name = "deepseek-chat"
-api_provider = "Qhaigc"
-price_in = 2.4
-price_out = 9.6
-
-[[models]]
-model_identifier = "deepseek-v4-pro"
-name = "deepseek-v4-pro"
-api_provider = "Deepseek"
-price_in = 3
-price_out = 6
-[models.extra_params]
-enable_thinking = false
-
-[[models]]
-model_identifier = "deepseek-v4-flash"
-name = "deepseek-v4-flash"
-api_provider = "Deepseek"
-price_in = 1
-price_out = 2
-[models.extra_params]
-enable_thinking = false
-
-[[models]]
-model_identifier = "Pro/zai-org/GLM-5"
-name = "Pro/zai-org/GLM-5"
-api_provider = "SiliconFlow"
-price_in = 4
-price_out = 18
-[models.extra_params]
-enable_thinking = false
-
-[[models]]
-model_identifier = "Pro/zai-org/GLM-4.7"
-name = "Pro/zai-org/GLM-4.7"
-api_provider = "SiliconFlow"
-price_in = 3.5
-price_out = 14
-[models.extra_params]
-enable_thinking = false
-
-[[models]]
-model_identifier = "qwen3.5-plus"
-name = "qwen3.5-plus"
-api_provider = "Qhaigc"
-price_in = 2
-price_out = 8
-[models.extra_params]
-enable_thinking = false
-
-[[models]]
-model_identifier = "gpt-4.1-nano"
-name = "gpt-4.1-nano"
-api_provider = "Qhaigc"
-price_in = 0.12
-price_out = 0.48
-
-[[models]]
-model_identifier = "gpt-5-nano"
-name = "gpt-5-nano"
-api_provider = "Qhaigc"
-price_in = 0.05
-price_out = 0.4
-
-[[models]]
-model_identifier = "gemini-2.0-flash"
-name = "gemini-2.0-flash"
-api_provider = "Qhaigc"
-price_in = 0.36
-price_out = 1.44
-
-[[models]]
-model_identifier = "claude-haiku-4-5-20251001"
-name = "claude-haiku-4-5-20251001"
-api_provider = "Qhaigc"
-price_in = 1
-price_out = 5
-
-[[models]]
-model_identifier = "claude-sonnet-4-5-20250929"
-name = "claude-sonnet-4-5-20250929"
-api_provider = "Qhaigc"
-price_in = 3
-price_out = 15
-
-[[models]]
-model_identifier = "claude-sonnet-4-6"
-name = "claude-sonnet-4-6"
-api_provider = "Qhaigc"
-price_in = 3
-price_out = 15
-[models.extra_params]
-enable_thinking = false
-
-[[models]]
-model_identifier = "claude-sonnet-4-6"
-name = "claude-sonnet-4-6/polo"
-api_provider = "poloai/c"
-price_in = 3
-price_out = 15
-[models.extra_params]
-enable_thinking = false
-
-[[models]]
-model_identifier = "claude-sonnet-4-6"
-name = "claude-sonnet-4-6/packy"
-api_provider = "Packy"
-price_in = 2.4
-price_out = 12
-[models.extra_params]
-enable_thinking = false
-
-[[models]]
-model_identifier = "gemini-2.5-pro"
-name = "gemini-2.5-pro"
-api_provider = "Qhaigc"
-price_in = 3
-price_out = 24
-thinking_budget_token_limit=100
-
-[[models]]
-model_identifier = "gpt-4.1-mini"
-name = "gpt-4.1-mini"
-api_provider = "Qhaigc"
-price_in = 0.48
-price_out = 1.92
-
-[[models]]
-model_identifier = "gpt-5-mini"
-name = "gpt-5-mini"
-api_provider = "Qhaigc"
-price_in = 0.25
-price_out = 2
-
-[[models]]
-model_identifier = "gpt-5.1"
-name = "gpt-5.1"
-api_provider = "Qhaigc"
-price_in = 1.25
-price_out = 10
-
-[[models]]
 model_identifier = "BAAI/bge-m3"
 name = "bge-m3"
 api_provider = "SiliconFlow"
@@ -424,82 +181,6 @@ api_provider = "SiliconFlow"
 price_in = 0
 price_out = 0
 
-[[models]]
-model_identifier = "waifubot-view"
-name = "waifubot-view"
-api_provider = "Qhaigc"
-price_in = 0.36
-price_out = 1.44
-
-[[models]]
-model_identifier = "waifubot-view-video"
-name = "waifubot-view-video"
-api_provider = "Qhaigc"
-price_in = 0.6
-price_out = 5.004
-
-[[models]]
-model_identifier = "waifubot-search"
-name = "waifubot-search"
-api_provider = "Qhaigc"
-price_in = 3.6
-price_out = 14.4
-
-[[models]]
-model_identifier = "chatgpt-4o"
-name = "chatgpt-4o"
-api_provider = "Qhaigc"
-price_in = 6
-price_out = 24
-
-[[models]]
-model_identifier = "gpt-5.2"
-name = "gpt-5.2"
-api_provider = "Qhaigc"
-price_in = 6
-price_out = 18
-
-[[models]]
-model_identifier = "gemini-3-flash-preview#search"
-name = "gemini-3-flash-preview#search"
-api_provider = "Qhaigc"
-price_in = 0.5
-price_out = 3
-
-[[models]]
-model_identifier = "grok-4.1#search"
-name = "grok-4.1#search"
-api_provider = "Qhaigc"
-price_in = 0.2
-price_out = 0.5
-
-[[models]]
-model_identifier = "claude-opus-4-6"
-name = "claude-opus-4-6"
-api_provider = "Qhaigc"
-price_in = 5
-price_out = 25
-
-[[models]]
-model_identifier = "gpt-5.3-codex"
-name = "gpt-5.3-codex"
-api_provider = "Qhaigc"
-price_in = 1
-price_out = 8
-
-[[models]]
-model_identifier = "gpt-5.2-codex"
-name = "gpt-5.2-codex"
-api_provider = "Qhaigc"
-price_in = 1
-price_out = 8
-
-[[models]]
-model_identifier = "gpt-5.1-codex"
-name = "gpt-5.1-codex"
-api_provider = "Qhaigc"
-price_in = 1
-price_out = 8
 
 
 [model_task_config.utils] # 一些组件中使用的模型，例如表情包模块，取名模块，关系模块，情绪变化等，是必须的模型
@@ -513,85 +194,90 @@ temperature = 0.2
 max_tokens = 800
 
 [model_task_config.tool_use] #工具调用模型，需要使用支持工具调用的模型
-model_list = ["gpt-4.1-mini","Qwen/Qwen3-8B","Qwen/Qwen2.5-7B-Instruct","THUDM/GLM-Z1-9B-0414","Qwen3.5-9B-Uncensored"]
+model_list = ["Qwen/Qwen3-8B","Qwen/Qwen2.5-7B-Instruct","THUDM/GLM-Z1-9B-0414","Qwen3.5-9B-Uncensored"]
 temperature = 0.05
 max_tokens = 800
 
 [model_task_config.file_edit] # 文件编辑/代码生成专用模型
-model_list = ["gpt-5.3-codex","claude-sonnet-4-6","claude-sonnet-4-5-20250929"]
+model_list = ["deepseek-v4-pro"]
 temperature = 0.1
-max_tokens = 4096
+max_tokens = 8192
 timeout = 50
 
 [model_task_config.mcp] # MCP插件专用模型配置
-model_list = ["grok-4.1-thinking"]
+model_list = []
 temperature = 0.05
 max_tokens = 800
 
 [model_task_config.web_search] # 联网搜索模型组
-model_list = ["grok-4.1#search","gemini-3-flash-preview#search"]
+model_list = ["grok-4.1#search"]
 temperature = 0.2
 max_tokens = 800
 
 [model_task_config.replyer0] # 默认回复模型组（原 replyer），还用于表达器和表达方式学习
-model_list = ["deepseek-v4-flash","claude-sonnet-4-6/polo","Qwen/Qwen3.5-397B-A17B"]
+model_list = ["deepseek-v4-flash"]
 temperature = 0.5                        
 max_tokens = 800
 
 [model_task_config.replyer1] # 备用回复模型组，可通过 #switch_rpygroup 切换
-model_list = ["Pro/zai-org/GLM-5","Qwen/Qwen3.5-397B-A17B"]
+model_list = []
 temperature = 0.5
 max_tokens = 800
 
 [model_task_config.replyer2] # 备用回复模型组2
-model_list = ["claude-sonnet-4-6/polo","Qwen/Qwen3.5-397B-A17B"]
+model_list = []
 temperature = 0.5
 max_tokens = 800
 
 [model_task_config.private_replyer0] # 私聊默认回复模型组
-model_list = ["deepseek-v4-flash","Qwen/Qwen3.5-397B-A17B"]
+model_list = ["deepseek-v4-flash"]
 temperature = 0.5
 max_tokens = 800
 
 [model_task_config.private_replyer1] # 私聊备用回复模型组1
-model_list = ["claude-sonnet-4-6/polo","Qwen/Qwen3.5-397B-A17B"]
+model_list = []
 temperature = 0.5
 max_tokens = 800
 
 [model_task_config.private_replyer2] # 私聊备用回复模型组2
-model_list = ["deepseek-v4-pro","Qwen/Qwen3.5-397B-A17B"]
+model_list = []
 temperature = 0.5
 max_tokens = 800
 
 [model_task_config.advanced_replyer] # 高级模式回复模型组（可选，未配置则回退replyer）
-model_list = ["grok-4.20-beta","grok-4.1-fast","grok-4/p","grok-3/p","grok-4-mini"]
+model_list = ["deepseek-v4-pro"]
 temperature = 0.5
 max_tokens = 800
 
 [model_task_config.planner] #决策：负责决定该什么时候回复的模型
-model_list = ["gpt-4.1-mini","Qwen/Qwen3-8B","THUDM/GLM-Z1-9B-0414","Qwen/Qwen2.5-7B-Instruct"]
+model_list = ["Qwen/Qwen3-8B","THUDM/GLM-Z1-9B-0414","Qwen/Qwen2.5-7B-Instruct"]
+temperature = 0.05
+max_tokens = 800
+
+[model_task_config.private_planner] #私聊专属独立规划模型组（可选，缺省回退到默认参数/planner）
+model_list = ["deepseek-v4-flash","Qwen/Qwen3-8B","THUDM/GLM-Z1-9B-0414","Qwen/Qwen2.5-7B-Instruct"]
 temperature = 0.05
 max_tokens = 800
 
 [model_task_config.vlm] # 图像识别模型（核心聊天图片/表情包描述）
-model_list = ["THUDM/GLM-4.1V-9B-Thinking","Qwen/Qwen3.5-4B","Qwen3.5-9B-Uncensored","Florence-2"]
+model_list = ["Qwen/Qwen3.5-4B","Florence-2"]
 max_tokens = 800
 
 [model_task_config.bilibili_vlm] # Bilibili 直播画面识别
-model_list = ["Qwen3.5-9B-Uncensored","Florence-2"]
+model_list = ["Florence-2"]
 max_tokens = 114514
 
 [model_task_config.bilibili_replyer] # Bilibili 直播间专属独立回复模型组
-model_list = ["deepseek-v4-pro","claude-sonnet-4-6/polo","Qwen/Qwen3.5-397B-A17B"]
+model_list = ["deepseek-v4-pro"]
 temperature = 0.5
 max_tokens = 800
 
-[model_task_config.video] # 视频识别模型
-model_list = ["deepseek-v4-flash"]
+[model_task_config.video] # 视频识别模型，模型需支持多模态
+model_list = ["gemini-2.5-flash-lite"]
 max_tokens = 4096
 
-[model_task_config.voice] # 语音识别模型（本地 FunASR）
-model_list = ["sensevoice-small"]
+[model_task_config.voice] # 语音识别模型
+model_list = ["sensevoice-small","FunAudioLLM/SenseVoiceSmall"]
 
 #嵌入模型
 [model_task_config.embedding]
