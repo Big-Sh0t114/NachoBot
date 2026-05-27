@@ -20,7 +20,7 @@ group_list_type = "whitelist" # 群组名单类型，可选为：whitelist, blac
 group_list = []               # 群组名单
 # 当group_list_type为whitelist时，只有群组名单中的群组可以聊天
 # 当group_list_type为blacklist时，群组名单中的任何群组无法聊天
-private_list_type = "whitelist" # 私聊名单类型，可选为：whitelist, blacklist
+private_list_type = "blacklist" # 私聊名单类型，可选为：whitelist, blacklist
 private_list = []               # 私聊名单
 # 当private_list_type为whitelist时，只有私聊名单中的用户可以聊天
 # 当private_list_type为blacklist时，私聊名单中的任何用户无法聊天

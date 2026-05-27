@@ -510,3 +510,47 @@ class AudioCapture:
         except Exception as e:
             self.logger.error(f"ASR request failed: {e}")
             return None
+
+    def get_application_name(self) -> str:
+        """Get the friendly name of the captured application."""
+        if not self.capture_config.target_process_name and not self.capture_config.target_pid:
+            return "系统音频"
+
+        # If a process name is configured
+        name = ""
+        if self.capture_config.target_process_name:
+            name = self.capture_config.target_process_name
+        elif self.capture_config.target_pid:
+            # Try to resolve process name from PID
+            try:
+                import psutil
+                proc = psutil.Process(self.capture_config.target_pid)
+                name = proc.name()
+            except Exception:
+                name = f"PID {self.capture_config.target_pid}"
+
+        if not name:
+            return "未知应用"
+
+        # Normalize and map to friendly name
+        name_lower = name.lower()
+        
+        # Remove suffix like .exe
+        if name_lower.endswith(".exe"):
+            name = name[:-4]
+            name_lower = name.lower()
+
+        # Friendly mapping
+        mapping = {
+            "qq": "QQ",
+            "wechat": "微信",
+            "discord": "Discord",
+            "vrchat": "VRChat",
+            "dingtalk": "钉钉",
+            "feishu": "飞书",
+            "lark": "飞书",
+            "tencentmeeting": "腾讯会议",
+        }
+
+        return mapping.get(name_lower, name)
+
