@@ -907,6 +907,15 @@ class HeartFChatting:
                         cycle_timers,
                     )
 
+                elif action_planner_info.action_type == "set_group_title":
+                    return await self._handle_set_group_title(
+                        action_planner_info,
+                        chosen_action_plan_infos,
+                        thinking_id,
+                        available_actions,
+                        cycle_timers,
+                    )
+
                 elif action_planner_info.action_type == "make_appoint":
                     return await self._handle_make_appoint(
                         action_planner_info,
@@ -1428,6 +1437,122 @@ class HeartFChatting:
         )
 
         return {"action_type": "block_user", "success": True, "reply_text": reply_text}
+
+    async def _handle_set_group_title(
+        self,
+        action_planner_info: ActionPlannerInfo,
+        chosen_action_plan_infos: List[ActionPlannerInfo],
+        thinking_id: str,
+        available_actions: Dict[str, ActionInfo],
+        cycle_timers: Dict[str, float],
+    ):
+        """处理 set_group_title 动作：设置群成员专属头衔"""
+        action_data = action_planner_info.action_data or {}
+        target_name = str(action_data.get("target_name", ""))
+        title = str(action_data.get("title", ""))
+
+        if not target_name:
+            logger.warning(f"{self.log_prefix} set_group_title 缺少 target_name 参数")
+            return {"action_type": "set_group_title", "success": False, "reply_text": ""}
+
+        # 头衔长度限制：6个字符
+        if len(title) > 6:
+            title = title[:6]
+            logger.info(f"{self.log_prefix} set_group_title 头衔超过6字符，已截断为: {title}")
+
+        # 仅群聊可用
+        if not self.chat_stream.group_info:
+            logger.warning(f"{self.log_prefix} set_group_title 仅适用于群聊")
+            return {"action_type": "set_group_title", "success": False, "reply_text": ""}
+
+        # 二次校验：当前群是否在启用列表中
+        current_group_id = str(self.chat_stream.group_info.group_id)
+        enabled_groups = global_config.chat.title_enabled_groups
+        if current_group_id not in enabled_groups:
+            logger.warning(f"{self.log_prefix} set_group_title 当前群 {current_group_id} 未启用头衔功能")
+            return {"action_type": "set_group_title", "success": False, "reply_text": ""}
+
+        # 解析用户QQ号（与 block_user 相同逻辑）
+        if target_name.isdigit():
+            target_user_id = target_name
+            logger.info(f"{self.log_prefix} set_group_title 直接使用QQ号 {target_user_id}")
+        else:
+            resolved_id = self._resolve_user_id_by_nickname(target_name)
+            if resolved_id:
+                logger.info(f"{self.log_prefix} set_group_title 将用户 '{target_name}' 解析为 QQ号 {resolved_id}")
+                target_user_id = resolved_id
+            else:
+                logger.warning(f"{self.log_prefix} set_group_title 无法将 '{target_name}' 解析为有效的QQ号")
+                return {"action_type": "set_group_title", "success": False, "reply_text": ""}
+
+        # 发送命令到适配器
+        try:
+            await send_api.command_to_stream(
+                command={
+                    "name": "SET_GROUP_TITLE",
+                    "args": {
+                        "group_id": current_group_id,
+                        "qq_id": target_user_id,
+                        "title": title,
+                    },
+                },
+                stream_id=self.chat_stream.stream_id,
+                storage_message=False,
+            )
+            logger.info(
+                f"{self.log_prefix} set_group_title 已发送命令: "
+                f"群={current_group_id}, 用户={target_user_id}, 头衔='{title}'"
+            )
+        except Exception as e:
+            logger.error(f"{self.log_prefix} set_group_title 发送命令失败: {e}")
+            return {"action_type": "set_group_title", "success": False, "reply_text": ""}
+
+        # 生成确认回复
+        action_desc = f"清除了{target_name}的头衔" if not title else f"将{target_name}的头衔设置为「{title}」"
+        confirm_extra_info = (
+            f"[头衔设置] 你刚刚{action_desc}。"
+            f"请自然地确认这个操作，告知用户头衔已设置成功。"
+        )
+
+        reply_text = ""
+        try:
+            success, llm_response = await generator_api.generate_reply(
+                chat_stream=self.chat_stream,
+                reply_message=action_planner_info.action_message,
+                available_actions=available_actions,
+                chosen_actions=chosen_action_plan_infos,
+                reply_reason=action_planner_info.reasoning or "",
+                request_type="replyer",
+                from_plugin=False,
+                extra_info=confirm_extra_info,
+            )
+            if success and llm_response and llm_response.reply_set:
+                _, reply_text, _ = await self._send_and_store_reply(
+                    response_set=llm_response.reply_set,
+                    action_message=action_planner_info.action_message,
+                    cycle_timers=cycle_timers,
+                    thinking_id=thinking_id,
+                    actions=chosen_action_plan_infos,
+                    selected_expressions=llm_response.selected_expressions,
+                )
+            else:
+                reply_text = ""
+        except Exception as e:
+            logger.error(f"{self.log_prefix} set_group_title 回复生成异常: {e}")
+            reply_text = ""
+
+        # 存储 action info
+        await database_api.store_action_info(
+            chat_stream=self.chat_stream,
+            action_build_into_prompt=True,
+            action_prompt_display=f"你{action_desc}",
+            action_done=True,
+            thinking_id=thinking_id,
+            action_data={"target_qq": target_user_id, "title": title},
+            action_name="set_group_title",
+        )
+
+        return {"action_type": "set_group_title", "success": True, "reply_text": reply_text}
 
     # =========================================================================
     # Bilibili Live 两阶段联网搜索

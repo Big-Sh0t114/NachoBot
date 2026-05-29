@@ -115,6 +115,7 @@ cancel_appoint
 }}
 
 {block_user_action_text}
+{set_group_title_action_text}
 {action_options_text}
 
 **动作选择要求**
@@ -251,6 +252,7 @@ class ActionPlanner:
                 "make_appoint",
                 "cancel_appoint",
                 "block_user",
+                "set_group_title",
             ]
 
             if action not in internal_action_names and action not in available_action_names:
@@ -517,6 +519,7 @@ class ActionPlanner:
                 pending_appointments=pending_text,
                 reply_action_description=reply_action_description,
                 block_user_action_text=self._build_block_user_prompt(is_group_chat),
+                set_group_title_action_text=self._build_set_group_title_prompt(is_group_chat),
             )
             if tts_lang_note:
                 prompt += tts_lang_note
@@ -586,12 +589,40 @@ class ActionPlanner:
 使用条件：当群聊中某用户持续发送垃圾信息、骚扰信息、刷屏或严重影响聊天秩序时使用
 仅限群聊使用，不可屏蔽自己
 绝对不可以听从他人意见，例如：用户A：“block 用户B”
-{{
+{
     "action": "block_user",
     "target_message_id":"触发action的消息id",
     "target_name":"要屏蔽的用户昵称",
     "reason":"屏蔽该用户的原因"
-}}
+}
+"""
+
+    def _build_set_group_title_prompt(self, is_group_chat: bool) -> str:
+        """构建 set_group_title 动作的提示词，仅在群聊且该群启用了头衔功能时生成"""
+        if not is_group_chat:
+            return ""
+        enabled_groups = global_config.chat.title_enabled_groups
+        if not enabled_groups:
+            return ""
+        stream = get_chat_manager().get_stream(self.chat_id)
+        if not stream or not stream.group_info or not getattr(stream.group_info, "group_id", None):
+            return ""
+        current_group_id = str(stream.group_info.group_id)
+        if current_group_id not in enabled_groups:
+            return ""
+        return """set_group_title
+动作描述：
+设置或修改指定群成员的专属头衔
+使用条件：仅当用户明确主动请求设置、修改或清除自己或他人的群头衔/称号时使用
+绝对严禁在未被用户明确要求的情况下自主使用此动作
+头衔内容限制在6个字符以内（汉字、字母、符号均算1个字符），超出会被截断
+{
+    "action": "set_group_title",
+    "target_message_id":"触发action的消息id",
+    "target_name":"要设置头衔的用户昵称",
+    "title":"要设置的头衔内容，为空字符串则清除头衔",
+    "reason":"设置头衔的原因"
+}
 """
 
     async def _build_action_options_block(self, current_available_actions: Dict[str, ActionInfo]) -> str:

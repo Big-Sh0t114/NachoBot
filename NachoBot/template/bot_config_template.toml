@@ -1,5 +1,5 @@
 [inner]
-version = "6.20.0_bs"
+version = "6.20.1_bs"
 
 #----以下是给开发人员阅读的，如果你只是部署，不需要阅读----
 #如果你想要修改配置文件，请递增version的值
@@ -75,6 +75,7 @@ talk_value_list = [['qq:114514:group', 1.0]] # 按会话设置思考频率
 mentioned_bot_reply = true # 是否启用提及必回复
 max_context_size_group = 50 # 群聊上下文长度
 max_context_size_private = 120 # 私聊上下文长度
+title_enabled_groups = [''] # 启用头衔设置功能的群号列表，仅列表中的群可使用set_group_title动作
 
 [relationship]
 enable_relationship = true # 是否启用关系系统
