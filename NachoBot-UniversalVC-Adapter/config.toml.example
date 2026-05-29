@@ -11,24 +11,50 @@ target_process_name = ""
 
 # System-wide capture device (only used when target_process_name is empty).
 # system_capture_device = "Stereo Mix"
-# system_capture_device = "Voicemeeter Out B1"
 
-# VAD (Voice Activity Detection) settings
-vad_threshold = 500         # RMS threshold - lower = more sensitive
-silence_threshold = 0.8     # Seconds of silence before speech is considered ended
-min_speech_duration = 0.3   # Minimum speech duration in seconds
+# Legacy VAD settings (used as fallback if Silero VAD fails to load)
+vad_threshold = 500
+silence_threshold = 0.8
+min_speech_duration = 0.3
 
 [output]
 # Virtual audio cable output device name.
 #   "CABLE Input"          - VB-Audio Virtual Cable
 #   "VoiceMeeter Input"    - VoiceMeeter
-#   "CABLE Input (VB-Audio Virtual Cable)"  - Full name on some systems
-device_name = "VoiceMeeter Input (VB-Audio VoiceMeeter VAIO)"
+device_name = "CABLE Input"
 sample_rate = 44100
 
 [nachobot]
 host = "localhost"
 port = 8000
+
+# ── DEV: Real-time Audio Pipeline ──────────────────────────────────
+
+[denoise]
+# Real-time denoising via DeepFilterNet (removes noise, game SFX, BGM)
+enabled = true
+
+[vad]
+# Silero VAD (neural-network-based, replaces simple RMS threshold)
+threshold = 0.5
+min_silence_duration = 0.25
+min_speech_duration = 0.3
+
+[speaker]
+# Real-time speaker tracking with voiceprint database
+enabled = true
+similarity_threshold = 0.6
+max_speakers = 8
+db_path = "speaker_db.json"
+
+[local_asr]
+# Local streaming ASR (sherpa-onnx Zipformer Chinese)
+# mode = "local_streaming"  — ultra-low latency, runs locally
+# mode = "remote_api"       — fallback to HTTP ASR API (needs [stt] config)
+mode = "local_streaming"
+num_threads = 2
+
+# ── Prompts ─────────────────────────────────────────────────────────
 
 [prompts]
 replyer_prompt = """{identity}

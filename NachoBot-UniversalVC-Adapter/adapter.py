@@ -1,8 +1,13 @@
 """
-Universal Voice Adapter - Core adapter logic.
+Universal Voice Adapter (DEV) — Core adapter logic.
 
 Bridges audio capture (ProcTap) and audio output (virtual cable) with
 NachoBot Core via ncnk_message Router/WebSocket.
+
+DEV enhancements:
+  - Real-time denoising (DeepFilterNet)
+  - Speaker diarization (WeSpeaker + online clustering)
+  - Streaming ASR (sherpa-onnx)
 """
 
 import asyncio
@@ -17,6 +22,7 @@ from typing import Optional
 from config import AdapterConfig
 from audio_capture import AudioCapture
 from audio_output import AudioOutput
+from audio_pipeline import AudioPipeline
 from tts_handler import TTSHandler
 
 # Add NachoBot path for ncnk_message module
@@ -79,7 +85,7 @@ def _clean_text_for_tts(text: str) -> str:
 class UniversalVCAdapter:
     """
     Core adapter that connects:
-    - AudioCapture (ProcTap) → speech text → NachoBot Core
+    - AudioCapture (ProcTap) → AudioPipeline → speaker text → NachoBot Core
     - NachoBot Core → reply text → TTS → AudioOutput (virtual cable)
     """
 
@@ -90,13 +96,19 @@ class UniversalVCAdapter:
         # Session identifier for this adapter instance
         self._session_id = f"uvc_{int(time.time())}"
 
-        # Initialize Audio Capture
+        # Initialize Audio Pipeline (Denoise → VAD → Speaker → ASR)
+        self.pipeline = AudioPipeline(
+            config=config,
+            logger=logger,
+            on_result=self._on_speech_result,
+            on_speech_start=self._on_speech_start,
+        )
+
+        # Initialize Audio Capture (feeds raw frames to pipeline)
         self.audio_capture = AudioCapture(
             capture_config=config.capture,
-            stt_config=config.stt,
             logger=logger,
-            on_speech_text=self._on_speech_text,
-            on_speech_start=self._on_speech_start,
+            on_frame=self.pipeline.process_frame,
         )
 
         # Initialize Audio Output
@@ -131,15 +143,16 @@ class UniversalVCAdapter:
         # Initialize audio output device
         self.audio_output.initialize()
 
-        # Start audio capture
+        # Start audio capture + pipeline
         loop = asyncio.get_running_loop()
+        self.pipeline.set_loop(loop)
         await self.audio_capture.start(loop)
 
         # Start Router (WebSocket to NachoBot Core)
         if self.router:
             tasks.append(asyncio.create_task(self.router.run()))
 
-        self.logger.info("Universal Voice Adapter is running!")
+        self.logger.info("Universal Voice Adapter (DEV) is running!")
         self.logger.info(f"Session ID: {self._session_id}")
         self.logger.info(f"Platform: universal_vc")
 
@@ -147,7 +160,6 @@ class UniversalVCAdapter:
             if tasks:
                 await asyncio.gather(*tasks)
             else:
-                # If no router, just keep running for capture
                 while True:
                     await asyncio.sleep(1)
         except asyncio.CancelledError:
@@ -172,9 +184,9 @@ class UniversalVCAdapter:
 
         return re.sub(r"\{(\w+)\}", replace, template)
 
-    async def _on_speech_text(self, text: str):
-        """Called when ASR produces recognized text from captured audio."""
-        self.logger.info(f"Speech recognized: {text}")
+    async def _on_speech_result(self, speaker_id: str, speaker_name: str, text: str):
+        """Called when pipeline produces a recognized speech result with speaker info."""
+        self.logger.info(f"[{speaker_name}] ({speaker_id}): {text}")
 
         if not self.router:
             return
@@ -194,7 +206,6 @@ class UniversalVCAdapter:
                 variables = self.config.prompts.variables.copy()
                 if "application_name" not in variables:
                     variables["application_name"] = self.audio_capture.get_application_name()
-
 
                 if self.config.prompts.planner_prompt:
                     p_prompt = self.config.prompts.planner_prompt
@@ -220,8 +231,8 @@ class UniversalVCAdapter:
             time=time.time(),
             user_info=UserInfo(
                 platform="universal_vc",
-                user_id="vc_user",
-                user_nickname="语音用户",
+                user_id=speaker_id,
+                user_nickname=speaker_name,
             ),
             group_info=GroupInfo(
                 platform="universal_vc",

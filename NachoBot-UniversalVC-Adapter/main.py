@@ -4,6 +4,16 @@ import os
 import sys
 from pathlib import Path
 
+# Windows DLL loading conflict mitigation:
+# Force loading of the venv's newer onnxruntime.dll rather than C:\Windows\System32\onnxruntime.dll
+if sys.platform == "win32":
+    try:
+        capi_path = Path(__file__).resolve().parent / ".venv" / "Lib" / "site-packages" / "onnxruntime" / "capi"
+        if capi_path.exists():
+            os.add_dll_directory(str(capi_path))
+    except Exception:
+        pass
+
 sys.path.append(str(Path(__file__).resolve().parent))
 
 from config import load_config
@@ -16,7 +26,7 @@ def setup_logging(level: str = "INFO") -> logging.Logger:
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    return logging.getLogger("UniversalVCAdapter")
+    return logging.getLogger("UniversalVCAdapter-DEV")
 
 
 async def main():
@@ -55,14 +65,31 @@ async def main():
             os.environ["PATH"] += os.pathsep + str(p)
             break
 
+    # ── Download models if needed ──
+    logger.info("Checking ML models...")
+    try:
+        from model_manager import ModelManager
+        models_dir = current_dir / "models"
+        mgr = ModelManager(models_dir=str(models_dir), logger=logger)
+        if not mgr.ensure_all():
+            logger.warning(
+                "Some models could not be downloaded. "
+                "Features may be degraded. Run `python download_models.py` manually."
+            )
+    except Exception as e:
+        logger.warning(f"Model check failed: {e}")
+
     logger.info("=" * 60)
-    logger.info("  NachoBot Universal Voice Adapter")
+    logger.info("  NachoBot Universal Voice Adapter (DEV)")
     logger.info("  Platform: universal_vc")
     logger.info("=" * 60)
     logger.info(f"Target Process: {config.capture.target_process_name or config.capture.target_pid}")
     logger.info(f"Output Device: {config.output.device_name}")
     logger.info(f"NachoBot Core: ws://{config.nachobot.host}:{config.nachobot.port}/ws")
-    logger.info(f"STT Enabled: {config.stt.enabled}")
+    logger.info(f"Denoise: {'ON' if config.denoise.enabled else 'OFF'}")
+    logger.info(f"Speaker Tracking: {'ON' if config.speaker.enabled else 'OFF'}")
+    logger.info(f"ASR Mode: {config.local_asr.mode}")
+    logger.info(f"STT Remote API: {'ON' if config.stt.enabled else 'OFF (fallback)'}")
     logger.info("TTS Handler: GPT-SoVITS (from NachoBot-TTS-Adapter)")
 
     adapter = UniversalVCAdapter(config, logger)
