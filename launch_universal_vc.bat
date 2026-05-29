@@ -33,6 +33,14 @@ cd /d "%UNIVERSALVC_ADAPTER_DIR%"
 uv sync
 if errorlevel 1 echo [WARN] UniversalVC Adapter uv sync failed.
 
+REM ===== download models =====
+echo [MODELS] Checking and downloading required ML models...
+uv run python download_models.py
+if errorlevel 1 (
+    echo [ERROR] Model download failed. The adapter may not work correctly.
+    pause
+)
+
 REM ===== start NachoBot-UniversalVC-Adapter =====
 echo [START] NachoBot-UniversalVC-Adapter ...
 start "NachoBot-UniversalVC-Adapter" cmd /k "cd /d ""%UNIVERSALVC_ADAPTER_DIR%"" && uv run python main.py"

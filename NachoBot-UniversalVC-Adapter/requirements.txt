@@ -14,3 +14,6 @@ requests
 toml
 pydub
 loguru
+sherpa-onnx
+pyrnnoise
+onnxruntime>=1.20
