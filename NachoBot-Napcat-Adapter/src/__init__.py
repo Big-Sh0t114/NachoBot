@@ -14,6 +14,7 @@ class CommandType(Enum):
     DELETE_MSG = "delete_msg"  # 撤回消息
     AI_VOICE_SEND = "send_group_ai_record"  # 发送群AI语音
     MESSAGE_LIKE = "message_like"  # 给消息贴表情
+    SET_GROUP_TITLE = "set_group_special_title"  # 设置群成员头衔
 
     def __str__(self) -> str:
         return self.value

@@ -24,6 +24,8 @@ class SendCommandHandleClass:
                     return cls.handle_ai_voice_send_command(raw_command_data.get("args", {}), group_info)
                 case CommandType.MESSAGE_LIKE.name:
                     return cls.handle_message_like_command(raw_command_data.get("args", {}))
+                case CommandType.SET_GROUP_TITLE.name:
+                    return cls.handle_set_group_title_command(raw_command_data.get("args", {}), group_info)
                 case _:
                     raise RuntimeError(f"未知的命令类型: {command_name}")
         except Exception as e:
@@ -217,5 +219,44 @@ class SendCommandHandleClass:
                 "message_id": message_id,
                 "emoji_id": emoji_id,
                 "set": True,
+            },
+        )
+
+    @staticmethod
+    def handle_set_group_title_command(args: Dict[str, Any], group_info: GroupInfo) -> Tuple[str, Dict[str, Any]]:
+        """
+        处理设置群成员头衔命令
+
+        Args:
+            args (Dict[str, Any]): 参数字典
+            group_info (GroupInfo): 群聊信息（对应目标群聊）
+
+        Returns:
+            Tuple[CommandType, Dict[str, Any]]
+        """
+        if not group_info or not group_info.group_id:
+            raise ValueError("设置头衔命令必须在群聊上下文中使用")
+        if not args:
+            raise ValueError("设置头衔命令缺少参数")
+
+        group_id: int = int(group_info.group_id)
+        user_id: int = int(args.get("qq_id", 0))
+        title: str = str(args.get("title", ""))
+
+        if group_id <= 0:
+            raise ValueError("群组ID无效")
+        if user_id <= 0:
+            raise ValueError("用户ID无效")
+
+        # 头衔长度限制：6个字符
+        if len(title) > 6:
+            title = title[:6]
+
+        return (
+            CommandType.SET_GROUP_TITLE.value,
+            {
+                "group_id": group_id,
+                "user_id": user_id,
+                "special_title": title,
             },
         )
