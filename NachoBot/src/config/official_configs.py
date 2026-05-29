@@ -40,6 +40,7 @@ class BotConfig(ConfigBase):
     """是否启用LLM自主屏蔽用户功能（群聊中屏蔽垃圾/骚扰信息发送者）"""
 
 
+
 @dataclass
 class PersonalityConfig(ConfigBase):
     """人格配置类"""
@@ -108,6 +109,9 @@ class ChatConfig(ConfigBase):
 
     mentioned_bot_reply: bool = True
     """是否启用提及必回复"""
+
+    title_enabled_groups: list[str] = field(default_factory=lambda: [])
+    """启用头衔设置功能的群号列表，仅列表中的群可使用 set_group_title 动作"""
 
     at_bot_inevitable_reply: float = 1
     """@bot 必然回复，1为100%回复，0为不额外增幅"""
