@@ -301,6 +301,8 @@ const SetupModule = (() => {
     function updateFormVisibility() {
         document.getElementById('setup-tts-section').style.display =
             selectedComponents.includes('tts') ? '' : 'none';
+        document.getElementById('setup-universalvc-section').style.display =
+            selectedComponents.includes('universalvc') ? '' : 'none';
     }
 
     // -- Provider rows --
@@ -504,6 +506,12 @@ const SetupModule = (() => {
             tts: {
                 engine: document.getElementById('setup-tts-engine')?.value || 'GPT_Sovits',
             },
+            universalvc: {
+                target_process_name: document.getElementById('setup-uvc-process')?.value.trim() || '',
+                output_device: document.getElementById('setup-uvc-output-device')?.value.trim() || '',
+                denoise_enabled: document.getElementById('setup-uvc-denoise')?.checked ?? true,
+                speaker_enabled: document.getElementById('setup-uvc-speaker')?.checked ?? true,
+            },
             env: {},
         };
     }
@@ -564,12 +572,13 @@ const SetupModule = (() => {
             if (engine === 'GPT_Sovits') checks.push('sovits');
             else if (engine === 'Vox') checks.push('voxcpm');
         }
+        if (selectedComponents.includes('universalvc')) checks.push('vb_cable');
         return checks;
     }
 
     function updatePathCheckVisibility() {
         const checks = getRequiredChecks();
-        const allTypes = ['napcat', 'nodejs', 'bilibili_dll', 'sovits', 'voxcpm'];
+        const allTypes = ['napcat', 'nodejs', 'bilibili_dll', 'sovits', 'voxcpm', 'vb_cable'];
         // Map type to card ID
         const cardMap = {
             napcat: 'path-check-napcat',
@@ -577,6 +586,7 @@ const SetupModule = (() => {
             bilibili_dll: 'path-check-bilibili',
             sovits: 'path-check-sovits',
             voxcpm: 'path-check-voxcpm',
+            vb_cable: 'path-check-vb-cable',
         };
         allTypes.forEach(t => {
             const card = document.getElementById(cardMap[t]);

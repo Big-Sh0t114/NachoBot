@@ -34,6 +34,7 @@ TEMPLATE_MAP: dict[str, str] = {
     "NachoBot-TTS-Adapter/template_configs/base_template.toml":       "NachoBot-TTS-Adapter/configs/base.toml",
     "NachoBot-TTS-Adapter/template_configs/gpt-sovits_template.toml": "NachoBot-TTS-Adapter/configs/gpt-sovits.toml",
     "NachoBot-TTS-Adapter/template_configs/vox_template.toml":        "NachoBot-TTS-Adapter/configs/vox.toml",
+    "NachoBot-UniversalVC-Adapter/template/config_template.toml":     "NachoBot-UniversalVC-Adapter/config.toml",
 }
 
 
@@ -694,6 +695,28 @@ class ConfigInitializer:
                 doc["enabled_tts"]["enabled"] = [engine]
                 changed = True
 
+        # -- UniversalVC adapter config.toml --
+        if "NachoBot-UniversalVC-Adapter" in target_rel and filename == "config.toml":
+            uvc = wizard_data.get("universalvc", {})
+            target_process = uvc.get("target_process_name", "")
+            output_device = uvc.get("output_device", "")
+            denoise_enabled = uvc.get("denoise_enabled", True)
+            speaker_enabled = uvc.get("speaker_enabled", True)
+
+            if "capture" in doc:
+                if target_process:
+                    doc["capture"]["target_process_name"] = target_process
+                changed = True
+            if "output" in doc and output_device:
+                doc["output"]["device_name"] = output_device
+                changed = True
+            if "denoise" in doc:
+                doc["denoise"]["enabled"] = denoise_enabled
+                changed = True
+            if "speaker" in doc:
+                doc["speaker"]["enabled"] = speaker_enabled
+                changed = True
+
         if changed:
             try:
                 target_path.write_text(tomlkit.dumps(doc), encoding="utf-8")
@@ -743,6 +766,12 @@ class PathVerifier:
             "download_url": "https://www.live2d.com/sdk/download/native/",
             "default_rel": None,
         },
+        "vb_cable": {
+            "name": "VB-Audio Virtual Cable",
+            "hint": "VB-Audio Virtual Cable 安装目录（包含 VBCABLE_Setup_x64.exe）",
+            "download_url": "https://vb-audio.com/Cable/",
+            "default_rel": None,
+        },
     }
 
     @staticmethod
@@ -783,6 +812,8 @@ class PathVerifier:
             return PathVerifier._check_sovits(p, download_url)
         elif check_type == "voxcpm":
             return PathVerifier._check_voxcpm(p, download_url)
+        elif check_type == "vb_cable":
+            return PathVerifier._check_vb_cable(p, download_url)
 
         return {"valid": False, "message": "未知检查类型", "download_url": download_url}
 
@@ -859,6 +890,26 @@ class PathVerifier:
         return {
             "valid": False,
             "message": "❌ 未找到 NachoBot-Bilibili-Adapter/Live2DCubismCore.dll",
+            "download_url": download_url,
+        }
+
+    @staticmethod
+    def _check_vb_cable(p: Path, download_url: str) -> dict:
+        """Verify VB-Audio Virtual Cable installation directory."""
+        # Check for the setup executable (main indicator)
+        setup_x64 = p / "VBCABLE_Setup_x64.exe"
+        setup_x86 = p / "VBCABLE_Setup.exe"
+        # Also accept the driver file directly
+        driver_cat = p / "vbaudio_cable64_win10.cat"
+        if setup_x64.exists() or setup_x86.exists() or driver_cat.exists():
+            return {"valid": True, "message": f"✅ VB-Audio Virtual Cable 已找到: {p}"}
+        # Fuzzy check: look for any VB-Audio related exe or sys file
+        vb_files = list(p.glob("VBCABLE*")) + list(p.glob("vbaudio*"))
+        if vb_files:
+            return {"valid": True, "message": f"✅ VB-Audio Virtual Cable 已找到: {p}"}
+        return {
+            "valid": False,
+            "message": f"❌ 未找到 VB-Audio Virtual Cable 安装文件: {p}",
             "download_url": download_url,
         }
 
