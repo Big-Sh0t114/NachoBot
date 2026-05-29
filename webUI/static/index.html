@@ -515,6 +515,36 @@
                                     </select>
                                 </div>
                             </div>
+
+                            <div class="form-section" id="setup-universalvc-section" style="display:none">
+                                <div class="form-section-title">🎤 全局语音适配器</div>
+                                <p class="form-section-hint">配置 UniversalVC 音频捕获与输出参数。部署后可在「配置编辑」中进一步调整 VAD、ASR 等高级选项</p>
+                                <div class="form-row">
+                                    <label class="form-label">目标应用进程名</label>
+                                    <input type="text" class="form-input" id="setup-uvc-process"
+                                        placeholder="例如: VRChat.exe（留空则捕获系统全局音频）">
+                                </div>
+                                <div class="form-row">
+                                    <label class="form-label">音频输出设备</label>
+                                    <input type="text" class="form-input" id="setup-uvc-output-device"
+                                        placeholder="例如: CABLE Input 或 VoiceMeeter Input">
+                                    <span class="form-row-tag">虚拟声卡</span>
+                                </div>
+                                <div class="form-row">
+                                    <label class="form-label" style="flex: none; width: auto; margin-right: 12px;">
+                                        <input type="checkbox" id="setup-uvc-denoise" checked>
+                                        启用降噪 (DeepFilterNet)
+                                    </label>
+                                    <span class="form-row-tag">推荐</span>
+                                </div>
+                                <div class="form-row">
+                                    <label class="form-label" style="flex: none; width: auto; margin-right: 12px;">
+                                        <input type="checkbox" id="setup-uvc-speaker" checked>
+                                        启用说话人追踪
+                                    </label>
+                                    <span class="form-row-tag">推荐</span>
+                                </div>
+                            </div>
                         </div>
                     </div>
                     <div class="setup-nav">
@@ -639,6 +669,29 @@
                                     <a class="btn-download" id="dl-voxcpm"
                                         href="https://github.com/openbmb/VoxCPM/releases" target="_blank"
                                         style="display:none">📥 前往下载 VoxCPM</a>
+                                </div>
+                            </div>
+
+                            <!-- VB-Audio Virtual Cable (universalvc) -->
+                            <div class="path-check-card" id="path-check-vb-cable" data-type="vb_cable" style="display:none">
+                                <div class="path-check-header">
+                                    <span class="path-check-icon">🎤</span>
+                                    <div class="path-check-info">
+                                        <span class="path-check-name">VB-Audio Virtual Cable</span>
+                                        <span class="path-check-hint">UniversalVC 适配器需要虚拟声卡将 TTS 音频输出到目标应用</span>
+                                    </div>
+                                    <span class="path-check-status" id="status-vb_cable"></span>
+                                </div>
+                                <div class="path-check-body">
+                                    <div class="form-input-group">
+                                        <input type="text" class="form-input path-check-input" id="path-vb_cable"
+                                            placeholder="例如: C:\Program Files\VB\CABLE">
+                                        <button class="btn btn-outline btn-sm btn-verify" data-type="vb_cable">验证</button>
+                                    </div>
+                                    <div class="path-check-result" id="result-vb_cable"></div>
+                                    <a class="btn-download" id="dl-vb_cable"
+                                        href="https://vb-audio.com/Cable/" target="_blank"
+                                        style="display:none">📥 前往下载 VB-Audio Virtual Cable</a>
                                 </div>
                             </div>
 
