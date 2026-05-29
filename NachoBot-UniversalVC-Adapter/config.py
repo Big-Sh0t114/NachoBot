@@ -11,9 +11,9 @@ class AudioCaptureConfig:
     target_pid: Optional[int] = None         # Explicit PID (takes precedence)
     target_process_name: str = ""            # Process name (e.g. "VRChat.exe")
     system_capture_device: str = ""          # Input device for system-wide capture (when no target process)
-    vad_threshold: int = 500                 # RMS threshold for Voice Activity Detection
-    silence_threshold: float = 0.8           # Seconds of silence to mark end of speech
-    min_speech_duration: float = 0.3         # Minimum duration to consider as valid speech
+    vad_threshold: int = 500                 # RMS threshold for Voice Activity Detection (legacy fallback)
+    silence_threshold: float = 0.8           # Seconds of silence to mark end of speech (legacy fallback)
+    min_speech_duration: float = 0.3         # Minimum duration to consider as valid speech (legacy fallback)
 
 
 
@@ -46,12 +46,52 @@ class PromptsConfig:
 
 
 @dataclass
+class DenoiseConfig:
+    """Real-time audio denoising settings (DeepFilterNet)."""
+    enabled: bool = True
+
+
+@dataclass
+class VADConfig:
+    """Silero VAD settings (replaces simple RMS threshold)."""
+    model_path: str = "models/silero_vad.onnx"
+    threshold: float = 0.5
+    min_silence_duration: float = 0.25   # seconds of silence to mark end of speech
+    min_speech_duration: float = 0.3     # minimum duration to consider as valid speech
+
+
+@dataclass
+class SpeakerConfig:
+    """Real-time speaker tracking settings."""
+    enabled: bool = True
+    embedding_model_path: str = "models/wespeaker_resnet34.onnx"
+    similarity_threshold: float = 0.6   # cosine similarity threshold
+    max_speakers: int = 8               # max distinct speakers to track
+    db_path: str = "speaker_db.json"    # voiceprint database path
+
+
+@dataclass
+class LocalASRConfig:
+    """Local streaming ASR settings (sherpa-onnx)."""
+    mode: str = "local_streaming"        # "local_streaming" | "remote_api"
+    tokens_path: str = "models/tokens.txt"
+    encoder_path: str = "models/encoder-epoch-99-avg-1.onnx"
+    decoder_path: str = "models/decoder-epoch-99-avg-1.onnx"
+    joiner_path: str = "models/joiner-epoch-99-avg-1.onnx"
+    num_threads: int = 2
+
+
+@dataclass
 class AdapterConfig:
     capture: AudioCaptureConfig
     output: AudioOutputConfig
     nachobot: NachoBotConfig
     stt: STTConfig
     prompts: PromptsConfig
+    denoise: DenoiseConfig
+    vad: VADConfig
+    speaker: SpeakerConfig
+    local_asr: LocalASRConfig
     log_level: str = "INFO"
     disable_network_search: bool = False
 
@@ -178,12 +218,35 @@ def load_config(path: Path) -> AdapterConfig:
             stt_config.model = local_stt_data["model"]
         stt_config.enabled = True
 
+    # New pipeline config sections
+    denoise_data = data.get("denoise", {})
+    vad_data = data.get("vad", {})
+    speaker_data = data.get("speaker", {})
+    local_asr_data = data.get("local_asr", {})
+
+    # Resolve model paths relative to config file directory
+    config_dir = path.parent
+    for cfg_dict, path_keys in [
+        (vad_data, ["model_path"]),
+        (speaker_data, ["embedding_model_path", "db_path"]),
+        (local_asr_data, ["tokens_path", "encoder_path", "decoder_path", "joiner_path"]),
+    ]:
+        for key in path_keys:
+            if key in cfg_dict:
+                p = Path(cfg_dict[key])
+                if not p.is_absolute():
+                    cfg_dict[key] = str(config_dir / p)
+
     return AdapterConfig(
         capture=AudioCaptureConfig(**capture_data),
         output=AudioOutputConfig(**output_data),
         nachobot=NachoBotConfig(**nachobot_data),
         stt=stt_config,
         prompts=PromptsConfig(**prompts_data),
+        denoise=DenoiseConfig(**denoise_data),
+        vad=VADConfig(**vad_data),
+        speaker=SpeakerConfig(**speaker_data),
+        local_asr=LocalASRConfig(**local_asr_data),
         log_level=data.get("log_level", "INFO"),
         disable_network_search=data.get("disable_network_search", False),
     )

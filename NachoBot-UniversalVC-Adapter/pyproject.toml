@@ -1,7 +1,7 @@
 [project]
-name = "nachobot-universalvc-adapter"
-version = "0.1.0"
-description = "NachoBot Universal Voice Channel Adapter - ProcTap + Virtual Audio Cable"
+name = "nachobot-universalvc-adapter-dev"
+version = "0.2.0"
+description = "NachoBot Universal Voice Channel Adapter (DEV) - Real-time Denoise + Speaker Diarization + Streaming ASR"
 requires-python = ">=3.10"
 dependencies = [
     "proc-tap",
@@ -20,4 +20,7 @@ dependencies = [
     "toml",
     "pydub",
     "loguru",
+    "sherpa-onnx",
+    "pyrnnoise",
+    "onnxruntime>=1.20",
 ]
