@@ -1483,6 +1483,7 @@ class BilibiliAdapter:
                     "num": num,
                     "level": guard_level,
                     "room_id": room_id,
+                    "price": price,
                 },
                 ensure_ascii=True,
             ),

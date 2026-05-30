@@ -160,6 +160,12 @@ class TelemetryHeartBeatTask(AsyncTask):
         if self.info_dict is None:
             self.info_dict = self._get_sys_info()
 
+        # 添加实时状态标记
+        self.info_dict["core_start"] = True
+        # 修复：因为 local_storage 类似于 dict 但并非所有字典方法都可用（比如上文作者提到了这点），
+        # 安全起见用 in 判断
+        self.info_dict["deploy_success"] = True if "deploy_success" in local_storage else False
+
         # 兜底：如果没有部署时间，强行加上，防止后续请求 UUID 失败
         import time
         if "deploy_time" not in local_storage:

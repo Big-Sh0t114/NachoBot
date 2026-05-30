@@ -140,6 +140,9 @@ class S4UMessageProcessor:
 
         await self.storage.store_message(message, chat)
 
+        # 处理SC/上舰的打赏金额记录和VIP标记（异步，不阻塞主流程）
+        asyncio.create_task(self._handle_gift_value_tracking(message))
+
         s4u_chat = get_s4u_chat_manager().get_or_create_chat(chat)
 
         # [NEW] Streamer Mode Control Commands
@@ -284,3 +287,64 @@ class S4UMessageProcessor:
 
         except Exception as e:
             logger.error(f"❌ 处理上下文网页更新失败: {e}", exc_info=True)
+
+    async def _handle_gift_value_tracking(self, message: MessageRecv) -> None:
+        """处理SC和上舰事件的打赏金额记录和VIP标记。
+        
+        在消息处理流程中调用，不阻塞主流程。
+        """
+        try:
+            raw = message.raw_message
+            if not raw:
+                return
+            
+            import json as _json
+            if isinstance(raw, str):
+                try:
+                    raw = _json.loads(raw)
+                except Exception:
+                    # 如果不是合法的 JSON 字符串（比如普通聊天文本），直接忽略，不当作打赏事件处理
+                    return
+            
+            if not isinstance(raw, dict):
+                return
+            
+            msg_type = raw.get("type", "")
+            platform = message.message_info.platform or "bilibili.live"
+            user_id = message.message_info.user_info.user_id
+            user_name = message.message_info.user_info.user_nickname
+            
+            # 收集需要更新的平台变体（例如 bilibili 和 bilibili.live）
+            platforms_to_update = {platform}
+            if platform.startswith("bilibili"):
+                from src.common.database.database_model import PersonInfo
+                try:
+                    records = PersonInfo.select().where(
+                        PersonInfo.platform.startswith("bilibili"),
+                        PersonInfo.user_id == str(user_id)
+                    )
+                    for r in records:
+                        if r.platform:
+                            platforms_to_update.add(r.platform)
+                except Exception as e:
+                    logger.debug(f"查找Bilibili平台变体时出错: {e}")
+
+            from src.person_info.person_info import Person
+            price = float(raw.get("price", 0))
+
+            for p in platforms_to_update:
+                person = Person(platform=p, user_id=user_id)
+                if not person.is_known:
+                    person = Person.register_person(
+                        platform=p, user_id=user_id, nickname=user_name
+                    )
+                if person and person.is_known:
+                    if msg_type == "superchat" and price > 0:
+                        person.update_gift_value(price)
+                    elif msg_type == "guard":
+                        if price > 0:
+                            person.update_gift_value(price)
+                        person.set_vip(duration_days=30)
+        
+        except Exception as e:
+            logger.error(f"处理打赏/VIP记录失败: {e}", exc_info=True)

@@ -317,6 +317,11 @@ class HeartFChatting:
                 selected_expressions=selected_expressions,
             )
 
+        from src.manager.local_store_manager import local_storage
+        if "deploy_success" not in local_storage:
+            local_storage["deploy_success"] = True
+            logger.info(f"{self.log_prefix} 核心成功完成一次完整的收发与回复，标记部署成功。")
+
         # 获取 platform，如果不存在则从 chat_stream 获取，如果还是 None 则使用默认值
         platform = action_message.chat_info.platform
         if platform is None:
