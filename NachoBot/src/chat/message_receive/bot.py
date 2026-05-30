@@ -2,6 +2,7 @@ import traceback
 import os
 import re
 import time
+import asyncio
 
 from typing import Dict, Any, Optional
 from ncnk_message import UserInfo, Seg
@@ -585,6 +586,9 @@ class ChatBot:
 
             # 处理消息内容，生成纯文本
             await message.process()
+
+            # 全局监听：处理打赏和VIP事件，保证无论主播模式开关与否都能记录
+            asyncio.create_task(self.s4u_message_processor._handle_gift_value_tracking(message))
 
             # 约定/誓言缓存处理
             promise_cache_hits = promise_cache_manager.handle_message(message)
