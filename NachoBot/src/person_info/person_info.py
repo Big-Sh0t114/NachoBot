@@ -31,8 +31,7 @@ def get_person_id(platform: str, user_id: Union[int, str]) -> str:
     try:
         # 1. 优先查询绑定表
         binding = PersonBinding.get_or_none(
-            PersonBinding.platform == platform,
-            PersonBinding.platform_user_id == user_id_str
+            PersonBinding.platform == platform, PersonBinding.platform_user_id == user_id_str
         )
         if binding:
             return binding.person_id
@@ -63,11 +62,10 @@ def is_person_known(person_id: str = None, user_id: str = None, platform: str = 
         # ── 多平台绑定：person_id 可能是聚合组 ID ──
         try:
             from src.person_info.bind_manager import bind_manager
+
             merged_row = bind_manager._get_merged_row_for_person(person_id)
             if merged_row and merged_row.merged_ids:
-                primary_info = bind_manager._get_primary_info(
-                    [x.strip() for x in merged_row.merged_ids.split(",")]
-                )
+                primary_info = bind_manager._get_primary_info([x.strip() for x in merged_row.merged_ids.split(",")])
                 if primary_info:
                     return primary_info.is_known
         except Exception:
@@ -256,6 +254,7 @@ class Person:
         person.know_since = time.time()
         person.last_know = time.time()
         person.memory_points = []
+        person.vip_expire_time = None
 
         # 同步到数据库
         person.sync_to_database()
@@ -277,6 +276,7 @@ class Person:
             self.know_since = None
             self.last_know = None
             self.memory_points = []
+            self.vip_expire_time = None
             return
 
         self.user_id = ""
@@ -315,6 +315,7 @@ class Person:
         self.know_since = None
         self.last_know: Optional[float] = None
         self.memory_points = []
+        self.vip_expire_time = None
 
         # 从数据库加载数据
         self.load_from_database()
@@ -425,39 +426,6 @@ class Person:
             if memory_point is None:
                 continue
             content = get_memory_content_from_memory(memory_point)
-            if not content:
-                continue
-            category = get_category_from_memory(memory_point) or ""
-
-            content_overlap = calculate_overlap_score(query, content)
-            content_similarity = calculate_string_similarity(query, content)
-            content_score = max(content_overlap, content_similarity)
-
-            category_score = 0.0
-            if category:
-                category_overlap = calculate_overlap_score(query, category)
-                category_similarity = calculate_string_similarity(query, category)
-                category_score = 0.6 * max(category_overlap, category_similarity)
-
-            score = max(content_score, category_score)
-            weight = get_weight_from_memory(memory_point)
-            if math.isfinite(weight) and weight > 0:
-                score *= 1 + min(weight, 5.0) * 0.05
-
-            scored.append((score, category, content))
-
-        scored.sort(key=lambda item: item[0], reverse=True)
-        result = []
-        for score, category, content in scored:
-            if score < min_score:
-                break
-            if category:
-                result.append(f"有关 {category} 的内容：{content}")
-            else:
-                result.append(content)
-            if len(result) >= max_num:
-                break
-        return result
 
     def load_from_database(self):
         """从数据库加载个人信息数据（支持多平台绑定聚合行）"""
@@ -471,15 +439,13 @@ class Person:
                 try:
                     from src.person_info.bind_manager import bind_manager, MERGED_PLATFORM
                     from src.common.database.database_model import PersonBinding
+
                     merged_row = PersonBinding.get_or_none(
-                        PersonBinding.platform == MERGED_PLATFORM,
-                        PersonBinding.person_id == self.person_id
+                        PersonBinding.platform == MERGED_PLATFORM, PersonBinding.person_id == self.person_id
                     )
                     if merged_row and merged_row.merged_ids:
                         # 从成员中找最优的基底信息
-                        record = bind_manager._get_primary_info(
-                            [x.strip() for x in merged_row.merged_ids.split(",")]
-                        )
+                        record = bind_manager._get_primary_info([x.strip() for x in merged_row.merged_ids.split(",")])
                 except Exception as e:
                     logger.debug(f"查找聚合组基底信息时出错: {e}")
 
@@ -491,6 +457,7 @@ class Person:
                 self.person_name = record.person_name or self.nickname
                 self.name_reason = record.name_reason or None
                 self.know_times = record.know_times or 0
+                self.vip_expire_time = record.vip_expire_time or None
 
                 # 处理points字段（JSON格式的列表）
                 if record.memory_points:
@@ -510,6 +477,7 @@ class Person:
                 # ── 多平台绑定：优先使用聚合行的记忆 ──
                 try:
                     from src.person_info.bind_manager import bind_manager
+
                     merged_memory = bind_manager.get_merged_memory_for_person(self.person_id)
                     if merged_memory is not None:
                         self.memory_points = merged_memory
@@ -535,18 +503,19 @@ class Person:
             memory_written_to_merged = False
             try:
                 from src.person_info.bind_manager import bind_manager
-                memory_written_to_merged = bind_manager.update_merged_memory(
-                    self.person_id, self.memory_points
-                )
+
+                memory_written_to_merged = bind_manager.update_merged_memory(self.person_id, self.memory_points)
                 if memory_written_to_merged:
                     logger.debug(f"用户 {self.person_id} 的记忆已写入聚合行")
             except Exception as e:
                 logger.debug(f"更新聚合记忆时出错（不影响正常保存）: {e}")
 
             # 准备数据
-            memory_json = json.dumps(
-                [point for point in self.memory_points if point is not None], ensure_ascii=False
-            ) if self.memory_points else json.dumps([], ensure_ascii=False)
+            memory_json = (
+                json.dumps([point for point in self.memory_points if point is not None], ensure_ascii=False)
+                if self.memory_points
+                else json.dumps([], ensure_ascii=False)
+            )
 
             data = {
                 "person_id": self.person_id,
@@ -559,6 +528,7 @@ class Person:
                 "know_times": self.know_times,
                 "know_since": self.know_since,
                 "last_know": self.last_know,
+                "vip_expire_time": self.vip_expire_time,
             }
 
             # 如果记忆没有写入聚合行，则正常写入 PersonInfo
@@ -587,8 +557,112 @@ class Person:
                     PersonInfo.create(**data)
                     logger.debug(f"已创建用户 {self.person_id} 的信息到数据库")
 
+            # ── 多平台绑定：同步 VIP 状态到绑定组的所有成员 ──
+            try:
+                from src.person_info.bind_manager import bind_manager
+
+                merged_row = bind_manager._get_merged_row_for_person(self.person_id)
+                if merged_row and merged_row.merged_ids:
+                    member_ids = [x.strip() for x in merged_row.merged_ids.split(",")]
+                    for mid in member_ids:
+                        if mid == self.person_id:
+                            continue
+                        member_record = PersonInfo.get_or_none(PersonInfo.person_id == mid)
+                        if member_record and member_record.vip_expire_time != self.vip_expire_time:
+                            member_record.vip_expire_time = self.vip_expire_time
+                            member_record.save()
+                    logger.debug(f"已同步 VIP 状态到绑定组 ({len(member_ids)} 个成员)")
+            except Exception as e:
+                logger.debug(f"同步 VIP 状态到绑定组时出错（不影响正常保存）: {e}")
+
         except Exception as e:
             logger.error(f"同步用户 {self.person_id} 信息到数据库时出错: {e}")
+
+    def is_vip(self) -> bool:
+        """检查用户是否为有效VIP（大航海未过期）"""
+        if not self.vip_expire_time:
+            return False
+        return time.time() < self.vip_expire_time
+
+    def set_vip(self, duration_days: int = 31) -> None:
+        """设置用户为VIP，开始倒计时。如果已是VIP则重置倒计时。
+
+        Args:
+            duration_days: VIP有效期天数，默认30天
+        """
+        self.vip_expire_time = time.time() + duration_days * 24 * 3600
+        self.sync_to_database()
+        logger.info(
+            f"用户 {self.person_name}({self.person_id}) 已设置VIP，到期时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.vip_expire_time))}"
+        )
+
+    def clear_expired_vip(self) -> bool:
+        """清除已过期的VIP标识。返回是否清除了VIP。"""
+        if self.vip_expire_time and time.time() >= self.vip_expire_time:
+            self.vip_expire_time = None
+            self.sync_to_database()
+            logger.info(f"用户 {self.person_name}({self.person_id}) 的VIP已过期，已清除")
+            return True
+        return False
+
+    def update_gift_value(self, amount_cny: float) -> None:
+        """更新用户的直播打赏累计记忆点（实时更新，非追加）。
+
+        记忆点格式: "直播打赏:累计送出直播打赏价值约{X}元人民币:{weight}"
+
+        Args:
+            amount_cny: 本次打赏金额（人民币元）
+        """
+        if amount_cny <= 0:
+            return
+
+        CATEGORY = "直播打赏"
+
+        # 查找现有的直播打赏记忆点
+        existing_memory = None
+        existing_value = 0.0
+        existing_weight = 1.0
+
+        for memory_point in self.memory_points:
+            if memory_point is None:
+                continue
+            cat = get_category_from_memory(memory_point)
+            if cat == CATEGORY:
+                existing_memory = memory_point
+                existing_weight = get_weight_from_memory(memory_point)
+                # 从记忆内容中解析已有金额
+                content = get_memory_content_from_memory(memory_point)
+                # content 格式: "累计送出直播打赏价值约{X}元人民币"
+                try:
+                    match = re.search(r"约([\d.]+)元", content)
+                    if match:
+                        existing_value = float(match.group(1))
+                except (ValueError, AttributeError):
+                    existing_value = 0.0
+                break
+
+        # 计算新的累计金额
+        new_value = existing_value + amount_cny
+        # 保留两位小数
+        new_value = round(new_value, 2)
+
+        # 删除旧记忆点
+        if existing_memory:
+            try:
+                self.memory_points.remove(existing_memory)
+            except ValueError:
+                pass
+            new_weight = existing_weight + 1.0
+        else:
+            new_weight = 1.0
+
+        # 创建新记忆点
+        new_memory = f"{CATEGORY}:累计送出直播打赏价值约{new_value}元人民币:{new_weight}"
+        self.memory_points.append(new_memory)
+
+        # 同步到数据库
+        self.sync_to_database()
+        logger.info(f"用户 {self.person_name}({self.person_id}) 直播打赏累计更新: {existing_value} -> {new_value} 元")
 
     async def build_relationship(self, chat_content: str = "", info_type="", skip_llm: bool = False):
         if not self.is_known:
@@ -671,9 +745,11 @@ class Person:
         if points_text:
             points_info = f"你还记得有关{self.person_name}的内容：{points_text}"
 
-        if not (nickname_str or points_info):
+        vip_tag = "（该用户是你的大航海成员/VIP）" if self.is_vip() else ""
+
+        if not (nickname_str or points_info or vip_tag):
             return ""
-        relation_info = f"{self.person_name}:{nickname_str}{points_info}"
+        relation_info = f"{self.person_name}:{nickname_str}{vip_tag}{points_info}"
 
         return relation_info
 
@@ -693,10 +769,10 @@ class PersonInfoManager:
                 db.execute_sql("PRAGMA temp_store = memory")  # 临时存储在内存中
                 db.execute_sql("PRAGMA mmap_size = 268435456")  # 256MB内存映射
             db.create_tables([PersonInfo, PersonBinding], safe=True)
-            
+
             # --- 热迁移逻辑：将老用户的单平台账号写入绑定表 ---
             self._migrate_old_bindings()
-            
+
         except Exception as e:
             logger.error(f"数据库连接或 PersonInfo/PersonBinding 表创建失败: {e}")
 
@@ -707,27 +783,25 @@ class PersonInfoManager:
             if PersonBinding.select().count() == 0:
                 logger.info("检测到 PersonBinding 表为空，开始执行旧用户数据热迁移...")
                 migrated_count = 0
-                for person in PersonInfo.select().where(PersonInfo.platform.is_null(False), PersonInfo.user_id.is_null(False)):
+                for person in PersonInfo.select().where(
+                    PersonInfo.platform.is_null(False), PersonInfo.user_id.is_null(False)
+                ):
                     # 忽略无效数据
                     if not person.platform or not person.user_id:
                         continue
-                    
+
                     # 如果带有 '-'，处理一下 platform 逻辑以保持与 get_person_id 一致
                     plat = person.platform.split("-")[1] if "-" in person.platform else person.platform
                     uid_str = str(person.user_id)
-                    
+
                     # 插入绑定表
                     try:
-                        PersonBinding.create(
-                            person_id=person.person_id,
-                            platform=plat,
-                            platform_user_id=uid_str
-                        )
+                        PersonBinding.create(person_id=person.person_id, platform=plat, platform_user_id=uid_str)
                         migrated_count += 1
                     except Exception as e:
                         # 可能是重复数据导致 unique 约束报错，忽略即可
                         logger.debug(f"迁移用户 {person.person_id} 时跳过: {e}")
-                
+
                 logger.info(f"旧用户数据热迁移完成，共迁移 {migrated_count} 条记录。")
         except Exception as e:
             logger.error(f"执行旧用户数据热迁移时出错: {e}")

@@ -292,6 +292,7 @@ class PersonInfo(BaseModel):
     know_times = FloatField(null=True)  # 认识时间 (时间戳)
     know_since = FloatField(null=True)  # 首次印象总结时间
     last_know = FloatField(null=True)  # 最后一次印象总结时间
+    vip_expire_time = FloatField(null=True)  # VIP（大航海）到期时间戳，None/0表示非VIP
 
     class Meta:
         # database = db # 继承自 BaseModel
