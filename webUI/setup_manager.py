@@ -26,15 +26,15 @@ MAX_BACKUPS_PER_FILE = 5
 # ---------------------------------------------------------------------------
 
 TEMPLATE_MAP: dict[str, str] = {
-    "NachoBot/template/bot_config_template.toml":        "NachoBot/config/bot_config.toml",
-    "NachoBot/template/model_config_template.toml":      "NachoBot/config/model_config.toml",
-    "NachoBot/template/topics_config_template.toml":     "NachoBot/config/topics_config.toml",
-    "NachoBot/template/template.env":                    "NachoBot/.env",
+    "NachoBot/template/bot_config_template.toml": "NachoBot/config/bot_config.toml",
+    "NachoBot/template/model_config_template.toml": "NachoBot/config/model_config.toml",
+    "NachoBot/template/topics_config_template.toml": "NachoBot/config/topics_config.toml",
+    "NachoBot/template/template.env": "NachoBot/.env",
     "NachoBot-Napcat-Adapter/template/template_config.toml": "NachoBot-Napcat-Adapter/config.toml",
-    "NachoBot-TTS-Adapter/template_configs/base_template.toml":       "NachoBot-TTS-Adapter/configs/base.toml",
+    "NachoBot-TTS-Adapter/template_configs/base_template.toml": "NachoBot-TTS-Adapter/configs/base.toml",
     "NachoBot-TTS-Adapter/template_configs/gpt-sovits_template.toml": "NachoBot-TTS-Adapter/configs/gpt-sovits.toml",
-    "NachoBot-TTS-Adapter/template_configs/vox_template.toml":        "NachoBot-TTS-Adapter/configs/vox.toml",
-    "NachoBot-UniversalVC-Adapter/template/config_template.toml":     "NachoBot-UniversalVC-Adapter/config.toml",
+    "NachoBot-TTS-Adapter/template_configs/vox_template.toml": "NachoBot-TTS-Adapter/configs/vox.toml",
+    "NachoBot-UniversalVC-Adapter/template/config_template.toml": "NachoBot-UniversalVC-Adapter/config.toml",
 }
 
 
@@ -43,13 +43,13 @@ TEMPLATE_MAP: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 KNOWN_PORTS: dict[str, int] = {
-    "NachoBot Core":       8000,
-    "Napcat Adapter":      8095,
-    "TTS Adapter":         8070,
-    "TTS Engine":          9880,
-    "Perception API":      9874,
-    "Koishi":              5140,
-    "WebUI":               8088,
+    "NachoBot Core": 8000,
+    "Napcat Adapter": 8095,
+    "TTS Adapter": 8070,
+    "TTS Engine": 9880,
+    "Perception API": 9874,
+    "Koishi": 5140,
+    "WebUI": 8088,
 }
 
 
@@ -82,7 +82,9 @@ class EnvironmentChecker:
         try:
             out = subprocess.run(
                 ["python", "--version"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             if out.returncode == 0:
                 version_str = out.stdout.strip() or out.stderr.strip()
@@ -101,7 +103,9 @@ class EnvironmentChecker:
         try:
             out = subprocess.run(
                 ["uv", "--version"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             if out.returncode == 0:
                 result["uv"] = out.stdout.strip()
@@ -127,7 +131,9 @@ class EnvironmentChecker:
         try:
             out = subprocess.run(
                 ["node", "--version"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             if out.returncode == 0:
                 result["node"] = out.stdout.strip()
@@ -137,7 +143,9 @@ class EnvironmentChecker:
         try:
             out = subprocess.run(
                 ["npm", "--version"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             if out.returncode == 0:
                 result["npm"] = f"npm {out.stdout.strip()}"
@@ -164,7 +172,9 @@ class EnvironmentChecker:
         try:
             out = subprocess.run(
                 ["docker", "--version"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             if out.returncode == 0:
                 result["docker"] = out.stdout.strip()
@@ -174,7 +184,9 @@ class EnvironmentChecker:
         try:
             out = subprocess.run(
                 ["docker", "compose", "version"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             if out.returncode == 0:
                 result["compose"] = out.stdout.strip()
@@ -199,10 +211,12 @@ class EnvironmentChecker:
         # Dynamically retrieve current WebUI port
         try:
             from webui_config import webui_config
+
             webui_port = webui_config.port
         except Exception:
             try:
                 from .webui_config import webui_config
+
                 webui_port = webui_config.port
             except Exception:
                 webui_port = 8088
@@ -211,7 +225,13 @@ class EnvironmentChecker:
         for name, port in KNOWN_PORTS.items():
             if name == "WebUI":
                 port = webui_port
-            entry = {"name": name, "port": port, "status": "ok", "message": "", "pid": None}
+            entry = {
+                "name": name,
+                "port": port,
+                "status": "ok",
+                "message": "",
+                "pid": None,
+            }
             try:
                 with socket.create_connection(("127.0.0.1", port), timeout=1):
                     # Port is in use
@@ -220,25 +240,34 @@ class EnvironmentChecker:
                     # Try to find PID
                     try:
                         import psutil
-                        for conn in psutil.net_connections(kind='inet'):
-                            if conn.laddr.port == port and conn.status == 'LISTEN':
+
+                        for conn in psutil.net_connections(kind="inet"):
+                            if conn.laddr.port == port and conn.status == "LISTEN":
                                 entry["pid"] = conn.pid
                                 if conn.pid == os.getpid():
                                     entry["status"] = "ok"
-                                    entry["message"] = f"端口 {port} 由当前 WebUI 占用 (正常)"
+                                    entry["message"] = (
+                                        f"端口 {port} 由当前 WebUI 占用 (正常)"
+                                    )
                                 else:
                                     try:
                                         proc = psutil.Process(conn.pid)
-                                        entry["message"] = f"端口 {port} 被 {proc.name()} (PID:{conn.pid}) 占用"
+                                        entry["message"] = (
+                                            f"端口 {port} 被 {proc.name()} (PID:{conn.pid}) 占用"
+                                        )
                                     except Exception:
-                                        entry["message"] = f"端口 {port} 被占用 (PID:{conn.pid})"
+                                        entry["message"] = (
+                                            f"端口 {port} 被占用 (PID:{conn.pid})"
+                                        )
                                 break
                     except Exception:
                         pass
 
                     # Fallback: if it is the WebUI port and we are running the check,
                     # we are definitely the one listening on it (or it's the current WebUI instance).
-                    if name == "WebUI" and (entry["pid"] is None or entry["pid"] == os.getpid()):
+                    if name == "WebUI" and (
+                        entry["pid"] is None or entry["pid"] == os.getpid()
+                    ):
                         entry["status"] = "ok"
                         entry["message"] = f"端口 {port} 由当前 WebUI 占用 (正常)"
                         if entry["pid"] is None:
@@ -257,14 +286,16 @@ class EnvironmentChecker:
         for tmpl, target in TEMPLATE_MAP.items():
             target_path = ROOT_DIR / target
             tmpl_path = ROOT_DIR / tmpl
-            results.append({
-                "template": tmpl,
-                "target": target,
-                "target_exists": target_path.exists(),
-                "template_exists": tmpl_path.exists(),
-                "filename": Path(target).name,
-                "component": target.split("/")[0],
-            })
+            results.append(
+                {
+                    "template": tmpl,
+                    "target": target,
+                    "target_exists": target_path.exists(),
+                    "template_exists": tmpl_path.exists(),
+                    "filename": Path(target).name,
+                    "component": target.split("/")[0],
+                }
+            )
         return results
 
     @staticmethod
@@ -275,17 +306,28 @@ class EnvironmentChecker:
             "has_gpu": False,
             "gpu_name": None,
             "vram_mb": 0.0,
-            "message": "未检测到可用 NVIDIA 显卡"
+            "message": "未检测到可用 NVIDIA 显卡",
         }
 
         # 1. Try nvidia-smi (reliable for NVIDIA CUDA GPUs)
         try:
             out = subprocess.run(
-                ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=5, shell=True
+                [
+                    "nvidia-smi",
+                    "--query-gpu=name,memory.total",
+                    "--format=csv,noheader,nounits",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                shell=True,
             )
             if out.returncode == 0:
-                lines = [line.strip() for line in out.stdout.strip().split("\n") if line.strip()]
+                lines = [
+                    line.strip()
+                    for line in out.stdout.strip().split("\n")
+                    if line.strip()
+                ]
                 gpus = []
                 for line in lines:
                     parts = line.split(",")
@@ -312,10 +354,17 @@ class EnvironmentChecker:
         try:
             out = subprocess.run(
                 ["wmic", "path", "win32_VideoController", "get", "Name,AdapterRAM"],
-                capture_output=True, text=True, timeout=5, shell=True
+                capture_output=True,
+                text=True,
+                timeout=5,
+                shell=True,
             )
             if out.returncode == 0:
-                lines = [line.strip() for line in out.stdout.strip().split("\n") if line.strip()]
+                lines = [
+                    line.strip()
+                    for line in out.stdout.strip().split("\n")
+                    if line.strip()
+                ]
                 if len(lines) > 1:
                     gpus = []
                     header = lines[0].lower()
@@ -347,7 +396,9 @@ class EnvironmentChecker:
                         if is_nvidia:
                             result["message"] = f"{best_gpu[0]} (显存 {vram_gb:.2f} GB)"
                         else:
-                            result["message"] = f"{best_gpu[0]} (非 NVIDIA 显卡，显存 {vram_gb:.2f} GB)"
+                            result["message"] = (
+                                f"{best_gpu[0]} (非 NVIDIA 显卡，显存 {vram_gb:.2f} GB)"
+                            )
                         return result
         except Exception:
             pass
@@ -383,7 +434,11 @@ class BackupManager:
         # Rotate: keep only MAX_BACKUPS_PER_FILE newest backups for this file
         prefix = f"{safe_name}."
         existing = sorted(
-            [f for f in BACKUP_DIR.iterdir() if f.name.startswith(prefix) and f.name.endswith(".bak")],
+            [
+                f
+                for f in BACKUP_DIR.iterdir()
+                if f.name.startswith(prefix) and f.name.endswith(".bak")
+            ],
             key=lambda p: p.stat().st_mtime,
         )
         while len(existing) > MAX_BACKUPS_PER_FILE:
@@ -488,8 +543,8 @@ class ConfigInitializer:
     # Adapter configs that may need TTS chain patching.
     # Each entry: (config path, has nachobot_server port, has voice.use_tts)
     _TTS_CHAIN_ADAPTERS: list[tuple[str, str, bool]] = [
-        ("NachoBot-Napcat-Adapter/config.toml",   "qq",        True),
-        ("NachoBot-Koishi-Adapter/config.toml",    "discord",   True),
+        ("NachoBot-Napcat-Adapter/config.toml", "qq", True),
+        ("NachoBot-Koishi-Adapter/config.toml", "discord", True),
         # Bilibili connects directly to Core (port 8000), no TTS chain
         # DiscordVC / UniversalVC also connect directly to Core
     ]
@@ -584,9 +639,7 @@ class ConfigInitializer:
             env_data = wizard_data.get("env", {})
             host = env_data.get("host", "127.0.0.1")
             port = env_data.get("port", "8000")
-            target_path.write_text(
-                f"HOST={host}\nPORT={port}\n", encoding="utf-8"
-            )
+            target_path.write_text(f"HOST={host}\nPORT={port}\n", encoding="utf-8")
             return None
 
         # ── TOML files ──
@@ -637,7 +690,9 @@ class ConfigInitializer:
                 for m in user_models:
                     t = tomlkit.table()
                     t.add("model_identifier", m.get("model_identifier", ""))
-                    t.add("name", m.get("model_name", "") or m.get("model_identifier", ""))
+                    t.add(
+                        "name", m.get("model_name", "") or m.get("model_identifier", "")
+                    )
                     t.add("api_provider", m.get("api_provider", ""))
                     t.add("price_in", 0)
                     t.add("price_out", 0)
@@ -654,7 +709,11 @@ class ConfigInitializer:
 
                 # Set all required model groups to use the user's models
                 required_groups = [
-                    "replyer0", "planner", "utils", "utils_small", "tool_use",
+                    "replyer0",
+                    "planner",
+                    "utils",
+                    "utils_small",
+                    "tool_use",
                 ]
                 if model_names and "model_task_config" in doc:
                     for group in required_groups:
@@ -745,7 +804,7 @@ class PathVerifier:
         "sovits": {
             "name": "GPT-SoVITS",
             "hint": "GPT-SoVITS 安装目录（包含 runtime/python.exe）",
-            "download_url": "https://github.com/RVC-Boss/GPT-SoVITS/releases",
+            "download_url": "https://www.yuque.com/baicaigongchang1145haoyuangong/ib3g1e/dkxgpiy9zb96hob4",
             "default_rel": None,
         },
         "voxcpm": {
@@ -784,7 +843,11 @@ class PathVerifier:
         """
         info = PathVerifier.CHECKS.get(check_type)
         if not info:
-            return {"valid": False, "message": f"未知检查类型: {check_type}", "download_url": ""}
+            return {
+                "valid": False,
+                "message": f"未知检查类型: {check_type}",
+                "download_url": "",
+            }
 
         download_url = info["download_url"]
 
@@ -798,13 +861,25 @@ class PathVerifier:
 
         # -- Path-based checks --
         if not path or not path.strip():
-            return {"valid": False, "message": "请输入路径", "download_url": download_url}
+            return {
+                "valid": False,
+                "message": "请输入路径",
+                "download_url": download_url,
+            }
 
         p = Path(path.strip())
         if not p.exists():
-            return {"valid": False, "message": f"路径不存在: {p}", "download_url": download_url}
+            return {
+                "valid": False,
+                "message": f"路径不存在: {p}",
+                "download_url": download_url,
+            }
         if not p.is_dir():
-            return {"valid": False, "message": f"路径不是目录: {p}", "download_url": download_url}
+            return {
+                "valid": False,
+                "message": f"路径不是目录: {p}",
+                "download_url": download_url,
+            }
 
         if check_type == "napcat":
             return PathVerifier._check_napcat(p, download_url)
@@ -867,7 +942,9 @@ class PathVerifier:
         try:
             result = subprocess.run(
                 ["node", "--version"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             if result.returncode == 0:
                 ver = result.stdout.strip()
@@ -976,6 +1053,7 @@ class NapCatConfigurator:
 
         accounts = []
         import re
+
         pattern = re.compile(r"^onebot11_(\d+)\.json$")
         for f in config_dir.iterdir():
             m = pattern.match(f.name)
@@ -1010,7 +1088,11 @@ class NapCatConfigurator:
             try:
                 config_dir.mkdir(parents=True, exist_ok=True)
             except Exception as e:
-                return {"configured": [], "skipped": [], "errors": [f"无法创建配置目录: {e}"]}
+                return {
+                    "configured": [],
+                    "skipped": [],
+                    "errors": [f"无法创建配置目录: {e}"],
+                }
 
         # Determine target files
         target_files: list[Path] = []
@@ -1022,6 +1104,7 @@ class NapCatConfigurator:
         else:
             # Auto-detect: scan for existing onebot11_*.json files
             import re
+
             pattern = re.compile(r"^onebot11_\d+\.json$")
             for f in config_dir.iterdir():
                 if pattern.match(f.name):
@@ -1075,9 +1158,7 @@ class NapCatConfigurator:
         ws_clients = network["websocketClients"]
 
         # Check if NachoBot WS client already exists
-        has_nachobot_ws = any(
-            c.get("url") == "ws://localhost:8095" for c in ws_clients
-        )
+        has_nachobot_ws = any(c.get("url") == "ws://localhost:8095" for c in ws_clients)
         if not has_nachobot_ws:
             ws_clients.append(dict(NapCatConfigurator._WS_CLIENT_ENTRY))
             changed = True
@@ -1088,17 +1169,13 @@ class NapCatConfigurator:
         http_servers = network["httpServers"]
 
         # Check if diary HTTP server already exists (port 9997)
-        has_diary = any(
-            s.get("port") == 9997 for s in http_servers
-        )
+        has_diary = any(s.get("port") == 9997 for s in http_servers)
         if not has_diary:
             http_servers.append(dict(NapCatConfigurator._DIARY_HTTP_ENTRY))
             changed = True
 
         # Check if bilibili video HTTP server already exists (port 9999)
-        has_bilibili = any(
-            s.get("port") == 9999 for s in http_servers
-        )
+        has_bilibili = any(s.get("port") == 9999 for s in http_servers)
         if not has_bilibili:
             http_servers.append(dict(NapCatConfigurator._BILIBILI_HTTP_ENTRY))
             changed = True
@@ -1156,66 +1233,82 @@ class DependencyInstaller:
         tasks = []
 
         # Always install core
-        tasks.append({
-            "id": "core",
-            "type": "uv",
-            "name": "NachoBot Core",
-            "dir": "NachoBot",
-        })
+        tasks.append(
+            {
+                "id": "core",
+                "type": "uv",
+                "name": "NachoBot Core",
+                "dir": "NachoBot",
+            }
+        )
 
         component_set = set(components)
 
         if "qq" in component_set:
-            tasks.append({
-                "id": "qq",
-                "type": "uv",
-                "name": "Napcat Adapter",
-                "dir": "NachoBot-Napcat-Adapter",
-            })
+            tasks.append(
+                {
+                    "id": "qq",
+                    "type": "uv",
+                    "name": "Napcat Adapter",
+                    "dir": "NachoBot-Napcat-Adapter",
+                }
+            )
 
         if "tts" in component_set:
-            tasks.append({
-                "id": "tts",
-                "type": "uv",
-                "name": "TTS Adapter",
-                "dir": "NachoBot-TTS-Adapter",
-            })
+            tasks.append(
+                {
+                    "id": "tts",
+                    "type": "uv",
+                    "name": "TTS Adapter",
+                    "dir": "NachoBot-TTS-Adapter",
+                }
+            )
 
         if "bilibili" in component_set:
-            tasks.append({
-                "id": "bilibili",
-                "type": "uv",
-                "name": "Bilibili Adapter",
-                "dir": "NachoBot-Bilibili-Adapter",
-            })
+            tasks.append(
+                {
+                    "id": "bilibili",
+                    "type": "uv",
+                    "name": "Bilibili Adapter",
+                    "dir": "NachoBot-Bilibili-Adapter",
+                }
+            )
 
         if "discord" in component_set:
-            tasks.append({
-                "id": "discord_koishi",
-                "type": "uv",
-                "name": "Koishi Adapter",
-                "dir": "NachoBot-Koishi-Adapter",
-            })
-            tasks.append({
-                "id": "discord_vc",
-                "type": "uv",
-                "name": "DiscordVC Adapter",
-                "dir": "NachoBot-DiscordVC-Adapter",
-            })
-            tasks.append({
-                "id": "discord_koishi_npm",
-                "type": "npm",
-                "name": "Koishi App (npm)",
-                "dir": "koishi-app",
-            })
+            tasks.append(
+                {
+                    "id": "discord_koishi",
+                    "type": "uv",
+                    "name": "Koishi Adapter",
+                    "dir": "NachoBot-Koishi-Adapter",
+                }
+            )
+            tasks.append(
+                {
+                    "id": "discord_vc",
+                    "type": "uv",
+                    "name": "DiscordVC Adapter",
+                    "dir": "NachoBot-DiscordVC-Adapter",
+                }
+            )
+            tasks.append(
+                {
+                    "id": "discord_koishi_npm",
+                    "type": "npm",
+                    "name": "Koishi App (npm)",
+                    "dir": "koishi-app",
+                }
+            )
 
         if "universalvc" in component_set:
-            tasks.append({
-                "id": "universalvc",
-                "type": "uv",
-                "name": "UniversalVC Adapter",
-                "dir": "NachoBot-UniversalVC-Adapter",
-            })
+            tasks.append(
+                {
+                    "id": "universalvc",
+                    "type": "uv",
+                    "name": "UniversalVC Adapter",
+                    "dir": "NachoBot-UniversalVC-Adapter",
+                }
+            )
 
         return tasks
 
@@ -1255,7 +1348,10 @@ class DependencyInstaller:
 
         try:
             proc = await asyncio.create_subprocess_exec(
-                "uv", "sync", "--python", ">=3.11,<=3.13",
+                "uv",
+                "sync",
+                "--python",
+                ">=3.11,<=3.13",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=str(project_dir),
@@ -1279,7 +1375,10 @@ class DependencyInstaller:
             if proc.returncode == 0:
                 return {"status": "ok", "message": "依赖安装完成"}
             else:
-                return {"status": "error", "message": f"uv sync 退出码: {proc.returncode}"}
+                return {
+                    "status": "error",
+                    "message": f"uv sync 退出码: {proc.returncode}",
+                }
         except FileNotFoundError:
             return {"status": "error", "message": "uv 未安装，请先安装 uv"}
         except Exception as e:
@@ -1297,7 +1396,10 @@ class DependencyInstaller:
 
         try:
             proc = await asyncio.create_subprocess_exec(
-                "cmd", "/c", "npm", "install",
+                "cmd",
+                "/c",
+                "npm",
+                "install",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=str(project_dir),
@@ -1321,7 +1423,10 @@ class DependencyInstaller:
             if proc.returncode == 0:
                 return {"status": "ok", "message": "npm install 完成"}
             else:
-                return {"status": "error", "message": f"npm install 退出码: {proc.returncode}"}
+                return {
+                    "status": "error",
+                    "message": f"npm install 退出码: {proc.returncode}",
+                }
         except FileNotFoundError:
             return {"status": "error", "message": "npm 未安装"}
         except Exception as e:

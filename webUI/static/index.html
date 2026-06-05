@@ -147,7 +147,8 @@
             <div class="setup-hint-banner" style="align-items: center; margin-bottom: 24px;">
                 <span class="hint-icon" style="font-size: 1.4rem;">☘</span>
                 <span style="flex: 1; font-size: 0.9rem;">发现更多有趣功能？前往 <strong>麦麦插件商店</strong> 获取海量社区精选插件！</span>
-                <a href="https://plugins.maibot.chat/" target="_blank" rel="noopener noreferrer" class="btn btn-primary" style="text-decoration: none; padding: 8px 18px; border-radius: 20px;">
+                <a href="https://plugins.maibot.chat/" target="_blank" rel="noopener noreferrer" class="btn btn-primary"
+                    style="text-decoration: none; padding: 8px 18px; border-radius: 20px;">
                     探索商店 →
                 </a>
             </div>
@@ -277,11 +278,15 @@
                         <div class="setup-gpu-body" style="padding: 20px;">
                             <div class="gpu-detect-status" style="margin-bottom: 15px; font-size: 0.95rem;">
                                 <strong>当前显卡检测结果：</strong>
-                                <span id="gpu-detect-info" style="color: var(--accent-dark); font-weight: 600;">正在获取硬件信息...</span>
+                                <span id="gpu-detect-info"
+                                    style="color: var(--accent-dark); font-weight: 600;">正在获取硬件信息...</span>
                             </div>
-                            <div class="gpu-recommend-box" style="background: var(--bg-base); border-radius: var(--radius-md); padding: 15px; border: 1px solid var(--border-light); margin-bottom: 15px;">
-                                <div style="font-weight: 600; margin-bottom: 8px; font-size: 0.95rem;">推荐方案：<span id="gpu-recommend-title" style="color: var(--accent-dark);"></span></div>
-                                <div id="gpu-recommend-desc" style="font-size: 0.85rem; color: var(--text-secondary); line-height: 1.5;"></div>
+                            <div class="gpu-recommend-box"
+                                style="background: var(--bg-base); border-radius: var(--radius-md); padding: 15px; border: 1px solid var(--border-light); margin-bottom: 15px;">
+                                <div style="font-weight: 600; margin-bottom: 8px; font-size: 0.95rem;">推荐方案：<span
+                                        id="gpu-recommend-title" style="color: var(--accent-dark);"></span></div>
+                                <div id="gpu-recommend-desc"
+                                    style="font-size: 0.85rem; color: var(--text-secondary); line-height: 1.5;"></div>
                             </div>
                             <div class="gpu-apply-actions" id="gpu-apply-actions" style="display: flex; gap: 10px;">
                                 <!-- Dynamic buttons will be loaded here -->
@@ -387,7 +392,8 @@
                         <div class="setup-form">
                             <div class="form-section">
                                 <div class="form-section-title">QQ 账号配置</div>
-                                <p class="form-section-hint">填写 bot 的 QQ 号和昵称，将自动写入 bot_config.toml。若选择了 QQ 适配器，QQ 号还将用于自动配置 NapCat 连接</p>
+                                <p class="form-section-hint">填写 bot 的 QQ 号和昵称，将自动写入 bot_config.toml。若选择了 QQ 适配器，QQ
+                                    号还将用于自动配置 NapCat 连接</p>
                                 <div class="form-row">
                                     <label class="form-label">QQ 号 <span class="form-required">*</span></label>
                                     <input type="text" class="form-input" id="setup-qq-account"
@@ -518,7 +524,8 @@
 
                             <div class="form-section" id="setup-universalvc-section" style="display:none">
                                 <div class="form-section-title">🎤 全局语音适配器</div>
-                                <p class="form-section-hint">配置 UniversalVC 音频捕获与输出参数。部署后可在「配置编辑」中进一步调整 VAD、ASR 等高级选项</p>
+                                <p class="form-section-hint">配置 UniversalVC 音频捕获与输出参数。部署后可在「配置编辑」中进一步调整 VAD、ASR 等高级选项
+                                </p>
                                 <div class="form-row">
                                     <label class="form-label">目标应用进程名</label>
                                     <input type="text" class="form-input" id="setup-uvc-process"
@@ -644,8 +651,8 @@
                                     </div>
                                     <div class="path-check-result" id="result-sovits"></div>
                                     <a class="btn-download" id="dl-sovits"
-                                        href="https://github.com/RVC-Boss/GPT-SoVITS/releases" target="_blank"
-                                        style="display:none">📥 前往下载 GPT-SoVITS</a>
+                                        href="https://www.yuque.com/baicaigongchang1145haoyuangong/ib3g1e/dkxgpiy9zb96hob4"
+                                        target="_blank" style="display:none">📥 前往下载 GPT-SoVITS</a>
                                 </div>
                             </div>
 
@@ -673,7 +680,8 @@
                             </div>
 
                             <!-- VB-Audio Virtual Cable (universalvc) -->
-                            <div class="path-check-card" id="path-check-vb-cable" data-type="vb_cable" style="display:none">
+                            <div class="path-check-card" id="path-check-vb-cable" data-type="vb_cable"
+                                style="display:none">
                                 <div class="path-check-header">
                                     <span class="path-check-icon">🎤</span>
                                     <div class="path-check-info">
@@ -686,12 +694,12 @@
                                     <div class="form-input-group">
                                         <input type="text" class="form-input path-check-input" id="path-vb_cable"
                                             placeholder="例如: C:\Program Files\VB\CABLE">
-                                        <button class="btn btn-outline btn-sm btn-verify" data-type="vb_cable">验证</button>
+                                        <button class="btn btn-outline btn-sm btn-verify"
+                                            data-type="vb_cable">验证</button>
                                     </div>
                                     <div class="path-check-result" id="result-vb_cable"></div>
-                                    <a class="btn-download" id="dl-vb_cable"
-                                        href="https://vb-audio.com/Cable/" target="_blank"
-                                        style="display:none">📥 前往下载 VB-Audio Virtual Cable</a>
+                                    <a class="btn-download" id="dl-vb_cable" href="https://vb-audio.com/Cable/"
+                                        target="_blank" style="display:none">📥 前往下载 VB-Audio Virtual Cable</a>
                                 </div>
                             </div>
 
@@ -722,7 +730,8 @@
                         </div>
                         <div class="deploy-log" id="deploy-log"></div>
                     </div>
-                    <div class="setup-hint-banner" id="setup-launch-tip" style="display:none; margin-top: 20px; background: rgba(34, 197, 94, 0.1); border-color: rgba(34, 197, 94, 0.2); color: #166534;">
+                    <div class="setup-hint-banner" id="setup-launch-tip"
+                        style="display:none; margin-top: 20px; background: rgba(34, 197, 94, 0.1); border-color: rgba(34, 197, 94, 0.2); color: #166534;">
                         <span class="hint-icon">💡</span>
                         <span>部署成功！根据您的硬件配置，推荐在控制面板启动「<strong id="setup-recommended-group"></strong>」服务组。</span>
                     </div>
