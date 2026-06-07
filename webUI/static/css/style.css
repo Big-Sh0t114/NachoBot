@@ -2263,6 +2263,204 @@ body {
 }
 
 /* ===================================================================
+   Memory Tab (A_Memorix)
+   =================================================================== */
+.memory-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 14px;
+    margin-bottom: 24px;
+}
+
+.memory-stat-card {
+    background: var(--bg-card);
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border-light);
+    box-shadow: var(--shadow-card);
+    padding: 18px 20px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    transition: transform var(--transition), box-shadow var(--transition);
+}
+
+.memory-stat-card:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-md);
+}
+
+.memory-stat-card .stat-icon {
+    font-size: 1.6rem;
+    flex-shrink: 0;
+}
+
+.memory-stat-card .stat-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.memory-stat-card .stat-label {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 600;
+}
+
+.memory-stat-card .stat-value {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* ---- Search ---- */
+.memory-search-section {
+    margin-bottom: 24px;
+}
+
+.memory-search-bar {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 16px;
+}
+
+.memory-search-bar .form-input {
+    flex: 1;
+    padding: 12px 16px;
+    font-size: 0.95rem;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border);
+    background: var(--bg-card);
+    transition: border-color var(--transition), box-shadow var(--transition);
+}
+
+.memory-search-bar .form-input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.12);
+    outline: none;
+}
+
+.memory-search-results {
+    background: var(--bg-card);
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border-light);
+    box-shadow: var(--shadow-card);
+    padding: 16px;
+    min-height: 200px;
+    max-height: calc(100vh - 520px);
+    overflow-y: auto;
+}
+
+.memory-result-card {
+    padding: 14px 16px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border-light);
+    margin-bottom: 10px;
+    transition: background var(--transition), border-color var(--transition);
+}
+
+.memory-result-card:hover {
+    background: var(--accent-bg);
+    border-color: var(--accent-light);
+}
+
+.memory-result-card:last-child {
+    margin-bottom: 0;
+}
+
+.memory-result-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+}
+
+.memory-result-idx {
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: var(--accent);
+    background: var(--accent-bg);
+    padding: 2px 8px;
+    border-radius: 12px;
+}
+
+.memory-score {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    font-family: 'JetBrains Mono', monospace;
+}
+
+.memory-time {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-left: auto;
+}
+
+.memory-result-text {
+    font-size: 0.85rem;
+    color: var(--text-primary);
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.memory-empty, .memory-loading, .memory-error {
+    text-align: center;
+    padding: 40px 20px;
+    color: var(--text-muted);
+    font-size: 0.9rem;
+}
+
+.memory-empty .placeholder-icon {
+    display: block;
+    font-size: 2.5rem;
+    margin-bottom: 12px;
+    opacity: 0.4;
+}
+
+.memory-loading {
+    color: var(--accent);
+    animation: pulse-dot 1.5s ease-in-out infinite;
+}
+
+.memory-error {
+    color: var(--error);
+}
+
+/* ---- Maintenance ---- */
+.memory-maintain-section {
+    background: var(--bg-card);
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border-light);
+    box-shadow: var(--shadow-card);
+    padding: 20px;
+}
+
+.memory-maintain-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 10px;
+}
+
+.memory-maintain-btn {
+    padding: 12px 16px;
+    font-size: 0.85rem;
+    border-radius: var(--radius-md);
+    transition: all var(--transition);
+}
+
+.memory-maintain-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-sm);
+}
+
+/* ===================================================================
    Responsive Adjustments
    =================================================================== */
 @media (max-width: 768px) {

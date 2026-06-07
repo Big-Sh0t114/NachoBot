@@ -12,6 +12,7 @@ from src.common.data_models.info_data_model import ActionPlannerInfo
 from src.common.data_models.message_data_model import ReplyContentType
 from src.chat.message_receive.chat_stream import ChatStream, get_chat_manager
 from src.chat.utils.prompt_builder import global_prompt_manager
+from src.chat.utils.prompt_variables import render_dynamic_prompt_template
 from src.chat.utils.timer_calculator import Timer
 from src.chat.planner_actions.planner import ActionPlanner
 from src.chat.planner_actions.action_modifier import ActionModifier
@@ -470,6 +471,24 @@ class HeartFChatting:
                     promise_block = "\n".join(["[约定缓存]"] + promise_snippets)
                     chat_content_block = f"{promise_block}\n----\n{chat_content_block}"
 
+                bypass_planner = (
+                    (is_group_chat and self.chat_stream.platform == "bilibili")
+                    or self.chat_stream.platform in {"discord_vc", "universal_vc"}
+                )
+
+                # --- A_Memorix: 启发式长期记忆注入 ---
+                if not bypass_planner:
+                    try:
+                        from src.memory_system.heuristic_memory_injector import inject_memory_context
+
+                        chat_content_block = await inject_memory_context(
+                            chat_id=self.stream_id,
+                            chat_content_block=chat_content_block,
+                            messages=message_list_before_now,
+                        )
+                    except Exception as e:
+                        logger.debug(f"{self.log_prefix} 长期记忆注入跳过: {e}")
+
                 prompt_info = await self.action_planner.build_planner_prompt(
                     is_group_chat=is_group_chat,
                     chat_target_info=chat_target_info,
@@ -488,9 +507,7 @@ class HeartFChatting:
 
                 # Bypass planner for Bilibili Live (Group Chat) AND Discord Voice Channel
                 # Both need low latency and simple reply/no-reply logic
-                if (
-                    is_group_chat and self.chat_stream.platform == "bilibili"
-                ) or self.chat_stream.platform in {"discord_vc", "universal_vc"}:
+                if bypass_planner:
                     logger.info(f"{self.log_prefix} [HFC] Bypassing Planner for {self.chat_stream.platform}")
                     # Skip bot's own messages to prevent self-reply loops
                     bot_id = str(global_config.bot.qq_account)
@@ -1796,7 +1813,7 @@ class HeartFChatting:
             logger.debug(f"[两阶段搜索] 获取背景对话失败: {e}")
 
         # 构建 identity
-        identity = global_config.personality.personality
+        identity = render_dynamic_prompt_template(global_config.personality.personality)
 
         # 构建表达习惯块（简化版）
         expression_habits_block = ""
@@ -1805,7 +1822,7 @@ class HeartFChatting:
         keywords_reaction_prompt = ""
 
         # 回复风格
-        reply_style = global_config.personality.reply_style or ""
+        reply_style = render_dynamic_prompt_template(global_config.personality.reply_style or "")
 
         # moderation
         moderation_prompt = ""

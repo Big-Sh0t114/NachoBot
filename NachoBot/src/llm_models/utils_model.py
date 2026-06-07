@@ -332,7 +332,7 @@ class LLMRequest:
                 elif request_type == RequestType.EMBEDDING:
                     assert embedding_input is not None
                     return await client.get_embedding(
-                        model_info=model_info,
+                        model_info,
                         embedding_input=embedding_input,
                         extra_params=model_info.extra_params,
                     )

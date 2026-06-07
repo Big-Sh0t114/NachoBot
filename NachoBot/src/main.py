@@ -55,6 +55,20 @@ class MainSystem:
         """初始化其他组件"""
         init_start_time = time.time()
 
+        # 初始化 A_Memorix 长期记忆子系统
+        try:
+            import src.A_memorix  # 注册兼容垫片
+            from src.A_memorix.host_service import a_memorix_host_service
+            from src.memory_system.api import router as memory_api_router
+
+            self.server.register_router(memory_api_router, prefix="/api/memory")
+            self._a_memorix_host_service = a_memorix_host_service
+            await a_memorix_host_service.start()
+            logger.info("A_Memorix 长期记忆子系统初始化完成")
+        except Exception as e:
+            logger.warning(f"A_Memorix 初始化失败（长期记忆功能不可用）: {e}")
+            self._a_memorix_host_service = None
+
         # 添加在线时间统计任务
         await async_task_manager.add_task(OnlineTimeRecordTask())
 
@@ -137,6 +151,16 @@ class MainSystem:
         except Exception as e:
             logger.error(f"启动大脑和外部世界失败: {e}")
             raise
+
+    async def shutdown(self):
+        """关闭系统组件"""
+        # 关闭 A_Memorix
+        if getattr(self, "_a_memorix_host_service", None):
+            try:
+                await self._a_memorix_host_service.stop()
+                logger.info("A_Memorix 长期记忆子系统已关闭")
+            except Exception as e:
+                logger.error(f"A_Memorix 关闭失败: {e}")
 
     async def schedule_tasks(self):
         """调度定时任务"""

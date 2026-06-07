@@ -13,6 +13,7 @@ from src.config.config import global_config, model_config
 from src.common.logger import get_logger
 from src.common.data_models.info_data_model import ActionPlannerInfo
 from src.chat.utils.prompt_builder import Prompt, global_prompt_manager
+from src.chat.utils.prompt_variables import render_dynamic_prompt_template
 from src.chat.utils.chat_message_builder import (
     build_readable_actions,
     get_actions_by_timestamp_with_chat,
@@ -663,7 +664,7 @@ class BrainPlanner:
             bot_nickname = (
                 f",也有人叫你{','.join(global_config.bot.alias_names)}" if global_config.bot.alias_names else ""
             )
-            prompt_personality = f"{global_config.personality.personality};"
+            prompt_personality = f"{render_dynamic_prompt_template(global_config.personality.personality)};"
             identity = f"你的名字是{bot_name}{bot_nickname}，你{prompt_personality}"
 
             # 其他块

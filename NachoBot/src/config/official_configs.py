@@ -27,6 +27,9 @@ class BotConfig(ConfigBase):
     nickname: str
     """昵称"""
 
+    owner_name: str = ""
+    """主人名，可用于 {owner_name} 动态模板字段"""
+
     alias_names: list[str] = field(default_factory=lambda: [])
     """别名列表"""
     
