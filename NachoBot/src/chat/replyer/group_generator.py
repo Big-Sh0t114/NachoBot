@@ -21,6 +21,7 @@ from src.chat.message_receive.uni_message_sender import UniversalMessageSender
 from src.chat.utils.timer_calculator import Timer  # <--- Import Timer
 from src.chat.utils.utils import get_chat_type_and_target_info
 from src.chat.utils.prompt_builder import global_prompt_manager
+from src.chat.utils.prompt_variables import render_dynamic_prompt_template
 from src.chat.utils.prompt_injection_guard import build_guardrail_instruction, guard_user_content
 from src.chat.utils.url_fetcher import UrlContentFetcher, extract_urls
 from src.chat.utils.web_search import WebSearchManager
@@ -371,10 +372,22 @@ class DefaultReplyer:
         _skip_llm = _platform in {"bilibili", "discord_vc", "universal_vc"}
 
         sender_relation = await person.build_relationship(chat_content, skip_llm=_skip_llm)
+        if sender_relation:
+            sender_relation += ";"
         others_relation = ""
-        for person in person_list:
-            person_relation = await person.build_relationship(skip_llm=_skip_llm)
-            others_relation += person_relation
+        
+        # 收集已处理过的 person_id，避免重复和重复发件人
+        processed_ids = set()
+        if person and hasattr(person, "person_id"):
+            processed_ids.add(person.person_id)
+            
+        for other_person in person_list:
+            if not other_person or not hasattr(other_person, "person_id") or other_person.person_id in processed_ids:
+                continue
+            processed_ids.add(other_person.person_id)
+            person_relation = await other_person.build_relationship(skip_llm=_skip_llm)
+            if person_relation:
+                others_relation += person_relation + ";\n"
 
         # 跨用户记忆检索：检测聊天内容中被提及的其他已知用户
         mentioned_relation = ""
@@ -382,13 +395,6 @@ class DefaultReplyer:
             from src.person_info.person_info import person_info_manager
 
             bot_name = global_config.bot.nickname
-            # 收集已处理过的 person_id，避免重复
-            processed_ids = set()
-            if person and hasattr(person, "person_id"):
-                processed_ids.add(person.person_id)
-            for p in person_list:
-                if hasattr(p, "person_id"):
-                    processed_ids.add(p.person_id)
 
             # 简单分词：按常见分隔符切分聊天内容
             import re as _re
@@ -969,7 +975,7 @@ class DefaultReplyer:
         else:
             bot_nickname = ""
 
-        prompt_personality = f"{global_config.personality.personality};"
+        prompt_personality = f"{render_dynamic_prompt_template(global_config.personality.personality)};"
         return f"你的名字是{bot_name}{bot_nickname}，你{prompt_personality}"
 
     async def build_prompt_reply_context(
@@ -1309,18 +1315,9 @@ class DefaultReplyer:
                 gift_reaction_prompt=global_config.personality.gift_reaction_prompt,
             )
 
-            # [LOGGING] Log Prompt for Bilibili (Live & Comments) and Discord VC
-            should_log = False
-            # 1. Always log for Discord VC and Bilibili Live
-            if chat_stream.platform in ["discord_vc", "universal_vc", "bilibili.live"]:
-                should_log = True
-            # 2. For 'bilibili' (Comments), log if it's a group context (not private)
-            elif chat_stream.platform == "bilibili":
-                if chat_stream.group_info:
-                    should_log = True
-
-            if should_log:
-                logger.info(f"Replyer Prompt: {prompt}")
+            # 群聊 replyer 在这里拿到的是插件修改前的原始 prompt。
+            if is_group_chat:
+                logger.info(f"[Group Replyer Original Prompt]\n{prompt}")
 
             return prompt, selected_expressions
 

@@ -519,7 +519,7 @@ class GeminiClient(BaseClient):
 
         return resp
 
-    async def get_embedding(
+    async def _get_embedding_impl(
         self,
         model_info: ModelInfo,
         embedding_input: str,

@@ -6,9 +6,11 @@ Main entry point: REST API + WebSocket endpoints + static file serving.
 import asyncio
 import json
 import logging
+import socket
 import uvicorn
 from pathlib import Path
 from contextlib import asynccontextmanager
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -20,6 +22,8 @@ from process_manager import ProcessManager
 from plugin_manager import PluginManager
 from db_manager import DatabaseManager
 from knowledge_manager import KnowledgeManager
+from memory_manager import is_available as memory_is_available
+import memory_manager
 from setup_manager import EnvironmentChecker, ConfigInitializer, DependencyInstaller, PathVerifier, NapCatConfigurator
 
 logger = logging.getLogger("webui")
@@ -366,10 +370,22 @@ def _is_core_running() -> bool:
     from process_manager import ServiceStatus
 
     state = process_mgr.states.get("nachobot")
-    return state is not None and state.status in (
+    if state is not None and state.status in (
         ServiceStatus.RUNNING,
         ServiceStatus.STARTING,
-    )
+    ):
+        return True
+
+    try:
+        parsed = urlparse(memory_manager._get_core_base_url())
+        host = parsed.hostname or "127.0.0.1"
+        if parsed.port is None:
+            return False
+        port = parsed.port
+        with socket.create_connection((host, port), timeout=0.3):
+            return True
+    except (OSError, RuntimeError):
+        return False
 
 
 @app.get("/api/knowledge/files")
@@ -428,6 +444,66 @@ async def knowledge_create_file(body: KnowledgeFileCreate):
 @app.get("/api/knowledge/stats")
 async def knowledge_stats():
     return knowledge_mgr.get_stats()
+
+
+# =========================================================================
+# Memory API (A_Memorix)
+# =========================================================================
+
+
+@app.get("/api/memory/status")
+async def memory_status():
+    """Check if A_Memorix is enabled."""
+    return {"enabled": memory_is_available(), "core_running": _is_core_running()}
+
+
+@app.get("/api/memory/stats")
+async def memory_stats():
+    """Get memory store statistics."""
+    try:
+        return await memory_manager.get_stats(core_running=_is_core_running())
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+class MemorySearchRequest(BaseModel):
+    query: str
+    chat_id: str = ""
+    limit: int = 10
+
+
+@app.post("/api/memory/search")
+async def memory_search(body: MemorySearchRequest):
+    """Search long-term memories."""
+    try:
+        return await memory_manager.search_memory(
+            query=body.query,
+            chat_id=body.chat_id,
+            limit=body.limit,
+            core_running=_is_core_running(),
+        )
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+class MemoryMaintainRequest(BaseModel):
+    action: str  # reinforce / protect / restore / freeze
+    target: str = ""
+    reason: str = ""
+
+
+@app.post("/api/memory/maintain")
+async def memory_maintain(body: MemoryMaintainRequest):
+    """Execute a memory maintenance action."""
+    try:
+        return await memory_manager.maintain(
+            action=body.action,
+            target=body.target,
+            reason=body.reason,
+            core_running=_is_core_running(),
+        )
+    except Exception as e:
+        raise HTTPException(500, str(e))
 
 
 # =========================================================================

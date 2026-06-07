@@ -23,6 +23,7 @@ const App = (() => {
         PluginsModule.init();
         DatabaseModule.init();
         KnowledgeModule.init();
+        MemoryModule.init();
         SetupModule.init();
 
         // Start polling status
@@ -47,6 +48,7 @@ const App = (() => {
         if (tab === 'plugins') PluginsModule.refresh();
         if (tab === 'database') DatabaseModule.refresh();
         if (tab === 'knowledge') KnowledgeModule.refresh();
+        if (tab === 'memory') MemoryModule.refresh();
         if (tab === 'setup') SetupModule.refresh();
     }
 

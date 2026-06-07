@@ -8,6 +8,7 @@ from src.common.logger import get_logger
 from src.chat.utils.chat_message_builder import build_readable_messages, get_raw_msg_by_timestamp_with_chat_inclusive
 from src.config.config import global_config, model_config
 from src.chat.utils.prompt_builder import Prompt, global_prompt_manager
+from src.chat.utils.prompt_variables import render_dynamic_prompt_template
 from src.manager.async_task_manager import AsyncTask, async_task_manager
 from src.plugin_system.apis import send_api
 from src.mais4u.s4u_config import s4u_config
@@ -182,7 +183,7 @@ class ChatMood:
         else:
             bot_nickname = ""
 
-        prompt_personality = global_config.personality.personality
+        prompt_personality = render_dynamic_prompt_template(global_config.personality.personality)
         indentify_block = f"你的名字是{bot_name}{bot_nickname}，你{prompt_personality}："
 
         async def _update_text_mood():
@@ -261,7 +262,7 @@ class ChatMood:
         else:
             bot_nickname = ""
 
-        prompt_personality = global_config.personality.personality
+        prompt_personality = render_dynamic_prompt_template(global_config.personality.personality)
         indentify_block = f"你的名字是{bot_name}{bot_nickname}，你{prompt_personality}："
 
         async def _regress_text_mood():

@@ -681,7 +681,7 @@ class Person:
         if chat_content:
             relevant_points = self.get_relevant_memories(chat_content, max_num=2)
             if relevant_points:
-                points_text = "\n".join(relevant_points)
+                points_text = ";\n".join(relevant_points)
             elif not skip_llm:
                 prompt = f"""当前聊天内容：
 {chat_content}
@@ -701,7 +701,7 @@ class Person:
                     for category in category_list:
                         top_memories = self.get_top_memories_by_category(category, 2)
                         if top_memories:
-                            random_memory_str = "\n".join(
+                            random_memory_str = ";\n".join(
                                 [get_memory_content_from_memory(memory) for memory in top_memories]
                             )
                             points_text = f"有关 {category} 的内容：{random_memory_str}"
@@ -709,7 +709,7 @@ class Person:
         elif info_type:
             relevant_points = self.get_relevant_memories(info_type, max_num=3)
             if relevant_points:
-                points_text = "\n".join(relevant_points)
+                points_text = ";\n".join(relevant_points)
             elif not skip_llm:
                 prompt = f"""你需要获取用户{self.person_name}的 **{info_type}** 信息。
 
@@ -727,7 +727,7 @@ class Person:
                     for category in category_list:
                         top_memories = self.get_top_memories_by_category(category, 3)
                         if top_memories:
-                            random_memory_str = "\n".join(
+                            random_memory_str = ";\n".join(
                                 [get_memory_content_from_memory(memory) for memory in top_memories]
                             )
                             points_text = f"有关 {category} 的内容：{random_memory_str}"

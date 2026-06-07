@@ -56,6 +56,25 @@ class APIResponse:
     """响应原始数据"""
 
 
+@dataclass
+class EmbeddingRequest:
+    """
+    嵌入请求封装 — 兼容上游 A_Memorix 的调用约定。
+    上游 api_adapter.py 通过 EmbeddingRequest 传递参数，
+    而 NachoBot 的 BaseClient.get_embedding 使用位置参数。
+    此类作为两者之间的桥梁。
+    """
+
+    model_info: ModelInfo
+    """模型信息"""
+
+    embedding_input: str
+    """嵌入输入文本"""
+
+    extra_params: dict[str, Any] | None = None
+    """附加请求参数"""
+
+
 class BaseClient(ABC):
     """
     基础客户端
@@ -97,20 +116,46 @@ class BaseClient(ABC):
         """
         raise NotImplementedError("'get_response' method should be overridden in subclasses")
 
-    @abstractmethod
     async def get_embedding(
+        self,
+        model_info_or_request: ModelInfo | EmbeddingRequest,
+        embedding_input: str | None = None,
+        extra_params: dict[str, Any] | None = None,
+    ) -> APIResponse:
+        """
+        获取文本嵌入。
+
+        支持两种调用方式：
+        1. 传统方式: get_embedding(model_info, embedding_input, extra_params)
+        2. A_Memorix 方式: get_embedding(EmbeddingRequest(...))
+        """
+        if isinstance(model_info_or_request, EmbeddingRequest):
+            req = model_info_or_request
+            return await self._get_embedding_impl(
+                model_info=req.model_info,
+                embedding_input=req.embedding_input,
+                extra_params=req.extra_params,
+            )
+        return await self._get_embedding_impl(
+            model_info=model_info_or_request,
+            embedding_input=embedding_input or "",
+            extra_params=extra_params,
+        )
+
+    @abstractmethod
+    async def _get_embedding_impl(
         self,
         model_info: ModelInfo,
         embedding_input: str,
         extra_params: dict[str, Any] | None = None,
     ) -> APIResponse:
         """
-        获取文本嵌入
+        获取文本嵌入的内部实现（由子类覆写）。
         :param model_info: 模型信息
         :param embedding_input: 嵌入输入文本
         :return: 嵌入响应
         """
-        raise NotImplementedError("'get_embedding' method should be overridden in subclasses")
+        raise NotImplementedError("'_get_embedding_impl' method should be overridden in subclasses")
 
     @abstractmethod
     async def get_audio_transcriptions(

@@ -61,6 +61,12 @@
                 </a>
             </li>
             <li>
+                <a href="#" class="nav-item" data-tab="memory" id="nav-memory">
+                    <span class="nav-icon">🧠</span>
+                    <span class="nav-label">长期记忆</span>
+                </a>
+            </li>
+            <li>
                 <a href="#" class="nav-item" data-tab="setup" id="nav-setup">
                     <span class="nav-icon">🧙</span>
                     <span class="nav-label">部署向导</span>
@@ -198,6 +204,59 @@
                         <span class="placeholder-icon">📚</span>
                         <p>选择左侧的知识库文件开始查看</p>
                     </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Memory Tab (A_Memorix) -->
+        <section id="tab-memory" class="tab-panel">
+            <div class="panel-header">
+                <h2>长期记忆管理</h2>
+                <p class="panel-desc">查询和维护 A_Memorix 长期记忆系统</p>
+            </div>
+
+            <!-- Stats -->
+            <div class="memory-stats" id="memory-stats">
+                <div class="memory-stat-card">
+                    <span class="stat-icon">⏳</span>
+                    <div class="stat-info">
+                        <span class="stat-label">状态</span>
+                        <span class="stat-value">加载中...</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Search -->
+            <div class="memory-search-section">
+                <div class="memory-search-bar">
+                    <input type="text" class="form-input" id="memory-search-input"
+                        placeholder="输入关键词搜索长期记忆...">
+                    <button class="btn btn-primary" id="memory-search-btn">🔍 搜索</button>
+                </div>
+                <div class="memory-search-results" id="memory-search-results">
+                    <div class="memory-empty">
+                        <span class="placeholder-icon">🧠</span>
+                        <p>输入关键词开始检索长期记忆</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Maintenance -->
+            <div class="memory-maintain-section">
+                <h3 style="margin-bottom: 12px; font-size: 1rem;">🔧 维护操作</h3>
+                <div class="memory-maintain-grid">
+                    <button class="btn btn-outline memory-maintain-btn" data-action="reinforce" data-label="强化记忆">
+                        💪 强化记忆
+                    </button>
+                    <button class="btn btn-outline memory-maintain-btn" data-action="protect" data-label="保护记忆">
+                        🛡️ 保护记忆
+                    </button>
+                    <button class="btn btn-outline memory-maintain-btn" data-action="restore" data-label="恢复记忆">
+                        ♻️ 恢复记忆
+                    </button>
+                    <button class="btn btn-outline memory-maintain-btn" data-action="freeze" data-label="冻结记忆">
+                        ❄️ 冻结记忆
+                    </button>
                 </div>
             </div>
         </section>
@@ -766,6 +825,7 @@
     <script src="/static/js/plugins.js"></script>
     <script src="/static/js/database.js"></script>
     <script src="/static/js/knowledge.js"></script>
+    <script src="/static/js/memory.js"></script>
     <script src="/static/js/setup.js"></script>
 </body>
 
