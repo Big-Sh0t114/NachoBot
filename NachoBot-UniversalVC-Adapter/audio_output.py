@@ -29,8 +29,10 @@ class AudioOutput:
         self._device_id: Optional[int] = None
         self._queue: deque[str] = deque()
         self._is_playing = False
+        self._is_paused = False
         self._play_lock = asyncio.Lock()
         self._current_stop_event: Optional[asyncio.Event] = None
+        self._interrupted_wav: Optional[str] = None
         self._sd = None  # sounddevice module (lazy import)
 
     def _ensure_sounddevice(self):
@@ -80,7 +82,7 @@ class AudioOutput:
 
         self._queue.append(wav_path)
 
-        if not self._is_playing:
+        if not self._is_playing and not self._is_paused:
             asyncio.create_task(self._play_next())
 
     async def stop_current(self):
@@ -88,10 +90,30 @@ class AudioOutput:
         if self._current_stop_event:
             self._current_stop_event.set()
 
+    async def stop_and_pause(self):
+        """Stop current playback and pause the queue."""
+        self._is_paused = True
+        self.logger.info("AudioOutput paused")
+        if self._current_stop_event:
+            self._current_stop_event.set()
+
+    def resume(self):
+        """Resume playback."""
+        self._is_paused = False
+        self.logger.info("AudioOutput resumed")
+        if self._interrupted_wav:
+            self._queue.appendleft(self._interrupted_wav)
+            self._interrupted_wav = None
+        if not self._is_playing and self._queue:
+            asyncio.create_task(self._play_next())
+
     async def _play_next(self):
         """Play the next audio file in the queue."""
         async with self._play_lock:
             while self._queue:
+                if self._is_paused:
+                    break
+
                 wav_path = self._queue.popleft()
                 self._is_playing = True
                 self._current_stop_event = asyncio.Event()
@@ -101,6 +123,10 @@ class AudioOutput:
                 except Exception as e:
                     self.logger.error(f"Error playing audio '{wav_path}': {e}")
                 finally:
+                    if self._current_stop_event and self._current_stop_event.is_set():
+                        # Interrupted
+                        if self._is_paused:
+                            self._interrupted_wav = wav_path
                     self._current_stop_event = None
 
             self._is_playing = False
