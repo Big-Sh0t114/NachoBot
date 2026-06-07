@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Optional
 
 from config import AdapterConfig
-from audio_capture import AudioCapture
+from audio_capture import AudioCapture, MicrophoneCapture
 from audio_output import AudioOutput
 from audio_pipeline import AudioPipeline
 from tts_handler import TTSHandler
@@ -102,6 +102,8 @@ class UniversalVCAdapter:
             logger=logger,
             on_result=self._on_speech_result,
             on_speech_start=self._on_speech_start,
+            on_mic_speech_start=self._on_mic_speech_start,
+            on_mic_speech_end=self._on_mic_speech_end,
         )
 
         # Initialize Audio Capture (feeds raw frames to pipeline)
@@ -110,6 +112,15 @@ class UniversalVCAdapter:
             logger=logger,
             on_frame=self.pipeline.process_frame,
         )
+
+        # Initialize Microphone Capture (feeds raw frames to mic pipeline)
+        self.mic_capture = None
+        if config.microphone.enabled:
+            self.mic_capture = MicrophoneCapture(
+                config=config.microphone,
+                logger=logger,
+                on_frame=self.pipeline.process_mic_frame,
+            )
 
         # Initialize Audio Output
         self.audio_output = AudioOutput(
@@ -147,6 +158,9 @@ class UniversalVCAdapter:
         loop = asyncio.get_running_loop()
         self.pipeline.set_loop(loop)
         await self.audio_capture.start(loop)
+        
+        if self.mic_capture:
+            await self.mic_capture.start(loop)
 
         # Start Router (WebSocket to NachoBot Core)
         if self.router:
@@ -171,6 +185,8 @@ class UniversalVCAdapter:
         """Stop all components gracefully."""
         self.logger.info("Stopping Universal Voice Adapter...")
         await self.audio_capture.stop()
+        if self.mic_capture:
+            await self.mic_capture.stop()
         await asyncio.sleep(0.5)
 
     def _inject_variables(self, template: str, variables: dict) -> str:
@@ -258,6 +274,16 @@ class UniversalVCAdapter:
         """Called when user starts speaking - interrupt current TTS playback."""
         self.logger.debug("User speech start detected, interrupting playback")
         await self.audio_output.stop_current()
+
+    async def _on_mic_speech_start(self):
+        """Called when mic user starts speaking - stop and pause TTS playback."""
+        self.logger.debug("Mic user speech start detected, pausing playback")
+        await self.audio_output.stop_and_pause()
+
+    async def _on_mic_speech_end(self):
+        """Called when mic user stops speaking - resume TTS playback."""
+        self.logger.debug("Mic user speech end detected, resuming playback")
+        self.audio_output.resume()
 
     async def _handle_from_nachobot(self, message: MessageBase) -> None:
         """Handle outgoing messages from NachoBot Core → TTS → Virtual Cable."""

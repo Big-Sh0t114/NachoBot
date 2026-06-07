@@ -16,6 +16,14 @@ class AudioCaptureConfig:
     min_speech_duration: float = 0.3         # Minimum duration to consider as valid speech (legacy fallback)
 
 
+@dataclass
+class MicrophoneConfig:
+    """Microphone capture settings for owner voice input."""
+    enabled: bool = False
+    device_name: str = ""               # Microphone device name (empty = system default)
+    owner_speaker_id: str = "owner"     # Fixed speaker ID for microphone input
+    owner_speaker_name: str = "主人"    # Fixed display name for microphone input
+
 
 @dataclass
 class AudioOutputConfig:
@@ -65,8 +73,8 @@ class SpeakerConfig:
     """Real-time speaker tracking settings."""
     enabled: bool = True
     embedding_model_path: str = "models/wespeaker_resnet34.onnx"
-    similarity_threshold: float = 0.6   # cosine similarity threshold
-    max_speakers: int = 8               # max distinct speakers to track
+    similarity_threshold: float = 0.5   # cosine similarity threshold
+    max_speakers: int = 8               # max distinct speakers to track (set to 0 for unlimited)
     db_path: str = "speaker_db.json"    # voiceprint database path
 
 
@@ -92,6 +100,7 @@ class AdapterConfig:
     vad: VADConfig
     speaker: SpeakerConfig
     local_asr: LocalASRConfig
+    microphone: MicrophoneConfig
     log_level: str = "INFO"
     disable_network_search: bool = False
 
@@ -237,6 +246,8 @@ def load_config(path: Path) -> AdapterConfig:
                 if not p.is_absolute():
                     cfg_dict[key] = str(config_dir / p)
 
+    microphone_data = data.get("microphone", {})
+
     return AdapterConfig(
         capture=AudioCaptureConfig(**capture_data),
         output=AudioOutputConfig(**output_data),
@@ -247,6 +258,7 @@ def load_config(path: Path) -> AdapterConfig:
         vad=VADConfig(**vad_data),
         speaker=SpeakerConfig(**speaker_data),
         local_asr=LocalASRConfig(**local_asr_data),
+        microphone=MicrophoneConfig(**microphone_data),
         log_level=data.get("log_level", "INFO"),
         disable_network_search=data.get("disable_network_search", False),
     )

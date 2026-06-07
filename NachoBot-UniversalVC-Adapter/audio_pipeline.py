@@ -31,16 +31,22 @@ class AudioPipeline:
         logger: logging.Logger,
         on_result: Optional[Callable] = None,
         on_speech_start: Optional[Callable] = None,
+        on_mic_speech_start: Optional[Callable] = None,
+        on_mic_speech_end: Optional[Callable] = None,
     ):
         """
         Args:
             config: Full adapter configuration.
             on_result: async callback(speaker_id: str, speaker_name: str, text: str)
             on_speech_start: async callback() when speech starts (for TTS interruption)
+            on_mic_speech_start: async callback() when mic speech starts (for TTS pausing)
+            on_mic_speech_end: async callback() when mic speech ends (for TTS resuming)
         """
         self.logger = logger
         self.on_result = on_result
         self.on_speech_start = on_speech_start
+        self.on_mic_speech_start = on_mic_speech_start
+        self.on_mic_speech_end = on_mic_speech_end
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._speech_started_notified = False
         self._frame_counter = 0
@@ -59,6 +65,19 @@ class AudioPipeline:
             min_speech_duration=config.vad.min_speech_duration,
             logger=logger,
         )
+
+        # ── Stage 2.5: Mic VAD (Independent state for microphone) ──
+        if config.microphone.enabled:
+            self.mic_vad = VADProcessor(
+                model_path=config.vad.model_path,
+                threshold=config.vad.threshold,
+                min_silence_duration=config.vad.min_silence_duration,
+                min_speech_duration=config.vad.min_speech_duration,
+                logger=logger,
+            )
+            self._owner_id = config.microphone.owner_speaker_id
+            self._owner_name = config.microphone.owner_speaker_name
+            self._mic_speech_started_notified = False
 
         # ── Stage 3: Speaker Tracker ──
         self.speaker_tracker = SpeakerTracker(
@@ -159,6 +178,52 @@ class AudioPipeline:
         except Exception as e:
             self.logger.error(f"Pipeline frame error: {e}")
 
+    def process_mic_frame(self, pcm_float32: bytes, sample_rate: int, channels: int):
+        """Process a raw audio frame from the microphone."""
+        try:
+            if isinstance(pcm_float32, (bytes, bytearray)):
+                samples = np.frombuffer(pcm_float32, dtype=np.float32)
+            elif isinstance(pcm_float32, np.ndarray):
+                samples = pcm_float32.astype(np.float32, copy=False)
+            else:
+                samples = np.array(pcm_float32, dtype=np.float32)
+
+            samples = samples.ravel()
+            if len(samples) == 0:
+                return
+
+            if channels > 1:
+                if len(samples) % channels != 0:
+                    samples = samples[: len(samples) - (len(samples) % channels)]
+                samples = samples.reshape(-1, channels).mean(axis=1)
+
+            if sample_rate != self.TARGET_SR:
+                mono_16k = self._resample(samples, sample_rate, self.TARGET_SR)
+            else:
+                mono_16k = samples
+
+            mono_16k = np.ascontiguousarray(mono_16k.ravel(), dtype=np.float32)
+
+            segments = self.mic_vad.feed(mono_16k)
+
+            if self.mic_vad.is_speaking and not self._mic_speech_started_notified:
+                self._mic_speech_started_notified = True
+                if self.on_mic_speech_start and self._loop:
+                    asyncio.run_coroutine_threadsafe(self.on_mic_speech_start(), self._loop)
+
+            if not self.mic_vad.is_speaking and self._mic_speech_started_notified:
+                self._mic_speech_started_notified = False
+                if self.on_mic_speech_end and self._loop:
+                    asyncio.run_coroutine_threadsafe(self.on_mic_speech_end(), self._loop)
+
+            for seg in segments:
+                if self._loop:
+                    asyncio.run_coroutine_threadsafe(
+                        self._process_mic_segment(seg.samples), self._loop
+                    )
+        except Exception as e:
+            self.logger.error(f"Mic pipeline frame error: {e}")
+
     async def _process_segment(self, samples_16k: np.ndarray):
         """Process a completed speech segment: Denoise -> Speaker ID + ASR."""
         try:
@@ -185,6 +250,32 @@ class AudioPipeline:
 
         except Exception as e:
             self.logger.error(f"Segment processing error: {e}", exc_info=True)
+
+    async def _process_mic_segment(self, samples_16k: np.ndarray):
+        """Process a microphone speech segment: Denoise -> ASR (Fixed Owner ID)."""
+        try:
+            duration = len(samples_16k) / self.TARGET_SR
+            self.logger.info(f"Processing mic segment: {duration:.2f}s")
+
+            if self.denoiser.enabled:
+                import asyncio
+                loop = asyncio.get_running_loop()
+                samples_16k = await loop.run_in_executor(
+                    None, self._denoise_segment, samples_16k
+                )
+
+            # Bypass speaker identification for microphone, use fixed owner ID
+            speaker_id = self._owner_id
+            speaker_name = self._owner_name
+
+            text = await self.asr.recognize_segment_async(samples_16k)
+
+            if text and self.on_result:
+                self.logger.info(f"[{speaker_name}] ({speaker_id}) [Mic]: {text}")
+                await self.on_result(speaker_id, speaker_name, text)
+
+        except Exception as e:
+            self.logger.error(f"Mic segment processing error: {e}", exc_info=True)
 
     def _denoise_segment(self, samples_16k: np.ndarray) -> np.ndarray:
         """Upsample to 48kHz, denoise, and downsample to 16kHz."""

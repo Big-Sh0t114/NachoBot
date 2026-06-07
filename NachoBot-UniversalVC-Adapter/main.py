@@ -90,6 +90,7 @@ async def main():
     logger.info(f"Speaker Tracking: {'ON' if config.speaker.enabled else 'OFF'}")
     logger.info(f"ASR Mode: {config.local_asr.mode}")
     logger.info(f"STT Remote API: {'ON' if config.stt.enabled else 'OFF (fallback)'}")
+    logger.info(f"Microphone Capture: {'ON' if config.microphone.enabled else 'OFF'}")
     logger.info("TTS Handler: GPT-SoVITS (from NachoBot-TTS-Adapter)")
 
     adapter = UniversalVCAdapter(config, logger)
