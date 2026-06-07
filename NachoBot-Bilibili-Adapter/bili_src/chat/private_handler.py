@@ -8,7 +8,6 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from ncnk_message import (
     BaseMessageInfo,
     FormatInfo,
-    GroupInfo,
     MessageBase,
     Seg,
     UserInfo,
