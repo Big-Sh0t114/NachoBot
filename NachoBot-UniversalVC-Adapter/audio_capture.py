@@ -12,7 +12,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from config import AudioCaptureConfig
+from config import AudioCaptureConfig, MicrophoneConfig
 
 # ProcTap output format: 48kHz, 2ch, float32
 PROCTAP_SAMPLE_RATE = 48000
@@ -326,3 +326,144 @@ class AudioCapture:
             "lark": "飞书", "tencentmeeting": "腾讯会议",
         }
         return mapping.get(name_lower, name)
+
+
+class MicrophoneCapture:
+    """Captures audio from the local microphone for owner voice input."""
+
+    def __init__(
+        self,
+        config: MicrophoneConfig,
+        logger: logging.Logger,
+        on_frame: Optional[Callable] = None,
+    ):
+        self.config = config
+        self.logger = logger
+        self.on_frame = on_frame
+
+        self._sd_stream = None
+        self._running = False
+        self._loop = None
+        self._worker_task = None
+        self._queue = None
+        self._samplerate = 16000
+        self._channels = 1
+
+    def _resolve_device(self) -> Optional[int]:
+        """Find the microphone input device."""
+        try:
+            import sounddevice as sd
+        except ImportError:
+            self.logger.error("sounddevice is required for microphone capture")
+            return None
+
+        devices = sd.query_devices()
+        target_name = (self.config.device_name or "").lower()
+
+        if target_name:
+            for i, dev in enumerate(devices):
+                if dev["max_input_channels"] > 0 and target_name in dev["name"].lower():
+                    self.logger.info(f"Microphone device: [{i}] {dev['name']}")
+                    return i
+
+        try:
+            default_input = sd.default.device[0]
+            if default_input is not None and default_input >= 0:
+                self.logger.info(f"Using default microphone: [{default_input}] {devices[default_input]['name']}")
+                return int(default_input)
+        except Exception:
+            pass
+        self.logger.error("No suitable microphone device found!")
+        return None
+
+    async def start(self, loop: asyncio.AbstractEventLoop):
+        """Start capturing microphone audio."""
+        if not self.config.enabled:
+            return
+
+        self._loop = loop
+        self._queue = asyncio.Queue(maxsize=500)
+        self._running = True
+
+        self._worker_task = asyncio.create_task(self._queue_worker_loop())
+
+        device_id = self._resolve_device()
+        if device_id is None:
+            self._running = False
+            return
+
+        try:
+            import sounddevice as sd
+            dev_info = sd.query_devices(device_id)
+            channels = min(int(dev_info["max_input_channels"]), 2)
+            samplerate = int(dev_info["default_samplerate"])
+
+            self._samplerate = samplerate
+            self._channels = channels
+
+            self._sd_stream = sd.InputStream(
+                device=device_id,
+                samplerate=samplerate,
+                channels=channels,
+                dtype="float32",
+                blocksize=int(samplerate * 0.05),
+                callback=self._audio_callback,
+            )
+            self._sd_stream.start()
+            self.logger.info(f"Microphone capture started: {samplerate}Hz, {channels}ch")
+        except Exception as e:
+            self.logger.error(f"Failed to start microphone capture: {e}", exc_info=True)
+            self._running = False
+
+    def _audio_callback(self, indata, frames, time_info, status):
+        """sounddevice callback."""
+        if not self._running:
+            return
+        if self._loop and self._queue:
+            self._loop.call_soon_threadsafe(
+                self._put_nowait_safe,
+                (indata.tobytes(), self._samplerate, self._channels)
+            )
+
+    def _put_nowait_safe(self, item):
+        try:
+            self._queue.put_nowait(item)
+        except asyncio.QueueFull:
+            pass
+
+    async def stop(self):
+        """Stop capturing audio."""
+        self._running = False
+        if self._worker_task:
+            self._worker_task.cancel()
+            try:
+                await self._worker_task
+            except asyncio.CancelledError:
+                pass
+        if self._sd_stream:
+            try:
+                self._sd_stream.stop()
+                self._sd_stream.close()
+            except Exception as e:
+                self.logger.error(f"Error closing microphone capture: {e}")
+            self._sd_stream = None
+        self.logger.info("Microphone capture stopped")
+
+    async def _queue_worker_loop(self):
+        """Background worker to process microphone frames."""
+        self.logger.info("Microphone worker loop active")
+        while self._running:
+            try:
+                item = await self._queue.get()
+                if item is None:
+                    continue
+                pcm_bytes, sr, ch = item
+
+                if self.on_frame:
+                    await self._loop.run_in_executor(None, self.on_frame, pcm_bytes, sr, ch)
+
+                self._queue.task_done()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.logger.error(f"Microphone worker exception: {e}", exc_info=True)

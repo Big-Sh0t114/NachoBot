@@ -35,7 +35,7 @@ class SpeakerTracker:
     SAMPLE_RATE = 16000
 
     def __init__(self, enabled: bool = True, embedding_model_path: str = "",
-                 similarity_threshold: float = 0.6, max_speakers: int = 8,
+                 similarity_threshold: float = 0.5, max_speakers: int = 8,
                  db_path: str = "speaker_db.json",
                  logger: Optional[logging.Logger] = None):
         self.logger = logger or logging.getLogger(__name__)
@@ -47,6 +47,7 @@ class SpeakerTracker:
         # Speaker state
         self._centroids: Dict[str, np.ndarray] = {}   # speaker_id -> centroid
         self._names: Dict[str, str] = {}               # speaker_id -> display name
+        self._last_used: Dict[str, float] = {}         # speaker_id -> timestamp
         self._next_idx = 0
         self._extractor = None
 
@@ -82,6 +83,16 @@ class SpeakerTracker:
                 emb = np.array(info["embedding"], dtype=np.float32)
                 self._centroids[spk_id] = emb
                 self._names[spk_id] = info.get("name", spk_id)
+                
+                updated_at_str = info.get("updated_at", "")
+                try:
+                    if updated_at_str:
+                        self._last_used[spk_id] = time.mktime(time.strptime(updated_at_str, "%Y-%m-%dT%H:%M:%S"))
+                    else:
+                        self._last_used[spk_id] = time.time()
+                except ValueError:
+                    self._last_used[spk_id] = time.time()
+
                 # Track next index
                 if spk_id.startswith("speaker_"):
                     try:
@@ -98,10 +109,11 @@ class SpeakerTracker:
         try:
             speakers = {}
             for spk_id, centroid in self._centroids.items():
+                last_used_time = self._last_used.get(spk_id, time.time())
                 speakers[spk_id] = {
                     "name": self._names.get(spk_id, spk_id),
                     "embedding": centroid.tolist(),
-                    "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(last_used_time)),
                 }
             data = {"speakers": speakers}
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -145,17 +157,36 @@ class SpeakerTracker:
                 self._centroids[best_id] = (
                     0.8 * self._centroids[best_id] + 0.2 * embedding
                 )
+                self._last_used[best_id] = time.time()
                 self._save_db()
                 name = self._names.get(best_id, best_id)
                 self.logger.debug(f"Matched {best_id} ({name}) sim={best_sim:.3f}")
                 return best_id, name
             else:
                 # New speaker
-                if len(self._centroids) >= self.max_speakers:
-                    self.logger.warning("Max speakers reached, reusing closest.")
-                    if best_id:
-                        return best_id, self._names.get(best_id, best_id)
-                    return "vc_user", "语音用户"
+                if self.max_speakers > 0 and len(self._centroids) >= self.max_speakers:
+                    # Try to evict the oldest auto-generated speaker
+                    evict_id = None
+                    oldest_time = float('inf')
+                    for sid in self._centroids:
+                        name = self._names.get(sid, "")
+                        if sid.startswith("speaker_") and name.startswith("语音用户"):
+                            if self._last_used.get(sid, 0) < oldest_time:
+                                oldest_time = self._last_used.get(sid, 0)
+                                evict_id = sid
+                    
+                    if evict_id:
+                        self.logger.info(f"Max speakers reached. Evicting oldest auto-generated speaker: {evict_id}")
+                        self._centroids.pop(evict_id, None)
+                        self._names.pop(evict_id, None)
+                        self._last_used.pop(evict_id, None)
+                        # Fall through to create new speaker
+                    else:
+                        self.logger.warning("Max speakers reached, and no evictable speakers. Reusing closest.")
+                        if best_id:
+                            self._last_used[best_id] = time.time()
+                            return best_id, self._names.get(best_id, best_id)
+                        return "vc_user", "语音用户"
 
                 new_id = f"speaker_{self._next_idx}"
                 self._next_idx += 1
@@ -164,6 +195,7 @@ class SpeakerTracker:
                 new_name = f"语音用户{label_char}"
                 self._centroids[new_id] = embedding
                 self._names[new_id] = new_name
+                self._last_used[new_id] = time.time()
                 self._save_db()
                 self.logger.info(f"New speaker: {new_id} ({new_name})")
                 return new_id, new_name
@@ -189,6 +221,7 @@ class SpeakerTracker:
         """Delete a speaker's voiceprint."""
         self._centroids.pop(speaker_id, None)
         self._names.pop(speaker_id, None)
+        self._last_used.pop(speaker_id, None)
         self._save_db()
         self.logger.info(f"Deleted speaker {speaker_id}")
 

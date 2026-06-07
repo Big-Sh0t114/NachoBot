@@ -54,6 +54,18 @@ db_path = "speaker_db.json"
 mode = "local_streaming"
 num_threads = 2
 
+[microphone]
+# Microphone capture for owner voice input.
+# When enabled, captures audio from the local microphone and fixes the speaker
+# identity as "owner" (主人), bypassing speaker tracking for mic input.
+enabled = false
+# Microphone device name (leave empty for system default microphone)
+# device_name = "Microphone (Realtek High Definition Audio)"
+device_name = ""
+# Fixed identity for microphone speaker
+owner_speaker_id = "owner"
+owner_speaker_name = "主人"
+
 # ── Prompts ─────────────────────────────────────────────────────────
 
 [prompts]
