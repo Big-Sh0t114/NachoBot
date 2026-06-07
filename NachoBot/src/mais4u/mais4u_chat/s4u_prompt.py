@@ -1,6 +1,7 @@
 from src.config.config import global_config
 from src.common.logger import get_logger
 from src.chat.utils.prompt_builder import Prompt, global_prompt_manager
+from src.chat.utils.prompt_variables import render_dynamic_prompt_template
 from src.chat.utils.chat_message_builder import build_readable_messages, get_raw_msg_before_timestamp_with_chat
 import time
 from src.chat.utils.utils import get_recent_group_speaker
@@ -32,7 +33,7 @@ def init_prompt():
     Prompt(
         """
 {identity}
-你现在正在你主人甘油三酯的Bilibili直播间内作为虚拟主播进行聊天
+你现在正在你主人{owner_name}的Bilibili直播间内作为虚拟主播进行聊天
 
 你可以看见用户发送的弹幕，礼物和superchat
 {screen_info}
@@ -99,7 +100,7 @@ def init_prompt():
     Prompt(
         """
 {identity}
-你现在正在你主人甘油三酯的Bilibili直播间内作为虚拟主播进行聊天
+你现在正在你主人{owner_name}的Bilibili直播间内作为虚拟主播进行聊天
 
 {expression_habits_block}
 
@@ -368,8 +369,8 @@ class PromptBuilder:
         # Build identity block from config
         bot_name = global_config.bot.nickname
         alias_str = f"，也叫{','.join(global_config.bot.alias_names)}" if global_config.bot.alias_names else ""
-        personality = global_config.personality.personality
-        reply_style = global_config.personality.reply_style
+        personality = render_dynamic_prompt_template(global_config.personality.personality)
+        reply_style = render_dynamic_prompt_template(global_config.personality.reply_style)
         identity = f"你的名字是{bot_name}{alias_str}。{personality} 你说话的风格是：{reply_style}"
 
         mood = mood_manager.get_mood_by_chat_id(chat_stream.stream_id)
@@ -393,6 +394,7 @@ class PromptBuilder:
                 internal_state=internal_state,
                 gift_info=gift_info,
                 sc_info=sc_info,
+                owner_name=global_config.bot.owner_name,
                 sender_name=sender_name,
                 core_dialogue_prompt=core_dialogue_prompt,
                 background_dialogue_prompt=background_dialogue_prompt,
@@ -436,8 +438,8 @@ class PromptBuilder:
         # Build identity block from config
         bot_name = global_config.bot.nickname
         alias_str = f"，也叫{','.join(global_config.bot.alias_names)}" if global_config.bot.alias_names else ""
-        personality = global_config.personality.personality
-        reply_style = global_config.personality.reply_style
+        personality = render_dynamic_prompt_template(global_config.personality.personality)
+        reply_style = render_dynamic_prompt_template(global_config.personality.reply_style)
         identity = f"你的名字是{bot_name}{alias_str}。{personality} 你说话的风格是：{reply_style}"
 
         logger.info(f"[DEBUG] Self-Talk Screen Info: {screen_info[:100] if screen_info else 'Empty'}")
@@ -445,6 +447,7 @@ class PromptBuilder:
         prompt = await global_prompt_manager.format_prompt(
             "s4u_screen_talk_prompt",
             identity=identity,
+            owner_name=global_config.bot.owner_name,
             expression_habits_block=expression_habits_block,
             screen_info=screen_info,
             time_block=time_block,

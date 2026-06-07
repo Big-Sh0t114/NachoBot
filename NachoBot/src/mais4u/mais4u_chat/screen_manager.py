@@ -1,5 +1,6 @@
 import os
 from src.common.logger import get_logger
+from src.config.config import global_config
 
 logger = get_logger("screen_manager")
 
@@ -54,7 +55,8 @@ class ScreenManager:
         content = self.now_screen if self.now_screen else "（屏幕暂时关闭或无内容）"
         logger.debug(f"[ScreenManager] get_screen_str returning {len(content)} chars")
 
-        return f"你可以看见面前的屏幕，目前屏幕的内容是:现在甘油三酯在和你一起直播，这是他正在操作的屏幕内容：{content}"
+        owner_name = getattr(global_config.bot, "owner_name", "") or "主人"
+        return f"你可以看见面前的屏幕，目前屏幕的内容是:现在{owner_name}在和你一起直播，这是他正在操作的屏幕内容：{content}"
 
 
 screen_manager = ScreenManager()

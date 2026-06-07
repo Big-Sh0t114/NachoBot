@@ -20,6 +20,7 @@ from src.chat.message_receive.uni_message_sender import UniversalMessageSender
 from src.chat.utils.timer_calculator import Timer  # <--- Import Timer
 from src.chat.utils.utils import get_chat_type_and_target_info
 from src.chat.utils.prompt_builder import global_prompt_manager
+from src.chat.utils.prompt_variables import render_dynamic_prompt_template
 from src.chat.utils.prompt_injection_guard import build_guardrail_instruction, guard_user_content
 from src.chat.utils.url_fetcher import UrlContentFetcher, extract_urls
 from src.chat.utils.web_search import WebSearchManager
@@ -760,7 +761,7 @@ class PrivateReplyer:
         else:
             bot_nickname = ""
 
-        prompt_personality = f"{global_config.personality.personality};"
+        prompt_personality = f"{render_dynamic_prompt_template(global_config.personality.personality)};"
         return f"你的名字是{bot_name}{bot_nickname}，你{prompt_personality}"
 
     async def build_prompt_reply_context(

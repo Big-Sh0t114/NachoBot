@@ -5,6 +5,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from src.common.logger import get_logger
 from src.config.config import global_config, model_config
 from src.chat.utils.prompt_builder import Prompt, global_prompt_manager
+from src.chat.utils.prompt_variables import render_dynamic_prompt_template
 from src.plugin_system.apis import llm_api
 from src.common.database.database_model import ThinkingBack
 from src.memory_system.retrieval_tools import get_tool_registry, init_all_tools
@@ -247,7 +248,7 @@ async def _react_agent_solve_question(
         # 获取bot信息
         bot_name = global_config.bot.nickname
         bot_nickname = global_config.bot.nickname
-        prompt_personality = global_config.personality.personality
+        prompt_personality = render_dynamic_prompt_template(global_config.personality.personality)
 
         # 获取当前时间
         time_now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
@@ -1143,7 +1144,7 @@ async def build_memory_retrieval_prompt(
         time_now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         bot_name = global_config.bot.nickname
         bot_nickname = global_config.bot.nickname
-        prompt_personality = global_config.personality.personality
+        prompt_personality = render_dynamic_prompt_template(global_config.personality.personality)
         chat_id = chat_stream.stream_id
 
         # 获取最近查询历史（最近10分钟内的查询，用于避免重复查询）

@@ -999,6 +999,65 @@ class ChatHistorySummarizer:
             traceback.print_exc()
             raise
 
+        # --- A_Memorix 双写：将摘要同步写入长期记忆 ---
+        try:
+            from src.memory_system.memory_service import memory_service
+
+            if memory_service.is_enabled():
+                asyncio.create_task(
+                    self._writeback_to_a_memorix(
+                        chat_id=self.chat_id,
+                        start_time=start_time,
+                        end_time=end_time,
+                        theme=theme,
+                        summary=summary,
+                        keywords=keywords,
+                        participants=participants,
+                        key_point=key_point,
+                    )
+                )
+        except Exception as e:
+            logger.debug(f"{self.log_prefix} A_Memorix 双写启动失败（不影响主流程）: {e}")
+
+    async def _writeback_to_a_memorix(
+        self,
+        chat_id: str,
+        start_time: float,
+        end_time: float,
+        theme: str,
+        summary: str,
+        keywords: List[str],
+        participants: List[str],
+        key_point: Optional[List[str]] = None,
+    ):
+        """将聊天摘要异步写回 A_Memorix 长期记忆"""
+        try:
+            from src.memory_system.memory_service import memory_service
+            from datetime import datetime
+
+            # 拼接为富文本：theme + summary + key_point
+            text_parts = [f"话题：{theme}", f"概括：{summary}"]
+            if key_point:
+                text_parts.append("关键信息：" + "；".join(key_point))
+
+            await memory_service.ingest_summary(
+                external_id=f"chat_summary:{chat_id}:{start_time:.0f}",
+                chat_id=chat_id,
+                text="\n".join(text_parts),
+                participants=participants,
+                time_start=datetime.fromtimestamp(start_time).isoformat() if start_time else None,
+                time_end=datetime.fromtimestamp(end_time).isoformat() if end_time else None,
+                tags=keywords,
+                metadata={
+                    "source": "chat_history_summarizer",
+                    "theme": theme,
+                    "key_point": key_point or [],
+                },
+            )
+            logger.info(f"{self.log_prefix} A_Memorix 双写成功: {theme}")
+        except Exception as e:
+            logger.warning(f"{self.log_prefix} A_Memorix 双写失败: {e}")
+
     async def start(self):
         """启动后台定期检查循环"""
         if self._running:
