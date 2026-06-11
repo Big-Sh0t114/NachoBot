@@ -3,9 +3,8 @@ from json_repair import repair_json
 from typing import List
 
 from src.llm_models.utils_model import LLMRequest
-from src.config.api_ada_configs import TaskConfig
+from src.config.config import model_config
 from src.common.logger import get_logger
-from src.mais4u.s4u_config import s4u_config
 
 logger = get_logger("bilingual_splitter")
 
@@ -35,15 +34,8 @@ SPLIT_PROMPT_TEMPLATE = """
 
 class BilingualSplitter:
     def __init__(self):
-        # Construct TaskConfig from s4u_config.models.motion
-        motion_conf = s4u_config.models.motion
-        logger.info(f"BilingualSplitter loaded motion config: {motion_conf}")
-        model_name = motion_conf.get("name", "gpt-4.1-mini")  # Default fallback to gpt-4.1-mini
-
-        # Create TaskConfig for the model
-        task_config = TaskConfig(model_list=[model_name], temperature=0.1, max_tokens=2000)
-
-        self.llm_model = LLMRequest(model_set=task_config, request_type="bilingual_split")
+        logger.info("BilingualSplitter loaded utils_small config")
+        self.llm_model = LLMRequest(model_set=model_config.model_task_config.utils_small, request_type="bilingual_split")
 
         # Register prompt if not exists (dynamic)
         # However, global_prompt_manager usually loads from DB or code.
