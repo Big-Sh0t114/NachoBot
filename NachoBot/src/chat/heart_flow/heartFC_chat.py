@@ -1142,12 +1142,90 @@ class HeartFChatting:
         if action_planner_info.action_message and hasattr(action_planner_info.action_message, "user_info"):
             user_id = str(getattr(action_planner_info.action_message.user_info, "user_id", ""))
 
-        # --- 解析时间 ---
-        from src.chat.heart_flow.appointment_scheduler import parse_remind_time
+        # --- LLM 结构化解析 + 双卡口（防误触发）---
+        from src.chat.heart_flow.appointment_parser import parse_appointment_request
+
+        message_text = ""
+        if action_planner_info.action_message is not None:
+            message_text = (getattr(action_planner_info.action_message, "processed_plain_text", "") or "").strip()
+        # planner 强制分支会把整条消息塞进 remind_time/remind_content，作为兜底文本
+        if not message_text:
+            message_text = str(remind_time_raw or remind_content or "").strip()
+
+        parse_result = await parse_appointment_request(
+            message_text=message_text,
+            remind_time_raw=remind_time_raw,
+            remind_content_hint=remind_content,
+        )
 
         tz_local = timezone(timedelta(hours=8))
         now = datetime.now(tz_local)
-        remind_datetime = parse_remind_time(remind_time_raw)
+
+        # 卡口 1：类型归一化纠偏——并非真正的提醒请求，回退为普通回复，不建预约
+        if not parse_result.is_reminder:
+            logger.info(f"{self.log_prefix} make_appoint 经 LLM 判定非提醒请求，转为普通回复")
+            try:
+                success, llm_response = await generator_api.generate_reply(
+                    chat_stream=self.chat_stream,
+                    reply_message=action_planner_info.action_message,
+                    available_actions=available_actions,
+                    chosen_actions=chosen_action_plan_infos,
+                    reply_reason=action_planner_info.reasoning or "",
+                    request_type="replyer",
+                    from_plugin=False,
+                )
+                if success and llm_response and llm_response.reply_set:
+                    _, reply_text, _ = await self._send_and_store_reply(
+                        response_set=llm_response.reply_set,
+                        action_message=action_planner_info.action_message,
+                        cycle_timers=cycle_timers,
+                        thinking_id=thinking_id,
+                        actions=chosen_action_plan_infos,
+                        selected_expressions=llm_response.selected_expressions,
+                    )
+                    return {"action_type": "reply", "success": True, "reply_text": reply_text}
+            except Exception as e:
+                logger.error(f"{self.log_prefix} make_appoint 回退回复生成失败: {e}")
+            return {"action_type": "reply", "success": False, "reply_text": ""}
+
+        # 采用 LLM 解析出的提醒内容（已去除时间和指令词）
+        if parse_result.remind_content:
+            remind_content = parse_result.remind_content
+
+        # 卡口 2：confidence / ambiguities 双卡口——信息不够明确则追问，不静默建预约
+        if parse_result.needs_clarification:
+            reason = "；".join(parse_result.ambiguities) if parse_result.ambiguities else "提醒信息不够明确"
+            logger.info(f"{self.log_prefix} make_appoint 需追问：{reason}")
+            clarify_extra_info = (
+                f"[预约提醒待确认] 用户似乎想让你设定提醒，但信息不够明确：{reason}。"
+                f"请自然地向用户追问缺少的信息（例如具体是哪天、几点），不要擅自创建提醒。"
+            )
+            try:
+                success, llm_response = await generator_api.generate_reply(
+                    chat_stream=self.chat_stream,
+                    reply_message=action_planner_info.action_message,
+                    available_actions=available_actions,
+                    chosen_actions=chosen_action_plan_infos,
+                    reply_reason=action_planner_info.reasoning or "",
+                    request_type="replyer",
+                    from_plugin=False,
+                    extra_info=clarify_extra_info,
+                )
+                if success and llm_response and llm_response.reply_set:
+                    _, reply_text, _ = await self._send_and_store_reply(
+                        response_set=llm_response.reply_set,
+                        action_message=action_planner_info.action_message,
+                        cycle_timers=cycle_timers,
+                        thinking_id=thinking_id,
+                        actions=chosen_action_plan_infos,
+                        selected_expressions=llm_response.selected_expressions,
+                    )
+                    return {"action_type": "make_appoint", "success": False, "reply_text": reply_text}
+            except Exception as e:
+                logger.error(f"{self.log_prefix} make_appoint 追问回复生成失败: {e}")
+            return {"action_type": "make_appoint", "success": False, "reply_text": ""}
+
+        remind_datetime = parse_result.remind_datetime
 
         # 校验
         if not remind_datetime:
