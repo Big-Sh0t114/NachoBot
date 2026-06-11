@@ -28,6 +28,7 @@ BASE_DIR = os.path.join("data")
 EMOJI_DIR = os.path.join(BASE_DIR, "emoji")  # 表情包存储目录
 EMOJI_REGISTERED_DIR = os.path.join(BASE_DIR, "emoji_registed")  # 已注册的表情包注册目录
 MAX_EMOJI_FOR_PROMPT = 20  # 最大允许的表情包描述数量于图片替换的 prompt 中
+REPLACE_USAGE_HALFLIFE_DAYS = 30  # 替换候选权重的使用次数时效衰减半衰期（天）
 
 """
 还没经过测试，有些地方数据库和内存数据同步可能不完全
@@ -838,7 +839,19 @@ class EmojiManager:
             # 获取所有表情包对象
             emoji_objects = self.emoji_objects
             # 计算每个表情包的选择概率
-            probabilities = [1 / (emoji.usage_count + 1) for emoji in emoji_objects]
+            # 使用经过时效衰减的“有效使用次数”：长期不再被使用的表情包，其使用次数权重
+            # 会随时间衰减，从而逐渐失去“热门保护”，重新进入被替换的候选池。
+            # 近期仍活跃的表情包（包括高频老表情）衰减很小，依然受到保护。
+            now = time.time()
+            halflife_seconds = REPLACE_USAGE_HALFLIFE_DAYS * 86400
+
+            def _effective_usage(emoji: "MaiEmoji") -> float:
+                idle_seconds = max(0.0, now - (emoji.last_used_time or emoji.register_time))
+                decay = 0.5 ** (idle_seconds / halflife_seconds) if halflife_seconds > 0 else 1.0
+                return emoji.usage_count * decay
+
+            # 越“热门且近期活跃”的表情包，被选为删除候选的概率越低
+            probabilities = [1 / (_effective_usage(emoji) + 1) for emoji in emoji_objects]
             # 归一化概率，确保总和为1
             total_probability = sum(probabilities)
             normalized_probabilities = [p / total_probability for p in probabilities]
