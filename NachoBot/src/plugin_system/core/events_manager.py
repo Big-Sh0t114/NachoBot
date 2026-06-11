@@ -239,6 +239,8 @@ class EventsManager:
         if hasattr(message, "message_info") and message.message_info:
             if message.message_info.platform:
                 transformed_message.message_base_info["platform"] = message.message_info.platform
+            if getattr(message.message_info, "message_id", None) is not None:
+                transformed_message.message_base_info["message_id"] = message.message_info.message_id
             if message.message_info.group_info:
                 transformed_message.is_group_message = True
                 transformed_message.message_base_info.update(
