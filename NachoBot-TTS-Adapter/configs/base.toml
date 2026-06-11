@@ -12,7 +12,7 @@ voice_probability = 1.0 # 使用语音的概率
 
 [enabled_tts] # 启用的TTS模块，请与各插件的目录名称一致
 # 可选值: "GPT_Sovits" 或 "Vox"（二选一，不可同时启用）
-enabled = ["Vox"]
+enabled = ["GPT_Sovits"]
 
 [tts_base_config]
 stream_mode = false  # 是否启用流式输出

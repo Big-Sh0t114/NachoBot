@@ -120,7 +120,7 @@ class MessengerRelayAction(BaseAction):
         target_record = PersonInfoModel.get_or_none(PersonInfoModel.person_id == matched_person_id)
         target_qq = target_record.user_id if target_record else "未知"
 
-        confirm_msg = f"你要转告的对象是「{matched_name}」(QQ: {target_qq}) 吗？\n"
+        confirm_msg = f"你要转告的对象是「{matched_name}」(QQ: {target_qq}) 吗？"
         await self.send_text(confirm_msg)
 
         # 等待用户确认 — 自定义轮询，以发送确认消息后的时间为基准

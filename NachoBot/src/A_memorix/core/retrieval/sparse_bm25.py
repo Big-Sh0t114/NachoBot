@@ -134,7 +134,15 @@ class SQLiteFTS5SparseBackend(SparseSearchBackend):
                 n=self.config.char_ngram_n,
                 conn=conn,
             ):
-                logger.warning("paragraph ngram 索引未就绪，检索路径将跳过 ngram fallback")
+                self.metadata_store.ensure_paragraph_ngram_backfilled(
+                    n=self.config.char_ngram_n,
+                    conn=conn,
+                )
+                if not self.metadata_store.is_paragraph_ngram_ready(
+                    n=self.config.char_ngram_n,
+                    conn=conn,
+                ):
+                    logger.warning("paragraph ngram 索引未就绪，检索路径将跳过 ngram fallback")
         return True
 
     def search_paragraphs(
