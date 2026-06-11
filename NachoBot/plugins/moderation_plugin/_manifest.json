@@ -1,0 +1,23 @@
+{
+    "manifest_version": 1,
+    "name": "消息撤回插件",
+    "version": "1.0.0",
+    "description": "基于正则表达式和图片哈希匹配的智能消息撤回拦截系统。",
+    "author": {
+        "name": "Big-Sh0t114",
+        "url": "https://github.com/Big-Sh0t114"
+    },
+    "license": "GPL-v3.0-or-later",
+    "host_application": {
+        "min_version": "0.10.0"
+    },
+    "repository_url": "https://github.com/Big-Sh0t114/NachoBot",
+    "keywords": [
+        "管理"
+    ],
+    "categories": [
+        "communication"
+    ],
+    "default_locale": "zh-CN",
+    "locales_path": "_locales"
+}
