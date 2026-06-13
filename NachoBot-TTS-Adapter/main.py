@@ -29,9 +29,9 @@ from tts_src.utils import post_process
 
 
 class TTSPipeline:
-    tts_list: List[BaseTTSModel] = []
 
     def __init__(self, config_path: str):  # sourcery skip: dict-comprehension
+        self.tts_list: List[BaseTTSModel] = []
         self._emotion_classifier = None
         self._emotion_config = None
         self.config: Config = Config(config_path)
@@ -83,12 +83,13 @@ class TTSPipeline:
                 logger.error(f"Unexpected error importing {module_name}: {e}")
                 raise
 
-        # 情感分类器：仅在 Vox 启用且配置了 emotion.enabled 时加载
-        if "Vox" in enabled and self.tts_list:
-            try:
-                vox_model = self.tts_list[0]
-                emotion_cfg = getattr(getattr(vox_model, 'config', None), 'emotion', None)
-                if emotion_cfg and emotion_cfg.enabled:
+        # 情感分类器：遍历已加载的 TTS 模型，找到第一个带有 emotion 配置的模型
+        # （不再依赖 enabled 列表和 tts_list 索引，避免从 GPT_Sovits 切回 Vox 时
+        #   因类变量残留导致情感系统未初始化的问题）
+        for tts_model in self.tts_list:
+            emotion_cfg = getattr(getattr(tts_model, 'config', None), 'emotion', None)
+            if emotion_cfg and getattr(emotion_cfg, 'enabled', False):
+                try:
                     from tts_src.utils.emotion_classifier import EmotionClassifier
                     self._emotion_config = emotion_cfg
                     self._emotion_classifier = EmotionClassifier(
@@ -97,8 +98,9 @@ class TTSPipeline:
                         use_fp16=emotion_cfg.use_fp16,
                     )
                     logger.info("情感分类系统已在 TTS Adapter 服务端启用（模型将在首次使用时加载）")
-            except Exception as e:
-                logger.warning(f"情感分类器初始化失败，将使用默认预设: {e}")
+                except Exception as e:
+                    logger.warning(f"情感分类器初始化失败，将使用默认预设: {e}")
+                break
 
     async def start(self):
         """启动服务器和路由，并导入设定的模块"""
