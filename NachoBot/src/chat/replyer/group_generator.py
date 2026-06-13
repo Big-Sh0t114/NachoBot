@@ -375,12 +375,12 @@ class DefaultReplyer:
         if sender_relation:
             sender_relation += ";"
         others_relation = ""
-        
+
         # 收集已处理过的 person_id，避免重复和重复发件人
         processed_ids = set()
         if person and hasattr(person, "person_id"):
             processed_ids.add(person.person_id)
-            
+
         for other_person in person_list:
             if not other_person or not hasattr(other_person, "person_id") or other_person.person_id in processed_ids:
                 continue
@@ -854,7 +854,7 @@ class DefaultReplyer:
             if not has_bot_message:
                 core_dialogue_prompt = ""
             else:
-                core_dialogue_list = core_dialogue_list[-int(context_size * 0.6):]  # 限制消息数量
+                core_dialogue_list = core_dialogue_list[-int(context_size * 0.6) :]  # 限制消息数量
 
                 core_dialogue_prompt_str = build_readable_messages(
                     core_dialogue_list,
@@ -873,7 +873,7 @@ class DefaultReplyer:
         # 构建背景对话 prompt
         all_dialogue_prompt = ""
         if message_list_before_now:
-            latest_25_msgs = message_list_before_now[-int(context_size):]
+            latest_25_msgs = message_list_before_now[-int(context_size) :]
             all_dialogue_prompt_str = build_readable_messages(
                 latest_25_msgs,
                 replace_bot_name=True,
@@ -1084,10 +1084,16 @@ class DefaultReplyer:
         planner_question_text = None
         if chosen_actions:
             for action in chosen_actions:
-                action_type = getattr(action, "action_type", "") or (action.get("action_type", "") if isinstance(action, dict) else "")
+                action_type = getattr(action, "action_type", "") or (
+                    action.get("action_type", "") if isinstance(action, dict) else ""
+                )
                 if action_type == "reply":
                     planner_question_text = getattr(action, "question", None)
-                    if planner_question_text is None and hasattr(action, "action_params") and isinstance(action.action_params, dict):
+                    if (
+                        planner_question_text is None
+                        and hasattr(action, "action_params")
+                        and isinstance(action.action_params, dict)
+                    ):
                         planner_question_text = action.action_params.get("question")
                     elif planner_question_text is None and isinstance(action, dict):
                         planner_question_text = action.get("question")
@@ -1103,7 +1109,11 @@ class DefaultReplyer:
             ),
             self._time_and_run_task(
                 build_memory_retrieval_prompt(
-                    message=chat_talking_prompt_short, sender=sender, target=target, chat_stream=chat_stream, question=planner_question_text
+                    message=chat_talking_prompt_short,
+                    sender=sender,
+                    target=target,
+                    chat_stream=chat_stream,
+                    question=planner_question_text,
                 ),
                 "memory_block",
             ),
@@ -1183,26 +1193,19 @@ class DefaultReplyer:
 
         extra_info_block_parts = []
 
-        if chat_stream.platform == "bilibili":
-            try:
-                from src.mais4u.mais4u_chat.screen_manager import screen_manager
-
-                screen_info_content = screen_manager.get_screen()
-                if screen_info_content:
-                    extra_info_block_parts.append(
-                        f"【屏幕画面】\n{screen_info_content}\n可参考【直播画面】的屏幕信息。"
-                    )
-            except Exception:
-                pass
-
+        if chat_stream.platform in ("bilibili", "bilibili.live"):
             # 检查是否在适配器中被禁用了工具 (由 live_disable_network_search 控制)
             disable_tools = False
-            if reply_message and hasattr(reply_message, "additional_config") and isinstance(reply_message.additional_config, dict):
+            if (
+                reply_message
+                and hasattr(reply_message, "additional_config")
+                and isinstance(reply_message.additional_config, dict)
+            ):
                 disable_tools = reply_message.additional_config.get("disable_tools", False)
 
             # 注入联网搜索能力提示 (仅 Bilibili Live 群聊弹幕区，排除评论区，且未禁用网络搜索)
             if (
-                is_group_chat 
+                is_group_chat
                 and not disable_tools
                 and not (
                     chat_stream.group_info
@@ -1229,6 +1232,7 @@ class DefaultReplyer:
         # 注入沙盒文件概述 (read_file 后 LLM 生成的概要，持续 3 轮)
         try:
             from src.chat.sandbox.sandbox_manager import sandbox_manager
+
             sandbox = sandbox_manager.get_sandbox(chat_id)
             file_summaries_text = sandbox.get_active_summaries()
             if file_summaries_text:
@@ -1510,9 +1514,13 @@ class DefaultReplyer:
             if not global_config.lpmm_knowledge.enable:
                 logger.debug("LPMM知识库未启用，跳过获取知识库内容")
                 return ""
-            
+
             # Bypass LPMM for real-time platforms (Bilibili Live, Discord VC)
-            if hasattr(self, "chat_stream") and getattr(self.chat_stream, "platform", None) in ["bilibili", "discord_vc", "universal_vc"]:
+            if hasattr(self, "chat_stream") and getattr(self.chat_stream, "platform", None) in [
+                "bilibili",
+                "discord_vc",
+                "universal_vc",
+            ]:
                 logger.debug(f"{self.chat_stream.platform} 直播/语音环境，跳过LPMM检索")
                 return ""
 
