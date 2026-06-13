@@ -2,7 +2,7 @@
 name = "NachoBotTTSAdapter"
 version = "0.3.1"
 description = "A TTS adapter for NachoBot"
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.11,<3.13"
 dependencies = [
     "aiohttp>=3.14.0",
     "base64io>=1.0.3",
