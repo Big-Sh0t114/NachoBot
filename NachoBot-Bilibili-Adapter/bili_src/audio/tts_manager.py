@@ -6,6 +6,11 @@ import random
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Callable
 
+try:
+    from tts_src.utils.emotion_resolver import resolve_emotion_preset_remote
+except ImportError:
+    resolve_emotion_preset_remote = None
+
 def _clean_text_for_tts(text: str) -> str:
     """Helper to clean text for TTS, similar to how utils did it. 
        We will keep this here if it's specific to TTS formatting."""
@@ -51,6 +56,9 @@ class TTSManager:
         self._tts_timer: Dict[int, asyncio.Task] = {}
         self._tts_metadata: Dict[int, Dict[str, Any]] = {}
         self._tts_manual_overrides: Dict[int, bool] = {}
+
+        # Per-room language preference: "ja" (default, bilingual JP+ZH) or "zh" (Chinese-only)
+        self._lang_overrides: Dict[int, str] = {}
 
         self._last_active_time = time.time()
         self._next_idle_target = self._get_next_idle_interval()
@@ -147,9 +155,44 @@ class TTSManager:
             self.logger.error(f"Error persisting TTS config: {e}")
             raise
 
+    def save_idle_tts_config(self, enable: bool) -> None:
+        try:
+            import tomlkit
+        except ImportError:
+            self.logger.error("tomlkit not installed, cannot persist idle config")
+            return
+
+        if not self.config_path or not self.config_path.exists():
+            self.logger.warning("Config path not set or file missing, skip persist idle")
+            return
+
+        try:
+            with open(self.config_path, "r", encoding="utf-8") as f:
+                doc = tomlkit.load(f)
+
+            live_sec = doc.get("live")
+            if not live_sec:
+                self.logger.warning("Config missing [live] section, skip persist idle")
+                return
+
+            idle_tts = live_sec.get("idle_tts")
+            if not idle_tts:
+                self.logger.warning("Config missing [live.idle_tts], skip persist idle")
+                return
+
+            idle_tts["enable"] = enable
+
+            with open(self.config_path, "w", encoding="utf-8") as f:
+                tomlkit.dump(doc, f)
+
+            self.logger.info(f"Persisted idle_tts config: enable={enable}")
+        except Exception as e:
+            self.logger.error(f"Error persisting idle_tts config: {e}")
+            raise
+
     def handle_tts_manual_command(self, room_id: int, user_id: str, text: str, user_name: str, allowed_user_ids: set) -> bool:
         command = text.strip().lower()
-        if command not in ("#tts_on", "#tts_off"):
+        if command not in ("#tts_on", "#tts_off", "#lang_switch", "#idle_on", "#idle_off"):
             return False
 
         allowed = False
@@ -163,6 +206,21 @@ class TTSManager:
                 "TTS manual command rejected: room_id=%s user_id=%s user_name=%s",
                 room_id, user_id, user_name,
             )
+            return True
+
+        if command == "#lang_switch":
+            return self._handle_lang_switch(room_id, user_id)
+
+        if command in ("#idle_on", "#idle_off"):
+            enable = command == "#idle_on"
+            self.config.idle_tts_enable = enable
+            action = "Enabled" if enable else "Disabled"
+            self.logger.info("Idle TTS %s manually by user_id=%s", action, user_id)
+            if self.config_path:
+                try:
+                    self.save_idle_tts_config(enable)
+                except Exception as e:
+                    self.logger.error(f"Failed to persist Idle TTS config: {e}")
             return True
 
         enable = command == "#tts_on"
@@ -184,6 +242,23 @@ class TTSManager:
                 self.logger.error(f"Failed to persist TTS config: {e}")
 
         return True
+
+    def _handle_lang_switch(self, room_id: int, user_id: str) -> bool:
+        """Toggle TTS language between Japanese (bilingual) and Chinese-only for a room."""
+        current = self.get_room_language(room_id)
+        new_lang = "zh" if current == "ja" else "ja"
+        self._lang_overrides[room_id] = new_lang
+
+        lang_display = {"ja": "日本語 (bilingual)", "zh": "中文 (Chinese-only)"}
+        self.logger.info(
+            "TTS language switched to %s by user_id=%s (Room: %s)",
+            lang_display.get(new_lang, new_lang), user_id, room_id,
+        )
+        return True
+
+    def get_room_language(self, room_id: int) -> str:
+        """Get the current TTS language for a room. Default is 'ja' (bilingual)."""
+        return self._lang_overrides.get(room_id, "ja")
 
     def parse_bilingual_response(self, text: str) -> Tuple[str, str]:
         if not text:
@@ -244,15 +319,15 @@ class TTSManager:
             self.logger.error(f"Failed to update subtitle: {e}")
 
     async def idle_tts_loop(self) -> None:
-        if not self.config.idle_tts_enable:
-            self.logger.warning("Idle TTS loop aborted: idle_tts.enable is False in config.")
-            return
         if not self.config.idle_tts_texts:
             self.logger.warning("Idle TTS loop aborted: idle_tts_texts list is empty (failed to load json?).")
             return
         self.logger.info(f"Idle TTS loop started. Min: {self.config.idle_tts_min_seconds}s, Max: {self.config.idle_tts_max_seconds}s")
         while True:
             await asyncio.sleep(2.0)
+            if not getattr(self.config, "idle_tts_enable", False):
+                self.reset_idle_timer()
+                continue
             if self.audio_player.is_playing:
                 self.reset_idle_timer()
                 continue
@@ -288,9 +363,9 @@ class TTSManager:
                     self.logger.info(f"Idle TTS 分段流式: {len(segments)} 个分段")
 
                     preset_name = None
-                    if hasattr(self.tts_model, "_resolve_emotion_preset_remote"):
+                    if resolve_emotion_preset_remote is not None:
                         try:
-                            preset_name = await self.tts_model._resolve_emotion_preset_remote(cleaned_tts_text)
+                            preset_name = await resolve_emotion_preset_remote(cleaned_tts_text)
                         except Exception as e:
                             self.logger.error(f"Failed to resolve emotion preset: {e}")
 
@@ -396,18 +471,28 @@ class TTSManager:
             room_config = self.config.live_room_prompts.get(room_id, {})
             tts_config = room_config.get("tts", {})
 
-            text_jp, text_zh = self.parse_bilingual_response(full_text)
-            display_text = text_zh if text_zh else full_text
-            msg_to_send = text_zh if text_zh else full_text
+            # Determine TTS language mode for this room
+            room_lang = self.get_room_language(room_id)
+
+            if room_lang == "zh":
+                # Chinese-only mode: strip any residual bilingual tags and TTS the Chinese text directly
+                display_text = re.sub(r"</?[A-Z]{2}>", "", full_text).strip()
+                msg_to_send = display_text
+                tts_text = display_text
+            else:
+                # Default bilingual mode: parse <JP> and <ZH> tags
+                text_jp, text_zh = self.parse_bilingual_response(full_text)
+                display_text = text_zh if text_zh else full_text
+                msg_to_send = text_zh if text_zh else full_text
+                tts_text = text_jp if text_jp else ""
 
             if self.tts_model or (tts_config and tts_config.get("enable") and self.ensure_tts_model()):
-                tts_text = text_jp if text_jp else ""
                 subtitle_path = str(tts_config.get("subtitle_path") or "subtitles.txt")
                 self.update_subtitle(display_text, subtitle_path=subtitle_path)
 
                 if tts_text:
                     cleaned_tts_text = _clean_text_for_tts(tts_text)
-                    self.logger.info(f"TTS Generating for room {room_id}: {cleaned_tts_text}")
+                    self.logger.info(f"TTS Generating for room {room_id} (lang={room_lang}): {cleaned_tts_text}")
                     try:
                         # 分段流式：按句切分文本，逐句生成并立即送入播放队列
                         from tts_src.utils.text_splitter import split_text_for_streaming
@@ -415,9 +500,9 @@ class TTSManager:
                         self.logger.info(f"TTS 分段流式: {len(segments)} 个分段")
 
                         preset_name = None
-                        if hasattr(self.tts_model, "_resolve_emotion_preset_remote"):
+                        if resolve_emotion_preset_remote is not None:
                             try:
-                                preset_name = await self.tts_model._resolve_emotion_preset_remote(cleaned_tts_text)
+                                preset_name = await resolve_emotion_preset_remote(cleaned_tts_text)
                             except Exception as e:
                                 self.logger.error(f"Failed to resolve emotion preset: {e}")
 
@@ -448,7 +533,7 @@ class TTSManager:
                         self.logger.error(f"TTS generation failed: {e}")
                         self.logger.info("Fallback to sending danmu due to TTS error")
                 else:
-                    self.logger.warning(f"TTS enabled for room {room_id} but no Japanese text parsed. Sending raw text as danmu.")
+                    self.logger.warning(f"TTS enabled for room {room_id} but no parseable text for TTS. Sending raw text as danmu.")
 
             # Fallback
             if self.on_start_replying and self.execute_live2d_action:

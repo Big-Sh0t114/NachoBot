@@ -116,6 +116,9 @@ subtitle_path = ""           # 语音识别字幕路径，用于obs直播
 silence_threshold = 0.015
 silence_duration = 0.8
 sample_rate = 48000
+# Push-to-talk: 只有按住按键时才捕获麦克风音频
+push_to_talk = true
+ptt_key = "v"  # 按住此键说话 (支持: "v", "ctrl", "alt", "shift", "caps_lock", "f1"-"f12" 等)
 
 [comment]
 enable_reply_notice = true

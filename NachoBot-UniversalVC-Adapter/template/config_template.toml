@@ -7,10 +7,11 @@ disable_network_search = true
 # Use EITHER target_pid (exact PID) OR target_process_name (e.g. "VRChat.exe").
 # Leave both empty to capture system-wide audio (loopback mode).
 # target_pid = 12345
-target_process_name = ""
+target_process_name = "VRChat.exe"
 
 # System-wide capture device (only used when target_process_name is empty).
 # system_capture_device = "Stereo Mix"
+# system_capture_device = "Voicemeeter Out B1"
 
 # Legacy VAD settings (used as fallback if Silero VAD fails to load)
 vad_threshold = 500
@@ -19,9 +20,7 @@ min_speech_duration = 0.3
 
 [output]
 # Virtual audio cable output device name.
-#   "CABLE Input"          - VB-Audio Virtual Cable
-#   "VoiceMeeter Input"    - VoiceMeeter
-device_name = "CABLE Input"
+device_name = "VoiceMeeter Input (VB-Audio VoiceMeeter VAIO)"
 sample_rate = 44100
 
 [nachobot]
@@ -31,8 +30,8 @@ port = 8000
 # ── DEV: Real-time Audio Pipeline ──────────────────────────────────
 
 [denoise]
-# Real-time denoising via DeepFilterNet (removes noise, game SFX, BGM)
-enabled = true
+# Real-time denoising (DeepFilterNet). Removes background noise, game SFX, BGM.
+enabled = false
 
 [vad]
 # Silero VAD (neural-network-based, replaces simple RMS threshold)
@@ -43,8 +42,8 @@ min_speech_duration = 0.3
 [speaker]
 # Real-time speaker tracking with voiceprint database
 enabled = true
-similarity_threshold = 0.6
-max_speakers = 8
+similarity_threshold = 0.5
+max_speakers = 24  # Set to 0 for unlimited
 db_path = "speaker_db.json"
 
 [local_asr]
@@ -55,16 +54,14 @@ mode = "local_streaming"
 num_threads = 2
 
 [microphone]
-# Microphone capture for owner voice input.
-# When enabled, captures audio from the local microphone and fixes the speaker
-# identity as "owner" (主人), bypassing speaker tracking for mic input.
-enabled = false
-# Microphone device name (leave empty for system default microphone)
-# device_name = "Microphone (Realtek High Definition Audio)"
-device_name = ""
+enabled = true
+device_name = "HECATE G4 S PRO"
 # Fixed identity for microphone speaker
 owner_speaker_id = "owner"
 owner_speaker_name = "主人"
+# Push-to-talk: only capture mic when key is held down
+push_to_talk = true
+ptt_key = "caps_lock"  # Key to hold (e.g. "v", "ctrl", "alt", "shift", "caps_lock")
 
 # ── Prompts ─────────────────────────────────────────────────────────
 

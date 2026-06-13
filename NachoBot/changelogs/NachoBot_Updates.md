@@ -1,3 +1,9 @@
+6/14
+    解耦情感解析与TTS模型实例
+    修改moderation插件，算法由MD5更换至dHash
+    moderation插件加入违规统计
+6/13
+    bilbili直播和universalVC侧新增按键说话功能
 6/11
     给表情包系统加入随时间增加替换权重的机制
     新增moderation插件，可自动撤回指定信息和表情包

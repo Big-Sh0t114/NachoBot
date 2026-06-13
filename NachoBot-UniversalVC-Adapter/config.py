@@ -23,6 +23,8 @@ class MicrophoneConfig:
     device_name: str = ""               # Microphone device name (empty = system default)
     owner_speaker_id: str = "owner"     # Fixed speaker ID for microphone input
     owner_speaker_name: str = "主人"    # Fixed display name for microphone input
+    push_to_talk: bool = False          # Enable push-to-talk mode (only capture when key held)
+    ptt_key: str = "v"                  # Key to hold for push-to-talk (e.g. "v", "ctrl", "alt")
 
 
 @dataclass

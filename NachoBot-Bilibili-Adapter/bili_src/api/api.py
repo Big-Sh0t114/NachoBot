@@ -269,7 +269,7 @@ class BilibiliApi:
             "GET",
             "https://api.live.bilibili.com/xlive/web-room/v1/index/getDanmuInfo",
             params={"id": room_id, "type": 0, "web_location": 444.8},
-            use_wbi=False,
+            use_wbi=True,
             referer=f"https://live.bilibili.com/{room_id}",
         )
 
