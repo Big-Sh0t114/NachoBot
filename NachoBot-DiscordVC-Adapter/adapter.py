@@ -11,6 +11,12 @@ from config import AdapterConfig
 from discord_client import NachoDiscordBot
 from voice_handler import VoiceHandler
 
+# 独立的情感预设解析器（不依赖 TTS 模型实例）
+try:
+    from tts_src.utils.emotion_resolver import resolve_emotion_preset_remote
+except ImportError:
+    resolve_emotion_preset_remote = None
+
 # Add NachoBot path for ncnk_message module (Standard NachoBot Architecture)
 # Assuming directory structure:
 # root/
@@ -358,9 +364,9 @@ class DiscordAdapter:
             self.logger.info(f"TTS segment stream: {len(segments)} segments")
 
             preset_name = None
-            if self.tts_handler.tts_model and hasattr(self.tts_handler.tts_model, "_resolve_emotion_preset_remote"):
+            if resolve_emotion_preset_remote is not None:
                 try:
-                    preset_name = await self.tts_handler.tts_model._resolve_emotion_preset_remote(cleaned_text)
+                    preset_name = await resolve_emotion_preset_remote(cleaned_text)
                 except Exception as e:
                     self.logger.error(f"Failed to resolve emotion preset: {e}")
 
