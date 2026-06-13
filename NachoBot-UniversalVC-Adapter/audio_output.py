@@ -9,6 +9,7 @@ piped into any application's microphone input.
 import asyncio
 import logging
 import wave
+import os
 from collections import deque
 from typing import Optional
 
@@ -34,6 +35,15 @@ class AudioOutput:
         self._current_stop_event: Optional[asyncio.Event] = None
         self._interrupted_wav: Optional[str] = None
         self._sd = None  # sounddevice module (lazy import)
+
+    def _cleanup_file(self, wav_path: str):
+        """Clean up the temporary WAV file."""
+        try:
+            if wav_path and os.path.exists(wav_path):
+                os.remove(wav_path)
+                self.logger.debug(f"Cleaned up temp audio file: {wav_path}")
+        except Exception as e:
+            self.logger.warning(f"Failed to clean up temp audio file {wav_path}: {e}")
 
     def _ensure_sounddevice(self):
         """Lazy import sounddevice to avoid import errors if not installed."""
@@ -97,6 +107,21 @@ class AudioOutput:
         if self._current_stop_event:
             self._current_stop_event.set()
 
+    async def stop(self):
+        """Completely stop playback and clean up all remaining files."""
+        self.logger.info("Stopping AudioOutput and cleaning up")
+        self._is_paused = False
+        if self._current_stop_event:
+            self._current_stop_event.set()
+        
+        while self._queue:
+            dropped = self._queue.popleft()
+            self._cleanup_file(dropped)
+            
+        if self._interrupted_wav:
+            self._cleanup_file(self._interrupted_wav)
+            self._interrupted_wav = None
+
     def resume(self):
         """Resume playback."""
         self._is_paused = False
@@ -128,6 +153,9 @@ class AudioOutput:
                         if self._is_paused:
                             self._interrupted_wav = wav_path
                     self._current_stop_event = None
+
+                    if self._interrupted_wav != wav_path:
+                        self._cleanup_file(wav_path)
 
             self._is_playing = False
 

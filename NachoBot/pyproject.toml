@@ -75,6 +75,7 @@ dependencies = [
     "tenacity>=8.0.0",
     "python-multipart>=0.0.9",
     "sqlmodel>=0.0.22",
+    "pynput",
 ]
 
 

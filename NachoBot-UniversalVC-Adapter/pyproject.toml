@@ -23,4 +23,5 @@ dependencies = [
     "sherpa-onnx",
     "pyrnnoise",
     "onnxruntime>=1.20",
+    "pynput",
 ]
