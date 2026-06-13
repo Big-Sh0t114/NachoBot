@@ -25,4 +25,5 @@ dependencies = [
     "toml>=0.10.2",
     "uvicorn>=0.41.0",
     "websockets>=11.0.3",
+    "pynput",
 ]

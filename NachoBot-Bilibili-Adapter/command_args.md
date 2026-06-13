@@ -50,3 +50,19 @@ Seg.data = {
 ```
 
 - `message` must be plain text. Emoji and non-text segments are ignored.
+
+## Danmu Commands (Manual Control)
+
+These commands are sent as regular danmu in the live room. Only users listed in `manual_user_ids` (or the bot owner `dede_user_id`) can use them.
+
+| Command | Description |
+|---|---|
+| `#tts_on` | Enable TTS for the current room |
+| `#tts_off` | Disable TTS for the current room |
+| `#lang_switch` | Toggle TTS language between Japanese (bilingual `<JP><ZH>` mode) and Chinese-only mode |
+| `#idle_on` | Enable idle TTS (待机语音) |
+| `#idle_off` | Disable idle TTS |
+| `#screen_on` | Enable screen monitor |
+| `#screen_off` | Disable screen monitor |
+| `#asr_on` | Force enable microphone ASR |
+| `#asr_off` | Force disable microphone ASR |

@@ -104,6 +104,8 @@ class AdapterConfig:
     mic_asr_silence_threshold: float
     mic_asr_silence_duration: float
     mic_asr_sample_rate: int
+    mic_asr_push_to_talk: bool
+    mic_asr_ptt_key: str
     # Live Streamer mode config (per room)
     live_streamer_configs: Dict[int, "LiveStreamerConfig"]
 
@@ -303,9 +305,9 @@ def load_config(path: Path) -> AdapterConfig:
                 import json
                 with open(file_path, "r", encoding="utf-8") as f:
                     if file_path.suffix == ".json":
-                        data = json.load(f)
-                        if isinstance(data, list):
-                            for item in data:
+                        idle_tts_data = json.load(f)
+                        if isinstance(idle_tts_data, list):
+                            for item in idle_tts_data:
                                 if isinstance(item, dict):
                                     idle_tts_texts.append(json.dumps(item, ensure_ascii=False))
                                 else:
@@ -557,6 +559,8 @@ def load_config(path: Path) -> AdapterConfig:
         mic_asr_silence_threshold=float(mic_asr.get("silence_threshold", 500.0)),
         mic_asr_silence_duration=float(mic_asr.get("silence_duration", 1.0)),
         mic_asr_sample_rate=int(mic_asr.get("sample_rate", 16000)),
+        mic_asr_push_to_talk=bool(mic_asr.get("push_to_talk", False)),
+        mic_asr_ptt_key=str(mic_asr.get("ptt_key", "v") or "v"),
         live_streamer_configs=live_streamer_configs,
     )
 

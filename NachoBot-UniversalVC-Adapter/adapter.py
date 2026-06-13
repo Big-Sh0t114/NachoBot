@@ -25,6 +25,12 @@ from audio_output import AudioOutput
 from audio_pipeline import AudioPipeline
 from tts_handler import TTSHandler
 
+# 独立的情感预设解析器（不依赖 TTS 模型实例）
+try:
+    from tts_src.utils.emotion_resolver import resolve_emotion_preset_remote
+except ImportError:
+    resolve_emotion_preset_remote = None
+
 # Add NachoBot path for ncnk_message module
 _root_dir = Path(__file__).resolve().parents[1]
 _nachobot_path = _root_dir / "NachoBot"
@@ -187,6 +193,8 @@ class UniversalVCAdapter:
         await self.audio_capture.stop()
         if self.mic_capture:
             await self.mic_capture.stop()
+        if self.audio_output:
+            await self.audio_output.stop()
         await asyncio.sleep(0.5)
 
     def _inject_variables(self, template: str, variables: dict) -> str:
@@ -356,9 +364,9 @@ class UniversalVCAdapter:
             self.logger.info(f"TTS segment stream: {len(segments)} segments")
 
             preset_name = None
-            if self.tts_handler.tts_model and hasattr(self.tts_handler.tts_model, "_resolve_emotion_preset_remote"):
+            if resolve_emotion_preset_remote is not None:
                 try:
-                    preset_name = await self.tts_handler.tts_model._resolve_emotion_preset_remote(cleaned_text)
+                    preset_name = await resolve_emotion_preset_remote(cleaned_text)
                 except Exception as e:
                     self.logger.error(f"Failed to resolve emotion preset: {e}")
 

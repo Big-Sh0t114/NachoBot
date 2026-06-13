@@ -157,6 +157,8 @@ class BilibiliAdapter:
                 silence_threshold=config.mic_asr_silence_threshold,
                 silence_duration=config.mic_asr_silence_duration,
                 sample_rate=config.mic_asr_sample_rate,
+                push_to_talk=config.mic_asr_push_to_talk,
+                ptt_key=config.mic_asr_ptt_key,
             )
             # Define callback alias for thread-safe calling if needed,
             # though MicCaptureWorker handles thread-safety via asyncio.run_coroutine_threadsafe now
@@ -601,7 +603,8 @@ class BilibiliAdapter:
         # This prevents prompt caching issues when hot-switching
         template_suffix = ""
         if self.tts_manager.is_tts_enabled(room_id):
-            template_suffix = "_tts"
+            room_lang = self.tts_manager.get_room_language(room_id)
+            template_suffix = f"_tts_{room_lang}"
 
         return TemplateInfo(
             template_items=template_items,
@@ -1228,7 +1231,9 @@ class BilibiliAdapter:
             )
             data.add_field("model", asr_config.model)
             data.add_field("language", "zh")
-            data.add_field("prompt", "ZH")
+            # Use a proper Chinese context prompt to guide the model, which reduces hallucinations
+            # and improves recognition of Chinese over strange languages.
+            data.add_field("prompt", "这是一段中文普通话日常对话录音。")
 
             headers = {"Authorization": f"Bearer {asr_config.api_key}"}
             url = f"{asr_config.base_url}/audio/transcriptions"
@@ -1254,7 +1259,26 @@ class BilibiliAdapter:
                             ch for ch in text if ch.isprintable() or ch in "\n\r\t"
                         )
                         # Then remove trailing punctuation
-                        text = text.rstrip("。?.，,！!？")
+                        text = text.rstrip("。?.，,！!？ ")
+                        
+                        # Filter out common Whisper hallucinations for silence/noise
+                        lower_text = text.lower()
+                        hallucinations = [
+                            "그", "thank you", "you", "amara.org", "subtitles", 
+                            "啊", "嗯", "那", "这", "好的"
+                        ]
+                        
+                        # Also check if it contains Korean characters (common whisper hallucination)
+                        import re
+                        if re.search(r'[\uac00-\ud7a3]', text):
+                            self.logger.debug(f"Filtered out ASR hallucination (Korean): {text}")
+                            return None
+                            
+                        # Check exact matches or substrings for English hallucinations
+                        if any(h == lower_text for h in hallucinations) or "amara.org" in lower_text:
+                            self.logger.debug(f"Filtered out ASR hallucination: {text}")
+                            return None
+
                     return text
 
         except Exception as e:
@@ -1612,19 +1636,41 @@ class BilibiliAdapter:
             if tts_planner:
                 planner_prompt = tts_planner
 
-            # Fallback: append generic instructions if no specific reply prompt was found
-            # (Or if the custom one is missing the required XML instructions)
-            if "<JP>" not in reply_prompt and "<ZH>" not in reply_prompt:
-                tts_instruction = (
-                    "\n\n非常重要：请必须同时输出中文回复和对应的日文翻译（用于语音播放），格式严格如下：\n"
-                    "<JP>日本語翻訳</JP><ZH>中文原本意思</ZH>\n"
-                    "例如：\n"
-                    "<JP>こんにちは、ご飯を食べましたか？</JP><ZH>你好呀，吃过饭了吗？</ZH>\n"
+            # Determine language mode for this room
+            room_lang = self.tts_manager.get_room_language(room_id)
+
+            if room_lang == "zh":
+                # Chinese-only TTS mode: tell model to output plain Chinese, no bilingual tags
+                zh_tts_instruction = (
+                    "\n\n语音模式已切换为中文。请只用中文回复，禁止使用<JP><ZH>标签，不要进行日语翻译。"
+                    "直接输出中文回复内容，语音系统会直接朗读你的中文回复。"
                 )
+                # Strip any pre-existing bilingual instructions from the prompt
+                reply_prompt = re.sub(
+                    r"非常重要：请必须同时输出中文回复和对应的日文翻译.*?(?=\n\n|\Z)",
+                    "",
+                    reply_prompt,
+                    flags=re.DOTALL,
+                )
+                reply_prompt += zh_tts_instruction
                 self.logger.debug(
-                    f"Appending TTS instruction to prompt for room {room_id}"
+                    f"Appending Chinese-only TTS instruction to prompt for room {room_id}"
                 )
-                reply_prompt += tts_instruction
+            else:
+                # Default: Bilingual JP+ZH mode
+                # Fallback: append generic instructions if no specific reply prompt was found
+                # (Or if the custom one is missing the required XML instructions)
+                if "<JP>" not in reply_prompt and "<ZH>" not in reply_prompt:
+                    tts_instruction = (
+                        "\n\n非常重要：请必须同时输出中文回复和对应的日文翻译（用于语音播放），格式严格如下：\n"
+                        "<JP>日本語翻訳</JP><ZH>中文原本意思</ZH>\n"
+                        "例如：\n"
+                        "<JP>こんにちは、ご飯を食べましたか？</JP><ZH>你好呀，吃过饭了吗？</ZH>\n"
+                    )
+                    self.logger.debug(
+                        f"Appending TTS instruction to prompt for room {room_id}"
+                    )
+                    reply_prompt += tts_instruction
         else:
             # Force disable XML if TTS is off (Circuit Breaker for Context Pollution)
             anti_tts_instruction = (

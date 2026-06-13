@@ -328,8 +328,118 @@ class AudioCapture:
         return mapping.get(name_lower, name)
 
 
+class PTTKeyMonitor:
+    """Global keyboard monitor for Push-to-Talk functionality.
+
+    Uses pynput to listen for key press/release events globally.
+    Thread-safe: the key state flag is set from the listener thread
+    and read from the audio callback thread.
+    """
+
+    # Mapping of common key names to pynput Key attributes
+    _SPECIAL_KEYS = {
+        "ctrl": "ctrl_l", "ctrl_l": "ctrl_l", "ctrl_r": "ctrl_r",
+        "alt": "alt_l", "alt_l": "alt_l", "alt_r": "alt_r",
+        "shift": "shift_l", "shift_l": "shift_l", "shift_r": "shift_r",
+        "caps_lock": "caps_lock", "tab": "tab", "space": "space",
+        "enter": "enter", "backspace": "backspace", "delete": "delete",
+        "esc": "esc", "f1": "f1", "f2": "f2", "f3": "f3", "f4": "f4",
+        "f5": "f5", "f6": "f6", "f7": "f7", "f8": "f8", "f9": "f9",
+        "f10": "f10", "f11": "f11", "f12": "f12",
+    }
+
+    def __init__(self, key_name: str, logger: logging.Logger):
+        self.logger = logger
+        self._key_held = False
+        self._listener = None
+        self._target_key = None
+        self._target_char = None
+
+        key_lower = key_name.strip().lower()
+
+        try:
+            from pynput import keyboard
+            if key_lower in self._SPECIAL_KEYS:
+                self._target_key = getattr(keyboard.Key, self._SPECIAL_KEYS[key_lower], None)
+                if self._target_key is None:
+                    self.logger.error(f"PTT: Unknown special key '{key_name}', falling back to 'v'")
+                    self._target_char = 'v'
+            else:
+                # Single character key
+                self._target_char = key_lower[0] if key_lower else 'v'
+        except ImportError:
+            self.logger.error("pynput is required for push-to-talk! pip install pynput")
+            raise
+
+    @property
+    def is_held(self) -> bool:
+        return self._key_held
+
+    def start(self):
+        """Start the global keyboard listener."""
+        try:
+            from pynput import keyboard
+
+            def on_press(key):
+                if self._match_key(key):
+                    self._key_held = True
+
+            def on_release(key):
+                if self._match_key(key):
+                    self._key_held = False
+
+            self._listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+            self._listener.daemon = True
+            self._listener.start()
+
+            key_display = self._target_char or str(self._target_key).replace("Key.", "")
+            self.logger.info(f"PTT keyboard listener started — hold [{key_display}] to talk")
+        except Exception as e:
+            self.logger.error(f"Failed to start PTT keyboard listener: {e}")
+            raise
+
+    def stop(self):
+        """Stop the global keyboard listener."""
+        if self._listener:
+            try:
+                self._listener.stop()
+            except Exception:
+                pass
+            self._listener = None
+        self._key_held = False
+
+    def _match_key(self, key) -> bool:
+        """Check if the pressed/released key matches our target.
+
+        On Windows with a Chinese IME active, key.char may be None even for
+        regular letter keys.  Fall back to key.vk (virtual-key code) which
+        always reflects the physical key.
+        """
+        if self._target_key is not None:
+            return key == self._target_key
+        if self._target_char is not None:
+            # 1) Try key.char first (works when no IME is intercepting)
+            try:
+                if hasattr(key, 'char') and key.char and key.char.lower() == self._target_char:
+                    return True
+            except AttributeError:
+                pass
+            # 2) Fall back to virtual-key code (works with any IME)
+            try:
+                if hasattr(key, 'vk') and key.vk is not None:
+                    target_vk = ord(self._target_char.upper())  # e.g. 'v' -> 86 (0x56)
+                    return key.vk == target_vk
+            except (AttributeError, TypeError):
+                pass
+        return False
+
+
 class MicrophoneCapture:
-    """Captures audio from the local microphone for owner voice input."""
+    """Captures audio from the local microphone for owner voice input.
+
+    Supports Push-to-Talk (PTT) mode: when enabled, audio frames are only
+    forwarded to the pipeline while the configured key is held down.
+    """
 
     def __init__(
         self,
@@ -348,6 +458,15 @@ class MicrophoneCapture:
         self._queue = None
         self._samplerate = 16000
         self._channels = 1
+
+        # Push-to-Talk state
+        self._ptt_monitor: Optional[PTTKeyMonitor] = None
+        if config.push_to_talk:
+            try:
+                self._ptt_monitor = PTTKeyMonitor(config.ptt_key, logger)
+            except Exception:
+                logger.warning("PTT monitor failed to initialize, mic will use continuous capture mode")
+                self._ptt_monitor = None
 
     def _resolve_device(self) -> Optional[int]:
         """Find the microphone input device."""
@@ -385,6 +504,13 @@ class MicrophoneCapture:
         self._queue = asyncio.Queue(maxsize=500)
         self._running = True
 
+        # Start PTT keyboard listener if configured
+        if self._ptt_monitor:
+            self._ptt_monitor.start()
+            self.logger.info("Microphone in Push-to-Talk mode")
+        else:
+            self.logger.info("Microphone in continuous capture mode")
+
         self._worker_task = asyncio.create_task(self._queue_worker_loop())
 
         device_id = self._resolve_device()
@@ -416,8 +542,11 @@ class MicrophoneCapture:
             self._running = False
 
     def _audio_callback(self, indata, frames, time_info, status):
-        """sounddevice callback."""
+        """sounddevice callback — gated by PTT key state."""
         if not self._running:
+            return
+        # PTT gate: skip frame if push-to-talk is enabled and key is not held
+        if self._ptt_monitor and not self._ptt_monitor.is_held:
             return
         if self._loop and self._queue:
             self._loop.call_soon_threadsafe(
@@ -434,6 +563,9 @@ class MicrophoneCapture:
     async def stop(self):
         """Stop capturing audio."""
         self._running = False
+        # Stop PTT listener
+        if self._ptt_monitor:
+            self._ptt_monitor.stop()
         if self._worker_task:
             self._worker_task.cancel()
             try:
