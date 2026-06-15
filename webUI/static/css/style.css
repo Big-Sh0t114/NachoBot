@@ -9,8 +9,8 @@
 :root {
     /* Palette */
     --bg-base:       #faf3e8;
-    --bg-card:       #ffffff;
-    --bg-sidebar:    #1a1a2e;
+    --bg-card:       rgba(255, 255, 255, 0.45);
+    --bg-sidebar:    rgba(26, 26, 46, 0.85);
     --bg-sidebar-hover: #252545;
     --bg-terminal:   #1e1e2e;
 
@@ -83,6 +83,8 @@ body {
     top: 0;
     z-index: 100;
     box-shadow: 4px 0 20px rgba(0,0,0,0.15);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
 }
 
 .sidebar-header {
@@ -261,7 +263,15 @@ body {
     border-radius: var(--radius-lg);
     border: 1px solid var(--border-light);
     box-shadow: var(--shadow-card);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
     transition: transform var(--transition), box-shadow var(--transition);
+}
+
+/* Apply glassmorphism to all similar card containers */
+.group-card, .plugin-card, .config-sidebar, .config-editor, .db-stats-bar, .db-sidebar {
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
 }
 
 .card:hover {
@@ -396,7 +406,7 @@ body {
     font-size: 0.85rem;
     line-height: 1.6;
     color: var(--text-primary);
-    background: var(--bg-card);
+    background: transparent;
     tab-size: 4;
 }
 

@@ -45,7 +45,7 @@ def db_message_to_str(message_dict: dict) -> str:
 
 def is_mentioned_bot_in_message(message: MessageRecv) -> tuple[bool, bool, float]:
     """检查消息是否提到了机器人"""
-    keywords = [global_config.bot.nickname] + list(global_config.bot.alias_names)
+    keywords = [k for k in [global_config.bot.nickname] + list(global_config.bot.alias_names) if k]
     reply_probability = 0.0
     is_at = False
     is_mentioned = False

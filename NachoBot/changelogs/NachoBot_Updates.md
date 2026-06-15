@@ -1,3 +1,5 @@
+6/15
+    更新WebUI
 6/14
     解耦情感解析与TTS模型实例
     修改moderation插件，算法由MD5更换至dHash
