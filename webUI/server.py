@@ -52,9 +52,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="NachoBot WebUI", lifespan=lifespan)
 
-# Mount static files
+# Mount static and resources files
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
+RESOURCES_DIR = Path(__file__).parent / "resources"
+if RESOURCES_DIR.exists():
+    app.mount("/resources", StaticFiles(directory=str(RESOURCES_DIR)), name="resources")
 
 # =========================================================================
 # Pages
@@ -69,6 +72,17 @@ async def favicon():
 @app.get("/")
 async def index():
     return FileResponse(STATIC_DIR / "index.html")
+
+@app.get("/api/music/list")
+async def list_music():
+    if not RESOURCES_DIR.exists():
+        return []
+    music_extensions = {".mp3", ".wav", ".ogg", ".flac"}
+    files = []
+    for p in RESOURCES_DIR.iterdir():
+        if p.is_file() and p.suffix.lower() in music_extensions:
+            files.append({"name": p.name, "url": f"/resources/{p.name}"})
+    return files
 
 
 # =========================================================================
