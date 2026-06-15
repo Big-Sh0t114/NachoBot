@@ -194,6 +194,19 @@ async def stop_service(service_id: str):
         raise HTTPException(400, str(e))
 
 
+class ServiceInput(BaseModel):
+    text: str
+
+
+@app.post("/api/services/{service_id}/input")
+async def send_service_input(service_id: str, body: ServiceInput):
+    try:
+        await process_mgr.send_input(service_id, body.text)
+        return {"status": "ok"}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 # =========================================================================
 # WebSocket — Log streaming
 # =========================================================================
