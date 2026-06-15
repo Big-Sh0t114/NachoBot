@@ -75,6 +75,21 @@
         </ul>
 
         <div class="sidebar-footer">
+            <!-- UI Settings -->
+            <div class="ui-settings" style="padding: 1rem; border-top: 1px solid var(--border-light); font-size: 0.85rem; color: var(--text-secondary);">
+                <label style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem; cursor: pointer;">
+                    <span>启动动画</span>
+                    <input type="checkbox" id="toggle-startup" checked>
+                </label>
+                <label style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem; cursor: pointer;">
+                    <span>背景音乐</span>
+                    <input type="checkbox" id="toggle-bgm">
+                </label>
+                <label style="display: flex; align-items: center; justify-content: space-between; cursor: pointer;">
+                    <span>互动背景</span>
+                    <input type="checkbox" id="toggle-interactive" checked>
+                </label>
+            </div>
             <div class="status-bar" id="status-bar">
                 <div class="status-dot" id="status-dot"></div>
                 <span id="status-text">就绪</span>
@@ -819,6 +834,7 @@
     </div>
 
     <script src="/static/js/app.js"></script>
+    <script src="/static/js/ui.js"></script>
     <script src="/static/js/config.js"></script>
     <script src="/static/js/launcher.js"></script>
     <script src="/static/js/terminal.js"></script>
