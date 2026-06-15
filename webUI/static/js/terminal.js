@@ -91,13 +91,16 @@ const TerminalModule = (() => {
                 if (msg.type === 'history') {
                     for (const line of msg.lines) {
                         appendLogLine(line, serviceId === 'all');
+                        checkEulaPrompt(line, serviceId);
                     }
                 } else if (msg.type === 'log') {
                     appendLogLine(msg.line, serviceId === 'all');
+                    checkEulaPrompt(msg.line, serviceId);
                 }
                 // Ignore pings
             } catch (e) {
                 appendLogLine(evt.data, false);
+                checkEulaPrompt(evt.data, serviceId);
             }
         };
 
@@ -211,6 +214,41 @@ const TerminalModule = (() => {
 
             el.style.display = (filter === 'all' || elLevel >= minLevel) ? '' : 'none';
         });
+    }
+
+    function checkEulaPrompt(text, currentServiceId) {
+        if (text && (text.includes('同意') || text.includes('confirmed') || text.includes('EULA或隐私条款内容已更新'))) {
+            if (text.includes('请输入') || text.includes('继续运行视为同意')) {
+                showEulaButton(currentServiceId);
+            }
+        }
+    }
+
+    function showEulaButton(currentServiceId) {
+        let btn = document.getElementById('btn-eula-confirm');
+        if (!btn) {
+            btn = document.createElement('button');
+            btn.id = 'btn-eula-confirm';
+            btn.className = 'btn-sm';
+            btn.style.backgroundColor = '#10b981';
+            btn.style.color = '#fff';
+            btn.style.border = 'none';
+            btn.innerHTML = '✅ 同意 EULA (发送 confirmed)';
+            btn.onclick = async () => {
+                try {
+                    const targetService = currentServiceId === 'all' ? 'nachobot' : currentServiceId;
+                    await apiPost(`/api/services/${targetService}/input`, { text: 'confirmed\n' });
+                    btn.remove();
+                    toast('已发送协议确认指令', 'success');
+                } catch (e) {
+                    toast('发送失败: ' + e.message, 'error');
+                }
+            };
+            const toolbar = document.querySelector('.terminal-toolbar .toolbar-actions');
+            if (toolbar) {
+                toolbar.prepend(btn);
+            }
+        }
     }
 
     return { init, refresh };
