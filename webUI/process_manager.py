@@ -327,6 +327,7 @@ class ProcessManager:
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=str(full_cwd),
@@ -437,6 +438,16 @@ class ProcessManager:
         # Stop in reverse order
         for sid in reversed(gdef.services):
             await self.stop_service(sid)
+
+    async def send_input(self, service_id: str, text: str) -> None:
+        state = self.states.get(service_id)
+        if not state or state.status != ServiceStatus.RUNNING or not state.process:
+            raise ValueError(f"Service {service_id} is not running")
+        if not state.process.stdin:
+            raise ValueError(f"Service {service_id} does not accept input")
+        
+        state.process.stdin.write(text.encode("utf-8"))
+        await state.process.stdin.drain()
 
     # ---- WebSocket subscriber management ----
 
