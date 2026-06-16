@@ -9,7 +9,7 @@ openai
 loguru
 scipy
 # ncnk_message 仅本地提供，启动脚本通过 PYTHONPATH 指向 NachoBot-Napcat-Adapter
-aiohttp>=3.14.0
+aiohttp>=3.14.1
 websockets>=12.0
 fastapi
 python-multipart
