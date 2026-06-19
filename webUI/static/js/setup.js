@@ -8,6 +8,8 @@ const SetupModule = (() => {
     let envCheckData = null;
     let selectedComponents = ['core']; // core is always selected
     let deploying = false;
+    let _loadingDefaults = false;
+    let defaultsLoaded = false;
 
     // Track path verification results
     let pathCheckResults = {};
@@ -86,8 +88,9 @@ const SetupModule = (() => {
         }
         if (step === 3) {
             updateFormVisibility();
-            syncProviderDropdowns();
-            syncModelGroups();
+            if (!defaultsLoaded) {
+                loadConfigDefaults();
+            }
         }
         if (step === 4) {
             updatePathCheckVisibility();
@@ -456,6 +459,7 @@ const SetupModule = (() => {
 
     /** Collect all model names and display in model group fields */
     function syncModelGroups() {
+        if (_loadingDefaults) return;
         const names = [];
         document.querySelectorAll('.model-row').forEach(row => {
             const idInput = row.querySelector('.setup-model-id');
@@ -468,6 +472,140 @@ const SetupModule = (() => {
         document.querySelectorAll('.setup-model-group').forEach(f => {
             f.value = display;
         });
+    }
+
+    // ---- Load defaults from template files ----
+
+    async function loadConfigDefaults() {
+        _loadingDefaults = true;
+
+        // Show loading overlay on Step 3 panel
+        const step3 = document.getElementById('setup-step-3');
+        const overlay = document.createElement('div');
+        overlay.id = 'setup-defaults-loading';
+        overlay.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;background:rgba(255,255,255,0.75);z-index:10;display:flex;flex-direction:column;align-items:center;justify-content:center;border-radius:12px;backdrop-filter:blur(2px);';
+        overlay.innerHTML = '<div class="setup-spinner"></div><p style="margin-top:12px;color:var(--text-secondary);font-size:0.9rem;">正在读取模板配置...</p>';
+        const origPosition = step3.style.position;
+        step3.style.position = 'relative';
+        step3.appendChild(overlay);
+
+        // Disable form inputs during load (keep nav buttons enabled)
+        const inputs = step3.querySelectorAll('input, select, textarea, button:not(#setup-prev-3):not(#setup-next-3)');
+        inputs.forEach(el => { if (!el.disabled) { el.disabled = true; el.dataset._wasEnabled = '1'; } });
+
+        try {
+            const defaults = await apiGet('/api/setup/configs/defaults');
+
+            // Core fields
+            const qqEl = document.getElementById('setup-qq-account');
+            if (qqEl) qqEl.value = defaults.core?.qq_account || '';
+            const nickEl = document.getElementById('setup-nickname');
+            if (nickEl) nickEl.value = defaults.core?.nickname || '';
+
+            // TTS engine
+            const ttsEl = document.getElementById('setup-tts-engine');
+            if (ttsEl) ttsEl.value = defaults.tts?.engine || 'GPT_Sovits';
+
+            // UniversalVC fields
+            if (defaults.universalvc) {
+                const uvc = defaults.universalvc;
+                const pEl = document.getElementById('setup-uvc-process');
+                if (pEl) pEl.value = uvc.target_process_name || '';
+                const oEl = document.getElementById('setup-uvc-output-device');
+                if (oEl) oEl.value = uvc.output_device || '';
+                const dEl = document.getElementById('setup-uvc-denoise');
+                if (dEl) dEl.checked = uvc.denoise_enabled ?? true;
+                const sEl = document.getElementById('setup-uvc-speaker');
+                if (sEl) sEl.checked = uvc.speaker_enabled ?? true;
+            }
+
+            // Provider rows — replace placeholders with template data
+            const providerContainer = document.getElementById('provider-rows');
+            if (providerContainer) {
+                providerContainer.innerHTML = '';
+                const providers = defaults.providers || [];
+                if (providers.length === 0) {
+                    addProviderRow();
+                } else {
+                    providers.forEach(p => {
+                        const row = createProviderRow();
+                        providerContainer.appendChild(row);
+                        bindProviderRow(row);
+                        row.querySelector('.setup-provider-name').value = p.name || '';
+                        row.querySelector('.setup-provider-url').value = p.base_url || '';
+                        row.querySelector('.setup-provider-key').value = p.api_key || '';
+                    });
+                }
+            }
+
+            // Model rows — replace placeholders with template data
+            const modelContainer = document.getElementById('model-rows');
+            if (modelContainer) {
+                modelContainer.innerHTML = '';
+                const models = defaults.models || [];
+                if (models.length === 0) {
+                    addModelRow();
+                } else {
+                    models.forEach(m => {
+                        const row = createModelRow();
+                        modelContainer.appendChild(row);
+                        bindModelRow(row);
+                        row.dataset.defaultProvider = m.api_provider || '';
+                        row.querySelector('.setup-model-id').value = m.model_identifier || '';
+                        if (m.model_name) {
+                            row.querySelector('.setup-model-name').value = m.model_name;
+                            row.querySelector('.setup-model-name').dataset.userEdited = 'true';
+                        }
+                    });
+                }
+            }
+
+            // Sync dropdowns (populates provider options in model rows)
+            syncProviderDropdowns();
+
+            // Now set the model-provider selects from the stashed default provider
+            document.querySelectorAll('.model-row').forEach(row => {
+                const defProv = row.dataset.defaultProvider;
+                if (defProv) {
+                    const select = row.querySelector('.setup-model-provider');
+                    if (select) {
+                        const options = Array.from(select.options);
+                        if (options.some(o => o.value === defProv)) {
+                            select.value = defProv;
+                        }
+                    }
+                }
+            });
+
+            // Populate model group fields with per-group defaults from template
+            const modelGroups = defaults.model_groups || {};
+            const groupIds = {
+                replyer0: 'setup-grp-replyer0',
+                planner: 'setup-grp-planner',
+                utils: 'setup-grp-utils',
+                utils_small: 'setup-grp-utils-small',
+                tool_use: 'setup-grp-tool-use',
+            };
+            for (const [key, id] of Object.entries(groupIds)) {
+                const val = modelGroups[key];
+                if (val) {
+                    const el = document.getElementById(id);
+                    if (el) el.value = val;
+                }
+            }
+
+            defaultsLoaded = true;
+        } catch (e) {
+            console.error('Failed to load config defaults:', e);
+        } finally {
+            _loadingDefaults = false;
+            // Remove loading overlay
+            const ov = document.getElementById('setup-defaults-loading');
+            if (ov) ov.remove();
+            step3.style.position = origPosition;
+            // Re-enable form inputs
+            inputs.forEach(el => { if (el.dataset._wasEnabled) { el.disabled = false; delete el.dataset._wasEnabled; } });
+        }
     }
 
     // ---- Data Collection ----

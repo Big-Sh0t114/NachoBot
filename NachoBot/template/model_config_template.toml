@@ -230,7 +230,7 @@ temperature = 0.5
 max_tokens = 800
 
 [model_task_config.private_replyer0] # 私聊默认回复模型组
-model_list = ["deepseek-v4-flash"]
+model_list = []
 temperature = 0.5
 max_tokens = 800
 
@@ -255,7 +255,7 @@ temperature = 0.05
 max_tokens = 800
 
 [model_task_config.private_planner] #私聊专属独立规划模型组（可选，缺省回退到默认参数/planner）
-model_list = ["deepseek-v4-flash","Qwen/Qwen3-8B","THUDM/GLM-Z1-9B-0414","Qwen/Qwen2.5-7B-Instruct"]
+model_list = []
 temperature = 0.05
 max_tokens = 800
 

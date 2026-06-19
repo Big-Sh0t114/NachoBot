@@ -40,7 +40,35 @@ const UI = (() => {
         if (bgmCheckbox) bgmCheckbox.checked = settings.bgm;
         if (interactiveCheckbox) interactiveCheckbox.checked = settings.interactive;
 
-        // Fetch Playlist and Setup Audio
+        // 1. Startup Animation — show immediately, don't wait for music fetch
+        if (settings.startup) {
+            startupScreen.style.display = 'flex';
+            requestAnimationFrame(() => { startupScreen.style.opacity = '1'; });
+            if (startupVideo) {
+                startupVideo.play().catch(e => console.log('Autoplay blocked:', e));
+                startupVideo.addEventListener('ended', () => {
+                    hideStartupScreen(startupScreen);
+                });
+                setTimeout(() => hideStartupScreen(startupScreen), 8000);
+            } else {
+                setTimeout(() => hideStartupScreen(startupScreen), 2000);
+            }
+        } else {
+            startupScreen.style.display = 'none';
+        }
+
+        // 2. Interactive Background — defer if startup animation is playing
+        if (settings.interactive) {
+            if (!settings.startup) {
+                initParticles();
+                bgCanvas.style.display = 'block';
+            }
+        } else {
+            bgCanvas.style.display = 'none';
+            stopParticles();
+        }
+
+        // 3. Fetch Playlist and Setup Audio (non-blocking for animation)
         try {
             const res = await fetch('/api/music/list');
             if (res.ok) {
@@ -60,32 +88,13 @@ const UI = (() => {
             bgmTitle.innerText = "No Music Found";
         }
 
-        // 1. Startup Animation
-        if (settings.startup) {
-            startupScreen.style.display = 'flex';
-            if (startupVideo) {
-                startupVideo.play().catch(e => console.log('Autoplay blocked:', e));
-                startupVideo.addEventListener('ended', () => {
-                    hideStartupScreen(startupScreen);
-                });
-                setTimeout(() => hideStartupScreen(startupScreen), 8000);
-            } else {
-                setTimeout(() => hideStartupScreen(startupScreen), 2000);
-            }
-        } else {
-            startupScreen.style.display = 'none';
-        }
-
-        // 2. Play BGM immediately if enabled
+        // 4. Play BGM if enabled
         if (settings.bgm && playlist.length > 0) {
-            // Attempt to play immediately (might be blocked by browser)
             bgm.play().then(() => {
                 updatePlayBtn();
             }).catch(e => {
                 console.log('Immediate BGM play blocked, waiting for interaction:', e);
 
-
-                // Fallback: wait for first interaction
                 const playAudio = () => {
                     if (bgmCheckbox && bgmCheckbox.checked && bgm.paused) {
                         bgm.play().then(() => updatePlayBtn()).catch(err => console.log(err));
@@ -185,16 +194,6 @@ const UI = (() => {
             });
         }
 
-
-        // 3. Interactive Background
-        if (settings.interactive) {
-            initParticles();
-            bgCanvas.style.display = 'block';
-        } else {
-            bgCanvas.style.display = 'none';
-            stopParticles();
-        }
-
         // Bind Settings Changes
         if (startupCheckbox) {
             startupCheckbox.addEventListener('change', (e) => {
@@ -237,6 +236,12 @@ const UI = (() => {
         screen.style.opacity = '0';
         setTimeout(() => {
             screen.style.display = 'none';
+            const canvas = document.getElementById('bg-canvas');
+            const cb = document.getElementById('toggle-interactive');
+            if (cb && cb.checked) {
+                initParticles();
+                if (canvas) canvas.style.display = 'block';
+            }
         }, 1000);
     }
 
@@ -302,10 +307,11 @@ const UI = (() => {
         startup.style.alignItems = 'center';
         startup.style.justifyContent = 'center';
         startup.style.transition = 'opacity 1s ease-in-out';
+        startup.style.opacity = '0';
 
         // Use CSS mask to feather the edges of the video to transparent, perfectly eliminating any color difference bounds
         startup.innerHTML = `
-            <video id="startup-video" src="/resources/NachoBotLogoAnime.mp4" muted playsinline style="width: 75%; height: auto; max-height: 75vh; object-fit: contain; pointer-events: none; -webkit-mask-image: radial-gradient(ellipse at center, black 60%, transparent 95%); mask-image: radial-gradient(ellipse at center, black 60%, transparent 95%);"></video>
+            <video id="startup-video" src="/resources/NachoBotLogoAnime.mp4" muted playsinline style="width: 75%; height: auto; max-height: 75vh; object-fit: contain; pointer-events: none; transform: translateZ(0); will-change: transform; -webkit-mask-image: radial-gradient(ellipse at center, black 60%, transparent 95%); mask-image: radial-gradient(ellipse at center, black 60%, transparent 95%);"></video>
         `;
         document.body.appendChild(startup);
 
@@ -442,7 +448,7 @@ const UI = (() => {
                 particles[i].update();
                 particles[i].draw();
 
-                for (let j = i; j < particles.length; j++) {
+                for (let j = i + 1; j < particles.length; j++) {
                     let dx = particles[i].x - particles[j].x;
                     let dy = particles[i].y - particles[j].y;
                     let dist = Math.sqrt(dx * dx + dy * dy);
