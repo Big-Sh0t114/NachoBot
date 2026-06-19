@@ -40,15 +40,10 @@ const UI = (() => {
         if (bgmCheckbox) bgmCheckbox.checked = settings.bgm;
         if (interactiveCheckbox) interactiveCheckbox.checked = settings.interactive;
 
-        // 1. Startup Animation — show immediately, don't wait for music fetch
+        // 1. Startup Animation — video autoplays from inline HTML, just set up end handlers
         if (settings.startup) {
-            startupScreen.style.display = 'flex';
-            requestAnimationFrame(() => { startupScreen.style.opacity = '1'; });
             if (startupVideo) {
-                startupVideo.play().catch(e => console.log('Autoplay blocked:', e));
-                startupVideo.addEventListener('ended', () => {
-                    hideStartupScreen(startupScreen);
-                });
+                startupVideo.addEventListener('ended', () => hideStartupScreen(startupScreen));
                 setTimeout(() => hideStartupScreen(startupScreen), 8000);
             } else {
                 setTimeout(() => hideStartupScreen(startupScreen), 2000);
@@ -293,29 +288,7 @@ const UI = (() => {
         canvas.style.pointerEvents = 'none';
         document.body.appendChild(canvas);
 
-        // 2. Startup Screen with Video (Scale to 75%)
-        const startup = document.createElement('div');
-        startup.id = 'startup-screen';
-        startup.style.position = 'fixed';
-        startup.style.top = '0';
-        startup.style.left = '0';
-        startup.style.width = '100vw';
-        startup.style.height = '100vh';
-        startup.style.backgroundColor = 'var(--bg-base)'; // Use webpage background instead of black
-        startup.style.zIndex = '9999';
-        startup.style.display = 'none';
-        startup.style.alignItems = 'center';
-        startup.style.justifyContent = 'center';
-        startup.style.transition = 'opacity 1s ease-in-out';
-        startup.style.opacity = '0';
-
-        // Use CSS mask to feather the edges of the video to transparent, perfectly eliminating any color difference bounds
-        startup.innerHTML = `
-            <video id="startup-video" src="/resources/NachoBotLogoAnime.mp4" muted playsinline style="width: 75%; height: auto; max-height: 75vh; object-fit: contain; pointer-events: none; transform: translateZ(0); will-change: transform; -webkit-mask-image: radial-gradient(ellipse at center, black 60%, transparent 95%); mask-image: radial-gradient(ellipse at center, black 60%, transparent 95%);"></video>
-        `;
-        document.body.appendChild(startup);
-
-        // 3. Audio Element and Mini Player
+        // 2. Audio Element and Mini Player
         const audio = document.createElement('audio');
         audio.id = 'bgm';
         audio.volume = 0.2;
