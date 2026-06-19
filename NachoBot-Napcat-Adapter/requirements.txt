@@ -1,6 +1,5 @@
 websockets
 aiohttp
-asyncio
 requests
 loguru
 pillow
