@@ -550,6 +550,12 @@ async def setup_config_status():
     return ConfigInitializer.get_status()
 
 
+@app.get("/api/setup/configs/defaults")
+async def setup_config_defaults():
+    """Return default config values from template files for pre-filling the wizard form."""
+    return ConfigInitializer.get_defaults()
+
+
 class SetupWizardData(BaseModel):
     components: list[str] = []
     core: dict = {}

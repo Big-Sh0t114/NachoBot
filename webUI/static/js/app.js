@@ -43,6 +43,7 @@ const App = (() => {
         document.getElementById(`tab-${tab}`).classList.add('active');
 
         // Trigger module refresh
+        if (tab === 'config') ConfigModule.refresh();
         if (tab === 'launcher') LauncherModule.refresh();
         if (tab === 'terminal') TerminalModule.refresh();
         if (tab === 'plugins') PluginsModule.refresh();

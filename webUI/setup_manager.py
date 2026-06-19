@@ -462,6 +462,107 @@ class ConfigInitializer:
         return EnvironmentChecker.check_configs()
 
     @staticmethod
+    def get_defaults() -> dict[str, Any]:
+        """Read template config files and return default values for the wizard form."""
+        result: dict[str, Any] = {
+            "core": {"qq_account": "", "nickname": "NachoBot"},
+            "providers": [],
+            "models": [],
+            "model_groups": {},
+            "tts": {"engine": "Vox"},
+            "universalvc": {
+                "target_process_name": "VRChat.exe",
+                "output_device": "",
+                "denoise_enabled": False,
+                "speaker_enabled": True,
+            },
+            "env": {"host": "127.0.0.1", "port": "8000"},
+        }
+
+        # ── bot_config template ──
+        bot_tmpl = ROOT_DIR / "NachoBot/template/bot_config_template.toml"
+        if bot_tmpl.exists():
+            try:
+                doc = tomlkit.parse(bot_tmpl.read_text(encoding="utf-8"))
+                bot = doc.get("bot", {})
+                result["core"]["qq_account"] = str(bot.get("qq_account", ""))
+                result["core"]["nickname"] = str(bot.get("nickname", "NachoBot"))
+            except Exception:
+                pass
+
+        # ── model_config template — providers & models ──
+        model_tmpl = ROOT_DIR / "NachoBot/template/model_config_template.toml"
+        if model_tmpl.exists():
+            try:
+                doc = tomlkit.parse(model_tmpl.read_text(encoding="utf-8"))
+                for p in doc.get("api_providers", []):
+                    result["providers"].append({
+                        "name": str(p.get("name", "")),
+                        "base_url": str(p.get("base_url", "")),
+                        "api_key": str(p.get("api_key", "")),
+                    })
+                for m in doc.get("models", []):
+                    result["models"].append({
+                        "model_identifier": str(m.get("model_identifier", "")),
+                        "model_name": str(m.get("name", "")),
+                        "api_provider": str(m.get("api_provider", "")),
+                    })
+                # Extract per-group model assignments from model_task_config
+                mtc = doc.get("model_task_config", {})
+                for group_name in ("replyer0", "planner", "utils", "utils_small", "tool_use"):
+                    if group_name in mtc:
+                        ml = mtc[group_name].get("model_list", [])
+                        result["model_groups"][group_name] = ", ".join(str(x) for x in ml)
+            except Exception:
+                pass
+
+        # ── .env template ──
+        env_tmpl = ROOT_DIR / "NachoBot/template/template.env"
+        if env_tmpl.exists():
+            try:
+                for line in env_tmpl.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line.startswith("HOST="):
+                        result["env"]["host"] = line.split("=", 1)[1]
+                    elif line.startswith("PORT="):
+                        result["env"]["port"] = line.split("=", 1)[1]
+            except Exception:
+                pass
+
+        # ── TTS base template ──
+        tts_tmpl = ROOT_DIR / "NachoBot-TTS-Adapter/template_configs/base_template.toml"
+        if tts_tmpl.exists():
+            try:
+                doc = tomlkit.parse(tts_tmpl.read_text(encoding="utf-8"))
+                enabled = doc.get("enabled_tts", {}).get("enabled", [])
+                if enabled:
+                    result["tts"]["engine"] = str(enabled[0])
+            except Exception:
+                pass
+
+        # ── UniversalVC template ──
+        uvc_tmpl = ROOT_DIR / "NachoBot-UniversalVC-Adapter/template/config_template.toml"
+        if uvc_tmpl.exists():
+            try:
+                doc = tomlkit.parse(uvc_tmpl.read_text(encoding="utf-8"))
+                result["universalvc"]["target_process_name"] = str(
+                    doc.get("capture", {}).get("target_process_name", "")
+                )
+                result["universalvc"]["output_device"] = str(
+                    doc.get("output", {}).get("device_name", "")
+                )
+                result["universalvc"]["denoise_enabled"] = bool(
+                    doc.get("denoise", {}).get("enabled", False)
+                )
+                result["universalvc"]["speaker_enabled"] = bool(
+                    doc.get("speaker", {}).get("enabled", True)
+                )
+            except Exception:
+                pass
+
+        return result
+
+    @staticmethod
     def generate_configs(wizard_data: dict[str, Any]) -> dict[str, Any]:
         """
         Generate config files from templates, applying wizard form data.
@@ -699,27 +800,6 @@ class ConfigInitializer:
                     aot.append(t)
                 doc["models"] = aot
                 changed = True
-
-                # Collect all model names for model group assignment
-                model_names = []
-                for m in user_models:
-                    name = m.get("model_name", "") or m.get("model_identifier", "")
-                    if name:
-                        model_names.append(name)
-
-                # Set all required model groups to use the user's models
-                required_groups = [
-                    "replyer0",
-                    "planner",
-                    "utils",
-                    "utils_small",
-                    "tool_use",
-                ]
-                if model_names and "model_task_config" in doc:
-                    for group in required_groups:
-                        if group in doc["model_task_config"]:
-                            doc["model_task_config"][group]["model_list"] = model_names
-                            changed = True
 
         # -- Napcat adapter config.toml — TTS chain only --
         if "NachoBot-Napcat-Adapter" in target_rel and filename == "config.toml":

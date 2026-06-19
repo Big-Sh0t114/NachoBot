@@ -142,5 +142,21 @@ const ConfigModule = (() => {
         }
     }
 
-    return { init };
+    // ---- Refresh ----
+
+    function refresh() {
+        activeFileId = null;
+        originalRaw = '';
+        const editor = document.getElementById('config-editor');
+        if (editor) {
+            editor.innerHTML = `
+                <div class="editor-placeholder">
+                    <span class="placeholder-icon">📄</span>
+                    <p>选择左侧的配置文件开始编辑</p>
+                </div>`;
+        }
+        return loadTree();
+    }
+
+    return { init, refresh };
 })();
