@@ -1,6 +1,6 @@
 [project]
 name = "NachoBot"
-version = "0.8.1"
+version = "0.9.2"
 description = "NachoCore 是一个基于大语言模型的可交互智能体"
 requires-python = ">=3.11,<3.13"
 dependencies = [
