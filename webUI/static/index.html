@@ -16,6 +16,11 @@
 </head>
 
 <body>
+    <!-- Splash — inline HTML autoplays video before any JS loads -->
+    <div id="startup-screen" style="position:fixed;top:0;left:0;width:100vw;height:100vh;background:var(--bg-base,#0f172a);z-index:9999;display:flex;align-items:center;justify-content:center;transition:opacity 1s ease-in-out;opacity:1;">
+        <video id="startup-video" src="/resources/NachoBotLogoAnime.mp4" autoplay muted playsinline style="width:75%;height:auto;max-height:75vh;object-fit:contain;pointer-events:none;transform:translateZ(0);will-change:transform;-webkit-mask-image:radial-gradient(ellipse at center,black 60%,transparent 95%);mask-image:radial-gradient(ellipse at center,black 60%,transparent 95%);"></video>
+    </div>
+
     <!-- Sidebar Navigation -->
     <nav id="sidebar" class="sidebar">
         <div class="sidebar-header">
@@ -833,6 +838,18 @@
         </div>
     </div>
 
+    <script>
+    // Inline startup toggle check — runs before module scripts
+    (function(){
+        try {
+            var s = localStorage.getItem('nacho_ui_settings');
+            if (s && JSON.parse(s).startup === false) {
+                var el = document.getElementById('startup-screen');
+                if (el) el.style.display = 'none';
+            }
+        } catch(e) {}
+    })();
+    </script>
     <script src="/static/js/app.js"></script>
     <script src="/static/js/ui.js"></script>
     <script src="/static/js/config.js"></script>
