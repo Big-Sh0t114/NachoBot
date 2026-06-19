@@ -194,7 +194,7 @@ temperature = 0.2
 max_tokens = 800
 
 [model_task_config.tool_use] #工具调用模型，需要使用支持工具调用的模型
-model_list = ["Qwen/Qwen3-8B","Qwen/Qwen2.5-7B-Instruct","THUDM/GLM-Z1-9B-0414","Qwen3.5-9B-Uncensored"]
+model_list = ["Qwen/Qwen3-8B","Qwen/Qwen2.5-7B-Instruct","THUDM/GLM-Z1-9B-0414"]
 temperature = 0.05
 max_tokens = 800
 
