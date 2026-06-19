@@ -15,7 +15,7 @@ fastapi
 python-multipart
 uvicorn
 pydantic
-cryptography>=41.0.0
+cryptography>=48.0.1
 
 # Florence-2 local vision
 --extra-index-url https://download.pytorch.org/whl/cu118
