@@ -77,6 +77,10 @@ mentioned_bot_reply = true # 是否启用提及必回复
 max_context_size_group = 50 # 群聊上下文长度
 max_context_size_private = 120 # 私聊上下文长度
 title_enabled_groups = [''] # 启用头衔设置功能的群号列表，仅列表中的群可使用set_group_title动作
+planner_interrupt_enabled = true # Planner 打断总开关，关闭后新消息不会打断正在执行的 LLM 请求
+planner_interrupt_max_consecutive_count = 5 # Planner 连续打断上限
+person_profile_injection_enabled = true # 人物画像注入开关
+person_profile_injection_max_profiles = 3 # 每轮最多注入几个人物画像
 
 [relationship]
 enable_relationship = true # 是否启用关系系统

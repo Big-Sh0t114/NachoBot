@@ -14,6 +14,7 @@ from src.common.data_models.info_data_model import ActionPlannerInfo
 from src.common.data_models.llm_data_model import LLMGenerationDataModel
 from src.config.config import global_config, model_config
 from src.llm_models.utils_model import LLMRequest
+from src.llm_models.exceptions import ReqAbortException
 from src.chat.message_receive.message import UserInfo, Seg, MessageRecv, MessageSending
 from src.chat.message_receive.chat_stream import ChatStream
 from src.chat.message_receive.uni_message_sender import UniversalMessageSender
@@ -231,6 +232,7 @@ class PrivateReplyer:
         from_plugin: bool = True,
         stream_id: Optional[str] = None,
         reply_message: Optional[DatabaseMessages] = None,
+        interrupt_flag: Optional[asyncio.Event] = None,
     ) -> Tuple[bool, LLMGenerationDataModel]:
         # sourcery skip: merge-nested-ifs
         """
@@ -289,7 +291,7 @@ class PrivateReplyer:
             model_name = "unknown_model"
 
             try:
-                content, reasoning_content, model_name, tool_call = await self.llm_generate_content(prompt)
+                content, reasoning_content, model_name, tool_call = await self.llm_generate_content(prompt, interrupt_flag=interrupt_flag)
                 logger.debug(f"replyer生成内容: {content}")
                 llm_response.content = content
                 llm_response.reasoning = reasoning_content
@@ -310,10 +312,13 @@ class PrivateReplyer:
                         llm_response.reasoning = modified_message.llm_response_reasoning
             except UserWarning as e:
                 raise e
+            except ReqAbortException:
+                logger.debug("LLM 生成被外部信号中断")
+                return False, llm_response
             except Exception as llm_e:
                 # 精简报错信息
                 logger.error(f"LLM 生成失败: {llm_e}")
-                return False, llm_response  # LLM 调用失败则无法生成回复
+                return False, llm_response
 
             return True, llm_response
 
@@ -1223,7 +1228,7 @@ class PrivateReplyer:
             display_message=display_message,
         )
 
-    async def llm_generate_content(self, prompt: str):
+    async def llm_generate_content(self, prompt: str, interrupt_flag: Optional[asyncio.Event] = None):
         with Timer("LLM生成", {}):  # 内部计时器，可选保留
             # 直接使用已初始化的模型实例
             logger.info(f"\n{prompt}\n")
@@ -1234,7 +1239,7 @@ class PrivateReplyer:
                 logger.debug(f"\n{prompt}\n")
 
             content, (reasoning_content, model_name, tool_calls) = await self.express_model.generate_response_async(
-                prompt
+                prompt, interrupt_flag=interrupt_flag
             )
 
             logger.debug(f"replyer生成内容: {content}")

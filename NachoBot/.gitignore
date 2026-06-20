@@ -5,6 +5,7 @@ plugins/mus_library/list.txt
 plugins/mus_library/dump.txt
 plugins/mus_library/audio/*
 plugins/bot_monitor
+plugins/external_service_monitor
 !plugins/mus_library/audio/.gitkeep
 plugins/messenger/config.toml
 plugins/mus_library/config.toml
