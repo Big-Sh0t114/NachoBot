@@ -36,6 +36,7 @@ from src.chat.utils.chat_message_builder import (
 )
 from src.memory_system.chat_history_summarizer import ChatHistorySummarizer
 from src.chat.heart_flow.relation_scanner import RelationScanner
+from src.llm_models.exceptions import ReqAbortException
 
 if TYPE_CHECKING:
     from src.common.data_models.database_data_model import DatabaseMessages
@@ -118,6 +119,14 @@ class HeartFChatting:
 
         # 用户屏蔽列表: {user_id: 过期时间戳}
         self.blocked_users: Dict[str, float] = {}
+
+        # Planner 打断机制
+        self._planner_interrupt_flag: Optional[asyncio.Event] = None
+        self._planner_interrupt_requested: bool = False
+        self._planner_interrupt_consecutive_count: int = 0
+        self._last_message_received_at: float = time.time()
+        self._message_debounce_required: bool = False
+        self._message_debounce_seconds: float = 1.0
 
     def _is_user_blocked(self, user_id: str) -> bool:
         """检查用户是否在屏蔽列表中且未过期"""
@@ -238,6 +247,22 @@ class HeartFChatting:
             + (f"\n详情: {'; '.join(timer_strings)}" if timer_strings else "")
         )
 
+    def signal_new_message(self, skip_interrupt: bool = False):
+        """由消息处理器推送调用，通知有新消息到达。如果 Planner 正在执行则触发打断。"""
+        self._last_message_received_at = time.time()
+        if skip_interrupt or not getattr(global_config.chat, "planner_interrupt_enabled", True):
+            return
+        if self._planner_interrupt_flag is not None and not self._planner_interrupt_requested:
+            planner_interrupt_max = getattr(global_config.chat, "planner_interrupt_max_consecutive_count", 3)
+            if self._planner_interrupt_consecutive_count < planner_interrupt_max:
+                self._planner_interrupt_requested = True
+                self._planner_interrupt_consecutive_count += 1
+                self._planner_interrupt_flag.set()
+                logger.info(
+                    f"{self.log_prefix} 新消息推送触发 Planner 打断 "
+                    f"({self._planner_interrupt_consecutive_count}/{planner_interrupt_max})"
+                )
+
     async def _loopbody(self):  # sourcery skip: hoist-if-from-if
         recent_messages_list = message_api.get_messages_by_time_in_chat(
             chat_id=self.stream_id,
@@ -252,6 +277,7 @@ class HeartFChatting:
         if len(recent_messages_list) >= 1:
             # 先推进读取时间戳，防止被屏蔽用户的消息不断累积占用循环
             self.last_read_time = time.time()
+            self._last_message_received_at = time.time()
 
             # 再过滤被屏蔽用户的消息
             recent_messages_list = self._filter_blocked_users(recent_messages_list, caller="loopbody")
@@ -260,6 +286,29 @@ class HeartFChatting:
             if len(recent_messages_list) == 0:
                 await asyncio.sleep(0.2)
                 return True
+
+            # Planner 打断：如果 Planner 正在执行且收到新消息，触发打断（@提及除外，总开关关闭时跳过）
+            if (
+                getattr(global_config.chat, "planner_interrupt_enabled", True)
+                and self._planner_interrupt_flag is not None
+                and not self._planner_interrupt_requested
+            ):
+                has_mentioned = any(
+                    getattr(msg, "is_mentioned", False) or getattr(msg, "is_at", False)
+                    for msg in recent_messages_list
+                )
+                if not has_mentioned:
+                    planner_interrupt_max = getattr(global_config.chat, "planner_interrupt_max_consecutive_count", 3)
+                    if self._planner_interrupt_consecutive_count < planner_interrupt_max:
+                        self._planner_interrupt_requested = True
+                        self._planner_interrupt_consecutive_count += 1
+                        self._message_debounce_required = True
+                        self._planner_interrupt_flag.set()
+                        logger.info(
+                            f"{self.log_prefix} 收到新消息，发起规划器打断; "
+                            f"消息数={len(recent_messages_list)} "
+                            f"连续打断次数={self._planner_interrupt_consecutive_count}/{planner_interrupt_max}"
+                        )
 
             # !处理no_reply_until_call逻辑
             if self.no_reply_until_call:
@@ -489,6 +538,19 @@ class HeartFChatting:
                     except Exception as e:
                         logger.debug(f"{self.log_prefix} 长期记忆注入跳过: {e}")
 
+                    # --- 人物画像注入 ---
+                    try:
+                        from src.memory_system.person_profile_injector import inject_person_profiles
+
+                        chat_content_block = await inject_person_profiles(
+                            chat_id=self.stream_id,
+                            chat_content_block=chat_content_block,
+                            messages=message_list_before_now,
+                            is_group_chat=is_group_chat,
+                        )
+                    except Exception as e:
+                        logger.debug(f"{self.log_prefix} 人物画像注入跳过: {e}")
+
                 prompt_info = await self.action_planner.build_planner_prompt(
                     is_group_chat=is_group_chat,
                     chat_target_info=chat_target_info,
@@ -561,11 +623,25 @@ class HeartFChatting:
                             if self.blocked_users
                             else None
                         )
-                        action_to_use_info, _ = await self.action_planner.plan(
-                            loop_start_time=self.last_read_time,
-                            available_actions=available_actions,
-                            blocked_user_ids=_active_blocked,
-                        )
+                        # 创建 Planner 打断信号
+                        interrupt_flag = asyncio.Event()
+                        self._planner_interrupt_flag = interrupt_flag
+                        self._planner_interrupt_requested = False
+                        try:
+                            action_to_use_info, _ = await self.action_planner.plan(
+                                loop_start_time=self.last_read_time,
+                                available_actions=available_actions,
+                                blocked_user_ids=_active_blocked,
+                                interrupt_flag=interrupt_flag,
+                            )
+                        except ReqAbortException:
+                            self._planner_interrupt_flag = None
+                            if not self._planner_interrupt_requested:
+                                self._planner_interrupt_consecutive_count = 0
+                            logger.info(
+                                f"{self.log_prefix} Planner 被新消息打断，中止本轮思考，等待新消息重新触发"
+                            )
+                            return True
 
             has_reply = False
             _reply_equivalent = {"reply", "make_appoint", "cancel_appoint"}
@@ -658,7 +734,7 @@ class HeartFChatting:
                         reply_loop_info = result["loop_info"]
                         reply_text_from_reply = result["reply_text"]
                     else:
-                        logger.warning(f"{self.log_prefix} 回复动作执行失败")
+                        logger.debug(f"{self.log_prefix} 回复动作未执行（可能被中断或生成失败）")
 
             # 构建最终的循环信息
             if reply_loop_info:
@@ -694,6 +770,10 @@ class HeartFChatting:
                 await stop_typing()
                 await mai_thinking_manager.get_mai_think(self.stream_id).do_think_after_response(reply_text)
             """S4U内容，暂时保留"""
+
+            self._planner_interrupt_flag = None
+            if not self._planner_interrupt_requested:
+                self._planner_interrupt_consecutive_count = 0
 
             return True
 
@@ -1005,6 +1085,7 @@ class HeartFChatting:
                             request_type="replyer",
                             from_plugin=False,
                             extra_info=injection_text,
+                            interrupt_flag=self._planner_interrupt_flag,
                         )
 
                         if not success or not llm_response or not llm_response.reply_set:
@@ -1173,6 +1254,7 @@ class HeartFChatting:
                     reply_reason=action_planner_info.reasoning or "",
                     request_type="replyer",
                     from_plugin=False,
+                    interrupt_flag=self._planner_interrupt_flag,
                 )
                 if success and llm_response and llm_response.reply_set:
                     _, reply_text, _ = await self._send_and_store_reply(
@@ -1210,6 +1292,7 @@ class HeartFChatting:
                     request_type="replyer",
                     from_plugin=False,
                     extra_info=clarify_extra_info,
+                    interrupt_flag=self._planner_interrupt_flag,
                 )
                 if success and llm_response and llm_response.reply_set:
                     _, reply_text, _ = await self._send_and_store_reply(
@@ -1255,6 +1338,7 @@ class HeartFChatting:
                     request_type="replyer",
                     from_plugin=False,
                     extra_info=extra_info,
+                    interrupt_flag=self._planner_interrupt_flag,
                 )
                 if success and llm_response and llm_response.reply_set:
                     _, reply_text, _ = await self._send_and_store_reply(
@@ -1287,6 +1371,7 @@ class HeartFChatting:
                 request_type="replyer",
                 from_plugin=False,
                 extra_info=confirm_extra_info,
+                interrupt_flag=self._planner_interrupt_flag,
             )
             if success and llm_response and llm_response.reply_set:
                 _, confirm_text, _ = await self._send_and_store_reply(
@@ -1321,6 +1406,7 @@ class HeartFChatting:
                 request_type="replyer",
                 from_plugin=False,
                 extra_info=reminder_extra_info,
+                interrupt_flag=self._planner_interrupt_flag,
             )
             if success and llm_response and llm_response.reply_set:
                 # 提取纯文本
@@ -1416,6 +1502,7 @@ class HeartFChatting:
                 request_type="replyer",
                 from_plugin=False,
                 extra_info=extra_info,
+                interrupt_flag=self._planner_interrupt_flag,
             )
             if success and llm_response and llm_response.reply_set:
                 _, reply_text, _ = await self._send_and_store_reply(
@@ -1509,6 +1596,7 @@ class HeartFChatting:
                 request_type="replyer",
                 from_plugin=False,
                 extra_info=confirm_extra_info,
+                interrupt_flag=self._planner_interrupt_flag,
             )
             if success and llm_response and llm_response.reply_set:
                 _, reply_text, _ = await self._send_and_store_reply(
@@ -1625,6 +1713,7 @@ class HeartFChatting:
                 request_type="replyer",
                 from_plugin=False,
                 extra_info=confirm_extra_info,
+                interrupt_flag=self._planner_interrupt_flag,
             )
             if success and llm_response and llm_response.reply_set:
                 _, reply_text, _ = await self._send_and_store_reply(

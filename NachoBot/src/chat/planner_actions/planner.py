@@ -3,12 +3,14 @@ import time
 import traceback
 import random
 import re
+import asyncio
 from typing import Dict, Optional, Tuple, List, TYPE_CHECKING
 from rich.traceback import install
 from datetime import datetime
 from json_repair import repair_json
 
 from src.llm_models.utils_model import LLMRequest
+from src.llm_models.exceptions import ReqAbortException
 from src.config.config import global_config, model_config
 from src.common.logger import get_logger
 from src.common.data_models.info_data_model import ActionPlannerInfo
@@ -300,6 +302,7 @@ class ActionPlanner:
         available_actions: Dict[str, ActionInfo],
         loop_start_time: float = 0.0,
         blocked_user_ids: Optional[set] = None,
+        interrupt_flag: Optional[asyncio.Event] = None,
     ) -> Tuple[List[ActionPlannerInfo], Optional["DatabaseMessages"]]:
         # sourcery skip: use-named-expression
         """
@@ -401,6 +404,7 @@ class ActionPlanner:
             filtered_actions=filtered_actions,
             available_actions=available_actions,
             loop_start_time=loop_start_time,
+            interrupt_flag=interrupt_flag,
         )
 
         # 获取target_message（如果有非no_action的动作）
@@ -667,6 +671,7 @@ class ActionPlanner:
         filtered_actions: Dict[str, ActionInfo],
         available_actions: Dict[str, ActionInfo],
         loop_start_time: float,
+        interrupt_flag: Optional[asyncio.Event] = None,
     ) -> List[ActionPlannerInfo]:
         """执行主规划器"""
         llm_content = None
@@ -675,7 +680,10 @@ class ActionPlanner:
 
         try:
             # 调用LLM
-            llm_content, (reasoning_content, _, _) = await self.planner_llm.generate_response_async(prompt=prompt)
+            llm_content, (reasoning_content, _, _) = await self.planner_llm.generate_response_async(
+                prompt=prompt,
+                interrupt_flag=interrupt_flag,
+            )
 
             logger.info(f"{self.log_prefix}规划器原始提示词: {prompt}")
             logger.info(f"{self.log_prefix}规划器原始响应: {llm_content}")
@@ -691,6 +699,8 @@ class ActionPlanner:
                 if reasoning_content:
                     logger.debug(f"{self.log_prefix}规划器推理: {reasoning_content}")
 
+        except ReqAbortException:
+            raise
         except Exception as req_e:
             logger.error(f"{self.log_prefix}LLM 请求执行失败: {req_e}")
             return [

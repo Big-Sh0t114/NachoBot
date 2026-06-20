@@ -20,6 +20,7 @@ from .exceptions import (
     RespNotOkException,
     EmptyResponseException,
     ModelAttemptFailed,
+    ReqAbortException,
 )
 
 install(extra_lines=3)
@@ -178,6 +179,7 @@ class LLMRequest:
         max_tokens: Optional[int] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         raise_when_empty: bool = True,
+        interrupt_flag: Optional[asyncio.Event] = None,
     ) -> Tuple[str, Tuple[str, str, Optional[List[ToolCall]]]]:
         """
         异步生成响应
@@ -187,6 +189,7 @@ class LLMRequest:
             max_tokens (int, optional): 最大token数
             tools (Optional[List[Dict[str, Any]]]): 工具列表
             raise_when_empty (bool): 当响应为空时是否抛出异常
+            interrupt_flag (asyncio.Event, optional): 外部中断信号，set时抛出ReqAbortException
         Returns:
             (Tuple[str, str, str, Optional[List[ToolCall]]]): 响应内容、推理内容、模型名称、工具调用列表
         """
@@ -205,6 +208,7 @@ class LLMRequest:
             temperature=temperature,
             max_tokens=max_tokens,
             tool_options=tool_built,
+            interrupt_flag=interrupt_flag,
         )
 
         logger.debug(f"LLM请求总耗时: {time.time() - start_time}")
@@ -307,6 +311,7 @@ class LLMRequest:
         max_tokens: Optional[int],
         embedding_input: str | None,
         audio_base64: str | None,
+        interrupt_flag: Optional[asyncio.Event] = None,
     ) -> APIResponse:
         """
         在单个模型上执行请求，包含针对临时错误的重试逻辑。
@@ -328,6 +333,7 @@ class LLMRequest:
                         stream_response_handler=stream_response_handler,
                         async_response_parser=async_response_parser,
                         extra_params=model_info.extra_params,
+                        interrupt_flag=interrupt_flag,
                     )
                 elif request_type == RequestType.EMBEDDING:
                     assert embedding_input is not None
@@ -343,6 +349,8 @@ class LLMRequest:
                         audio_base64=audio_base64,
                         extra_params=model_info.extra_params,
                     )
+            except ReqAbortException:
+                raise
             except (EmptyResponseException, NetworkConnectionError) as e:
                 retry_remain -= 1
                 if retry_remain <= 0:
@@ -397,6 +405,7 @@ class LLMRequest:
         max_tokens: Optional[int] = None,
         embedding_input: str | None = None,
         audio_base64: str | None = None,
+        interrupt_flag: Optional[asyncio.Event] = None,
     ) -> Tuple[APIResponse, ModelInfo]:
         """
         调度器函数，负责模型选择、故障切换。
@@ -427,9 +436,12 @@ class LLMRequest:
                     max_tokens=max_tokens,
                     embedding_input=embedding_input,
                     audio_base64=audio_base64,
+                    interrupt_flag=interrupt_flag,
                 )
                 return response, model_info
 
+            except ReqAbortException:
+                raise
             except ModelAttemptFailed as e:
                 last_exception = e.original_exception or e
                 logger.warning(f"模型 '{model_info.name}' 尝试失败，切换到下一个模型。原因: {e}")

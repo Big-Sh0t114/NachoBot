@@ -119,6 +119,18 @@ class ChatConfig(ConfigBase):
     at_bot_inevitable_reply: float = 1
     """@bot 必然回复，1为100%回复，0为不额外增幅"""
 
+    planner_interrupt_enabled: bool = True
+    """Planner 打断总开关，关闭后新消息不会打断正在执行的 LLM 请求"""
+
+    planner_interrupt_max_consecutive_count: int = 3
+    """Planner 连续打断上限，超过此次数后即使有新消息也不再打断当前 LLM 请求"""
+
+    person_profile_injection_enabled: bool = True
+    """人物画像注入开关，开启后在 Planner 决策前自动注入对话参与者的画像信息"""
+
+    person_profile_injection_max_profiles: int = 3
+    """每轮 Planner 最多注入几个对话参与者的画像"""
+
     talk_value: float = 1
     """思考频率"""
 

@@ -27,6 +27,7 @@ from src.person_info.person_info import Person
 from src.plugin_system.base.component_types import EventType, ActionInfo
 from src.plugin_system.core import events_manager
 from src.plugin_system.apis import generator_api, send_api, message_api, database_api
+from src.llm_models.exceptions import ReqAbortException
 from src.chat.utils.chat_message_builder import (
     build_readable_messages_with_id,
     get_raw_msg_before_timestamp_with_chat,
@@ -104,6 +105,12 @@ class BrainChatting:
 
         self.more_plan = False
 
+        # Planner 打断机制
+        self._planner_interrupt_flag: Optional[asyncio.Event] = None
+        self._planner_interrupt_requested: bool = False
+        self._planner_interrupt_consecutive_count: int = 0
+        self._last_message_received_at: float = time.time()
+
         # 关系扫描器与记忆激活器
         self.relation_scanner = RelationScanner(chat_id=self.stream_id)
         self.memory_activator = MemoryActivator()
@@ -174,6 +181,22 @@ class BrainChatting:
             + (f"\n详情: {'; '.join(timer_strings)}" if timer_strings else "")
         )
 
+    def signal_new_message(self, skip_interrupt: bool = False):
+        """由消息处理器推送调用，通知有新消息到达。如果 Planner 正在执行则触发打断。"""
+        self._last_message_received_at = time.time()
+        if skip_interrupt or not getattr(global_config.chat, "planner_interrupt_enabled", True):
+            return
+        if self._planner_interrupt_flag is not None and not self._planner_interrupt_requested:
+            planner_interrupt_max = getattr(global_config.chat, "planner_interrupt_max_consecutive_count", 3)
+            if self._planner_interrupt_consecutive_count < planner_interrupt_max:
+                self._planner_interrupt_requested = True
+                self._planner_interrupt_consecutive_count += 1
+                self._planner_interrupt_flag.set()
+                logger.info(
+                    f"{self.log_prefix} 新消息推送触发 Planner 打断 "
+                    f"({self._planner_interrupt_consecutive_count}/{planner_interrupt_max})"
+                )
+
     async def _loopbody(self):  # sourcery skip: hoist-if-from-if
         recent_messages_list = message_api.get_messages_by_time_in_chat(
             chat_id=self.stream_id,
@@ -187,6 +210,30 @@ class BrainChatting:
 
         if len(recent_messages_list) >= 1:
             self.last_read_time = time.time()
+            self._last_message_received_at = time.time()
+
+            # Planner 打断：如果 Planner 正在执行且收到新消息，触发打断（@提及除外，总开关关闭时跳过）
+            if (
+                getattr(global_config.chat, "planner_interrupt_enabled", True)
+                and self._planner_interrupt_flag is not None
+                and not self._planner_interrupt_requested
+            ):
+                has_mentioned = any(
+                    getattr(msg, "is_mentioned", False) or getattr(msg, "is_at", False)
+                    for msg in recent_messages_list
+                )
+                if not has_mentioned:
+                    planner_interrupt_max = getattr(global_config.chat, "planner_interrupt_max_consecutive_count", 3)
+                    if self._planner_interrupt_consecutive_count < planner_interrupt_max:
+                        self._planner_interrupt_requested = True
+                        self._planner_interrupt_consecutive_count += 1
+                        self._planner_interrupt_flag.set()
+                        logger.info(
+                            f"{self.log_prefix} 收到新消息，发起规划器打断; "
+                            f"消息数={len(recent_messages_list)} "
+                            f"连续打断次数={self._planner_interrupt_consecutive_count}/{planner_interrupt_max}"
+                        )
+
             await self._observe(recent_messages_list=recent_messages_list)
 
         else:
@@ -307,6 +354,19 @@ class BrainChatting:
                 promise_block = "\n".join(["[约定缓存]"] + promise_snippets)
                 chat_content_block = f"{promise_block}\n----\n{chat_content_block}"
 
+            # --- 人物画像注入 ---
+            try:
+                from src.memory_system.person_profile_injector import inject_person_profiles
+
+                chat_content_block = await inject_person_profiles(
+                    chat_id=self.stream_id,
+                    chat_content_block=chat_content_block,
+                    messages=message_list_before_now,
+                    is_group_chat=is_group_chat,
+                )
+            except Exception as e:
+                logger.debug(f"{self.log_prefix} 人物画像注入跳过: {e}")
+
             # High-level mode check
             if advanced_manager.is_on(self.chat_stream):
                 logger.info(f"{self.log_prefix} 检测到高级模式开启，跳过Planner直接回复")
@@ -351,10 +411,24 @@ class BrainChatting:
                     prompt_info = (modified_message.llm_prompt, prompt_info[1])
 
                 with Timer("规划器", cycle_timers):
-                    action_to_use_info, _ = await self.action_planner.plan(
-                        loop_start_time=self.last_read_time,
-                        available_actions=available_actions,
-                    )
+                    # 创建 Planner 打断信号
+                    interrupt_flag = asyncio.Event()
+                    self._planner_interrupt_flag = interrupt_flag
+                    self._planner_interrupt_requested = False
+                    try:
+                        action_to_use_info, _ = await self.action_planner.plan(
+                            loop_start_time=self.last_read_time,
+                            available_actions=available_actions,
+                            interrupt_flag=interrupt_flag,
+                        )
+                    except ReqAbortException:
+                        self._planner_interrupt_flag = None
+                        if not self._planner_interrupt_requested:
+                            self._planner_interrupt_consecutive_count = 0
+                        logger.info(
+                            f"{self.log_prefix} Planner 被新消息打断，中止本轮思考，等待新消息重新触发"
+                        )
+                        return True
 
             # 3. 按并行标记执行动作，避免非并行动作互相抢占
             serial_actions = []
@@ -427,7 +501,7 @@ class BrainChatting:
                         reply_loop_info = result["loop_info"]
                         reply_text_from_reply = result["reply_text"]
                     else:
-                        logger.warning(f"{self.log_prefix} 回复动作执行失败")
+                        logger.debug(f"{self.log_prefix} 回复动作未执行（可能被中断或生成失败）")
 
             # 构建最终的循环信息
             if reply_loop_info:
@@ -457,6 +531,10 @@ class BrainChatting:
 
             self.end_cycle(loop_info, cycle_timers)
             self.print_cycle_info(cycle_timers)
+
+            self._planner_interrupt_flag = None
+            if not self._planner_interrupt_requested:
+                self._planner_interrupt_consecutive_count = 0
 
             return True
 
@@ -732,6 +810,7 @@ class BrainChatting:
                             request_type=request_type,
                             from_plugin=False,
                             extra_info=injection_text,
+                            interrupt_flag=self._planner_interrupt_flag,
                         )
 
                         if not success or not llm_response or not llm_response.reply_set:
@@ -876,6 +955,7 @@ class BrainChatting:
                     request_type="replyer",
                     from_plugin=False,
                     extra_info=extra_info,
+                    interrupt_flag=self._planner_interrupt_flag,
                 )
                 if success and llm_response and llm_response.reply_set:
                     await self._send_and_store_reply(
@@ -909,6 +989,7 @@ class BrainChatting:
                 request_type="replyer",
                 from_plugin=False,
                 extra_info=confirm_extra_info,
+                interrupt_flag=self._planner_interrupt_flag,
             )
             if success and llm_response and llm_response.reply_set:
                 await self._send_and_store_reply(
@@ -945,6 +1026,7 @@ class BrainChatting:
                 request_type="replyer",
                 from_plugin=False,
                 extra_info=reminder_extra_info,
+                interrupt_flag=self._planner_interrupt_flag,
             )
             if success and llm_response and llm_response.reply_set:
                 parts = []
@@ -1036,6 +1118,7 @@ class BrainChatting:
                 request_type="replyer",
                 from_plugin=False,
                 extra_info=extra_info,
+                interrupt_flag=self._planner_interrupt_flag,
             )
             if success and llm_response and llm_response.reply_set:
                 await self._send_and_store_reply(
