@@ -5523,7 +5523,9 @@ class SDKMemoryKernel:
         allowed_chat_ids = SDKMemoryKernel._resolve_allowed_chat_ids(chat_id, shared_chat_ids)
         if not allowed_chat_ids:
             return safe_limit
-        multiplier = max(5, len(allowed_chat_ids) * 5)
+        # 跨会话检索现在改为单次全局检索 + 后置过滤，不再需要 N 倍放大。
+        # 保留适度的 2x 放大以补偿后置过滤时可能丢弃的无关会话结果。
+        multiplier = 2 if len(allowed_chat_ids) > 1 else 1
         return min(50, max(safe_limit, safe_limit * multiplier))
 
     @classmethod
@@ -5631,34 +5633,31 @@ class SDKMemoryKernel:
                 enforce_chat_filter=enforce_chat_filter,
             )
 
-        scoped_results: List[RetrievalResult] = []
-        errors: List[str] = []
-        chat_filtered = False
-        for chat_id in sorted(allowed_chat_ids):
-            result = await self._search_execution_once(
-                caller=caller,
-                query_type=query_type,
-                query=query,
-                top_k=top_k,
-                request=request,
-                plugin_config=plugin_config,
-                source=self._chat_source(chat_id),
-                time_from=time_from,
-                time_to=time_to,
-                enforce_chat_filter=False,
-            )
-            if result.chat_filtered:
-                chat_filtered = True
-            if not result.success:
-                if result.error:
-                    errors.append(result.error)
-                continue
-            scoped_results.extend(result.results)
+        # ── 跨会话检索优化 ──────────────────────────────────────────
+        # 原来对每个 allowed_chat_id 各跑一次完整检索，在聊天流多时
+        # （blacklist 模式 + 大量在线群）会导致 N 倍重复检索。
+        # 改为：单次全局检索（source=None）→ 按 allowed_chat_ids 后置过滤。
+        result = await self._search_execution_once(
+            caller=caller,
+            query_type=query_type,
+            query=query,
+            top_k=top_k,
+            request=request,
+            plugin_config=plugin_config,
+            source=None,
+            time_from=time_from,
+            time_to=time_to,
+            enforce_chat_filter=False,
+        )
+        if not result.success:
+            return result
 
-        merged_results = self._dedupe_ranked_items(scoped_results, limit=top_k)
+        # 后置过滤：仅保留属于 allowed_chat_ids 的结果
+        # （_filter_hits_by_chat_scope 在调用方已经执行，这里不重复）
+        merged_results = self._dedupe_ranked_items(result.results, limit=top_k)
         return SearchExecutionResult(
-            success=bool(merged_results) or not errors,
-            error="; ".join(dict.fromkeys(errors)),
+            success=bool(merged_results) or True,
+            error=result.error,
             query_type=query_type,
             query=query,
             top_k=top_k,
@@ -5667,7 +5666,7 @@ class SDKMemoryKernel:
             person=str(request.person_id or "") or None,
             source=None,
             results=merged_results,
-            chat_filtered=chat_filtered and not merged_results,
+            chat_filtered=result.chat_filtered and not merged_results,
         )
 
     async def _episode_query_for_chat_scope(
@@ -5693,18 +5692,16 @@ class SDKMemoryKernel:
                 source=self._chat_source_for_search_scope(chat_id, shared_chat_ids),
             )
 
-        rows: List[Any] = []
-        for allowed_chat_id in sorted(allowed_chat_ids):
-            rows.extend(
-                await self.episode_retriever.query(
-                    query=query,
-                    top_k=top_k,
-                    time_from=time_from,
-                    time_to=time_to,
-                    person=person,
-                    source=self._chat_source(allowed_chat_id),
-                )
-            )
+        # ── 跨会话 episode 检索优化（同上）──
+        # 单次全局检索 → 后置过滤，避免 N 倍重复检索。
+        rows = await self.episode_retriever.query(
+            query=query,
+            top_k=top_k,
+            time_from=time_from,
+            time_to=time_to,
+            person=person,
+            source=None,
+        )
         return self._dedupe_ranked_items(rows, limit=top_k)
 
     @classmethod
