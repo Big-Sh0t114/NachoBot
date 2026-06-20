@@ -1936,15 +1936,24 @@ class HeartFChatting:
                 msg = chat_stream.context.message
                 if msg.message_info and msg.message_info.template_info:
                     template_name = msg.message_info.template_info.template_name
-                    if template_name and isinstance(template_name, str) and template_name.endswith("_tts"):
-                        tts_instruction = (
-                            "\n\n非常重要：请必须同时输出中文回复和对应的日文翻译（用于语音播放），格式严格如下：\n"
-                            "<JP>日本語翻訳</JP><ZH>中文原本意思</ZH>\n"
-                            "例如：\n"
-                            "<JP>こんにちは、ご飯を食べましたか？</JP><ZH>你好呀，吃过饭了吗？</ZH>\n"
-                        )
-                        prompt += tts_instruction
-                        logger.info("[两阶段搜索] Pass 2 已追加 TTS 语言标签指令")
+                    if template_name and isinstance(template_name, str):
+                        if template_name.endswith("_tts_ja"):
+                            # 双语模式：要求输出 <JP>/<ZH> 标签
+                            tts_instruction = (
+                                "\n\n非常重要：请必须同时输出中文回复和对应的日文翻译（用于语音播放），格式严格如下：\n"
+                                "<JP>日本語翻訳</JP><ZH>中文原本意思</ZH>\n"
+                                "例如：\n"
+                                "<JP>こんにちは、ご飯を食べましたか？</JP><ZH>你好呀，吃过饭了吗？</ZH>\n"
+                            )
+                            prompt += tts_instruction
+                            logger.info("[两阶段搜索] Pass 2 已追加 TTS 双语标签指令 (ja)")
+                        elif template_name.endswith("_tts_zh"):
+                            # 纯中文模式：不需要双语标签，直接输出中文
+                            tts_instruction = (
+                                "\n\n请直接用中文回复，不需要输出日文翻译，不需要使用 <JP> <ZH> 等标签。\n"
+                            )
+                            prompt += tts_instruction
+                            logger.info("[两阶段搜索] Pass 2 已追加 TTS 纯中文指令 (zh)")
         except Exception as e:
             logger.debug(f"[两阶段搜索] TTS 检测失败: {e}")
 

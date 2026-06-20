@@ -312,7 +312,7 @@ class DualPathRetriever:
         strategy = strategy or self.config.retrieval_strategy
         relation_intent_ctx = self._build_relation_intent_context(query=query, top_k=top_k)
 
-        logger.info(
+        logger.debug(
             "执行检索: "
             f"query='{query[:50]}...', "
             f"strategy={strategy.value}, "
@@ -335,13 +335,13 @@ class DualPathRetriever:
                 relation_intent=relation_intent_ctx,
             )
 
-        logger.info(f"检索完成: 返回 {len(results)} 条结果")
+        logger.debug(f"检索完成: 返回 {len(results)} 条结果")
 
         # 调试模式：打印结果原文
         if self.config.debug:
-            logger.info("[DEBUG] 检索结果内容原文:")
+            logger.debug("[DEBUG] 检索结果内容原文:")
             for i, res in enumerate(results):
-                logger.info(f"  {i+1}. [{res.result_type}] (Score: {res.score:.4f}) {res.content}")
+                logger.debug(f"  {i+1}. [{res.result_type}] (Score: {res.score:.4f}) {res.content}")
 
         return results
 

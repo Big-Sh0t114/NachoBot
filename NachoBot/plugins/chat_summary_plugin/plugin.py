@@ -809,7 +809,7 @@ class DailySummaryEventHandler(BaseEventHandler):
                                 img_base64 = base64.b64encode(img_data).decode("utf-8")
                                 await send_api.image_to_stream(img_base64, chat_id, storage_message=False)
                                 await send_api.text_to_stream(
-                                    "今天的群聊总结和NachoBot的日记一起发送啦~",
+                                    "今天的群聊总结发送啦~",
                                     chat_id,
                                     storage_message=False,
                                 )
