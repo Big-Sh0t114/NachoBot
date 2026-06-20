@@ -86,6 +86,10 @@ class HeartFCMessageReceiver:
 
             heartflow_chat: HeartFChatting = await heartflow.get_or_create_heartflow_chat(chat.stream_id)  # type: ignore
 
+            # 推送新消息通知，若 Planner 正在执行则触发打断（@提及消息不触发打断）
+            is_mentioned = getattr(message, "is_mentioned", False) or getattr(message, "is_at", False)
+            heartflow_chat.signal_new_message(skip_interrupt=is_mentioned)
+
             if global_config.mood.enable_mood:
                 chat_mood = mood_manager.get_mood_by_chat_id(heartflow_chat.stream_id)
                 asyncio.create_task(chat_mood.update_mood_by_message(message))

@@ -8,6 +8,7 @@
     success, reply_set, _ = await generator_api.generate_reply(chat_stream, action_data, reasoning)
 """
 
+import asyncio
 import traceback
 from typing import Tuple, Any, Dict, List, Optional, TYPE_CHECKING
 from rich.traceback import install
@@ -15,6 +16,7 @@ from src.common.logger import get_logger
 from src.common.data_models.message_data_model import ReplySetModel
 from src.chat.replyer.group_generator import DefaultReplyer
 from src.chat.replyer.private_generator import PrivateReplyer
+from src.llm_models.exceptions import ReqAbortException
 from src.chat.message_receive.chat_stream import ChatStream
 from src.chat.utils.utils import process_llm_response
 from src.chat.replyer.replyer_manager import replyer_manager
@@ -90,6 +92,7 @@ async def generate_reply(
     enable_chinese_typo: bool = True,
     request_type: str = "generator_api",
     from_plugin: bool = True,
+    interrupt_flag: Optional[asyncio.Event] = None,
 ) -> Tuple[bool, Optional["LLMGenerationDataModel"]]:
     """生成回复
 
@@ -136,6 +139,7 @@ async def generate_reply(
             reply_reason=reply_reason,
             from_plugin=from_plugin,
             stream_id=chat_stream.stream_id if chat_stream else chat_id,
+            interrupt_flag=interrupt_flag,
         )
         if not success:
             logger.warning("[GeneratorAPI] 回复生成失败")
@@ -165,6 +169,10 @@ async def generate_reply(
 
     except UserWarning as uw:
         logger.warning(f"[GeneratorAPI] 中断了生成: {uw}")
+        return False, None
+
+    except ReqAbortException:
+        logger.debug("[GeneratorAPI] 回复生成被外部信号中断")
         return False, None
 
     except Exception as e:
