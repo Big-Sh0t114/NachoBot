@@ -20,6 +20,22 @@
 3. **虚拟声卡驱动** — 推荐 [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) 或 [VoiceMeeter](https://vb-audio.com/Voicemeeter/)
 4. **NachoBot Core** 处于运行状态
 
+## 🎛️ 输入/输出设备设置指南
+
+为了让 Bot 能够听到频道内其他人的声音，并让频道内的人能听到 Bot 的声音，请按照以下步骤配置音频路由：
+
+### 1. 适配器配置 (`config.toml`)
+- **`[capture] target_process_name`**：填写目标语音软件的进程名（例如 `"QQ.exe"`、`"Discord.exe"`）。这是 **Bot 的耳朵**，适配器会自动从该进程中捕获其他人说话的声音。
+- **`[output] device_name`**：填写虚拟声卡的**输入端**名称（例如 `"CABLE Input (VB-Audio Virtual Cable)"`）。这是 **Bot 的嘴巴**，Bot 的 TTS 回复会播放到这个虚拟声卡中。
+
+### 2. 语音软件配置 (以 Discord/QQ/游戏 为例)
+进入该目标语音软件的音频设置界面：
+- **输出设备 (扬声器/播放)**：保持为你**日常使用的耳机或扬声器**。你只需正常听声音即可，适配器是直接在进程层面捕获音频的，无需修改输出设备。
+- **输入设备 (麦克风/录音)**：修改为虚拟声卡的**输出端**（例如 `"CABLE Output (VB-Audio Virtual Cable)"`）。这样，Bot 播放到虚拟声卡里的声音，就会作为麦克风输入发送给频道里的其他人。
+
+> 💡 **提示：如何实现你与 Bot 同时说话？**
+> 如果你把语音软件的麦克风改成了虚拟声卡，别人就听不到你本人的声音了。若想**你和 Bot 一起在频道里说话**，需要使用 [VoiceMeeter](https://vb-audio.com/Voicemeeter/) 等混音软件，将你的**物理麦克风**和 **Bot的音频** 混合后，作为单一麦克风输入提供给语音软件。
+
 ## 🚀 快速开始
 
 ```bash
