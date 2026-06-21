@@ -1,5 +1,6 @@
 .tmp.driveupload/
 .tmp.drivedownload/
+.claude/
 # Local Models
 iic/
 microsoft/
