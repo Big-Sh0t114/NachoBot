@@ -311,6 +311,11 @@ class S4UMessageProcessor:
             
             msg_type = raw.get("type", "")
             platform = message.message_info.platform or "bilibili.live"
+            
+            # 安全检查：有些特殊系统消息或事件可能不包含 user_info
+            if not message.message_info or not message.message_info.user_info:
+                return
+                
             user_id = message.message_info.user_info.user_id
             user_name = message.message_info.user_info.user_nickname
             

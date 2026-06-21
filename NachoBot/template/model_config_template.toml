@@ -1,9 +1,18 @@
 [inner]
 version = "1.10.0_bs"
 
-[[api_providers]]  #本地模型配置(FULL模式下自带，无需修改)
+[[api_providers]]  # 本地模型配置(FULL模式下自带，无需修改)
 name = "LocalModel"
 base_url = "http://127.0.0.1:9874/v1"
+api_key = "fuck"
+client_type = "openai"
+max_retry = 2
+timeout = 60
+retry_interval = 5
+
+[[api_providers]]   # 为本地模型接入预留的预设
+name = "LocalModelLarge"
+base_url = "http://127.0.0.1:11433/v1"
 api_key = "fuck"
 client_type = "openai"
 max_retry = 2
@@ -198,7 +207,7 @@ model_list = ["Qwen/Qwen3-8B","Qwen/Qwen2.5-7B-Instruct","THUDM/GLM-Z1-9B-0414"]
 temperature = 0.05
 max_tokens = 800
 
-[model_task_config.file_edit] # 文件编辑/代码生成专用模型
+[model_task_config.file_edit] # 文件编辑/代码生成专用模型，建议使用能力较强的模型
 model_list = ["deepseek-v4-pro"]
 temperature = 0.1
 max_tokens = 8192
@@ -209,7 +218,7 @@ model_list = []
 temperature = 0.05
 max_tokens = 800
 
-[model_task_config.web_search] # 联网搜索模型组
+[model_task_config.web_search] # 联网搜索模型组，需要模型支持联网
 model_list = ["grok-4.1#search"]
 temperature = 0.2
 max_tokens = 800

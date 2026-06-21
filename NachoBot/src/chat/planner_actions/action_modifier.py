@@ -147,6 +147,8 @@ class ActionModifier:
 
     def _check_action_associated_types(self, all_actions: Dict[str, ActionInfo], chat_context: ChatMessageContext):
         type_mismatched_actions: List[Tuple[str, str]] = []
+        if chat_context is None:
+            return type_mismatched_actions
         for action_name, action_info in all_actions.items():
             if action_info.associated_types and not chat_context.check_types(action_info.associated_types):
                 associated_types_str = ", ".join(action_info.associated_types)
