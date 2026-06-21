@@ -856,9 +856,14 @@ class BrainPlanner:
         # 解析LLM响应
         if llm_content:
             try:
-                if json_objects := self._extract_json_from_markdown(llm_content):
+                filtered_actions_list = list(filtered_actions.items())
+                json_objects = self._extract_json_from_markdown(llm_content)
+                if not json_objects:
+                    raw_json_objects = self._extract_json_from_raw_content(llm_content)
+                    json_objects = self._filter_raw_json_action_objects(raw_json_objects, filtered_actions_list)
+
+                if json_objects:
                     logger.debug(f"{self.log_prefix}从响应中提取到{len(json_objects)}个JSON对象")
-                    filtered_actions_list = list(filtered_actions.items())
                     for json_obj in json_objects:
                         actions.extend(self._parse_single_action(json_obj, message_id_list, filtered_actions_list))
                 else:
@@ -929,6 +934,63 @@ class BrainPlanner:
                 continue
 
         return json_objects
+
+    def _extract_json_from_raw_content(self, content: str) -> List[dict]:
+        """Parse raw JSON responses that are not wrapped in Markdown fences."""
+        raw_content = content.strip()
+        if not raw_content:
+            return []
+
+        if not (
+            (raw_content.startswith("{") and raw_content.endswith("}"))
+            or (raw_content.startswith("[") and raw_content.endswith("]"))
+        ):
+            return []
+
+        try:
+            json_obj = json.loads(repair_json(raw_content))
+            if isinstance(json_obj, dict):
+                return [json_obj]
+            if isinstance(json_obj, list):
+                return [item for item in json_obj if isinstance(item, dict)]
+        except Exception as e:
+            logger.warning(f"解析裸JSON失败: {e}, 内容: {raw_content[:100]}...")
+
+        return []
+
+    def _filter_raw_json_action_objects(
+        self,
+        json_objects: List[dict],
+        current_available_actions: List[Tuple[str, ActionInfo]],
+    ) -> List[dict]:
+        """Keep only supported actions from raw JSON fallback responses."""
+        if not json_objects:
+            return []
+
+        available_action_names = [action_name for action_name, _ in current_available_actions]
+        internal_action_names = ["no_reply", "reply", "wait_time", "make_appoint", "cancel_appoint"]
+        supported_actions = set(internal_action_names + available_action_names)
+        filtered_objects = []
+
+        for json_obj in json_objects:
+            action = json_obj.get("action")
+
+            if action in (None, "", "no_action"):
+                filtered_objects.append(
+                    {
+                        "action": "no_reply",
+                        "reason": json_obj.get("reason", "裸JSON响应未包含可执行动作"),
+                    }
+                )
+                continue
+
+            if action not in supported_actions:
+                logger.warning(f"{self.log_prefix}裸JSON响应包含不支持的动作: '{action}'")
+                continue
+
+            filtered_objects.append(json_obj)
+
+        return filtered_objects
 
 
 init_prompt()
