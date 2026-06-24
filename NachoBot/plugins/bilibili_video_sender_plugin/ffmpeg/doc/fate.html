@@ -1,6 +1,6 @@
 <!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
 <html>
-<!-- Created by , GNU Texinfo 7.1.1 -->
+<!-- Created by GNU Texinfo 7.2, https://www.gnu.org/software/texinfo/ -->
   <head>
     <meta charset="utf-8">
     <title>
@@ -20,7 +20,7 @@
 <a name="Top"></a>
 <a name="SEC_Top"></a>
 
-<div class="element-contents" id="SEC_Contents">
+<div class="region-contents" id="SEC_Contents">
 <h2 class="contents-heading">Table of Contents</h2>
 
 <div class="contents">
@@ -73,41 +73,60 @@ targets and variables.
 <a name="Using-FATE-from-your-FFmpeg-source-directory"></a>
 <h2 class="chapter">2 Using FATE from your FFmpeg source directory<span class="pull-right"><a class="anchor hidden-xs" href="#Using-FATE-from-your-FFmpeg-source-directory" aria-hidden="true">#</a> <a class="anchor hidden-xs"href="#toc-Using-FATE-from-your-FFmpeg-source-directory" aria-hidden="true">TOC</a></span></h2>
 
-<p>If you want to run FATE on your machine you need to have the samples
-in place. You can get the samples via the build target fate-rsync.
-Use this command from the top-level source directory:
+<p>If you want to run FATE on your machine, FFmpeg needs to be configured first.
+You may specify the location of samples during configuration by adding the
+argument <code class="code">--samples=/path/to/fate-suite</code>.
 </p>
 <div class="example">
-<pre class="example-preformatted">make fate-rsync SAMPLES=fate-suite/
-make fate       SAMPLES=fate-suite/
+<pre class="example-preformatted">./configure --enable-somelib --samples=/path/to/fate-suite
 </pre></div>
 
-<p>The above commands set the samples location by passing a makefile
-variable via command line. It is also possible to set the samples
-location at source configuration time by invoking configure with
-<samp class="option">--samples=&lt;path to the samples directory&gt;</samp>. Afterwards you can
-invoke the makefile targets without setting the <var class="var">SAMPLES</var> makefile
-variable. This is illustrated by the following commands:
+<p>After successful configuration, you need to add and/or update the samples in place:
 </p>
 <div class="example">
-<pre class="example-preformatted">./configure --samples=fate-suite/
+<pre class="example-preformatted">make fate-rsync
+</pre></div>
+
+<p>Now you are ready to run FATE:
+</p>
+<div class="example">
+<pre class="example-preformatted">make fate
+</pre></div>
+
+<p>See <a class="ref" href="#makefile-variables">makefile variables</a> for a list of arguments that can be added.
+</p>
+<p>If you did not set the samples path during configuration, or if you wish to
+override it just before starting FATE, you can do so in one of three ways.
+</p>
+<p>Either by setting a make variable:
+</p>
+<div class="example">
+<pre class="example-preformatted">make fate-rsync SAMPLES=/path/to/fate-suite
+make fate       SAMPLES=/path/to/fate-suite
+</pre></div>
+
+<p>or by setting an environment variable for the current session:
+</p>
+<div class="example">
+<pre class="example-preformatted">export FATE_SAMPLES=/path/to/fate-suite
 make fate-rsync
 make fate
 </pre></div>
 
-<p>Yet another way to tell FATE about the location of the sample
-directory is by making sure the environment variable FATE_SAMPLES
-contains the path to your samples directory. This can be achieved
-by e.g. putting that variable in your shell profile or by setting
-it in your interactive session.
+<p>or in isolation for a single command by prepending it:
 </p>
 <div class="example">
-<pre class="example-preformatted">FATE_SAMPLES=fate-suite/ make fate
+<pre class="example-preformatted">FATE_SAMPLES=/path/to/fate-suite make fate-rsync
+FATE_SAMPLES=/path/to/fate-suite make fate
 </pre></div>
 
+<p>This variable can also be set in your shell profile to make it permanent.
+</p>
 <div class="info">
 <p>Do not put a &rsquo;~&rsquo; character in the samples path to indicate a home
 directory. Because of shell nuances, this will cause FATE to fail.
+Also, on Windows the path has to be relative to the build path
+which in this case is the FFmpeg source directory.
 </p></div>
 <p>Beware that some assertions are disabled by default, so mind setting
 <samp class="option">--assert-level=&lt;level&gt;</samp> at configuration time, e.g. when seeking
@@ -159,21 +178,28 @@ workdir=                                 # directory in which to do all the work
 #fate_recv=&quot;ssh -T fate@fate.ffmpeg.org&quot; # command to submit report
 comment=                                 # optional description
 build_only=     # set to &quot;yes&quot; for a compile-only instance that skips tests
+skip_clean=     # set to &quot;yes&quot; to preserve build/install directories
 ignore_tests=
 
 # the following are optional and map to configure options
 arch=
 cpu=
+toolchain=
 cross_prefix=
+ar=
 as=
 cc=
+cxx=
 ld=
+nm=
 target_os=
 sysroot=
 target_exec=
 target_path=
 target_samples=
 extra_cflags=
+extra_cxxflags=
+extra_objcflags=
 extra_ldflags=
 extra_libs=
 extra_conf=     # extra configure options not covered above
@@ -298,6 +324,15 @@ rsync -vaL  --no-g --chmod=Dg+s,Duo+x,ug+rw,o+r,o-w,+X ~/fate-suite/ fate-suite.
 <dd><p>Will list all fate/regression test targets.
 </p>
 </dd>
+<dt><samp class="option">fate-list-failing</samp></dt>
+<dd><p>List the fate tests that failed the last time they were executed.
+</p>
+</dd>
+<dt><samp class="option">fate-clear-reports</samp></dt>
+<dd><p>Remove the test reports from previous test executions (getting rid of
+potentially stale results from fate-list-failing).
+</p>
+</dd>
 <dt><samp class="option">fate</samp></dt>
 <dd><p>Run the FATE test suite (requires the fate-suite dataset).
 </p></dd>
@@ -305,7 +340,7 @@ rsync -vaL  --no-g --chmod=Dg+s,Duo+x,ug+rw,o+r,o-w,+X ~/fate-suite/ fate-suite.
 
 <a name="Makefile-variables"></a>
 <h3 class="section">5.2 Makefile variables<span class="pull-right"><a class="anchor hidden-xs" href="#Makefile-variables" aria-hidden="true">#</a> <a class="anchor hidden-xs"href="#toc-Makefile-variables" aria-hidden="true">TOC</a></span></h3>
-
+<a class="anchor" id="makefile-variables"></a>
 <dl class="table">
 <dt><code class="env">V</code></dt>
 <dd><p>Verbosity level, can be set to 0, 1 or 2.
