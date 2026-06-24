@@ -16,6 +16,7 @@
 
 import asyncio
 import datetime
+import random
 from typing import Dict, Any
 
 from src.plugin_system import (
@@ -164,6 +165,8 @@ class DiaryScheduler:
         self.task = None
         self.logger = get_logger("DiaryScheduler")
         self.storage = DiaryStorage()
+        self.fluctuated_time = None  # 浮动后的执行时间
+        self.last_reset_date = None  # 上次重置浮动时间的日期
     
     def _get_timezone_now(self):
         """
@@ -190,6 +193,46 @@ class DiaryScheduler:
             self.logger.error(f"时区处理出错: {e},使用系统时间")
             return datetime.datetime.now()
 
+    def _generate_fluctuated_time(self):
+        """
+        生成随机浮动后的执行时间
+        
+        参考 Maizone 的 fluctuation_minutes 做法，在配置的基础时间上
+        添加随机偏移量，使定时任务执行时间不固定。
+        
+        Returns:
+            str: 浮动后的时间字符串 (HH:MM格式)
+        """
+        schedule_time_str = self.plugin.get_config("schedule.schedule_time", "23:30")
+        fluctuation_minutes = self.plugin.get_config("schedule.fluctuation_minutes", 0)
+        
+        if fluctuation_minutes == 0:
+            self.fluctuated_time = schedule_time_str
+            self.logger.info(f"无浮动，使用计划时间: {self.fluctuated_time}")
+            return self.fluctuated_time
+        
+        # 解析基础时间
+        base_hour, base_minute = map(int, schedule_time_str.split(":"))
+        base_total_minutes = base_hour * 60 + base_minute
+        
+        # 生成随机偏移量
+        offset = random.randint(-fluctuation_minutes, fluctuation_minutes)
+        
+        # 处理溢出
+        total_minutes = base_total_minutes + offset
+        if total_minutes < 0:
+            total_minutes += 24 * 60
+        elif total_minutes >= 24 * 60:
+            total_minutes -= 24 * 60
+        
+        # 转换回时间格式
+        h = total_minutes // 60
+        m = total_minutes % 60
+        self.fluctuated_time = f"{h:02d}:{m:02d}"
+        
+        self.logger.info(f"基础时间: {schedule_time_str}, 浮动: {offset:+d}分钟, 实际执行时间: {self.fluctuated_time}")
+        return self.fluctuated_time
+
     async def start(self):
         """
         启动定时任务
@@ -214,9 +257,11 @@ class DiaryScheduler:
             return
         
         self.is_running = True
+        self.last_reset_date = datetime.datetime.now().date()
+        self._generate_fluctuated_time()  # 生成今日浮动时间
         self.task = asyncio.create_task(self._schedule_loop())
         schedule_time = self.plugin.get_config("schedule.schedule_time", "23:30")
-        self.logger.info(f"定时任务已启动 - 模式: {filter_mode}, 执行时间: {schedule_time}")
+        self.logger.info(f"定时任务已启动 - 模式: {filter_mode}, 基础时间: {schedule_time}, 今日实际时间: {self.fluctuated_time}")
 
     async def stop(self):
         """
@@ -243,26 +288,35 @@ class DiaryScheduler:
         
         持续运行的异步循环，计算下次执行时间并等待。
         当到达配置的时间点时，自动执行日记生成任务。
+        每天0点自动重新生成浮动时间。
         
         循环会处理异常情况，确保单次失败不会影响后续执行。
         """
         while self.is_running:
             try:
-                now = self._get_timezone_now()
-                schedule_time_str = self.plugin.get_config("schedule.schedule_time", "23:30")
+                # 检查是否需要重置浮动时间（每天0点）
+                current_date = datetime.datetime.now().date()
+                if current_date != self.last_reset_date:
+                    self.logger.info("检测到日期变化，重新生成浮动时间")
+                    self.last_reset_date = current_date
+                    self._generate_fluctuated_time()
                 
-                schedule_hour, schedule_minute = map(int, schedule_time_str.split(":"))
+                now = self._get_timezone_now()
+                # 使用浮动后的时间
+                schedule_hour, schedule_minute = map(int, self.fluctuated_time.split(":"))
                 today_schedule = now.replace(hour=schedule_hour, minute=schedule_minute, second=0, microsecond=0)
                 
                 if now >= today_schedule:
                     today_schedule += datetime.timedelta(days=1)
                 
                 wait_seconds = (today_schedule - now).total_seconds()
-                self.logger.info(f"下次日记生成时间: {today_schedule.strftime('%Y-%m-%d %H:%M:%S')}")
+                self.logger.info(f"下次日记生成时间: {today_schedule.strftime('%Y-%m-%d %H:%M:%S')} (浮动后)")
                 
                 await asyncio.sleep(wait_seconds)
                 if self.is_running:
                     await self._generate_daily_diary()
+                    # 执行完毕后重新生成下次的浮动时间
+                    self._generate_fluctuated_time()
                 
             except asyncio.CancelledError:
                 break
