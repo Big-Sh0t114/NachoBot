@@ -623,25 +623,15 @@ class HeartFChatting:
                             if self.blocked_users
                             else None
                         )
-                        # 创建 Planner 打断信号
+                        # 创建打断信号（仅用于 reply 动作，Planner 不受打断）
                         interrupt_flag = asyncio.Event()
                         self._planner_interrupt_flag = interrupt_flag
                         self._planner_interrupt_requested = False
-                        try:
-                            action_to_use_info, _ = await self.action_planner.plan(
-                                loop_start_time=self.last_read_time,
-                                available_actions=available_actions,
-                                blocked_user_ids=_active_blocked,
-                                interrupt_flag=interrupt_flag,
-                            )
-                        except ReqAbortException:
-                            self._planner_interrupt_flag = None
-                            if not self._planner_interrupt_requested:
-                                self._planner_interrupt_consecutive_count = 0
-                            logger.info(
-                                f"{self.log_prefix} Planner 被新消息打断，中止本轮思考，等待新消息重新触发"
-                            )
-                            return True
+                        action_to_use_info, _ = await self.action_planner.plan(
+                            loop_start_time=self.last_read_time,
+                            available_actions=available_actions,
+                            blocked_user_ids=_active_blocked,
+                        )
 
             has_reply = False
             _reply_equivalent = {"reply", "make_appoint", "cancel_appoint"}
@@ -1254,7 +1244,6 @@ class HeartFChatting:
                     reply_reason=action_planner_info.reasoning or "",
                     request_type="replyer",
                     from_plugin=False,
-                    interrupt_flag=self._planner_interrupt_flag,
                 )
                 if success and llm_response and llm_response.reply_set:
                     _, reply_text, _ = await self._send_and_store_reply(
@@ -1292,7 +1281,6 @@ class HeartFChatting:
                     request_type="replyer",
                     from_plugin=False,
                     extra_info=clarify_extra_info,
-                    interrupt_flag=self._planner_interrupt_flag,
                 )
                 if success and llm_response and llm_response.reply_set:
                     _, reply_text, _ = await self._send_and_store_reply(
@@ -1338,7 +1326,6 @@ class HeartFChatting:
                     request_type="replyer",
                     from_plugin=False,
                     extra_info=extra_info,
-                    interrupt_flag=self._planner_interrupt_flag,
                 )
                 if success and llm_response and llm_response.reply_set:
                     _, reply_text, _ = await self._send_and_store_reply(
@@ -1371,7 +1358,6 @@ class HeartFChatting:
                 request_type="replyer",
                 from_plugin=False,
                 extra_info=confirm_extra_info,
-                interrupt_flag=self._planner_interrupt_flag,
             )
             if success and llm_response and llm_response.reply_set:
                 _, confirm_text, _ = await self._send_and_store_reply(
@@ -1406,7 +1392,6 @@ class HeartFChatting:
                 request_type="replyer",
                 from_plugin=False,
                 extra_info=reminder_extra_info,
-                interrupt_flag=self._planner_interrupt_flag,
             )
             if success and llm_response and llm_response.reply_set:
                 # 提取纯文本
@@ -1502,7 +1487,6 @@ class HeartFChatting:
                 request_type="replyer",
                 from_plugin=False,
                 extra_info=extra_info,
-                interrupt_flag=self._planner_interrupt_flag,
             )
             if success and llm_response and llm_response.reply_set:
                 _, reply_text, _ = await self._send_and_store_reply(
@@ -1596,7 +1580,6 @@ class HeartFChatting:
                 request_type="replyer",
                 from_plugin=False,
                 extra_info=confirm_extra_info,
-                interrupt_flag=self._planner_interrupt_flag,
             )
             if success and llm_response and llm_response.reply_set:
                 _, reply_text, _ = await self._send_and_store_reply(
@@ -1713,7 +1696,6 @@ class HeartFChatting:
                 request_type="replyer",
                 from_plugin=False,
                 extra_info=confirm_extra_info,
-                interrupt_flag=self._planner_interrupt_flag,
             )
             if success and llm_response and llm_response.reply_set:
                 _, reply_text, _ = await self._send_and_store_reply(
