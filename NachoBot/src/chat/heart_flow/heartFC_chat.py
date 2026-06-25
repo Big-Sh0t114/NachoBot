@@ -1534,17 +1534,27 @@ class HeartFChatting:
             logger.warning(f"{self.log_prefix} block_user 缺少 target_name 参数")
             return {"action_type": "block_user", "success": False, "reply_text": ""}
 
-        # 如果LLM返回的是纯数字（QQ号），直接使用；否则通过昵称解析QQ号
+        # 如果LLM返回的是纯数字（QQ号），直接使用；否则通过 Person 系统解析QQ号
         if target_name.isdigit():
             target_user_id = target_name
             logger.info(f"{self.log_prefix} block_user 直接使用QQ号 {target_user_id}")
         else:
-            resolved_id = self._resolve_user_id_by_nickname(target_name)
-            if resolved_id:
-                logger.info(f"{self.log_prefix} block_user 将用户 '{target_name}' 解析为 QQ号 {resolved_id}")
-                target_user_id = resolved_id
-            else:
-                logger.warning(f"{self.log_prefix} block_user 无法将 '{target_name}' 解析为有效的QQ号")
+            try:
+                person = Person(person_name=target_name)
+                if person.is_known:
+                    target_user_id = person.get_user_id_for_platform(global_config.bot.platform) or str(person.user_id)
+                    logger.info(f"{self.log_prefix} block_user 通过Person解析用户 '{target_name}' -> QQ号 {target_user_id}")
+                else:
+                    # 回退到消息记录匹配
+                    resolved_id = self._resolve_user_id_by_nickname(target_name)
+                    if resolved_id:
+                        target_user_id = resolved_id
+                        logger.info(f"{self.log_prefix} block_user 通过消息记录解析用户 '{target_name}' -> QQ号 {target_user_id}")
+                    else:
+                        logger.warning(f"{self.log_prefix} block_user 无法将 '{target_name}' 解析为有效的QQ号")
+                        return {"action_type": "block_user", "success": False, "reply_text": ""}
+            except Exception as e:
+                logger.warning(f"{self.log_prefix} block_user 解析用户 '{target_name}' 失败: {e}")
                 return {"action_type": "block_user", "success": False, "reply_text": ""}
 
         # 仅群聊可用
@@ -1643,17 +1653,27 @@ class HeartFChatting:
             logger.warning(f"{self.log_prefix} set_group_title 当前群 {current_group_id} 未启用头衔功能")
             return {"action_type": "set_group_title", "success": False, "reply_text": ""}
 
-        # 解析用户QQ号（与 block_user 相同逻辑）
+        # 解析用户QQ号：优先通过 Person 系统，回退到消息记录匹配
         if target_name.isdigit():
             target_user_id = target_name
             logger.info(f"{self.log_prefix} set_group_title 直接使用QQ号 {target_user_id}")
         else:
-            resolved_id = self._resolve_user_id_by_nickname(target_name)
-            if resolved_id:
-                logger.info(f"{self.log_prefix} set_group_title 将用户 '{target_name}' 解析为 QQ号 {resolved_id}")
-                target_user_id = resolved_id
-            else:
-                logger.warning(f"{self.log_prefix} set_group_title 无法将 '{target_name}' 解析为有效的QQ号")
+            try:
+                person = Person(person_name=target_name)
+                if person.is_known:
+                    target_user_id = person.get_user_id_for_platform(global_config.bot.platform) or str(person.user_id)
+                    logger.info(f"{self.log_prefix} set_group_title 通过Person解析用户 '{target_name}' -> QQ号 {target_user_id}")
+                else:
+                    # 回退到消息记录匹配
+                    resolved_id = self._resolve_user_id_by_nickname(target_name)
+                    if resolved_id:
+                        target_user_id = resolved_id
+                        logger.info(f"{self.log_prefix} set_group_title 通过消息记录解析用户 '{target_name}' -> QQ号 {target_user_id}")
+                    else:
+                        logger.warning(f"{self.log_prefix} set_group_title 无法将 '{target_name}' 解析为有效的QQ号")
+                        return {"action_type": "set_group_title", "success": False, "reply_text": ""}
+            except Exception as e:
+                logger.warning(f"{self.log_prefix} set_group_title 解析用户 '{target_name}' 失败: {e}")
                 return {"action_type": "set_group_title", "success": False, "reply_text": ""}
 
         # 发送命令到适配器
