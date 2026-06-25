@@ -446,6 +446,63 @@ class ThinkingBack(BaseModel):
         table_name = "thinking_back"
 
 
+class LLMUsageHourly(BaseModel):
+    """
+    LLM 调用按小时聚合统计表。
+    每小时 + 模型 + 请求类型 维度汇总，用于替代对 llm_usage 明细表的全量扫描。
+    """
+
+    bucket_time = TextField()      # 小时粒度时间桶，格式 "YYYY-MM-DD HH:00:00"
+    model_name = TextField()       # 模型名称 (model_assign_name 或 model_name)
+    request_type = TextField()     # 请求类型
+    request_count = IntegerField(default=0)
+    prompt_tokens = IntegerField(default=0)
+    completion_tokens = IntegerField(default=0)
+    total_tokens = IntegerField(default=0)
+    total_cost = DoubleField(default=0.0)
+    time_cost_sum = DoubleField(default=0.0)      # 耗时累计（用于计算平均值）
+    time_cost_sq_sum = DoubleField(default=0.0)    # 耗时平方累计（用于计算标准差）
+
+    class Meta:
+        table_name = "statistics_llm_usage_hourly"
+        indexes = (
+            (('bucket_time', 'model_name', 'request_type'), True),  # 联合唯一索引
+        )
+
+
+class MessageHourly(BaseModel):
+    """
+    消息按小时聚合统计表。
+    每小时 + 聊天 ID 维度汇总，用于替代对 messages 明细表的全量扫描。
+    """
+
+    bucket_time = TextField()      # 小时粒度时间桶，格式 "YYYY-MM-DD HH:00:00"
+    chat_id = TextField()          # 聊天 ID（g+群号 或 u+用户ID）
+    chat_name = TextField(null=True)  # 聊天名称（最新一条消息的名称）
+    chat_type = TextField(default='unknown')  # 聊天类型: 'group' 或 'private'
+    message_count = IntegerField(default=0)
+
+    class Meta:
+        table_name = "statistics_message_hourly"
+        indexes = (
+            (('bucket_time', 'chat_id'), True),  # 联合唯一索引
+        )
+
+
+class AggregationCursor(BaseModel):
+    """
+    聚合游标表。
+    记录每个聚合源上次处理到的最大 ID，实现增量聚合。
+    """
+
+    source_name = TextField(unique=True)  # 聚合源名称，如 "llm_usage"、"messages"
+    last_processed_id = IntegerField(default=0)  # 上次处理到的最大 ID
+    updated_at = DateTimeField()  # 最后更新时间
+
+    class Meta:
+        table_name = "statistics_aggregation_cursors"
+
+
 def create_tables():
     """
     创建所有在模型中定义的数据库表。
@@ -469,6 +526,9 @@ def create_tables():
                 ActionRecords,  # 添加 ActionRecords 到初始化列表
                 ChatHistory,
                 ThinkingBack,
+                LLMUsageHourly,  # 聚合表：LLM 调用小时统计
+                MessageHourly,   # 聚合表：消息小时统计
+                AggregationCursor,  # 聚合游标
             ]
         )
 
@@ -500,6 +560,9 @@ def initialize_database(sync_constraints=False):
         ActionRecords,  # 添加 ActionRecords 到初始化列表
         ChatHistory,
         ThinkingBack,
+        LLMUsageHourly,  # 聚合表：LLM 调用小时统计
+        MessageHourly,   # 聚合表：消息小时统计
+        AggregationCursor,  # 聚合游标
     ]
 
     try:
