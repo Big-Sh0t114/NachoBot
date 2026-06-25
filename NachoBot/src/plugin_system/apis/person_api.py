@@ -81,3 +81,49 @@ def get_person_id_by_name(person_name: str) -> str:
     except Exception as e:
         logger.error(f"[PersonAPI] 根据用户名获取person_id失败: person_name={person_name}, error={e}")
         return ""
+
+
+def get_person_platform_user_id(person_id: str, target_platform: str) -> str:
+    """获取指定平台的 user_id
+
+    当用户绑定了多个平台时，Person.user_id 可能是任意平台的 ID。
+    使用此函数可精确获取目标平台的 user_id。
+
+    Args:
+        person_id: 用户的唯一标识ID
+        target_platform: 目标平台名称，如 "qq", "bilibili"
+
+    Returns:
+        str: 该平台的 user_id，未找到返回空字符串
+
+    示例:
+        qq_id = person_api.get_person_platform_user_id(person_id, "qq")
+    """
+    try:
+        person = Person(person_id=person_id)
+        return person.get_user_id_for_platform(target_platform)
+    except Exception as e:
+        logger.error(f"[PersonAPI] 获取平台user_id失败: person_id={person_id}, platform={target_platform}, error={e}")
+        return ""
+
+
+def get_person_platform_user_ids(person_id: str) -> dict:
+    """获取该用户所有已绑定平台的 user_id 映射
+
+    Args:
+        person_id: 用户的唯一标识ID
+
+    Returns:
+        dict: {platform: user_id} 映射，如 {"qq": "12345", "bilibili": "67890"}
+
+    示例:
+        ids = person_api.get_person_platform_user_ids(person_id)
+        qq_id = ids.get("qq", "")
+    """
+    try:
+        person = Person(person_id=person_id)
+        return person.get_platform_user_ids()
+    except Exception as e:
+        logger.error(f"[PersonAPI] 获取平台映射失败: person_id={person_id}, error={e}")
+        return {}
+
