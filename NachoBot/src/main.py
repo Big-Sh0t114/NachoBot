@@ -16,6 +16,7 @@ from src.mood.mood_manager import mood_manager
 from src.chat.knowledge import lpmm_start_up
 from rich.traceback import install
 from src.migrate_helper.migrate import check_and_run_migrations
+from src.services.db_aggregation_service import DBAggregationTask
 # from src.api.main import start_api_server
 
 # 导入新的插件管理器
@@ -80,6 +81,9 @@ class MainSystem:
 
         # 添加高级模式挂机检测
         await async_task_manager.add_task(AdvancedIdleTimeoutTask())
+
+        # 添加数据库聚合维护任务
+        await async_task_manager.add_task(DBAggregationTask())
 
         # 添加图谱记忆沉淀器
         from src.chat.memory_system.memory_accumulator import MemoryAccumulator
