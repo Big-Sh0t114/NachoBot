@@ -45,10 +45,21 @@ def get_person_id(platform: str, user_id: Union[int, str]) -> str:
 
 
 def get_person_id_by_person_name(person_name: str) -> str:
-    """根据用户名获取用户ID"""
+    """根据用户名获取用户ID（支持多平台绑定：若用户属于聚合组，返回组ID）"""
     try:
         record = PersonInfo.get_or_none(PersonInfo.person_name == person_name)
-        return record.person_id if record else ""
+        if not record:
+            return ""
+        person_id = record.person_id
+        try:
+            from src.person_info.bind_manager import bind_manager
+
+            merged = bind_manager._get_merged_row_for_person(person_id)
+            if merged:
+                return merged.person_id
+        except Exception:
+            pass
+        return person_id
     except Exception as e:
         logger.error(f"根据用户名 {person_name} 获取用户ID时出错 (Peewee): {e}")
         return ""
@@ -459,6 +470,29 @@ class Person:
                 self.know_times = record.know_times or 0
                 self.vip_expire_time = record.vip_expire_time or None
 
+                # ── 多平台绑定：修正 user_id/platform ──
+                # 当基底记录来自非当前运行平台（如 Bilibili）时，
+                # self.user_id 会被设为错误平台的 ID。
+                # 这里优先从绑定表中查找当前 bot 运行平台的 user_id。
+                try:
+                    from src.common.database.database_model import PersonBinding
+                    bot_platform = global_config.bot.platform or ""
+                    if bot_platform and self.platform != bot_platform:
+                        # 当前基底记录不是 bot 运行平台，尝试从绑定表查找
+                        bot_binding = PersonBinding.get_or_none(
+                            PersonBinding.person_id == self.person_id,
+                            PersonBinding.platform == bot_platform,
+                        )
+                        if bot_binding and bot_binding.platform_user_id:
+                            logger.debug(
+                                f"用户 {self.person_id} 的 user_id 从 {self.platform}:{self.user_id} "
+                                f"修正为 {bot_platform}:{bot_binding.platform_user_id}"
+                            )
+                            self.user_id = bot_binding.platform_user_id
+                            self.platform = bot_platform
+                except Exception as e:
+                    logger.debug(f"修正绑定用户 user_id 时出错（不影响正常加载）: {e}")
+
                 # 处理points字段（JSON格式的列表）
                 if record.memory_points:
                     try:
@@ -604,6 +638,81 @@ class Person:
             logger.info(f"用户 {self.person_name}({self.person_id}) 的VIP已过期，已清除")
             return True
         return False
+
+    def get_platform_user_ids(self) -> dict:
+        """获取该用户所有已绑定平台的 user_id 映射。
+
+        通过查询 PersonBinding 表获取当前 person_id 关联的所有平台账号。
+        适用于多平台绑定场景，当 self.user_id 可能不是目标平台的 ID 时使用。
+
+        Returns:
+            dict: {platform: user_id} 映射，如 {"qq": "12345", "bilibili": "67890"}
+                  若无绑定信息，返回当前记录自身的 {self.platform: self.user_id}
+        """
+        result = {}
+        try:
+            from src.common.database.database_model import PersonBinding
+            from src.person_info.bind_manager import MERGED_PLATFORM
+
+            # 查找该 person_id 关联的所有非聚合映射行
+            binding_rows = PersonBinding.select().where(
+                PersonBinding.person_id == self.person_id,
+                PersonBinding.platform != MERGED_PLATFORM,
+            )
+            for row in binding_rows:
+                result[row.platform] = row.platform_user_id
+        except Exception as e:
+            logger.debug(f"查询绑定平台映射失败: {e}")
+
+        # 兜底：如果绑定表查不到，返回当前记录自身的信息
+        if not result and self.platform and self.user_id:
+            result[self.platform] = self.user_id
+
+        return result
+
+    def get_user_id_for_platform(self, target_platform: str) -> str:
+        """获取指定平台的 user_id。
+
+        当用户绑定了多个平台时，self.user_id 可能是任意平台的 ID。
+        使用此方法可精确获取目标平台的 user_id。
+
+        Args:
+            target_platform: 目标平台名称，如 "qq", "bilibili"
+                            支持前缀匹配（如 "bilibili" 可匹配 "bilibili.live"）
+
+        Returns:
+            str: 该平台的 user_id，未找到返回空字符串
+        """
+        try:
+            from src.common.database.database_model import PersonBinding
+            from src.person_info.bind_manager import MERGED_PLATFORM
+
+            target_platform = target_platform.lower()
+
+            # 精确匹配
+            row = PersonBinding.get_or_none(
+                PersonBinding.person_id == self.person_id,
+                PersonBinding.platform == target_platform,
+            )
+            if row:
+                return row.platform_user_id
+
+            # 前缀匹配（如 "bilibili" 匹配 "bilibili.live"）
+            row = PersonBinding.get_or_none(
+                PersonBinding.person_id == self.person_id,
+                PersonBinding.platform.startswith(target_platform),
+            )
+            if row:
+                return row.platform_user_id
+
+        except Exception as e:
+            logger.debug(f"查询平台 {target_platform} 的 user_id 失败: {e}")
+
+        # 兜底：如果当前记录的 platform 匹配，直接返回
+        if self.platform and self.platform.lower().startswith(target_platform.lower()) and self.user_id:
+            return self.user_id
+
+        return ""
 
     def update_gift_value(self, amount_cny: float) -> None:
         """更新用户的直播打赏累计记忆点（实时更新，非追加）。
