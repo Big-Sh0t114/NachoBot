@@ -1,5 +1,6 @@
 import asyncio
 import concurrent.futures
+import math
 
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -7,7 +8,7 @@ from typing import Any, Dict, Tuple, List
 
 from src.common.logger import get_logger
 from src.common.database.database import db
-from src.common.database.database_model import OnlineTime, LLMUsage, Messages
+from src.common.database.database_model import OnlineTime, LLMUsageHourly, MessageHourly
 from src.manager.async_task_manager import AsyncTask
 from src.manager.local_store_manager import local_storage
 
@@ -272,137 +273,131 @@ class StatisticOutputTask(AsyncTask):
     @staticmethod
     def _collect_model_request_for_period(collect_period: List[Tuple[str, datetime]]) -> Dict[str, Any]:
         """
-        收集指定时间段的LLM请求统计数据
+        收集指定时间段的LLM请求统计数据（基于聚合表 statistics_llm_usage_hourly）。
 
         :param collect_period: 统计时间段
         """
         if not collect_period:
             return {}
 
-        # 排序-按照时间段开始时间降序排列（最晚的时间段在前）
         collect_period.sort(key=lambda x: x[1], reverse=True)
 
         stats = {
             period_key: {
                 TOTAL_REQ_CNT: 0,
                 REQ_CNT_BY_TYPE: defaultdict(int),
-                REQ_CNT_BY_USER: defaultdict(int),
                 REQ_CNT_BY_MODEL: defaultdict(int),
                 REQ_CNT_BY_MODULE: defaultdict(int),
                 IN_TOK_BY_TYPE: defaultdict(int),
-                IN_TOK_BY_USER: defaultdict(int),
                 IN_TOK_BY_MODEL: defaultdict(int),
                 IN_TOK_BY_MODULE: defaultdict(int),
                 OUT_TOK_BY_TYPE: defaultdict(int),
-                OUT_TOK_BY_USER: defaultdict(int),
                 OUT_TOK_BY_MODEL: defaultdict(int),
                 OUT_TOK_BY_MODULE: defaultdict(int),
                 TOTAL_TOK_BY_TYPE: defaultdict(int),
-                TOTAL_TOK_BY_USER: defaultdict(int),
                 TOTAL_TOK_BY_MODEL: defaultdict(int),
                 TOTAL_TOK_BY_MODULE: defaultdict(int),
                 TOTAL_COST: 0.0,
                 COST_BY_TYPE: defaultdict(float),
-                COST_BY_USER: defaultdict(float),
                 COST_BY_MODEL: defaultdict(float),
                 COST_BY_MODULE: defaultdict(float),
-                TIME_COST_BY_TYPE: defaultdict(list),
-                TIME_COST_BY_USER: defaultdict(list),
-                TIME_COST_BY_MODEL: defaultdict(list),
-                TIME_COST_BY_MODULE: defaultdict(list),
+                "time_cost_sum_by_type": defaultdict(float),
+                "time_cost_sq_by_type": defaultdict(float),
+                "time_cost_cnt_by_type": defaultdict(int),
+                "time_cost_sum_by_model": defaultdict(float),
+                "time_cost_sq_by_model": defaultdict(float),
+                "time_cost_cnt_by_model": defaultdict(int),
+                "time_cost_sum_by_module": defaultdict(float),
+                "time_cost_sq_by_module": defaultdict(float),
+                "time_cost_cnt_by_module": defaultdict(int),
                 AVG_TIME_COST_BY_TYPE: defaultdict(float),
-                AVG_TIME_COST_BY_USER: defaultdict(float),
                 AVG_TIME_COST_BY_MODEL: defaultdict(float),
                 AVG_TIME_COST_BY_MODULE: defaultdict(float),
                 STD_TIME_COST_BY_TYPE: defaultdict(float),
-                STD_TIME_COST_BY_USER: defaultdict(float),
                 STD_TIME_COST_BY_MODEL: defaultdict(float),
                 STD_TIME_COST_BY_MODULE: defaultdict(float),
             }
             for period_key, _ in collect_period
         }
 
-        # 以最早的时间戳为起始时间获取记录
-        # Assuming LLMUsage.timestamp is a DateTimeField
-        query_start_time = collect_period[-1][1]
-        for record in LLMUsage.select().where(LLMUsage.timestamp >= query_start_time):  # type: ignore
-            record_timestamp = record.timestamp  # This is already a datetime object
+        # 查询聚合表而非原始表：大幅减少扫描行数
+        earliest_start = collect_period[-1][1]
+        query_start_str = earliest_start.strftime("%Y-%m-%d %H:00:00")
+        for row in LLMUsageHourly.select().where(LLMUsageHourly.bucket_time >= query_start_str):
+            try:
+                bucket_dt = datetime.strptime(row.bucket_time, "%Y-%m-%d %H:00:00")
+            except Exception:
+                continue
+
+            model = row.model_name or "unknown"
+            req_type = row.request_type or "unknown"
+            module_name = req_type.split(".")[0] if "." in req_type else req_type
+            rc = row.request_count or 0
+            pt = row.prompt_tokens or 0
+            ct = row.completion_tokens or 0
+            tt = row.total_tokens or 0
+            cost = row.total_cost or 0.0
+            tc_sum = row.time_cost_sum or 0.0
+            tc_sq = row.time_cost_sq_sum or 0.0
+
             for idx, (_, period_start) in enumerate(collect_period):
-                if record_timestamp >= period_start:
+                if bucket_dt >= period_start:
                     for period_key, _ in collect_period[idx:]:
-                        stats[period_key][TOTAL_REQ_CNT] += 1
-
-                        request_type = record.request_type or "unknown"
-                        user_id = record.user_id or "unknown"  # user_id is TextField, already string
-                        model_name = record.model_assign_name or record.model_name or "unknown"
-
-                        # 提取模块名：如果请求类型包含"."，取第一个"."之前的部分
-                        module_name = request_type.split(".")[0] if "." in request_type else request_type
-
-                        stats[period_key][REQ_CNT_BY_TYPE][request_type] += 1
-                        stats[period_key][REQ_CNT_BY_USER][user_id] += 1
-                        stats[period_key][REQ_CNT_BY_MODEL][model_name] += 1
-                        stats[period_key][REQ_CNT_BY_MODULE][module_name] += 1
-
-                        prompt_tokens = record.prompt_tokens or 0
-                        completion_tokens = record.completion_tokens or 0
-                        total_tokens = prompt_tokens + completion_tokens
-
-                        stats[period_key][IN_TOK_BY_TYPE][request_type] += prompt_tokens
-                        stats[period_key][IN_TOK_BY_USER][user_id] += prompt_tokens
-                        stats[period_key][IN_TOK_BY_MODEL][model_name] += prompt_tokens
-                        stats[period_key][IN_TOK_BY_MODULE][module_name] += prompt_tokens
-
-                        stats[period_key][OUT_TOK_BY_TYPE][request_type] += completion_tokens
-                        stats[period_key][OUT_TOK_BY_USER][user_id] += completion_tokens
-                        stats[period_key][OUT_TOK_BY_MODEL][model_name] += completion_tokens
-                        stats[period_key][OUT_TOK_BY_MODULE][module_name] += completion_tokens
-
-                        stats[period_key][TOTAL_TOK_BY_TYPE][request_type] += total_tokens
-                        stats[period_key][TOTAL_TOK_BY_USER][user_id] += total_tokens
-                        stats[period_key][TOTAL_TOK_BY_MODEL][model_name] += total_tokens
-                        stats[period_key][TOTAL_TOK_BY_MODULE][module_name] += total_tokens
-
-                        cost = record.cost or 0.0
-                        stats[period_key][TOTAL_COST] += cost
-                        stats[period_key][COST_BY_TYPE][request_type] += cost
-                        stats[period_key][COST_BY_USER][user_id] += cost
-                        stats[period_key][COST_BY_MODEL][model_name] += cost
-                        stats[period_key][COST_BY_MODULE][module_name] += cost
-
-                        # 收集time_cost数据
-                        time_cost = record.time_cost or 0.0
-                        if time_cost > 0:  # 只记录有效的time_cost
-                            stats[period_key][TIME_COST_BY_TYPE][request_type].append(time_cost)
-                            stats[period_key][TIME_COST_BY_USER][user_id].append(time_cost)
-                            stats[period_key][TIME_COST_BY_MODEL][model_name].append(time_cost)
-                            stats[period_key][TIME_COST_BY_MODULE][module_name].append(time_cost)
+                        s = stats[period_key]
+                        s[TOTAL_REQ_CNT] += rc
+                        s[REQ_CNT_BY_TYPE][req_type] += rc
+                        s[REQ_CNT_BY_MODEL][model] += rc
+                        s[REQ_CNT_BY_MODULE][module_name] += rc
+                        s[IN_TOK_BY_TYPE][req_type] += pt
+                        s[IN_TOK_BY_MODEL][model] += pt
+                        s[IN_TOK_BY_MODULE][module_name] += pt
+                        s[OUT_TOK_BY_TYPE][req_type] += ct
+                        s[OUT_TOK_BY_MODEL][model] += ct
+                        s[OUT_TOK_BY_MODULE][module_name] += ct
+                        s[TOTAL_TOK_BY_TYPE][req_type] += tt
+                        s[TOTAL_TOK_BY_MODEL][model] += tt
+                        s[TOTAL_TOK_BY_MODULE][module_name] += tt
+                        s[TOTAL_COST] += cost
+                        s[COST_BY_TYPE][req_type] += cost
+                        s[COST_BY_MODEL][model] += cost
+                        s[COST_BY_MODULE][module_name] += cost
+                        s["time_cost_sum_by_type"][req_type] += tc_sum
+                        s["time_cost_sq_by_type"][req_type] += tc_sq
+                        s["time_cost_cnt_by_type"][req_type] += rc
+                        s["time_cost_sum_by_model"][model] += tc_sum
+                        s["time_cost_sq_by_model"][model] += tc_sq
+                        s["time_cost_cnt_by_model"][model] += rc
+                        s["time_cost_sum_by_module"][module_name] += tc_sum
+                        s["time_cost_sq_by_module"][module_name] += tc_sq
+                        s["time_cost_cnt_by_module"][module_name] += rc
                     break
 
-        # 计算平均耗时和标准差
+        # 根据聚合表的累加值计算 avg 和 stddev
         for period_key in stats:
-            for category in [REQ_CNT_BY_TYPE, REQ_CNT_BY_USER, REQ_CNT_BY_MODEL, REQ_CNT_BY_MODULE]:
-                time_cost_key = f"time_costs_by_{category.split('_')[-1]}"
-                avg_key = f"avg_time_costs_by_{category.split('_')[-1]}"
-                std_key = f"std_time_costs_by_{category.split('_')[-1]}"
-
-                for item_name in stats[period_key][category]:
-                    time_costs = stats[period_key][time_cost_key].get(item_name, [])
-                    if time_costs:
-                        # 计算平均耗时
-                        avg_time_cost = sum(time_costs) / len(time_costs)
-                        stats[period_key][avg_key][item_name] = round(avg_time_cost, 3)
-
-                        # 计算标准差
-                        if len(time_costs) > 1:
-                            variance = sum((x - avg_time_cost) ** 2 for x in time_costs) / len(time_costs)
-                            std_time_cost = variance**0.5
-                            stats[period_key][std_key][item_name] = round(std_time_cost, 3)
+            s = stats[period_key]
+            for sum_key, sq_key, cnt_key, avg_key, std_key in [
+                ("time_cost_sum_by_type", "time_cost_sq_by_type", "time_cost_cnt_by_type",
+                 AVG_TIME_COST_BY_TYPE, STD_TIME_COST_BY_TYPE),
+                ("time_cost_sum_by_model", "time_cost_sq_by_model", "time_cost_cnt_by_model",
+                 AVG_TIME_COST_BY_MODEL, STD_TIME_COST_BY_MODEL),
+                ("time_cost_sum_by_module", "time_cost_sq_by_module", "time_cost_cnt_by_module",
+                 AVG_TIME_COST_BY_MODULE, STD_TIME_COST_BY_MODULE),
+            ]:
+                for item_name in s[sum_key]:
+                    total = s[sum_key][item_name]
+                    sq_total = s[sq_key][item_name]
+                    n = s[cnt_key][item_name]
+                    if n > 0:
+                        avg = total / n
+                        s[avg_key][item_name] = round(avg, 3)
+                        if n > 1:
+                            variance = (sq_total / n) - (avg * avg)
+                            s[std_key][item_name] = round(math.sqrt(max(variance, 0)), 3)
                         else:
-                            stats[period_key][std_key][item_name] = 0.0
+                            s[std_key][item_name] = 0.0
                     else:
-                        stats[period_key][avg_key][item_name] = 0.0
-                        stats[period_key][std_key][item_name] = 0.0
+                        s[avg_key][item_name] = 0.0
+                        s[std_key][item_name] = 0.0
 
         return stats
 
@@ -449,7 +444,7 @@ class StatisticOutputTask(AsyncTask):
 
     def _collect_message_count_for_period(self, collect_period: List[Tuple[str, datetime]]) -> Dict[str, Any]:
         """
-        收集指定时间段的消息统计数据
+        收集指定时间段的消息统计数据（基于聚合表 statistics_message_hourly）。
 
         :param collect_period: 统计时间段
         """
@@ -466,43 +461,32 @@ class StatisticOutputTask(AsyncTask):
             for period_key, _ in collect_period
         }
 
-        query_start_timestamp = collect_period[-1][1].timestamp()  # Messages.time is a DoubleField (timestamp)
-        for message in Messages.select().where(Messages.time >= query_start_timestamp):  # type: ignore
-            message_time_ts = message.time  # This is a float timestamp
-
-            chat_id = None
-            chat_name = None
-
-            # Logic based on Peewee model structure, aiming to replicate original intent
-            if message.chat_info_group_id:
-                chat_id = f"g{message.chat_info_group_id}"
-                chat_name = message.chat_info_group_name or f"群{message.chat_info_group_id}"
-            elif message.user_id:  # Fallback to sender's info for chat_id if not a group_info based chat
-                # This uses the message SENDER's ID as per original logic's fallback
-                chat_id = f"u{message.user_id}"  # SENDER's user_id
-                chat_name = message.user_nickname  # SENDER's nickname
-            else:
-                # If neither group_id nor sender_id is available for chat identification
-                logger.warning(
-                    f"Message (PK: {message.id if hasattr(message, 'id') else 'N/A'}) lacks group_id and user_id for chat stats."
-                )
+        # 查询聚合表而非原始 messages 表
+        earliest_start = collect_period[-1][1]
+        query_start_str = earliest_start.strftime("%Y-%m-%d %H:00:00")
+        for row in MessageHourly.select().where(MessageHourly.bucket_time >= query_start_str):
+            try:
+                bucket_dt = datetime.strptime(row.bucket_time, "%Y-%m-%d %H:00:00")
+            except Exception:
                 continue
 
-            if not chat_id:  # Should not happen if above logic is correct
-                continue
+            chat_id = row.chat_id or "unknown"
+            chat_name = row.chat_name or chat_id
+            msg_count = row.message_count or 0
 
-            # Update name_mapping
+            # Update name_mapping (use bucket_time as a proxy for latest record time)
             if chat_id in self.name_mapping:
-                if chat_name != self.name_mapping[chat_id][0] and message_time_ts > self.name_mapping[chat_id][1]:
-                    self.name_mapping[chat_id] = (chat_name, message_time_ts)
+                current_name, current_ts = self.name_mapping[chat_id]
+                if chat_name != current_name:
+                    self.name_mapping[chat_id] = (chat_name, bucket_dt.timestamp())
             else:
-                self.name_mapping[chat_id] = (chat_name, message_time_ts)
+                self.name_mapping[chat_id] = (chat_name, bucket_dt.timestamp())
 
-            for idx, (_, period_start_dt) in enumerate(collect_period):
-                if message_time_ts >= period_start_dt.timestamp():
+            for idx, (_, period_start) in enumerate(collect_period):
+                if bucket_dt >= period_start:
                     for period_key, _ in collect_period[idx:]:
-                        stats[period_key][TOTAL_MSG_CNT] += 1
-                        stats[period_key][MSG_CNT_BY_CHAT][chat_id] += 1
+                        stats[period_key][TOTAL_MSG_CNT] += msg_count
+                        stats[period_key][MSG_CNT_BY_CHAT][chat_id] += msg_count
                     break
         return stats
 
@@ -1199,8 +1183,7 @@ class StatisticOutputTask(AsyncTask):
         return chart_data
 
     def _collect_interval_data(self, now: datetime, hours: int, interval_minutes: int) -> dict:
-        """收集指定时间范围内每个间隔的数据"""
-        # 生成时间点
+        """收集指定时间范围内每个间隔的数据（基于聚合表）"""
         start_time = now - timedelta(hours=hours)
         time_points = []
         current_time = start_time
@@ -1209,7 +1192,6 @@ class StatisticOutputTask(AsyncTask):
             time_points.append(current_time)
             current_time += timedelta(minutes=interval_minutes)
 
-        # 初始化数据结构
         total_cost_data = [0] * len(time_points)
         cost_by_model = {}
         cost_by_module = {}
@@ -1218,59 +1200,49 @@ class StatisticOutputTask(AsyncTask):
 
         interval_seconds = interval_minutes * 60
 
-        # 查询LLM使用记录
-        query_start_time = start_time
-        for record in LLMUsage.select().where(LLMUsage.timestamp >= query_start_time):  # type: ignore
-            record_time = record.timestamp
+        # 查询 LLM 聚合表
+        start_str = start_time.strftime("%Y-%m-%d %H:00:00")
+        for row in LLMUsageHourly.select().where(LLMUsageHourly.bucket_time >= start_str):
+            try:
+                bucket_dt = datetime.strptime(row.bucket_time, "%Y-%m-%d %H:00:00")
+            except Exception:
+                continue
 
-            # 找到对应的时间间隔索引
-            time_diff = (record_time - start_time).total_seconds()
+            time_diff = (bucket_dt - start_time).total_seconds()
             interval_index = int(time_diff // interval_seconds)
 
             if 0 <= interval_index < len(time_points):
-                # 累加总花费数据
-                cost = record.cost or 0.0
-                total_cost_data[interval_index] += cost  # type: ignore
+                cost = row.total_cost or 0.0
+                total_cost_data[interval_index] += cost
 
-                # 累加按模型分类的花费
-                model_name = record.model_name or "unknown"
+                model_name = row.model_name or "unknown"
                 if model_name not in cost_by_model:
                     cost_by_model[model_name] = [0] * len(time_points)
                 cost_by_model[model_name][interval_index] += cost
 
-                # 累加按模块分类的花费
-                request_type = record.request_type or "unknown"
+                request_type = row.request_type or "unknown"
                 module_name = request_type.split(".")[0] if "." in request_type else request_type
                 if module_name not in cost_by_module:
                     cost_by_module[module_name] = [0] * len(time_points)
                 cost_by_module[module_name][interval_index] += cost
 
-        # 查询消息记录
-        query_start_timestamp = start_time.timestamp()
-        for message in Messages.select().where(Messages.time >= query_start_timestamp):  # type: ignore
-            message_time_ts = message.time
+        # 查询消息聚合表
+        for row in MessageHourly.select().where(MessageHourly.bucket_time >= start_str):
+            try:
+                bucket_dt = datetime.strptime(row.bucket_time, "%Y-%m-%d %H:00:00")
+            except Exception:
+                continue
 
-            # 找到对应的时间间隔索引
-            time_diff = message_time_ts - query_start_timestamp
+            time_diff = (bucket_dt - start_time).total_seconds()
             interval_index = int(time_diff // interval_seconds)
 
             if 0 <= interval_index < len(time_points):
-                # 确定聊天流名称
-                chat_name = None
-                if message.chat_info_group_id:
-                    chat_name = message.chat_info_group_name or f"群{message.chat_info_group_id}"
-                elif message.user_id:
-                    chat_name = message.user_nickname or f"用户{message.user_id}"
-                else:
-                    continue
+                chat_name = row.chat_name or row.chat_id or "unknown"
+                msg_count = row.message_count or 0
 
-                if not chat_name:
-                    continue
-
-                # 累加消息数
                 if chat_name not in message_by_chat:
                     message_by_chat[chat_name] = [0] * len(time_points)
-                message_by_chat[chat_name][interval_index] += 1
+                message_by_chat[chat_name][interval_index] += msg_count
 
         return {
             "time_labels": time_labels,
