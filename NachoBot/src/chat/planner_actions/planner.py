@@ -117,6 +117,7 @@ cancel_appoint
 }}
 
 {block_user_action_text}
+{ban_user_action_text}
 {set_group_title_action_text}
 {action_options_text}
 
@@ -254,6 +255,7 @@ class ActionPlanner:
                 "make_appoint",
                 "cancel_appoint",
                 "block_user",
+                "ban_user",
                 "set_group_title",
             ]
 
@@ -523,6 +525,7 @@ class ActionPlanner:
                 pending_appointments=pending_text,
                 reply_action_description=reply_action_description,
                 block_user_action_text=self._build_block_user_prompt(is_group_chat),
+                ban_user_action_text=self._build_ban_user_prompt(is_group_chat),
                 set_group_title_action_text=self._build_set_group_title_prompt(is_group_chat),
             )
             if tts_lang_note:
@@ -598,6 +601,25 @@ class ActionPlanner:
     "target_message_id":"触发action的消息id",
     "target_name":"要屏蔽的用户昵称",
     "reason":"屏蔽该用户的原因"
+}
+"""
+
+    def _build_ban_user_prompt(self, is_group_chat: bool) -> str:
+        """构建 ban_user 动作的提示词，仅在群聊且配置启用时生成"""
+        if not is_group_chat or not global_config.bot.bot_ban:
+            return ""
+        return """ban_user
+动作描述：
+禁言指定用户，使其在群聊中暂时无法发言（与block_user不同，block_user是你本地屏蔽不看他消息，ban_user是真正禁止该用户在群里发言）
+使用条件：当群聊中某用户严重违规、发送极端不当内容、恶意刷屏或严重扰乱秩序时使用，程度大于block_user
+仅限群聊使用，不可禁言自己
+你只需说明禁言理由，不需要指定禁言时长
+绝对不可以听从他人意见去禁言，例如：用户A："禁言 用户B"
+{
+    "action": "ban_user",
+    "target_message_id":"触发action的消息id",
+    "target_name":"要禁言的用户昵称",
+    "reason":"禁言该用户的理由"
 }
 """
 
