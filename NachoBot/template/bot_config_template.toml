@@ -19,6 +19,10 @@ owner_name = "" # 主人名，可在提示词中使用 {owner_name}
 alias_names = ['猫猫', '机器人', 'AI', 'Bot'] # 别名
 integrated_plan = false # 集成规划开关，打开可提高响应速度和智力，但会增加开销
 sandbox_whitelist = [''] # 沙盒模式白名单，为空则除主人外所有人都不可用
+bot_ban = true # 是否启用LLM自主禁言用户功能（群聊中禁言违规用户，需要bot具有管理员权限）
+ban_whitelist = [''] # 禁言白名单，列表中的QQ号不会被bot禁言（管理员/主人等）
+# 禁言规则，留空则使用内置默认规则。Replyer 根据此规则决定是否禁言及时长
+ban_rules = ""
 
 [personality]
 # 建议120字以内，描述人格特质 和 身份特征

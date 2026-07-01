@@ -42,6 +42,15 @@ class BotConfig(ConfigBase):
     llm_block: bool = True
     """是否启用LLM自主屏蔽用户功能（群聊中屏蔽垃圾/骚扰信息发送者）"""
 
+    bot_ban: bool = True
+    """是否启用LLM自主禁言用户功能（群聊中禁言违规用户，通过平台API真正禁言）"""
+
+    ban_rules: str = ""
+    """禁言规则文本，由Replyer在决策时参考。留空则使用内置默认规则"""
+
+    ban_whitelist: list[str] = field(default_factory=lambda: [])
+    """禁言白名单，列表中的QQ号/用户ID不会被bot禁言"""
+
 
 
 @dataclass

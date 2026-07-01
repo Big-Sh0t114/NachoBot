@@ -634,7 +634,7 @@ class HeartFChatting:
                         )
 
             has_reply = False
-            _reply_equivalent = {"reply", "make_appoint", "cancel_appoint"}
+            _reply_equivalent = {"reply", "make_appoint", "cancel_appoint", "ban_user", "block_user", "tts_action"}
             for action in action_to_use_info:
                 if action.action_type in _reply_equivalent:
                     has_reply = True
@@ -992,6 +992,15 @@ class HeartFChatting:
 
                 elif action_planner_info.action_type == "block_user":
                     return await self._handle_block_user(
+                        action_planner_info,
+                        chosen_action_plan_infos,
+                        thinking_id,
+                        available_actions,
+                        cycle_timers,
+                    )
+
+                elif action_planner_info.action_type == "ban_user":
+                    return await self._handle_ban_user(
                         action_planner_info,
                         chosen_action_plan_infos,
                         thinking_id,
@@ -1618,6 +1627,225 @@ class HeartFChatting:
         )
 
         return {"action_type": "block_user", "success": True, "reply_text": reply_text}
+
+    async def _handle_ban_user(
+        self,
+        action_planner_info: ActionPlannerInfo,
+        chosen_action_plan_infos: List[ActionPlannerInfo],
+        thinking_id: str,
+        available_actions: Dict[str, ActionInfo],
+        cycle_timers: Dict[str, float],
+    ):
+        """处理 ban_user 动作：禁言指定用户（由 Replyer 决策是否执行及时长）"""
+        action_data = action_planner_info.action_data or {}
+        target_name = str(action_data.get("target_name", ""))
+        planner_reason = action_planner_info.reasoning or action_data.get("reason", "未提供原因")
+
+        # 1. 参数校验
+        if not target_name:
+            logger.warning(f"{self.log_prefix} ban_user 缺少 target_name 参数")
+            return {"action_type": "ban_user", "success": False, "reply_text": ""}
+
+        # 2. 仅群聊可用
+        if not self.chat_stream.group_info:
+            logger.warning(f"{self.log_prefix} ban_user 仅适用于群聊")
+            return {"action_type": "ban_user", "success": False, "reply_text": ""}
+
+        # 3. 解析用户ID（复用 block_user 的解析逻辑）
+        if target_name.isdigit():
+            target_user_id = target_name
+            logger.info(f"{self.log_prefix} ban_user 直接使用QQ号 {target_user_id}")
+        else:
+            try:
+                person = Person(person_name=target_name)
+                if person.is_known:
+                    target_user_id = person.get_user_id_for_platform(global_config.bot.platform) or str(person.user_id)
+                    logger.info(f"{self.log_prefix} ban_user 通过Person解析用户 '{target_name}' -> QQ号 {target_user_id}")
+                else:
+                    resolved_id = self._resolve_user_id_by_nickname(target_name)
+                    if resolved_id:
+                        target_user_id = resolved_id
+                        logger.info(f"{self.log_prefix} ban_user 通过消息记录解析用户 '{target_name}' -> QQ号 {target_user_id}")
+                    else:
+                        logger.warning(f"{self.log_prefix} ban_user 无法将 '{target_name}' 解析为有效的QQ号")
+                        return {"action_type": "ban_user", "success": False, "reply_text": ""}
+            except Exception as e:
+                logger.warning(f"{self.log_prefix} ban_user 解析用户 '{target_name}' 失败: {e}")
+                return {"action_type": "ban_user", "success": False, "reply_text": ""}
+
+        # 4. 不能禁言自己
+        bot_id = str(global_config.bot.qq_account)
+        if target_user_id == bot_id:
+            logger.warning(f"{self.log_prefix} ban_user 不能禁言自己")
+            return {"action_type": "ban_user", "success": False, "reply_text": ""}
+
+        # 5. 白名单检查
+        ban_whitelist = global_config.bot.ban_whitelist
+        if target_user_id in ban_whitelist:
+            logger.warning(f"{self.log_prefix} ban_user 用户 {target_user_id} 在禁言白名单中，跳过")
+            return {"action_type": "ban_user", "success": False, "reply_text": ""}
+
+        # 6. 构建禁言规则 extra_info，交给 Replyer 决策
+        # 优先使用配置中的规则，为空则使用内置默认规则
+        custom_rules = global_config.bot.ban_rules.strip() if global_config.bot.ban_rules else ""
+        if custom_rules:
+            rules_text = custom_rules
+        else:
+            rules_text = (
+                "1. 你需要判断是否真的应该禁言该用户。请基于聊天上下文和Planner的理由做出独立判断。\n"
+                "2. 如果你认为不应该禁言（比如理由不充分、用户行为不严重、存在误判），你应该拒绝禁言。\n"
+                "3. 如果用户的发言令你感到不适，你可以禁言。\n"
+                "4. 如果你决定禁言，需要确定禁言时长（1分钟~24小时之间），根据违规严重程度决定：\n"
+                "   - 轻度违规（如轻度刷屏或是和用户开玩笑）：1~10分钟\n"
+                "   - 中度违规（如持续骚扰、攻击性语言）：10~60分钟\n"
+                "   - 严重违规（如涉政讨论、极端不当内容）：1~24小时\n"
+                "5. 禁言时长不可超过24小时（1440分钟）。"
+            )
+
+        ban_rules_extra_info = (
+            f"[禁言决策请求]\n"
+            f"Planner 认为应该禁言用户「{target_name}」(ID: {target_user_id})。\n"
+            f"Planner 给出的理由是：{planner_reason}\n\n"
+            f"**禁言规则**：\n{rules_text}\n\n"
+            f"**输出格式**：在你的回复中，必须包含以下JSON来表达你的决策（用```json包裹）：\n"
+            f"如果决定禁言：\n"
+            f'```json\n{{"ban_decision": true, "duration_minutes": <禁言分钟数>, "reply_to_user": "<你要对群里说的话>"}}\n```\n'
+            f"如果拒绝禁言：\n"
+            f'```json\n{{"ban_decision": false, "reply_to_user": "<你要对群里说的话>"}}\n```\n'
+            f"注意：reply_to_user 是你想在群聊中发送的话（可以是告诫、警告，或者解释为什么不禁言等）。"
+        )
+
+        # 7. 调用 Replyer 生成决策
+        try:
+            success, llm_response = await generator_api.generate_reply(
+                chat_stream=self.chat_stream,
+                reply_message=action_planner_info.action_message,
+                available_actions=available_actions,
+                chosen_actions=chosen_action_plan_infos,
+                reply_reason=planner_reason,
+                request_type="replyer",
+                from_plugin=False,
+                extra_info=ban_rules_extra_info,
+            )
+        except Exception as e:
+            logger.error(f"{self.log_prefix} ban_user Replyer 决策生成异常: {e}")
+            return {"action_type": "ban_user", "success": False, "reply_text": ""}
+
+        if not success or not llm_response or not llm_response.content:
+            logger.warning(f"{self.log_prefix} ban_user Replyer 决策生成失败")
+            return {"action_type": "ban_user", "success": False, "reply_text": ""}
+
+        # 8. 解析 Replyer 的 JSON 决策
+        ban_decision = self._parse_ban_decision(llm_response.content)
+
+        reply_text = ""
+        ban_executed = False
+        duration_minutes = 0
+
+        if ban_decision and ban_decision.get("ban_decision"):
+            # Replyer 决定禁言
+            duration_minutes = min(int(ban_decision.get("duration_minutes", 10)), 1440)
+            duration_minutes = max(duration_minutes, 1)  # 至少1分钟
+            duration_seconds = duration_minutes * 60
+
+            # 发送 GROUP_BAN 命令
+            current_group_id = str(self.chat_stream.group_info.group_id)
+            try:
+                await send_api.command_to_stream(
+                    command={
+                        "name": "GROUP_BAN",
+                        "args": {
+                            "group_id": current_group_id,
+                            "qq_id": target_user_id,
+                            "duration": duration_seconds,
+                        },
+                    },
+                    stream_id=self.chat_stream.stream_id,
+                    storage_message=False,
+                )
+                ban_executed = True
+                logger.info(
+                    f"{self.log_prefix} ban_user 已发送禁言命令: "
+                    f"群={current_group_id}, 用户={target_user_id}, 时长={duration_minutes}分钟"
+                )
+            except Exception as e:
+                logger.error(f"{self.log_prefix} ban_user 发送禁言命令失败: {e}")
+        else:
+            logger.info(f"{self.log_prefix} ban_user Replyer 拒绝禁言用户 {target_name}")
+
+        # 9. 发送回复（使用 Replyer 决策中的回复文本）
+        user_reply_text = ban_decision.get("reply_to_user", "") if ban_decision else ""
+
+        if user_reply_text:
+            from src.plugin_system.apis.generator_api import process_human_text
+            reply_set = process_human_text(user_reply_text, True, True)
+            if reply_set:
+                _, reply_text, _ = await self._send_and_store_reply(
+                    response_set=reply_set,
+                    action_message=action_planner_info.action_message,
+                    cycle_timers=cycle_timers,
+                    thinking_id=thinking_id,
+                    actions=chosen_action_plan_infos,
+                    selected_expressions=llm_response.selected_expressions,
+                )
+        elif llm_response.reply_set:
+            _, reply_text, _ = await self._send_and_store_reply(
+                response_set=llm_response.reply_set,
+                action_message=action_planner_info.action_message,
+                cycle_timers=cycle_timers,
+                thinking_id=thinking_id,
+                actions=chosen_action_plan_infos,
+                selected_expressions=llm_response.selected_expressions,
+            )
+
+        # 10. 存储 action info
+        await database_api.store_action_info(
+            chat_stream=self.chat_stream,
+            action_build_into_prompt=True,
+            action_prompt_display=(
+                f"你{'禁言了' if ban_executed else '拒绝禁言'}用户({target_name})"
+                + (f"，时长{duration_minutes}分钟" if ban_executed else "")
+            ),
+            action_done=True,
+            thinking_id=thinking_id,
+            action_data={
+                "target_name": target_name,
+                "target_user_id": target_user_id,
+                "ban_executed": ban_executed,
+                "duration_minutes": duration_minutes,
+                "planner_reason": planner_reason,
+            },
+            action_name="ban_user",
+        )
+
+        return {"action_type": "ban_user", "success": ban_executed, "reply_text": reply_text}
+
+    def _parse_ban_decision(self, content: str) -> Optional[dict]:
+        """从 Replyer 回复中解析禁言决策 JSON"""
+        import re
+        from json_repair import repair_json
+
+        try:
+            # 优先匹配 ```json ... ``` 代码块
+            json_pattern = r"```json\s*(.*?)\s*```"
+            matches = re.findall(json_pattern, content, re.DOTALL)
+            for match in matches:
+                json_str = match.strip()
+                if json_str:
+                    obj = json.loads(repair_json(json_str))
+                    if isinstance(obj, dict) and "ban_decision" in obj:
+                        return obj
+
+            # 回退：尝试在全文中直接搜索 JSON
+            start = content.find("{")
+            end = content.rfind("}")
+            if start != -1 and end != -1 and start < end:
+                obj = json.loads(repair_json(content[start : end + 1]))
+                if isinstance(obj, dict) and "ban_decision" in obj:
+                    return obj
+        except Exception as e:
+            logger.warning(f"{self.log_prefix} ban_user 解析 Replyer 决策 JSON 失败: {e}")
+        return None
 
     async def _handle_set_group_title(
         self,
