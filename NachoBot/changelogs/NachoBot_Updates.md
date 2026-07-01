@@ -1,3 +1,5 @@
+7/1
+    动作池新增ban_user动作，需planner/replyer双验证
 6/25
     修复person id对于多平台绑定用户获取出错的问题
     优化数据库表现
