@@ -982,6 +982,20 @@ class DefaultReplyer:
         prompt_personality = f"{render_dynamic_prompt_template(global_config.personality.personality)};"
         return f"你的名字是{bot_name}{bot_nickname}，你{prompt_personality}"
 
+    async def _build_mid_term_memory_block(self, chat_id: str, messages) -> str:
+        """构建中期记忆召回文本块"""
+        try:
+            from src.memory_system.mid_term_memory import get_mid_term_memory_manager
+
+            manager = get_mid_term_memory_manager(chat_id=chat_id)
+            if not messages:
+                return ""
+            result = await manager.recall_relevant_summaries(current_messages=messages)
+            return result if result else ""
+        except Exception as e:
+            logger.debug(f"中期记忆召回失败: {e}")
+            return ""
+
     async def build_prompt_reply_context(
         self,
         reply_message: Optional[DatabaseMessages] = None,
@@ -1130,6 +1144,7 @@ class DefaultReplyer:
             self._time_and_run_task(self.get_prompt_info(chat_talking_prompt_short, sender, target), "prompt_info"),
             self._time_and_run_task(self.build_actions_prompt(available_actions, chosen_actions), "actions_info"),
             self._time_and_run_task(self.build_personality_prompt(), "personality_prompt"),
+            self._time_and_run_task(self._build_mid_term_memory_block(chat_id, message_list_before_now_long), "mid_term_memory"),
         )
 
         # 任务名称中英文映射
@@ -1141,6 +1156,7 @@ class DefaultReplyer:
             "prompt_info": "获取知识",
             "actions_info": "动作信息",
             "personality_prompt": "人格信息",
+            "mid_term_memory": "中期记忆",
         }
 
         # 处理结果
@@ -1169,6 +1185,7 @@ class DefaultReplyer:
         prompt_info: str = results_dict["prompt_info"]  # 直接使用格式化后的结果
         actions_info: str = results_dict["actions_info"]
         personality_prompt: str = results_dict["personality_prompt"]
+        mid_term_memory_block: str = results_dict.get("mid_term_memory", "")
         keywords_reaction_prompt = await self.build_keywords_reaction_prompt(target)
 
         tts_language_prompt = ""
@@ -1282,6 +1299,7 @@ class DefaultReplyer:
                 tool_info_block=tool_info,
                 knowledge_prompt=prompt_info,
                 memory_retrieval=memory_block,
+                mid_term_memory_block=mid_term_memory_block,
                 relation_info_block=relation_info,
                 extra_info_block=extra_info_block,
                 identity=personality_prompt,
@@ -1307,6 +1325,7 @@ class DefaultReplyer:
                 tool_info_block=tool_info,
                 knowledge_prompt=prompt_info,
                 memory_retrieval=memory_block,
+                mid_term_memory_block=mid_term_memory_block,
                 relation_info_block=relation_info,
                 extra_info_block=extra_info_block,
                 identity=personality_prompt,

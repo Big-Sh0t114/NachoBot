@@ -22,7 +22,7 @@ def init_replyer_prompt():
 {time_block}
 
 {reply_target_block}。{keywords_reaction_prompt}
-{knowledge_prompt}{memory_retrieval}{relation_info_block}{tool_info_block}{extra_info_block}
+{knowledge_prompt}{memory_retrieval}{mid_term_memory_block}{relation_info_block}{tool_info_block}{extra_info_block}
 {expression_habits_block}
 {moderation_prompt}""",
         "replyer_prompt",
@@ -41,7 +41,7 @@ def init_replyer_prompt():
 
 你现在想补充说明你刚刚自己的发言内容：{target}，原因是{reason}
 请你根据聊天内容，组织一条新回复。注意，{target} 是刚刚你自己的发言，你要在这基础上进一步发言，请按照你自己的角度来继续进行回复。注意保持上下文的连贯性。{keywords_reaction_prompt}
-{knowledge_prompt}{memory_retrieval}{relation_info_block}{tool_info_block}{extra_info_block}
+{knowledge_prompt}{memory_retrieval}{mid_term_memory_block}{relation_info_block}{tool_info_block}{extra_info_block}
 {expression_habits_block}
 {moderation_prompt}
 """,
@@ -61,7 +61,7 @@ def init_replyer_prompt():
 {time_block}
 
 {reply_target_block}。{keywords_reaction_prompt}
-{knowledge_prompt}{memory_retrieval}{relation_info_block}{tool_info_block}{extra_info_block}
+{knowledge_prompt}{memory_retrieval}{mid_term_memory_block}{relation_info_block}{tool_info_block}{extra_info_block}
 {expression_habits_block}
 {moderation_prompt}""",
         "private_replyer_prompt",
@@ -80,7 +80,7 @@ def init_replyer_prompt():
 
 你现在想补充说明你刚刚自己的发言内容：{target}，原因是{reason}
 请你根据聊天内容，组织一条新回复。注意，{target} 是刚刚你自己的发言，你要在这基础上进一步发言，请按照你自己的角度来继续进行回复。注意保持上下文的连贯性。{keywords_reaction_prompt}
-{knowledge_prompt}{memory_retrieval}{relation_info_block}{tool_info_block}{extra_info_block}
+{knowledge_prompt}{memory_retrieval}{mid_term_memory_block}{relation_info_block}{tool_info_block}{extra_info_block}
 {expression_habits_block}
 {moderation_prompt}
 """,
