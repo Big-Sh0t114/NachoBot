@@ -115,6 +115,10 @@ class HeartFChatting:
         self.chat_history_summarizer = ChatHistorySummarizer(chat_id=self.stream_id)
         self.relation_scanner = RelationScanner(chat_id=self.stream_id)
 
+        # 中期记忆管理器
+        from src.memory_system.mid_term_memory import get_mid_term_memory_manager
+        self.mid_term_memory = get_mid_term_memory_manager(chat_id=self.stream_id)
+
         self.no_reply_until_call = False
 
         # 用户屏蔽列表: {user_id: 过期时间戳}
@@ -195,6 +199,15 @@ class HeartFChatting:
             # 启动聊天内容概括器的后台定期检查循环
             if getattr(self.chat_stream, "platform", "") not in ("bilibili", "bilibili.live"):
                 await self.chat_history_summarizer.start()
+
+            # 注册到中期记忆后台构建器
+            try:
+                from src.memory_system.mid_term_memory_builder import get_mid_term_memory_builder
+                _mtm_builder = get_mid_term_memory_builder()
+                _mtm_builder.register_chat(self.stream_id)
+                await _mtm_builder.start()  # 幂等，多次调用安全
+            except Exception as e:
+                logger.debug(f"{self.log_prefix} 中期记忆后台构建器注册跳过: {e}")
 
             # 暂时停用群聊关系扫描
             # await self.relation_scanner.start()
@@ -524,6 +537,10 @@ class HeartFChatting:
                     (is_group_chat and self.chat_stream.platform == "bilibili")
                     or self.chat_stream.platform in {"discord_vc", "universal_vc"}
                 )
+
+                logger.debug(f"{self.log_prefix} bypass_planner={bypass_planner}, messages={len(message_list_before_now)}")
+
+                # --- 中期记忆摘要生成已移至独立后台循环，此处无需处理 ---
 
                 # --- A_Memorix: 启发式长期记忆注入 ---
                 if not bypass_planner:
