@@ -221,7 +221,13 @@ class BrainPlanner:
     @property
     def planner_llm(self) -> LLMRequest:
         if global_config.bot.integrated_plan:
-            return LLMRequest(model_set=model_config.model_task_config.replyer, request_type="integrated_planner")
+            from src.manager.local_store_manager import local_storage
+            group = local_storage[f"private_replyer_group_{self.chat_id}"]
+            if isinstance(group, int) and group in [0, 1, 2]:
+                model_set = model_config.model_task_config.get_private_replyer(group)
+            else:
+                model_set = model_config.model_task_config.replyer
+            return LLMRequest(model_set=model_set, request_type="integrated_planner")
         return self.separated_llm
 
     def _check_sandbox_permission(self, user_id: str) -> bool:
