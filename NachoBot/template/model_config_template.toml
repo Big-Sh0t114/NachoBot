@@ -1,6 +1,15 @@
 [inner]
 version = "1.10.0_bs"
 
+[[api_providers]] # SiliconFlow的API服务商配置
+name = "SiliconFlow"
+base_url = "https://api.siliconflow.cn/v1"
+api_key = ""
+client_type = "openai"
+max_retry = 2
+timeout = 60
+retry_interval = 10
+
 [[api_providers]]  # 本地模型配置(FULL模式下自带，无需修改)
 name = "LocalModel"
 base_url = "http://127.0.0.1:9874/v1"
@@ -28,15 +37,6 @@ max_retry = 2
 timeout = 30
 retry_interval = 5
 
-[[api_providers]] # SiliconFlow的API服务商配置
-name = "SiliconFlow"
-base_url = "https://api.siliconflow.cn/v1"
-api_key = ""
-client_type = "openai"
-max_retry = 2
-timeout = 60
-retry_interval = 10
-
 [[api_providers]]  # Deepseek配置
 name = "Deepseek"
 base_url = "https://api.deepseek.com/v1"
@@ -46,14 +46,12 @@ max_retry = 2
 timeout = 30
 retry_interval = 10
 
-[[api_providers]]  # 本地垫片
-name = "LocalShim"
-base_url = "http://127.0.0.1:11435/v1"
-api_key = "fuck"                 # 垫片默认不验key
-client_type = "openai"
-max_retry = 2
-timeout = 30
-retry_interval = 5
+[[models]]
+model_identifier = "BAAI/bge-m3"
+name = "bge-m3/Silicon"
+api_provider = "SiliconFlow"
+price_in = 0
+price_out = 0
 
 [[models]]  #本地模型(FULL模式下自带，无需修改)
 model_identifier = "sensevoice-small"
@@ -69,22 +67,84 @@ api_provider = "LocalModel"
 price_in = 0
 price_out = 0
 
-[[models]]
-model_identifier = "gemini-2.5-pro"
-name = "gemini-2.5-pro/shim"
-api_provider = "LocalShim"
-price_in = 3.0
-price_out = 24.0
-[models.extra_params]  #额外参数控制，具体字段需根据供应商来填
-enable_thinking = false
-thinking_budget_token_limit=100
-
 [[models]]   # 联网模型，模型自身需具备联网能力
 model_identifier = "grok-4.1#search"
-name = "grok-4.1#search"
+name = "grok-4.1#search/Qhaigc"
 api_provider = "Qhaigc"
 price_in = 0.2
 price_out = 0.5
+
+[[models]]   # 硅基流动提供的一些免费模型，部分可能已过期
+model_identifier = "Qwen/Qwen3-8B"
+name = "Qwen/Qwen3-8B/Silicon"
+api_provider = "SiliconFlow"
+price_in = 0
+price_out = 0
+[models.extra_params]
+enable_thinking = false
+
+[[models]]
+model_identifier = "Qwen/Qwen2.5-7B-Instruct"
+name = "Qwen/Qwen2.5-7B-Instruct/Silicon"
+api_provider = "SiliconFlow"
+price_in = 0
+price_out = 0
+
+[[models]]
+model_identifier = "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B"
+name = "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B/Silicon"
+api_provider = "SiliconFlow"
+price_in = 0
+price_out = 0
+
+[[models]]
+model_identifier = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+name = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B/Silicon"
+api_provider = "SiliconFlow"
+price_in = 0
+price_out = 0
+
+[[models]]
+model_identifier = "THUDM/GLM-4.1V-9B-Thinking"
+name = "THUDM/GLM-4.1V-9B-Thinking/Silicon"
+api_provider = "SiliconFlow"
+price_in = 0
+price_out = 0
+
+[[models]]
+model_identifier = "THUDM/GLM-Z1-9B-0414"
+name = "THUDM/GLM-Z1-9B-0414/Silicon"
+api_provider = "SiliconFlow"
+price_in = 0
+price_out = 0
+
+[[models]]
+model_identifier = "THUDM/GLM-4-9B-0414"
+name = "THUDM/GLM-4-9B-0414/Silicon"
+api_provider = "SiliconFlow"
+price_in = 0
+price_out = 0
+
+[[models]]
+model_identifier = "Qwen/Qwen3.5-4B"
+name = "Qwen/Qwen3.5-4B/Silicon"
+api_provider = "SiliconFlow"
+price_in = 0
+price_out = 0
+
+[[models]]
+model_identifier = "FunAudioLLM/SenseVoiceSmall"
+name = "FunAudioLLM/SenseVoiceSmall/Silicon"
+api_provider = "SiliconFlow"
+price_in = 0
+price_out = 0
+
+[[models]]
+model_identifier = "TeleAI/TeleSpeechASR"
+name = "TeleAI/TeleSpeechASR/Silicon"
+api_provider = "SiliconFlow"
+price_in = 0
+price_out = 0
 
 [[models]]
 model_identifier = "deepseek-v4-pro"
@@ -104,106 +164,22 @@ price_out = 2
 [models.extra_params]
 enable_thinking = false
 
-[[models]]   # 硅基流动提供的一些免费模型，部分可能已过期
-model_identifier = "Qwen/Qwen3-8B"
-name = "Qwen/Qwen3-8B"
-api_provider = "SiliconFlow"
-price_in = 0
-price_out = 0
-[models.extra_params]
-enable_thinking = false
 
-[[models]]
-model_identifier = "Qwen/Qwen2.5-7B-Instruct"
-name = "Qwen/Qwen2.5-7B-Instruct"
-api_provider = "SiliconFlow"
-price_in = 0
-price_out = 0
-
-[[models]]
-model_identifier = "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B"
-name = "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B"
-api_provider = "SiliconFlow"
-price_in = 0
-price_out = 0
-
-[[models]]
-model_identifier = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
-name = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
-api_provider = "SiliconFlow"
-price_in = 0
-price_out = 0
-
-[[models]]
-model_identifier = "THUDM/GLM-4.1V-9B-Thinking"
-name = "THUDM/GLM-4.1V-9B-Thinking"
-api_provider = "SiliconFlow"
-price_in = 0
-price_out = 0
-
-[[models]]
-model_identifier = "THUDM/GLM-Z1-9B-0414"
-name = "THUDM/GLM-Z1-9B-0414"
-api_provider = "SiliconFlow"
-price_in = 0
-price_out = 0
-
-[[models]]
-model_identifier = "THUDM/GLM-4-9B-0414"
-name = "THUDM/GLM-4-9B-0414"
-api_provider = "SiliconFlow"
-price_in = 0
-price_out = 0
-
-[[models]]
-model_identifier = "Qwen/Qwen3.5-4B"
-name = "Qwen/Qwen3.5-4B"
-api_provider = "SiliconFlow"
-price_in = 0
-price_out = 0
-
-[[models]]
-model_identifier = "BAAI/bge-m3"
-name = "bge-m3"
-api_provider = "SiliconFlow"
-price_in = 0
-price_out = 0
-
-[[models]]
-model_identifier = "BAAI/bge-large-zh-v1.5"
-name = "BAAI/bge-large-zh-v1.5"
-api_provider = "SiliconFlow"
-price_in = 0
-price_out = 0
-
-[[models]]
-model_identifier = "FunAudioLLM/SenseVoiceSmall"
-name = "FunAudioLLM/SenseVoiceSmall"
-api_provider = "SiliconFlow"
-price_in = 0
-price_out = 0
-
-[[models]]
-model_identifier = "TeleAI/TeleSpeechASR"
-name = "TeleAI/TeleSpeechASR"
-api_provider = "SiliconFlow"
-price_in = 0
-price_out = 0
 
 
 
 [model_task_config.utils] # 一些组件中使用的模型，例如表情包模块，取名模块，关系模块，情绪变化等，是必须的模型
-model_list = ["deepseek-ai/DeepSeek-R1-0528-Qwen3-8B","deepseek-ai/DeepSeek-R1-Distill-Qwen-7B","THUDM/GLM-Z1-9B-0414"] # 使用的模型列表，每个子项对应上面的模型名称(name)
+model_list = ["deepseek-ai/DeepSeek-R1-0528-Qwen3-8B/Silicon","deepseek-ai/DeepSeek-R1-Distill-Qwen-7B/Silicon","THUDM/GLM-Z1-9B-0414/Silicon"] # 使用的模型列表，每个子项对应上面的模型名称(name)
 temperature = 0.2                        # 模型温度，新V3建议0.1-0.3
 max_tokens = 800                         # 最大输出token数
 
 [model_task_config.utils_small] # 一些组件中使用的小模型，消耗量较大，建议使用速度较快的小模型
-model_list = ["Qwen/Qwen3-8B","Qwen/Qwen2.5-7B-Instruct","THUDM/GLM-Z1-9B-0414"]
+model_list = ["Qwen/Qwen3-8B/Silicon","Qwen/Qwen2.5-7B-Instruct/Silicon","THUDM/GLM-Z1-9B-0414/Silicon"]
 temperature = 0.2
 max_tokens = 800
 
 [model_task_config.tool_use] #工具调用模型，需要使用支持工具调用的模型
-model_list = ["Qwen/Qwen3-8B","Qwen/Qwen2.5-7B-Instruct","THUDM/GLM-Z1-9B-0414"]
+model_list = ["Qwen/Qwen3-8B/Silicon","Qwen/Qwen2.5-7B-Instruct/Silicon","THUDM/GLM-Z1-9B-0414/Silicon"]
 temperature = 0.05
 max_tokens = 800
 
@@ -219,7 +195,7 @@ temperature = 0.05
 max_tokens = 800
 
 [model_task_config.web_search] # 联网搜索模型组，需要模型支持联网
-model_list = ["grok-4.1#search"]
+model_list = ["grok-4.1#search/Qhaigc"]
 temperature = 0.2
 max_tokens = 800
 
@@ -259,7 +235,7 @@ temperature = 0.5
 max_tokens = 800
 
 [model_task_config.planner] #决策：负责决定该什么时候回复的模型
-model_list = ["Qwen/Qwen3-8B","THUDM/GLM-Z1-9B-0414","Qwen/Qwen2.5-7B-Instruct"]
+model_list = ["Qwen/Qwen3-8B/Silicon","THUDM/GLM-Z1-9B-0414/Silicon","Qwen/Qwen2.5-7B-Instruct/Silicon"]
 temperature = 0.05
 max_tokens = 800
 
@@ -269,7 +245,7 @@ temperature = 0.05
 max_tokens = 800
 
 [model_task_config.vlm] # 图像识别模型（核心聊天图片/表情包描述）
-model_list = ["Qwen/Qwen3.5-4B","Florence-2"]
+model_list = ["Qwen/Qwen3.5-4B/Silicon","Florence-2"]
 max_tokens = 800
 
 [model_task_config.bilibili_vlm] # Bilibili 直播画面识别
@@ -282,29 +258,29 @@ temperature = 0.5
 max_tokens = 800
 
 [model_task_config.video] # 视频识别模型，模型需支持多模态
-model_list = ["gemini-2.5-flash-lite"]
+model_list = [""]
 max_tokens = 4096
 
 [model_task_config.voice] # 语音识别模型
-model_list = ["sensevoice-small","FunAudioLLM/SenseVoiceSmall"]
+model_list = ["sensevoice-small/Silicon","FunAudioLLM/SenseVoiceSmall/Silicon"]
 
-#嵌入模型
+#嵌入模型（注意：不要在此填入多个模型，因为不同模型的向量维度和语义空间不同，混用会导致检索完全失效。更换模型前必须清空现有的向量数据库）
 [model_task_config.embedding]
-model_list = ["bge-m3","BAAI/bge-large-zh-v1.5"]
+model_list = ["bge-m3/Silicon"]
 
 #------------LPMM知识库模型------------
 
 [model_task_config.lpmm_entity_extract] # 实体提取模型
-model_list = ["siliconflow-deepseek-v3"]
+model_list = [""]
 temperature = 0.2
 max_tokens = 800
 
 [model_task_config.lpmm_rdf_build] # RDF构建模型
-model_list = ["siliconflow-deepseek-v3"]
+model_list = [""]
 temperature = 0.2
 max_tokens = 800
 
 [model_task_config.lpmm_qa] # 问答模型
-model_list = ["qwen3-30b"]
+model_list = [""]
 temperature = 0.7
 max_tokens = 800
