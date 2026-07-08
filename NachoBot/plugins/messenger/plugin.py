@@ -51,6 +51,11 @@ class MessengerPlugin(BasePlugin):
                 default=60,
                 description="转发确认等待超时（秒）",
             ),
+            "mute_user_list": ConfigField(
+                type=list,
+                default=[],
+                description="免打扰用户QQ号列表，列表中的用户禁止被转告",
+            ),
         },
     }
 

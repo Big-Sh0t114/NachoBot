@@ -105,6 +105,15 @@ class MessengerRelayAction(BaseAction):
 
         logger.info(f"[信使] 匹配到目标用户: {matched_name} (person_id: {matched_person_id})")
 
+        # Step 1.5: 检查目标用户是否在免打扰列表中
+        mute_list = self.get_config("components.mute_user_list", [])
+        if mute_list:
+            target_record_check = PersonInfoModel.get_or_none(PersonInfoModel.person_id == matched_person_id)
+            if target_record_check and target_record_check.user_id in mute_list:
+                logger.info(f"[信使] 目标用户在免打扰列表中，取消转告: {matched_name}")
+                await self.send_text("此用户关闭了转告功能哦~")
+                return True, f"目标用户已关闭转告: {matched_name}"
+
         # Step 2: 查找目标用户的私聊 stream_id
         target_stream_id = self._find_private_stream_id(matched_person_id)
         if not target_stream_id:
