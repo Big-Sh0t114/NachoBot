@@ -167,6 +167,7 @@ class DiaryScheduler:
         self.storage = DiaryStorage()
         self.fluctuated_time = None  # 浮动后的执行时间
         self.last_reset_date = None  # 上次重置浮动时间的日期
+        self.last_execution_date = None  # 上次成功执行日记的日期，防止同日重复执行
     
     def _get_timezone_now(self):
         """
@@ -306,6 +307,14 @@ class DiaryScheduler:
                 schedule_hour, schedule_minute = map(int, self.fluctuated_time.split(":"))
                 today_schedule = now.replace(hour=schedule_hour, minute=schedule_minute, second=0, microsecond=0)
                 
+                # 如果今天已经执行过，直接跳到明天
+                if self.last_execution_date == now.date():
+                    today_schedule = now.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(days=1)
+                    wait_seconds = (today_schedule - now).total_seconds()
+                    self.logger.info(f"今日已执行过日记生成，等待至明天: {today_schedule.strftime('%Y-%m-%d %H:%M:%S')}")
+                    await asyncio.sleep(wait_seconds)
+                    continue
+                
                 if now >= today_schedule:
                     today_schedule += datetime.timedelta(days=1)
                 
@@ -314,9 +323,13 @@ class DiaryScheduler:
                 
                 await asyncio.sleep(wait_seconds)
                 if self.is_running:
-                    await self._generate_daily_diary()
-                    # 执行完毕后重新生成下次的浮动时间
-                    self._generate_fluctuated_time()
+                    # 再次检查今日是否已执行，防止sleep期间的边界情况
+                    if self.last_execution_date != datetime.datetime.now().date():
+                        await self._generate_daily_diary()
+                        self.last_execution_date = datetime.datetime.now().date()
+                        self.logger.info(f"今日日记已生成，标记执行日期: {self.last_execution_date}")
+                    else:
+                        self.logger.info("跳过执行：今日已生成过日记")
                 
             except asyncio.CancelledError:
                 break
