@@ -41,6 +41,12 @@ class MetaEventHandler:
                 now_time = time.time()
                 if now_time - self.last_heart_beat > self.interval * 2:
                     logger.error(f"Bot {id} 可能发生了连接断开，被下线，或者Napcat卡死！")
+                    # 通知核心平台离线
+                    try:
+                        from main import notify_platform_status
+                        await notify_platform_status(online=False)
+                    except Exception as e:
+                        logger.warning(f"通知核心平台离线失败: {e}")
                     break
                 else:
                     logger.debug("心跳正常")

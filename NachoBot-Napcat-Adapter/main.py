@@ -15,6 +15,25 @@ from src.mmc_com_layer import mmc_start_com, mmc_stop_com, router
 from src.response_pool import put_response, check_timeout_response
 
 message_queue = asyncio.Queue()
+
+
+async def notify_platform_status(online: bool):
+    """通知NachoBot核心当前平台的在线状态"""
+    platform = global_config.nachobot_server.platform_name
+    try:
+        await message_send_instance.send_custom_message(
+            custom_message={
+                "platform": platform,
+                "online": online,
+                "timestamp": time.time(),
+            },
+            platform=platform,
+            message_type="platform_status",
+        )
+        status_text = "上线" if online else "离线"
+        logger.info(f"已通知核心: 平台 {platform} {status_text}")
+    except Exception as e:
+        logger.warning(f"通知核心平台状态失败: {e}")
 last_message_time = time.time()
 
 
@@ -24,6 +43,10 @@ async def message_recv(server_connection: Server.ServerConnection):
     asyncio.create_task(notice_handler.set_server_connection(server_connection))
     await nc_message_sender.set_server_connection(server_connection)
     asyncio.create_task(connection_watchdog(server_connection))
+
+    # NapCat 成功连接，通知核心平台上线
+    asyncio.create_task(notify_platform_status(online=True))
+
     try:
         async for raw_message in server_connection:
             last_message_time = time.time()
@@ -43,10 +66,13 @@ async def message_recv(server_connection: Server.ServerConnection):
                 logger.exception(f"接收消息处理异常，跳过本条消息: {exc}")
     except Server.exceptions.ConnectionClosedError:
         logger.warning("与 Napcat 的 WebSocket 连接异常断开 (通常是 Napcat 超时重置)。已捕获异常，等待客户端重新连接...")
+        await notify_platform_status(online=False)
     except Server.exceptions.ConnectionClosedOK:
         logger.info("与 Napcat 的 WebSocket 连接已正常关闭。")
+        await notify_platform_status(online=False)
     except Exception as e:
         logger.error(f"message_recv 发生严重未处理异常: {e}")
+        await notify_platform_status(online=False)
 
 
 async def message_process():
