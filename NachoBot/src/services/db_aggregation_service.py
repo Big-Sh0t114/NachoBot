@@ -282,14 +282,35 @@ def vacuum_database() -> None:
     """
     执行 WAL checkpoint + VACUUM 回收磁盘空间。
 
-    注意：VACUUM 需要在没有其他活跃连接/事务时执行。
+    使用独立的 sqlite3 连接执行，避免 Peewee 的 WAL 模式连接导致 VACUUM 静默失败。
     """
+    import sqlite3
+    import os
+
+    db_path = db.database
+    if not db_path or not os.path.exists(db_path):
+        logger.warning("无法定位数据库文件，跳过 VACUUM")
+        return
+
+    conn = None
     try:
-        db.execute_sql("PRAGMA wal_checkpoint(TRUNCATE)")
-        db.execute_sql("VACUUM")
-        logger.info("数据库 VACUUM 完成")
+        conn = sqlite3.connect(db_path, timeout=60, isolation_level=None)
+        conn.execute("PRAGMA busy_timeout=60000")
+
+        # 先将 WAL 内容写回主库文件
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        logger.debug("WAL checkpoint 完成")
+
+        # 执行 VACUUM 压缩数据库
+        conn.execute("VACUUM")
+
+        size_mb = os.path.getsize(db_path) / (1024 * 1024)
+        logger.info(f"数据库 VACUUM 完成，当前大小: {size_mb:.1f} MB")
     except Exception as e:
         logger.warning(f"VACUUM 执行失败: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 
 def run_full_aggregation_cycle(
