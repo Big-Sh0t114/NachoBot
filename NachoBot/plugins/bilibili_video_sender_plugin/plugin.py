@@ -16,7 +16,7 @@ import aiohttp
 import uuid
 import time
 
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Tuple, Type
 
 from src.common.logger import get_logger
 
@@ -387,10 +387,11 @@ class BilibiliParser:
     )
 
     VIDEO_URL_PATTERN = re.compile(
-        r"https?://(?:www\.)?bilibili\.com/video/(?P<bv>BV[\w]+|av\d+)",
+        r"https?://(?:(?:www|m)\.)?bilibili\.com/video/(?P<bv>BV[\w]+|av\d+)",
         re.IGNORECASE,
     )
     B23_SHORT_PATTERN = re.compile(r"https?://b23\.tv/[\w]+", re.IGNORECASE)
+    CARD_URL_FIELD_NAMES = frozenset({"qqdocurl", "jumpurl", "contenturl", "videourl", "url"})
 
     @staticmethod
     def _build_request(url: str, headers: Optional[Dict[str, str]] = None) -> urllib.request.Request:
@@ -441,6 +442,55 @@ class BilibiliParser:
         match = BilibiliParser.VIDEO_URL_PATTERN.search(text)
         if match:
             return match.group(0)
+        return None
+
+    @staticmethod
+    def _iter_card_url_candidates(payload: Any) -> Iterator[str]:
+        """递归提取 QQ 卡片中可能承载跳转地址的字段。"""
+
+        if isinstance(payload, Mapping):
+            for raw_key, value in payload.items():
+                normalized_key = re.sub(r"[^a-z]", "", str(raw_key).lower())
+                if normalized_key in BilibiliParser.CARD_URL_FIELD_NAMES and isinstance(value, str):
+                    candidate = value.strip()
+                    if candidate:
+                        yield candidate
+                if isinstance(value, (Mapping, list, tuple)):
+                    yield from BilibiliParser._iter_card_url_candidates(value)
+            return
+
+        if isinstance(payload, (list, tuple)):
+            for item in payload:
+                yield from BilibiliParser._iter_card_url_candidates(item)
+
+    @staticmethod
+    def find_first_bilibili_card_url(additional_data: Any) -> Optional[str]:
+        """从适配器保留的 QQ 卡片元数据中提取首个 B 站视频链接。"""
+
+        if not isinstance(additional_data, Mapping):
+            return None
+
+        card_payloads = additional_data.get("platform_card_payloads")
+        if isinstance(card_payloads, Mapping):
+            card_items = [card_payloads]
+        elif isinstance(card_payloads, list):
+            card_items = card_payloads
+        else:
+            return None
+
+        for card_item in card_items:
+            if not isinstance(card_item, Mapping):
+                continue
+            payload: Any = card_item.get("payload", card_item)
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except (TypeError, ValueError):
+                    continue
+            for candidate in BilibiliParser._iter_card_url_candidates(payload):
+                url = BilibiliParser.find_first_bilibili_url(candidate)
+                if url:
+                    return url
         return None
 
     @staticmethod
@@ -1946,7 +1996,7 @@ class BilibiliAutoSendHandler(BaseEventHandler):
 
     event_type = EventType.ON_MESSAGE
     handler_name = "bilibili_auto_send_handler"
-    handler_description = "解析B站视频链接并发送视频"
+    handler_description = "解析B站视频链接或QQ分享卡片并发送视频"
 
     def _should_return_5_tuple(self) -> bool:
         """判断是否应该返回5元组（基于events_manager版本）
@@ -2197,10 +2247,14 @@ class BilibiliAutoSendHandler(BaseEventHandler):
         raw: str = getattr(message, "raw_message", "") or ""
 
         url = BilibiliParser.find_first_bilibili_url(raw)
+        detection_source = "text"
+        if not url:
+            url = BilibiliParser.find_first_bilibili_card_url(getattr(message, "additional_data", None))
+            detection_source = "qq_card"
         if not url:
             return self._make_return_value(True, True, None)
 
-        self._logger.info("Bilibili video link detected", url=url)
+        self._logger.info("Bilibili video link detected", url=url, source=detection_source)
 
         # 获取stream_id用于发送消息
         stream_id = self._get_stream_id(message)

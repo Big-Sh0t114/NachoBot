@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "麦麦发B站视频",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "让麦麦解析b站视频链接并发送，群聊私聊都可用",
   "author": {
     "name": "XinxInxiN0",
@@ -23,6 +23,7 @@
     "components": [],
     "features": [
       "自动识别B站链接",
+      "自动识别QQ中的B站小程序/分享卡片",
       "发送视频文件",
       "支持b23.tv短链"
     ]

@@ -1,5 +1,5 @@
 # 使用说明
-发送B站视频链接到群里，麦麦会自动解析并发送视频。
+发送B站视频链接或QQ中的B站小程序/分享卡片到群里，麦麦会自动解析并发送视频。
 还有问题加qq3087033824
 觉得好用的话，可以点个star
 ### 请务必仔细填写config.toml！！！！！
@@ -57,6 +57,5 @@
 ## 完成后的文件夹结构示例
 <img width="412" height="131" alt="image" src="https://github.com/user-attachments/assets/63ef60df-99f3-4c79-b124-da566fd15cd0" />
 <img width="659" height="182" alt="image" src="https://github.com/user-attachments/assets/ddeb422f-b9fc-49b6-a652-866d06eb812c" />
-
 
 

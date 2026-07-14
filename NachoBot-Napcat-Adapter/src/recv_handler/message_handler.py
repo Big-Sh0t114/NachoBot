@@ -11,6 +11,7 @@ from src.utils import (
 from .qq_emoji_list import qq_face
 from .message_sending import message_send_instance
 from . import RealMessageType, MessageType, ACCEPT_FORMAT
+from .card_handler import parse_json_card
 
 import time
 import json
@@ -339,7 +340,14 @@ class MessageHandler:
                     # 预计等价于戳一戳
                     logger.warning("暂时不支持窗口抖动解析")
                 case RealMessageType.share:
-                    logger.warning("暂时不支持链接解析")
+                    seg_message.append(Seg(type="text", data="[share]"))
+                case RealMessageType.json:
+                    card_segments, card_metadata = await parse_json_card(sub_message, get_image_base64)
+                    seg_message.extend(card_segments)
+                    if card_metadata:
+                        additional_config.setdefault("platform_card_payloads", []).append(card_metadata)
+                case RealMessageType.xml:
+                    seg_message.append(Seg(type="text", data="[xml]"))
                 case RealMessageType.forward:
                     messages = await self._get_forward_message(sub_message)
                     if not messages:
