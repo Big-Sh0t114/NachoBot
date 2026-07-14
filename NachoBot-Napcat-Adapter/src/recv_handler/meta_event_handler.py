@@ -23,6 +23,12 @@ class MetaEventHandler:
                 self_id = message.get("self_id")
                 self.last_heart_beat = time.time()
                 logger.success(f"Bot {self_id} 连接成功")
+                # 通知核心平台上线
+                try:
+                    from main import notify_platform_status
+                    notify_platform_status(online=True)
+                except Exception:
+                    pass
                 asyncio.create_task(self.check_heartbeat(self_id))
         elif event_type == MetaEventType.heartbeat:
             self_id = message.get("self_id")
@@ -44,9 +50,9 @@ class MetaEventHandler:
                     # 通知核心平台离线
                     try:
                         from main import notify_platform_status
-                        await notify_platform_status(online=False)
-                    except Exception as e:
-                        logger.warning(f"通知核心平台离线失败: {e}")
+                        notify_platform_status(online=False)
+                    except Exception:
+                        pass
                     break
                 else:
                     logger.debug("心跳正常")

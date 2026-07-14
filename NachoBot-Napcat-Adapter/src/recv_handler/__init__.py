@@ -53,6 +53,8 @@ class RealMessageType:  # 实际消息分类
     shake = "shake"  # 私聊窗口抖动（只收）
     poke = "poke"  # 群聊戳一戳
     share = "share"  # 链接分享（json形式）
+    json = "json"  # JSON 卡片（小程序、音乐、位置等）
+    xml = "xml"  # XML 卡片
     reply = "reply"  # 回复消息
     forward = "forward"  # 转发消息
     node = "node"  # 转发消息节点
