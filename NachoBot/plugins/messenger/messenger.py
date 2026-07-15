@@ -137,34 +137,8 @@ class MessengerRelayAction(BaseAction):
         confirm_start = time.time()
         logger.info(f"[信使] 等待用户确认转告目标: {matched_name} (timeout={timeout}s, baseline={confirm_start})")
 
-        got_reply = False
-        reply_text = ""
-        wait_start = asyncio.get_event_loop().time()
-
-        while True:
-            elapsed = asyncio.get_event_loop().time() - wait_start
-            if elapsed > timeout:
-                logger.info(f"[信使] 等待确认超时 ({timeout}s)")
-                break
-
-            # 仅检测 confirm_start 之后的用户消息（排除 bot 自身）
-            user_messages = message_api.get_messages_by_time_in_chat(
-                self.chat_id,
-                confirm_start,
-                time.time(),
-                limit=1,
-                limit_mode="latest",
-                filter_mai=True,
-            )
-            if user_messages:
-                reply_text = (user_messages[0].processed_plain_text or "").strip()
-                got_reply = True
-                logger.info(f"[信使] 收到用户确认回复: {reply_text}")
-                break
-
-            await asyncio.sleep(1.0)
-
-        if not got_reply:
+        reply_text = await self._wait_for_confirmation_reply(confirm_start, timeout)
+        if reply_text is None:
             await self.send_text("等待确认超时，已取消转告~")
             return True, "转告确认超时"
 
@@ -194,6 +168,36 @@ class MessengerRelayAction(BaseAction):
 
         logger.info(f"[信使] 转告完成: {source_name} -> {matched_name}: {content[:30]}...")
         return True, f"已转告给{matched_name}"
+
+    async def _wait_for_confirmation_reply(self, confirm_start: float, timeout: int) -> Optional[str]:
+        """等待传话发起人的确认消息，忽略群内其他成员的回复。"""
+        source_user_id = str(self.user_id or "").strip()
+        if not source_user_id:
+            logger.error("[信使] 无法确定传话发起人，拒绝接受确认回复")
+            return None
+
+        wait_start = asyncio.get_event_loop().time()
+        while True:
+            elapsed = asyncio.get_event_loop().time() - wait_start
+            if elapsed > timeout:
+                logger.info(f"[信使] 等待确认超时 ({timeout}s)")
+                return None
+
+            # 只查询发起此动作的用户，群内其他成员和机器人消息均不能确认转告。
+            user_messages = message_api.get_messages_by_time_in_chat_for_users(
+                self.chat_id,
+                confirm_start,
+                time.time(),
+                [source_user_id],
+                limit=1,
+                limit_mode="latest",
+            )
+            if user_messages:
+                reply_text = (user_messages[0].processed_plain_text or "").strip()
+                logger.info(f"[信使] 收到传话发起人确认回复: {reply_text}")
+                return reply_text
+
+            await asyncio.sleep(1.0)
 
     @staticmethod
     def _extract_confirmation_intent(text: str) -> Optional[str]:

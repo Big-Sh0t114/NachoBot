@@ -15,6 +15,10 @@
 7. 在napcat上新建一个正向http,并在config.toml内填入端口
 8. 使用愉快 😊。
 
+### 视频时长上限
+
+在 `config.toml` 的 `[bilibili]` 配置节中，可通过 `max_video_duration_minutes` 设置视频时长上限，单位为分钟，默认值为 `10`。设为 `0` 可关闭视频时长预检。
+
 ---
 
 ## sessdata 和 buvid3 获取方法
