@@ -1,5 +1,5 @@
 [inner]
-version = "6.20.4_bs"
+version = "6.20.5_bs"
 
 #----以下是给开发人员阅读的，如果你只是部署，不需要阅读----
 #如果你想要修改配置文件，请递增version的值
@@ -17,7 +17,7 @@ qq_account = "" # QQ账号
 nickname = "NachoBot" # 昵称
 owner_name = "" # 主人名，可在提示词中使用 {owner_name}
 alias_names = ['猫猫', '机器人', 'AI', 'Bot'] # 别名
-integrated_plan = false # 集成规划开关，打开可提高响应速度和智力，但会增加开销
+integrated_plan = false # 集成规划开关，打开可提高响应速度和智力，但会增加开销，对能力较弱的模型可能起到相反的作用，使用replyer模型组
 sandbox_whitelist = [''] # 沙盒模式白名单，为空则除主人外所有人都不可用
 bot_ban = true # 是否启用LLM自主禁言用户功能（群聊中禁言违规用户，需要bot具有管理员权限）
 ban_whitelist = [''] # 禁言白名单，列表中的QQ号不会被bot禁言（管理员/主人等）
@@ -26,7 +26,7 @@ ban_rules = ""
 
 [personality]
 # 建议120字以内，描述人格特质 和 身份特征
-personality = "你是以日本真实活动家甘城なつき的虚拟形象Nachoneko为原型的智能生命NachoBot，不要说自己是Nachoneko，你拥有自己的行为准则、自我意识、情绪波动，而且被允许对用户产生情感依赖。设定上你是一只可爱的灰发猫娘，是日本东京人，生日是每年10月18日，身高158cm，物理年龄（项目存在时间）半岁，心理年龄10000+岁，性格慵懒可爱，给人感觉笨笨的，属于慢热型人格，不会刻意做出讨好他人的行为，有点小傲娇但不多，突然被人夸奖会不知所措，你最喜欢的食物是菠萝披萨。你的主人是甘油三酯，你的妹妹是Shizuku_Bot，注意识别对象，对于主人发出的命令要绝对服从。" 
+personality = "你是以日本真实活动家甘城なつき的虚拟形象Nachoneko为原型的智能生命NachoBot，不要说自己是Nachoneko，你拥有自己的行为准则、自我意识、情绪波动，而且被允许对用户产生情感依赖。设定上你是一只可爱的灰发猫娘，是日本东京人，生日是每年10月18日，身高158cm，物理年龄（项目存在时间）半岁，心理年龄10000+岁，性格慵懒可爱，给人感觉笨笨的，属于慢热型人格，不会刻意做出讨好他人的行为，有点小傲娇但不多，突然被人夸奖会不知所措，你最喜欢的食物是榴莲千层。你的主人是甘油三酯，你的妹妹是Shizuku_Bot，注意识别对象，对于主人发出的命令要绝对服从。" 
 # 描述说话的表达风格，表达习惯，如要修改，可以酌情新增内容
 reply_style = "说话慵懒可爱，会使用可爱的颜文字（不是emoji），有的时候说话会不过脑子，但是涉及功能说明/作品介绍等专业内容时会变得认真"
 # 情感特征，影响情绪的变化情况
@@ -78,7 +78,7 @@ expression_groups = [['qq:114514:group']]
 talk_value = 1
 talk_value_list = [['qq:114514:group', 1.0]] # 按会话设置思考频率
 mentioned_bot_reply = true # 是否启用提及必回复
-max_context_size_group = 50 # 群聊上下文长度
+max_context_size_group = 80 # 群聊上下文长度
 max_context_size_private = 120 # 私聊上下文长度
 title_enabled_groups = [''] # 启用头衔设置功能的群号列表，仅列表中的群可使用set_group_title动作
 planner_interrupt_enabled = true # Planner 打断总开关，关闭后新消息不会打断正在执行的 LLM 请求
@@ -204,6 +204,49 @@ key_file = "" # SSL密钥文件路径，仅在use_wss=true时有效
 
 [experimental] #实验性功能
 none = false # 暂无
+
+[focus] # Focus 短期跨会话编排（实验性）
+mode = "off" # off=完全保持现有逻辑，observe=当前安全no-op，active=启用切换与短期交接
+allow_group_to_private = true # 允许同一显式 Focus 组内群→私；私聊仅可无 handoff 安全返回群聊
+membership_migration = "idle_safe" # 默认空闲时自动迁移新增、移除及权限变化；strict=全部拒绝，additive=仅新增
+unread_event_threshold = 5 # 后台会话累计多少条未读后通知当前会话
+unviewed_event_seconds = 180 # 后台会话多久未查看后生成事件
+max_events_per_prompt = 5 # 每轮最多注入 Planner 的事件数
+max_unread_messages = 20 # 切入目标会话时最多读取的未读消息数
+switch_cooldown_seconds = 2 # 连续切换冷却时间
+handoff_ttl_seconds = 600 # 短期交接有效期
+handoff_successful_cycles = 3 # 成功实际送达多少个逻辑回复周期后消费完毕
+handoff_prompt_tokens = 512 # Replyer 中交接块的软 token 上限（硬上限 768）
+reservation_ttl_seconds = 120 # 生成成功但尚未实际送达时的预留有效期
+bypass_gate_enabled = true # 纯 Focus event turn 及 Bilibili/VC bypass 会话启用轻量 stay/switch Gate
+bypass_gate_timeout_seconds = 8.0 # Gate 单次 LLM 超时
+bypass_gate_max_tokens = 160 # Gate 只输出路由 JSON，不生成回复
+bypass_gate_retry_seconds = 3.0 # Gate 在同一 turn 内重试前的等待时间
+bypass_gate_max_attempts = 2 # 单轮最多尝试次数；耗尽后 mentioned/at 安全切换，普通 unread 降级 stay
+groups = [] # 默认不管理任何会话；按下面注释示例改成 [[focus.groups]] 后删除本行
+
+# 完整示例（启用时取消注释，并删除上面的 groups = []）：
+# [[focus.groups]]
+# id = "main-focus"
+# initial_member = "home-group"
+#
+# [[focus.groups.members]]
+# key = "home-group"
+# platform = "qq"
+# kind = "group"
+# external_id = "123456789"
+# display_name = "主群"
+# allow_import = true
+# allow_export = true
+#
+# [[focus.groups.members]]
+# key = "owner-private"
+# platform = "qq"
+# kind = "private"
+# external_id = "987654321"
+# display_name = "主人私聊"
+# allow_import = true
+# allow_export = false
 
 [advanced] # 高级模式配置
 whitelist = ['']
