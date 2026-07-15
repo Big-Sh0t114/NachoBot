@@ -21,6 +21,8 @@
 
 import traceback
 import time
+from dataclasses import dataclass
+from enum import Enum
 from typing import Optional, Union, Dict, List, TYPE_CHECKING, Tuple
 
 from src.common.logger import get_logger
@@ -29,6 +31,8 @@ from src.config.config import global_config
 from src.chat.message_receive.chat_stream import get_chat_manager
 from src.chat.message_receive.uni_message_sender import UniversalMessageSender
 from src.chat.message_receive.message import MessageSending, MessageRecv
+from src.chat.focus.coordinator import focus_coordinator
+from src.chat.focus.models import EffectKind, StaleFocusLeaseError
 from ncnk_message import Seg, UserInfo, MessageBase, BaseMessageInfo
 
 if TYPE_CHECKING:
@@ -36,6 +40,27 @@ if TYPE_CHECKING:
     from src.common.data_models.message_data_model import ReplySetModel, ReplyContent, ForwardNode
 
 logger = get_logger("send_api")
+
+
+class SendStatus(str, Enum):
+    """可区分真实投递、策略抑制与失败的发送结果。"""
+
+    DELIVERED = "delivered"
+    SUPPRESSED = "suppressed"
+    FAILED = "failed"
+    STALE_LEASE = "stale_lease"
+
+
+@dataclass(frozen=True)
+class SendReceipt:
+    status: SendStatus
+    stream_id: str
+    message_id: Optional[str] = None
+    detail: str = ""
+
+    @property
+    def delivered(self) -> bool:
+        return self.status is SendStatus.DELIVERED
 
 
 # =============================================================================
@@ -155,7 +180,7 @@ def _should_suppress_silent_reply(target_stream, text: str) -> bool:
     return text in texts
 
 
-async def _send_to_target(
+async def _send_to_target_receipt(
     message_segment: Seg,
     stream_id: str,
     display_message: str = "",
@@ -165,7 +190,41 @@ async def _send_to_target(
     storage_message: bool = True,
     show_log: bool = True,
     selected_expressions: Optional[List[int]] = None,
-) -> bool:
+) -> SendReceipt:
+    """经过 Focus epoch/turn 围栏后发送，并返回真实投递结果。"""
+    try:
+        async with focus_coordinator.effect_permit(
+            None,
+            EffectKind.SEND,
+            target_chat_id=stream_id,
+        ):
+            return await _send_to_target_receipt_permitted(
+                message_segment=message_segment,
+                stream_id=stream_id,
+                display_message=display_message,
+                typing=typing,
+                set_reply=set_reply,
+                reply_message=reply_message,
+                storage_message=storage_message,
+                show_log=show_log,
+                selected_expressions=selected_expressions,
+            )
+    except StaleFocusLeaseError as exc:
+        logger.warning(f"[SendAPI] Focus 租约失效，拒绝发送到 {stream_id}: {exc}")
+        return SendReceipt(SendStatus.STALE_LEASE, stream_id, detail=str(exc))
+
+
+async def _send_to_target_receipt_permitted(
+    message_segment: Seg,
+    stream_id: str,
+    display_message: str = "",
+    typing: bool = False,
+    set_reply: bool = False,
+    reply_message: Optional["DatabaseMessages"] = None,
+    storage_message: bool = True,
+    show_log: bool = True,
+    selected_expressions: Optional[List[int]] = None,
+) -> SendReceipt:
     """向指定目标发送消息的内部实现
 
     Args:
@@ -183,7 +242,7 @@ async def _send_to_target(
     try:
         if set_reply and not reply_message:
             logger.warning("[SendAPI] 使用引用回复，但未提供回复消息")
-            return False
+            return SendReceipt(SendStatus.FAILED, stream_id, detail="missing_reply_message")
 
         text_data: Optional[str] = None
         if message_segment.type == "text":
@@ -201,10 +260,10 @@ async def _send_to_target(
         target_stream = get_chat_manager().get_stream(stream_id)
         if not target_stream:
             logger.error(f"[SendAPI] 未找到聊天流: {stream_id}")
-            return False
+            return SendReceipt(SendStatus.FAILED, stream_id, detail="stream_not_found")
         if text_data is not None and _should_suppress_silent_reply(target_stream, text_data):
             logger.info("[SendAPI] 本次回复已被 silent_reply 抑制")
-            return True
+            return SendReceipt(SendStatus.SUPPRESSED, stream_id, detail="silent_reply")
 
         # 创建发送器
         message_sender = UniversalMessageSender()
@@ -223,6 +282,12 @@ async def _send_to_target(
         reply_to_platform_id = ""
         anchor_message: Union["MessageRecv", None] = None
         if reply_message:
+            reply_chat_id = str(getattr(reply_message, "chat_id", "") or "")
+            if reply_chat_id and reply_chat_id != str(stream_id):
+                logger.error(
+                    f"[SendAPI] 拒绝跨流引用回复: reply_chat_id={reply_chat_id}, target={stream_id}"
+                )
+                return SendReceipt(SendStatus.FAILED, stream_id, detail="cross_stream_reply")
             anchor_message = db_message_to_message_recv(reply_message)
             logger.info(f"[SendAPI] 找到匹配的回复消息，发送者: {anchor_message.message_info.user_info.user_id}")  # type: ignore
             if anchor_message:
@@ -278,15 +343,45 @@ async def _send_to_target(
 
         if sent_msg:
             logger.debug(f"[SendAPI] 成功发送消息到 {stream_id}")
-            return True
+            delivered_message_id = str(
+                getattr(getattr(sent_msg, "message_info", None), "message_id", None) or message_id
+            )
+            return SendReceipt(SendStatus.DELIVERED, stream_id, message_id=delivered_message_id)
         else:
             logger.error("[SendAPI] 发送消息失败")
-            return False
+            return SendReceipt(SendStatus.FAILED, stream_id, message_id=message_id, detail="adapter_failed")
 
     except Exception as e:
         logger.error(f"[SendAPI] 发送消息时出错: {e}")
         traceback.print_exc()
-        return False
+        return SendReceipt(SendStatus.FAILED, stream_id, detail=type(e).__name__)
+
+
+async def _send_to_target(
+    message_segment: Seg,
+    stream_id: str,
+    display_message: str = "",
+    typing: bool = False,
+    set_reply: bool = False,
+    reply_message: Optional["DatabaseMessages"] = None,
+    storage_message: bool = True,
+    show_log: bool = True,
+    selected_expressions: Optional[List[int]] = None,
+) -> bool:
+    """Legacy bool API: delivery and intentional suppression are both handled."""
+    receipt = await _send_to_target_receipt(
+        message_segment=message_segment,
+        stream_id=stream_id,
+        display_message=display_message,
+        typing=typing,
+        set_reply=set_reply,
+        reply_message=reply_message,
+        storage_message=storage_message,
+        show_log=show_log,
+        selected_expressions=selected_expressions,
+    )
+    # Legacy callers treat intentional policy suppression as handled success.
+    return receipt.status in {SendStatus.DELIVERED, SendStatus.SUPPRESSED}
 
 
 def db_message_to_message_recv(message_obj: "DatabaseMessages") -> MessageRecv:
@@ -339,6 +434,28 @@ def db_message_to_message_recv(message_obj: "DatabaseMessages") -> MessageRecv:
 # =============================================================================
 # 公共API函数 - 预定义类型的发送函数
 # =============================================================================
+
+
+async def text_to_stream_receipt(
+    text: str,
+    stream_id: str,
+    typing: bool = False,
+    set_reply: bool = False,
+    reply_message: Optional["DatabaseMessages"] = None,
+    storage_message: bool = True,
+    selected_expressions: Optional[List[int]] = None,
+) -> SendReceipt:
+    """发送文本并返回可用于 Focus handoff ACK 的真实投递回执。"""
+    return await _send_to_target_receipt(
+        message_segment=Seg(type="text", data=text),
+        stream_id=stream_id,
+        display_message="",
+        typing=typing,
+        set_reply=set_reply,
+        reply_message=reply_message,
+        storage_message=storage_message,
+        selected_expressions=selected_expressions,
+    )
 
 
 async def text_to_stream(

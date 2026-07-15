@@ -27,6 +27,10 @@ from src.chat.utils.utils import get_chat_type_and_target_info
 from src.chat.planner_actions.action_manager import ActionManager
 from src.chat.message_receive.chat_stream import get_chat_manager
 from src.chat.advanced.advanced_manager import advanced_manager
+from src.chat.focus.coordinator import focus_coordinator
+from src.chat.focus.switch_action import SWITCH_CHAT_ACTION, normalize_switch_action_data
+from src.chat.focus.switch_eligibility import can_offer_switch_chat
+from src.chat.focus.switch_planner import render_switch_planner_context
 from src.plugin_system.base.component_types import ActionInfo, ComponentType, ActionActivationType
 from src.plugin_system.core.component_registry import component_registry
 
@@ -222,13 +226,25 @@ class ActionPlanner:
         try:
             action = action_json.get("action", "no_action")
             reasoning = action_json.get("reason", "未提供原因")
-            action_data = {key: value for key, value in action_json.items() if key not in ["action", "reason"]}
+            if action == SWITCH_CHAT_ACTION and not can_offer_switch_chat(focus_coordinator, self.chat_id):
+                logger.warning(f"{self.log_prefix} 当前上下文无权使用 switch_chat，回退为 reply")
+                action = "reply"
+                reasoning = f"当前上下文不允许跨会话切换，改为正常回复。原始理由: {reasoning}"
+                action_data = {}
+            else:
+                action_data = (
+                    normalize_switch_action_data(action_json)
+                    if action == SWITCH_CHAT_ACTION
+                    else {key: value for key, value in action_json.items() if key not in ["action", "reason"]}
+                )
             # 非no_action动作需要target_message_id
             latest_user_message = _pick_latest_user_message(message_id_list)
             target_message = None
             fallback_to_latest = False
 
-            if target_message_id := action_json.get("target_message_id"):
+            if action == SWITCH_CHAT_ACTION:
+                target_message = None
+            elif target_message_id := action_json.get("target_message_id"):
                 # 根据target_message_id查找原始消息
                 target_message = self.find_message_by_id(target_message_id, message_id_list)
                 if target_message is None:
@@ -257,6 +273,7 @@ class ActionPlanner:
                 "block_user",
                 "ban_user",
                 "set_group_title",
+                SWITCH_CHAT_ACTION,
             ]
 
             if action not in internal_action_names and action not in available_action_names:
@@ -327,7 +344,8 @@ class ActionPlanner:
                 msg for msg in message_list_before_now
                 if str(msg.user_info.user_id) not in blocked_user_ids
             ]
-        if message_list_before_now:
+        focus_switch_context = can_offer_switch_chat(focus_coordinator, self.chat_id)
+        if message_list_before_now and not focus_switch_context:
             latest_message = message_list_before_now[-1]
             if _has_url_message(getattr(latest_message, "processed_plain_text", "") or "") and not _is_bot_message(
                 latest_message
@@ -528,6 +546,7 @@ class ActionPlanner:
                 ban_user_action_text=self._build_ban_user_prompt(is_group_chat),
                 set_group_title_action_text=self._build_set_group_title_prompt(is_group_chat),
             )
+            prompt += await render_switch_planner_context(focus_coordinator, self.chat_id)
             if tts_lang_note:
                 prompt += tts_lang_note
 
@@ -759,6 +778,14 @@ class ActionPlanner:
         for action in actions:
             action.action_data = action.action_data or {}
             action.action_data["loop_start_time"] = loop_start_time
+
+        switch_actions = [action for action in actions if action.action_type == SWITCH_CHAT_ACTION]
+        if switch_actions:
+            if len(switch_actions) > 1 or len(actions) > 1:
+                logger.warning(f"{self.log_prefix} switch_chat 是终止动作，丢弃本轮其余动作")
+            actions = [switch_actions[0]]
+            logger.info(f"{self.log_prefix}规划器选择终止动作 switch_chat")
+            return actions
 
         logger.info(
             f"{self.log_prefix}规划器决定执行{len(actions)}个动作: {' '.join([a.action_type for a in actions])}"

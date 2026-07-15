@@ -119,6 +119,10 @@ class MainSystem:
         asyncio.create_task(get_chat_manager()._auto_save_task())
 
         logger.info("聊天管理器初始化成功")
+        from src.chat.focus.bootstrap import focus_bootstrap
+
+        await focus_bootstrap.start()
+        logger.info("Focus bootstrap completed")
 
         # 根据配置条件性地初始化记忆系统
         if global_config.lpmm_knowledge.enable:
@@ -158,6 +162,14 @@ class MainSystem:
 
     async def shutdown(self):
         """关闭系统组件"""
+        from src.chat.focus.bootstrap import focus_bootstrap
+        from src.chat.heart_flow.heartflow import heartflow
+
+        await focus_bootstrap.begin_shutdown()
+        await heartflow.stop_all()
+        await focus_bootstrap.stop()
+        logger.info("Focus and Heartflow runtimes stopped")
+
         # 关闭 A_Memorix
         if getattr(self, "_a_memorix_host_service", None):
             try:
@@ -192,10 +204,8 @@ class MainSystem:
 async def main():
     """主函数"""
     system = MainSystem()
-    await asyncio.gather(
-        system.initialize(),
-        system.schedule_tasks(),
-    )
+    await system.initialize()
+    await system.schedule_tasks()
 
 
 if __name__ == "__main__":

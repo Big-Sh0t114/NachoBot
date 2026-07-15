@@ -32,7 +32,7 @@ class BotConfig(ConfigBase):
 
     alias_names: list[str] = field(default_factory=lambda: [])
     """别名列表"""
-    
+
     integrated_plan: bool = True
     """集成规划开关（设为false则回退至分离的planner/replyer模式）"""
 
@@ -50,7 +50,6 @@ class BotConfig(ConfigBase):
 
     ban_whitelist: list[str] = field(default_factory=lambda: [])
     """禁言白名单，列表中的QQ号/用户ID不会被bot禁言"""
-
 
 
 @dataclass
@@ -740,6 +739,137 @@ class ExperimentalConfig(ConfigBase):
 
     enable_friend_chat: bool = False
     """是否启用好友聊天"""
+
+
+@dataclass
+class FocusMemberConfig(ConfigBase):
+    """Focus 组中的一个显式会话成员。"""
+
+    key: str
+    """组内稳定别名，供 initial_member 引用；不会暴露给模型作为实际目标ID。"""
+
+    platform: str
+    """适配器平台名，例如 qq。"""
+
+    kind: Literal["group", "private"]
+    """会话类型。v1 支持 group->group 和 group->private。"""
+
+    external_id: str
+    """平台侧群号或用户号，启动时解析成 ChatStream.stream_id。"""
+
+    display_name: str = ""
+    """Planner 中展示的安全名称；为空时由集成层生成。"""
+
+    allow_import: bool = True
+    """是否允许该会话接收短期交接内容。"""
+
+    allow_export: bool = True
+    """是否允许该会话导出短期交接内容。私聊源在 v1 中仍会被策略拒绝。"""
+
+    def __post_init__(self) -> None:
+        if not self.key.strip() or not self.platform.strip() or not self.external_id.strip():
+            raise ValueError("Focus member key/platform/external_id 均不能为空")
+
+
+@dataclass
+class FocusGroupConfig(ConfigBase):
+    """共享一个 active-chat lease 的 Focus 会话组。"""
+
+    id: str
+    members: list[FocusMemberConfig]
+    initial_member: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.id.strip():
+            raise ValueError("Focus group id 不能为空")
+        if len(self.members) < 2:
+            raise ValueError(f"Focus group {self.id!r} 至少需要两个成员")
+        keys = [member.key for member in self.members]
+        if len(keys) != len(set(keys)):
+            raise ValueError(f"Focus group {self.id!r} 中存在重复 member key")
+        if self.initial_member and self.initial_member not in keys:
+            raise ValueError(f"Focus group {self.id!r} 的 initial_member 不在 members 中")
+
+
+@dataclass
+class FocusConfig(ConfigBase):
+    """短期跨会话 Focus 编排配置。"""
+
+    mode: Literal["off", "observe", "active"] = "off"
+    """off 保持现有逻辑；observe 当前为安全 no-op；active 允许终止式切换和交接。"""
+
+    allow_group_to_private: bool = True
+    """允许显式 Focus 组内的群聊到私聊路径；私聊仅可无 handoff 安全返回群聊。"""
+
+    membership_migration: Literal["strict", "additive", "idle_safe"] = "idle_safe"
+    """成员配置变化时的启动迁移策略；默认仅在组空闲时安全迁移增删和权限变化。"""
+
+    unread_event_threshold: int = 5
+    unviewed_event_seconds: int = 180
+    max_events_per_prompt: int = 5
+    max_unread_messages: int = 20
+    switch_cooldown_seconds: int = 2
+    handoff_ttl_seconds: int = 600
+    handoff_successful_cycles: int = 3
+    handoff_prompt_tokens: int = 512
+    reservation_ttl_seconds: int = 120
+    bypass_gate_enabled: bool = True
+    """纯 Focus event turn 及 Planner bypass 会话使用仅允许 stay/switch 的轻量 Gate。"""
+    bypass_gate_timeout_seconds: float = 8.0
+    """轻量 Gate 的单次 LLM 超时。"""
+    bypass_gate_max_tokens: int = 160
+    """轻量 Gate 的最大输出 token。"""
+    bypass_gate_retry_seconds: float = 3.0
+    """轻量 Gate 在同一 turn 内重试前的等待时间。"""
+    bypass_gate_max_attempts: int = 2
+    """轻量 Gate 单轮最大尝试次数；耗尽后执行确定性安全降级。"""
+    groups: list[FocusGroupConfig] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.membership_migration not in {"strict", "additive", "idle_safe"}:
+            raise ValueError("Focus membership_migration 必须是 strict/additive/idle_safe")
+        positive_fields = {
+            "unread_event_threshold": self.unread_event_threshold,
+            "unviewed_event_seconds": self.unviewed_event_seconds,
+            "max_events_per_prompt": self.max_events_per_prompt,
+            "max_unread_messages": self.max_unread_messages,
+            "handoff_ttl_seconds": self.handoff_ttl_seconds,
+            "handoff_successful_cycles": self.handoff_successful_cycles,
+            "reservation_ttl_seconds": self.reservation_ttl_seconds,
+            "bypass_gate_max_attempts": self.bypass_gate_max_attempts,
+        }
+        positive_float_fields = {
+            "bypass_gate_timeout_seconds": self.bypass_gate_timeout_seconds,
+            "bypass_gate_retry_seconds": self.bypass_gate_retry_seconds,
+        }
+        invalid = [name for name, value in positive_fields.items() if value <= 0]
+        invalid.extend(name for name, value in positive_float_fields.items() if value <= 0)
+        if invalid:
+            raise ValueError(f"Focus 配置必须为正数: {', '.join(invalid)}")
+        if self.switch_cooldown_seconds < 0:
+            raise ValueError("Focus switch_cooldown_seconds 不能为负数")
+        if not 128 <= self.handoff_prompt_tokens <= 768:
+            raise ValueError("Focus handoff_prompt_tokens 必须在 128..768 范围内")
+
+        if not 64 <= self.bypass_gate_max_tokens <= 512:
+            raise ValueError("Focus bypass_gate_max_tokens 必须在 64..512 范围内")
+        if self.bypass_gate_max_attempts > 5:
+            raise ValueError("Focus bypass_gate_max_attempts 必须在 1..5 范围内")
+        group_ids = [group.id for group in self.groups]
+        if len(group_ids) != len(set(group_ids)):
+            raise ValueError("Focus group id 不能重复")
+        identities: dict[tuple[str, str, str], str] = {}
+        for group in self.groups:
+            if not any(member.kind == "group" for member in group.members):
+                raise ValueError(f"Focus group {group.id!r} 至少需要一个群聊成员")
+            for member in group.members:
+                identity = (member.platform, member.kind, member.external_id)
+                owner = identities.get(identity)
+                if owner is not None:
+                    raise ValueError(f"Focus 成员 {identity!r} 同时出现在 {owner!r} 和 {group.id!r}")
+                identities[identity] = group.id
+                if member.kind == "private" and not self.allow_group_to_private:
+                    raise ValueError(f"Focus group {group.id!r} 包含私聊成员，但 allow_group_to_private=false")
 
 
 @dataclass

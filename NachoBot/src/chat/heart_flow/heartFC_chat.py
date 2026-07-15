@@ -37,8 +37,35 @@ from src.chat.utils.chat_message_builder import (
 from src.memory_system.chat_history_summarizer import ChatHistorySummarizer
 from src.chat.heart_flow.relation_scanner import RelationScanner
 from src.llm_models.exceptions import ReqAbortException
+from src.chat.focus.coordinator import FocusCoordinator, bind_lease, focus_coordinator, current_context_lease
+from src.chat.focus.bypass_gate import (
+    FocusBypassDecisionGate,
+    FocusBypassDecisionKind,
+    FocusBypassGateError,
+)
+from src.chat.focus.models import (
+    ChatKind,
+    EffectKind,
+    FocusStoppedError,
+    FocusMember,
+    FocusTurn,
+    StaleFocusLeaseError,
+    TurnOutcome,
+    TurnStatus,
+    WakeReason,
+)
+from src.chat.focus.reply_context import acquire_reply_context_request, release_reply_context
+from src.chat.focus.reply_delivery import settle_reply_context_delivery
+from src.chat.focus.message_repository import load_message_batch
+from src.chat.focus.switch_action import (
+    SWITCH_CHAT_ACTION,
+    execute_switch_chat,
+    format_recent_source_messages,
+)
+from src.chat.focus.switch_planner import suppress_focus_planner_context
 
 if TYPE_CHECKING:
+    from src.chat.focus.reply_context import ReplyContextRef
     from src.common.data_models.database_data_model import DatabaseMessages
     from src.common.data_models.message_data_model import ReplySetModel
 
@@ -117,6 +144,7 @@ class HeartFChatting:
 
         # 中期记忆管理器
         from src.memory_system.mid_term_memory import get_mid_term_memory_manager
+
         self.mid_term_memory = get_mid_term_memory_manager(chat_id=self.stream_id)
 
         self.no_reply_until_call = False
@@ -131,6 +159,8 @@ class HeartFChatting:
         self._last_message_received_at: float = time.time()
         self._message_debounce_required: bool = False
         self._message_debounce_seconds: float = 1.0
+        self._focus_bypass_gate: FocusBypassDecisionGate | None = None
+        self._focus_delivered_event_revisions: Dict[str, int] | None = None
 
     def _is_user_blocked(self, user_id: str) -> bool:
         """检查用户是否在屏蔽列表中且未过期"""
@@ -203,6 +233,7 @@ class HeartFChatting:
             # 注册到中期记忆后台构建器
             try:
                 from src.memory_system.mid_term_memory_builder import get_mid_term_memory_builder
+
                 _mtm_builder = get_mid_term_memory_builder()
                 _mtm_builder.register_chat(self.stream_id)
                 await _mtm_builder.start()  # 幂等，多次调用安全
@@ -222,6 +253,29 @@ class HeartFChatting:
             self._loop_task = None
             logger.error(f"{self.log_prefix} HeartFChatting 启动失败: {e}")
             raise
+
+    async def stop(self):
+        """幂等停止当前聊天循环及其按聊天创建的后台任务。"""
+        self.running = False
+        task = self._loop_task
+        self._loop_task = None
+        if task and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        try:
+            await self.chat_history_summarizer.stop()
+        except Exception as e:
+            logger.debug(f"{self.log_prefix} 停止聊天概括器时跳过: {e}")
+        try:
+            await self.relation_scanner.stop()
+        except Exception as e:
+            logger.debug(f"{self.log_prefix} 停止关系扫描器时跳过: {e}")
+        try:
+            from src.memory_system.mid_term_memory_builder import get_mid_term_memory_builder
+
+            get_mid_term_memory_builder().unregister_chat(self.stream_id)
+        except Exception as e:
+            logger.debug(f"{self.log_prefix} 注销中期记忆构建器时跳过: {e}")
 
     def _handle_loop_completion(self, task: asyncio.Task):
         """当 _hfc_loop 任务完成时执行的回调。"""
@@ -276,15 +330,33 @@ class HeartFChatting:
                     f"({self._planner_interrupt_consecutive_count}/{planner_interrupt_max})"
                 )
 
-    async def _loopbody(self):  # sourcery skip: hoist-if-from-if
-        recent_messages_list = message_api.get_messages_by_time_in_chat(
-            chat_id=self.stream_id,
-            start_time=self.last_read_time,
-            end_time=time.time(),
-            limit=20,
-            limit_mode="latest",
-            filter_mai=True,
-            filter_command=True,
+    async def _loopbody(self, focus_turn: FocusTurn | None = None):  # sourcery skip: hoist-if-from-if
+        if focus_turn is not None:
+            batch = load_message_batch(
+                self.stream_id,
+                focus_turn.read_after_row_id,
+                focus_turn.read_through_row_id,
+                limit=getattr(global_config.focus, "max_unread_messages", 20),
+            )
+            recent_messages_list = list(batch.messages)
+            self._focus_consumed_through_row_id = batch.consumed_through_row_id
+        else:
+            recent_messages_list = message_api.get_messages_by_time_in_chat(
+                chat_id=self.stream_id,
+                start_time=self.last_read_time,
+                end_time=time.time(),
+                limit=20,
+                limit_mode="latest",
+                filter_mai=True,
+                filter_command=True,
+            )
+        focus_requires_observe = bool(
+            focus_turn is not None
+            and (
+                focus_turn.events
+                or focus_turn.handoff_ids
+                or focus_turn.wake_reason & (WakeReason.FOCUS_EVENT | WakeReason.SWITCH_TARGET)
+            )
         )
 
         if len(recent_messages_list) >= 1:
@@ -297,7 +369,10 @@ class HeartFChatting:
 
             # 过滤后无消息则跳过本轮思考
             if len(recent_messages_list) == 0:
-                await asyncio.sleep(0.2)
+                if focus_requires_observe:
+                    return await self._observe(recent_messages_list=[], focus_turn=focus_turn)
+                if focus_turn is None:
+                    await asyncio.sleep(0.2)
                 return True
 
             # Planner 打断：如果 Planner 正在执行且收到新消息，触发打断（@提及除外，总开关关闭时跳过）
@@ -307,8 +382,7 @@ class HeartFChatting:
                 and not self._planner_interrupt_requested
             ):
                 has_mentioned = any(
-                    getattr(msg, "is_mentioned", False) or getattr(msg, "is_at", False)
-                    for msg in recent_messages_list
+                    getattr(msg, "is_mentioned", False) or getattr(msg, "is_at", False) for msg in recent_messages_list
                 )
                 if not has_mentioned:
                     planner_interrupt_max = getattr(global_config.chat, "planner_interrupt_max_consecutive_count", 3)
@@ -324,7 +398,7 @@ class HeartFChatting:
                         )
 
             # !处理no_reply_until_call逻辑
-            if self.no_reply_until_call:
+            if self.no_reply_until_call and not focus_requires_observe:
                 for message in recent_messages_list:
                     if (
                         message.is_mentioned
@@ -347,22 +421,283 @@ class HeartFChatting:
                     mentioned_message = message
 
             # *控制频率用
-            if mentioned_message:
-                await self._observe(recent_messages_list=recent_messages_list, force_reply_message=mentioned_message)
+            if focus_requires_observe:
+                await self._observe(recent_messages_list=recent_messages_list, focus_turn=focus_turn)
+            elif mentioned_message:
+                await self._observe(
+                    recent_messages_list=recent_messages_list,
+                    force_reply_message=mentioned_message,
+                    focus_turn=focus_turn,
+                )
             elif (
                 random.random()
                 < self.talk_threshold
                 * frequency_control_manager.get_or_create_frequency_control(self.stream_id).get_talk_frequency_adjust()
             ):
-                await self._observe(recent_messages_list=recent_messages_list)
+                await self._observe(recent_messages_list=recent_messages_list, focus_turn=focus_turn)
             else:
                 # 没有提到，继续保持沉默，等待5秒防止频繁触发
                 await asyncio.sleep(5)
                 return True
         else:
-            await asyncio.sleep(0.2)
+            if focus_requires_observe:
+                return await self._observe(recent_messages_list=[], focus_turn=focus_turn)
+            if focus_turn is None:
+                await asyncio.sleep(0.2)
             return True
         return True
+
+    def _get_focus_bypass_gate(self) -> FocusBypassDecisionGate:
+        gate = self._focus_bypass_gate
+        if gate is None:
+            gate = FocusBypassDecisionGate(
+                self.action_planner.planner_llm,
+                timeout_seconds=global_config.focus.bypass_gate_timeout_seconds,
+                max_tokens=global_config.focus.bypass_gate_max_tokens,
+            )
+            self._focus_bypass_gate = gate
+        return gate
+
+    @staticmethod
+    def _focus_platform_bypasses_planner(platform: str, is_group_chat: bool) -> bool:
+        normalized = str(platform or "").strip().lower()
+        return normalized in {"discord_vc", "universal_vc"} or (
+            is_group_chat and normalized in {"bilibili", "bilibili.live"}
+        )
+
+    @classmethod
+    def _focus_member_bypasses_planner(cls, member: FocusMember) -> bool:
+        return cls._focus_platform_bypasses_planner(
+            member.platform,
+            member.kind is ChatKind.GROUP,
+        )
+
+    @staticmethod
+    def _is_focus_event_only_turn(
+        focus_turn: FocusTurn,
+        recent_messages_list: List["DatabaseMessages"],
+    ) -> bool:
+        # WakeReason records why a runtime was nudged; it is not authoritative
+        # evidence that unread local rows still exist.  In particular, a safe
+        # return can leave SWITCH_TARGET on the same turn as a new Focus event.
+        # The cursor range is the source of truth for local message work.
+        return bool(
+            focus_turn.events
+            and not recent_messages_list
+            and not focus_turn.handoff_ids
+            and focus_turn.read_through_row_id <= focus_turn.read_after_row_id
+        )
+
+    @classmethod
+    def _fence_focus_event_only_actions(
+        cls,
+        focus_turn: FocusTurn | None,
+        recent_messages_list: List["DatabaseMessages"],
+        actions: List[ActionPlannerInfo],
+    ) -> List[ActionPlannerInfo]:
+        if focus_turn is None or not cls._is_focus_event_only_turn(focus_turn, recent_messages_list):
+            return actions
+        if any(action.action_type == SWITCH_CHAT_ACTION for action in actions):
+            return actions
+        return []
+
+    @staticmethod
+    def _focus_handoff_recent_results(
+        recent_messages: List["DatabaseMessages"] | None,
+    ) -> List[str]:
+        return list(format_recent_source_messages(recent_messages or (), limit=10))
+
+    @staticmethod
+    def _focus_forced_private_action(
+        coordinator: FocusCoordinator,
+        source_chat_id: str,
+        focus_turn: FocusTurn,
+        available_actions: Dict[str, ActionInfo],
+        recent_messages: List["DatabaseMessages"] | None = None,
+    ) -> ActionPlannerInfo | None:
+        """Deterministically route an authorized background private event."""
+
+        definition = coordinator.definition_for_chat(source_chat_id)
+        if definition is None:
+            return None
+        source = coordinator.policy.member(definition, source_chat_id)
+        if source is None:
+            return None
+        recent_results = HeartFChatting._focus_handoff_recent_results(recent_messages)
+        for event in focus_turn.events:
+            target = coordinator.policy.member(definition, event.target_chat_id)
+            if target is None or target.kind is not ChatKind.PRIVATE:
+                continue
+            decision = coordinator.policy.decide_switch(
+                definition,
+                source_chat_id,
+                event.target_chat_id,
+                has_handoff=True,
+            )
+            if not decision.allowed:
+                continue
+            return ActionPlannerInfo(
+                action_type=SWITCH_CHAT_ACTION,
+                reasoning="Focus policy forces active session to the incoming private chat",
+                action_data={
+                    "event_id": event.event_id,
+                    "handoff": {
+                        "task_summary": (
+                            f"从「{source.display_name or source.chat_id}」切换到"
+                            f"「{target.display_name or target.chat_id}」处理新私聊；"
+                            "以下源会话近期内容用于衔接。"
+                        ),
+                        "known_facts": [],
+                        "pending_items": ["处理目标私聊中的最新未读消息"],
+                        "recent_results": recent_results,
+                    },
+                },
+                action_message=None,
+                available_actions=available_actions,
+            )
+        return None
+
+    @staticmethod
+    def _focus_gate_failure_fallback(
+        coordinator: FocusCoordinator,
+        source_chat_id: str,
+        focus_turn: FocusTurn,
+        available_actions: Dict[str, ActionInfo],
+    ) -> ActionPlannerInfo | None:
+        """Choose a server-validated fallback after the routing LLM is unavailable."""
+
+        definition = coordinator.definition_for_chat(source_chat_id)
+        if definition is None:
+            return None
+        source = coordinator.policy.member(definition, source_chat_id)
+        if source is None:
+            return None
+        source_bypasses_planner = HeartFChatting._focus_member_bypasses_planner(source)
+        for event in focus_turn.events:
+            target = coordinator.policy.member(definition, event.target_chat_id)
+            if target is None:
+                continue
+
+            explicit_signal = bool(event.is_mentioned or event.is_at)
+            bypass_boundary = (
+                source_bypasses_planner
+                or HeartFChatting._focus_member_bypasses_planner(target)
+            )
+            if not (explicit_signal or bypass_boundary):
+                continue
+
+            safe_return = coordinator.policy.can_return_without_handoff(
+                definition,
+                source_chat_id,
+                event.target_chat_id,
+            )
+            if source.kind is ChatKind.PRIVATE and not safe_return:
+                continue
+            if target.kind is ChatKind.PRIVATE and not global_config.focus.allow_group_to_private:
+                continue
+            policy_decision = coordinator.policy.decide_switch(
+                definition,
+                source_chat_id,
+                event.target_chat_id,
+                has_handoff=not safe_return,
+            )
+            if not policy_decision.allowed:
+                continue
+
+            fallback_kind = "mentioned/at" if explicit_signal else "bypass-session boundary"
+            handoff = {}
+            if not safe_return:
+                handoff = {
+                    "task_summary": (
+                        f"Focus Gate 不可用，按 {fallback_kind} 降级规则从"
+                        f"「{source.display_name or source.chat_id}」切换到"
+                        f"「{target.display_name or target.chat_id}」。"
+                    ),
+                    "pending_items": ["处理目标会话中的最新 Focus 事件"],
+                }
+            return ActionPlannerInfo(
+                action_type=SWITCH_CHAT_ACTION,
+                reasoning=f"Focus Gate unavailable; deterministic {fallback_kind} fallback",
+                action_data={"event_id": event.event_id, "handoff": handoff},
+                action_message=None,
+                available_actions=available_actions,
+            )
+        return None
+
+    async def _focus_bypass_action(
+        self,
+        *,
+        focus_turn: FocusTurn,
+        current_chat_context: str,
+        available_actions: Dict[str, ActionInfo],
+        event_only: bool = False,
+    ) -> ActionPlannerInfo | None:
+        observed_revisions = {event.event_id: event.revision for event in focus_turn.events}
+        definition = focus_coordinator.definition_for_chat(self.stream_id)
+        source = focus_coordinator.policy.member(definition, self.stream_id) if definition is not None else None
+        allow_handoff = source is None or source.kind is not ChatKind.PRIVATE
+        max_attempts = global_config.focus.bypass_gate_max_attempts
+        decision = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                decision = await self._get_focus_bypass_gate().decide(
+                    events=focus_turn.events,
+                    current_chat_context=current_chat_context,
+                    event_only=event_only,
+                    allow_handoff=allow_handoff,
+                )
+                break
+            except FocusBypassGateError as exc:
+                if attempt < max_attempts:
+                    retry_seconds = global_config.focus.bypass_gate_retry_seconds
+                    logger.warning(
+                        f"{self.log_prefix} Focus bypass gate failed on attempt "
+                        f"{attempt}/{max_attempts} ({exc}); retrying in {retry_seconds}s"
+                    )
+                    await asyncio.sleep(retry_seconds)
+                    continue
+                fallback_action = self._focus_gate_failure_fallback(
+                    focus_coordinator,
+                    self.stream_id,
+                    focus_turn,
+                    available_actions,
+                )
+                self._focus_delivered_event_revisions = {} if fallback_action is not None else observed_revisions
+                fallback_name = "switch" if fallback_action is not None else "stay"
+                logger.warning(
+                    f"{self.log_prefix} Focus bypass gate failed after {max_attempts} attempts "
+                    f"({exc}); deterministic fallback={fallback_name}"
+                )
+                return fallback_action
+
+        assert decision is not None
+        logger.info(
+            f"{self.log_prefix} [Focus Gate] decision={decision.kind.value} event_id={decision.event_id or '-'}"
+        )
+        if decision.kind is FocusBypassDecisionKind.STAY:
+            self._focus_delivered_event_revisions = dict(decision.observed_event_revisions)
+            return None
+        # A switch event is acknowledged atomically by switch_chat.  Keeping
+        # this mapping empty ensures a failed switch is not mistaken for stay.
+        self._focus_delivered_event_revisions = {}
+        return ActionPlannerInfo(
+            action_type=SWITCH_CHAT_ACTION,
+            reasoning=decision.reasoning or "Focus bypass gate selected a pending event",
+            action_data=dict(decision.action_data),
+            action_message=None,
+            available_actions=available_actions,
+        )
+
+    def _focus_reply_context(self, cycle_id: str):
+        """为当前 Focus turn 预留一次 handoff；Normal 模式返回 None。"""
+        lease = current_context_lease()
+        if lease is None or lease.chat_id != self.stream_id:
+            return None
+        return acquire_reply_context_request(
+            lease,
+            str(cycle_id),
+            max_prompt_tokens=global_config.focus.handoff_prompt_tokens,
+        )
 
     async def _send_and_store_reply(
         self,
@@ -372,15 +707,18 @@ class HeartFChatting:
         thinking_id,
         actions,
         selected_expressions: Optional[List[int]] = None,
+        context_refs: Optional[List["ReplyContextRef"]] = None,
     ) -> Tuple[Dict[str, Any], str, Dict[str, float]]:
         with Timer("回复发送", cycle_timers):
             reply_text = await self._send_response(
                 reply_set=response_set,
                 message_data=action_message,
                 selected_expressions=selected_expressions,
+                context_refs=context_refs,
             )
 
         from src.manager.local_store_manager import local_storage
+
         if "deploy_success" not in local_storage:
             local_storage["deploy_success"] = True
             logger.info(f"{self.log_prefix} 核心成功完成一次完整的收发与回复，标记部署成功。")
@@ -423,6 +761,7 @@ class HeartFChatting:
         self,  # interest_value: float = 0.0,
         recent_messages_list: Optional[List["DatabaseMessages"]] = None,
         force_reply_message: Optional["DatabaseMessages"] = None,
+        focus_turn: FocusTurn | None = None,
     ) -> bool:  # sourcery skip: merge-else-if-into-elif, remove-redundant-if
         if recent_messages_list is None:
             recent_messages_list = []
@@ -433,7 +772,8 @@ class HeartFChatting:
 
         # 刷新上下文以确保获取最新的模板信息
         get_chat_manager().get_stream(self.stream_id)
-        current_template = self.chat_stream.context.get_template_name()
+        context = getattr(self.chat_stream, "context", None)
+        current_template = context.get_template_name() if context is not None else None
         logger.debug(f"{self.log_prefix} [HFC] Current template name: {current_template}")
 
         async with global_prompt_manager.async_message_scope(current_template):
@@ -533,12 +873,45 @@ class HeartFChatting:
                     promise_block = "\n".join(["[约定缓存]"] + promise_snippets)
                     chat_content_block = f"{promise_block}\n----\n{chat_content_block}"
 
-                bypass_planner = (
-                    (is_group_chat and self.chat_stream.platform == "bilibili")
-                    or self.chat_stream.platform in {"discord_vc", "universal_vc"}
+                bypass_session = self._focus_platform_bypasses_planner(
+                    self.chat_stream.platform,
+                    is_group_chat,
+                )
+                event_only_focus_turn = bool(
+                    focus_turn is not None and self._is_focus_event_only_turn(focus_turn, recent_messages_list)
+                )
+                gate_required = bool(focus_turn is not None and focus_turn.events)
+                bypass_planner = bool(bypass_session)
+
+                logger.debug(
+                    f"{self.log_prefix} bypass_planner={bypass_planner}, messages={len(message_list_before_now)}"
                 )
 
-                logger.debug(f"{self.log_prefix} bypass_planner={bypass_planner}, messages={len(message_list_before_now)}")
+                forced_private_action = (
+                    self._focus_forced_private_action(
+                        focus_coordinator,
+                        self.stream_id,
+                        focus_turn,
+                        available_actions,
+                        message_list_before_now,
+                    )
+                    if focus_turn is not None
+                    else None
+                )
+                if forced_private_action is not None:
+                    logger.info(f"{self.log_prefix} [Focus] private event forces active-session switch")
+                    switch_result = await execute_switch_chat(
+                        focus_coordinator,
+                        lease=focus_turn.lease,
+                        action_data=forced_private_action.action_data,
+                        reasoning=forced_private_action.reasoning,
+                    )
+                    if switch_result.success:
+                        return True
+                    logger.warning(
+                        f"{self.log_prefix} [Focus] forced private switch failed: {switch_result.reason}"
+                    )
+                    return False
 
                 # --- 中期记忆摘要生成已移至独立后台循环，此处无需处理 ---
 
@@ -568,14 +941,58 @@ class HeartFChatting:
                     except Exception as e:
                         logger.debug(f"{self.log_prefix} 人物画像注入跳过: {e}")
 
-                prompt_info = await self.action_planner.build_planner_prompt(
-                    is_group_chat=is_group_chat,
-                    chat_target_info=chat_target_info,
-                    current_available_actions=available_actions,
-                    chat_content_block=chat_content_block,
-                    message_id_list=message_id_list,
-                    interest=global_config.personality.interest,
-                )
+                # Focus routing is owned by the dedicated Gate.  The full
+                # Planner only decides ordinary actions after Gate has stayed;
+                # it must not reinterpret or acknowledge Focus events itself.
+                gate_action = None
+                focus_gate_stayed = False
+                if gate_required and focus_turn is not None:
+                    if global_config.focus.bypass_gate_enabled:
+                        gate_action = await self._focus_bypass_action(
+                            focus_turn=focus_turn,
+                            current_chat_context=chat_content_block,
+                            available_actions=available_actions,
+                            event_only=event_only_focus_turn,
+                        )
+                    else:
+                        self._focus_delivered_event_revisions = {
+                            event.event_id: event.revision for event in focus_turn.events
+                        }
+                        logger.info(f"{self.log_prefix} [Focus Gate] disabled; deterministic stay")
+                    focus_gate_stayed = gate_action is None
+                    if focus_gate_stayed and event_only_focus_turn:
+                        logger.info(f"{self.log_prefix} [Focus Gate] event-only stay; skipping all actions")
+                        return True
+                    if gate_action is not None:
+                        logger.info(f"{self.log_prefix} [Focus Gate] terminal switch without full Planner")
+                        switch_result = await execute_switch_chat(
+                            focus_coordinator,
+                            lease=focus_turn.lease,
+                            action_data=gate_action.action_data,
+                            reasoning=gate_action.reasoning,
+                        )
+                        if switch_result.success:
+                            return True
+                        logger.warning(
+                            f"{self.log_prefix} [Focus Gate] switch failed: {switch_result.reason}"
+                        )
+                        return False
+
+                async def build_current_planner_prompt():
+                    return await self.action_planner.build_planner_prompt(
+                        is_group_chat=is_group_chat,
+                        chat_target_info=chat_target_info,
+                        current_available_actions=available_actions,
+                        chat_content_block=chat_content_block,
+                        message_id_list=message_id_list,
+                        interest=global_config.personality.interest,
+                    )
+
+                if focus_gate_stayed:
+                    with suppress_focus_planner_context():
+                        prompt_info = await build_current_planner_prompt()
+                else:
+                    prompt_info = await build_current_planner_prompt()
                 continue_flag, modified_message = await events_manager.handle_nacho_events(
                     EventType.ON_PLAN, None, prompt_info[0], None, self.chat_stream.stream_id
                 )
@@ -584,10 +1001,9 @@ class HeartFChatting:
                 if modified_message and modified_message._modify_flags.modify_llm_prompt:
                     prompt_info = (modified_message.llm_prompt, prompt_info[1])
 
-                # Bypass planner for Bilibili Live (Group Chat) AND Discord Voice Channel
-                # Both need low latency and simple reply/no-reply logic
                 if bypass_planner:
                     logger.info(f"{self.log_prefix} [HFC] Bypassing Planner for {self.chat_stream.platform}")
+
                     # Skip bot's own messages to prevent self-reply loops
                     bot_id = str(global_config.bot.qq_account)
                     target_msg = None
@@ -644,11 +1060,35 @@ class HeartFChatting:
                         interrupt_flag = asyncio.Event()
                         self._planner_interrupt_flag = interrupt_flag
                         self._planner_interrupt_requested = False
-                        action_to_use_info, _ = await self.action_planner.plan(
-                            loop_start_time=self.last_read_time,
-                            available_actions=available_actions,
-                            blocked_user_ids=_active_blocked,
-                        )
+                        if focus_gate_stayed:
+                            with suppress_focus_planner_context():
+                                action_to_use_info, _ = await self.action_planner.plan(
+                                    loop_start_time=self.last_read_time,
+                                    available_actions=available_actions,
+                                    blocked_user_ids=_active_blocked,
+                                )
+                        else:
+                            action_to_use_info, _ = await self.action_planner.plan(
+                                loop_start_time=self.last_read_time,
+                                available_actions=available_actions,
+                                blocked_user_ids=_active_blocked,
+                            )
+
+            fenced_actions = self._fence_focus_event_only_actions(
+                focus_turn,
+                recent_messages_list,
+                action_to_use_info,
+            )
+            if action_to_use_info and not fenced_actions:
+                logger.warning(f"{self.log_prefix} event-only Focus turn 丢弃非 switch_chat 动作")
+            action_to_use_info = fenced_actions
+
+            switch_actions = [action for action in action_to_use_info if action.action_type == SWITCH_CHAT_ACTION]
+            terminal_switch_selected = bool(switch_actions)
+            if terminal_switch_selected:
+                if len(switch_actions) > 1 or len(action_to_use_info) > 1:
+                    logger.warning(f"{self.log_prefix} switch_chat 是终止动作，丢弃本轮其余动作")
+                action_to_use_info = [switch_actions[0]]
 
             has_reply = False
             _reply_equivalent = {"reply", "make_appoint", "cancel_appoint", "ban_user", "block_user", "tts_action"}
@@ -661,7 +1101,7 @@ class HeartFChatting:
                     has_reply = True
                     break
 
-            if not has_reply and force_reply_message:
+            if not terminal_switch_selected and not has_reply and force_reply_message:
                 action_to_use_info.append(
                     ActionPlannerInfo(
                         action_type="reply",
@@ -722,6 +1162,11 @@ class HeartFChatting:
                 ]
                 results.extend(await asyncio.gather(*action_tasks, return_exceptions=True))
 
+            terminal_result = next(
+                (result for result in results if isinstance(result, dict) and result.get("terminal")),
+                None,
+            )
+
             # 处理执行结果
             reply_loop_info = None
             reply_text_from_reply = ""
@@ -772,6 +1217,12 @@ class HeartFChatting:
             self.end_cycle(loop_info, cycle_timers)
             self.print_cycle_info(cycle_timers)
 
+            if terminal_result is not None:
+                self._planner_interrupt_flag = None
+                if not self._planner_interrupt_requested:
+                    self._planner_interrupt_consecutive_count = 0
+                return not bool(terminal_result.get("retry"))
+
             """S4U内容，暂时保留"""
             if s4u_config.enable_s4u:
                 await stop_typing()
@@ -784,7 +1235,87 @@ class HeartFChatting:
 
             return True
 
+    async def _run_focus_turn(self) -> bool:
+        turn = await focus_coordinator.wait_for_turn(self.stream_id)
+        self._focus_consumed_through_row_id = turn.read_after_row_id
+        self._focus_delivered_event_revisions = None
+        outcome = None
+        self._focus_turn_interrupted = False
+        try:
+            with bind_lease(turn.lease):
+                success = await self._loopbody(turn)
+            if not await focus_coordinator.is_current(turn.lease):
+                status = TurnStatus.SWITCHED
+            elif self._focus_turn_interrupted or self._planner_interrupt_requested:
+                status = TurnStatus.CANCELLED
+            elif success:
+                status = TurnStatus.COMPLETED
+            else:
+                status = TurnStatus.FAILED
+            outcome = TurnOutcome(
+                status=status,
+                consumed_through_row_id=self._focus_consumed_through_row_id,
+                delivered_event_revisions=self._focus_delivered_event_revisions,
+            )
+        except asyncio.CancelledError:
+            outcome = TurnOutcome(
+                status=TurnStatus.CANCELLED,
+                consumed_through_row_id=self._focus_consumed_through_row_id,
+            )
+            raise
+        except StaleFocusLeaseError as exc:
+            logger.info(f"{self.log_prefix} Focus turn became stale: {exc}")
+            outcome = TurnOutcome(
+                status=TurnStatus.STALE,
+                consumed_through_row_id=self._focus_consumed_through_row_id,
+            )
+        except ReqAbortException:
+            self._focus_turn_interrupted = True
+            outcome = TurnOutcome(
+                status=TurnStatus.CANCELLED,
+                consumed_through_row_id=self._focus_consumed_through_row_id,
+            )
+        except Exception:
+            outcome = TurnOutcome(
+                status=TurnStatus.FAILED,
+                consumed_through_row_id=self._focus_consumed_through_row_id,
+            )
+            raise
+        finally:
+            if outcome is not None:
+                try:
+                    await asyncio.shield(focus_coordinator.finish_turn(turn, outcome))
+                except Exception as exc:
+                    logger.error(f"{self.log_prefix} Failed to finish Focus turn: {exc}")
+        return True
+
     async def _main_chat_loop(self):
+        if not focus_coordinator.is_managed(self.stream_id):
+            await self._normal_chat_loop()
+            return
+
+        try:
+            while self.running:
+                try:
+                    await self._run_focus_turn()
+                    await asyncio.sleep(0.1)
+                except FocusStoppedError:
+                    break
+                except asyncio.CancelledError:
+                    raise
+                except FocusBypassGateError as exc:
+                    retry_seconds = global_config.focus.bypass_gate_retry_seconds
+                    logger.warning(f"{self.log_prefix} Focus bypass gate failed ({exc}); retrying in {retry_seconds}s")
+                    await asyncio.sleep(retry_seconds)
+                except Exception:
+                    logger.error(f"{self.log_prefix} Focus turn failed; retrying in 3s")
+                    print(traceback.format_exc())
+                    await asyncio.sleep(3)
+        except asyncio.CancelledError:
+            logger.info(f"{self.log_prefix} Focus chat loop stopped")
+        logger.info(f"{self.log_prefix} Focus chat loop ended")
+
+    async def _normal_chat_loop(self):
         """主循环，持续进行计划并可能回复消息，直到被外部取消。"""
         try:
             while self.running:
@@ -847,13 +1378,21 @@ class HeartFChatting:
                 logger.warning(f"{self.log_prefix} 未能创建动作处理器: {action}")
                 return False, "", ""
 
-            # 处理动作并获取结果
-            result = await action_handler.execute()
+            # Focus 管理的动作必须持有当前 turn/epoch 租约，防止切换后的迟到副作用。
+            async with focus_coordinator.effect_permit(
+                None,
+                EffectKind.ACTION,
+                target_chat_id=self.stream_id,
+            ):
+                result = await action_handler.execute()
             success, action_text = result
             command = ""
 
             return success, action_text, command
 
+        except StaleFocusLeaseError as e:
+            logger.info(f"{self.log_prefix} Focus 租约失效，取消动作 {action}: {e}")
+            return False, "", ""
         except Exception as e:
             logger.error(f"{self.log_prefix} 处理{action}时出错: {e}")
             traceback.print_exc()
@@ -864,7 +1403,68 @@ class HeartFChatting:
         reply_set: "ReplySetModel",
         message_data: "DatabaseMessages",
         selected_expressions: Optional[List[int]] = None,
+        context_refs: Optional[List["ReplyContextRef"]] = None,
     ) -> str:
+        receipts: List[send_api.SendReceipt] = []
+        refs = tuple(context_refs or ())
+        try:
+            # One permit covers the complete logical reply so a Focus switch
+            # cannot commit between split message segments.
+            async with focus_coordinator.effect_permit(
+                None,
+                EffectKind.SEND,
+                target_chat_id=self.stream_id,
+            ):
+                reply_text, receipts = await self._send_response_permitted(
+                    reply_set=reply_set,
+                    message_data=message_data,
+                    selected_expressions=selected_expressions,
+                    receipts=receipts,
+                )
+        except StaleFocusLeaseError as exc:
+            await self._settle_interrupted_reply_context(refs, receipts, "stale_focus_lease")
+            logger.info(f"{self.log_prefix} Focus lease became stale; dropping reply send: {exc}")
+            return ""
+        except asyncio.CancelledError:
+            await self._settle_interrupted_reply_context(refs, receipts, "send_cancelled")
+            raise
+        except Exception:
+            await self._settle_interrupted_reply_context(refs, receipts, "send_error")
+            raise
+
+        try:
+            await settle_reply_context_delivery(refs, receipts)
+        except Exception as exc:
+            # Delivery already happened. Releasing here could consume the same
+            # handoff twice after a later retry, so retain it for recovery.
+            logger.error(f"{self.log_prefix} Focus delivery settlement failed: {exc}")
+        return reply_text
+
+    async def _settle_interrupted_reply_context(
+        self,
+        context_refs: Tuple["ReplyContextRef", ...],
+        receipts: List[send_api.SendReceipt],
+        reason: str,
+    ) -> None:
+        if not context_refs:
+            return
+        try:
+            if any(receipt.delivered for receipt in receipts):
+                await asyncio.shield(settle_reply_context_delivery(context_refs, receipts))
+            else:
+                await asyncio.shield(release_reply_context(context_refs, reason))
+        except Exception as exc:
+            logger.warning(
+                f"{self.log_prefix} Focus reply context release/settlement failed: reason={reason}, error={exc}"
+            )
+
+    async def _send_response_permitted(
+        self,
+        reply_set: "ReplySetModel",
+        message_data: "DatabaseMessages",
+        selected_expressions: Optional[List[int]],
+        receipts: List[send_api.SendReceipt],
+    ) -> Tuple[str, List[send_api.SendReceipt]]:
         new_message_count = message_api.count_new_messages(
             chat_id=self.chat_stream.stream_id, start_time=self.last_read_time, end_time=time.time()
         )
@@ -887,7 +1487,7 @@ class HeartFChatting:
             pre_filtered = " ".join(texts)
             logger.warning(f"{self.log_prefix} 过滤前信息: {pre_filtered}")
             logger.error(f"{self.log_prefix} 检测到可疑回复模板，已替换为 Filtered")
-            await send_api.text_to_stream(
+            receipt = await send_api.text_to_stream_receipt(
                 text="Filtered",
                 stream_id=self.chat_stream.stream_id,
                 reply_message=message_data,
@@ -895,7 +1495,8 @@ class HeartFChatting:
                 typing=False,
                 selected_expressions=selected_expressions,
             )
-            return "Filtered"
+            receipts.append(receipt)
+            return ("Filtered" if receipt.delivered else ""), receipts
 
         # Smart Aggregation for Bilibili TTS in HeartFC_Chat
         # If platform is Bilibili AND message contains TTS tags (<ZH> or <JP>),
@@ -928,7 +1529,7 @@ class HeartFChatting:
                     full_text += str(reply_content.content)
 
             if full_text:
-                await send_api.text_to_stream(
+                receipt = await send_api.text_to_stream_receipt(
                     text=full_text,
                     stream_id=self.chat_stream.stream_id,
                     reply_message=message_data,
@@ -936,8 +1537,9 @@ class HeartFChatting:
                     typing=False,
                     selected_expressions=selected_expressions,
                 )
-                return full_text
-            return ""
+                receipts.append(receipt)
+                return (full_text if receipt.delivered else ""), receipts
+            return "", receipts
 
         reply_text = ""
         first_replied = False
@@ -946,7 +1548,7 @@ class HeartFChatting:
                 continue
             data: str = reply_content.content  # type: ignore
             if not first_replied:
-                await send_api.text_to_stream(
+                receipt = await send_api.text_to_stream_receipt(
                     text=data,
                     stream_id=self.chat_stream.stream_id,
                     reply_message=message_data,
@@ -954,9 +1556,8 @@ class HeartFChatting:
                     typing=False,
                     selected_expressions=selected_expressions,
                 )
-                first_replied = True
             else:
-                await send_api.text_to_stream(
+                receipt = await send_api.text_to_stream_receipt(
                     text=data,
                     stream_id=self.chat_stream.stream_id,
                     reply_message=message_data,
@@ -964,9 +1565,12 @@ class HeartFChatting:
                     typing=True,
                     selected_expressions=selected_expressions,
                 )
-            reply_text += data
+            receipts.append(receipt)
+            if receipt.delivered:
+                first_replied = True
+                reply_text += data
 
-        return reply_text
+        return reply_text, receipts
 
     async def _execute_action(
         self,
@@ -979,6 +1583,45 @@ class HeartFChatting:
         """执行单个动作的通用函数"""
         try:
             with Timer(f"动作{action_planner_info.action_type}", cycle_timers):
+                if action_planner_info.action_type == SWITCH_CHAT_ACTION:
+                    lease = current_context_lease()
+                    if lease is None or lease.chat_id != self.stream_id:
+                        return {
+                            "action_type": SWITCH_CHAT_ACTION,
+                            "success": False,
+                            "reply_text": "",
+                            "terminal": True,
+                            "retry": False,
+                            "reason": "switch_chat requires the current Focus turn lease",
+                        }
+                    switch_result = await execute_switch_chat(
+                        focus_coordinator,
+                        lease=lease,
+                        action_data=action_planner_info.action_data or {},
+                        reasoning=action_planner_info.reasoning or "",
+                    )
+                    retryable = switch_result.reason.startswith(
+                        (
+                            "cannot resolve Focus events",
+                            "target runtime preparation failed",
+                            "handoff persistence failed",
+                            "switch compare-and-set failed",
+                            "Focus event revision changed",
+                        )
+                    )
+                    log = logger.info if switch_result.success else logger.warning
+                    log(f"{self.log_prefix} Focus switch_chat: {switch_result.reason}")
+                    return {
+                        "action_type": SWITCH_CHAT_ACTION,
+                        "success": switch_result.success,
+                        "reply_text": "",
+                        "terminal": True,
+                        "retry": retryable,
+                        "reason": switch_result.reason,
+                        "target_chat_id": switch_result.target_chat_id,
+                        "handoff_id": switch_result.handoff_id,
+                    }
+
                 if action_planner_info.action_type == "no_reply":
                     # 直接处理no_action逻辑，不再通过动作系统
                     reason = action_planner_info.reasoning or "选择不回复"
@@ -1063,6 +1706,24 @@ class HeartFChatting:
                             chat_id=self.chat_stream.stream_id, message_text=message_text_for_injection
                         )
 
+                        # --- 直播平台: A_Memorix + Person Profile 注入到 extra_info ---
+                        if action_planner_info.reasoning in (
+                            "Bilibili Live Bypass: Direct Reply",
+                            "Discord VC Bypass: Direct Reply",
+                        ):
+                            try:
+                                live_memory_context = await self._build_live_memory_context(
+                                    action_planner_info.action_message,
+                                )
+                                if live_memory_context:
+                                    injection_text = (
+                                        f"{live_memory_context}\n{injection_text}"
+                                        if injection_text
+                                        else live_memory_context
+                                    )
+                            except Exception:
+                                pass
+
                         # Inject pending danmaku summary from Bilibili/DiscordVC bypass
                         bypass_extra = (action_planner_info.action_data or {}).get("bypass_extra_info", "")
                         if bypass_extra:
@@ -1102,6 +1763,7 @@ class HeartFChatting:
                             from_plugin=False,
                             extra_info=injection_text,
                             interrupt_flag=self._planner_interrupt_flag,
+                            reply_context=self._focus_reply_context(thinking_id),
                         )
 
                         if not success or not llm_response or not llm_response.reply_set:
@@ -1137,6 +1799,7 @@ class HeartFChatting:
                                 llm_response=llm_response,
                                 action_planner_info=action_planner_info,
                                 chosen_action_plan_infos=chosen_action_plan_infos,
+                                context_refs=llm_response.context_refs,
                                 thinking_id=thinking_id,
                                 available_actions=available_actions,
                                 cycle_timers=cycle_timers,
@@ -1157,6 +1820,7 @@ class HeartFChatting:
                         thinking_id=thinking_id,
                         actions=chosen_action_plan_infos,
                         selected_expressions=selected_expressions,
+                        context_refs=llm_response.context_refs,
                     )
                     return {
                         "action_type": "reply",
@@ -1569,13 +2233,17 @@ class HeartFChatting:
                 person = Person(person_name=target_name)
                 if person.is_known:
                     target_user_id = person.get_user_id_for_platform(global_config.bot.platform) or str(person.user_id)
-                    logger.info(f"{self.log_prefix} block_user 通过Person解析用户 '{target_name}' -> QQ号 {target_user_id}")
+                    logger.info(
+                        f"{self.log_prefix} block_user 通过Person解析用户 '{target_name}' -> QQ号 {target_user_id}"
+                    )
                 else:
                     # 回退到消息记录匹配
                     resolved_id = self._resolve_user_id_by_nickname(target_name)
                     if resolved_id:
                         target_user_id = resolved_id
-                        logger.info(f"{self.log_prefix} block_user 通过消息记录解析用户 '{target_name}' -> QQ号 {target_user_id}")
+                        logger.info(
+                            f"{self.log_prefix} block_user 通过消息记录解析用户 '{target_name}' -> QQ号 {target_user_id}"
+                        )
                     else:
                         logger.warning(f"{self.log_prefix} block_user 无法将 '{target_name}' 解析为有效的QQ号")
                         return {"action_type": "block_user", "success": False, "reply_text": ""}
@@ -1677,12 +2345,16 @@ class HeartFChatting:
                 person = Person(person_name=target_name)
                 if person.is_known:
                     target_user_id = person.get_user_id_for_platform(global_config.bot.platform) or str(person.user_id)
-                    logger.info(f"{self.log_prefix} ban_user 通过Person解析用户 '{target_name}' -> QQ号 {target_user_id}")
+                    logger.info(
+                        f"{self.log_prefix} ban_user 通过Person解析用户 '{target_name}' -> QQ号 {target_user_id}"
+                    )
                 else:
                     resolved_id = self._resolve_user_id_by_nickname(target_name)
                     if resolved_id:
                         target_user_id = resolved_id
-                        logger.info(f"{self.log_prefix} ban_user 通过消息记录解析用户 '{target_name}' -> QQ号 {target_user_id}")
+                        logger.info(
+                            f"{self.log_prefix} ban_user 通过消息记录解析用户 '{target_name}' -> QQ号 {target_user_id}"
+                        )
                     else:
                         logger.warning(f"{self.log_prefix} ban_user 无法将 '{target_name}' 解析为有效的QQ号")
                         return {"action_type": "ban_user", "success": False, "reply_text": ""}
@@ -1795,6 +2467,7 @@ class HeartFChatting:
 
         if user_reply_text:
             from src.plugin_system.apis.generator_api import process_human_text
+
             reply_set = process_human_text(user_reply_text, True, True)
             if reply_set:
                 _, reply_text, _ = await self._send_and_store_reply(
@@ -1907,13 +2580,17 @@ class HeartFChatting:
                 person = Person(person_name=target_name)
                 if person.is_known:
                     target_user_id = person.get_user_id_for_platform(global_config.bot.platform) or str(person.user_id)
-                    logger.info(f"{self.log_prefix} set_group_title 通过Person解析用户 '{target_name}' -> QQ号 {target_user_id}")
+                    logger.info(
+                        f"{self.log_prefix} set_group_title 通过Person解析用户 '{target_name}' -> QQ号 {target_user_id}"
+                    )
                 else:
                     # 回退到消息记录匹配
                     resolved_id = self._resolve_user_id_by_nickname(target_name)
                     if resolved_id:
                         target_user_id = resolved_id
-                        logger.info(f"{self.log_prefix} set_group_title 通过消息记录解析用户 '{target_name}' -> QQ号 {target_user_id}")
+                        logger.info(
+                            f"{self.log_prefix} set_group_title 通过消息记录解析用户 '{target_name}' -> QQ号 {target_user_id}"
+                        )
                     else:
                         logger.warning(f"{self.log_prefix} set_group_title 无法将 '{target_name}' 解析为有效的QQ号")
                         return {"action_type": "set_group_title", "success": False, "reply_text": ""}
@@ -1945,10 +2622,7 @@ class HeartFChatting:
 
         # 生成确认回复
         action_desc = f"清除了{target_name}的头衔" if not title else f"将{target_name}的头衔设置为「{title}」"
-        confirm_extra_info = (
-            f"[头衔设置] 你刚刚{action_desc}。"
-            f"请自然地确认这个操作，告知用户头衔已设置成功。"
-        )
+        confirm_extra_info = f"[头衔设置] 你刚刚{action_desc}。请自然地确认这个操作，告知用户头衔已设置成功。"
 
         reply_text = ""
         try:
@@ -1991,6 +2665,45 @@ class HeartFChatting:
         return {"action_type": "set_group_title", "success": True, "reply_text": reply_text}
 
     # =========================================================================
+    # 直播平台 Person Profile 注入
+    # =========================================================================
+
+    async def _build_live_memory_context(
+        self,
+        action_message,
+    ) -> str:
+        """直播 bypass 路径：Person Profile 注入到 extra_info，超时 500ms。开关由适配器 additional_config 控制。"""
+        add_cfg = getattr(action_message, "additional_config", None) or {}
+        if not add_cfg.get("live_person_profile_enabled", True):
+            return ""
+
+        timeout = add_cfg.get("live_memory_search_timeout_seconds", 0.5)
+
+        try:
+            from src.memory_system.person_profile_injector import inject_person_profiles
+
+            messages = [action_message] if action_message else []
+            is_group_chat = bool(self.chat_stream.group_info)
+
+            result = await asyncio.wait_for(
+                inject_person_profiles(
+                    chat_id=self.stream_id,
+                    chat_content_block="",
+                    messages=messages,
+                    is_group_chat=is_group_chat,
+                ),
+                timeout=timeout,
+            )
+
+            return result.strip() if isinstance(result, str) and result.strip() else ""
+        except asyncio.TimeoutError:
+            logger.debug(f"{self.log_prefix} Person Profile 预取超时")
+            return ""
+        except Exception as e:
+            logger.debug(f"{self.log_prefix} Person Profile 预取跳过: {e}")
+            return ""
+
+    # =========================================================================
     # Bilibili Live 两阶段联网搜索
     # =========================================================================
 
@@ -2003,6 +2716,7 @@ class HeartFChatting:
         llm_response,
         action_planner_info: ActionPlannerInfo,
         chosen_action_plan_infos: List[ActionPlannerInfo],
+        context_refs: Optional[List["ReplyContextRef"]],
         thinking_id: str,
         available_actions: Dict[str, ActionInfo],
         cycle_timers: Dict[str, float],
@@ -2026,22 +2740,52 @@ class HeartFChatting:
         if not search_query:
             return None
 
+        # From this point the two-pass path owns the reservation. When there is
+        # no search request the caller still owns it and settles it through the
+        # normal reply path.
+        refs = tuple(context_refs or ())
         logger.info(f"{self.log_prefix} [两阶段搜索] 检测到搜索请求: {search_query}")
 
         # --- Pass 1: 发送"正在查询"的初始回复 ---
-        initial_reply_text = self._extract_initial_reply_from_response(llm_response)
-        if not initial_reply_text:
-            initial_reply_text = self._BILIBILI_SEARCH_FALLBACK_REPLY
+        try:
+            initial_reply_text = self._extract_initial_reply_from_response(llm_response)
+            if not initial_reply_text:
+                initial_reply_text = self._BILIBILI_SEARCH_FALLBACK_REPLY
 
-        logger.info(f"{self.log_prefix} [两阶段搜索] 发送初始回复: {initial_reply_text[:50]}...")
+            logger.info(f"{self.log_prefix} [两阶段搜索] 发送初始回复: {initial_reply_text[:50]}...")
+            receipt = await send_api.text_to_stream_receipt(
+                text=initial_reply_text,
+                stream_id=self.chat_stream.stream_id,
+                typing=False,
+                storage_message=True,
+            )
+        except asyncio.CancelledError:
+            await self._settle_interrupted_reply_context(refs, [], "bilibili_pass1_cancelled")
+            raise
+        except Exception as e:
+            await self._settle_interrupted_reply_context(refs, [], "bilibili_pass1_send_error")
+            logger.error(f"{self.log_prefix} [两阶段搜索] Pass 1 发送失败: {e}")
+            return {
+                "action_type": "reply",
+                "success": False,
+                "reply_text": "",
+                "loop_info": None,
+            }
 
-        # 发送初始回复给直播间
-        await send_api.text_to_stream(
-            text=initial_reply_text,
-            stream_id=self.chat_stream.stream_id,
-            typing=False,
-            storage_message=True,
-        )
+        # Pass 1 is the reply produced from the reserved handoff context. Settle
+        # it now from the real adapter receipt; Pass 2 must never ACK it again.
+        await self._settle_interrupted_reply_context(refs, [receipt], "bilibili_pass1_not_delivered")
+        if not receipt.delivered:
+            logger.warning(
+                f"{self.log_prefix} [两阶段搜索] Pass 1 未投递，停止搜索: "
+                f"status={receipt.status}, detail={receipt.detail}"
+            )
+            return {
+                "action_type": "reply",
+                "success": False,
+                "reply_text": "",
+                "loop_info": None,
+            }
 
         # --- 执行联网搜索 (30秒超时) ---
         search_results = ""
@@ -2347,6 +3091,8 @@ class HeartFChatting:
             thinking_id=thinking_id,
             actions=chosen_action_plan_infos,
         )
+        # context_refs intentionally stay on Pass 1: the generated follow-up is
+        # a second delivery, not a second consumption of the Focus handoff.
 
         return {
             "action_type": "reply",
