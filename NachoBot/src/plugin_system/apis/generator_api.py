@@ -20,6 +20,12 @@ from src.llm_models.exceptions import ReqAbortException
 from src.chat.message_receive.chat_stream import ChatStream
 from src.chat.utils.utils import process_llm_response
 from src.chat.replyer.replyer_manager import replyer_manager
+from src.chat.focus.reply_context import (
+    ReplyContextRef,
+    ReplyContextRequest,
+    assemble_reply_context,
+    release_reply_context,
+)
 from src.plugin_system.base.component_types import ActionInfo
 
 if TYPE_CHECKING:
@@ -93,6 +99,7 @@ async def generate_reply(
     request_type: str = "generator_api",
     from_plugin: bool = True,
     interrupt_flag: Optional[asyncio.Event] = None,
+    reply_context: Optional[ReplyContextRequest] = None,
 ) -> Tuple[bool, Optional["LLMGenerationDataModel"]]:
     """生成回复
 
@@ -112,16 +119,33 @@ async def generate_reply(
         model_set_with_weight: 模型配置列表，每个元素为 (TaskConfig, weight) 元组
         request_type: 请求类型（可选，记录LLM使用）
         from_plugin: 是否来自插件
+        reply_context: Focus 短期跨会话上下文请求；由服务端 provider 校验并预留
     Returns:
         Tuple[bool, List[Tuple[str, Any]], Optional[str]]: (是否成功, 回复集合, 提示词)
     """
+    acquired_refs: tuple[ReplyContextRef, ...] = ()
     try:
+        if chat_stream is not None and chat_id is not None and chat_stream.stream_id != chat_id:
+            raise ValueError("chat_stream 与 chat_id 指向不同会话")
+        canonical_chat_id = chat_stream.stream_id if chat_stream is not None else chat_id
+        if not canonical_chat_id:
+            raise ValueError("无法确定回复目标会话")
+        if reply_message is not None:
+            reply_message_chat_id = getattr(reply_message, "chat_id", None)
+            if reply_message_chat_id and reply_message_chat_id != canonical_chat_id:
+                raise ValueError("reply_message 不属于当前回复目标会话")
+
         # 获取回复器
         logger.debug("[GeneratorAPI] 开始生成回复")
         replyer = get_replyer(chat_stream, chat_id, request_type=request_type)
         if not replyer:
             logger.error("[GeneratorAPI] 无法获取回复器")
             return False, None
+        if replyer.chat_stream.stream_id != canonical_chat_id:
+            raise ValueError("Replyer 实例与回复目标会话不一致")
+
+        prompt_context = await assemble_reply_context(reply_context, target_chat_id=canonical_chat_id)
+        acquired_refs = prompt_context.context_refs
 
         if not extra_info and action_data:
             extra_info = action_data.get("extra_info", "")
@@ -138,10 +162,15 @@ async def generate_reply(
             reply_message=reply_message,
             reply_reason=reply_reason,
             from_plugin=from_plugin,
-            stream_id=chat_stream.stream_id if chat_stream else chat_id,
+            stream_id=canonical_chat_id,
             interrupt_flag=interrupt_flag,
+            prompt_context=prompt_context,
         )
+        if llm_response is not None:
+            llm_response.context_refs = list(acquired_refs)
         if not success:
+            await release_reply_context(acquired_refs, "generation_failed")
+            acquired_refs = ()
             logger.warning("[GeneratorAPI] 回复生成失败")
             return False, None
         reply_set: Optional[ReplySetModel] = None
@@ -160,22 +189,34 @@ async def generate_reply(
                     pass
             reply_set = process_human_text(content, enable_splitter, enable_chinese_typo)
         llm_response.reply_set = reply_set
+        if not content or not content.strip() or not reply_set or len(reply_set) == 0:
+            await release_reply_context(acquired_refs, "empty_generation")
+            llm_response.context_refs = []
+            acquired_refs = ()
         logger.debug(f"[GeneratorAPI] 回复生成成功，生成了 {len(reply_set) if reply_set else 0} 个回复项")
 
         return success, llm_response
 
+    except asyncio.CancelledError:
+        await asyncio.shield(release_reply_context(acquired_refs, "generation_cancelled"))
+        raise
+
     except ValueError as ve:
+        await release_reply_context(acquired_refs, "invalid_request")
         raise ve
 
     except UserWarning as uw:
+        await release_reply_context(acquired_refs, "generation_cancelled")
         logger.warning(f"[GeneratorAPI] 中断了生成: {uw}")
         return False, None
 
     except ReqAbortException:
+        await release_reply_context(acquired_refs, "generation_cancelled")
         logger.debug("[GeneratorAPI] 回复生成被外部信号中断")
         return False, None
 
     except Exception as e:
+        await release_reply_context(acquired_refs, "generation_error")
         logger.error(f"[GeneratorAPI] 生成回复时出错: {e}")
         logger.error(traceback.format_exc())
         return False, None

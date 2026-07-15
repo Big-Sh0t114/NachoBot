@@ -36,6 +36,7 @@ from src.config.official_configs import (
     DebugConfig,
     AdvancedConfig,
     InjectionConfig,
+    FocusConfig,
 )
 
 from .api_ada_configs import (
@@ -375,6 +376,7 @@ class Config(ConfigBase):
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     response_filter: ResponseFilterConfig = field(default_factory=ResponseFilterConfig)
     injections: InjectionConfig = field(default_factory=InjectionConfig)
+    focus: FocusConfig = field(default_factory=FocusConfig)
 
 
 @dataclass

@@ -21,8 +21,9 @@ from src.chat.message_receive.uni_message_sender import UniversalMessageSender
 from src.chat.utils.timer_calculator import Timer  # <--- Import Timer
 from src.chat.utils.utils import get_chat_type_and_target_info
 from src.chat.utils.prompt_builder import global_prompt_manager
-from src.chat.utils.prompt_variables import render_dynamic_prompt_template
+from src.chat.utils.prompt_variables import get_latest_session_name, render_dynamic_prompt_template
 from src.chat.utils.prompt_injection_guard import build_guardrail_instruction, guard_user_content
+from src.chat.focus.reply_context import ReplyPromptContext
 from src.chat.utils.url_fetcher import UrlContentFetcher, extract_urls
 from src.chat.utils.web_search import WebSearchManager
 from src.chat.utils.chat_message_builder import (
@@ -233,6 +234,7 @@ class PrivateReplyer:
         stream_id: Optional[str] = None,
         reply_message: Optional[DatabaseMessages] = None,
         interrupt_flag: Optional[asyncio.Event] = None,
+        prompt_context: Optional[ReplyPromptContext] = None,
     ) -> Tuple[bool, LLMGenerationDataModel]:
         # sourcery skip: merge-nested-ifs
         """
@@ -254,6 +256,8 @@ class PrivateReplyer:
         prompt = None
         selected_expressions: Optional[List[int]] = None
         llm_response = LLMGenerationDataModel()
+        if prompt_context is not None:
+            llm_response.context_refs = list(prompt_context.context_refs)
         if available_actions is None:
             available_actions = {}
         try:
@@ -266,6 +270,7 @@ class PrivateReplyer:
                     enable_tool=enable_tool,
                     reply_message=reply_message,
                     reply_reason=reply_reason,
+                    prompt_context=prompt_context,
                 )
             llm_response.prompt = prompt
             llm_response.selected_expressions = selected_expressions
@@ -771,6 +776,17 @@ class PrivateReplyer:
 
     async def _build_mid_term_memory_block(self, chat_id: str, messages) -> str:
         """构建中期记忆召回文本块"""
+        platform = getattr(self.chat_stream, "platform", "")
+        if platform in {"bilibili", "bilibili.live", "discord_vc", "universal_vc"}:
+            add_cfg = {}
+            try:
+                ctx_msg = getattr(self.chat_stream.context, "message", None)
+                msg_info = getattr(ctx_msg, "message_info", None)
+                add_cfg = getattr(msg_info, "additional_config", None) or {}
+            except Exception:
+                pass
+            if not add_cfg.get("live_memory_search_enabled", True):
+                return ""
         try:
             from src.memory_system.mid_term_memory import get_mid_term_memory_manager
 
@@ -791,6 +807,7 @@ class PrivateReplyer:
         available_actions: Optional[Dict[str, ActionInfo]] = None,
         chosen_actions: Optional[List[ActionPlannerInfo]] = None,
         enable_tool: bool = True,
+        prompt_context: Optional[ReplyPromptContext] = None,
     ) -> Tuple[str, List[int]]:
         """
         构建回复器上下文
@@ -818,7 +835,10 @@ class PrivateReplyer:
         person_name = "用户"
         sender = "用户"
         target = "消息"
-        injection_detected = False
+        if prompt_context is not None and prompt_context.target_chat_id != chat_id:
+            raise ValueError("Focus ReplyPromptContext 不属于当前私聊 Replyer")
+        focus_handoff_block = prompt_context.focus_handoff_block if prompt_context is not None else ""
+        injection_detected = bool(prompt_context and prompt_context.injection_detected)
 
         if reply_message:
             user_id = reply_message.user_info.user_id
@@ -1055,6 +1075,7 @@ class PrivateReplyer:
                 mid_term_memory_block=mid_term_memory_block,
                 relation_info_block=relation_info,
                 extra_info_block=extra_info_block,
+                focus_handoff_block=focus_handoff_block,
                 identity=personality_prompt,
                 action_descriptions=actions_info,
                 mood_state=mood_prompt,
@@ -1081,6 +1102,7 @@ class PrivateReplyer:
                 mid_term_memory_block=mid_term_memory_block,
                 relation_info_block=relation_info,
                 extra_info_block=extra_info_block,
+                focus_handoff_block=focus_handoff_block,
                 identity=personality_prompt,
                 action_descriptions=actions_info,
                 mood_state=mood_prompt,
@@ -1102,6 +1124,7 @@ class PrivateReplyer:
         chat_stream = self.chat_stream
         chat_id = chat_stream.stream_id
         is_group_chat = bool(chat_stream.group_info)
+        latest_session = get_latest_session_name(chat_stream)
         context_size = global_config.chat.get_max_context_size(is_group_chat=is_group_chat)
         advanced_on = advanced_manager.is_on(chat_stream)
         injection_detected = False
@@ -1163,12 +1186,12 @@ class PrivateReplyer:
             if is_group_chat:
                 if sender:
                     reply_target_block = (
-                        f"现在{sender}说的:{target}。引起了你的注意，你想要在群里发言或者回复这条消息。"
+                        f"现在{sender}说的:{target}。引起了你的注意，你想要在群「{latest_session}」里发言或者回复这条消息。"
                     )
                 elif target:
-                    reply_target_block = f"现在{target}引起了你的注意，你想要在群里发言或者回复这条消息。"
+                    reply_target_block = f"现在{target}引起了你的注意，你想要在群「{latest_session}」里发言或者回复这条消息。"
                 else:
-                    reply_target_block = "现在，你想要在群里发言或者回复消息。"
+                    reply_target_block = f"现在，你想要在群「{latest_session}」里发言或者回复消息。"
             else:  # private chat
                 if sender:
                     reply_target_block = f"现在{sender}说的:{target}。引起了你的注意，针对这条消息回复。"
@@ -1180,8 +1203,12 @@ class PrivateReplyer:
             reply_target_block = ""
 
         if is_group_chat:
-            chat_target_1 = await global_prompt_manager.get_prompt_async("chat_target_group1")
-            chat_target_2 = await global_prompt_manager.get_prompt_async("chat_target_group2")
+            chat_target_1 = await global_prompt_manager.format_prompt(
+                "chat_target_group1", latest_session=latest_session
+            )
+            chat_target_2 = await global_prompt_manager.format_prompt(
+                "chat_target_group2", latest_session=latest_session
+            )
         else:
             chat_target_name = "对方"
             if self.chat_target_info:
@@ -1250,12 +1277,13 @@ class PrivateReplyer:
     async def llm_generate_content(self, prompt: str, interrupt_flag: Optional[asyncio.Event] = None):
         with Timer("LLM生成", {}):  # 内部计时器，可选保留
             # 直接使用已初始化的模型实例
-            logger.info(f"\n{prompt}\n")
+            prompt_for_log = prompt
+            logger.info(f"\n{prompt_for_log}\n")
 
             if global_config.debug.show_prompt:
-                logger.info(f"\n{prompt}\n")
+                logger.info(f"\n{prompt_for_log}\n")
             else:
-                logger.debug(f"\n{prompt}\n")
+                logger.debug(f"\n{prompt_for_log}\n")
 
             content, (reasoning_content, model_name, tool_calls) = await self.express_model.generate_response_async(
                 prompt, interrupt_flag=interrupt_flag

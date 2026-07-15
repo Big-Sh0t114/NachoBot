@@ -79,17 +79,17 @@ class EventsManager:
 
         continue_flag = True
 
-        # 1. 准备消息
+        # 1. 没有订阅者时不要触碰聊天流。Focus 事件轮次可能尚未创建消息上下文。
+        handlers = self._events_subscribers.get(event_type, [])
+        if not handlers:
+            return True, None
+
+        # 2. 准备消息
         transformed_message = self._prepare_message(
             event_type, message, llm_prompt, llm_response, stream_id, action_usage
         )
         if transformed_message:
             transformed_message = transformed_message.deepcopy()
-
-        # 2. 获取并遍历处理器
-        handlers = self._events_subscribers.get(event_type, [])
-        if not handlers:
-            return True, None
 
         current_stream_id = transformed_message.stream_id if transformed_message else None
         modified_message: Optional[NachoMessages] = None
@@ -268,7 +268,13 @@ class EventsManager:
         """从流ID构建消息"""
         chat_stream = get_chat_manager().get_stream(stream_id)
         assert chat_stream, f"未找到流ID为 {stream_id} 的聊天流"
-        message = chat_stream.context.get_last_message()
+        context = getattr(chat_stream, "context", None)
+        message = context.get_last_message() if context is not None else None
+        if message is None:
+            logger.debug(
+                f"流 {stream_id} 尚无消息上下文，使用无原始消息的事件对象"
+            )
+            return self._transform_event_without_message(stream_id, llm_prompt, llm_response)
         return self._transform_event_message(message, llm_prompt, llm_response)
 
     def _transform_event_without_message(
