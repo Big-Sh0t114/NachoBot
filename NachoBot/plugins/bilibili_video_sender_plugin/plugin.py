@@ -2319,6 +2319,7 @@ class BilibiliAutoSendHandler(BaseEventHandler):
             "buvid3": self.get_config("bilibili.buvid3", ""),
             "enable_video_splitting": self.get_config("bilibili.enable_video_splitting", True),
             "delete_original_after_split": self.get_config("bilibili.delete_original_after_split", True),
+            "max_video_duration_minutes": self.get_config("bilibili.max_video_duration_minutes", 10),
         }
 
         # 检查鉴权配置
@@ -2340,6 +2341,8 @@ class BilibiliAutoSendHandler(BaseEventHandler):
             for rec in validation_result["recommendations"]:
                 self._logger.debug(f"配置建议: {rec}")
 
+        max_video_duration_minutes = config_opts["max_video_duration_minutes"]
+        max_video_duration_seconds = max_video_duration_minutes * 60
         loop = asyncio.get_running_loop()
 
         def _blocking() -> Optional[Tuple[BilibiliVideoInfo, List[str], str]]:
@@ -2350,11 +2353,11 @@ class BilibiliAutoSendHandler(BaseEventHandler):
 
             self._logger.debug("Video info parsed", title=info.title, aid=info.aid, cid=info.cid)
 
-            if info.duration > 600:
+            if max_video_duration_minutes > 0 and info.duration > max_video_duration_seconds:
                 self._logger.info(
-                    f"Video duration ({info.duration}s) exceeds 10 minutes, discarding before fetching URLs."
+                    f"Video duration ({info.duration}s) exceeds configured limit ({max_video_duration_minutes} minutes), discarding before fetching URLs."
                 )
-                return info, [], "视频时长超过10分钟"
+                return info, [], "video_duration_exceeds_configured_limit"
 
             urls, status = BilibiliParser.get_play_urls(info.aid, info.cid, config_opts)
             self._logger.debug("Playback URLs fetched", status=status, url_count=len(urls), title=info.title)
@@ -2377,8 +2380,10 @@ class BilibiliAutoSendHandler(BaseEventHandler):
         if not urls:
             error_msg = f"解析失败：{status}"
             self._logger.error(error_msg)
-            if status == "视频时长超过10分钟":
-                await self._send_text("视频太长，猫猫搬不动啦        (；´-ω-`)", stream_id)
+            if status == "video_duration_exceeds_configured_limit":
+                await self._send_text(
+                    f"视频超过{max_video_duration_minutes}分钟，猫猫搬不动啦        (；´-ω-`)", stream_id
+                )
                 return self._make_return_value(True, True, "视频过长，已丢弃")
             return self._make_return_value(True, True, "解析失败")
 
@@ -3086,6 +3091,9 @@ class BilibiliVideoSenderPlugin(BasePlugin):
             "buvid3": ConfigField(type=str, default="", description="B站设备标识Buvid3（用于生成session参数）"),
             "enable_video_splitting": ConfigField(type=bool, default=True, description="是否启用视频分块功能"),
             "delete_original_after_split": ConfigField(type=bool, default=True, description="是否在分块后删除原始文件"),
+            "max_video_duration_minutes": ConfigField(
+                type=int, default=10, description="视频时长上限（分钟）；设为0表示不限制视频时长"
+            ),
             "max_video_size_mb": ConfigField(
                 type=int, default=100, description="视频文件大小限制（MB），超过此大小将进行压缩或分割"
             ),
