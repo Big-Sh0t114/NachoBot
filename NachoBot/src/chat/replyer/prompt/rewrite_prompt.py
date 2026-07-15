@@ -5,9 +5,9 @@ from src.chat.utils.prompt_builder import Prompt
 
 
 def init_rewrite_prompt():
-    Prompt("你正在qq群里聊天，下面是群里正在聊的内容:", "chat_target_group1")
+    Prompt("你正在qq群「{latest_session}」里聊天，下面是群「{latest_session}」里正在聊的内容:", "chat_target_group1")
     Prompt("你正在和{sender_name}聊天，这是你们之前聊的内容：", "chat_target_private1")
-    Prompt("正在群里聊天", "chat_target_group2")
+    Prompt("正在群「{latest_session}」里聊天", "chat_target_group2")
     Prompt("和{sender_name}聊天", "chat_target_private2")
 
     Prompt(
