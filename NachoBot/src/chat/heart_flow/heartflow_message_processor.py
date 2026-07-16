@@ -8,6 +8,7 @@ from src.config.config import global_config
 from src.chat.message_receive.message import MessageRecv
 from src.chat.message_receive.storage import MessageStorage
 from src.chat.heart_flow.heartflow import heartflow
+from src.chat.focus.coordinator import focus_coordinator
 from src.chat.utils.utils import is_mentioned_bot_in_message
 from src.chat.utils.chat_message_builder import replace_user_references
 from src.common.logger import get_logger
@@ -82,16 +83,27 @@ class HeartFCMessageReceiver:
             # 2. 兴趣度计算与更新
             _, keywords = await _calculate_interest(message)
 
-            await self.storage.store_message(message, chat)
+            stored_ref = await self.storage.store_message(message, chat)
+            dispatch = await focus_coordinator.route_message(message, stored_ref)
 
-            heartflow_chat: HeartFChatting = await heartflow.get_or_create_heartflow_chat(chat.stream_id)  # type: ignore
+            heartflow_chat = None
 
             # 推送新消息通知，若 Planner 正在执行则触发打断（@提及消息不触发打断）
             is_mentioned = getattr(message, "is_mentioned", False) or getattr(message, "is_at", False)
-            heartflow_chat.signal_new_message(skip_interrupt=is_mentioned)
+            if dispatch.managed:
+                if dispatch.woke_active and dispatch.active_chat_id:
+                    heartflow_chat = await heartflow.get_or_create_heartflow_chat(dispatch.active_chat_id)
+                    if heartflow_chat is None:
+                        raise RuntimeError(f"Cannot start Focus active chat: {dispatch.active_chat_id}")
+                    heartflow_chat.signal_new_message(skip_interrupt=is_mentioned)
+            else:
+                heartflow_chat = await heartflow.get_or_create_heartflow_chat(chat.stream_id)
+                if heartflow_chat is None:
+                    raise RuntimeError(f"Cannot start chat runtime: {chat.stream_id}")
+                heartflow_chat.signal_new_message(skip_interrupt=is_mentioned)
 
             if global_config.mood.enable_mood:
-                chat_mood = mood_manager.get_mood_by_chat_id(heartflow_chat.stream_id)
+                chat_mood = mood_manager.get_mood_by_chat_id(chat.stream_id)
                 asyncio.create_task(chat_mood.update_mood_by_message(message))
 
             # 3. 日志记录
@@ -128,6 +140,8 @@ class HeartFCMessageReceiver:
                 platform=message.message_info.platform,  # type: ignore
                 user_id=message.message_info.user_info.user_id,  # type: ignore
                 nickname=userinfo.user_nickname,  # type: ignore
+                group_id=message.message_info.group_info.group_id if message.message_info.group_info else None,
+                group_cardname=userinfo.user_cardname,
             )
 
         except Exception as e:
