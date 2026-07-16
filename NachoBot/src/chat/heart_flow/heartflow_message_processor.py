@@ -140,6 +140,8 @@ class HeartFCMessageReceiver:
                 platform=message.message_info.platform,  # type: ignore
                 user_id=message.message_info.user_info.user_id,  # type: ignore
                 nickname=userinfo.user_nickname,  # type: ignore
+                group_id=message.message_info.group_info.group_id if message.message_info.group_info else None,
+                group_cardname=userinfo.user_cardname,
             )
 
         except Exception as e:
