@@ -90,6 +90,7 @@ async def generate_reply(
     action_data: Optional[Dict[str, Any]] = None,
     reply_message: Optional["DatabaseMessages"] = None,
     extra_info: str = "",
+    person_profile_block: str = "",
     reply_reason: str = "",
     available_actions: Optional[Dict[str, ActionInfo]] = None,
     chosen_actions: Optional[List["ActionPlannerInfo"]] = None,
@@ -109,6 +110,7 @@ async def generate_reply(
         action_data: 动作数据（向下兼容，包含reply_to和extra_info）
         reply_message: 回复的消息对象
         extra_info: 额外信息，用于补充上下文
+        person_profile_block: Rendered profile block for an explicit Replyer template slot
         reply_reason: 回复原因
         available_actions: 可用动作
         chosen_actions: 已选动作
@@ -156,6 +158,7 @@ async def generate_reply(
         # 调用回复器生成回复
         success, llm_response = await replyer.generate_reply_with_context(
             extra_info=extra_info,
+            person_profile_block=person_profile_block,
             available_actions=available_actions,
             chosen_actions=chosen_actions,
             enable_tool=enable_tool,

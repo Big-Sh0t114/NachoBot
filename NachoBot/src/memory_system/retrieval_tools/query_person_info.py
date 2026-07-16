@@ -57,7 +57,7 @@ def _format_group_nick_names(group_nick_name_field) -> str:
         for item in group_nick_names_data:
             if isinstance(item, dict):
                 group_id = item.get("group_id", "未知群号")
-                group_nick_name = item.get("group_nick_name", "未知群昵称")
+                group_nick_name = item.get("group_cardname") or item.get("group_nick_name") or "未知群昵称"
                 group_nick_list.append(f"  - 群号 {group_id}：{group_nick_name}")
             elif isinstance(item, str):
                 # 兼容旧格式（如果存在）
@@ -140,8 +140,10 @@ async def query_person_info(person_name: str) -> str:
             # 基本信息
             if record.person_name:
                 result_parts.append(f"用户名称：{record.person_name}")
+            if record.user_nickname:
+                result_parts.append(f"平台昵称：{record.user_nickname}")
             if record.nickname:
-                result_parts.append(f"昵称：{record.nickname}")
+                result_parts.append(f"bot 对用户的称呼：{record.nickname}")
             if record.person_id:
                 result_parts.append(f"用户ID：{record.person_id}")
             if record.platform:
@@ -150,7 +152,7 @@ async def query_person_info(person_name: str) -> str:
                 result_parts.append(f"平台用户ID：{record.user_id}")
 
             # 群昵称信息
-            group_nick_name_str = _format_group_nick_names(getattr(record, "group_nick_name", None))
+            group_nick_name_str = _format_group_nick_names(record.group_cardname)
             if group_nick_name_str:
                 result_parts.append(group_nick_name_str)
 
@@ -213,8 +215,10 @@ async def query_person_info(person_name: str) -> str:
             # 基本信息
             if record.person_name:
                 result_parts.append(f"用户名称：{record.person_name}")
+            if record.user_nickname:
+                result_parts.append(f"平台昵称：{record.user_nickname}")
             if record.nickname:
-                result_parts.append(f"昵称：{record.nickname}")
+                result_parts.append(f"bot 对用户的称呼：{record.nickname}")
             if record.person_id:
                 result_parts.append(f"用户ID：{record.person_id}")
             if record.platform:
@@ -223,7 +227,7 @@ async def query_person_info(person_name: str) -> str:
                 result_parts.append(f"平台用户ID：{record.user_id}")
 
             # 群昵称信息
-            group_nick_name_str = _format_group_nick_names(getattr(record, "group_nick_name", None))
+            group_nick_name_str = _format_group_nick_names(record.group_cardname)
             if group_nick_name_str:
                 result_parts.append(group_nick_name_str)
 
