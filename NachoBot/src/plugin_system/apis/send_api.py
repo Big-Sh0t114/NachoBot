@@ -31,7 +31,7 @@ from src.config.config import global_config
 from src.chat.message_receive.chat_stream import get_chat_manager
 from src.chat.message_receive.uni_message_sender import UniversalMessageSender
 from src.chat.message_receive.message import MessageSending, MessageRecv
-from src.chat.focus.coordinator import focus_coordinator
+from src.chat.focus.coordinator import current_context_lease, focus_coordinator
 from src.chat.focus.models import EffectKind, StaleFocusLeaseError
 from ncnk_message import Seg, UserInfo, MessageBase, BaseMessageInfo
 
@@ -191,7 +191,12 @@ async def _send_to_target_receipt(
     show_log: bool = True,
     selected_expressions: Optional[List[int]] = None,
 ) -> SendReceipt:
-    """经过 Focus epoch/turn 围栏后发送，并返回真实投递结果。"""
+    """发送聊天生成的回复，并返回经过 Focus 围栏的真实投递结果。
+
+    该入口只供需要 ACK/结算回复上下文的聊天生成链路使用。插件、
+    hook 和系统通知使用 legacy bool API；它们不是 Focus 回合副作用，
+    不应受 active chat 租约限制。
+    """
     try:
         async with focus_coordinator.effect_permit(
             None,
@@ -368,8 +373,18 @@ async def _send_to_target(
     show_log: bool = True,
     selected_expressions: Optional[List[int]] = None,
 ) -> bool:
-    """Legacy bool API: delivery and intentional suppression are both handled."""
-    receipt = await _send_to_target_receipt(
+    """通用发送入口；仅围栏当前 Focus 回合产生的副作用。
+
+    未绑定 Focus 租约的插件、hook 和系统通知可向任意已注册聊天流
+    发送，不受 active chat 限制。若调用发生在 Focus 回合上下文内，
+    则继续校验租约，防止聊天动作或其派生任务在切换后迟到落地。
+    """
+    receipt_sender = (
+        _send_to_target_receipt
+        if current_context_lease() is not None
+        else _send_to_target_receipt_permitted
+    )
+    receipt = await receipt_sender(
         message_segment=message_segment,
         stream_id=stream_id,
         display_message=display_message,
