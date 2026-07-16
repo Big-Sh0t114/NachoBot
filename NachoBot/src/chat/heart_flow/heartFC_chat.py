@@ -53,6 +53,8 @@ from src.chat.focus.models import (
     TurnOutcome,
     TurnStatus,
     WakeReason,
+    focus_platform_bypasses_planner,
+    focus_session_priority,
 )
 from src.chat.focus.reply_context import acquire_reply_context_request, release_reply_context
 from src.chat.focus.reply_delivery import settle_reply_context_delivery
@@ -460,16 +462,39 @@ class HeartFChatting:
 
     @staticmethod
     def _focus_platform_bypasses_planner(platform: str, is_group_chat: bool) -> bool:
-        normalized = str(platform or "").strip().lower()
-        return normalized in {"discord_vc", "universal_vc"} or (
-            is_group_chat and normalized in {"bilibili", "bilibili.live"}
-        )
+        kind = ChatKind.GROUP if is_group_chat else ChatKind.PRIVATE
+        return focus_platform_bypasses_planner(platform, kind)
+
+
 
     @classmethod
     def _focus_member_bypasses_planner(cls, member: FocusMember) -> bool:
         return cls._focus_platform_bypasses_planner(
             member.platform,
             member.kind is ChatKind.GROUP,
+        )
+
+    @staticmethod
+    def _focus_switch_target_reply_action(
+        focus_turn: FocusTurn | None,
+        recent_messages: List["DatabaseMessages"],
+        available_actions: Dict[str, ActionInfo],
+    ) -> ActionPlannerInfo | None:
+        """Turn a committed Focus switch into a direct Replyer handoff."""
+
+        if (
+            focus_turn is None
+            or not (focus_turn.wake_reason & WakeReason.SWITCH_TARGET)
+            or not recent_messages
+        ):
+            return None
+        target_message = recent_messages[-1]
+        return ActionPlannerInfo(
+            action_type="reply",
+            reasoning="Focus switch target: directly handle the event selected by the routing Gate",
+            action_data={"focus_switch_target": True},
+            action_message=target_message,
+            available_actions=available_actions,
         )
 
     @staticmethod
@@ -508,14 +533,14 @@ class HeartFChatting:
         return list(format_recent_source_messages(recent_messages or (), limit=10))
 
     @staticmethod
-    def _focus_forced_private_action(
+    def _focus_forced_priority_action(
         coordinator: FocusCoordinator,
         source_chat_id: str,
         focus_turn: FocusTurn,
         available_actions: Dict[str, ActionInfo],
         recent_messages: List["DatabaseMessages"] | None = None,
     ) -> ActionPlannerInfo | None:
-        """Deterministically route an authorized background private event."""
+        """Immediately preempt the active session for a higher-priority event."""
 
         definition = coordinator.definition_for_chat(source_chat_id)
         if definition is None:
@@ -523,39 +548,75 @@ class HeartFChatting:
         source = coordinator.policy.member(definition, source_chat_id)
         if source is None:
             return None
-        recent_results = HeartFChatting._focus_handoff_recent_results(recent_messages)
-        for event in focus_turn.events:
+        source_priority = focus_session_priority(source)
+
+        def event_priority(event) -> int:
             target = coordinator.policy.member(definition, event.target_chat_id)
-            if target is None or target.kind is not ChatKind.PRIVATE:
+            return int(focus_session_priority(target)) if target is not None else 0
+
+        ranked_events = sorted(
+            focus_turn.events,
+            key=lambda event: (
+                -event_priority(event),
+                not (event.is_at or event.is_mentioned),
+                event.first_unread.message_time,
+                event.event_id,
+            ),
+        )
+        recent_results = HeartFChatting._focus_handoff_recent_results(recent_messages)
+        for event in ranked_events:
+            target = coordinator.policy.member(definition, event.target_chat_id)
+            if target is None:
                 continue
+            target_priority = focus_session_priority(target)
+            if target_priority <= source_priority:
+                continue
+
+            safe_return = coordinator.policy.can_return_without_handoff(
+                definition,
+                source_chat_id,
+                event.target_chat_id,
+            )
             decision = coordinator.policy.decide_switch(
                 definition,
                 source_chat_id,
                 event.target_chat_id,
-                has_handoff=True,
+                has_handoff=not safe_return,
             )
             if not decision.allowed:
                 continue
+
+            target_kind = (
+                "Planner bypass 会话"
+                if HeartFChatting._focus_member_bypasses_planner(target)
+                else "私聊"
+            )
+            handoff = {}
+            if not safe_return:
+                handoff = {
+                    "task_summary": (
+                        f"按 Focus 会话优先级从「{source.display_name or source.chat_id}」切换到"
+                        f"「{target.display_name or target.chat_id}」处理新的{target_kind}事件；"
+                        "以下源会话近期内容用于衔接。"
+                    ),
+                    "known_facts": [],
+                    "pending_items": [f"处理目标{target_kind}中的最新未读消息"],
+                    "recent_results": recent_results,
+                }
             return ActionPlannerInfo(
                 action_type=SWITCH_CHAT_ACTION,
-                reasoning="Focus policy forces active session to the incoming private chat",
-                action_data={
-                    "event_id": event.event_id,
-                    "handoff": {
-                        "task_summary": (
-                            f"从「{source.display_name or source.chat_id}」切换到"
-                            f"「{target.display_name or target.chat_id}」处理新私聊；"
-                            "以下源会话近期内容用于衔接。"
-                        ),
-                        "known_facts": [],
-                        "pending_items": ["处理目标私聊中的最新未读消息"],
-                        "recent_results": recent_results,
-                    },
-                },
+                reasoning=(
+                    "Focus priority preemption: "
+                    "planner-bypass > private > normal-group"
+                ),
+                action_data={"event_id": event.event_id, "handoff": handoff},
                 action_message=None,
                 available_actions=available_actions,
             )
         return None
+
+    # Compatibility for integrations/tests that used the old private-only helper.
+    _focus_forced_private_action = _focus_forced_priority_action
 
     @staticmethod
     def _focus_gate_failure_fallback(
@@ -882,13 +943,19 @@ class HeartFChatting:
                 )
                 gate_required = bool(focus_turn is not None and focus_turn.events)
                 bypass_planner = bool(bypass_session)
+                switch_target_reply_action = self._focus_switch_target_reply_action(
+                    focus_turn,
+                    recent_messages_list,
+                    available_actions,
+                )
+
 
                 logger.debug(
                     f"{self.log_prefix} bypass_planner={bypass_planner}, messages={len(message_list_before_now)}"
                 )
 
-                forced_private_action = (
-                    self._focus_forced_private_action(
+                forced_priority_action = (
+                    self._focus_forced_priority_action(
                         focus_coordinator,
                         self.stream_id,
                         focus_turn,
@@ -898,18 +965,18 @@ class HeartFChatting:
                     if focus_turn is not None
                     else None
                 )
-                if forced_private_action is not None:
-                    logger.info(f"{self.log_prefix} [Focus] private event forces active-session switch")
+                if forced_priority_action is not None:
+                    logger.info(f"{self.log_prefix} [Focus] higher-priority event forces active-session switch")
                     switch_result = await execute_switch_chat(
                         focus_coordinator,
                         lease=focus_turn.lease,
-                        action_data=forced_private_action.action_data,
-                        reasoning=forced_private_action.reasoning,
+                        action_data=forced_priority_action.action_data,
+                        reasoning=forced_priority_action.reasoning,
                     )
                     if switch_result.success:
                         return True
                     logger.warning(
-                        f"{self.log_prefix} [Focus] forced private switch failed: {switch_result.reason}"
+                        f"{self.log_prefix} [Focus] forced priority switch failed: {switch_result.reason}"
                     )
                     return False
 
@@ -1048,6 +1115,9 @@ class HeartFChatting:
                             available_actions=available_actions,
                         )
                     ]
+                elif switch_target_reply_action is not None:
+                    logger.info(f"{self.log_prefix} [Focus] switch target goes directly to Replyer")
+                    action_to_use_info = [switch_target_reply_action]
                 else:
                     with Timer("规划器", cycle_timers):
                         # 获取当前有效的屏蔽用户ID集合传递给规划器
@@ -1706,23 +1776,10 @@ class HeartFChatting:
                             chat_id=self.chat_stream.stream_id, message_text=message_text_for_injection
                         )
 
-                        # --- 直播平台: A_Memorix + Person Profile 注入到 extra_info ---
-                        if action_planner_info.reasoning in (
-                            "Bilibili Live Bypass: Direct Reply",
-                            "Discord VC Bypass: Direct Reply",
-                        ):
-                            try:
-                                live_memory_context = await self._build_live_memory_context(
-                                    action_planner_info.action_message,
-                                )
-                                if live_memory_context:
-                                    injection_text = (
-                                        f"{live_memory_context}\n{injection_text}"
-                                        if injection_text
-                                        else live_memory_context
-                                    )
-                            except Exception:
-                                pass
+                        # --- Bilibili live bypass: dedicated Person Profile template block ---
+                        person_profile_block = await self._build_bilibili_live_person_profile_block(
+                            action_planner_info.action_message,
+                        )
 
                         # Inject pending danmaku summary from Bilibili/DiscordVC bypass
                         bypass_extra = (action_planner_info.action_data or {}).get("bypass_extra_info", "")
@@ -1762,6 +1819,7 @@ class HeartFChatting:
                             request_type="replyer",
                             from_plugin=False,
                             extra_info=injection_text,
+                            person_profile_block=person_profile_block,
                             interrupt_flag=self._planner_interrupt_flag,
                             reply_context=self._focus_reply_context(thinking_id),
                         )
@@ -2665,14 +2723,26 @@ class HeartFChatting:
         return {"action_type": "set_group_title", "success": True, "reply_text": reply_text}
 
     # =========================================================================
-    # 直播平台 Person Profile 注入
+    # Bilibili live bypass Person Profile injection
     # =========================================================================
 
-    async def _build_live_memory_context(
+    def _is_bilibili_live_room(self) -> bool:
+        platform = str(getattr(self.chat_stream, "platform", "") or "").strip().lower()
+        group_info = getattr(self.chat_stream, "group_info", None)
+        group_id = str(getattr(group_info, "group_id", "") or "")
+        return (
+            platform in {"bilibili", "bilibili.live"}
+            and bool(group_id)
+            and not group_id.startswith("comment:")
+        )
+
+    async def _build_bilibili_live_person_profile_block(
         self,
         action_message,
     ) -> str:
-        """直播 bypass 路径：Person Profile 注入到 extra_info，超时 500ms。开关由适配器 additional_config 控制。"""
+        """Build a dedicated Person Profile block only for Bilibili live bypass."""
+        if not self._is_bilibili_live_room() or action_message is None:
+            return ""
         add_cfg = getattr(action_message, "additional_config", None) or {}
         if not add_cfg.get("live_person_profile_enabled", True):
             return ""

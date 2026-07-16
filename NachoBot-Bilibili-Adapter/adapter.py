@@ -954,7 +954,7 @@ class BilibiliAdapter:
         # Sanitize text to prevent spoofing
         processed_text = self._sanitize_user_text(text)
 
-        if self.config.live_disable_network_search:
+        if not self.config.live_network_search_enabled:
             processed_text = _mask_urls(processed_text)
             additional_config["disable_tools"] = True
 
@@ -1324,7 +1324,7 @@ class BilibiliAdapter:
         )
 
         processed_text = text
-        if self.config.live_disable_network_search:
+        if not self.config.live_network_search_enabled:
             processed_text = _mask_urls(processed_text)
 
         message = MessageBase(
@@ -1750,6 +1750,10 @@ class BilibiliAdapter:
     ) -> BaseMessageInfo:
         # 直播消息使用 bilibili 平台
         live_platform = "bilibili"
+
+        if additional_config is None:
+            additional_config = {}
+
         return BaseMessageInfo(
             platform=live_platform,
             message_id=message_id,

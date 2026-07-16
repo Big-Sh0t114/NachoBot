@@ -206,6 +206,22 @@ class LiveRoomWorker:
             raise RuntimeError(
                 f"getDanmuInfo missing token/host_list: code={info_code} message={info_msg}"
             )
+        login_valid = getattr(self.api, "login_valid", None)
+        ws_uid = 0
+        if login_valid is True and self.config.dede_user_id:
+            try:
+                ws_uid = int(self.config.dede_user_id)
+            except (TypeError, ValueError):
+                self.logger.warning(
+                    "Room %s has an invalid DedeUserID; using anonymous danmu auth",
+                    self.room_id,
+                )
+        elif self.config.dede_user_id:
+            self.logger.warning(
+                "Room %s Bilibili login is invalid; using anonymous danmu auth",
+                self.room_id,
+            )
+
         if self.config.live_max_hosts > 0:
             host_list = host_list[: self.config.live_max_hosts]
         schemes = ["wss", "ws"] if self.config.use_wss else ["ws", "wss"]
@@ -229,10 +245,11 @@ class LiveRoomWorker:
                         seen.add(uri)
 
         last_exc: Optional[BaseException] = None
-        ws_headers = {
-            "Origin": "https://live.bilibili.com",
-            "Referer": f"https://live.bilibili.com/{self.room_id}",
-        }
+        ws_headers = {"Referer": f"https://live.bilibili.com/{self.room_id}"}
+        if ws_uid:
+            cookie_header = self.api._cookie_header()
+            if cookie_header:
+                ws_headers["Cookie"] = cookie_header
         proxy_value = (self.config.live_ws_proxy or "").strip()
         proxy_lower = proxy_value.lower()
         proxy_cycle: Optional[List[str]] = None
@@ -279,8 +296,8 @@ class LiveRoomWorker:
         )
 
         attempt_count = 0
-        for uri in uris:
-            for variant_name, variant_kwargs in connect_variants:
+        for variant_name, variant_kwargs in connect_variants:
+            for uri in uris:
                 if self._stop_event.is_set():
                     return
                 if proxy_cycle:
@@ -308,10 +325,12 @@ class LiveRoomWorker:
                     variant_name,
                     proxy_label,
                 )
+                auth_sent = False
                 try:
                     connect = websockets.connect(
                         uri,
                         ping_interval=None,
+                        origin="https://live.bilibili.com",
                         additional_headers=ws_headers,
                         user_agent_header=self.config.user_agent,
                         proxy=proxy_setting,
@@ -351,11 +370,10 @@ class LiveRoomWorker:
                             proxy_label,
                         )
                         auth_body = {
-                            "uid": int(self.config.dede_user_id)
-                            if self.config.dede_user_id
-                            else 0,
+                            "uid": ws_uid,
                             "roomid": self.room_id,
                             "protover": 3,
+                            "buvid": self.config.buvid3 or "",
                             "platform": "web",
                             "type": 2,
                             "key": token,
@@ -363,6 +381,7 @@ class LiveRoomWorker:
                         await ws.send(self._pack(auth_body, op=7))
                         self.logger.debug("Room %s auth packet sent", self.room_id)
                         heartbeat_task = asyncio.create_task(self._heartbeat_loop(ws))
+                        auth_sent = True
                         try:
                             async for message in ws:
                                 if isinstance(message, bytes):
@@ -385,6 +404,16 @@ class LiveRoomWorker:
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
+                    if auth_sent and not self._authed and ws_uid:
+                        self.logger.warning(
+                            "Room %s authenticated danmu identity was rejected; "
+                            "retrying anonymously",
+                            self.room_id,
+                        )
+                        ws_uid = 0
+                        ws_headers.pop("Cookie", None)
+                        self.api.login_valid = False
+
                     last_exc = exc
                     self.logger.warning(
                         "Room %s connect failed: %s (%s) uri=%s variant=%s",

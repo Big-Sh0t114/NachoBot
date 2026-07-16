@@ -20,7 +20,6 @@ from src.common.logger import get_logger
 
 from .handoff_store import HandoffStore, InMemoryHandoffStore
 from .models import (
-    ChatKind,
     EffectKind,
     FocusDispatch,
     FocusEventSnapshot,
@@ -39,6 +38,7 @@ from .models import (
     TurnStatus,
     UnknownFocusGroupError,
     WakeReason,
+    focus_session_priority,
 )
 from .scope_policy import ChatScopePolicy
 
@@ -442,6 +442,16 @@ class FocusCoordinator:
         state = self._state_for_chat(chat_id)
         return bool(state and state.phase is FocusGroupPhase.RUNNING and state.active_chat_id == chat_id)
 
+    def active_runtime_chat_ids(self) -> tuple[str, ...]:
+        """Return every running group's active chat, including idle groups."""
+
+        return tuple(
+            state.active_chat_id
+            for state in self._groups.values()
+            if state.active_chat_id is not None
+            and state.phase is FocusGroupPhase.RUNNING
+        )
+
     def pending_runtime_chat_ids(self) -> tuple[str, ...]:
         """Return active chats which have recovered work waiting at startup."""
 
@@ -530,16 +540,26 @@ class FocusCoordinator:
                 state.active_chat_id,
                 stored_ref.chat_id,
             )
+            source_member = self._policy.member(state.definition, state.active_chat_id)
             target_member = self._policy.member(state.definition, stored_ref.chat_id)
-            force_private_switch = bool(
-                target_member is not None
-                and target_member.kind is ChatKind.PRIVATE
+            safe_return = self._policy.can_return_without_handoff(
+                state.definition,
+                state.active_chat_id,
+                stored_ref.chat_id,
+            )
+            force_priority_switch = bool(
+                source_member is not None
+                and target_member is not None
+                and focus_session_priority(target_member) > focus_session_priority(source_member)
                 and self._policy.decide_switch(
-                    state.definition, state.active_chat_id, stored_ref.chat_id, has_handoff=True
+                    state.definition,
+                    state.active_chat_id,
+                    stored_ref.chat_id,
+                    has_handoff=not safe_return,
                 ).allowed
             )
             should_surface = may_emit and (
-                force_private_switch
+                force_priority_switch
                 or attention.visible
                 or attention.is_mentioned
                 or attention.is_at
@@ -1171,11 +1191,20 @@ class FocusCoordinator:
         return sorted(
             events,
             key=lambda event: (
+                -self._event_session_priority(state.definition, event),
                 not (event.is_at or event.is_mentioned),
                 event.first_unread.message_time,
                 event.event_id,
             ),
         )
+
+    def _event_session_priority(
+        self,
+        definition: FocusGroupDefinition,
+        event: FocusEventSnapshot,
+    ) -> int:
+        member = self._policy.member(definition, event.target_chat_id)
+        return int(focus_session_priority(member)) if member is not None else 0
 
     @staticmethod
     def _can_dispatch_or_stop(state: _FocusGroupState, chat_id: str) -> bool:
