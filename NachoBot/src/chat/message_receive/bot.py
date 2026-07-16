@@ -461,6 +461,8 @@ class ChatBot:
             platform=message.message_info.platform,  # type: ignore
             user_id=message.message_info.user_info.user_id,  # type: ignore
             nickname=user_info.user_nickname,  # type: ignore
+            group_id=group_info.group_id if group_info else None,
+            group_cardname=user_info.user_cardname,  # type: ignore
         )
 
         # Handle Template Info for S4U (Streamer Mode Prompts)

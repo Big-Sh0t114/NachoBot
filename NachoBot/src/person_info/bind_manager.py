@@ -73,9 +73,9 @@ class BindManager:
             logger.info(f"成功将 person_name '{identifier}' 解析为真实 UID: {person.user_id}")
             return person.user_id
 
-        # 2. 再按 nickname（平台显示昵称）查找，用户更可能输入的是平台昵称
+        # 2. 再按 user_nickname（平台显示昵称）查找，用户更可能输入的是平台昵称
         person = PersonInfo.get_or_none(
-            PersonInfo.platform.startswith(target_platform), PersonInfo.nickname == identifier
+            PersonInfo.platform.startswith(target_platform), PersonInfo.user_nickname == identifier
         )
         if person and person.user_id:
             logger.info(f"成功将 nickname '{identifier}' 解析为真实 UID: {person.user_id}")
@@ -87,7 +87,8 @@ class BindManager:
 
             fn = _peewee.fn
             person = PersonInfo.get_or_none(
-                PersonInfo.platform.startswith(target_platform), fn.LOWER(PersonInfo.nickname) == identifier.lower()
+                PersonInfo.platform.startswith(target_platform),
+                fn.LOWER(PersonInfo.user_nickname) == identifier.lower(),
             )
             if person and person.user_id:
                 logger.info(f"成功将 nickname '{identifier}'（大小写不敏感）解析为真实 UID: {person.user_id}")
@@ -561,7 +562,7 @@ class BindManager:
                 info = PersonInfo.get_or_none(PersonInfo.person_id == mid)
                 display_name = ""
                 if info:
-                    name = info.person_name or info.nickname or ""
+                    name = info.person_name or info.user_nickname or info.nickname or ""
                     if name:
                         display_name = f"（{name}）"
                 lines.append(f"  · {mapping.platform}: {mapping.platform_user_id}{display_name}")

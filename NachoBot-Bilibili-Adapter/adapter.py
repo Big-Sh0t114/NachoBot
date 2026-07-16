@@ -944,6 +944,7 @@ class BilibiliAdapter:
             "room_id": room_id,
             "reply_mid": reply_mid,
             "reply_dmid": reply_dmid,
+            "live_person_profile_enabled": self.config.live_person_profile_enabled,
         }
         if is_mentioned:
             additional_config["is_mentioned"] = 1.0
@@ -1097,7 +1098,9 @@ class BilibiliAdapter:
 
         # Prepare additional config for high value gifts logic if needed
         # Ensuring mention logic is consistent
-        additional_config = {}
+        additional_config = {
+            "live_person_profile_enabled": self.config.live_person_profile_enabled,
+        }
         # if template_info:
         #    additional_config = template_info.additional_config or {}
 
@@ -1182,6 +1185,7 @@ class BilibiliAdapter:
 
         additional_config = {
             "room_id": room_id,
+            "live_person_profile_enabled": self.config.live_person_profile_enabled,
         }
 
         message_info = BaseMessageInfo(
@@ -1291,6 +1295,7 @@ class BilibiliAdapter:
             "room_id": room_id,
             "is_mentioned": 2.0,
             "source": "mic_asr",
+            "live_person_profile_enabled": self.config.live_person_profile_enabled,
         }
 
         # 修复：从配置动态读取主人的 ID 和名字，消除硬编码
@@ -1369,7 +1374,9 @@ class BilibiliAdapter:
         prompt_text = f"发送了超级弹幕(SC)：{message_text} (价值 {price} 元)"
         template_info = await self._get_template_info(room_id, user_id, prompt_text)
 
-        additional_config = {}
+        additional_config = {
+            "live_person_profile_enabled": self.config.live_person_profile_enabled,
+        }
         # if template_info:
         #    additional_config = template_info.additional_config or {}
 
@@ -1458,7 +1465,9 @@ class BilibiliAdapter:
         prompt_text = f"开通了 {guard_name} ({num} 个月)"
         template_info = await self._get_template_info(room_id, user_id, prompt_text)
 
-        additional_config = {}
+        additional_config = {
+            "live_person_profile_enabled": self.config.live_person_profile_enabled,
+        }
         # if template_info:
         #    additional_config = template_info.additional_config or {}
 
@@ -1537,6 +1546,7 @@ class BilibiliAdapter:
         additional_config = {
             "room_id": room_id,
             "is_mentioned": 1.0,
+            "live_person_profile_enabled": self.config.live_person_profile_enabled,
         }
 
         message_info = BaseMessageInfo(
@@ -1678,6 +1688,14 @@ class BilibiliAdapter:
             )
             reply_prompt += anti_tts_instruction
 
+        if reply_prompt and "{person_profile_block}" not in reply_prompt:
+            injection_point = "{extra_info_block}"
+            if injection_point in reply_prompt:
+                reply_prompt = reply_prompt.replace(
+                    injection_point, f"{injection_point}\n{{person_profile_block}}", 1
+                )
+            else:
+                reply_prompt += "\n{person_profile_block}"
         if reply_prompt:
             reply_prompt += "\n{moderation_prompt}"
         if planner_prompt:
@@ -1753,6 +1771,10 @@ class BilibiliAdapter:
 
         if additional_config is None:
             additional_config = {}
+        additional_config.setdefault(
+            "live_person_profile_enabled",
+            self.config.live_person_profile_enabled,
+        )
 
         return BaseMessageInfo(
             platform=live_platform,

@@ -57,6 +57,7 @@ class AdapterConfig:
     live_mention_prefixes: List[str]
     live_mention_any_at: bool
     live_network_search_enabled: bool
+    live_person_profile_enabled: bool
     live_reply_prompt: str
     live_planner_prompt: str
     live_gift_reaction_prompt: str
@@ -509,6 +510,7 @@ def load_config(path: Path) -> AdapterConfig:
         live_mention_prefixes=mention_prefixes,
         live_mention_any_at=bool(live.get("mention_any_at", False)),
         live_network_search_enabled=bool(live.get("network_search_enabled", True)),
+        live_person_profile_enabled=bool(live.get("live_person_profile_enabled", True)),
         live_reply_prompt=str(live.get("reply_prompt", "") or ""),
         live_planner_prompt=str(live.get("planner_prompt", "") or ""),
         live_gift_reaction_prompt=str(live.get("gift_reaction_prompt", "") or ""),
