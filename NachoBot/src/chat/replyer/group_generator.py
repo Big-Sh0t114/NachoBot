@@ -189,6 +189,7 @@ class DefaultReplyer:
     async def generate_reply_with_context(
         self,
         extra_info: str = "",
+        person_profile_block: str = "",
         reply_reason: str = "",
         available_actions: Optional[Dict[str, ActionInfo]] = None,
         chosen_actions: Optional[List[ActionPlannerInfo]] = None,
@@ -228,6 +229,7 @@ class DefaultReplyer:
             with Timer("构建Prompt", {}):  # 内部计时器，可选保留
                 prompt, selected_expressions = await self.build_prompt_reply_context(
                     extra_info=extra_info,
+                    person_profile_block=person_profile_block,
                     available_actions=available_actions,
                     chosen_actions=chosen_actions,
                     enable_tool=enable_tool,
@@ -1016,6 +1018,7 @@ class DefaultReplyer:
         self,
         reply_message: Optional[DatabaseMessages] = None,
         extra_info: str = "",
+        person_profile_block: str = "",
         reply_reason: str = "",
         available_actions: Optional[Dict[str, ActionInfo]] = None,
         chosen_actions: Optional[List[ActionPlannerInfo]] = None,
@@ -1323,6 +1326,7 @@ class DefaultReplyer:
                 mid_term_memory_block=mid_term_memory_block,
                 relation_info_block=relation_info,
                 extra_info_block=extra_info_block,
+                person_profile_block=person_profile_block,
                 focus_handoff_block=focus_handoff_block,
                 latest_session=latest_session,
                 identity=personality_prompt,
@@ -1351,6 +1355,7 @@ class DefaultReplyer:
                 mid_term_memory_block=mid_term_memory_block,
                 relation_info_block=relation_info,
                 extra_info_block=extra_info_block,
+                person_profile_block=person_profile_block,
                 focus_handoff_block=focus_handoff_block,
                 latest_session=latest_session,
                 identity=personality_prompt,
