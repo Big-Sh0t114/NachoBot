@@ -8,7 +8,7 @@ coordinator, which keeps integration code explicit and testable.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum, IntFlag, auto
+from enum import Enum, IntEnum, IntFlag, auto
 from typing import Mapping
 
 
@@ -72,6 +72,28 @@ class FocusMember:
     allow_import: bool = True
     allow_export: bool = True
     platform: str = ""
+
+class FocusSessionPriority(IntEnum):
+    """Deterministic preemption order for Focus-managed sessions."""
+
+    NORMAL_GROUP = 1
+    PRIVATE = 2
+    PLANNER_BYPASS = 3
+
+
+def focus_platform_bypasses_planner(platform: str, kind: ChatKind) -> bool:
+    normalized = str(platform or "").strip().lower()
+    return normalized in {"discord_vc", "universal_vc"} or (
+        kind is ChatKind.GROUP and normalized in {"bilibili", "bilibili.live"}
+    )
+
+
+def focus_session_priority(member: FocusMember) -> FocusSessionPriority:
+    if focus_platform_bypasses_planner(member.platform, member.kind):
+        return FocusSessionPriority.PLANNER_BYPASS
+    if member.kind is ChatKind.PRIVATE:
+        return FocusSessionPriority.PRIVATE
+    return FocusSessionPriority.NORMAL_GROUP
 
 
 @dataclass(frozen=True, slots=True)

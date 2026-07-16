@@ -191,7 +191,7 @@ class FocusBootstrap:
             focus_coordinator.set_ensure_runtime_callback(ensure_runtime)
             await focus_coordinator.start()
             coordinator_started = True
-            for chat_id in focus_coordinator.pending_runtime_chat_ids():
+            for chat_id in focus_coordinator.active_runtime_chat_ids():
                 await ensure_runtime(chat_id)
             self._storage = storage
             self._started = True
