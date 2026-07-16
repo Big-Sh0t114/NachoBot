@@ -801,9 +801,6 @@ class FocusConfig(ConfigBase):
     allow_group_to_private: bool = True
     """允许显式 Focus 组内的群聊到私聊路径；私聊仅可无 handoff 安全返回群聊。"""
 
-    membership_migration: Literal["strict", "additive", "idle_safe"] = "idle_safe"
-    """成员配置变化时的启动迁移策略；默认仅在组空闲时安全迁移增删和权限变化。"""
-
     unread_event_threshold: int = 5
     unviewed_event_seconds: int = 180
     max_events_per_prompt: int = 5
@@ -826,8 +823,6 @@ class FocusConfig(ConfigBase):
     groups: list[FocusGroupConfig] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        if self.membership_migration not in {"strict", "additive", "idle_safe"}:
-            raise ValueError("Focus membership_migration 必须是 strict/additive/idle_safe")
         positive_fields = {
             "unread_event_threshold": self.unread_event_threshold,
             "unviewed_event_seconds": self.unviewed_event_seconds,

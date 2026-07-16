@@ -408,12 +408,6 @@ class FocusCoordinator:
 
     async def stop(self) -> None:
         await self.begin_shutdown()
-        flush_error: Exception | None = None
-        if self._state_store is not None:
-            try:
-                await self._flush_persistent_state()
-            except Exception as exc:
-                flush_error = exc
         task = self._timer_task
         self._timer_task = None
         if task is not None:
@@ -432,8 +426,6 @@ class FocusCoordinator:
             unregister_reply_context_provider("focus", self._reply_context_provider)
             self._reply_context_provider = None
         self._started = False
-        if flush_error is not None:
-            raise flush_error
 
     def is_managed(self, chat_id: str) -> bool:
         return chat_id in self._chat_to_group
@@ -448,12 +440,11 @@ class FocusCoordinator:
         return tuple(
             state.active_chat_id
             for state in self._groups.values()
-            if state.active_chat_id is not None
-            and state.phase is FocusGroupPhase.RUNNING
+            if state.active_chat_id is not None and state.phase is FocusGroupPhase.RUNNING
         )
 
     def pending_runtime_chat_ids(self) -> tuple[str, ...]:
-        """Return active chats which have recovered work waiting at startup."""
+        """Return active chats which currently have work waiting."""
 
         return tuple(
             state.active_chat_id
@@ -1005,43 +996,6 @@ class FocusCoordinator:
                 raise
             except Exception as exc:
                 logger.error(f"Focus timer iteration failed: {exc}")
-
-    async def _flush_persistent_state(self) -> None:
-        store = self._state_store
-        if store is None:
-            return
-        for state in self._groups.values():
-            async with state.condition:
-                group_id = state.definition.group_id
-                active_chat_id = state.active_chat_id
-                epoch = state.epoch
-                membership_hash = state.membership_hash
-                cursors = tuple(
-                    (
-                        chat_id,
-                        state.committed_cursor.get(chat_id, 0),
-                        state.last_viewed_at.get(chat_id, 0.0),
-                    )
-                    for chat_id in state.committed_cursor
-                )
-                events = tuple(
-                    (
-                        attention.snapshot(),
-                        attention.delivered_revision,
-                        attention.visible,
-                    )
-                    for attention in state.attention.values()
-                )
-            await store.save_group_state(group_id, active_chat_id, epoch, membership_hash)
-            for chat_id, cursor, last_viewed_at in cursors:
-                await store.save_cursor(group_id, chat_id, cursor, last_viewed_at)
-            for event, delivered_revision, visible in events:
-                await store.upsert_event(
-                    group_id,
-                    event,
-                    last_delivered_revision=delivered_revision,
-                    visible=visible,
-                )
 
     async def _restore_running(self, state: _FocusGroupState) -> None:
         async with state.condition:

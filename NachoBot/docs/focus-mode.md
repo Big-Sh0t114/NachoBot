@@ -14,7 +14,7 @@ Focus 在一个显式配置的会话组内只允许一个会话处于活动状�
 
 ## 运行流程
 
-启动恢复完成后，每个 Focus 组都会预先创建当前 active 会话的 runtime；没有工作时它只阻塞等待 Coordinator，不会主动回复。这样即使 active 会话没有新消息，后台事件达到即时暴露条件或 `unviewed_event_seconds` 定时阈值后也能唤醒路由思考。
+启动重置完成后，每个 Focus 组都会预先创建当前 active 会话的 runtime；没有工作时它只阻塞等待 Coordinator，不会主动回复。这样即使 active 会话没有新消息，后台事件达到即时暴露条件或 `unviewed_event_seconds` 定时阈值后也能唤醒路由思考。
 
 1. 接收层先把消息写入数据库，获得不可变的消息行号。
 2. 当前活动会话的消息唤醒其运行时；后台会话只更新未读事件，不启动后台回复循环。
@@ -24,8 +24,7 @@ Focus 在一个显式配置的会话组内只允许一个会话处于活动状�
 6. 目标会话由 Replyer 正常生成回复。handoff 被放在当前消息之后、长期记忆之前，内容经过转义、长度限制并标记为不可信上下文。
 7. 只有适配器确认至少一段回复实际送达后才 ACK handoff。生成失败、取消、静默抑制或 lease 过期都会释放 reservation，不会误消费上下文。
 
-消息读取使用数据库主键行号而不是时间戳。一次 Focus turn 只有在完成、无操作或被策略丢弃时提交 cursor；失败、取消、过期或切换会安全重试。活动会话、epoch、cursor、事件和 handoff 均由独立的 Focus 表持久化，启动时在注册消息处理器前恢复；若进程在消息入库和 Focus event 落库之间退出，启动扫描会从 row-id cursor 补建事件。
-
+消息读取使用数据库主键行号而不是时间戳。一次 Focus turn 只有在完成、无操作或被策略丢弃时提交 cursor；失败、取消、过期或切换会在当前进程内安全重试。SQLite 仍作为活动会话切换、cursor、事件和 handoff 的运行期事务边界，但这些运行状态不跨重启恢复：每次启动都会作废旧 pending event、active handoff 和 reservation，将所有当前成员 cursor 建立在启动时的最新消息，并从 `initial_member` 开始。
 ## 配置
 
 在 `config/bot_config.toml` 中配置；完整注释示例也可参考 `template/bot_config_template.toml`：
@@ -34,7 +33,6 @@ Focus 在一个显式配置的会话组内只允许一个会话处于活动状�
 [focus]
 mode = "active"
 allow_group_to_private = true
-membership_migration = "idle_safe"
 unread_event_threshold = 5
 unviewed_event_seconds = 180
 max_events_per_prompt = 5
@@ -73,8 +71,7 @@ allow_import = true
 allow_export = false
 ```
 
-每个成员对应的 ChatStream 必须已经被 NachoBot 记录过；建议先保持 `mode = "off"`，在每个目标群聊和私聊各收一条消息，再改为 `active` 并重启。默认 `membership_migration = "idle_safe"`：组空闲时自动迁移新增、移除及成员权限变化，保留仍在组内的 cursor，新成员从最新消息建立基线，移除成员删除其 Focus cursor；若 active 成员被移除，则原子回退到 `initial_member`。`strict` 拒绝全部变化，`additive` 仅允许纯新增。任何模式遇到 pending 事件、active handoff 或保留中的投递时都拒绝迁移。
-
+每个成员对应的 ChatStream 必须已经被 NachoBot 记录过；建议先保持 `mode = "off"`，在每个目标群聊和私聊各收一条消息，再改为 `active` 并重启。成员增删或权限变化无需迁移旧状态，因为每次启动都会以当前配置和最新消息重新建立 Focus 运行状态。重启前尚未处理的 Focus event 和 handoff 不会继续执行。
 Focus Gate 在单个 turn 内最多尝试 `bypass_gate_max_attempts` 次。全部失败时不再重放整个 turn：带 `mentioned`/`at` 信号，或源/目标任一侧是 Bilibili、Discord VC、Universal VC 等 bypass Planner 会话的事件，在通过组策略校验后确定性降级为 `switch`；其他仅有普通 `unread` 的事件降级为 `stay`。bypass 边界规则双向生效，因此既能切入直播/语音会话，也能在 Gate 不可用时切出，同时不会绕过成员关系、导入导出或私聊安全返回规则。
 Focus 会话的确定性抢占优先级为 `Planner bypass 会话 > 私聊 > 普通群聊`。后台目标的优先级严格高于当前 active 会话时，第一条消息立即暴露为事件，并在 Focus Gate 和完整 Planner 之前直接执行服务端校验后的切换；多个事件同时待处理时先选择最高优先级。私聊切入 bypass 群聊使用不携带 handoff 的安全返回路径，避免导出私聊内容。同级或较低优先级事件不强制抢占，继续交给 Gate 决定，因此直播结束后仍可正常切出。
 

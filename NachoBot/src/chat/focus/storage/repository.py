@@ -19,7 +19,12 @@ from ..models import (
     UntrustedExcerpt,
 )
 from .migrations import migrate_focus_database
-from .models import FocusCursorRecord, FocusEventRecord, FocusGroupStateRecord, HandoffReservationRecord
+from .models import (
+    FocusEventRecord,
+    FocusStartupGroupState,
+    FocusStartupResetResult,
+    HandoffReservationRecord,
+)
 
 
 T = TypeVar("T")
@@ -70,132 +75,87 @@ class FocusSQLiteStorage:
 
         await self._write(operation)
 
-    async def load_group_states(self) -> tuple[FocusGroupStateRecord, ...]:
-        def operation(connection: sqlite3.Connection) -> tuple[FocusGroupStateRecord, ...]:
-            rows = connection.execute(
-                "SELECT group_id, active_chat_id, epoch, membership_hash, updated_at FROM focus_group_state"
-            ).fetchall()
-            return tuple(FocusGroupStateRecord(**dict(row)) for row in rows)
-
-        return await self._read(operation)
-
-    async def migrate_idle_group_membership(
+    async def reset_for_startup(
         self,
+        groups: tuple[FocusStartupGroupState, ...],
         *,
-        group_id: str,
-        expected_epoch: int,
-        expected_membership_hash: str,
-        new_membership_hash: str,
-        member_baselines: Mapping[str, int],
-        fallback_active_chat_id: str | None,
-        allow_removals: bool,
         updated_at: float | None = None,
-    ) -> bool:
-        """Atomically migrate an idle Focus group's membership.
+    ) -> FocusStartupResetResult:
+        """Discard cross-restart runtime state and install fresh group baselines.
 
-        Existing member cursors are preserved, new members start at their latest
-        stored row, and removed cursors are deleted only when ``allow_removals``
-        is true.  If the active member was removed, the configured fallback is
-        selected in the same transaction.  Live Focus work always fails closed.
+        SQLite remains the live transaction boundary for switches, cursors, and
+        delivery acknowledgements. This reset only removes restart recovery:
+        every configured group starts at its initial chat with member cursors
+        set to the latest rows observed before handlers are registered.
         """
 
         timestamp = time.time() if updated_at is None else updated_at
-        configured_chat_ids = set(member_baselines)
-        if not configured_chat_ids or expected_membership_hash == new_membership_hash:
-            return False
-        if any(row_id < 0 for row_id in member_baselines.values()):
-            raise ValueError("Focus member baselines cannot be negative")
+        group_ids = [group.group_id for group in groups]
+        if len(group_ids) != len(set(group_ids)):
+            raise ValueError("Focus startup group ids must be unique")
+        for group in groups:
+            if not group.group_id or not group.membership_hash:
+                raise ValueError("Focus startup group id and membership hash are required")
+            member_ids = set(group.member_baselines)
+            if not member_ids:
+                raise ValueError(f"Focus startup group {group.group_id!r} requires members")
+            if group.initial_chat_id is not None and group.initial_chat_id not in member_ids:
+                raise ValueError(f"Focus startup group {group.group_id!r} initial chat is not a configured member")
+            if any(row_id < 0 for row_id in group.member_baselines.values()):
+                raise ValueError("Focus member baselines cannot be negative")
 
-        def operation(connection: sqlite3.Connection) -> bool:
-            state = connection.execute(
-                """
-                SELECT active_chat_id, epoch, membership_hash
-                FROM focus_group_state WHERE group_id = ?
-                """,
-                (group_id,),
-            ).fetchone()
-            if (
-                state is None
-                or int(state["epoch"]) != expected_epoch
-                or state["membership_hash"] != expected_membership_hash
-            ):
-                return False
-
-            existing_chat_ids = {
-                str(row["chat_id"])
-                for row in connection.execute(
-                    "SELECT chat_id FROM focus_chat_cursor WHERE group_id = ?",
-                    (group_id,),
-                ).fetchall()
-            }
-            added_chat_ids = configured_chat_ids - existing_chat_ids
-            removed_chat_ids = existing_chat_ids - configured_chat_ids
-            if not existing_chat_ids:
-                return False
-            if not allow_removals and (removed_chat_ids or not added_chat_ids):
-                return False
-
-            active_chat_id = state["active_chat_id"]
-            selected_active_chat_id = active_chat_id
-            if active_chat_id is not None and active_chat_id not in configured_chat_ids:
-                if not allow_removals or fallback_active_chat_id not in configured_chat_ids:
-                    return False
-                selected_active_chat_id = fallback_active_chat_id
-
-            pending_event = connection.execute(
-                "SELECT 1 FROM focus_event WHERE group_id = ? AND status = 'pending' LIMIT 1",
-                (group_id,),
-            ).fetchone()
-            active_handoff = connection.execute(
-                "SELECT 1 FROM focus_handoff WHERE group_id = ? AND status = 'active' LIMIT 1",
-                (group_id,),
-            ).fetchone()
-            reserved_delivery = connection.execute(
-                """
-                SELECT 1
-                FROM focus_handoff_reservation AS reservation
-                JOIN focus_handoff AS handoff ON handoff.handoff_id = reservation.handoff_id
-                WHERE handoff.group_id = ? AND reservation.state = 'reserved'
-                LIMIT 1
-                """,
-                (group_id,),
-            ).fetchone()
-            if pending_event is not None or active_handoff is not None or reserved_delivery is not None:
-                return False
-
-            state_cursor = connection.execute(
-                """
-                UPDATE focus_group_state
-                SET active_chat_id = ?, epoch = epoch + 1, membership_hash = ?, updated_at = ?
-                WHERE group_id = ? AND epoch = ? AND membership_hash = ?
-                """,
+        def operation(connection: sqlite3.Connection) -> FocusStartupResetResult:
+            reservation_cursor = connection.execute(
+                "UPDATE focus_handoff_reservation SET state = 'released' WHERE state = 'reserved'"
+            )
+            handoff_cursor = connection.execute(
+                "UPDATE focus_handoff SET status = ? WHERE status = ?",
+                (HandoffStatus.EXPIRED.value, HandoffStatus.ACTIVE.value),
+            )
+            event_cursor = connection.execute(
+                "UPDATE focus_event SET status = ?, updated_at = ? WHERE status = ?",
                 (
-                    selected_active_chat_id,
-                    new_membership_hash,
+                    FocusEventStatus.EXPIRED.value,
                     timestamp,
-                    group_id,
-                    expected_epoch,
-                    expected_membership_hash,
+                    FocusEventStatus.PENDING.value,
                 ),
             )
-            if state_cursor.rowcount != 1:
-                return False
-            if removed_chat_ids:
-                placeholders = ",".join("?" for _ in removed_chat_ids)
+            connection.execute("DELETE FROM focus_chat_cursor")
+            connection.execute("DELETE FROM focus_group_state")
+
+            for group in groups:
+                epoch = 1 if group.initial_chat_id is not None else 0
                 connection.execute(
-                    f"DELETE FROM focus_chat_cursor WHERE group_id = ? AND chat_id IN ({placeholders})",
-                    (group_id, *sorted(removed_chat_ids)),
+                    """
+                    INSERT INTO focus_group_state(
+                        group_id, active_chat_id, epoch, membership_hash, updated_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        group.group_id,
+                        group.initial_chat_id,
+                        epoch,
+                        group.membership_hash,
+                        timestamp,
+                    ),
                 )
-            for chat_id in sorted(added_chat_ids):
-                connection.execute(
+                connection.executemany(
                     """
                     INSERT INTO focus_chat_cursor(
                         group_id, chat_id, processed_row_id, last_viewed_at, updated_at
                     ) VALUES (?, ?, ?, ?, ?)
                     """,
-                    (group_id, chat_id, member_baselines[chat_id], timestamp, timestamp),
+                    (
+                        (group.group_id, chat_id, row_id, timestamp, timestamp)
+                        for chat_id, row_id in group.member_baselines.items()
+                    ),
                 )
-            return True
+
+            return FocusStartupResetResult(
+                pending_events_expired=event_cursor.rowcount,
+                active_handoffs_expired=handoff_cursor.rowcount,
+                reservations_released=reservation_cursor.rowcount,
+            )
 
         return await self._write(operation)
 
@@ -224,19 +184,6 @@ class FocusSQLiteStorage:
             )
 
         await self._write(operation)
-
-    async def load_cursors(self, group_id: str) -> tuple[FocusCursorRecord, ...]:
-        def operation(connection: sqlite3.Connection) -> tuple[FocusCursorRecord, ...]:
-            rows = connection.execute(
-                """
-                SELECT group_id, chat_id, processed_row_id, last_viewed_at, updated_at
-                FROM focus_chat_cursor WHERE group_id = ?
-                """,
-                (group_id,),
-            ).fetchall()
-            return tuple(FocusCursorRecord(**dict(row)) for row in rows)
-
-        return await self._read(operation)
 
     async def upsert_event(
         self,

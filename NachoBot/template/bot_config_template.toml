@@ -208,7 +208,6 @@ none = false # 暂无
 [focus] # Focus 短期跨会话编排（实验性）
 mode = "off" # off=完全保持现有逻辑，observe=当前安全no-op，active=启用切换与短期交接
 allow_group_to_private = true # 允许同一显式 Focus 组内群→私；私聊仅可无 handoff 安全返回群聊
-membership_migration = "idle_safe" # 默认空闲时自动迁移新增、移除及权限变化；strict=全部拒绝，additive=仅新增
 unread_event_threshold = 5 # 后台会话累计多少条未读后通知当前会话
 unviewed_event_seconds = 180 # 后台会话多久未查看后生成事件
 max_events_per_prompt = 5 # 每轮最多注入 Planner 的事件数
