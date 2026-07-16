@@ -3,26 +3,28 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Mapping
 
 from ..models import FocusEventStatus
 
 
 @dataclass(frozen=True, slots=True)
-class FocusGroupStateRecord:
+class FocusStartupGroupState:
+    """Fresh runtime baseline installed atomically at process startup."""
+
     group_id: str
-    active_chat_id: str | None
-    epoch: int
+    initial_chat_id: str | None
     membership_hash: str
-    updated_at: float
+    member_baselines: Mapping[str, int]
 
 
 @dataclass(frozen=True, slots=True)
-class FocusCursorRecord:
-    group_id: str
-    chat_id: str
-    processed_row_id: int
-    last_viewed_at: float
-    updated_at: float
+class FocusStartupResetResult:
+    """Live rows retired while starting a fresh Focus runtime."""
+
+    pending_events_expired: int
+    active_handoffs_expired: int
+    reservations_released: int
 
 
 @dataclass(frozen=True, slots=True)

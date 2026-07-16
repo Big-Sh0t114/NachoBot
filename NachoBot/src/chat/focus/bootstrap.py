@@ -6,24 +6,16 @@ import asyncio
 import hashlib
 import json
 import time
-import uuid
 from typing import Any
 
 from src.common.logger import get_logger
 from src.config.config import global_config
 
 from .coordinator import focus_coordinator
-from .message_repository import latest_message_row_id, load_message_range_summary
-from .models import (
-    ChatKind,
-    FocusEventSnapshot,
-    FocusGroupDefinition,
-    FocusMember,
-    RestoredFocusEvent,
-    StoredMessageRef,
-)
+from .message_repository import latest_message_row_id
+from .models import ChatKind, FocusGroupDefinition, FocusMember
 from .scope_policy import ChatScopePolicy
-from .storage.models import FocusEventRecord
+from .storage.models import FocusStartupGroupState
 from .storage.repository import FocusSQLiteStorage
 
 
@@ -68,10 +60,9 @@ class FocusBootstrap:
         from src.chat.message_receive.chat_stream import get_chat_manager
 
         chat_manager = get_chat_manager()
-        saved_states = {record.group_id: record for record in await storage.load_group_states()}
-
         coordinator_started = False
         try:
+            resolved_groups: list[tuple[FocusGroupDefinition, str | None, str, dict[str, int]]] = []
             for group_config in config.groups:
                 definition, initial_chat_id, membership_hash = self._resolve_group(
                     group_config,
@@ -84,91 +75,37 @@ class FocusBootstrap:
                     )
                     for member in definition.members
                 }
-                saved_state = saved_states.get(definition.group_id)
-                cursor_records = {record.chat_id: record for record in await storage.load_cursors(definition.group_id)}
-                now = time.time()
-                if saved_state is not None:
-                    active_chat_id = saved_state.active_chat_id
-                    epoch = saved_state.epoch
-                    if saved_state.membership_hash != membership_hash:
-                        migration_mode = config.membership_migration
-                        migrated = False
-                        if migration_mode != "strict":
-                            migrated = await storage.migrate_idle_group_membership(
-                                group_id=definition.group_id,
-                                expected_epoch=saved_state.epoch,
-                                expected_membership_hash=saved_state.membership_hash,
-                                new_membership_hash=membership_hash,
-                                member_baselines=latest_rows,
-                                fallback_active_chat_id=initial_chat_id,
-                                allow_removals=migration_mode == "idle_safe",
-                            )
-                        if not migrated:
-                            raise RuntimeError(
-                                f"Focus group {definition.group_id!r} membership changed; "
-                                f"membership_migration={migration_mode!r} could not migrate live or incompatible state"
-                            )
-                        old_chat_ids = set(cursor_records)
-                        added_chat_ids = sorted(set(latest_rows) - old_chat_ids)
-                        removed_chat_ids = sorted(old_chat_ids - set(latest_rows))
-                        if active_chat_id not in latest_rows:
-                            active_chat_id = initial_chat_id
-                        epoch += 1
-                        cursor_records = {
-                            record.chat_id: record for record in await storage.load_cursors(definition.group_id)
-                        }
-                        logger.warning(
-                            f"Focus group {definition.group_id!r} safely migrated idle membership; "
-                            f"mode={migration_mode}, added={added_chat_ids}, removed={removed_chat_ids}, "
-                            f"active={active_chat_id!r}, epoch={epoch}"
-                        )
-                    if active_chat_id is None:
-                        active_chat_id = initial_chat_id
-                        epoch = max(1, epoch + 1)
-                        await storage.save_group_state(
-                            definition.group_id,
-                            active_chat_id,
-                            epoch,
-                            membership_hash,
-                        )
-                    if active_chat_id is not None and active_chat_id not in latest_rows:
-                        raise RuntimeError(
-                            f"Persisted active chat {active_chat_id!r} is outside Focus group {definition.group_id!r}"
-                        )
-                    cursors = {
-                        chat_id: cursor_records[chat_id].processed_row_id if chat_id in cursor_records else latest_row
-                        for chat_id, latest_row in latest_rows.items()
-                    }
-                else:
-                    active_chat_id = initial_chat_id
-                    epoch = 1 if active_chat_id is not None else 0
-                    cursors = dict(latest_rows)
-                    await storage.save_group_state(
-                        definition.group_id,
-                        active_chat_id,
-                        epoch,
-                        membership_hash,
-                    )
+                resolved_groups.append((definition, initial_chat_id, membership_hash, latest_rows))
 
-                last_viewed_at = {
-                    chat_id: cursor_records[chat_id].last_viewed_at if chat_id in cursor_records else now
-                    for chat_id in latest_rows
-                }
-                for chat_id, cursor in cursors.items():
-                    await storage.save_cursor(
-                        definition.group_id,
-                        chat_id,
-                        cursor,
-                        last_viewed_at[chat_id],
+            reset_result = await storage.reset_for_startup(
+                tuple(
+                    FocusStartupGroupState(
+                        group_id=definition.group_id,
+                        initial_chat_id=initial_chat_id,
+                        membership_hash=membership_hash,
+                        member_baselines=latest_rows,
                     )
-
-                restored_events = await self._restore_events(
-                    storage=storage,
-                    definition=definition,
-                    active_chat_id=active_chat_id,
-                    cursors=cursors,
-                    latest_rows=latest_rows,
+                    for definition, initial_chat_id, membership_hash, latest_rows in resolved_groups
                 )
+            )
+            retired_count = (
+                reset_result.pending_events_expired
+                + reset_result.active_handoffs_expired
+                + reset_result.reservations_released
+            )
+            log = logger.warning if retired_count else logger.info
+            log(
+                "Focus startup reset previous runtime state; "
+                f"pending_events={reset_result.pending_events_expired}, "
+                f"active_handoffs={reset_result.active_handoffs_expired}, "
+                f"reservations={reset_result.reservations_released}"
+            )
+
+            now = time.time()
+            for definition, active_chat_id, membership_hash, latest_rows in resolved_groups:
+                epoch = 1 if active_chat_id is not None else 0
+                cursors = dict(latest_rows)
+                last_viewed_at = {chat_id: now for chat_id in latest_rows}
                 focus_coordinator.register_group(
                     definition,
                     active_chat_id=active_chat_id,
@@ -176,7 +113,6 @@ class FocusBootstrap:
                     cursors=cursors,
                     latest_rows=latest_rows,
                     last_viewed_at=last_viewed_at,
-                    restored_events=restored_events,
                     membership_hash=membership_hash,
                 )
                 self._registered_group_ids.append(definition.group_id)
@@ -225,131 +161,6 @@ class FocusBootstrap:
             self._storage = None
             self._started = False
         logger.info("Focus stopped")
-
-    @staticmethod
-    async def _restore_events(
-        *,
-        storage: FocusSQLiteStorage,
-        definition: FocusGroupDefinition,
-        active_chat_id: str | None,
-        cursors: dict[str, int],
-        latest_rows: dict[str, int],
-    ) -> tuple[RestoredFocusEvent, ...]:
-        records = {record.chat_id: record for record in await storage.load_pending_events(definition.group_id)}
-        member_ids = {member.chat_id for member in definition.members}
-        unknown = set(records) - member_ids
-        if unknown:
-            raise RuntimeError(
-                f"Focus group {definition.group_id!r} has pending events for unknown chats: {sorted(unknown)!r}"
-            )
-
-        restored: list[RestoredFocusEvent] = []
-        for member in definition.members:
-            chat_id = member.chat_id
-            record = records.get(chat_id)
-            if chat_id == active_chat_id:
-                if record is not None:
-                    raise RuntimeError(f"Focus pending event {record.event_id!r} targets active chat {chat_id!r}")
-                continue
-
-            after_row_id = record.last_row_id if record is not None else cursors[chat_id]
-            summary = None
-            if latest_rows[chat_id] > after_row_id:
-                summary = await asyncio.to_thread(
-                    load_message_range_summary,
-                    chat_id,
-                    after_row_id,
-                    latest_rows[chat_id],
-                )
-
-            if record is None and summary is None:
-                continue
-            if record is None:
-                assert summary is not None
-                snapshot = FocusEventSnapshot(
-                    event_id=f"evt_{uuid.uuid4().hex}",
-                    revision=summary.unread_count,
-                    target_chat_id=chat_id,
-                    display_name=member.display_name or chat_id,
-                    unread_count=summary.unread_count,
-                    first_unread=summary.first_message,
-                    last_unread=summary.last_message,
-                    is_mentioned=summary.has_mention,
-                    is_at=summary.has_at,
-                    latest_preview=summary.latest_preview,
-                )
-                delivered_revision = 0
-                visible = False
-            else:
-                snapshot = FocusBootstrap._event_snapshot(record, member.display_name or chat_id)
-                delivered_revision = min(record.last_delivered_revision, record.revision)
-                visible = record.visible
-                if summary is not None:
-                    snapshot = FocusEventSnapshot(
-                        event_id=record.event_id,
-                        revision=record.revision + summary.unread_count,
-                        target_chat_id=chat_id,
-                        display_name=member.display_name or chat_id,
-                        unread_count=record.unread_count + summary.unread_count,
-                        first_unread=snapshot.first_unread,
-                        last_unread=summary.last_message,
-                        is_mentioned=record.has_mention or summary.has_mention,
-                        is_at=record.has_at or summary.has_at,
-                        latest_preview=summary.latest_preview,
-                    )
-
-            may_emit = bool(
-                active_chat_id
-                and focus_coordinator.policy.can_emit_event(
-                    definition,
-                    active_chat_id,
-                    chat_id,
-                )
-            )
-            visible = (
-                visible
-                or may_emit
-                and (
-                    snapshot.is_mentioned
-                    or snapshot.is_at
-                    or snapshot.unread_count >= global_config.focus.unread_event_threshold
-                )
-            )
-            event = RestoredFocusEvent(snapshot, delivered_revision, visible)
-            if record is None or summary is not None or visible != record.visible:
-                await storage.upsert_event(
-                    definition.group_id,
-                    snapshot,
-                    last_delivered_revision=delivered_revision,
-                    visible=visible,
-                )
-            restored.append(event)
-        return tuple(restored)
-
-    @staticmethod
-    def _event_snapshot(record: FocusEventRecord, display_name: str) -> FocusEventSnapshot:
-        return FocusEventSnapshot(
-            event_id=record.event_id,
-            revision=record.revision,
-            target_chat_id=record.chat_id,
-            display_name=display_name,
-            unread_count=record.unread_count,
-            first_unread=StoredMessageRef(
-                record.first_row_id,
-                record.chat_id,
-                f"focus-row-{record.first_row_id}",
-                record.created_at,
-            ),
-            last_unread=StoredMessageRef(
-                record.last_row_id,
-                record.chat_id,
-                f"focus-row-{record.last_row_id}",
-                record.updated_at,
-            ),
-            is_mentioned=record.has_mention,
-            is_at=record.has_at,
-            latest_preview=record.latest_preview,
-        )
 
     @staticmethod
     def _resolve_group(
