@@ -15,6 +15,35 @@ class PlaywrightSearchProvider:
     """使用共享 Playwright 浏览器直接查询公开搜索引擎。"""
 
     _SUPPORTED_ENGINES = ("bing", "duckduckgo")
+    _CJK_QUERY_NOISE = (
+        "帮我查一下",
+        "帮我查询",
+        "请帮我查",
+        "多少钱",
+        "怎么样",
+        "是什么",
+        "最新消息",
+        "今日",
+        "今天",
+        "现在",
+        "当前",
+        "目前",
+        "最新",
+        "实时",
+        "查询",
+        "搜索",
+        "请问",
+        "帮我",
+        "一下",
+    )
+    _LATIN_QUERY_NOISE = {
+        "current",
+        "latest",
+        "official",
+        "search",
+        "today",
+        "website",
+    }
 
     def __init__(
         self,
@@ -91,7 +120,9 @@ class PlaywrightSearchProvider:
     def _build_search_url(engine: str, query: str, max_results: int) -> str:
         encoded_query = quote_plus(query)
         if engine == "bing":
-            return f"https://www.bing.com/search?q={encoded_query}&count={max_results}"
+            return (
+                f"https://cn.bing.com/search?q={encoded_query}&count={max_results}&ensearch=0&setlang=zh-hans"
+            )
         if engine == "duckduckgo":
             return f"https://html.duckduckgo.com/html/?q={encoded_query}"
         raise ValueError(f"不支持的浏览器搜索引擎: {engine}")
@@ -206,21 +237,35 @@ class PlaywrightSearchProvider:
             return ""
         return decoded
 
-    @staticmethod
-    def _results_match_query(query: str, results: List[Dict[str, str]]) -> bool:
+    @classmethod
+    def _query_relevance_tokens(cls, query: str) -> List[str]:
         normalized_query = query.casefold()
-        tokens = re.findall(r"[a-z0-9][a-z0-9._+-]+|[\u4e00-\u9fff]+", normalized_query)
-        searchable_tokens = []
-        for token in tokens:
-            if re.fullmatch(r"[\u4e00-\u9fff]+", token) and len(token) > 2:
-                searchable_tokens.extend(token[index : index + 2] for index in range(len(token) - 1))
-            else:
-                searchable_tokens.append(token)
+        for noise in cls._CJK_QUERY_NOISE:
+            normalized_query = normalized_query.replace(noise, " ")
 
-        if not searchable_tokens:
+        raw_tokens = re.findall(r"[a-z0-9][a-z0-9._+-]+|[\u4e00-\u9fff]+", normalized_query)
+        relevance_tokens = []
+        for token in raw_tokens:
+            if token in cls._LATIN_QUERY_NOISE:
+                continue
+            if re.fullmatch(r"[\u4e00-\u9fff]+", token) and len(token) > 2:
+                relevance_tokens.extend(token[index : index + 2] for index in range(len(token) - 1))
+            else:
+                relevance_tokens.append(token)
+
+        # 保持顺序去重，避免一个重复词被多次计入命中数。
+        return list(dict.fromkeys(relevance_tokens))
+
+    @classmethod
+    def _results_match_query(cls, query: str, results: List[Dict[str, str]]) -> bool:
+        relevance_tokens = cls._query_relevance_tokens(query)
+
+        if not relevance_tokens:
             return True
 
         result_text = " ".join(
             f"{item.get('title', '')} {item.get('snippet', '')} {item.get('url', '')}" for item in results
         ).casefold()
-        return any(token in result_text for token in searchable_tokens)
+        matched_count = sum(token in result_text for token in relevance_tokens)
+        required_matches = 1 if len(relevance_tokens) == 1 else 2
+        return matched_count >= required_matches

@@ -578,25 +578,6 @@ const SetupModule = (() => {
                                 </div>
                             `;
                             row.insertBefore(hintBanner, row.firstChild);
-                        } else if ((p.name || '').toLowerCase() === 'qhaigc') {
-                            row.querySelector('.setup-provider-name').readOnly = true;
-                            row.querySelector('.setup-provider-url').readOnly = true;
-
-                            const hintBanner = document.createElement('div');
-                            hintBanner.className = 'setup-hint-banner';
-                            hintBanner.style.marginBottom = '12px';
-                            hintBanner.style.alignItems = 'center';
-                            hintBanner.style.background = 'rgba(59, 130, 246, 0.08)';
-                            hintBanner.style.borderColor = 'rgba(59, 130, 246, 0.2)';
-                            hintBanner.innerHTML = `
-                                <span class="hint-icon">🌐</span>
-                                <div>
-                                    <strong>可选配置：联网查询服务商</strong><br>
-                                    专供内置联网模型 grok-4.1#search 使用。如无需联网功能，可删除此项及对应模型。<br><span style="color: var(--accent);">价格参考：输入 0.2 / 输出 0.5 (元 / 万 token)</span>
-                                </div>
-                                <a href="https://www.qhaigc.net" target="_blank" class="btn btn-primary" style="margin-left: auto; text-decoration: none; font-size: 0.85rem; padding: 6px 14px; border-radius: var(--radius-sm); white-space: nowrap; box-shadow: var(--shadow-sm);">获取 API Key 🔗</a>
-                            `;
-                            row.insertBefore(hintBanner, row.firstChild);
                         } else if ((p.name || '').toLowerCase() === 'deepseek') {
                             row.querySelector('.setup-provider-name').readOnly = true;
                             row.querySelector('.setup-provider-url').readOnly = true;
@@ -645,7 +626,6 @@ const SetupModule = (() => {
                         const isBge = mId.includes('bge-m3') || mName.includes('bge-m3');
                         const isLocal = mName === 'sensevoice-small' || mName === 'florence-2' || mName === 'teleai/telespeechasr/silicon'; // Assuming SenseVoice and Florence
                         const isFree = mName.endsWith('/silicon');
-                        const isSearch = mName.includes('#search') || mId.includes('#search');
 
                         if (isBge) {
                             row.querySelector('.setup-model-id').readOnly = true;
@@ -691,29 +671,6 @@ const SetupModule = (() => {
                                 </div>
                             `;
                             row.insertBefore(hintBanner, row.firstChild);
-                        } else if (isSearch) {
-                            row.querySelector('.setup-model-id').readOnly = true;
-                            row.querySelector('.setup-model-name').readOnly = true;
-                            const sel = row.querySelector('.setup-model-provider');
-                            if (sel) {
-                                sel.style.pointerEvents = 'none';
-                                sel.style.opacity = '0.7';
-                            }
-
-                            const hintBanner = document.createElement('div');
-                            hintBanner.className = 'setup-hint-banner';
-                            hintBanner.style.marginBottom = '12px';
-                            hintBanner.style.alignItems = 'center';
-                            hintBanner.style.background = 'rgba(59, 130, 246, 0.08)';
-                            hintBanner.style.borderColor = 'rgba(59, 130, 246, 0.2)';
-                            hintBanner.innerHTML = `
-                                <span class="hint-icon">🌐</span>
-                                <div>
-                                    <strong>半锁定项：联网查询模型（可选）</strong><br>
-                                    此模型原生支持联网搜索查询。其服务商已被锁定，但若您无需联网功能，可自由<strong style="color: var(--error);">删除</strong>此模型。<br><span style="color: var(--accent);">价格参考：输入 0.2 / 输出 0.5 (元 / 百万 token)</span>
-                                </div>
-                            `;
-                            row.insertBefore(hintBanner, row.firstChild);
                         } else if (isFree) {
                             // Lock provider for free models
                             const sel = row.querySelector('.setup-model-provider');
@@ -747,18 +704,6 @@ const SetupModule = (() => {
                             badge.style.marginTop = '6px';
                             badge.textContent = '本地免费';
                             badge.title = '项目自带的本地模型，无推理费用';
-                            nameContainer.appendChild(badge);
-                        }
-                        if (isSearch) {
-                            const badge = document.createElement('span');
-                            badge.className = 'form-row-tag';
-                            badge.style.background = 'rgba(59, 130, 246, 0.1)';
-                            badge.style.color = '#3b82f6';
-                            badge.style.border = '1px solid rgba(59, 130, 246, 0.2)';
-                            badge.style.padding = '4px 8px';
-                            badge.style.marginTop = '6px';
-                            badge.textContent = '🌐 联网查询模型';
-                            badge.title = '此模型原生支持联网搜索查询，建议配置';
                             nameContainer.appendChild(badge);
                         }
                         if (mName === 'deepseek-v4-pro' || mName === 'deepseek-v4-flash') {
