@@ -416,6 +416,7 @@ def patch_build_prompt_reply_context() -> None:
             chosen_actions: list[dict[str, object]] | None = None,
             enable_tool: bool = True,
             reply_message: dict[str, object] | None = None,
+            prompt_context: Any = None,
             **kwargs,
         ) -> tuple[str, list[int]]:
             # 兼容旧版/新版参数名差异
@@ -437,6 +438,7 @@ def patch_build_prompt_reply_context() -> None:
                     choosen_actions=choosen_actions,
                     enable_tool=enable_tool,
                     reply_message=reply_message,
+                    prompt_context=prompt_context,
                 )
             except TypeError as te:
                 # 如果旧版本参数名不匹配，尝试使用新版 'chosen_actions'
@@ -449,6 +451,7 @@ def patch_build_prompt_reply_context() -> None:
                         chosen_actions=choosen_actions,
                         enable_tool=enable_tool,
                         reply_message=reply_message,
+                        prompt_context=prompt_context,
                     )
                 else:
                     raise

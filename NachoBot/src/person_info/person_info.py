@@ -22,26 +22,58 @@ relation_selection_model = LLMRequest(
 )
 
 
+def _normalize_person_platform(platform: str) -> str:
+    """Normalize adapter-specific platform names for identity lookups."""
+    return platform.split("-", 1)[1] if "-" in platform else platform
+
+
+def get_original_person_id(platform: str, user_id: Union[int, str]) -> str:
+    """Return an existing legacy ID, or derive a strong ID for a new account."""
+    platform = str(platform)
+    normalized_platform = _normalize_person_platform(platform)
+    user_id_str = str(user_id)
+
+    try:
+        record = PersonInfo.get_or_none(
+            PersonInfo.platform == platform,
+            PersonInfo.user_id == user_id_str,
+        )
+        if record is None:
+            candidates = PersonInfo.select().where(PersonInfo.user_id == user_id_str)
+            record = next(
+                (
+                    candidate
+                    for candidate in candidates
+                    if _normalize_person_platform(candidate.platform) == normalized_platform
+                ),
+                None,
+            )
+        if record is not None:
+            return record.person_id
+    except Exception as e:
+        logger.warning(f"Failed to query original person ID; the table may not be initialized: {e}")
+
+    payload = json.dumps([normalized_platform, user_id_str], ensure_ascii=False, separators=(",", ":")).encode()
+    return hashlib.sha256(b"nachobot:person-id:v2\0" + payload).hexdigest()
+
+
 def get_person_id(platform: str, user_id: Union[int, str]) -> str:
     """获取唯一id (支持多平台绑定)"""
-    if "-" in platform:
-        platform = platform.split("-")[1]
+    normalized_platform = _normalize_person_platform(platform)
     user_id_str = str(user_id)
 
     try:
         # 1. 优先查询绑定表
         binding = PersonBinding.get_or_none(
-            PersonBinding.platform == platform, PersonBinding.platform_user_id == user_id_str
+            PersonBinding.platform == normalized_platform, PersonBinding.platform_user_id == user_id_str
         )
         if binding:
             return binding.person_id
     except Exception as e:
         logger.warning(f"查询绑定表时出错，可能表还未初始化: {e}")
 
-    # 2. 如果没有查到，使用传统的 MD5 方式生成默认的 person_id
-    components = [platform, user_id_str]
-    key = "_".join(components)
-    return hashlib.md5(key.encode()).hexdigest()
+    # 2. Preserve registered legacy IDs; derive strong IDs only for new accounts.
+    return get_original_person_id(platform, user_id_str)
 
 
 def get_person_id_by_person_name(person_name: str) -> str:
@@ -224,15 +256,24 @@ def levenshtein_distance(s1: str, s2: str) -> int:
 
 class Person:
     @classmethod
-    def register_person(cls, platform: str, user_id: str, nickname: str):
+    def register_person(
+        cls,
+        platform: str,
+        user_id: str,
+        nickname: str,
+        group_id: Optional[str] = None,
+        group_cardname: Optional[str] = None,
+    ):
         """
-        注册新用户的类方法
+        注册新用户，或用最新的平台资料刷新已有用户。
         必须输入 platform、user_id 和 nickname 参数
 
         Args:
             platform: 平台名称
             user_id: 用户ID
-            nickname: 用户昵称
+            nickname: 用户的平台昵称
+            group_id: 群 ID（私聊时为 None）
+            group_cardname: 用户在该群的当前名片
 
         Returns:
             Person: 新注册的Person实例
@@ -246,7 +287,16 @@ class Person:
 
         if is_person_known(person_id=person_id):
             logger.debug(f"用户 {nickname} 已存在")
-            return Person(person_id=person_id)
+            person = Person(person_id=person_id)
+            cls._refresh_platform_profile(
+                person=person,
+                platform=platform,
+                user_id=user_id,
+                user_nickname=nickname,
+                group_id=group_id,
+                group_cardname=group_cardname,
+            )
+            return person
 
         # 创建Person实例
         person = cls.__new__(cls)
@@ -256,6 +306,7 @@ class Person:
         person.platform = platform
         person.user_id = user_id
         person.nickname = nickname
+        person.user_nickname = nickname
 
         # 初始化默认值
         person.is_known = True  # 注册后立即标记为已认识
@@ -265,7 +316,11 @@ class Person:
         person.know_since = time.time()
         person.last_know = time.time()
         person.memory_points = []
+        person.group_cardname = []
         person.vip_expire_time = None
+
+        if group_id is not None:
+            person.update_group_cardname(group_id, group_cardname, sync=False)
 
         # 同步到数据库
         person.sync_to_database()
@@ -274,6 +329,97 @@ class Person:
 
         return person
 
+    @staticmethod
+    def _original_person_id(platform: str, user_id: str) -> str:
+        """返回平台账号在跨平台绑定前的原始 person_id。"""
+        return get_original_person_id(platform, user_id)
+
+    @classmethod
+    def _refresh_platform_profile(
+        cls,
+        person: "Person",
+        platform: str,
+        user_id: str,
+        user_nickname: str,
+        group_id: Optional[str],
+        group_cardname: Optional[str],
+    ) -> None:
+        """仅刷新平台资料，不覆盖 bot 已经学会的称呼或人物名。"""
+        original_person_id = cls._original_person_id(platform, str(user_id))
+        record = PersonInfo.get_or_none(PersonInfo.person_id == original_person_id)
+        if record is None:
+            record = PersonInfo.get_or_none(PersonInfo.person_id == person.person_id)
+        if record is None:
+            logger.warning(f"无法刷新用户 {platform}:{user_id} 的资料：未找到 PersonInfo")
+            return
+
+        changed = False
+        if record.user_nickname != user_nickname:
+            record.user_nickname = user_nickname
+            changed = True
+
+        cards = cls._load_group_cardnames(record.group_cardname)
+        if group_id is not None:
+            changed = cls._update_group_cardname_list(cards, group_id, group_cardname) or changed
+
+        if changed:
+            record.group_cardname = json.dumps(cards, ensure_ascii=False)
+            record.save()
+            logger.debug(f"已刷新用户 {platform}:{user_id} 的平台昵称/群名片")
+
+        # 当前消息链路也立即使用新资料。
+        person.user_nickname = user_nickname
+        person.group_cardname = cards
+
+    @staticmethod
+    def _load_group_cardnames(raw_value) -> list[dict[str, str]]:
+        if not raw_value:
+            return []
+        if isinstance(raw_value, list):
+            items = raw_value
+        else:
+            try:
+                items = json.loads(raw_value)
+            except (json.JSONDecodeError, TypeError):
+                return []
+        if not isinstance(items, list):
+            return []
+        return [item for item in items if isinstance(item, dict) and item.get("group_id") is not None]
+
+    @staticmethod
+    def _update_group_cardname_list(
+        cards: list[dict[str, str]], group_id: str, group_cardname: Optional[str]
+    ) -> bool:
+        """原地更新某个群的名片；明确的空名片会移除旧值。"""
+        group_id = str(group_id)
+        cardname = None if group_cardname is None else str(group_cardname).strip()
+        for index, item in enumerate(cards):
+            if str(item.get("group_id")) != group_id:
+                continue
+            if group_cardname is None:
+                return False
+            if not cardname:
+                cards.pop(index)
+                return True
+            if item.get("group_cardname") == cardname:
+                return False
+            item["group_cardname"] = cardname
+            return True
+
+        if cardname:
+            cards.append({"group_id": group_id, "group_cardname": cardname})
+            return True
+        return False
+
+    def update_group_cardname(
+        self, group_id: str, group_cardname: Optional[str], *, sync: bool = True
+    ) -> bool:
+        """更新当前用户在指定群的名片，返回资料是否变化。"""
+        changed = self._update_group_cardname_list(self.group_cardname, group_id, group_cardname)
+        if changed and sync:
+            self.sync_to_database()
+        return changed
+
     def __init__(self, platform: str = "", user_id: str = "", person_id: str = "", person_name: str = ""):
         if platform == global_config.bot.platform and user_id == global_config.bot.qq_account:
             self.is_known = True
@@ -281,12 +427,14 @@ class Person:
             self.user_id = user_id
             self.platform = platform
             self.nickname = global_config.bot.nickname
+            self.user_nickname = global_config.bot.nickname
             self.person_name = global_config.bot.nickname
             self.name_reason = "bot self"
             self.know_times = 0
             self.know_since = None
             self.last_know = None
             self.memory_points = []
+            self.group_cardname = []
             self.vip_expire_time = None
             return
 
@@ -320,12 +468,14 @@ class Person:
 
         # 初始化默认值
         self.nickname = ""
+        self.user_nickname = ""
         self.person_name: Optional[str] = None
         self.name_reason: Optional[str] = None
         self.know_times = 0
         self.know_since = None
         self.last_know: Optional[float] = None
         self.memory_points = []
+        self.group_cardname = []
         self.vip_expire_time = None
 
         # 从数据库加载数据
@@ -465,6 +615,7 @@ class Person:
                 self.platform = record.platform or ""
                 self.is_known = record.is_known or False
                 self.nickname = record.nickname or ""
+                self.user_nickname = record.user_nickname or record.nickname or ""
                 self.person_name = record.person_name or self.nickname
                 self.name_reason = record.name_reason or None
                 self.know_times = record.know_times or 0
@@ -507,6 +658,8 @@ class Person:
                         self.memory_points = []
                 else:
                     self.memory_points = []
+
+                self.group_cardname = self._load_group_cardnames(record.group_cardname)
 
                 # ── 多平台绑定：优先使用聚合行的记忆 ──
                 try:
@@ -557,6 +710,8 @@ class Person:
                 "platform": self.platform,
                 "user_id": self.user_id,
                 "nickname": self.nickname,
+                "user_nickname": self.user_nickname,
+                "group_cardname": json.dumps(self.group_cardname, ensure_ascii=False),
                 "person_name": self.person_name,
                 "name_reason": self.name_reason,
                 "know_times": self.know_times,
@@ -778,9 +933,21 @@ class Person:
             return ""
         # 构建points文本
 
-        nickname_str = ""
-        if self.person_name != self.nickname:
-            nickname_str = f"(ta在{self.platform}上的昵称是{self.nickname})"
+        identity_details = []
+        if self.user_nickname and self.person_name != self.user_nickname:
+            identity_details.append(f"ta在{self.platform}上的昵称是{self.user_nickname}")
+        if self.nickname and self.nickname not in {self.person_name, self.user_nickname}:
+            identity_details.append(f"你平时称呼ta为{self.nickname}")
+        cardnames = list(
+            dict.fromkeys(
+                str(item.get("group_cardname", "")).strip()
+                for item in self.group_cardname
+                if item.get("group_cardname")
+            )
+        )
+        if cardnames:
+            identity_details.append(f"ta当前使用的群名片有{'、'.join(cardnames)}")
+        nickname_str = f"（{'；'.join(identity_details)}）" if identity_details else ""
 
         relation_info = ""
 
@@ -879,11 +1046,28 @@ class PersonInfoManager:
                 db.execute_sql("PRAGMA mmap_size = 268435456")  # 256MB内存映射
             db.create_tables([PersonInfo, PersonBinding], safe=True)
 
+            # create_tables(safe=True) 不会为旧 SQLite 表补列。
+            # 启动时做幂等热迁移，保留已有的人物和记忆数据。
+            self._ensure_profile_columns()
+
             # --- 热迁移逻辑：将老用户的单平台账号写入绑定表 ---
             self._migrate_old_bindings()
 
         except Exception as e:
             logger.error(f"数据库连接或 PersonInfo/PersonBinding 表创建失败: {e}")
+
+    @staticmethod
+    def _ensure_profile_columns() -> None:
+        columns = {row[1] for row in db.execute_sql("PRAGMA table_info(person_info)").fetchall()}
+        if "user_nickname" not in columns:
+            db.execute_sql("ALTER TABLE person_info ADD COLUMN user_nickname TEXT")
+        if "group_cardname" not in columns:
+            db.execute_sql("ALTER TABLE person_info ADD COLUMN group_cardname TEXT")
+
+        db.execute_sql(
+            "UPDATE person_info SET user_nickname = nickname "
+            "WHERE user_nickname IS NULL OR user_nickname = ''"
+        )
 
     def _migrate_old_bindings(self):
         """将老的 PersonInfo 中的 platform 和 user_id 迁移到 PersonBinding 中"""

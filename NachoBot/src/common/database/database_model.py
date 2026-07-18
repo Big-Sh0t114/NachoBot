@@ -287,7 +287,9 @@ class PersonInfo(BaseModel):
     name_reason = TextField(null=True)  # 名称设定的原因
     platform = TextField()  # 平台
     user_id = TextField(index=True)  # 用户ID
-    nickname = TextField(null=True)  # 用户昵称
+    nickname = TextField(null=True)  # bot 对用户的称呼（兼容旧数据）
+    user_nickname = TextField(null=True)  # 平台昵称
+    group_cardname = TextField(null=True)  # 群名片 JSON: [{"group_id": str, "group_cardname": str}]
     memory_points = TextField(null=True)  # 个人印象的点
     know_times = FloatField(null=True)  # 认识时间 (时间戳)
     know_since = FloatField(null=True)  # 首次印象总结时间
