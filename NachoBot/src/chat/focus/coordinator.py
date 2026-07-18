@@ -515,7 +515,13 @@ class FocusCoordinator:
                     state.pending_wakes.get(stored_ref.chat_id, WakeReason.NONE) | WakeReason.LOCAL_MESSAGE
                 )
                 state.condition.notify_all()
-                return FocusDispatch(True, group_id, stored_ref.chat_id, True)
+                return FocusDispatch(
+                    managed=True,
+                    group_id=group_id,
+                    active_chat_id=stored_ref.chat_id,
+                    woke_active=True,
+                    interrupt_active=True,
+                )
 
             if stored_ref.chat_id == state.active_chat_id:
                 state.latest_message_row[stored_ref.chat_id] = next_latest
@@ -523,7 +529,13 @@ class FocusCoordinator:
                     state.pending_wakes.get(stored_ref.chat_id, WakeReason.NONE) | WakeReason.LOCAL_MESSAGE
                 )
                 state.condition.notify_all()
-                return FocusDispatch(True, group_id, state.active_chat_id, True)
+                return FocusDispatch(
+                    managed=True,
+                    group_id=group_id,
+                    active_chat_id=state.active_chat_id,
+                    woke_active=True,
+                    interrupt_active=True,
+                )
 
             attention = self._next_background_attention(state, message, stored_ref)
             may_emit = self._policy.can_emit_event(
@@ -577,11 +589,14 @@ class FocusCoordinator:
                 state.condition.notify_all()
                 woke_active = True
             return FocusDispatch(
-                True,
-                group_id,
-                state.active_chat_id,
-                woke_active,
-                self._attention_snapshot(state, attention) if attention.visible else None,
+                managed=True,
+                group_id=group_id,
+                active_chat_id=state.active_chat_id,
+                woke_active=woke_active,
+                event=self._attention_snapshot(state, attention) if attention.visible else None,
+                # Ordinary background activity is a Gate wake, not a local message in the active chat.
+                # Let the in-flight turn commit before the Gate observes it so replied rows cannot replay.
+                interrupt_active=force_priority_switch,
             )
 
     async def wait_for_turn(self, chat_id: str) -> FocusTurn:
