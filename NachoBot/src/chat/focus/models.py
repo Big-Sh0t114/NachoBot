@@ -192,6 +192,7 @@ class FocusDispatch:
     active_chat_id: str | None = None
     woke_active: bool = False
     event: FocusEventSnapshot | None = None
+    interrupt_active: bool = False
 
 
 @dataclass(frozen=True, slots=True)
