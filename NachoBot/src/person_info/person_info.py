@@ -22,26 +22,58 @@ relation_selection_model = LLMRequest(
 )
 
 
+def _normalize_person_platform(platform: str) -> str:
+    """Normalize adapter-specific platform names for identity lookups."""
+    return platform.split("-", 1)[1] if "-" in platform else platform
+
+
+def get_original_person_id(platform: str, user_id: Union[int, str]) -> str:
+    """Return an existing legacy ID, or derive a strong ID for a new account."""
+    platform = str(platform)
+    normalized_platform = _normalize_person_platform(platform)
+    user_id_str = str(user_id)
+
+    try:
+        record = PersonInfo.get_or_none(
+            PersonInfo.platform == platform,
+            PersonInfo.user_id == user_id_str,
+        )
+        if record is None:
+            candidates = PersonInfo.select().where(PersonInfo.user_id == user_id_str)
+            record = next(
+                (
+                    candidate
+                    for candidate in candidates
+                    if _normalize_person_platform(candidate.platform) == normalized_platform
+                ),
+                None,
+            )
+        if record is not None:
+            return record.person_id
+    except Exception as e:
+        logger.warning(f"Failed to query original person ID; the table may not be initialized: {e}")
+
+    payload = json.dumps([normalized_platform, user_id_str], ensure_ascii=False, separators=(",", ":")).encode()
+    return hashlib.sha256(b"nachobot:person-id:v2\0" + payload).hexdigest()
+
+
 def get_person_id(platform: str, user_id: Union[int, str]) -> str:
     """获取唯一id (支持多平台绑定)"""
-    if "-" in platform:
-        platform = platform.split("-")[1]
+    normalized_platform = _normalize_person_platform(platform)
     user_id_str = str(user_id)
 
     try:
         # 1. 优先查询绑定表
         binding = PersonBinding.get_or_none(
-            PersonBinding.platform == platform, PersonBinding.platform_user_id == user_id_str
+            PersonBinding.platform == normalized_platform, PersonBinding.platform_user_id == user_id_str
         )
         if binding:
             return binding.person_id
     except Exception as e:
         logger.warning(f"查询绑定表时出错，可能表还未初始化: {e}")
 
-    # 2. 如果没有查到，使用传统的 MD5 方式生成默认的 person_id
-    components = [platform, user_id_str]
-    key = "_".join(components)
-    return hashlib.md5(key.encode()).hexdigest()
+    # 2. Preserve registered legacy IDs; derive strong IDs only for new accounts.
+    return get_original_person_id(platform, user_id_str)
 
 
 def get_person_id_by_person_name(person_name: str) -> str:
@@ -300,18 +332,7 @@ class Person:
     @staticmethod
     def _original_person_id(platform: str, user_id: str) -> str:
         """返回平台账号在跨平台绑定前的原始 person_id。"""
-        normalized_platform = platform.split("-", 1)[1] if "-" in platform else platform
-        user_id = str(user_id)
-        record = PersonInfo.get_or_none(
-            PersonInfo.platform == platform,
-            PersonInfo.user_id == user_id,
-        )
-        if record is None and normalized_platform != platform:
-            record = PersonInfo.get_or_none(
-                PersonInfo.platform == normalized_platform,
-                PersonInfo.user_id == user_id,
-            )
-        return record.person_id if record is not None else ""
+        return get_original_person_id(platform, user_id)
 
     @classmethod
     def _refresh_platform_profile(

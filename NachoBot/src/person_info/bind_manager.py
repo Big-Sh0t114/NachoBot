@@ -5,7 +5,7 @@ import random
 from src.common.logger import get_logger
 from src.common.database.database import db
 from src.common.database.database_model import PersonInfo, PersonBinding, BindRequest
-from src.person_info.person_info import get_person_id
+from src.person_info.person_info import get_original_person_id
 
 logger = get_logger("bind_manager")
 
@@ -23,14 +23,14 @@ class BindManager:
 
     @staticmethod
     def _compute_original_person_id(platform: str, user_id: str) -> str:
-        """计算某个平台账号的原始 person_id（与 get_person_id 的 MD5 逻辑一致）"""
-        return hashlib.md5(f"{platform}_{user_id}".encode()).hexdigest()
+        """Return an existing original ID, or derive a strong ID for a new account."""
+        return get_original_person_id(platform, user_id)
 
     @staticmethod
     def _compute_group_id(original_ids: list[str]) -> str:
-        """根据所有成员的原始 person_id 计算聚合组 ID（排序后 MD5，保证稳定性）"""
+        """Derive a stable, strongly hashed group ID from the original person IDs."""
         key = ",".join(sorted(original_ids))
-        return hashlib.md5(key.encode()).hexdigest()
+        return hashlib.sha256(f"nachobot:person-group:v2\0{key}".encode()).hexdigest()
 
     @staticmethod
     def _find_binding_flexible(target_platform: str, target_user_id: str):
