@@ -3,20 +3,21 @@ from src.chat.utils.prompt_builder import Prompt
 
 
 def init_replyer_prompt():
-    Prompt("你正在qq群里聊天，下面是群里正在聊的内容:", "chat_target_group1")
+    Prompt("你正在qq群「{latest_session}」里聊天，下面是群「{latest_session}」里正在聊的内容:", "chat_target_group1")
     Prompt("你正在和{sender_name}聊天，这是你们之前聊的内容：", "chat_target_private1")
-    Prompt("正在群里聊天", "chat_target_group2")
+    Prompt("正在群「{latest_session}」里聊天", "chat_target_group2")
     Prompt("和{sender_name}聊天", "chat_target_private2")
 
     Prompt(
         """{identity}
-你正在群里聊天,现在请你读读之前的聊天记录，然后给出日常且口语化的回复，平淡一些，
+{focus_handoff_block}
+你正在群「{latest_session}」里聊天,现在请你读读之前的聊天记录，然后给出日常且口语化的回复，平淡一些，
 说话简短一些，单次回复控制在50字以内。请注意把握聊天内容，不要回复的太有条理，可以有个性。
 {reply_style}
 请注意不要输出多余内容(包括前后缀，冒号和引号，括号，表情等)，只输出回复内容。
 不要输出多余内容(包括前后缀，冒号和引号，括号，表情包，at或 @等 )。
 
-你正在qq群里聊天，下面是群里正在聊的内容:
+你正在qq群「{latest_session}」里聊天，下面是群「{latest_session}」里正在聊的内容:
 {background_dialogue_prompt}
 {core_dialogue_prompt}
 {time_block}
@@ -30,12 +31,13 @@ def init_replyer_prompt():
 
     Prompt(
         """{identity}
+{focus_handoff_block}
 说话简短一些，单次回复控制在50字以内。请注意把握聊天内容，不要回复的太有条理，可以有个性。
 {reply_style}
 请注意不要输出多余内容(包括前后缀，冒号和引号，括号，表情等)，只输出回复内容。
 不要输出多余内容(包括前后缀，冒号和引号，括号，表情包，at或 @等 )。
 
-你正在qq群里聊天，下面是群里正在聊的内容:
+你正在qq群「{latest_session}」里聊天，下面是群「{latest_session}」里正在聊的内容:
 {background_dialogue_prompt}
 {time_block}
 
@@ -50,6 +52,7 @@ def init_replyer_prompt():
 
     Prompt(
         """{identity}
+{focus_handoff_block}
 现在请你读读之前的聊天记录，然后给出日常且口语化的回复，平淡一些，
 尽量简短一些。请注意把握聊天内容，不要回复的太有条理，可以有个性。
 {reply_style}
@@ -69,6 +72,7 @@ def init_replyer_prompt():
 
     Prompt(
         """{identity}
+{focus_handoff_block}
 尽量简短一些。请注意把握聊天内容，不要回复的太有条理，可以有个性。
 {reply_style}
 请注意不要输出多余内容(包括前后缀，冒号和引号，括号，表情等)，只输出回复内容。
@@ -88,6 +92,7 @@ def init_replyer_prompt():
     )
     Prompt(
         """{identity}
+{focus_handoff_block}
 【核心编码规则】当涉及编写代码、调试或专业功能说明时，你必须进入"认真模式"。
 代码的底层算法、语法结构和逻辑必须100%严谨规范，不可带有任何"笨笨的"或无条理的特征。
 但是，你必须将你的人设无缝融入代码的"观感层"：请使用可爱的风格来命名变量/函数（在符合命名规范的前提下），并使用慵懒傲娇的语气和颜文字来编写代码注释。

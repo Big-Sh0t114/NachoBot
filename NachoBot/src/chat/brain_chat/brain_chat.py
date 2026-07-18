@@ -28,6 +28,12 @@ from src.plugin_system.base.component_types import EventType, ActionInfo
 from src.plugin_system.core import events_manager
 from src.plugin_system.apis import generator_api, send_api, message_api, database_api
 from src.llm_models.exceptions import ReqAbortException
+from src.chat.focus.coordinator import bind_lease, focus_coordinator, current_context_lease
+from src.chat.focus.models import EffectKind, FocusStoppedError, FocusTurn, StaleFocusLeaseError, TurnOutcome, TurnStatus, WakeReason
+from src.chat.focus.reply_context import acquire_reply_context_request, release_reply_context
+from src.chat.focus.reply_delivery import settle_reply_context_delivery
+from src.chat.focus.message_repository import load_message_batch
+from src.chat.focus.switch_action import SWITCH_CHAT_ACTION, execute_switch_chat
 from src.chat.utils.chat_message_builder import (
     build_readable_messages_with_id,
     get_raw_msg_before_timestamp_with_chat,
@@ -36,6 +42,7 @@ from src.chat.heart_flow.relation_scanner import RelationScanner
 from src.chat.memory_system.memory_activator import MemoryActivator
 
 if TYPE_CHECKING:
+    from src.chat.focus.reply_context import ReplyContextRef
     from src.common.data_models.database_data_model import DatabaseMessages
     from src.common.data_models.message_data_model import ReplySetModel
 
@@ -144,6 +151,19 @@ class BrainChatting:
             logger.error(f"{self.log_prefix} BrainChatting 启动失败: {e}")
             raise
 
+    async def stop(self):
+        """幂等停止私聊运行时。"""
+        self.running = False
+        task = self._loop_task
+        self._loop_task = None
+        if task and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        try:
+            await self.relation_scanner.stop()
+        except Exception as e:
+            logger.debug(f"{self.log_prefix} 停止关系扫描器时跳过: {e}")
+
     def _handle_loop_completion(self, task: asyncio.Task):
         """当 _hfc_loop 任务完成时执行的回调。"""
         try:
@@ -197,15 +217,33 @@ class BrainChatting:
                     f"({self._planner_interrupt_consecutive_count}/{planner_interrupt_max})"
                 )
 
-    async def _loopbody(self):  # sourcery skip: hoist-if-from-if
-        recent_messages_list = message_api.get_messages_by_time_in_chat(
-            chat_id=self.stream_id,
-            start_time=self.last_read_time,
-            end_time=time.time(),
-            limit=20,
-            limit_mode="latest",
-            filter_mai=True,
-            filter_command=True,
+    async def _loopbody(self, focus_turn: FocusTurn | None = None):  # sourcery skip: hoist-if-from-if
+        if focus_turn is not None:
+            batch = load_message_batch(
+                self.stream_id,
+                focus_turn.read_after_row_id,
+                focus_turn.read_through_row_id,
+                limit=getattr(global_config.focus, "max_unread_messages", 20),
+            )
+            recent_messages_list = list(batch.messages)
+            self._focus_consumed_through_row_id = batch.consumed_through_row_id
+        else:
+            recent_messages_list = message_api.get_messages_by_time_in_chat(
+                chat_id=self.stream_id,
+                start_time=self.last_read_time,
+                end_time=time.time(),
+                limit=20,
+                limit_mode="latest",
+                filter_mai=True,
+                filter_command=True,
+            )
+        focus_requires_observe = bool(
+            focus_turn is not None
+            and (
+                focus_turn.events
+                or focus_turn.handoff_ids
+                or focus_turn.wake_reason & (WakeReason.FOCUS_EVENT | WakeReason.SWITCH_TARGET)
+            )
         )
 
         if len(recent_messages_list) >= 1:
@@ -238,9 +276,24 @@ class BrainChatting:
 
         else:
             # Normal模式：消息数量不足，等待
+            if focus_requires_observe:
+                return await self._observe(recent_messages_list=[])
+            if focus_turn is not None:
+                return True
             await asyncio.sleep(0.2)
             return True
         return True
+
+    def _focus_reply_context(self, cycle_id: str):
+        """为当前 Focus turn 预留一次 handoff；Normal 模式返回 None。"""
+        lease = current_context_lease()
+        if lease is None or lease.chat_id != self.stream_id:
+            return None
+        return acquire_reply_context_request(
+            lease,
+            str(cycle_id),
+            max_prompt_tokens=global_config.focus.handoff_prompt_tokens,
+        )
 
     async def _send_and_store_reply(
         self,
@@ -250,12 +303,14 @@ class BrainChatting:
         thinking_id,
         actions,
         selected_expressions: Optional[List[int]] = None,
+        context_refs: Optional[List["ReplyContextRef"]] = None,
     ) -> Tuple[Dict[str, Any], str, Dict[str, float]]:
         with Timer("回复发送", cycle_timers):
             reply_text = await self._send_response(
                 reply_set=response_set,
                 message_data=action_message,
                 selected_expressions=selected_expressions,
+                context_refs=context_refs,
             )
 
         # 获取 platform，如果不存在则从 chat_stream 获取，如果还是 None 则使用默认值
@@ -302,7 +357,8 @@ class BrainChatting:
 
         # 刷新上下文以确保获取最新的模板信息
         get_chat_manager().get_stream(self.stream_id)
-        current_template = self.chat_stream.context.get_template_name()
+        context = getattr(self.chat_stream, "context", None)
+        current_template = context.get_template_name() if context is not None else None
         logger.debug(f"{self.log_prefix} Current template name: {current_template}")
         async with global_prompt_manager.async_message_scope(current_template):
             # Debug check
@@ -423,12 +479,22 @@ class BrainChatting:
                         )
                     except ReqAbortException:
                         self._planner_interrupt_flag = None
+                        self._focus_turn_interrupted = True
                         if not self._planner_interrupt_requested:
                             self._planner_interrupt_consecutive_count = 0
                         logger.info(
                             f"{self.log_prefix} Planner 被新消息打断，中止本轮思考，等待新消息重新触发"
                         )
                         return True
+
+            switch_actions = [
+                action for action in action_to_use_info if action.action_type == SWITCH_CHAT_ACTION
+            ]
+            terminal_switch_selected = bool(switch_actions)
+            if terminal_switch_selected:
+                if len(switch_actions) > 1 or len(action_to_use_info) > 1:
+                    logger.warning(f"{self.log_prefix} switch_chat 是终止动作，丢弃本轮其余动作")
+                action_to_use_info = [switch_actions[0]]
 
             # 3. 按并行标记执行动作，避免非并行动作互相抢占
             serial_actions = []
@@ -481,6 +547,11 @@ class BrainChatting:
                     for action in parallel_actions
                 ]
                 results.extend(await asyncio.gather(*action_tasks, return_exceptions=True))
+
+            terminal_result = next(
+                (result for result in results if isinstance(result, dict) and result.get("terminal")),
+                None,
+            )
 
             # 处理执行结果
             reply_loop_info = None
@@ -536,9 +607,86 @@ class BrainChatting:
             if not self._planner_interrupt_requested:
                 self._planner_interrupt_consecutive_count = 0
 
+            if terminal_result is not None and terminal_result.get("retry"):
+                return False
             return True
 
+    async def _run_focus_turn(self) -> bool:
+        turn = await focus_coordinator.wait_for_turn(self.stream_id)
+        self._focus_consumed_through_row_id = turn.read_after_row_id
+        outcome = None
+        self._focus_turn_interrupted = False
+        try:
+            with bind_lease(turn.lease):
+                success = await self._loopbody(turn)
+            if not await focus_coordinator.is_current(turn.lease):
+                status = TurnStatus.SWITCHED
+            elif self._focus_turn_interrupted or self._planner_interrupt_requested:
+                status = TurnStatus.CANCELLED
+            elif success:
+                status = TurnStatus.COMPLETED
+            else:
+                status = TurnStatus.FAILED
+            outcome = TurnOutcome(
+                status=status,
+                consumed_through_row_id=self._focus_consumed_through_row_id,
+            )
+        except asyncio.CancelledError:
+            outcome = TurnOutcome(
+                status=TurnStatus.CANCELLED,
+                consumed_through_row_id=self._focus_consumed_through_row_id,
+            )
+            raise
+        except StaleFocusLeaseError as exc:
+            logger.info(f"{self.log_prefix} Focus turn became stale: {exc}")
+            outcome = TurnOutcome(
+                status=TurnStatus.STALE,
+                consumed_through_row_id=self._focus_consumed_through_row_id,
+            )
+        except ReqAbortException:
+            self._focus_turn_interrupted = True
+            outcome = TurnOutcome(
+                status=TurnStatus.CANCELLED,
+                consumed_through_row_id=self._focus_consumed_through_row_id,
+            )
+        except Exception:
+            outcome = TurnOutcome(
+                status=TurnStatus.FAILED,
+                consumed_through_row_id=self._focus_consumed_through_row_id,
+            )
+            raise
+        finally:
+            if outcome is not None:
+                try:
+                    await asyncio.shield(focus_coordinator.finish_turn(turn, outcome))
+                except Exception as exc:
+                    logger.error(f"{self.log_prefix} Failed to finish Focus turn: {exc}")
+        return True
+
     async def _main_chat_loop(self):
+        if not focus_coordinator.is_managed(self.stream_id):
+            await self._normal_chat_loop()
+            return
+
+        try:
+            while self.running:
+                try:
+                    await self._run_focus_turn()
+                    await asyncio.sleep(0.1)
+                except FocusStoppedError:
+                    break
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.error(f"{self.log_prefix} Focus turn failed; retrying in 3s")
+                    print(traceback.format_exc())
+                    await asyncio.sleep(3)
+        except asyncio.CancelledError:
+            logger.info(f"{self.log_prefix} Focus chat loop stopped")
+        logger.info(f"{self.log_prefix} Focus chat loop ended")
+
+    async def _normal_chat_loop(self):
+
         """主循环，持续进行计划并可能回复消息，直到被外部取消。"""
         try:
             while self.running:
@@ -601,13 +749,21 @@ class BrainChatting:
                 logger.warning(f"{self.log_prefix} 未能创建动作处理器: {action}")
                 return False, "", ""
 
-            # 处理动作并获取结果
-            result = await action_handler.execute()
+            # Focus 管理的动作必须持有当前 turn/epoch 租约，防止切换后的迟到副作用。
+            async with focus_coordinator.effect_permit(
+                None,
+                EffectKind.ACTION,
+                target_chat_id=self.stream_id,
+            ):
+                result = await action_handler.execute()
             success, action_text = result
             command = ""
 
             return success, action_text, command
 
+        except StaleFocusLeaseError as e:
+            logger.info(f"{self.log_prefix} Focus 租约失效，取消动作 {action}: {e}")
+            return False, "", ""
         except Exception as e:
             logger.error(f"{self.log_prefix} 处理{action}时出错: {e}")
             traceback.print_exc()
@@ -618,7 +774,69 @@ class BrainChatting:
         reply_set: "ReplySetModel",
         message_data: "DatabaseMessages",
         selected_expressions: Optional[List[int]] = None,
+        context_refs: Optional[List["ReplyContextRef"]] = None,
     ) -> str:
+        receipts: List[send_api.SendReceipt] = []
+        refs = tuple(context_refs or ())
+        try:
+            # One permit covers the complete logical reply so a Focus switch
+            # cannot commit between split message segments.
+            async with focus_coordinator.effect_permit(
+                None,
+                EffectKind.SEND,
+                target_chat_id=self.stream_id,
+            ):
+                reply_text, receipts = await self._send_response_permitted(
+                    reply_set=reply_set,
+                    message_data=message_data,
+                    selected_expressions=selected_expressions,
+                    receipts=receipts,
+                )
+        except StaleFocusLeaseError as exc:
+            await self._settle_interrupted_reply_context(refs, receipts, "stale_focus_lease")
+            logger.info(f"{self.log_prefix} Focus lease became stale; dropping reply send: {exc}")
+            return ""
+        except asyncio.CancelledError:
+            await self._settle_interrupted_reply_context(refs, receipts, "send_cancelled")
+            raise
+        except Exception:
+            await self._settle_interrupted_reply_context(refs, receipts, "send_error")
+            raise
+
+        try:
+            await settle_reply_context_delivery(refs, receipts)
+        except Exception as exc:
+            # Delivery already happened. Releasing here could consume the same
+            # handoff twice after a later retry, so retain it for recovery.
+            logger.error(f"{self.log_prefix} Focus delivery settlement failed: {exc}")
+        return reply_text
+
+    async def _settle_interrupted_reply_context(
+        self,
+        context_refs: Tuple["ReplyContextRef", ...],
+        receipts: List[send_api.SendReceipt],
+        reason: str,
+    ) -> None:
+        if not context_refs:
+            return
+        try:
+            if any(receipt.delivered for receipt in receipts):
+                await asyncio.shield(settle_reply_context_delivery(context_refs, receipts))
+            else:
+                await asyncio.shield(release_reply_context(context_refs, reason))
+        except Exception as exc:
+            logger.warning(
+                f"{self.log_prefix} Focus reply context release/settlement failed: "
+                f"reason={reason}, error={exc}"
+            )
+
+    async def _send_response_permitted(
+        self,
+        reply_set: "ReplySetModel",
+        message_data: "DatabaseMessages",
+        selected_expressions: Optional[List[int]],
+        receipts: List[send_api.SendReceipt],
+    ) -> Tuple[str, List[send_api.SendReceipt]]:
         new_message_count = message_api.count_new_messages(
             chat_id=self.chat_stream.stream_id, start_time=self.last_read_time, end_time=time.time()
         )
@@ -641,7 +859,7 @@ class BrainChatting:
             pre_filtered = " ".join(texts)
             logger.warning(f"{self.log_prefix} 过滤前信息: {pre_filtered}")
             logger.error(f"{self.log_prefix} 检测到可疑回复模板，已替换为 Filtered")
-            await send_api.text_to_stream(
+            receipt = await send_api.text_to_stream_receipt(
                 text="Filtered",
                 stream_id=self.chat_stream.stream_id,
                 reply_message=message_data,
@@ -649,7 +867,8 @@ class BrainChatting:
                 typing=False,
                 selected_expressions=selected_expressions,
             )
-            return "Filtered"
+            receipts.append(receipt)
+            return ("Filtered" if receipt.delivered else ""), receipts
 
         reply_text = ""
         first_replied = False
@@ -658,7 +877,7 @@ class BrainChatting:
                 continue
             data: str = reply_content.content  # type: ignore
             if not first_replied:
-                await send_api.text_to_stream(
+                receipt = await send_api.text_to_stream_receipt(
                     text=data,
                     stream_id=self.chat_stream.stream_id,
                     reply_message=message_data,
@@ -666,9 +885,8 @@ class BrainChatting:
                     typing=False,
                     selected_expressions=selected_expressions,
                 )
-                first_replied = True
             else:
-                await send_api.text_to_stream(
+                receipt = await send_api.text_to_stream_receipt(
                     text=data,
                     stream_id=self.chat_stream.stream_id,
                     reply_message=message_data,
@@ -676,9 +894,12 @@ class BrainChatting:
                     typing=True,
                     selected_expressions=selected_expressions,
                 )
-            reply_text += data
+            receipts.append(receipt)
+            if receipt.delivered:
+                first_replied = True
+                reply_text += data
 
-        return reply_text
+        return reply_text, receipts
 
     async def _execute_action(
         self,
@@ -691,6 +912,45 @@ class BrainChatting:
         """执行单个动作的通用函数"""
         try:
             with Timer(f"动作{action_planner_info.action_type}", cycle_timers):
+                if action_planner_info.action_type == SWITCH_CHAT_ACTION:
+                    lease = current_context_lease()
+                    if lease is None or lease.chat_id != self.stream_id:
+                        return {
+                            "action_type": SWITCH_CHAT_ACTION,
+                            "success": False,
+                            "reply_text": "",
+                            "terminal": True,
+                            "retry": False,
+                            "reason": "switch_chat requires the current Focus turn lease",
+                        }
+                    switch_result = await execute_switch_chat(
+                        focus_coordinator,
+                        lease=lease,
+                        action_data=action_planner_info.action_data or {},
+                        reasoning=action_planner_info.reasoning or "",
+                    )
+                    retryable = switch_result.reason.startswith(
+                        (
+                            "cannot resolve Focus events",
+                            "target runtime preparation failed",
+                            "handoff persistence failed",
+                            "switch compare-and-set failed",
+                            "Focus event revision changed",
+                        )
+                    )
+                    log = logger.info if switch_result.success else logger.warning
+                    log(f"{self.log_prefix} Focus switch_chat: {switch_result.reason}")
+                    return {
+                        "action_type": SWITCH_CHAT_ACTION,
+                        "success": switch_result.success,
+                        "reply_text": "",
+                        "terminal": True,
+                        "retry": retryable,
+                        "reason": switch_result.reason,
+                        "target_chat_id": switch_result.target_chat_id,
+                        "handoff_id": switch_result.handoff_id,
+                    }
+
                 if action_planner_info.action_type == "no_reply":
                     # 直接处理no_action逻辑，不再通过动作系统
                     reason = action_planner_info.reasoning or "选择不回复"
@@ -779,7 +1039,11 @@ class BrainChatting:
                                 ]
 
                         # 整合模式：如果 planner 已经生成了回复，直接使用
-                        if action_planner_info.reply_text:
+                        focus_replyer_required = (
+                            getattr(global_config.focus, "mode", "off") == "active"
+                            and focus_coordinator.is_managed(self.stream_id)
+                        )
+                        if action_planner_info.reply_text and not focus_replyer_required:
                             logger.info(f"{self.log_prefix} 使用集成生成的回复内容")
                             # 将文本转换为 ReplySetModel
                             from src.plugin_system.apis.generator_api import process_human_text
@@ -811,6 +1075,7 @@ class BrainChatting:
                             from_plugin=False,
                             extra_info=injection_text,
                             interrupt_flag=self._planner_interrupt_flag,
+                            reply_context=self._focus_reply_context(thinking_id),
                         )
 
                         if not success or not llm_response or not llm_response.reply_set:
@@ -844,6 +1109,7 @@ class BrainChatting:
                         thinking_id=thinking_id,
                         actions=chosen_action_plan_infos,
                         selected_expressions=selected_expressions,
+                        context_refs=llm_response.context_refs,
                     )
                     return {
                         "action_type": action_planner_info.action_type,

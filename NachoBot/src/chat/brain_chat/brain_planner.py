@@ -31,6 +31,10 @@ from src.memory_system.memory_retrieval import build_memory_retrieval_prompt
 from src.chat.utils.utils import get_chat_type_and_target_info
 from src.chat.planner_actions.action_manager import ActionManager
 from src.chat.message_receive.chat_stream import get_chat_manager
+from src.chat.focus.coordinator import focus_coordinator
+from src.chat.focus.switch_action import SWITCH_CHAT_ACTION, normalize_switch_action_data
+from src.chat.focus.switch_eligibility import can_offer_switch_chat
+from src.chat.focus.switch_planner import has_active_focus_lease, render_switch_planner_context
 from src.plugin_system.base.component_types import ActionInfo, ComponentType, ActionActivationType
 from src.plugin_system.core.component_registry import component_registry
 import os
@@ -220,6 +224,11 @@ class BrainPlanner:
 
     @property
     def planner_llm(self) -> LLMRequest:
+        if has_active_focus_lease(self.chat_id) or (
+            getattr(global_config.focus, "mode", "off") == "active"
+            and focus_coordinator.is_managed(self.chat_id)
+        ):
+            return self.separated_llm
         if global_config.bot.integrated_plan:
             from src.manager.local_store_manager import local_storage
             group = local_storage[f"private_replyer_group_{self.chat_id}"]
@@ -301,14 +310,27 @@ class BrainPlanner:
         try:
             action = action_json.get("action", "no_action")
             reasoning = action_json.get("reason", "未提供原因")
-            reply_text = action_json.get("text", "")  # 获取整合后的回复文本
-            action_data = {key: value for key, value in action_json.items() if key not in ["action", "reason", "text"]}
+            requested_switch = action == SWITCH_CHAT_ACTION
+            reply_text = "" if requested_switch else action_json.get("text", "")
+            if requested_switch and not can_offer_switch_chat(focus_coordinator, self.chat_id):
+                logger.warning(f"{self.log_prefix} 当前上下文无权使用 switch_chat，回退为 reply")
+                action = "reply"
+                reasoning = f"当前上下文不允许跨会话切换，改为正常回复。原始理由: {reasoning}"
+                action_data = {}
+            else:
+                action_data = (
+                    normalize_switch_action_data(action_json)
+                    if requested_switch
+                    else {key: value for key, value in action_json.items() if key not in ["action", "reason", "text"]}
+                )
             # 非no_action动作需要target_message_id
             latest_user_message = _pick_latest_user_message(message_id_list)
             target_message = None
             fallback_to_latest = False
 
-            if target_message_id := action_json.get("target_message_id"):
+            if action == SWITCH_CHAT_ACTION:
+                target_message = None
+            elif target_message_id := action_json.get("target_message_id"):
                 # 根据target_message_id查找原始消息
                 target_message = self.find_message_by_id(target_message_id, message_id_list)
                 if target_message is None:
@@ -327,7 +349,7 @@ class BrainPlanner:
 
             # 验证action是否可用
             available_action_names = [action_name for action_name, _ in current_available_actions]
-            internal_action_names = ["no_reply", "reply", "wait_time", "make_appoint", "cancel_appoint"]
+            internal_action_names = ["no_reply", "reply", "wait_time", "make_appoint", "cancel_appoint", SWITCH_CHAT_ACTION]
 
             if action not in internal_action_names and action not in available_action_names:
                 invalid_action = action
@@ -458,7 +480,11 @@ class BrainPlanner:
         logger.debug(f"{self.log_prefix}过滤后有{len(filtered_actions)}个可用动作")
 
         # 构建包含所有动作和回复上下文的提示词
-        if global_config.bot.integrated_plan:
+        focus_managed = has_active_focus_lease(self.chat_id) or (
+            getattr(global_config.focus, "mode", "off") == "active"
+            and focus_coordinator.is_managed(self.chat_id)
+        )
+        if global_config.bot.integrated_plan and not focus_managed:
             prompt, message_id_list = await self.build_integrated_planner_prompt(
                 is_group_chat=is_group_chat,
                 chat_target_info=chat_target_info,
@@ -563,6 +589,7 @@ class BrainPlanner:
                 plan_style=global_config.personality.private_plan_style,
                 pending_appointments=pending_text,
             )
+            prompt += await render_switch_planner_context(focus_coordinator, self.chat_id)
 
             return prompt, message_id_list
         except Exception as e:
@@ -889,6 +916,14 @@ class BrainPlanner:
             action.action_data = action.action_data or {}
             action.action_data["loop_start_time"] = loop_start_time
 
+        switch_actions = [action for action in actions if action.action_type == SWITCH_CHAT_ACTION]
+        if switch_actions:
+            if len(switch_actions) > 1 or len(actions) > 1:
+                logger.warning(f"{self.log_prefix} switch_chat 是终止动作，丢弃本轮其余动作")
+            actions = [switch_actions[0]]
+            logger.info(f"{self.log_prefix}规划器选择终止动作 switch_chat")
+            return actions
+
         logger.info(
             f"{self.log_prefix}规划器决定执行{len(actions)}个动作: {' '.join([a.action_type for a in actions])}"
         )
@@ -974,7 +1009,7 @@ class BrainPlanner:
             return []
 
         available_action_names = [action_name for action_name, _ in current_available_actions]
-        internal_action_names = ["no_reply", "reply", "wait_time", "make_appoint", "cancel_appoint"]
+        internal_action_names = ["no_reply", "reply", "wait_time", "make_appoint", "cancel_appoint", SWITCH_CHAT_ACTION]
         supported_actions = set(internal_action_names + available_action_names)
         filtered_objects = []
 

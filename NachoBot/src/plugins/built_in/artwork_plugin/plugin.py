@@ -66,11 +66,9 @@ class SendArtworkAction(BaseAction):
                 return False, "用户不在Discord画作白名单中"
 
         if not artwork_files:
-            empty_reply = self.get_config(
-                "artwork.empty_message",
-                "画夹里暂时没有图片，等我补几张再给你看~",
-            )
-            await self.send_text(empty_reply)
+            if not getattr(SendArtworkAction, "_empty_warned", False):
+                logger.warning(f"{self.log_prefix} artwork目录为空，画夹内没有可用图片")
+                SendArtworkAction._empty_warned = True
             return False, "artwork目录为空"
 
         chosen_path = random.choice(artwork_files)

@@ -1,4 +1,5 @@
 import asyncio
+import asyncio
 import hashlib
 import time
 import copy
@@ -129,6 +130,8 @@ class ChatManager:
         if not self._initialized:
             self.streams: Dict[str, ChatStream] = {}  # stream_id -> ChatStream
             self.last_messages: Dict[str, "MessageRecv"] = {}  # stream_id -> last_message
+            self._stream_registry_lock = asyncio.Lock()
+            self._stream_creation_tasks: Dict[str, asyncio.Task[ChatStream]] = {}
             try:
                 db.connect(reuse_if_open=True)
                 # 确保 ChatStreams 表存在
@@ -195,6 +198,26 @@ class ChatManager:
         return hashlib.md5(key.encode()).hexdigest()
 
     async def get_or_create_stream(
+        self, platform: str, user_info: UserInfo, group_info: Optional[GroupInfo] = None
+    ) -> ChatStream:
+        """并发安全地获取或创建聊天流。"""
+        stream_id = self._generate_stream_id(platform, user_info, group_info)
+        async with self._stream_registry_lock:
+            creation_task = self._stream_creation_tasks.get(stream_id)
+            if creation_task is None:
+                creation_task = asyncio.create_task(
+                    self._get_or_create_stream_impl(platform, user_info, group_info)
+                )
+                self._stream_creation_tasks[stream_id] = creation_task
+        try:
+            return await asyncio.shield(creation_task)
+        finally:
+            if creation_task.done():
+                async with self._stream_registry_lock:
+                    if self._stream_creation_tasks.get(stream_id) is creation_task:
+                        self._stream_creation_tasks.pop(stream_id, None)
+
+    async def _get_or_create_stream_impl(
         self, platform: str, user_info: UserInfo, group_info: Optional[GroupInfo] = None
     ) -> ChatStream:
         """获取或创建聊天流

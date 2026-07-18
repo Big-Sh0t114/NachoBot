@@ -151,7 +151,7 @@ def easter_egg():
     print(rainbow_text)
 
 
-async def graceful_shutdown():  # sourcery skip: use-named-expression
+async def graceful_shutdown(main_system: MainSystem | None = None):  # sourcery skip: use-named-expression
     try:
         logger.info("正在优雅关闭NachoBot...")
 
@@ -162,6 +162,9 @@ async def graceful_shutdown():  # sourcery skip: use-named-expression
         await events_manager.handle_nacho_events(event_type=EventType.ON_STOP)
 
         # 停止所有异步任务
+        if main_system is not None:
+            await main_system.shutdown()
+
         await async_task_manager.stop_and_wait_all_tasks()
 
         # 获取所有剩余任务，排除当前任务
@@ -287,6 +290,9 @@ def raw_main():
 
 
 if __name__ == "__main__":
+    main_system: MainSystem | None = None
+    loop: asyncio.AbstractEventLoop | None = None
+    shutdown_completed = False
     exit_code = 0  # 用于记录程序最终的退出状态
     try:
         # 获取MainSystem实例
@@ -309,7 +315,8 @@ if __name__ == "__main__":
             logger.warning("收到中断信号，正在优雅关闭...")
             if loop and not loop.is_closed():
                 try:
-                    loop.run_until_complete(graceful_shutdown())
+                    loop.run_until_complete(graceful_shutdown(main_system))
+                    shutdown_completed = True
                 except Exception as ge:  # 捕捉优雅关闭时可能发生的错误
                     logger.error(f"优雅关闭时发生错误: {ge}")
         # 新增：检测外部请求关闭
@@ -318,6 +325,15 @@ if __name__ == "__main__":
         logger.error(f"主程序发生异常: {str(e)} {str(traceback.format_exc())}")
         exit_code = 1  # 标记发生错误
     finally:
+        # Always persist Focus state before closing the event loop, including
+        # normal returns, initialization failures, and non-KeyboardInterrupt errors.
+        if loop and not loop.is_closed() and main_system is not None and not shutdown_completed:
+            try:
+                loop.run_until_complete(graceful_shutdown(main_system))
+                shutdown_completed = True
+            except Exception as ge:
+                logger.error(f"Final graceful shutdown failed: {ge}")
+
         # 确保 loop 在任何情况下都尝试关闭（如果存在且未关闭）
         if "loop" in locals() and loop and not loop.is_closed():
             loop.close()

@@ -6,6 +6,7 @@ from typing import Union
 from src.common.database.database_model import Messages, Images
 from src.common.logger import get_logger
 from .chat_stream import ChatStream
+from src.chat.focus.models import StoredMessageRef
 from .message import MessageSending, MessageRecv
 
 logger = get_logger("message_storage")
@@ -30,7 +31,10 @@ class MessageStorage:
             return []
 
     @staticmethod
-    async def store_message(message: Union[MessageSending, MessageRecv], chat_stream: ChatStream) -> None:
+    async def store_message(
+        message: Union[MessageSending, MessageRecv],
+        chat_stream: ChatStream,
+    ) -> StoredMessageRef:
         """存储消息到数据库"""
         try:
             pattern = r"<MainRule>.*?</MainRule>|<schedule>.*?</schedule>|<UserMessage>.*?</UserMessage>"
@@ -96,7 +100,7 @@ class MessageStorage:
             # 安全地获取 user_info, 如果为 None 则视为空字典 (以防万一)
             user_info_from_chat = chat_info_dict.get("user_info") or {}
 
-            Messages.create(
+            stored_message = Messages.create(
                 message_id=msg_id,
                 time=float(message.message_info.time),  # type: ignore
                 chat_id=chat_stream.stream_id,
@@ -135,11 +139,18 @@ class MessageStorage:
                 key_words_lite=key_words_lite,
                 selected_expressions=selected_expressions,
             )
+            return StoredMessageRef(
+                row_id=int(stored_message.id),
+                chat_id=chat_stream.stream_id,
+                message_id=str(msg_id),
+                message_time=float(message.message_info.time),  # type: ignore
+            )
         except Exception:
             logger.exception("存储消息失败")
             logger.error(f"消息：{message}")
             traceback.print_exc()
 
+            raise
     # 如果需要其他存储相关的函数，可以在这里添加
     @staticmethod
     def update_message(mmc_message_id: str | None, qq_message_id: str | None) -> bool:
