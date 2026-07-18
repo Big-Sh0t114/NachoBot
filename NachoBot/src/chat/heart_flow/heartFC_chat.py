@@ -18,7 +18,6 @@ from src.chat.planner_actions.planner import ActionPlanner
 from src.chat.planner_actions.action_modifier import ActionModifier
 from src.chat.planner_actions.action_manager import ActionManager
 from src.chat.heart_flow.hfc_utils import CycleDetail
-from src.chat.heart_flow.hfc_utils import send_typing, stop_typing
 from src.chat.express.expression_learner import expression_learner_manager
 from src.chat.frequency_control.frequency_control import frequency_control_manager
 from src.chat.keyword_cache import promise_cache_manager
@@ -27,8 +26,6 @@ from src.plugin_system.base.component_types import EventType, ActionInfo
 from src.chat.injection.injection_manager import injection_manager
 from src.plugin_system.core import events_manager
 from src.plugin_system.apis import generator_api, send_api, message_api, database_api
-from src.mais4u.mai_think import mai_thinking_manager
-from src.mais4u.s4u_config import s4u_config
 from src.chat.utils.chat_message_builder import (
     build_readable_messages_with_id,
     get_raw_msg_before_timestamp_with_chat,
@@ -826,10 +823,6 @@ class HeartFChatting:
     ) -> bool:  # sourcery skip: merge-else-if-into-elif, remove-redundant-if
         if recent_messages_list is None:
             recent_messages_list = []
-        reply_text = ""  # 初始化reply_text变量，避免UnboundLocalError
-
-        if s4u_config.enable_s4u:
-            await send_typing()
 
         # 刷新上下文以确保获取最新的模板信息
         get_chat_manager().get_stream(self.stream_id)
@@ -1239,7 +1232,6 @@ class HeartFChatting:
 
             # 处理执行结果
             reply_loop_info = None
-            reply_text_from_reply = ""
             action_success = False
             action_reply_text = ""
 
@@ -1254,7 +1246,6 @@ class HeartFChatting:
                 elif result["action_type"] == "reply":
                     if result["success"]:
                         reply_loop_info = result["loop_info"]
-                        reply_text_from_reply = result["reply_text"]
                     else:
                         logger.debug(f"{self.log_prefix} 回复动作未执行（可能被中断或生成失败）")
 
@@ -1269,7 +1260,6 @@ class HeartFChatting:
                         "taken_time": time.time(),
                     }
                 )
-                reply_text = reply_text_from_reply
             else:
                 # 没有回复信息，构建纯动作的loop_info
                 loop_info = {
@@ -1282,7 +1272,6 @@ class HeartFChatting:
                         "taken_time": time.time(),
                     },
                 }
-                reply_text = action_reply_text
 
             self.end_cycle(loop_info, cycle_timers)
             self.print_cycle_info(cycle_timers)
@@ -1292,12 +1281,6 @@ class HeartFChatting:
                 if not self._planner_interrupt_requested:
                     self._planner_interrupt_consecutive_count = 0
                 return not bool(terminal_result.get("retry"))
-
-            """S4U内容，暂时保留"""
-            if s4u_config.enable_s4u:
-                await stop_typing()
-                await mai_thinking_manager.get_mai_think(self.stream_id).do_think_after_response(reply_text)
-            """S4U内容，暂时保留"""
 
             self._planner_interrupt_flag = None
             if not self._planner_interrupt_requested:
@@ -3020,7 +3003,6 @@ class HeartFChatting:
         )
 
         chat_stream = self.chat_stream
-        chat_id = chat_stream.stream_id
         context_size = global_config.chat.get_max_context_size(is_group_chat=True)
 
         # 获取背景对话

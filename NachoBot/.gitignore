@@ -10,7 +10,6 @@ plugins/external_service_monitor
 plugins/messenger/config.toml
 plugins/mus_library/config.toml
 plugins/Maizone/
-src/mais4u/mais4u_chat/s4u_screen_cache.txt
 src/plugins/built_in/artwork_plugin/config.toml
 src/plugins/built_in/emoji_plugin/config.toml
 src/plugins/built_in/help_plugin/config.toml
@@ -25,8 +24,6 @@ temp/
 .env.*
 config/bot_config.toml
 !config/.gitkeep
-src/mais4u/config/s4u_config.toml
-src/mais4u/config/old
 template/compare/bot_config_template.toml
 template/compare/model_config_template.toml
 template/compare/topics_config_template.toml
