@@ -4,8 +4,9 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
+from src.chat.utils.playwright_search import PlaywrightSearchProvider
 from src.common.logger import get_logger
-from src.config.config import model_config
+from src.config.config import global_config, model_config
 from src.llm_models.utils_model import LLMRequest
 
 logger = get_logger("web_search")
@@ -27,23 +28,15 @@ Output JSON only:
 {{"need_search": true/false, "query": "...", "reason": "..."}}
 """
 
-SEARCH_PROMPT = """
-You are a web search assistant. Use online search to fetch public information.
-Query: {query}
-Context: {chat_history}
-
-Requirements:
-- Return no more than {max_results} results
-- Each result includes title, url, snippet
-- Output JSON only, no extra text
-
-JSON format:
-{{"query": "...", "results": [{{"title": "", "url": "", "snippet": ""}}], "note": ""}}
-"""
-
-
 class WebSearchManager:
-    def __init__(self, chat_id: str, enable_cache: bool = True, cache_ttl: int = 2, max_results: int = 5):
+    def __init__(
+        self,
+        chat_id: str,
+        enable_cache: bool = True,
+        cache_ttl: int = 2,
+        max_results: int = 5,
+        search_provider: Optional[PlaywrightSearchProvider] = None,
+    ):
         self.chat_id = chat_id
         self.enable_cache = enable_cache
         self.cache_ttl = cache_ttl
@@ -52,19 +45,29 @@ class WebSearchManager:
         self._warned_disabled = False
         self._warned_decider = False
 
-        model_set_search = getattr(model_config.model_task_config, "web_search", None)
         model_set_decider = getattr(model_config.model_task_config, "tool_use", None)
-        self._search_enabled = bool(model_set_search and model_set_search.model_list)
         self._decider_enabled = bool(model_set_decider and model_set_decider.model_list)
-        self._decider = LLMRequest(model_set=model_set_decider, request_type="web_search_decider") if self._decider_enabled else None
-        self._searcher = LLMRequest(model_set=model_set_search, request_type="web_search") if self._search_enabled else None
+        self._decider = (
+            LLMRequest(model_set=model_set_decider, request_type="web_search_decider")
+            if self._decider_enabled
+            else None
+        )
+
+        tool_config = getattr(global_config, "tool", None)
+        engines = getattr(tool_config, "web_search_engines", ["bing", "duckduckgo"])
+        timeout_seconds = getattr(tool_config, "web_search_timeout_seconds", 20)
+        self._search_provider = search_provider or PlaywrightSearchProvider(
+            engines=engines,
+            timeout_seconds=timeout_seconds,
+        )
+        self._search_enabled = search_provider is not None or self._search_provider.is_available()
 
     async def build_search_info(self, chat_history: str, sender: str, target: str, bot_name: str) -> str:
         if not target:
             return ""
         if not self._search_enabled:
             if not self._warned_disabled:
-                logger.warning("联网搜索未启用：model_task_config.web_search 为空或未配置")
+                logger.warning("联网搜索未启用：Playwright 不可用")
                 self._warned_disabled = True
             return ""
         if not self._decider_enabled and not self._warned_decider:
@@ -127,7 +130,7 @@ class WebSearchManager:
             return ""
         if not self._search_enabled:
             if not self._warned_disabled:
-                logger.warning("联网搜索未启用：model_task_config.web_search 为空或未配置")
+                logger.warning("联网搜索未启用：Playwright 不可用")
                 self._warned_disabled = True
             return ""
 
@@ -182,30 +185,14 @@ class WebSearchManager:
         return decision
 
     async def _search(self, query: str, chat_history: str) -> List[Dict[str, str]]:
-        if not self._searcher:
+        if not self._search_enabled:
             return []
-
-        prompt = SEARCH_PROMPT.format(
-            query=query,
-            chat_history=chat_history,
-            max_results=self.max_results,
-        )
 
         try:
-            content, _detail = await self._searcher.generate_response_async(prompt)
+            return await self._search_provider.search(query=query, max_results=self.max_results)
         except Exception as e:
-            logger.error(f"Web search execution failed: {e}")
+            logger.error(f"Playwright web search execution failed: {e}")
             return []
-
-        payload = self._load_json(content)
-        if not payload:
-            fallback_results = self._fallback_plain_text_results(content)
-            if fallback_results:
-                return fallback_results
-            logger.warning("Web search returned non-JSON content and no fallback extracted")
-            return []
-
-        return self._normalize_results(payload.get("results"))
 
     def _format_results(self, query: str, results: List[Dict[str, str]], reason: str) -> str:
         lines = [f"Query: {query}"]
@@ -224,14 +211,6 @@ class WebSearchManager:
         if reason:
             lines.append(f"Reason: {reason}")
         return "\n".join(lines)
-
-    def _fallback_plain_text_results(self, content: str) -> List[Dict[str, str]]:
-        if not content:
-            return []
-        cleaned = content.strip()
-        if not cleaned:
-            return []
-        return [{"title": "", "url": "", "snippet": cleaned}]
 
     @staticmethod
     def _truncate_for_log(text: str, max_len: int = 800) -> str:
@@ -288,23 +267,6 @@ class WebSearchManager:
     def _extract_json(text: str) -> Optional[str]:
         match = re.search(r"\{.*\}", text, flags=re.DOTALL)
         return match.group(0) if match else None
-
-    @staticmethod
-    def _normalize_results(raw_results: Any) -> List[Dict[str, str]]:
-        if not isinstance(raw_results, list):
-            return []
-
-        results: List[Dict[str, str]] = []
-        for item in raw_results:
-            if not isinstance(item, dict):
-                continue
-            title = str(item.get("title", "")).strip()
-            url = str(item.get("url", "")).strip()
-            snippet = str(item.get("snippet", "")).strip()
-            if not (title or snippet or url):
-                continue
-            results.append({"title": title, "url": url, "snippet": snippet})
-        return results
 
     def _get_cache(self, query: str) -> Optional[str]:
         if not self.enable_cache:
