@@ -441,6 +441,12 @@ class ToolConfig(ConfigBase):
     enable_tool: bool = False
     """是否在聊天中启用工具"""
 
+    web_search_engines: list[str] = field(default_factory=lambda: ["bing", "duckduckgo"])
+    """浏览器联网搜索引擎，按顺序失败回退"""
+
+    web_search_timeout_seconds: int = 20
+    """单个搜索引擎页面的加载超时时间（秒）"""
+
 
 @dataclass
 class VoiceConfig(ConfigBase):

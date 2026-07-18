@@ -154,9 +154,6 @@ class ModelTaskConfig(ConfigBase):
     advanced_replyer: TaskConfig = field(default_factory=TaskConfig)
     """高级模式回复模型配置（可选，缺省回退到默认参数）"""
 
-    web_search: TaskConfig = field(default_factory=TaskConfig)
-    """联网搜索模型配置（可选，缺省回退到默认参数）"""
-
     mcp: TaskConfig = field(default_factory=TaskConfig)
     """MCP插件专用模型配置"""
 

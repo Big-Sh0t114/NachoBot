@@ -67,13 +67,6 @@ api_provider = "LocalModel"
 price_in = 0
 price_out = 0
 
-[[models]]   # 联网模型，模型自身需具备联网能力
-model_identifier = "grok-4.1#search"
-name = "grok-4.1#search/Qhaigc"
-api_provider = "Qhaigc"
-price_in = 0.2
-price_out = 0.5
-
 [[models]]   # 硅基流动提供的一些免费模型，部分可能已过期
 model_identifier = "Qwen/Qwen3-8B"
 name = "Qwen/Qwen3-8B/Silicon"
@@ -192,11 +185,6 @@ timeout = 50
 [model_task_config.mcp] # MCP插件专用模型配置
 model_list = []
 temperature = 0.05
-max_tokens = 800
-
-[model_task_config.web_search] # 联网搜索模型组，需要模型支持联网
-model_list = ["grok-4.1#search/Qhaigc"]
-temperature = 0.2
 max_tokens = 800
 
 [model_task_config.replyer0] # 默认回复模型组（原 replyer），还用于表达器和表达方式学习

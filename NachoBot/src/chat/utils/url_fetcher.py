@@ -146,9 +146,17 @@ class UrlContentFetcher:
             logger.debug(f"URL fetch error: {url}, err={e}")
             return None
 
+    @staticmethod
+    def browser_available() -> bool:
+        """返回当前环境是否可以使用 Playwright。"""
+        return _PLAYWRIGHT_AVAILABLE and async_playwright is not None
+
     @classmethod
-    async def _get_shared_browser(cls):
+    async def get_shared_browser(cls):
         """获取或创建共享的浏览器实例（单例模式）"""
+        if not cls.browser_available():
+            raise RuntimeError("Playwright 不可用，无法创建浏览器实例")
+
         async with cls._browser_lock:
             if cls._browser is not None:
                 try:
@@ -169,7 +177,7 @@ class UrlContentFetcher:
         if not _PLAYWRIGHT_AVAILABLE or async_playwright is None:
             return None
         try:
-            browser = await self._get_shared_browser()
+            browser = await self.get_shared_browser()
             page = await browser.new_page(user_agent=self.user_agent)
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=self.browser_timeout_seconds * 1000)
@@ -191,7 +199,7 @@ class UrlContentFetcher:
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         lines = []
-        for idx, (url, fetched) in enumerate(zip(urls, results), 1):
+        for idx, (url, fetched) in enumerate(zip(urls, results, strict=True), 1):
             if isinstance(fetched, Exception):
                 logger.debug(f"URL抓取异常: {url}, err={fetched}")
                 continue
