@@ -41,7 +41,11 @@ class WbiSigner:
             data=None,
             use_wbi=False,
         )
-        wbi_img = (data or {}).get("data", {}).get("wbi_img", {})
+        nav_data = (data or {}).get("data") or {}
+        self.api.login_valid = (data or {}).get("code") == 0 and bool(
+            nav_data.get("isLogin")
+        )
+        wbi_img = nav_data.get("wbi_img", {})
         img_url = str(wbi_img.get("img_url") or "")
         sub_url = str(wbi_img.get("sub_url") or "")
         if not img_url or not sub_url:
@@ -83,6 +87,7 @@ class BilibiliApi:
         self.config = config
         self.logger = logger
         self.session: Optional[aiohttp.ClientSession] = None
+        self.login_valid: Optional[bool] = None
         self.signer = WbiSigner(self, logger)
 
     async def start(self) -> None:
@@ -157,13 +162,19 @@ class BilibiliApi:
             if isinstance(payload, dict):
                 code = payload.get("code")
                 if code not in (None, 0):
-                    self.logger.warning(
-                        "Bilibili API error: url=%s status=%s code=%s message=%s",
-                        url,
-                        resp.status,
-                        code,
-                        payload.get("message") or payload.get("msg"),
-                    )
+                    if code == -101 and url.endswith("/x/web-interface/nav"):
+                        self.logger.info(
+                            "Bilibili account session is unavailable; "
+                            "anonymous API mode will be used"
+                        )
+                    else:
+                        self.logger.warning(
+                            "Bilibili API error: url=%s status=%s code=%s message=%s",
+                            url,
+                            resp.status,
+                            code,
+                            payload.get("message") or payload.get("msg"),
+                        )
             return payload
 
     async def fetch_bytes(

@@ -29,7 +29,7 @@ live2d_action_enable = true
 room_ids = [ ]       # 填写直播间id
 use_wss = true
 heartbeat_interval = 30
-disable_network_search = true
+live_person_profile_enabled = true  # Inject person profiles into the Bilibili bypass Replyer prompt
 reconnect_seconds = 5
 max_reconnect_seconds = 60
 ws_proxy = "none"
@@ -86,6 +86,8 @@ reply_prompt = """{identity}
 - `action`: 你的动作，只能从以下选项中选一个："待机/放松", "点头/同意", "摇头/否定", "转身向左/看左边", "转身向右/看右边", "眨眼/卖萌/Wink", "身体晃动/开心/兴奋", "歪头/疑惑/思考", "害羞/移开视线/不好意思", "一般"。根据回复内容选择最合适的动作，大多数情况用"一般"即可，只在情感或语境明确时才选其他动作。
 
 {extra_info_block}，
+{person_profile_block}
+{focus_handoff_block}，
 
 下面是直播间里正在聊的内容:
 {background_dialogue_prompt}
