@@ -28,15 +28,6 @@ max_retry = 2
 timeout = 60
 retry_interval = 5
 
-[[api_providers]] # 阿里 百炼 API服务商配置
-name = "Qhaigc"
-base_url = "https://api-hk.qhaigc.net/v1"
-api_key = ""
-client_type = "openai"
-max_retry = 2
-timeout = 30
-retry_interval = 5
-
 [[api_providers]]  # Deepseek配置
 name = "Deepseek"
 base_url = "https://api.deepseek.com/v1"
