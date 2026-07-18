@@ -301,7 +301,17 @@ class Person:
     def _original_person_id(platform: str, user_id: str) -> str:
         """返回平台账号在跨平台绑定前的原始 person_id。"""
         normalized_platform = platform.split("-", 1)[1] if "-" in platform else platform
-        return hashlib.md5(f"{normalized_platform}_{user_id}".encode()).hexdigest()
+        user_id = str(user_id)
+        record = PersonInfo.get_or_none(
+            PersonInfo.platform == platform,
+            PersonInfo.user_id == user_id,
+        )
+        if record is None and normalized_platform != platform:
+            record = PersonInfo.get_or_none(
+                PersonInfo.platform == normalized_platform,
+                PersonInfo.user_id == user_id,
+            )
+        return record.person_id if record is not None else ""
 
     @classmethod
     def _refresh_platform_profile(
