@@ -1,7 +1,6 @@
 import asyncio
 import json
-import time
-from typing import Dict, Any, Optional
+from typing import Dict, Optional
 
 from src.chat.message_receive.message import MessageRecv
 from src.chat.utils.chat_message_builder import (
@@ -179,7 +178,7 @@ class MoodManager:
         self._init_prompts()
 
     def _init_prompts(self):
-        # Register prompts (Copied from s4u_mood_manager.py)
+        # Register prompts ported from the legacy live mood manager.
         # We assume Prompt class is available
         Prompt(
             """{chat_talking_prompt}\n以上是直播间里正在进行的对话\n\n{indentify_block}\n你刚刚的情绪状态是：{mood_state}\n\n现在，发送了消息，引起了你的注意，你对其进行了阅读和思考，请你输出一句话描述你新的情绪状态，不要输出任何其他内容\n请只输出情绪状态，不要输出其他内容：\n""",

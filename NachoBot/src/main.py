@@ -85,11 +85,6 @@ class MainSystem:
         # 添加数据库聚合维护任务
         await async_task_manager.add_task(DBAggregationTask())
 
-        # 添加图谱记忆沉淀器
-        from src.chat.memory_system.memory_accumulator import MemoryAccumulator
-
-        await async_task_manager.add_task(MemoryAccumulator())
-
         # 启动API服务器
         # start_api_server()
         # logger.info("API服务器启动成功")
@@ -124,12 +119,15 @@ class MainSystem:
         await focus_bootstrap.start()
         logger.info("Focus bootstrap completed")
 
-        # 根据配置条件性地初始化记忆系统
-        if global_config.lpmm_knowledge.enable:
+        # 根据配置条件性地初始化关系图谱记忆系统。
+        # MemoryAccumulator 注册后会立即执行一次，因此必须在海马体初始化完成后再启动。
+        if global_config.relationship.enable_relationship:
             from src.chat.memory_system.Hippocampus import hippocampus_manager
+            from src.chat.memory_system.memory_accumulator import MemoryAccumulator
 
             hippocampus_manager.initialize()
             logger.info("记忆系统初始化成功")
+            await async_task_manager.add_task(MemoryAccumulator())
         else:
             logger.info("记忆系统已禁用，跳过初始化")
 
