@@ -95,6 +95,8 @@ persistent_rounds = 10
 
 [tool]
 enable_tool = true # 是否启用回复工具
+web_search_engines = ["bing", "duckduckgo"] # 浏览器搜索引擎，前者失败时自动尝试后者
+web_search_timeout_seconds = 20 # 单个搜索引擎页面的加载超时时间（秒）
 
 [mood]
 enable_mood = true # 是否启用情绪系统
