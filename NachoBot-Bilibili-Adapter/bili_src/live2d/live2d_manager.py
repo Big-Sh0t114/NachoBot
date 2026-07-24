@@ -1,24 +1,35 @@
+"""Live2D response parsing and remote-adapter coordination."""
+
+from __future__ import annotations
+
 import asyncio
 import json
-import logging
-from typing import Optional, Tuple, Any
+from loguru import logger
+from typing import Any, Optional, Tuple
 
 
 class Live2DManager:
-    _ACTION_TO_MOTION_GROUP = {
-        "待机/放松": "Idle",
-        "点头/同意": "Nod",
-        "摇头/否定": "Shake",
-        "转身向左/看左边": "TurnLeft",
-        "转身向右/看右边": "TurnRight",
-        "眨眼/卖萌/Wink": "Wink",
-        "身体晃动/开心/兴奋": "Sway",
-        "歪头/疑惑/思考": "TiltHead",
-        "害羞/移开视线/不好意思": "LookAway",
-        "一般": "",
+    """Translate Bilibili reply metadata into platform-neutral avatar commands."""
+
+    _ACTION_TO_CANONICAL_ID = {
+        "待机/放松": "IDLE",
+        "点头/同意": "NOD",
+        "摇头/否定": "SHAKE_HEAD",
+        "转身向左/看左边": "TURN_LEFT",
+        "转身向右/看右边": "TURN_RIGHT",
+        "眨眼/卖萌/Wink": "WINK",
+        "身体晃动/开心/兴奋": "HAPPY",
+        "歪头/疑惑/思考": "TILT_HEAD",
+        "害羞/移开视线/不好意思": "LOOK_AWAY",
+        "一般": "GENERAL",
     }
 
-    def __init__(self, config: Any, logger: logging.Logger, adapter_ref: Any = None):
+    def __init__(
+        self,
+        config: Any,
+        logger,
+        adapter_ref: Any = None,
+    ) -> None:
         self.config = config
         self.logger = logger
         self.adapter = adapter_ref
@@ -26,20 +37,28 @@ class Live2DManager:
 
         if self.config.live_live2d_enable:
             try:
-                from live2d_render.controller import Live2DController
+                from bili_src.live2d.remote_controller import RemoteLive2DController
 
-                self.controller = Live2DController(adapter_ref, logger)
-            except Exception as e:
-                self.logger.error(f"Failed to initialize Live2DController: {e}")
+                self.controller = RemoteLive2DController(adapter_ref, logger)
+            except Exception as exc:
+                self.logger.error(
+                    "Failed to initialize remote Live2D controller: %s",
+                    exc,
+                )
 
-    async def start(self):
+    async def start(self) -> None:
         if self.controller:
             await self.controller.start()
 
+    async def stop(self) -> None:
+        if self.controller:
+            await self.controller.stop()
+
     def extract_json_emotion_from_text(
-        self, text: str
+        self,
+        text: str,
     ) -> Tuple[str, Optional[str], Optional[str]]:
-        """尝试解析回复中的JSON表情+动作指令，返回(解析后文本, emotion, action)。"""
+        """Parse reply JSON and return ``(reply, emotion, action)``."""
         start_idx = text.find("{")
         end_idx = text.rfind("}")
         parsed_text = ""
@@ -50,45 +69,54 @@ class Live2DManager:
             try:
                 json_str = text[start_idx : end_idx + 1]
                 data = json.loads(json_str, strict=False)
+                if not isinstance(data, dict):
+                    return text, None, None
 
-                if "reply" in data and data["reply"]:
+                if data.get("reply"):
                     parsed_text = str(data["reply"])
-                emotion = data.get("emotion")
-                action = data.get("action")
-
+                emotion_value = data.get("emotion")
+                action_value = data.get("action")
+                emotion = str(emotion_value) if emotion_value is not None else None
+                action = str(action_value) if action_value is not None else None
                 return parsed_text if parsed_text else text, emotion, action
-            except Exception as e:
-                self.logger.debug(f"JSON parsing failed (fallback to raw): {e}")
+            except Exception as exc:
+                self.logger.debug("JSON parsing failed; using raw reply: %s", exc)
 
         return text, None, None
 
     def execute_extracted_live2d_action(
-        self, emotion: Optional[str], action: Optional[str]
+        self,
+        emotion: Optional[str],
+        action: Optional[str],
     ) -> None:
-        """从 extract_json_emotion_from_text 提取出的指令执行 Live2D 事件"""
-        ctrl = self.controller
-        if not ctrl:
+        """Dispatch parsed emotion and action metadata without blocking TTS."""
+        controller = self.controller
+        if not controller:
             return
 
-        if emotion and emotion in ["normal", "shy", "disgust", "angry"]:
-            try:
-                asyncio.create_task(ctrl.send_live2d_event("emotion", emotion))
-                self.logger.info(f"Dispatched Live2D emotion event: {emotion}")
-            except Exception as e:
-                self.logger.error(f"Failed to dispatch Live2D emotion: {e}")
+        if emotion in {"normal", "shy", "disgust", "angry"}:
+            self._schedule(
+                controller.send_live2d_event("emotion", emotion),
+                f"emotion:{emotion}",
+            )
 
-        if action:
-            motion_group = self._ACTION_TO_MOTION_GROUP.get(action, "")
-            if motion_group and motion_group != "Idle":
-                try:
-                    asyncio.create_task(
-                        ctrl.send_live2d_event(
-                            "random_motion",
-                            {"group": motion_group, "priority": 3},
-                        )
-                    )
-                    self.logger.info(
-                        f"Dispatched Live2D action: {action} -> {motion_group}"
-                    )
-                except Exception as e:
-                    self.logger.error(f"Failed to dispatch Live2D action: {e}")
+        if not action:
+            return
+
+        action_id = self._ACTION_TO_CANONICAL_ID.get(action)
+        if not action_id or action_id in {"IDLE", "GENERAL"}:
+            return
+
+        self._schedule(
+            controller.send_canonical_action(action_id),
+            f"action:{action}->{action_id}",
+        )
+
+    def _schedule(self, coroutine: Any, description: str) -> None:
+        try:
+            asyncio.create_task(coroutine)
+            self.logger.info("Dispatched Live2D %s", description)
+        except Exception as exc:
+            if hasattr(coroutine, "close"):
+                coroutine.close()
+            self.logger.error("Failed to dispatch Live2D %s: %s", description, exc)

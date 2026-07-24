@@ -95,7 +95,7 @@ async def main():
         logger.info(f"  Push-to-Talk: ON (key: {config.microphone.ptt_key})")
     elif config.microphone.enabled:
         logger.info(f"  Push-to-Talk: OFF (continuous capture)")
-    logger.info("TTS Handler: GPT-SoVITS (from NachoBot-TTS-Adapter)")
+    logger.info("TTS Handler: GPT-SoVITS (from NachoBot-Multimodal-Adapter)")
 
     adapter = UniversalVCAdapter(config, logger)
 

@@ -1,6 +1,6 @@
 import asyncio
 import json
-import logging
+from loguru import logger
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -18,7 +18,7 @@ COMMENT_REPLY_LIMIT = 10
 COMMENT_LIMIT_FALLBACK_TEXT = "NachoBot有点口渴了哦，先休息一下啦~"
 
 class CommentHandler:
-    def __init__(self, config: Any, logger: logging.Logger, adapter_ref: Any):
+    def __init__(self, config: Any, logger, adapter_ref: Any):
         self.config = config
         self.logger = logger
         self.adapter = adapter_ref

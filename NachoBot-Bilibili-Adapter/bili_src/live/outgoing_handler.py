@@ -1,5 +1,5 @@
 import asyncio
-import logging
+from loguru import logger
 import time
 from typing import Any, Dict, Optional
 
@@ -16,7 +16,7 @@ from bili_src.core.utils import (
 
 
 class OutgoingHandler:
-    def __init__(self, config: Any, logger: logging.Logger, adapter_ref: Any):
+    def __init__(self, config: Any, logger, adapter_ref: Any):
         self.config = config
         self.logger = logger
         self.adapter = adapter_ref
