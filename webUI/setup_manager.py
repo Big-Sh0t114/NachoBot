@@ -31,10 +31,11 @@ TEMPLATE_MAP: dict[str, str] = {
     "NachoBot/template/topics_config_template.toml": "NachoBot/config/topics_config.toml",
     "NachoBot/template/template.env": "NachoBot/.env",
     "NachoBot-Napcat-Adapter/template/template_config.toml": "NachoBot-Napcat-Adapter/config.toml",
-    "NachoBot-TTS-Adapter/template_configs/base_template.toml": "NachoBot-TTS-Adapter/configs/base.toml",
-    "NachoBot-TTS-Adapter/template_configs/gpt-sovits_template.toml": "NachoBot-TTS-Adapter/configs/gpt-sovits.toml",
-    "NachoBot-TTS-Adapter/template_configs/vox_template.toml": "NachoBot-TTS-Adapter/configs/vox.toml",
+    "NachoBot-Multimodal-Adapter/template_configs/base_template.toml": "NachoBot-Multimodal-Adapter/configs/base.toml",
+    "NachoBot-Multimodal-Adapter/template_configs/gpt-sovits_template.toml": "NachoBot-Multimodal-Adapter/configs/gpt-sovits.toml",
+    "NachoBot-Multimodal-Adapter/template_configs/vox_template.toml": "NachoBot-Multimodal-Adapter/configs/vox.toml",
     "NachoBot-UniversalVC-Adapter/template/config_template.toml": "NachoBot-UniversalVC-Adapter/config.toml",
+    "NachoBot-Multimodal-Adapter/template_configs/perception_template.toml": "NachoBot-Multimodal-Adapter/configs/perception.toml",
 }
 
 
@@ -45,9 +46,9 @@ TEMPLATE_MAP: dict[str, str] = {
 KNOWN_PORTS: dict[str, int] = {
     "NachoBot Core": 8000,
     "Napcat Adapter": 8095,
-    "TTS Adapter": 8070,
+    "Multimodal Adapter": 8070,
     "TTS Engine": 9880,
-    "Perception API": 9874,
+    "VLM / ASR API": 9874,
     "Koishi": 5140,
     "WebUI": 8088,
 }
@@ -530,7 +531,7 @@ class ConfigInitializer:
                 pass
 
         # ── TTS base template ──
-        tts_tmpl = ROOT_DIR / "NachoBot-TTS-Adapter/template_configs/base_template.toml"
+        tts_tmpl = ROOT_DIR / "NachoBot-Multimodal-Adapter/template_configs/base_template.toml"
         if tts_tmpl.exists():
             try:
                 doc = tomlkit.parse(tts_tmpl.read_text(encoding="utf-8"))
@@ -710,7 +711,7 @@ class ConfigInitializer:
         # Adapter configs only when their component is selected
         mapping = {
             "NachoBot-Napcat-Adapter": "qq",
-            "NachoBot-TTS-Adapter": "tts",
+            "NachoBot-Multimodal-Adapter": "tts",
             "NachoBot-Bilibili-Adapter": "bilibili",
             "NachoBot-Koishi-Adapter": "discord",
             "NachoBot-DiscordVC-Adapter": "discord",
@@ -827,7 +828,7 @@ class ConfigInitializer:
                 changed = True
 
         # -- TTS base.toml --
-        if "NachoBot-TTS-Adapter" in target_rel and "base" in filename:
+        if "NachoBot-Multimodal-Adapter" in target_rel and "base" in filename:
             tts = wizard_data.get("tts", {})
             engine = tts.get("engine", "GPT_Sovits")
             if "enabled_tts" in doc:
@@ -1294,7 +1295,7 @@ class DependencyInstaller:
     UV_PROJECTS: dict[str, str] = {
         "core": "NachoBot",
         "qq": "NachoBot-Napcat-Adapter",
-        "tts": "NachoBot-TTS-Adapter",
+        "tts": "NachoBot-Multimodal-Adapter",
         "bilibili": "NachoBot-Bilibili-Adapter",
         "discord_koishi": "NachoBot-Koishi-Adapter",
         "discord_vc": "NachoBot-DiscordVC-Adapter",
@@ -1339,8 +1340,8 @@ class DependencyInstaller:
                 {
                     "id": "tts",
                     "type": "uv",
-                    "name": "TTS Adapter",
-                    "dir": "NachoBot-TTS-Adapter",
+                    "name": "Multimodal Adapter",
+                    "dir": "NachoBot-Multimodal-Adapter",
                 }
             )
 
