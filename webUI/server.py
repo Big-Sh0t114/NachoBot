@@ -24,6 +24,7 @@ from db_manager import DatabaseManager
 from knowledge_manager import KnowledgeManager
 from memory_manager import is_available as memory_is_available
 import memory_manager
+from music_library import build_music_playlist
 from setup_manager import EnvironmentChecker, ConfigInitializer, DependencyInstaller, PathVerifier, NapCatConfigurator
 
 logger = logging.getLogger("webui")
@@ -75,14 +76,7 @@ async def index():
 
 @app.get("/api/music/list")
 async def list_music():
-    if not RESOURCES_DIR.exists():
-        return []
-    music_extensions = {".mp3", ".wav", ".ogg", ".flac"}
-    files = []
-    for p in RESOURCES_DIR.iterdir():
-        if p.is_file() and p.suffix.lower() in music_extensions:
-            files.append({"name": p.name, "url": f"/resources/{p.name}"})
-    return files
+    return build_music_playlist(RESOURCES_DIR)
 
 
 # =========================================================================

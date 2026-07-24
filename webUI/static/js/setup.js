@@ -225,27 +225,27 @@ const SetupModule = (() => {
             // VRAM > 4GB and < 6GB
             titleEl.textContent = 'gpt lite 方案';
             descEl.textContent = '检测到可用显存介于 4G 到 6G 之间。推荐使用 gpt lite 方案部署（仅启用 GPT-SoVITS 合成，不启用本地 Florence-2 VLM 视觉与 FunASR 语音识别，以节约显存）。';
-            recommendedLaunchGroup = 'TTS 语音 (LITE)';
+            recommendedLaunchGroup = '语音服务 (LITE)';
             createApplyButton('一键应用此方案', () => applyScheme('gpt_lite'));
         }
         else if (vramGb >= 6.0 && vramGb <= 8.0) {
             // VRAM in [6GB, 8GB]
             titleEl.textContent = 'gpt FULL 方案';
             descEl.textContent = '检测到可用显存介于 6G 到 8G 之间。推荐使用 gpt FULL 方案部署（启用 GPT-SoVITS 语音合成 + Florence-2 视觉大模型 + FunASR 语音识别，满足全功能交互需求）。';
-            recommendedLaunchGroup = 'TTS 语音 (FULL)';
+            recommendedLaunchGroup = '多模态服务 (FULL)';
             createApplyButton('一键应用此方案', () => applyScheme('gpt_full'));
         }
         else if (vramGb > 8.0 && vramGb <= 12.0) {
             // VRAM in (8GB, 12GB]
             titleEl.textContent = 'gpt FULL 方案 或 vox LITE 方案';
             descEl.textContent = '检测到可用显存介于 8G 到 12G 之间。您可以选择使用轻量合成但全功能的 gpt FULL 方案，或者尝试使用高质量拟真拟音但消耗较大的 vox LITE 方案（仅使用 VoxCPM 语音合成，不开启视觉和语音识别）。';
-            recommendedLaunchGroup = 'TTS 语音 (FULL)';
+            recommendedLaunchGroup = '多模态服务 (FULL)';
             createApplyButton('应用 gpt FULL 方案', () => {
-                recommendedLaunchGroup = 'TTS 语音 (FULL)';
+                recommendedLaunchGroup = '多模态服务 (FULL)';
                 applyScheme('gpt_full');
             });
             createApplyButton('应用 vox LITE 方案', () => {
-                recommendedLaunchGroup = 'TTS 语音 (LITE)';
+                recommendedLaunchGroup = '语音服务 (LITE)';
                 applyScheme('vox_lite');
             });
         }
@@ -253,7 +253,7 @@ const SetupModule = (() => {
             // VRAM > 12GB
             titleEl.textContent = 'Vox Full 方案';
             descEl.textContent = '检测到可用显存大于 12G。推荐使用极致画质和音质的 Vox Full 方案（VoxCPM 语音合成 + Florence-2 视觉大模型 + FunASR 语音识别，完美释放大显存显卡潜力）。';
-            recommendedLaunchGroup = 'TTS 语音 (FULL)';
+            recommendedLaunchGroup = '多模态服务 (FULL)';
             createApplyButton('一键应用此方案', () => applyScheme('vox_full'));
         }
 
