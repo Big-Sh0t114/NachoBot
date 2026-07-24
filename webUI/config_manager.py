@@ -23,11 +23,11 @@ CONFIG_REGISTRY: list[dict[str, str]] = [
     {"id": "model_config",  "group": "NachoBot 核心",  "path": "NachoBot/config/model_config.toml",         "label": "模型与 API 配置"},
     {"id": "topics_config", "group": "NachoBot 核心",  "path": "NachoBot/config/topics_config.toml",        "label": "话题系统配置"},
     {"id": "env",           "group": "NachoBot 核心",  "path": "NachoBot/.env",                             "label": "环境变量"},
-    # TTS 适配器
-    {"id": "tts_base",      "group": "TTS 适配器",     "path": "NachoBot-TTS-Adapter/configs/base.toml",    "label": "TTS 基础配置"},
-    {"id": "tts_vox",       "group": "TTS 适配器",     "path": "NachoBot-TTS-Adapter/configs/vox.toml",     "label": "VoxCPM 配置"},
-    {"id": "tts_sovits",    "group": "TTS 适配器",     "path": "NachoBot-TTS-Adapter/configs/gpt-sovits.toml", "label": "GPT-SoVITS 配置"},
-    {"id": "tts_perception","group": "TTS 适配器",     "path": "NachoBot-TTS-Adapter/configs/perception.toml", "label": "感知模块配置"},
+    # 多模态适配器
+    {"id": "tts_base",      "group": "多模态适配器", "path": "NachoBot-Multimodal-Adapter/configs/base.toml",       "label": "TTS 基础配置"},
+    {"id": "tts_vox",       "group": "多模态适配器", "path": "NachoBot-Multimodal-Adapter/configs/vox.toml",        "label": "VoxCPM 配置"},
+    {"id": "tts_sovits",    "group": "多模态适配器", "path": "NachoBot-Multimodal-Adapter/configs/gpt-sovits.toml", "label": "GPT-SoVITS 配置"},
+    {"id": "tts_perception","group": "多模态适配器", "path": "NachoBot-Multimodal-Adapter/configs/perception.toml", "label": "VLM / ASR 配置"},
     # 各平台适配器
     {"id": "napcat_config",       "group": "Napcat 适配器",    "path": "NachoBot-Napcat-Adapter/config.toml",       "label": "Napcat 适配器配置"},
     {"id": "bilibili_config",     "group": "Bilibili 适配器",  "path": "NachoBot-Bilibili-Adapter/config.toml",     "label": "Bilibili 适配器配置"},

@@ -17,7 +17,7 @@ const UI = (() => {
 
         const startupScreen = document.getElementById('startup-screen');
         const startupVideo = document.getElementById('startup-video');
-        const bgm = document.getElementById('bgm');
+        const bgm = new SeamlessBgmPlayer();
         const bgCanvas = document.getElementById('bg-canvas');
 
         const miniPlayer = document.getElementById('mini-player');
@@ -65,9 +65,9 @@ const UI = (() => {
 
         // 3. Fetch Playlist and Setup Audio (non-blocking for animation)
         try {
-            const res = await fetch('/api/music/list');
+            const res = await fetch('/api/music/list', { cache: 'no-store' });
             if (res.ok) {
-                playlist = await res.json();
+                playlist = normalizeBgmPlaylist(await res.json());
             }
         } catch (e) {
             console.error('Failed to load playlist:', e);
@@ -100,12 +100,6 @@ const UI = (() => {
             });
         }
 
-        // Audio Events
-        bgm.addEventListener('ended', () => {
-            currentTrackIndex = (currentTrackIndex + 1) % playlist.length;
-            loadTrack(currentTrackIndex);
-            if (settings.bgm) bgm.play();
-        });
 
         bgm.addEventListener('play', () => {
             updatePlayBtn();
@@ -123,6 +117,33 @@ const UI = (() => {
             }
         }
 
+        const playlistHideDelay = 400;
+        let playlistHideTimer = null;
+
+        function clearPlaylistHideTimer() {
+            if (playlistHideTimer) {
+                clearTimeout(playlistHideTimer);
+                playlistHideTimer = null;
+            }
+        }
+
+        function showPlaylist() {
+            clearPlaylistHideTimer();
+            bgmPlaylist.classList.add('is-visible');
+            bgmListBtn.setAttribute('aria-expanded', 'true');
+        }
+
+        function hidePlaylist() {
+            clearPlaylistHideTimer();
+            bgmPlaylist.classList.remove('is-visible');
+            bgmListBtn.setAttribute('aria-expanded', 'false');
+        }
+
+        function schedulePlaylistHide() {
+            clearPlaylistHideTimer();
+            playlistHideTimer = setTimeout(hidePlaylist, playlistHideDelay);
+        }
+
         bgmPlayBtn.addEventListener('click', () => {
             if (bgm.paused) {
                 bgm.play();
@@ -133,12 +154,27 @@ const UI = (() => {
 
         bgmListBtn.addEventListener('click', (e) => {
             e.stopPropagation();
-            bgmPlaylist.style.display = bgmPlaylist.style.display === 'none' ? 'flex' : 'none';
+            if (bgmPlaylist.classList.contains('is-visible')) {
+                hidePlaylist();
+            } else {
+                showPlaylist();
+            }
         });
 
         document.addEventListener('click', (e) => {
-            if (!bgmPlaylist.contains(e.target) && e.target !== bgmListBtn) {
-                bgmPlaylist.style.display = 'none';
+            if (!miniPlayer.contains(e.target)) {
+                hidePlaylist();
+            }
+        });
+
+        miniPlayer.addEventListener('mouseenter', clearPlaylistHideTimer);
+        miniPlayer.addEventListener('mouseleave', schedulePlaylistHide);
+        bgmPlaylist.addEventListener('mouseenter', clearPlaylistHideTimer);
+        bgmPlaylist.addEventListener('mouseleave', schedulePlaylistHide);
+        miniPlayer.addEventListener('focusin', clearPlaylistHideTimer);
+        miniPlayer.addEventListener('focusout', (e) => {
+            if (!miniPlayer.contains(e.relatedTarget)) {
+                schedulePlaylistHide();
             }
         });
 
@@ -152,12 +188,15 @@ const UI = (() => {
         }
 
         function loadTrack(index) {
-            if (!playlist[index]) return;
+            const track = playlist[index];
+            if (!track) return;
+
             currentTrackIndex = index;
-            bgm.src = playlist[index].url;
-            bgmTitle.innerText = playlist[index].name.replace(/\.[^/.]+$/, "");
+            bgm.setTrack(track).catch(error => console.error('Failed to preload BGM:', error));
+            bgmTitle.textContent = track.name;
             renderPlaylist();
         }
+
 
         function renderPlaylist() {
             bgmPlaylist.innerHTML = '';
@@ -169,7 +208,7 @@ const UI = (() => {
                 item.style.fontSize = '0.85rem';
                 item.style.color = idx === currentTrackIndex ? 'var(--accent)' : 'var(--text-primary)';
                 item.style.backgroundColor = idx === currentTrackIndex ? 'var(--accent-bg)' : 'transparent';
-                item.innerText = track.name.replace(/\.[^/.]+$/, "");
+                item.textContent = track.name;
 
                 item.addEventListener('mouseenter', () => {
                     if (idx !== currentTrackIndex) item.style.backgroundColor = 'rgba(0,0,0,0.02)';
@@ -183,7 +222,7 @@ const UI = (() => {
                     if (settings.bgm) {
                         bgm.play().catch(e => console.log(e));
                     }
-                    bgmPlaylist.style.display = 'none';
+                    hidePlaylist();
                 });
                 bgmPlaylist.appendChild(item);
             });
@@ -206,6 +245,7 @@ const UI = (() => {
                     bgm.play().catch(e => console.log('BGM Play prevented:', e));
                 } else {
                     bgm.pause();
+                    hidePlaylist();
                     miniPlayer.style.display = 'none';
                 }
             });
@@ -273,6 +313,20 @@ const UI = (() => {
                 gap: 0;
                 pointer-events: none;
             }
+            #bgm-playlist {
+                opacity: 0;
+                visibility: hidden;
+                pointer-events: none;
+                transform: translateX(-50%) translateY(-4px);
+                transition: opacity 0.25s ease, transform 0.25s ease, visibility 0s linear 0.25s;
+            }
+            #bgm-playlist.is-visible {
+                opacity: 1;
+                visibility: visible;
+                pointer-events: auto;
+                transform: translateX(-50%) translateY(0);
+                transition: opacity 0.25s ease, transform 0.25s ease, visibility 0s;
+            }
         `;
         document.head.appendChild(style);
 
@@ -288,11 +342,7 @@ const UI = (() => {
         canvas.style.pointerEvents = 'none';
         document.body.appendChild(canvas);
 
-        // 2. Audio Element and Mini Player
-        const audio = document.createElement('audio');
-        audio.id = 'bgm';
-        audio.volume = 0.2;
-        document.body.appendChild(audio);
+        // 2. Mini Player
 
         const playerUI = document.createElement('div');
         playerUI.id = 'mini-player';
@@ -332,9 +382,9 @@ const UI = (() => {
                     <span style="font-size: 1rem; color: #64748b; line-height: 1;">🔈</span>
                     <input type="range" id="bgm-volume-slider" min="0" max="1" step="0.01" value="0.2" style="width: 50px; cursor: pointer; accent-color: var(--accent);">
                 </div>
-                <button id="bgm-list-btn" style="background: none; border: none; cursor: pointer; font-size: 1.2rem; color: #64748b; display: flex; align-items: center; transition: color 0.2s;">&#9776;</button>
+                <button id="bgm-list-btn" aria-controls="bgm-playlist" aria-expanded="false" style="background: none; border: none; cursor: pointer; font-size: 1.2rem; color: #64748b; display: flex; align-items: center; transition: color 0.2s;">&#9776;</button>
             </div>
-            <div id="bgm-playlist" style="display: none; position: absolute; top: calc(100% + 12px); left: 50%; transform: translateX(-50%); background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(12px); border: 1px solid rgba(0,0,0,0.05); border-radius: 16px; box-shadow: 0 10px 40px rgba(0,0,0,0.1); max-height: 280px; overflow-y: auto; width: 280px; flex-direction: column; overflow: hidden;">
+            <div id="bgm-playlist" style="display: flex; position: absolute; top: calc(100% + 12px); left: 50%; background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(12px); border: 1px solid rgba(0,0,0,0.05); border-radius: 16px; box-shadow: 0 10px 40px rgba(0,0,0,0.1); max-height: 280px; overflow-y: auto; width: 280px; flex-direction: column; overflow: hidden;">
             </div>
         `;
         document.body.appendChild(playerUI);
