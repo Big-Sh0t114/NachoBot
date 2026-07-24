@@ -1,6 +1,6 @@
 import asyncio
 import json
-import logging
+from loguru import logger
 import time
 import uuid
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -19,7 +19,7 @@ from bili_src.core.utils import _decode_image_base64, _normalize_text, _strip_em
 ACCEPT_FORMAT_PRIVATE = ["text", "image", "emoji", "reply", "command"]
 
 class PrivateHandler:
-    def __init__(self, config: Any, logger: logging.Logger, adapter_ref: Any):
+    def __init__(self, config: Any, logger, adapter_ref: Any):
         self.config = config
         self.logger = logger
         self.adapter = adapter_ref

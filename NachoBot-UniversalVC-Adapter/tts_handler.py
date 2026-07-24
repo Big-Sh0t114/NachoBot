@@ -1,5 +1,5 @@
 """
-TTS Handler - Text-to-Speech generation using GPT-SoVITS from NachoBot-TTS-Adapter.
+TTS Handler - Text-to-Speech generation using GPT-SoVITS from NachoBot-Multimodal-Adapter.
 """
 
 import sys
@@ -10,9 +10,9 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-# Attempt to include NachoBot-TTS-Adapter
+# Attempt to include NachoBot-Multimodal-Adapter
 _root_dir = Path(__file__).resolve().parents[1]
-_tts_adapter_path = _root_dir / "NachoBot-TTS-Adapter"
+_tts_adapter_path = _root_dir / "NachoBot-Multimodal-Adapter"
 
 
 class TTSHandler:
@@ -29,7 +29,7 @@ class TTSHandler:
     def _init_model(self):
         """Initialize the TTS model based on availability."""
         try:
-            from tts_src.utils.tts_resolver import resolve_tts_model_class
+            from nachobot_multimodal.utils.tts_resolver import resolve_tts_model_class
             
             TTSModelClass, err = resolve_tts_model_class()
             if TTSModelClass:

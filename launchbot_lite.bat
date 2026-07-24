@@ -30,7 +30,7 @@ set "TTS_RC=0"
 set "DISABLE_VLM_ASR=1"
 
 set "BASE_DIR=%ROOT%"
-set "ADAPTER_DIR=%BASE_DIR%NachoBot-TTS-Adapter"
+set "ADAPTER_DIR=%BASE_DIR%NachoBot-Multimodal-Adapter"
 set "NAPCAT_DIR=%BASE_DIR%NachoBot-Napcat-Adapter"
 set "NAPCAT_SRC=%NAPCAT_DIR%\src"
 set "SOVITS_DIR=C:\Users\BigSh0t\GPT-SoVITS\GPT-SoVITS-v2pro-20250604"
@@ -152,7 +152,7 @@ if errorlevel 1 (
 
 echo [INFO] Starting VoxCPM API Server on port %PORT_VOX%...
 
-set "VOX_API_SCRIPT=%ADAPTER_DIR%\tts_src\plugins\Vox\vox_api_server.py"
+set "VOX_API_SCRIPT=%ADAPTER_DIR%\src\tts\backends\Vox\vox_api_server.py"
 set "VOX_MODEL_DIR=%VOXCPM_DIR%\models\openbmb__VoxCPM2"
 set "VOX_LORA=%VOXCPM_DIR%\lora\ncnk"
 
@@ -189,7 +189,7 @@ goto :START_ADAPTER_VOX
 
 REM ---- Adapter for GPT-SoVITS (Lite: TTS only, no Perception) ----
 :START_ADAPTER_SOVITS
-start "TTS Adapter (%PORT_ADAPTER%)" cmd /k "chcp 65001>nul && cd /d %ADAPTER_DIR% && set DISABLE_VLM_ASR=1 && uv run python main.py"
+start "Multimodal Adapter (%PORT_ADAPTER%)" cmd /k "chcp 65001>nul && cd /d %ADAPTER_DIR% && set DISABLE_VLM_ASR=1 && uv run python main.py"
 
 echo.
 echo All modules started. (Lite mode, Perception skipped)
@@ -198,7 +198,7 @@ goto :TTS_END
 
 REM ---- Adapter for VoxCPM (Lite: TTS only, no Perception) ----
 :START_ADAPTER_VOX
-start "TTS Adapter (%PORT_ADAPTER%)" cmd /k "chcp 65001>nul && cd /d %ADAPTER_DIR% && set DISABLE_VLM_ASR=1 && uv run python main.py"
+start "Multimodal Adapter (%PORT_ADAPTER%)" cmd /k "chcp 65001>nul && cd /d %ADAPTER_DIR% && set DISABLE_VLM_ASR=1 && uv run python main.py"
 
 echo.
 echo All modules started. (Lite mode, Perception skipped)

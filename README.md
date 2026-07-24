@@ -44,7 +44,7 @@
 🌐 **[Koishi 框架](./koishi-app)**：Discord 接入的底层依赖与插件管理
 
 ### 🗣️ 3. 感知与表现层
-🎵 **[TTS 适配器](./NachoBot-TTS-Adapter)**：文本转语音服务配置与多模态（VLM/ASR）本地服务启动
+🎵 **[多模态适配器](./NachoBot-Multimodal-Adapter)**：文本转语音、视觉理解与语音识别的本地服务启动
 
 ---
 

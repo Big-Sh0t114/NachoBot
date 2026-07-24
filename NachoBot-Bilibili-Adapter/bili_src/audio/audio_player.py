@@ -1,6 +1,6 @@
 import asyncio
 import io
-import logging
+from loguru import logger
 import os
 import queue
 import tempfile
@@ -15,7 +15,7 @@ class AudioPlayer:
     Uses winsound for playback and calculates duration for timing.
     """
 
-    def __init__(self, logger: logging.Logger, on_start=None, on_stop=None):
+    def __init__(self, logger, on_start=None, on_stop=None):
         self.logger = logger
         self.on_start = on_start
         self.on_stop = on_stop

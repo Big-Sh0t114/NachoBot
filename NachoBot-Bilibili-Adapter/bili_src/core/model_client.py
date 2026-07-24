@@ -1,7 +1,7 @@
 """Model client for Live Streamer mode that reads Core's model_config.toml."""
 
 import asyncio
-import logging
+from loguru import logger
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -64,7 +64,7 @@ class ModelClient:
     def __init__(
         self,
         core_config_path: Path,
-        logger: logging.Logger,
+        logger,
     ):
         self._logger = logger
         self._config_path = core_config_path
@@ -252,7 +252,7 @@ _model_client: Optional[ModelClient] = None
 
 def get_model_client(
     core_path: Path,
-    logger: logging.Logger,
+    logger,
 ) -> ModelClient:
     """Get or create the global ModelClient instance."""
     global _model_client

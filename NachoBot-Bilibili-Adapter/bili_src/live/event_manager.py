@@ -1,7 +1,7 @@
 import asyncio
 import itertools
 import json
-import logging
+from loguru import logger
 import time
 import uuid
 from typing import Any, Dict, Tuple
@@ -18,7 +18,7 @@ from ncnk_message import (
 ACCEPT_FORMAT = ["text", "voice", "reply", "command"]
 
 class EventManager:
-    def __init__(self, config: Any, logger: logging.Logger, adapter_ref: Any):
+    def __init__(self, config: Any, logger, adapter_ref: Any):
         self.config = config
         self.logger = logger
         self.adapter = adapter_ref

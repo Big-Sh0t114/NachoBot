@@ -1,6 +1,6 @@
 import asyncio
 import json
-import logging
+from loguru import logger
 import re
 import sys
 import time
@@ -50,7 +50,7 @@ from bili_src.audio.audio_player import AudioPlayer  # noqa: E402
 
 # Try to import TTS model
 # 修复：动态获取相对路径，替换硬编码的绝对路径
-tts_adapter_path = _root_dir / "NachoBot-TTS-Adapter"
+tts_adapter_path = _root_dir / "NachoBot-Multimodal-Adapter"
 TTSModel = None
 _tts_import_error = None
 
@@ -58,7 +58,7 @@ if tts_adapter_path.exists():
     if str(tts_adapter_path) not in sys.path:
         sys.path.insert(0, str(tts_adapter_path))
     try:
-        from tts_src.utils.tts_resolver import resolve_tts_model_class
+        from nachobot_multimodal.utils.tts_resolver import resolve_tts_model_class
         TTSModel, _tts_import_error = resolve_tts_model_class()
     except ImportError as e:
         _tts_import_error = str(e)
@@ -77,7 +77,7 @@ class BilibiliAdapter:
     def __init__(
         self,
         config: AdapterConfig,
-        logger: logging.Logger,
+        logger,
         config_path: Optional[Path] = None,
     ):
         self.config = config
@@ -172,7 +172,13 @@ class BilibiliAdapter:
         if self._screen_host_room_id is not None:
             monitor_configs = self._load_vlm_model_configs()
             if monitor_configs:
-                self._screen_monitor = ScreenMonitor(monitor_configs, logger)
+                self._screen_monitor = ScreenMonitor(
+                    monitor_configs,
+                    logger,
+                    min_interval_seconds=config.screen_capture_interval_seconds,
+                    capture_active_window=config.screen_capture_active_window,
+                    excluded_exes=config.screen_capture_excluded_exes,
+                )
             else:
                 self.logger.warning("Screen monitor disabled: VLM config unavailable")
         else:
@@ -192,14 +198,6 @@ class BilibiliAdapter:
         #         )
         #         self.logger.info(f"Live Streamer mode enabled for room {room_id}")
 
-        # Initialize ModelClient (for Live2D)
-        self.model_client = None
-        if self.config.live_live2d_enable:
-            _nachobot_path = Path(__file__).resolve().parents[1] / "NachoBot"
-            from bili_src.core.model_client import get_model_client
-
-            self.model_client = get_model_client(_nachobot_path, self.logger)
-
         from bili_src.live2d.live2d_manager import Live2DManager
 
         self.live2d_manager = Live2DManager(self.config, self.logger, self)
@@ -211,10 +209,7 @@ class BilibiliAdapter:
 
             def _on_audio_stop():
                 self.live2d_manager.controller.set_speaking(False)
-                # Reset gaze to center after audio finishes
-                asyncio.ensure_future(
-                    self.live2d_manager.controller.on_reply_finished()
-                )
+                self.live2d_manager.controller.notify_reply_finished()
 
             self.audio_player.on_start = _on_audio_start
             self.audio_player.on_stop = _on_audio_stop
@@ -300,7 +295,12 @@ class BilibiliAdapter:
 
         self.audio_player.start()  # Start audio player loop
 
-        await asyncio.gather(*tasks)
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            if self.live2d_manager:
+                await self.live2d_manager.stop()
+            await self.api.close()
 
     async def _run_mic_worker_forever(self) -> None:
         """Keep mic worker running, restarting on failure"""
@@ -902,33 +902,10 @@ class BilibiliAdapter:
             additional_config=additional_config,
         )
 
-        # Hook Live2D: Message Received
+        # Notify the standalone avatar without constructing NachoBot chat objects.
         if self.live2d_manager.controller:
             try:
-                # Construct a minimal MessageRecv compatible dict
-                # We need to map adapter's data to MessageRecv structure
-                msg_dict = {
-                    "message_info": message_info.to_dict(),
-                    "message_segment": {"type": "text", "data": processed_text},
-                    "raw_message": None,
-                    "processed_plain_text": processed_text,
-                }
-                # For dependencies like chat_stream, we rely on managers to handle missing streams or use chat_id from msg_info
-                from src.chat.message_receive.message import MessageRecv
-
-                msg_recv = MessageRecv(msg_dict)
-
-                # Inject chat_stream mock if needed by MoodManager?
-                # MoodManager uses message.chat_stream.stream_id.
-                # MessageRecv doesn't set chat_stream in __init__ from dict.
-                # We can monkey-patch it or use a mock object.
-                class MockStream:
-                    def __init__(self, room_id):
-                        self.stream_id = str(room_id)
-
-                msg_recv.chat_stream = MockStream(room_id)
-
-                await self.live2d_manager.controller.on_message_received(msg_recv)
+                await self.live2d_manager.controller.on_message_received()
             except Exception as e:
                 self.logger.error(f"Live2D hook error: {e}")
 
