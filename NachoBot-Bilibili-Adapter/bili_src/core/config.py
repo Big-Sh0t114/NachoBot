@@ -1,7 +1,7 @@
 """Configuration dataclasses and loading functions for Bilibili Adapter."""
 
 import json
-import logging
+from loguru import logger
 import requests
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,15 +44,9 @@ class AdapterConfig:
     live_allow_self_danmu: bool
     live_log_danmu: bool
     live_live2d_enable: bool
-    live_live2d_model_path: str
-    live_live2d_transparent: bool
-    live_live2d_antialiasing: bool
-    live_live2d_width: int
-    live_live2d_height: int
-    live_live2d_scale: float
-    live_live2d_track_mouse: bool
-    live_live2d_mood_enable: bool
-    live_live2d_action_enable: bool
+    live_live2d_url: str
+    live_live2d_token: str
+    live_live2d_reconnect_seconds: float
     live_mention_keywords: List[str]
     live_mention_prefixes: List[str]
     live_mention_any_at: bool
@@ -72,14 +66,12 @@ class AdapterConfig:
     idle_tts_min_seconds: int
     idle_tts_max_seconds: int
     idle_tts_texts: List[str]
-
-    idle_tts_enable: bool
-    idle_tts_min_seconds: int
-    idle_tts_max_seconds: int
-    idle_tts_texts: List[str]
     screen_manual_enable: bool
     screen_manual_duration_seconds: int
     screen_manual_user_ids: List[str]
+    screen_capture_active_window: bool
+    screen_capture_interval_seconds: int
+    screen_capture_excluded_exes: List[str]
     live_resolve_user_nickname: bool
     enable_reply_notice: bool
     comment_resolve_user_nickname: bool
@@ -186,7 +178,7 @@ def _check_proxy_list(
     proxy_list: List[Dict[str, str]],
     url: str,
     timeout: int,
-    logger: logging.Logger,
+    logger,
 ) -> List[Dict[str, str]]:
     can_use: List[Dict[str, str]] = []
     if timeout <= 0:
@@ -221,7 +213,7 @@ def _proxy_dicts_to_urls(proxy_list: List[Dict[str, str]]) -> List[str]:
 
 
 def _resolve_asr_model_config(
-    path: Path, logger: logging.Logger
+    path: Path, logger
 ) -> Optional[AsrModelConfig]:
     if not path.exists():
         logger.warning(f"Model config not found at {path}")
@@ -445,6 +437,28 @@ def load_config(path: Path) -> AdapterConfig:
     if not manual_user_ids and bilibili.get("dede_user_id"):
         manual_user_ids = [str(bilibili.get("dede_user_id"))]
 
+    capture_active_window = bool(screen_monitor.get("capture_active_window", True))
+    capture_interval_seconds = max(
+        1, int(screen_monitor.get("capture_interval_seconds", 30))
+    )
+    excluded_exes_raw = screen_monitor.get(
+        "excluded_exes", ["obs64.exe", "obs32.exe"]
+    )
+    if isinstance(excluded_exes_raw, list):
+        capture_excluded_exes = [
+            str(value).strip()
+            for value in excluded_exes_raw
+            if str(value).strip()
+        ]
+    elif excluded_exes_raw is None:
+        capture_excluded_exes = []
+    else:
+        capture_excluded_exes = [
+            value.strip()
+            for value in str(excluded_exes_raw).split(",")
+            if value.strip()
+        ]
+
     response_filter_enable = bool(response_filter.get("enable", True))
     blocked_markers_raw = response_filter.get("blocked_markers", [])
     response_filter_blocked_markers: List[str] = []
@@ -497,15 +511,15 @@ def load_config(path: Path) -> AdapterConfig:
         live_allow_self_danmu=bool(live.get("allow_self_danmu", False)),
         live_log_danmu=bool(live.get("log_danmu", False)),
         live_live2d_enable=bool(live.get("enable_live2D", False)),
-        live_live2d_model_path=str(live.get("live2d_model_path", "")),
-        live_live2d_transparent=bool(live.get("live2d_transparent", False)),
-        live_live2d_antialiasing=bool(live.get("live2d_antialiasing", True)),
-        live_live2d_width=int(live.get("live2d_width", 800)),
-        live_live2d_height=int(live.get("live2d_height", 600)),
-        live_live2d_scale=float(live.get("live2d_scale", 1.0)),
-        live_live2d_track_mouse=bool(live.get("live2d_track_mouse", False)),
-        live_live2d_mood_enable=bool(live.get("live2d_mood_enable", True)),
-        live_live2d_action_enable=bool(live.get("live2d_action_enable", True)),
+        live_live2d_url=str(
+            live.get("live2d_url", "ws://127.0.0.1:8766")
+            or "ws://127.0.0.1:8766"
+        ),
+        live_live2d_token=str(live.get("live2d_token", "") or ""),
+        live_live2d_reconnect_seconds=max(
+            1.0,
+            float(live.get("live2d_reconnect_seconds", 3.0)),
+        ),
         live_mention_keywords=mention_keywords,
         live_mention_prefixes=mention_prefixes,
         live_mention_any_at=bool(live.get("mention_any_at", False)),
@@ -530,6 +544,9 @@ def load_config(path: Path) -> AdapterConfig:
         screen_manual_enable=manual_enable,
         screen_manual_duration_seconds=max(60, manual_duration_minutes * 60),
         screen_manual_user_ids=manual_user_ids,
+        screen_capture_active_window=capture_active_window,
+        screen_capture_interval_seconds=capture_interval_seconds,
+        screen_capture_excluded_exes=capture_excluded_exes,
         live_resolve_user_nickname=bool(live.get("resolve_user_nickname", False)),
         enable_reply_notice=bool(comment.get("enable_reply_notice", True)),
         comment_poll_interval=int(comment.get("poll_interval_seconds", 20)),
@@ -567,10 +584,11 @@ def load_config(path: Path) -> AdapterConfig:
     )
 
 
-def setup_logging(level: str) -> logging.Logger:
-    logger = logging.getLogger("nachobot-bilibili-adapter")
-    if logger.handlers:
-        return logger
+def setup_logging(level: str = "INFO"):
+    import sys
+    logger.remove()
+    logger.add(sys.stderr, level=level.upper())
+    return logger
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
         format="%(asctime)s [%(levelname)s] %(message)s",
@@ -583,7 +601,7 @@ def _resolve_single_vlm_model(
     models: list,
     providers: list,
     vlm_config: dict,
-    logger: logging.Logger,
+    logger,
 ) -> Optional[VlmModelConfig]:
     """Resolve a single model name to a VlmModelConfig. Returns None on failure."""
     selected_model = None
@@ -634,7 +652,7 @@ def _resolve_single_vlm_model(
 
 
 def _resolve_vlm_model_config_list(
-    model_config_path: Path, logger: logging.Logger
+    model_config_path: Path, logger
 ) -> List[VlmModelConfig]:
     """Resolve ALL models in bilibili_vlm.model_list to a list of VlmModelConfig."""
     if not model_config_path.exists():
@@ -664,7 +682,7 @@ def _resolve_vlm_model_config_list(
 
 
 def _resolve_vlm_model_config(
-    model_config_path: Path, logger: logging.Logger
+    model_config_path: Path, logger
 ) -> Optional[VlmModelConfig]:
     """Backward-compatible wrapper: returns the first resolved VLM config."""
     configs = _resolve_vlm_model_config_list(model_config_path, logger)

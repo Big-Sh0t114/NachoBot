@@ -123,7 +123,7 @@ NachoBot 现已配备完善的 **可视化 WebUI 部署向导与后台管理控�
 *   复制 `DiscordVC-Adapter` 中的 `config.toml.example` 重命名为 `config.toml`，填写频道对接配置。
 
 #### C. TTS 平台配置
-*   详见 [NachoBot-TTS-Adapter/README.md](../NachoBot-TTS-Adapter/README.md) 获取双语音合成引擎、DeBERTa 情感分析与 VLM/ASR 多模态服务的独立配置方法。
+*   详见 [NachoBot-Multimodal-Adapter/README.md](../NachoBot-Multimodal-Adapter/README.md) 获取双语音合成引擎、DeBERTa 情感分析与 VLM/ASR 多模态服务的独立配置方法。
 
 > ** 说明：** 
 > * 保持所有终端运行！在全平台服务跑起来的情况下应该有多达 6+3+1 个终端窗口同时在后台工作。
@@ -166,7 +166,7 @@ cd NachoBot-DiscordVC-Adapter && docker compose up -d
 cd NachoBot-Koishi-Adapter && docker compose up -d
 
 # TTS 语音合成适配器
-cd NachoBot-TTS-Adapter && docker compose up -d
+cd NachoBot-Multimodal-Adapter && docker compose up -d
 ```
 
 ### Docker 注意事项

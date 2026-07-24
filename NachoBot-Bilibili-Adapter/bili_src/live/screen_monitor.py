@@ -2,30 +2,42 @@
 
 import asyncio
 import base64
-import logging
+from loguru import logger
 import time
 from io import BytesIO
-from typing import List, Optional
+from typing import Iterable, List, Optional
 
 import aiohttp
 from PIL import ImageGrab
 
 from bili_src.core.config import VlmModelConfig
 from bili_src.core.utils import _normalize_text
+from bili_src.live.active_window import (
+    ActiveWindowInfo,
+    WINDOWS_ACTIVE_WINDOW_SUPPORTED,
+    get_active_window_info,
+    normalise_executables,
+)
 
 
 class ScreenMonitor:
     def __init__(
         self,
         configs: List[VlmModelConfig],
-        logger: logging.Logger,
+        logger,
         min_interval_seconds: int = 30,
+        capture_active_window: bool = True,
+        excluded_exes: Optional[Iterable[str]] = None,
     ):
         self.configs = configs
         self.logger = logger
         self.min_interval_seconds = max(1, int(min_interval_seconds))
+        self.capture_active_window = bool(capture_active_window)
+        self.excluded_exes = normalise_executables(excluded_exes)
         self._last_attempt = 0.0
         self._last_summary: Optional[str] = None
+        self._last_window_info: Optional[ActiveWindowInfo] = None
+        self._warned_non_windows = False
         self._lock = asyncio.Lock()
         self._disabled_models = set()
 
@@ -34,14 +46,26 @@ class ScreenMonitor:
     def from_single_config(
         cls,
         config: VlmModelConfig,
-        logger: logging.Logger,
+        logger,
         min_interval_seconds: int = 15,
+        capture_active_window: bool = True,
+        excluded_exes: Optional[Iterable[str]] = None,
     ) -> "ScreenMonitor":
-        return cls([config], logger, min_interval_seconds)
+        return cls(
+            [config],
+            logger,
+            min_interval_seconds,
+            capture_active_window,
+            excluded_exes,
+        )
 
     def get_cached_summary(self) -> Optional[str]:
         """Return the last cached screen summary without triggering VLM analysis."""
         return self._last_summary
+
+    def get_cached_window_info(self) -> Optional[ActiveWindowInfo]:
+        """Return metadata for the window used by the most recent capture."""
+        return self._last_window_info
 
     async def maybe_analyze(self, message_text: str = "") -> Optional[str]:
         now = time.time()
@@ -69,25 +93,54 @@ class ScreenMonitor:
         image_bytes = await asyncio.to_thread(self._grab_screen_image)
         if not image_bytes:
             return None
-        return await self._call_vlm(image_bytes, message_text)
+        return await self._call_vlm(
+            image_bytes,
+            message_text,
+            self._last_window_info,
+        )
 
     def _grab_screen_image(self) -> Optional[bytes]:
+        window_info = None
+        if self.capture_active_window:
+            window_info = get_active_window_info(self.excluded_exes)
+            self._last_window_info = window_info
+            if WINDOWS_ACTIVE_WINDOW_SUPPORTED and window_info is None:
+                self.logger.debug(
+                    "No capturable foreground window; skipping this screen capture"
+                )
+                return None
+            if not WINDOWS_ACTIVE_WINDOW_SUPPORTED and not self._warned_non_windows:
+                self.logger.warning(
+                    "Active-window capture is only available on Windows; "
+                    "using the primary screen"
+                )
+                self._warned_non_windows = True
+
         try:
             import mss
             from PIL import Image
 
             with mss.mss() as sct:
-                # Get the primary monitor
-                monitor = sct.monitors[1]
+                if window_info is not None:
+                    left, top, right, bottom = window_info.rect
+                    monitor = {
+                        "left": left,
+                        "top": top,
+                        "width": right - left,
+                        "height": bottom - top,
+                    }
+                else:
+                    monitor = sct.monitors[1]
+
                 sct_img = sct.grab(monitor)
-                # Convert to PIL Image
                 image = Image.frombytes(
                     "RGB", sct_img.size, sct_img.bgra, "raw", "BGRX"
                 )
         except ImportError:
             self.logger.warning("mss not found, falling back to ImageGrab")
             try:
-                image = ImageGrab.grab(all_screens=False)
+                bbox = window_info.rect if window_info else None
+                image = ImageGrab.grab(bbox=bbox, all_screens=bool(bbox))
             except Exception as exc:
                 self.logger.warning("Screen capture failed: %s", exc)
                 return None
@@ -96,19 +149,19 @@ class ScreenMonitor:
                 "mss capture failed: %s, falling back to ImageGrab", exc
             )
             try:
-                image = ImageGrab.grab(all_screens=False)
+                bbox = window_info.rect if window_info else None
+                image = ImageGrab.grab(bbox=bbox, all_screens=bool(bbox))
             except Exception as inner_exc:
                 self.logger.warning("Fallback screen capture failed: %s", inner_exc)
                 return None
 
-        # Resize if too large
         max_dim = 1280
-        w, h = image.size
-        if max(w, h) > max_dim:
-            scale = max_dim / max(w, h)
-            new_w = int(w * scale)
-            new_h = int(h * scale)
-            image = image.resize((new_w, new_h))
+        width, height = image.size
+        if max(width, height) > max_dim:
+            scale = max_dim / max(width, height)
+            image = image.resize(
+                (int(width * scale), int(height * scale))
+            )
 
         with BytesIO() as buffer:
             image = image.convert("RGB")
@@ -116,7 +169,10 @@ class ScreenMonitor:
             return buffer.getvalue()
 
     async def _call_vlm(
-        self, image_bytes: bytes, message_text: str = ""
+        self,
+        image_bytes: bytes,
+        message_text: str = "",
+        window_info: Optional[ActiveWindowInfo] = None,
     ) -> Optional[str]:
         """Try each VLM config in order with per-model retry, return first success."""
         if not self.configs:
@@ -126,10 +182,15 @@ class ScreenMonitor:
         image_b64 = base64.b64encode(image_bytes).decode("utf-8")
         danmu_text = _normalize_text(message_text or "")
         prompt_text = (
-            "你将收到一张直播截图和当前观众弹幕。先判断截图中是否存在与弹幕相关或需要特别注意的部分，"
-            "再用300到500字尽可能详细描述屏幕内容，包含主窗口细节与活动窗口标题，并简要概括其他区域。"
+            "你将收到当前活动窗口的截图和当前观众弹幕。先判断截图中是否存在与弹幕相关或需要特别注意的部分，"
+            "再用300到500字尽可能详细描述活动窗口内容、文字和界面状态。"
             "只输出纯文本，不要使用markdown。"
         )
+        if window_info:
+            prompt_text += (
+                f" 当前活动窗口标题：{window_info.title}；"
+                f"进程：{window_info.executable}；窗口类：{window_info.window_class}。"
+            )
         if danmu_text:
             prompt_text += f" 弹幕内容：{danmu_text}"
 

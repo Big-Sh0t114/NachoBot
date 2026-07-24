@@ -1,0 +1,31 @@
+[server]
+host = "127.0.0.1"
+port = 8766
+# 留空表示仅依赖本机监听地址；需要鉴权时同时配置 Bilibili 侧令牌。
+token = ""
+
+[renderer]
+# 相对于本配置文件所在目录解析。
+model_path = "resources/NachoBot/Nachobot.model3.json"
+transparent = true
+antialiasing = true
+width = 1400
+height = 1200
+scale = 1.0
+track_mouse = false
+poke_cooldown_seconds = 10.0
+
+# Canonical action ID -> 当前 Live2D 模型中的 Motion Group。
+# 模型的实际分组名称不一致时，只需修改此表，无需改 NachoBot 或平台适配器。
+[actions]
+NOD = "Nod"
+SHAKE_HEAD = "Shake"
+TURN_LEFT = "TurnLeft"
+TURN_RIGHT = "TurnRight"
+WINK = "Wink"
+HAPPY = "Sway"
+TILT_HEAD = "TiltHead"
+LOOK_AWAY = "LookAway"
+
+[logging]
+level = "INFO"

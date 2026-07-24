@@ -4,7 +4,7 @@ from pathlib import Path
 
 # Add core paths to sys.path so the adapter can find ncnk_message
 ROOT_DIR = Path(__file__).resolve().parents[1]
-for candidate in ("NachoBot", "NachoBot-Napcat-Adapter", "NachoBot-TTS-Adapter"):
+for candidate in ("NachoBot", "NachoBot-Napcat-Adapter", "NachoBot-Multimodal-Adapter"):
     candidate_path = ROOT_DIR / candidate
     if candidate_path.exists():
         candidate_str = str(candidate_path)

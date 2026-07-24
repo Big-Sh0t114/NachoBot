@@ -3,7 +3,7 @@
 import asyncio
 import contextlib
 import json
-import logging
+from loguru import logger
 import os
 import socket
 import time
@@ -35,7 +35,7 @@ class LiveRoomWorker:
         config: AdapterConfig,
         api: "BilibiliApi",
         adapter: "BilibiliAdapter",
-        logger: logging.Logger,
+        logger,
     ):
         self.room_id = room_id
         self.config = config
@@ -115,9 +115,8 @@ class LiveRoomWorker:
         self.logger.info(f"Screen refresh loop started for room {self.room_id}")
         while not self._stop_event.is_set():
             try:
-                # Interval: 30 seconds
-                # Ensure we don't spam if VLM is slow, but VLM call awaits, so it's serial.
-                await asyncio.sleep(30)
+                # VLM refreshes are serial, so this interval also bounds capture rate.
+                await asyncio.sleep(self.config.screen_capture_interval_seconds)
                 if self._stop_event.is_set():
                     break
 
