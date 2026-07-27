@@ -1,0 +1,10 @@
+**
+!NachoBot/
+!NachoBot/ncnk_message/
+!NachoBot/ncnk_message/**
+!NachoBot-Napcat-Adapter/
+!NachoBot-Napcat-Adapter/**
+NachoBot-Napcat-Adapter/.venv/
+NachoBot-Napcat-Adapter/**/__pycache__/
+NachoBot-Napcat-Adapter/**/*.pyc
+NachoBot-Napcat-Adapter/logs/

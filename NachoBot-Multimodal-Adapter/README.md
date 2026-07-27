@@ -171,6 +171,10 @@ asr = "cuda:0"              # FunASR 运行设备
 docker compose up -d
 ```
 
+The Compose build uses the integrated workspace root and copies the canonical
+`NachoBot/ncnk_message` implementation. Keep `NachoBot` adjacent to this adapter.
+
+
 ### 2. Docker 环境注意事项
 *   **共享网络**：本服务依赖外部自定义桥接网络 `nacho_bot`。如果尚未创建该网络，请先执行：
     ```bash

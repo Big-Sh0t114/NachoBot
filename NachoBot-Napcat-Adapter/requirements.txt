@@ -6,3 +6,4 @@ pillow
 tomlkit
 rich
 sqlmodel
+# ncnk_message is provided by the adjacent NachoBot core directory.

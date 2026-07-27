@@ -23,8 +23,8 @@ logging_level = "DEBUG" # 日志级别
 
 [plugins.GPT_Sovits]
 api_base = "http://127.0.0.1:9880" 
-gpt_weights    = "C:/Users/BigSh0t/Nacho-with-u/nachobot_tts_adapter/configs/ncnk.ckpt"
-sovits_weights = "C:/Users/BigSh0t/Nacho-with-u/nachobot_tts_adapter/configs/ncnk.pth" 
+gpt_weights    = "C:/Users/BigSh0t/Nacho-with-u/NachoBot-Multimodal-Adapter/configs/ncnk.ckpt"
+sovits_weights = "C:/Users/BigSh0t/Nacho-with-u/NachoBot-Multimodal-Adapter/configs/ncnk.pth" 
 speaker = "NachoChan"
 
 [plugins.Vox]

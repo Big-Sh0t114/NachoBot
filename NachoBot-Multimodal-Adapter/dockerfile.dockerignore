@@ -1,0 +1,10 @@
+**
+!NachoBot/
+!NachoBot/ncnk_message/
+!NachoBot/ncnk_message/**
+!NachoBot-Multimodal-Adapter/
+!NachoBot-Multimodal-Adapter/**
+NachoBot-Multimodal-Adapter/.venv/
+NachoBot-Multimodal-Adapter/**/__pycache__/
+NachoBot-Multimodal-Adapter/**/*.pyc
+NachoBot-Multimodal-Adapter/logs/

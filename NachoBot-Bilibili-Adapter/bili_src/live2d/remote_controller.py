@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from loguru import logger
 from typing import Any
@@ -17,6 +18,8 @@ COMMAND_MESSAGE_TYPE = "avatar.command"
 INTERACTION_MESSAGE_TYPE = "avatar.interaction"
 
 
+MAX_REMOTE_AUDIO_BYTES = 4 * 1024 * 1024
+MAX_WEBSOCKET_MESSAGE_BYTES = 8 * 1024 * 1024
 class RemoteLive2DController:
     """Compatibility-oriented controller for the extracted Live2D process."""
 
@@ -90,6 +93,28 @@ class RemoteLive2DController:
         """Thread-safe synchronous wrapper for resetting avatar reply state."""
         self._schedule(self.on_reply_finished())
 
+    async def play_audio(self, audio_data: bytes) -> bool:
+        """Ask the standalone Live2D process to play a WAV audio segment."""
+        if not self.connected:
+            return False
+        if len(audio_data) > MAX_REMOTE_AUDIO_BYTES:
+            self.logger.warning(
+                "TTS audio segment is too large for Live2D playback (%d bytes); using local fallback",
+                len(audio_data),
+            )
+            return False
+
+        await self.send_live2d_event("play_audio", audio_data)
+        return True
+
+    async def stop_audio(self) -> bool:
+        """Stop renderer-owned audio when normal playback is interrupted."""
+        if not self.connected:
+            return False
+
+        await self.send_live2d_event("stop_audio", None)
+        return True
+
     async def send_live2d_event(self, event_type: str, content: Any) -> None:
         protocol_event, payload = self._translate_legacy_event(event_type, content)
         envelope = {
@@ -138,7 +163,7 @@ class RemoteLive2DController:
                     open_timeout=10,
                     ping_interval=20,
                     ping_timeout=20,
-                    max_size=1_048_576,
+                    max_size=MAX_WEBSOCKET_MESSAGE_BYTES,
                 ) as websocket:
                     self._connected.set()
                     self.logger.info("Connected to standalone Live2D adapter")
@@ -281,4 +306,13 @@ class RemoteLive2DController:
                 "value": float(data.get("value", 0.0)),
                 "duration": float(data.get("duration", 1.0)),
             }
+        if event_type == "play_audio":
+            if not isinstance(content, bytes):
+                raise ValueError("Live2D audio payload must be bytes")
+            return "play_audio", {
+                "format": "wav",
+                "audio_base64": base64.b64encode(content).decode("ascii"),
+            }
+        if event_type == "stop_audio":
+            return "stop_audio", {}
         raise ValueError(f"Unsupported Live2D event type: {event_type}")

@@ -22,6 +22,7 @@ from .protocol import (
 from .runtime import AvatarRuntime
 
 
+MAX_WEBSOCKET_MESSAGE_BYTES = 8 * 1024 * 1024
 class AvatarWebSocketServer:
     """Expose :class:`AvatarRuntime` through the versioned avatar protocol."""
 
@@ -53,7 +54,7 @@ class AvatarWebSocketServer:
                 port,
                 ping_interval=20,
                 ping_timeout=20,
-                max_size=1_048_576,
+                max_size=MAX_WEBSOCKET_MESSAGE_BYTES,
             ) as server:
                 self._server = server
                 await server.wait_closed()

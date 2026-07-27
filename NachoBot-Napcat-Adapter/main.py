@@ -1,8 +1,17 @@
+# ruff: noqa: E402
 import asyncio
 import sys
 import json
 import http
 import time
+from pathlib import Path
+
+_NACHOBOT_PATH = Path(__file__).resolve().parents[1] / "NachoBot"
+if (_NACHOBOT_PATH / "ncnk_message").is_dir():
+    nachobot_path = str(_NACHOBOT_PATH)
+    if nachobot_path not in sys.path:
+        sys.path.insert(1, nachobot_path)
+
 import websockets as Server
 from src.logger import logger
 from src.recv_handler.message_handler import message_handler
