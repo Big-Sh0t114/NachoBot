@@ -33,6 +33,8 @@ class AvatarEvent(StrEnum):
     RANDOM_MOTION = "random_motion"
     GAZE = "gaze"
     PARAM_TWEEN = "param_tween"
+    PLAY_AUDIO = "play_audio"
+    STOP_AUDIO = "stop_audio"
     SHUTDOWN = "shutdown"
     PING = "ping"
 

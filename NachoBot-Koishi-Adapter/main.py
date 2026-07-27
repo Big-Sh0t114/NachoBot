@@ -1,15 +1,14 @@
+# ruff: noqa: E402
 import asyncio
 import sys
 from pathlib import Path
 
-# Add core paths to sys.path so the adapter can find ncnk_message
-ROOT_DIR = Path(__file__).resolve().parents[1]
-for candidate in ("NachoBot", "NachoBot-Napcat-Adapter", "NachoBot-Multimodal-Adapter"):
-    candidate_path = ROOT_DIR / candidate
-    if candidate_path.exists():
-        candidate_str = str(candidate_path)
-        if candidate_str not in sys.path:
-            sys.path.insert(0, candidate_str)
+# Add the NachoBot core path so the adapter uses the canonical ncnk_message.
+NACHOBOT_PATH = Path(__file__).resolve().parents[1] / "NachoBot"
+if (NACHOBOT_PATH / "ncnk_message").is_dir():
+    nachobot_path = str(NACHOBOT_PATH)
+    if nachobot_path not in sys.path:
+        sys.path.insert(1, nachobot_path)
 
 from config import load_config, setup_logging
 from adapter import KoishiOneBotAdapter

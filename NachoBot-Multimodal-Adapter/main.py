@@ -1,4 +1,21 @@
-from ncnk_message import (
+import asyncio
+import importlib
+import logging
+import os
+import random
+import sys
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+import toml
+
+_NACHOBOT_PATH = Path(__file__).resolve().parents[1] / "NachoBot"
+if (_NACHOBOT_PATH / "ncnk_message").is_dir():
+    nachobot_path = str(_NACHOBOT_PATH)
+    if nachobot_path not in sys.path:
+        sys.path.insert(1, nachobot_path)
+
+from ncnk_message import (  # noqa: E402
     MessageServer,
     Router,
     RouteConfig,
@@ -7,13 +24,6 @@ from ncnk_message import (
     Seg,
     FormatInfo,
 )
-import asyncio
-from typing import List, Tuple, Dict, Optional
-import importlib
-import toml
-import random
-from pathlib import Path
-import os
 
 # Set global Hugging Face cache directory to avoid re-downloading models in temp folders
 # and set the mirror for faster downloads in China
@@ -21,14 +31,13 @@ os.environ["HF_HOME"] = str(Path(__file__).parent / "models" / "hf_cache")
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
 # 隐藏 ncnk_message 的冗余日志
-import logging
 logging.getLogger("ncnk_message").setLevel(logging.CRITICAL)
 
-from nachobot_multimodal.config import Config
-from nachobot_multimodal.logger import logger
-from nachobot_multimodal.tts.base import BaseTTSModel
-from nachobot_multimodal.utils.audio_encode import encode_audio, encode_audio_stream
-from nachobot_multimodal.utils import post_process
+from nachobot_multimodal.config import Config  # noqa: E402
+from nachobot_multimodal.logger import logger  # noqa: E402
+from nachobot_multimodal.tts.base import BaseTTSModel  # noqa: E402
+from nachobot_multimodal.utils.audio_encode import encode_audio, encode_audio_stream  # noqa: E402
+from nachobot_multimodal.utils import post_process  # noqa: E402
 
 
 class TTSPipeline:

@@ -213,6 +213,10 @@ class BilibiliAdapter:
 
             self.audio_player.on_start = _on_audio_start
             self.audio_player.on_stop = _on_audio_stop
+            self.audio_player.remote_playback_callback = (
+                self.live2d_manager.controller.play_audio
+            )
+            self.audio_player.remote_stop_callback = self.live2d_manager.controller.stop_audio
 
         from bili_src.audio.tts_manager import TTSManager
 

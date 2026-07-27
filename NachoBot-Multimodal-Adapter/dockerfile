@@ -1,20 +1,22 @@
 FROM python:3.13-slim-bookworm
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
+# Use the integrated workspace root as the Docker build context.
+COPY NachoBot/ncnk_message /NachoBot/ncnk_message
+ENV PYTHONPATH=/NachoBot
+
+
 # 设置工作目录
 WORKDIR /nachobot_multimodal_adapter
 
-# 安装本地 ncnk_message 包
-COPY ncnk_message /ncnk_message
-RUN uv pip install --system -e /ncnk_message
 
 # 安装依赖
-COPY requirements.txt pyproject.toml ./
+COPY NachoBot-Multimodal-Adapter/requirements.txt NachoBot-Multimodal-Adapter/pyproject.toml ./
 RUN uv pip install --system --upgrade pip
 RUN uv pip install --system -r requirements.txt
 
 # 复制项目代码
-COPY . .
+COPY NachoBot-Multimodal-Adapter/ .
 
 # 创建配置目录并从模板复制默认配置
 RUN mkdir -p /nachobot_multimodal_adapter/configs && \

@@ -1,7 +1,9 @@
 services:
   multimodal-adapter:
     container_name: nacho-bot-multimodal-adapter
-    build: .
+    build:
+      context: ..
+      dockerfile: NachoBot-Multimodal-Adapter/dockerfile
     environment:
       - TZ=Asia/Shanghai
     volumes:
