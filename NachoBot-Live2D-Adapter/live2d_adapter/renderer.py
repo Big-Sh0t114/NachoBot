@@ -1,5 +1,6 @@
 import os
 import sys
+import io
 from loguru import logger
 import queue
 import pygame
@@ -34,6 +35,8 @@ class Live2DRenderer:
         self.hwnd = None
         self.model = None
         self.live2d = None
+        self._audio_channel = None
+        self._current_sound = None
 
         # Lip sync state
         self.is_speaking = False
@@ -804,6 +807,13 @@ class Live2DRenderer:
         return rel_x, rel_y
 
     def _handle_command(self, cmd_type: str, cmd_data: Any):
+        if cmd_type == "play_audio":
+            self._play_audio(cmd_data)
+            return
+        if cmd_type == "stop_audio":
+            self._stop_audio()
+            return
+
         if not self.model:
             return
 
@@ -957,3 +967,33 @@ class Live2DRenderer:
         elif cmd_type == "speaking":
             self.is_speaking = bool(cmd_data)
             self.logger.info(f"[Live2D] Speaking state: {self.is_speaking}")
+
+    def _play_audio(self, audio_data: Any) -> None:
+        """Play WAV data inside the renderer process via PyGame's audio device."""
+        if not isinstance(audio_data, bytes) or not audio_data:
+            self.logger.warning("[Live2D] Ignored empty or invalid audio command")
+            return
+
+        try:
+            if not pygame.mixer.get_init():
+                pygame.mixer.init()
+            self._stop_audio()
+            sound = pygame.mixer.Sound(file=io.BytesIO(audio_data))
+            channel = sound.play()
+            if channel is None:
+                self.logger.warning("[Live2D] No PyGame mixer channel is available for TTS")
+                return
+            self._current_sound = sound
+            self._audio_channel = channel
+        except pygame.error as exc:
+            self.logger.error(f"[Live2D] Failed to play TTS audio: {exc}")
+
+    def _stop_audio(self) -> None:
+        channel = self._audio_channel
+        if channel is not None:
+            try:
+                channel.stop()
+            except pygame.error:
+                pass
+        self._audio_channel = None
+        self._current_sound = None

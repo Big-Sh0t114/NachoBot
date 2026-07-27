@@ -8,7 +8,7 @@ pyyaml>=6.0
 openai
 loguru
 scipy
-# ncnk_message 仅本地提供，启动脚本通过 PYTHONPATH 指向 NachoBot-Napcat-Adapter
+# ncnk_message is provided by the adjacent NachoBot core directory.
 aiohttp>=3.14.0
 websockets>=12.0
 fastapi

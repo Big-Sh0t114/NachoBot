@@ -8,6 +8,7 @@ InteractionEvent objects.
 from __future__ import annotations
 
 import asyncio
+import base64
 from loguru import logger
 import queue
 import threading
@@ -28,6 +29,8 @@ from .renderer import Live2DRenderer
 InteractionSink = Callable[[InteractionEvent], Awaitable[None]]
 
 
+MAX_REMOTE_AUDIO_BYTES = 4 * 1024 * 1024
+MAX_REMOTE_AUDIO_BASE64_CHARS = ((MAX_REMOTE_AUDIO_BYTES + 2) // 3) * 4
 class AvatarRuntime:
     """Own the renderer thread and translate protocol events into commands."""
 
@@ -198,6 +201,12 @@ class AvatarRuntime:
                 {"param": param, "value": value, "duration": duration},
             )
 
+        elif event is AvatarEvent.PLAY_AUDIO:
+            self._enqueue("play_audio", self._decode_wav_payload(payload))
+
+        elif event is AvatarEvent.STOP_AUDIO:
+            self._enqueue("stop_audio", None)
+
         else:
             raise ProtocolError(f"unsupported runtime event: {event.value}")
 
@@ -221,6 +230,25 @@ class AvatarRuntime:
             self.command_queue.put_nowait((command_type, content))
         except queue.Full as exc:
             raise RuntimeError("Live2D render command queue is full") from exc
+
+    @staticmethod
+    def _decode_wav_payload(payload: dict[str, Any]) -> bytes:
+        if str(payload.get("format") or "").lower() != "wav":
+            raise ProtocolError("play_audio only supports WAV payloads")
+
+        encoded_audio = payload.get("audio_base64")
+        if not isinstance(encoded_audio, str) or not encoded_audio:
+            raise ProtocolError("play_audio requires a non-empty audio_base64 string")
+        if len(encoded_audio) > MAX_REMOTE_AUDIO_BASE64_CHARS:
+            raise ProtocolError("play_audio payload exceeds the 4 MiB limit")
+
+        try:
+            audio_data = base64.b64decode(encoded_audio, validate=True)
+        except (ValueError, TypeError) as exc:
+            raise ProtocolError("play_audio audio_base64 must be valid base64") from exc
+        if not audio_data or len(audio_data) > MAX_REMOTE_AUDIO_BYTES:
+            raise ProtocolError("play_audio payload exceeds the 4 MiB limit")
+        return audio_data
 
     def _on_renderer_click(self, button: int) -> None:
         now = time.monotonic()
