@@ -25,6 +25,7 @@ from knowledge_manager import KnowledgeManager
 from memory_manager import is_available as memory_is_available
 import memory_manager
 from music_library import build_music_playlist
+from chat_backend import ChatBackendError, chat_backend
 from setup_manager import EnvironmentChecker, ConfigInitializer, DependencyInstaller, PathVerifier, NapCatConfigurator
 
 logger = logging.getLogger("webui")
@@ -43,6 +44,7 @@ knowledge_mgr = KnowledgeManager()
 async def lifespan(app: FastAPI):
     """Application lifecycle."""
     yield
+    await chat_backend.close()
     # Shutdown: stop all running services
     for sid in list(process_mgr.states.keys()):
         try:
@@ -199,6 +201,96 @@ async def send_service_input(service_id: str, body: ServiceInput):
         return {"status": "ok"}
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+# =========================================================================
+# Chat API
+# =========================================================================
+
+
+class ChatMessageRequest(BaseModel):
+    conversation_id: str = ""
+    message: str
+    user_id: str = "webui-user"
+    user_name: str = "WebUI"
+
+
+@app.get("/api/chat/status")
+async def chat_status():
+    return await chat_backend.status(core_running=_is_core_running())
+
+
+@app.post("/api/chat/message")
+async def chat_message(body: ChatMessageRequest):
+    if not _is_core_running():
+        raise HTTPException(503, "NachoBot Core 未运行，请先启动核心服务")
+    try:
+        return await chat_backend.send_message(
+            conversation_id=body.conversation_id,
+            text=body.message,
+            user_id=body.user_id,
+            user_name=body.user_name,
+        )
+    except ChatBackendError as e:
+        raise HTTPException(e.status_code, str(e))
+
+
+@app.delete("/api/chat/conversations/{conversation_id}")
+async def delete_chat_conversation(conversation_id: str):
+    """Delete one WebUI conversation and its Core-side local identity data."""
+    conversation_id = str(conversation_id or "").strip()
+    if not conversation_id:
+        raise HTTPException(400, "conversation_id 不能为空")
+
+    try:
+        backend_user_id = chat_backend.resolve_webui_user_id(conversation_id)
+        result = await asyncio.to_thread(
+            db_mgr.delete_webui_conversation,
+            conversation_id,
+            backend_user_id,
+        )
+        chat_backend.forget_conversation(conversation_id)
+        logger.info(
+            "Deleted WebUI conversation %s: backend_user_id=%s, deleted_rows=%s",
+            conversation_id,
+            backend_user_id,
+            result.get("deleted_rows", 0),
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    except Exception as e:
+        logger.exception("Failed to delete WebUI conversation %s", conversation_id)
+        raise HTTPException(500, f"删除会话数据库记录失败: {e}")
+
+
+@app.websocket("/ws/chat/{conversation_id}")
+async def ws_chat(ws: WebSocket, conversation_id: str):
+    """Push each streamed Core reply into the matching WebUI conversation."""
+    await ws.accept()
+    queue = chat_backend.subscribe(conversation_id)
+
+    try:
+        while True:
+            event_task = asyncio.create_task(queue.get())
+            receive_task = asyncio.create_task(ws.receive())
+            done, pending = await asyncio.wait(
+                {event_task, receive_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+
+            if receive_task in done:
+                received = receive_task.result()
+                if received["type"] == "websocket.disconnect":
+                    break
+            if event_task in done:
+                await ws.send_json(event_task.result())
+    except WebSocketDisconnect:
+        pass
+    finally:
+        chat_backend.unsubscribe(conversation_id, queue)
 
 
 # =========================================================================
