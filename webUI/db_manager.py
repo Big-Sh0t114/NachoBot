@@ -3,6 +3,8 @@ NachoBot WebUI — Database Manager
 Provides read/write access to the NachoBot SQLite database for the WebUI.
 """
 
+import hashlib
+import json
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -285,6 +287,186 @@ class DatabaseManager:
 
             conn.execute(f"DELETE FROM [{table}] WHERE id = ?", (row_id,))
             conn.commit()
+        finally:
+            conn.close()
+
+    def delete_webui_conversation(self, conversation_id: str, backend_user_id: str) -> dict[str, Any]:
+        """Delete all SQLite records owned exclusively by one WebUI chat session.
+
+        WebUI private chats use platform ``local`` and derive their Core user ID
+        from the browser conversation ID. Core then derives both the private
+        stream ID and person ID from that user ID. This method reproduces those
+        stable IDs and removes the corresponding records in one transaction.
+
+        A local identity that has been merged with another platform is rejected
+        deliberately: deleting it as an ordinary session could otherwise erase
+        or corrupt shared cross-platform memories.
+        """
+        conversation_id = str(conversation_id or "").strip()
+        backend_user_id = str(backend_user_id or "").strip()
+        if not conversation_id or not backend_user_id:
+            raise ValueError("conversation_id 和 backend_user_id 不能为空")
+
+        platform = "local"
+        stream_key = f"{platform}_{backend_user_id}_private"
+        stream_id = hashlib.md5(stream_key.encode()).hexdigest()
+        person_payload = json.dumps(
+            [platform, backend_user_id],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+        derived_person_id = hashlib.sha256(
+            b"nachobot:person-id:v2\0" + person_payload
+        ).hexdigest()
+
+        conn = _get_rw_conn()
+        deleted: dict[str, int] = {}
+
+        def table_exists(table: str) -> bool:
+            row = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+                (table,),
+            ).fetchone()
+            return row is not None
+
+        def table_columns(table: str) -> set[str]:
+            if not table_exists(table):
+                return set()
+            return {row[1] for row in conn.execute(f"PRAGMA table_info([{table}])").fetchall()}
+
+        def delete_any(table: str, matches: list[tuple[str, tuple[Any, ...]]]) -> int:
+            columns = table_columns(table)
+            clauses: list[str] = []
+            params: list[Any] = []
+            for column, values in matches:
+                if column not in columns or not values:
+                    continue
+                placeholders = ", ".join("?" for _ in values)
+                clauses.append(f"[{column}] IN ({placeholders})")
+                params.extend(values)
+            if not clauses:
+                return 0
+            cursor = conn.execute(
+                f"DELETE FROM [{table}] WHERE " + " OR ".join(clauses),
+                params,
+            )
+            count = max(0, cursor.rowcount)
+            if count:
+                deleted[table] = deleted.get(table, 0) + count
+            return count
+
+        try:
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("BEGIN IMMEDIATE")
+
+            # Preserve legacy person IDs when this account was registered before
+            # the current SHA-256 identity derivation was introduced.
+            person_id = derived_person_id
+            if table_exists("person_info"):
+                row = conn.execute(
+                    "SELECT person_id FROM person_info "
+                    "WHERE platform = ? AND user_id = ? ORDER BY id LIMIT 1",
+                    (platform, backend_user_id),
+                ).fetchone()
+                if row and row["person_id"]:
+                    person_id = str(row["person_id"])
+
+            # Refuse destructive cleanup when this ephemeral WebUI identity has
+            # been merged into a persistent cross-platform person group.
+            if table_exists("person_bindings"):
+                binding = conn.execute(
+                    "SELECT person_id FROM person_bindings "
+                    "WHERE platform = ? AND platform_user_id = ? LIMIT 1",
+                    (platform, backend_user_id),
+                ).fetchone()
+                if binding and str(binding["person_id"]) != person_id:
+                    merged = conn.execute(
+                        "SELECT 1 FROM person_bindings "
+                        "WHERE platform = '__merged__' AND person_id = ? LIMIT 1",
+                        (str(binding["person_id"]),),
+                    ).fetchone()
+                    if merged:
+                        raise ValueError(
+                            "该 WebUI 会话身份已与其他平台账号绑定。请先解绑账号，再删除会话。"
+                        )
+
+            # Focus runtime tables are optional and may vary by schema version.
+            # Delete children before their parent rows to satisfy foreign keys.
+            delete_any("focus_handoff_reservation", [("target_chat_id", (stream_id,))])
+            delete_any(
+                "focus_handoff",
+                [("target_chat_id", (stream_id,)), ("source_chat_id", (stream_id,))],
+            )
+            delete_any("focus_event", [("chat_id", (stream_id,))])
+            delete_any("focus_chat_cursor", [("chat_id", (stream_id,))])
+
+            delete_any(
+                "messages",
+                [
+                    ("chat_id", (stream_id,)),
+                    ("chat_info_stream_id", (stream_id,)),
+                    ("chat_info_user_id", (backend_user_id,)),
+                    ("user_id", (backend_user_id,)),
+                ],
+            )
+            delete_any(
+                "action_records",
+                [("chat_id", (stream_id,)), ("chat_info_stream_id", (stream_id,))],
+            )
+            delete_any("expression", [("chat_id", (stream_id,))])
+            delete_any("chat_history", [("chat_id", (stream_id,))])
+            delete_any("thinking_back", [("chat_id", (stream_id,))])
+            delete_any("statistics_message_hourly", [("chat_id", (stream_id,))])
+            delete_any("llm_usage", [("user_id", (backend_user_id, person_id))])
+
+            if table_exists("chat_streams"):
+                cursor = conn.execute(
+                    "DELETE FROM chat_streams WHERE stream_id = ? "
+                    "OR (platform = ? AND user_id = ?)",
+                    (stream_id, platform, backend_user_id),
+                )
+                if cursor.rowcount > 0:
+                    deleted["chat_streams"] = cursor.rowcount
+
+            if table_exists("bind_requests"):
+                cursor = conn.execute(
+                    "DELETE FROM bind_requests WHERE req_person_id = ? "
+                    "OR (target_platform = ? AND target_user_id = ?)",
+                    (person_id, platform, backend_user_id),
+                )
+                if cursor.rowcount > 0:
+                    deleted["bind_requests"] = cursor.rowcount
+
+            if table_exists("person_bindings"):
+                cursor = conn.execute(
+                    "DELETE FROM person_bindings WHERE platform = ? AND platform_user_id = ?",
+                    (platform, backend_user_id),
+                )
+                if cursor.rowcount > 0:
+                    deleted["person_bindings"] = cursor.rowcount
+
+            if table_exists("person_info"):
+                cursor = conn.execute(
+                    "DELETE FROM person_info WHERE person_id = ? "
+                    "OR (platform = ? AND user_id = ?)",
+                    (person_id, platform, backend_user_id),
+                )
+                if cursor.rowcount > 0:
+                    deleted["person_info"] = cursor.rowcount
+
+            conn.commit()
+            return {
+                "status": "ok",
+                "conversation_id": conversation_id,
+                "backend_user_id": backend_user_id,
+                "person_id": person_id,
+                "stream_id": stream_id,
+                "deleted": deleted,
+                "deleted_rows": sum(deleted.values()),
+            }
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 

@@ -9,6 +9,9 @@
     const START_DELAY_SECONDS = 0.03;
     const JOIN_FADE_SECONDS = 0.012;
     const MAX_CACHED_BUFFERS = 4;
+    const ANALYSER_FFT_SIZE = 512;
+    const ANALYSER_SMOOTHING = 0.7;
+    const BEAT_MIN_INTERVAL_SECONDS = 0.16;
 
     class SeamlessBgmPlayer extends EventTarget {
         constructor() {
@@ -23,6 +26,14 @@
             this._paused = true;
             this._playRequested = false;
             this._volume = 0.2;
+            this._analyser = null;
+            this._frequencyData = null;
+            this._reactive = {
+                bassBaseline: 0,
+                previousBass: 0,
+                lastBeatAt: -Infinity,
+                pulse: 0,
+            };
         }
 
         get paused() {
@@ -42,11 +53,95 @@
             gain.setTargetAtTime(this._volume, this._audioContext.currentTime, 0.015);
         }
 
+        /**
+         * 返回当前音频帧的低频、中频、高频能量以及鼓点脉冲。
+         * 所有数值均归一化到 0..1；暂停时会平滑衰减到 0。
+         */
+        getReactiveFrame() {
+            const state = this._reactive;
+
+            if (
+                this._paused ||
+                !this._analyser ||
+                !this._frequencyData ||
+                this._audioContext?.state !== 'running'
+            ) {
+                state.pulse *= 0.82;
+                return {
+                    bass: 0,
+                    mid: 0,
+                    high: 0,
+                    intensity: 0,
+                    pulse: state.pulse,
+                    beat: false,
+                };
+            }
+
+            this._analyser.getByteFrequencyData(this._frequencyData);
+
+            const binHz = this._audioContext.sampleRate / this._analyser.fftSize;
+            const averageBand = (lowHz, highHz) => {
+                const start = Math.max(0, Math.floor(lowHz / binHz));
+                const end = Math.min(
+                    this._frequencyData.length - 1,
+                    Math.ceil(highHz / binHz)
+                );
+                if (end < start) return 0;
+
+                let total = 0;
+                for (let index = start; index <= end; index += 1) {
+                    total += this._frequencyData[index];
+                }
+                return total / ((end - start + 1) * 255);
+            };
+
+            const bass = averageBand(45, 180);
+            const mid = averageBand(180, 1800);
+            const high = averageBand(1800, 8000);
+
+            if (state.bassBaseline <= 0) {
+                state.bassBaseline = bass;
+            } else {
+                const baselineRate = bass > state.bassBaseline ? 0.025 : 0.08;
+                state.bassBaseline += (bass - state.bassBaseline) * baselineRate;
+            }
+
+            const now = this._audioContext.currentTime;
+            const transient = bass - state.previousBass;
+            const threshold = Math.max(0.115, state.bassBaseline * 1.34 + 0.018);
+            const minTransient = Math.max(0.022, state.bassBaseline * 0.13);
+            const beat =
+                bass > threshold &&
+                transient > minTransient &&
+                now - state.lastBeatAt >= BEAT_MIN_INTERVAL_SECONDS;
+
+            if (beat) {
+                state.lastBeatAt = now;
+                state.pulse = Math.min(1, 0.6 + bass * 0.8);
+            } else {
+                state.pulse *= 0.84;
+            }
+            state.previousBass = bass;
+
+            const weightedEnergy = bass * 0.55 + mid * 0.3 + high * 0.15;
+            const intensity = Math.min(1, Math.sqrt(Math.max(0, weightedEnergy)) * 1.05);
+
+            return {
+                bass,
+                mid,
+                high,
+                intensity,
+                pulse: state.pulse,
+                beat,
+            };
+        }
+
         setTrack(track) {
             const wasPlaying = !this._paused;
             this._generation += 1;
             this._playRequested = false;
             this._track = track;
+            this._resetReactiveState();
             this._stopSources();
             this._paused = true;
 
@@ -62,14 +157,25 @@
             return this._trackReady;
         }
 
-        async play() {
+        async play({ userInitiated = typeof navigator !== 'undefined' && navigator.userActivation?.isActive === true } = {}) {
             if (!this._track) return;
 
-            this._playRequested = true;
             const generation = this._generation;
             const context = this._ensureAudioGraph();
-            await context.resume();
+            if (context.state !== 'running' && !userInitiated) {
+                this._playRequested = false;
+                throw new Error('Audio playback requires a user interaction.');
+            }
+
+            this._playRequested = true;
+            try {
+                await this.unlock();
+            } catch (error) {
+                this._playRequested = false;
+                throw error;
+            }
             if (context.state !== 'running') {
+                this._playRequested = false;
                 throw new Error('Audio playback requires a user interaction.');
             }
 
@@ -97,6 +203,15 @@
             this.dispatchEvent(new Event('pause'));
         }
 
+        async unlock() {
+            const context = this._ensureAudioGraph();
+            if (context.state !== 'running') {
+                await context.resume();
+            }
+            if (context.state !== 'running') {
+                throw new Error('Audio playback requires a user interaction.');
+            }
+        }
         _ensureAudioGraph() {
             if (this._audioContext) return this._audioContext;
 
@@ -107,8 +222,17 @@
 
             this._audioContext = new AudioContextConstructor();
             this._masterGain = this._audioContext.createGain();
+            this._analyser = this._audioContext.createAnalyser();
+
             this._masterGain.gain.value = this._volume;
-            this._masterGain.connect(this._audioContext.destination);
+            this._analyser.fftSize = ANALYSER_FFT_SIZE;
+            this._analyser.smoothingTimeConstant = ANALYSER_SMOOTHING;
+            this._analyser.minDecibels = -90;
+            this._analyser.maxDecibels = -10;
+            this._frequencyData = new Uint8Array(this._analyser.frequencyBinCount);
+
+            this._masterGain.connect(this._analyser);
+            this._analyser.connect(this._audioContext.destination);
             return this._audioContext;
         }
 
@@ -180,6 +304,14 @@
             const node = { source, gain };
             this._nodes.push(node);
             return node;
+        }
+
+        _resetReactiveState() {
+            this._reactive.bassBaseline = 0;
+            this._reactive.previousBass = 0;
+            this._reactive.lastBeatAt = -Infinity;
+            this._reactive.pulse = 0;
+            this._frequencyData?.fill(0);
         }
 
         _stopSources() {
