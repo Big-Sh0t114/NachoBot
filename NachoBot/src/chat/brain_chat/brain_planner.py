@@ -544,6 +544,13 @@ class BrainPlanner:
             else:
                 actions_before_now_block = ""
 
+            # 新用户在首次消息落库、注册完成前可能尚无 TargetPersonInfo；始终提供模板所需变量。
+            chat_context_description = (
+                "你现在正在一个群聊中"
+                if is_group_chat
+                else "你正在和一位尚未认识的用户私聊"
+            )
+
             if chat_target_info:
                 # 构建聊天上下文描述
                 chat_context_description = (

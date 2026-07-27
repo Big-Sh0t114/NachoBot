@@ -646,6 +646,13 @@ class OwnerAuthHandler(BaseEventHandler):
                 return True, True, "身份验证已禁用", None, message
 
             # 获取主人QQ号配置 - 安全类型转换
+            # These platforms do not provide a QQ identity. Regular Discord is not skipped.
+            platform = str(message.message_base_info.get("platform") or "").strip().lower()
+            unsupported_platforms = {"local", "webui", "universal", "universal_vc", "discord_vc"}
+            if platform in unsupported_platforms:
+                logger.debug(f"[OwnerAuth] Platform {platform} does not support QQ owner authentication; skipped")
+                return True, True, f"Platform {platform} does not support QQ owner authentication; skipped", None, message
+
             owner_qq_config = self.get_config("owner_auth.owner_qq", 2900218130)
             if isinstance(owner_qq_config, int):
                 owner_qq = owner_qq_config
