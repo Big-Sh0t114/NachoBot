@@ -11,9 +11,9 @@ WORKDIR /nachobot_multimodal_adapter
 
 
 # 安装依赖
-COPY NachoBot-Multimodal-Adapter/requirements.txt NachoBot-Multimodal-Adapter/pyproject.toml ./
-RUN uv pip install --system --upgrade pip
-RUN uv pip install --system -r requirements.txt
+COPY NachoBot-Multimodal-Adapter/pyproject.toml NachoBot-Multimodal-Adapter/uv.lock ./
+RUN uv sync --locked --no-dev --no-install-project
+ENV PATH="/nachobot_multimodal_adapter/.venv/bin:${PATH}"
 
 # 复制项目代码
 COPY NachoBot-Multimodal-Adapter/ .

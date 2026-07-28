@@ -57,7 +57,8 @@ NachoBot-Multimodal-Adapter/
 ├── nachobot_multimodal/      # 对外唯一导入命名空间（避免与核心 src 冲突）
 ├── main.py                   # 适配器主入口 (包含双向 WS 转发路由与 HTTP 接口)
 ├── tts_model_debugger.py     # TTS 音质和配置本地测试脚本
-└── requirements.txt          # Python 依赖清单
+├── pyproject.toml            # Python 依赖声明
+└── uv.lock                   # 锁定依赖版本
 ```
 
 ---
@@ -148,7 +149,7 @@ asr = "cuda:0"              # FunASR 运行设备
 如果你需要独立调试，可按照以下步骤进行：
 1. **创建环境并安装依赖**（推荐使用更高效的 `uv` 工具）：
    ```bash
-   uv pip install -r requirements.txt
+   uv sync --locked
    ```
 2. **运行调试器测试 TTS 输出**：
    ```bash

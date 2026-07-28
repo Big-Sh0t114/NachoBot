@@ -6,11 +6,12 @@ LABEL authors="infinitycat233"
 
 # Copy uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-COPY NachoBot-Napcat-Adapter/requirements.txt /requirements.txt
+COPY NachoBot-Napcat-Adapter/pyproject.toml NachoBot-Napcat-Adapter/uv.lock /adapters/
 
 # Install requirements
-RUN uv pip install --system --upgrade pip
-RUN uv pip install --system -r /requirements.txt
+WORKDIR /adapters
+RUN uv sync --locked --no-dev --no-install-project
+ENV PATH="/adapters/.venv/bin:${PATH}"
 
 COPY NachoBot/ncnk_message /NachoBot/ncnk_message
 ENV PYTHONPATH=/NachoBot
