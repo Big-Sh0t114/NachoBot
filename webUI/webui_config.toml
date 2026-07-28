@@ -1,3 +1,7 @@
+[webui]
+# WebUI semantic version displayed in the sidebar
+version = "1.0.0"
+
 [server]
 # FastAPI/Uvicorn server hosting configuration
 host = "127.0.0.1"

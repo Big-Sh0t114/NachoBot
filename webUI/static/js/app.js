@@ -9,6 +9,8 @@ const App = (() => {
 
     // ---- Tab Routing ----
     function init() {
+        loadWebUIInfo();
+
         document.querySelectorAll('.nav-item').forEach(item => {
             item.addEventListener('click', (e) => {
                 e.preventDefault();
@@ -30,6 +32,21 @@ const App = (() => {
         // Start polling status
         statusInterval = setInterval(pollStatus, 3000);
         pollStatus();
+    }
+
+    async function loadWebUIInfo() {
+        const versionElement = document.getElementById('sidebar-version');
+        if (!versionElement) return;
+
+        try {
+            const data = await apiGet('/api/webui/info');
+            const version = String(data.version || '').trim();
+            versionElement.textContent = version ? `WebUI v${version}` : 'WebUI';
+            versionElement.title = version ? `WebUI v${version}` : 'WebUI';
+        } catch (error) {
+            versionElement.textContent = 'WebUI';
+            versionElement.removeAttribute('title');
+        }
     }
 
     function switchTab(tab) {
@@ -98,7 +115,7 @@ const App = (() => {
         }
     }
 
-    return { init, switchTab, pollStatus };
+    return { init, switchTab, pollStatus, loadWebUIInfo };
 })();
 
 // ---- Global Utilities ----

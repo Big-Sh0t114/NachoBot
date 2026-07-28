@@ -1,10 +1,12 @@
 import os
+import importlib.metadata
 import sys
 import traceback
 
 from typing import Dict, List, Optional, Tuple, Type, Any
 from importlib.util import spec_from_file_location, module_from_spec
 from pathlib import Path
+from packaging.requirements import InvalidRequirement, Requirement
 
 # 将兼容层包目录加入 sys.path，保证上游插件运行时能无缝 "import maibot_sdk"
 compat_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "compatibility"))
@@ -34,6 +36,7 @@ class PluginManager:
 
         self.loaded_plugins: Dict[str, PluginBase] = {}  # 已加载的插件类实例注册表，插件名 -> 插件类实例
         self.failed_plugins: Dict[str, str] = {}  # 记录加载失败的插件文件及其错误信息，插件名 -> 错误信息
+        self.plugin_requirements: Dict[str, List[str]] = {}
 
         # 确保插件目录存在
         self._ensure_plugin_directories()
@@ -299,6 +302,7 @@ class PluginManager:
         module_name = ".".join(plugin_path.parent.parts)
 
         try:
+            self._record_plugin_requirements(plugin_file)
             # 动态导入插件模块
             spec = spec_from_file_location(module_name, plugin_file)
             if spec is None or spec.loader is None:
@@ -342,6 +346,64 @@ class PluginManager:
             self.failed_plugins[module_name] = error_msg
             return False
 
+    def _read_plugin_requirements(self, requirements_file: Path) -> List[str]:
+        """读取插件 requirements.txt 中可解析的 PEP 508 依赖。"""
+        requirements: List[str] = []
+        with requirements_file.open("r", encoding="utf-8") as file:
+            for raw_line in file:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or line.startswith(("-", "--")):
+                    continue
+                if " #" in line:
+                    line = line.split(" #", 1)[0].strip()
+                try:
+                    Requirement(line)
+                except InvalidRequirement:
+                    logger.warning(f"插件依赖格式无法解析，跳过检查: {requirements_file} -> {line}")
+                    continue
+                requirements.append(line)
+        return requirements
+
+    def _find_missing_plugin_requirements(self, requirements: List[str]) -> List[str]:
+        """检查插件 requirements.txt 中缺失或版本不满足的依赖。"""
+        missing: List[str] = []
+        for requirement in requirements:
+            parsed = Requirement(requirement)
+            try:
+                installed_version = importlib.metadata.version(parsed.name)
+            except importlib.metadata.PackageNotFoundError:
+                missing.append(requirement)
+                continue
+            if parsed.specifier and not parsed.specifier.contains(installed_version, prereleases=True):
+                missing.append(requirement)
+        return missing
+
+    def _record_plugin_requirements(self, plugin_file: str) -> None:
+        """读取并记录插件依赖，不在插件扫描阶段执行安装。"""
+        plugin_dir = Path(plugin_file).parent
+        requirements_file = plugin_dir / "requirements.txt"
+        if not requirements_file.is_file():
+            return
+
+        try:
+            requirements = self._read_plugin_requirements(requirements_file)
+        except (OSError, UnicodeError) as exc:
+            logger.error(f"读取插件 requirements.txt 失败: {requirements_file} - {exc}")
+            return
+
+        plugin_key = str(plugin_dir.resolve())
+        self.plugin_requirements[plugin_key] = requirements
+        if not requirements:
+            return
+
+        missing = self._find_missing_plugin_requirements(requirements)
+        if missing:
+            logger.warning(
+                f"插件依赖未满足: {plugin_dir.name} -> {', '.join(missing)}；"
+                "请运行项目 uv sync 或手动安装该 requirements.txt"
+            )
+        else:
+            logger.debug(f"插件 requirements.txt 依赖已满足: {requirements_file}")
     # == 兼容性检查 ==
 
     def _check_plugin_version_compatibility(self, plugin_name: str, manifest_data: Dict[str, Any]) -> Tuple[bool, str]:
