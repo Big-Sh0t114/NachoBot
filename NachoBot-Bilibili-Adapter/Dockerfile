@@ -10,9 +10,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # 复制依赖列表并安装
-COPY requirements.txt pyproject.toml ./
-RUN uv pip install --system --upgrade pip
-RUN uv pip install --system -r requirements.txt
+COPY pyproject.toml uv.lock ./
+RUN uv sync --locked --no-dev --no-install-project
+ENV PATH="/bilibili-adapter/.venv/bin:${PATH}"
 
 # 复制项目代码
 COPY . .

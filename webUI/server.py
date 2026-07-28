@@ -81,6 +81,13 @@ async def list_music():
     return build_music_playlist(RESOURCES_DIR)
 
 
+@app.get("/api/webui/info")
+async def webui_info():
+    from webui_config import webui_config
+
+    return {"version": webui_config.version}
+
+
 # =========================================================================
 # Config API
 # =========================================================================

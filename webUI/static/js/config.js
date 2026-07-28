@@ -115,6 +115,9 @@ const ConfigModule = (() => {
             originalRaw = raw;
             const item = document.querySelector(`.config-item[data-id="${activeFileId}"]`);
             if (item) item.classList.remove('modified');
+            if (activeFileId === 'webui_config') {
+                await App.loadWebUIInfo();
+            }
             toast('配置已保存', 'success');
         } catch (e) {
             toast('保存失败: ' + e.message, 'error');

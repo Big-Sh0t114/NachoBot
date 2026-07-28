@@ -499,15 +499,20 @@ button.chat-status-chip:disabled {
     padding: 0;
     border: 0;
     overflow: hidden;
+    background: transparent;
+    box-shadow: none;
     cursor: pointer;
     font: inherit;
+    isolation: isolate;
     transition: transform var(--transition), box-shadow var(--transition), filter var(--transition);
 }
 
 .chat-avatar-customizable img {
-    width: 100%;
-    height: 100%;
+    width: calc(100% + 2px);
+    height: calc(100% + 2px);
+    margin: -1px;
     display: block;
+    border-radius: inherit;
     object-fit: cover;
 }
 
@@ -935,6 +940,22 @@ button.chat-status-chip:disabled {
     -webkit-backdrop-filter: blur(22px);
     overflow: hidden;
     transition: width 0.22s ease, min-width 0.22s ease, transform 0.22s ease;
+}
+
+.sidebar-version {
+    margin-left: auto;
+    color: rgba(203, 213, 225, 0.48);
+    font-size: 0.67rem;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    line-height: 1;
+    text-align: right;
+    white-space: nowrap;
+    user-select: none;
+}
+
+body.sidebar-collapsed .sidebar-version {
+    display: none;
 }
 
 .main-content {
