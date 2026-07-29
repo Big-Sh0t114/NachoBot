@@ -573,9 +573,95 @@ button.chat-status-chip:disabled {
     line-height: 1.62;
 }
 
-.chat-message-assistant .chat-message-content {
+.chat-message-body {
+    min-width: 0;
     flex: 1;
+}
+
+.chat-message-assistant .chat-message-content {
     padding-top: 3px;
+}
+
+.chat-message-content > p:has(+ .chat-tts-button) {
+    display: inline;
+}
+
+.chat-tts-button {
+    width: 24px;
+    height: 24px;
+    display: inline-grid;
+    place-items: center;
+    vertical-align: middle;
+    margin-left: 4px;
+    padding: 0;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--accent-dark);
+    cursor: pointer;
+    transition:
+        color var(--transition),
+        background var(--transition),
+        transform var(--transition),
+        opacity var(--transition);
+}
+
+.chat-tts-button svg {
+    width: 16px;
+    height: 16px;
+    overflow: visible;
+    fill: currentColor;
+}
+
+.chat-tts-button .chat-tts-wave {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+}
+
+.chat-tts-button:hover:not(:disabled),
+.chat-tts-button:focus-visible {
+    background: rgba(13, 148, 136, 0.1);
+    transform: translateY(-1px);
+    outline: none;
+}
+
+.chat-tts-button:disabled {
+    background: transparent;
+    color: #94a3b8;
+    cursor: not-allowed;
+    opacity: 0.58;
+}
+
+.chat-tts-button.is-loading {
+    color: var(--accent-dark);
+    opacity: 0.85;
+}
+
+.chat-tts-button.is-loading svg {
+    animation: chat-tts-loading 0.8s ease-in-out infinite alternate;
+}
+
+.chat-tts-button.is-playing {
+    background: rgba(13, 148, 136, 0.12);
+    color: var(--accent-dark);
+}
+
+.chat-tts-button.is-playing .chat-tts-wave-one {
+    animation: chat-tts-wave 0.75s ease-in-out infinite alternate;
+}
+
+.chat-tts-button.is-playing .chat-tts-wave-two {
+    animation: chat-tts-wave 0.75s 0.16s ease-in-out infinite alternate;
+}
+
+@keyframes chat-tts-loading {
+    to { opacity: 0.35; transform: scale(0.88); }
+}
+
+@keyframes chat-tts-wave {
+    to { opacity: 0.25; transform: translateX(-1px); }
 }
 
 .chat-message-notice {
@@ -913,7 +999,9 @@ button.chat-status-chip:disabled {
 
 @media (prefers-reduced-motion: reduce) {
     .chat-thinking-dots span,
-    .chat-send-button.is-busy span {
+    .chat-send-button.is-busy span,
+    .chat-tts-button svg,
+    .chat-tts-button .chat-tts-wave {
         animation: none;
         transition: none;
     }
@@ -1568,6 +1656,113 @@ body.sidebar-collapsed .sidebar-webui-menu .nav-icon {
     #chat-welcome-subtitle.is-gradient-tip {
         animation: none;
         transition: none;
+    }
+}
+
+/* ===================================================================
+   OMEGA Tip — rainbow chat-card border and glow
+   =================================================================== */
+@keyframes omegaChatCardFlow {
+    from { background-position: 0% 50%; }
+    to { background-position: 200% 50%; }
+}
+
+html[data-omega-tip-active="true"] .chat-message-user .chat-message-content {
+    position: relative;
+    isolation: isolate;
+    border: 1px solid transparent;
+    border-radius: 17px;
+    background: rgba(255, 255, 255, 0.70);
+    box-shadow: none;
+}
+
+html[data-omega-tip-active="true"] .chat-message-user .chat-message-content::before {
+    content: '';
+    position: absolute;
+    inset: -1px;
+    padding: 1px;
+    border-radius: inherit;
+    background: linear-gradient(
+        90deg,
+        #ff3d81 0%,
+        #ff9f1c 8.333%,
+        #ffe600 16.666%,
+        #2ed573 25%,
+        #00c2ff 33.333%,
+        #7d5fff 41.666%,
+        #ff3d81 50%,
+        #ff9f1c 58.333%,
+        #ffe600 66.666%,
+        #2ed573 75%,
+        #00c2ff 83.333%,
+        #7d5fff 91.666%,
+        #ff3d81 100%
+    );
+    background-size: 200% 100%;
+    animation: omegaChatCardFlow 2.8s linear infinite;
+    pointer-events: none;
+    z-index: -1;
+    -webkit-mask:
+        linear-gradient(#fff 0 0) content-box,
+        linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    html[data-omega-tip-active="true"] .chat-message-user .chat-message-content::before {
+        animation: none;
+    }
+}
+
+/* OMEGA Tip — guide cards and composer glow */
+html[data-omega-tip-active="true"] .chat-suggestion,
+html[data-omega-tip-active="true"] .chat-composer {
+    position: relative;
+    isolation: isolate;
+    overflow: visible;
+    border-color: transparent !important;
+    box-shadow: none;
+}
+
+html[data-omega-tip-active="true"] .chat-suggestion::before,
+html[data-omega-tip-active="true"] .chat-composer::before {
+    content: '';
+    position: absolute;
+    inset: -1px;
+    padding: 1px;
+    border-radius: inherit;
+    background: linear-gradient(
+        90deg,
+        #ff3d81 0%,
+        #ff9f1c 8.333%,
+        #ffe600 16.666%,
+        #2ed573 25%,
+        #00c2ff 33.333%,
+        #7d5fff 41.666%,
+        #ff3d81 50%,
+        #ff9f1c 58.333%,
+        #ffe600 66.666%,
+        #2ed573 75%,
+        #00c2ff 83.333%,
+        #7d5fff 91.666%,
+        #ff3d81 100%
+    );
+    background-size: 200% 100%;
+    animation: omegaChatCardFlow 2.8s linear infinite;
+    pointer-events: none;
+    z-index: -1;
+    -webkit-mask:
+        linear-gradient(#fff 0 0) content-box,
+        linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    html[data-omega-tip-active="true"] .chat-suggestion::before,
+    html[data-omega-tip-active="true"] .chat-composer::before {
+        animation: none;
     }
 }
 

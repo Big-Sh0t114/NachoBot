@@ -538,8 +538,13 @@ const UI = (() => {
         let width = 0;
         let height = 0;
         let particles = [];
+        const BASE_PARTICLE_COUNT = 60;
+        const NORMAL_PARTICLE_LIMIT = 120;
+        const OMEGA_PARTICLE_LIMIT = 180;
+        const OMEGA_REACTIVE_MULTIPLIER = 1.2;
         let visualPulse = 0;
         let visualIntensity = 0;
+        let currentSpeedMultiplier = 0.5;
         let pendingHeartEchoes = [];
         const mouse = { x: null, y: null };
         const chatScrollContainer = document.getElementById('chat-messages');
@@ -627,6 +632,8 @@ const UI = (() => {
                 this.pulseVelocityX = 0;
                 this.pulseVelocityY = 0;
                 this.heartbeatLevel = 0;
+                this.lifeAlpha = 0;
+                this.isDying = false;
             }
 
             get drawX() {
@@ -643,10 +650,16 @@ const UI = (() => {
                 this.heartbeatLevel = Math.min(1, this.heartbeatLevel + strength / 11);
             }
 
-            update() {
-                // 始终保持原本的缓慢漂移速度，音乐不会令粒子加速。
-                this.x += this.speedX;
-                this.y += this.speedY;
+            update(reaction, speedMultiplier = 0.5) {
+                if (this.isDying) {
+                    this.lifeAlpha -= 0.015;
+                } else {
+                    this.lifeAlpha += 0.015;
+                    if (this.lifeAlpha > 1) this.lifeAlpha = 1;
+                }
+
+                this.x += this.speedX * speedMultiplier;
+                this.y += this.speedY * speedMultiplier;
 
                 // 位移弹簧令整组节点向外张开后同步回到原来的结构。
                 const springStrength = 0.155;
@@ -700,7 +713,7 @@ const UI = (() => {
                     0.38 +
                     reaction.intensity * 0.08 +
                     this.heartbeatLevel * 0.16
-                );
+                ) * Math.max(0, this.lifeAlpha);
                 const defaultHue =
                     214 -
                     reaction.bass * 12 +
@@ -720,7 +733,7 @@ const UI = (() => {
             }
         }
 
-        for (let index = 0; index < 80; index += 1) {
+        for (let index = 0; index < BASE_PARTICLE_COUNT; index += 1) {
             particles.push(new Particle());
         }
 
@@ -734,9 +747,9 @@ const UI = (() => {
                 availableSeeds[
                 Math.floor(Math.random() * availableSeeds.length)
                 ];
-            const desiredNodeCount = 6 + Math.floor(reaction.bass * 4);
+            const desiredNodeCount = 8 + Math.floor(reaction.bass * 8);
             const heartbeatLinkDistance =
-                100 + reaction.intensity * 8 + reaction.pulse * 14;
+                130 + reaction.intensity * 15 + reaction.pulse * 25;
 
             // 沿当前邻近连线图进行广度遍历，而不是单纯抓取最近节点。
             // 因此参与一次搏动的所有节点都能通过至少一条实际连线相互连接。
@@ -829,7 +842,7 @@ const UI = (() => {
             const excludedParticles = new Set();
 
             // 普通鼓点触发一个局部节点群；强低频时同时触发第二个节点群。
-            const clusterCount = reaction.bass > 0.58 ? 2 : 1;
+            const clusterCount = reaction.bass > 0.45 ? 2 : 1;
             const clusters = [];
 
             for (let index = 0; index < clusterCount; index += 1) {
@@ -841,9 +854,9 @@ const UI = (() => {
             }
 
             const primaryStrength =
-                5.4 +
-                reaction.bass * 6.2 +
-                reaction.intensity * 2.2;
+                7.5 +
+                reaction.bass * 8.5 +
+                reaction.intensity * 3.0;
 
             for (const cluster of clusters) {
                 applyClusterKick(cluster, primaryStrength);
@@ -889,30 +902,90 @@ const UI = (() => {
                 pulse: 0,
                 beat: false,
             };
+            const rainbowActive =
+                document.documentElement.dataset.omegaTipActive === 'true';
+            const reactiveMultiplier = rainbowActive
+                ? OMEGA_REACTIVE_MULTIPLIER
+                : 1;
+            const reactiveFrame = {
+                ...audioFrame,
+                bass: Math.min(1, audioFrame.bass * reactiveMultiplier),
+                mid: Math.min(1, audioFrame.mid * reactiveMultiplier),
+                high: Math.min(1, audioFrame.high * reactiveMultiplier),
+                intensity: Math.min(
+                    1,
+                    audioFrame.intensity * reactiveMultiplier
+                ),
+                pulse: Math.min(1, audioFrame.pulse * reactiveMultiplier),
+            };
 
-            if (audioFrame.beat) {
+            if (reactiveFrame.beat) {
                 visualPulse = 1;
-                triggerClusterHeartbeat(audioFrame, now);
+                triggerClusterHeartbeat(reactiveFrame, now);
             } else {
                 const pulseRate =
-                    audioFrame.pulse > visualPulse ? 0.55 : 0.12;
+                    reactiveFrame.pulse > visualPulse ? 0.55 : 0.12;
                 visualPulse +=
-                    (audioFrame.pulse - visualPulse) * pulseRate;
+                    (reactiveFrame.pulse - visualPulse) * pulseRate;
             }
 
             processHeartbeatEchoes(now);
 
             visualIntensity +=
-                (audioFrame.intensity - visualIntensity) * 0.12;
+                (reactiveFrame.intensity - visualIntensity) * 0.12;
 
             const reaction = {
-                ...audioFrame,
+                ...reactiveFrame,
                 pulse: visualPulse,
                 intensity: visualIntensity,
-                rainbowActive:
-                    document.documentElement.dataset.omegaTipActive === 'true',
+                rainbowActive,
                 rainbowPhase: (now * 0.08) % 360,
             };
+
+            // 线性映射：将 0.5~1.0 之间的响度直接线性放大到 0~1.0，比二次方更敏感
+            const activeIntensity = Math.min(1, Math.max(0, reaction.intensity - 0.6) * 2.5);
+            const intensityCurve = activeIntensity; // 取消二次方，使用线性响应
+
+            const targetSpeedMultiplier = 0.5 + intensityCurve * 1.0;
+            currentSpeedMultiplier += (targetSpeedMultiplier - currentSpeedMultiplier) * 0.02;
+
+            const particleLimit = reaction.rainbowActive
+                ? OMEGA_PARTICLE_LIMIT
+                : NORMAL_PARTICLE_LIMIT;
+            const targetParticleCount =
+                BASE_PARTICLE_COUNT +
+                Math.floor(
+                    intensityCurve *
+                    (particleLimit - BASE_PARTICLE_COUNT)
+                );
+
+            let aliveCount = 0;
+            for (const p of particles) {
+                if (!p.isDying) aliveCount++;
+            }
+
+            if (aliveCount < targetParticleCount) {
+                particles.push(new Particle());
+                if (aliveCount + 1 < targetParticleCount) particles.push(new Particle());
+            } else if (
+                aliveCount > targetParticleCount &&
+                aliveCount > BASE_PARTICLE_COUNT
+            ) {
+                let killed = 0;
+                for (let i = particles.length - 1; i >= 0; i--) {
+                    if (!particles[i].isDying) {
+                        particles[i].isDying = true;
+                        killed++;
+                        if (killed >= 2) break;
+                    }
+                }
+            }
+
+            for (let i = particles.length - 1; i >= 0; i--) {
+                if (particles[i].isDying && particles[i].lifeAlpha <= 0) {
+                    particles.splice(i, 1);
+                }
+            }
 
             ctx.clearRect(0, 0, width, height);
 
@@ -932,7 +1005,7 @@ const UI = (() => {
 
             for (let i = 0; i < particles.length; i += 1) {
                 const particle = particles[i];
-                particle.update();
+                particle.update(reaction, currentSpeedMultiplier);
                 particle.draw(reaction);
 
                 for (let j = i + 1; j < particles.length; j += 1) {
@@ -955,7 +1028,7 @@ const UI = (() => {
                                 reaction.intensity * 0.06 +
                                 reaction.pulse * 0.12 +
                                 heartbeatAlpha
-                            ) * distanceFade;
+                            ) * distanceFade * Math.max(0, particle.lifeAlpha) * Math.max(0, other.lifeAlpha);
 
                         const rainbowLineHue = (
                             ((particle.drawX + other.drawX) /
