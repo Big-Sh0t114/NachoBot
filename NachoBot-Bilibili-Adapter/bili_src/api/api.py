@@ -3,7 +3,7 @@
 import base64
 import hashlib
 import json
-import logging
+from loguru import logger
 import time
 import urllib.parse
 import uuid
@@ -23,7 +23,7 @@ class WbiSigner:
         36, 20, 34, 44, 52,
     ]
 
-    def __init__(self, api: "BilibiliApi", logger: logging.Logger):
+    def __init__(self, api: "BilibiliApi", logger):
         self.api = api
         self.logger = logger
         self._img_key = ""
@@ -83,7 +83,7 @@ class WbiSigner:
 
 
 class BilibiliApi:
-    def __init__(self, config: "AdapterConfig", logger: logging.Logger):
+    def __init__(self, config: "AdapterConfig", logger):
         self.config = config
         self.logger = logger
         self.session: Optional[aiohttp.ClientSession] = None

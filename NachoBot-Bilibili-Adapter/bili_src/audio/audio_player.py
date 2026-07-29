@@ -1,24 +1,36 @@
 import asyncio
 import io
-import logging
+from loguru import logger
 import os
 import queue
 import tempfile
 import wave
 import winsound
+from collections.abc import Awaitable, Callable
 from typing import Deque, Optional
 
 
 class AudioPlayer:
     """
     Manages audio playback with support for queuing, interruption, and resuming.
-    Uses winsound for playback and calculates duration for timing.
+    When a Live2D playback callback is available, it asks the renderer process
+    to play the audio so OBS can associate the sound with that window. Falls
+    back to winsound when the remote renderer is unavailable.
     """
 
-    def __init__(self, logger: logging.Logger, on_start=None, on_stop=None):
+    def __init__(
+        self,
+        logger,
+        on_start=None,
+        on_stop=None,
+        remote_playback_callback: Optional[Callable[[bytes], Awaitable[bool]]] = None,
+        remote_stop_callback: Optional[Callable[[], Awaitable[bool]]] = None,
+    ):
         self.logger = logger
         self.on_start = on_start
         self.on_stop = on_stop
+        self.remote_playback_callback = remote_playback_callback
+        self.remote_stop_callback = remote_stop_callback
         self.queue: Deque[tuple[bytes, bool]] = queue.deque() # (audio_data, is_idle)
         self.current_audio: Optional[bytes] = None
         self.interrupted_audio: Optional[bytes] = None
@@ -65,7 +77,7 @@ class AudioPlayer:
                         asyncio.create_task(self.on_start())
                     else:
                         self.on_start()
-                self._play_sound(audio_data)
+                await self._play_sound(audio_data)
 
                 # Wait for duration (or interruption)
                 # We wait for duration, checking stop_event periodically or using wait_for
@@ -73,7 +85,7 @@ class AudioPlayer:
                     await asyncio.wait_for(self.stop_event.wait(), timeout=duration)
                     # If we got here, stop_event was set (Interrupted!)
                     self.logger.info("Audio playback interrupted!")
-                    self._stop_sound()
+                    await self._stop_sound()
                     self.interrupted_audio = self.current_audio  # Save current
                 except asyncio.TimeoutError:
                     # Finished playing naturally
@@ -94,7 +106,18 @@ class AudioPlayer:
                 self.logger.error(f"AudioPlayer loop error: {e}")
                 await asyncio.sleep(1)
 
-    def _play_sound(self, audio_data: bytes):
+    async def _play_sound(self, audio_data: bytes) -> None:
+        """Play through Live2D when connected, otherwise use the local fallback."""
+        if self.remote_playback_callback is not None:
+            try:
+                if await self.remote_playback_callback(audio_data):
+                    return
+            except Exception as e:
+                self.logger.warning(f"Live2D audio playback failed; using winsound: {e}")
+
+        self._play_sound_locally(audio_data)
+
+    def _play_sound_locally(self, audio_data: bytes) -> None:
         try:
             # Save to temp
             temp_path = os.path.join(tempfile.gettempdir(), "nachobot_tts_player.wav")
@@ -104,7 +127,14 @@ class AudioPlayer:
         except Exception as e:
             self.logger.error(f"Winsound play error: {e}")
 
-    def _stop_sound(self):
+    async def _stop_sound(self) -> None:
+        if self.remote_stop_callback is not None:
+            try:
+                if await self.remote_stop_callback():
+                    return
+            except Exception as e:
+                self.logger.warning(f"Live2D audio stop failed; stopping winsound: {e}")
+
         try:
             winsound.PlaySound(None, winsound.SND_PURGE)
         except Exception:

@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nachobot-live2d-adapter"
+version = "0.1.0"
+description = "Standalone Live2D rendering adapter for NachoBot"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "live2d-py>=0.7.0.4,<0.8; sys_platform == 'win32'",
+    "pygame>=2.5",
+    "PyOpenGL>=3.1.10,<4",
+    "PyOpenGL-accelerate>=3.1.10,<4",
+    "pywin32>=306; sys_platform == 'win32'",
+    "websockets>=11,<17",
+    "loguru",
+]
+
+[project.scripts]
+nachobot-live2d-adapter = "live2d_adapter.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["live2d_adapter"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

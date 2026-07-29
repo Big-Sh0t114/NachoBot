@@ -1,0 +1,18 @@
+services:
+  multimodal-adapter:
+    container_name: nacho-bot-multimodal-adapter
+    build:
+      context: ..
+      dockerfile: NachoBot-Multimodal-Adapter/dockerfile
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./configs:/nachobot_multimodal_adapter/configs  # 配置文件
+      - ./logs:/nachobot_multimodal_adapter/logs        # 日志持久化
+    restart: always
+    networks:
+      - nacho_bot
+
+networks:
+  nacho_bot:
+    external: true

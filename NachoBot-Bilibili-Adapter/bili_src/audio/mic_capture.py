@@ -10,7 +10,7 @@ the configured key is held down.
 
 import asyncio
 import io
-import logging
+from loguru import logger
 import wave
 import struct
 import queue
@@ -47,7 +47,7 @@ class PTTKeyMonitor:
         "f10": "f10", "f11": "f11", "f12": "f12",
     }
 
-    def __init__(self, key_name: str, logger: logging.Logger):
+    def __init__(self, key_name: str, logger):
         self.logger = logger
         self._key_held = False
         self._listener = None
@@ -161,7 +161,7 @@ class MicCaptureWorker:
         self,
         config: MicConfig,
         on_speech_recognized: Callable[[str], Awaitable[None]],
-        logger: logging.Logger,
+        logger,
     ):
         self.config = config
         self.on_speech_recognized = on_speech_recognized
