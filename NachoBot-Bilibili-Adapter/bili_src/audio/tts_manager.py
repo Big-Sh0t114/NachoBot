@@ -1,13 +1,18 @@
 import asyncio
-import logging
+from loguru import logger
 import re
 import time
 import random
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Callable
 
+_multimodal_adapter_path = Path(__file__).resolve().parents[3] / "NachoBot-Multimodal-Adapter"
+if _multimodal_adapter_path.exists() and str(_multimodal_adapter_path) not in sys.path:
+    sys.path.insert(0, str(_multimodal_adapter_path))
+
 try:
-    from tts_src.utils.emotion_resolver import resolve_emotion_preset_remote
+    from nachobot_multimodal.utils.emotion_resolver import resolve_emotion_preset_remote
 except ImportError:
     resolve_emotion_preset_remote = None
 
@@ -23,7 +28,7 @@ class TTSManager:
     def __init__(
         self,
         config: Any,
-        logger: logging.Logger,
+        logger,
         config_path: Optional[Path],
         audio_player: Any,
         send_danmu_callback: Callable,
@@ -358,7 +363,7 @@ class TTSManager:
                     cleaned_tts_text = _clean_text_for_tts(tts_text)
                     
                     # 分段流式：按句切分，逐句生成并立即送入空闲播放队列
-                    from tts_src.utils.text_splitter import split_text_for_streaming
+                    from nachobot_multimodal.utils.text_splitter import split_text_for_streaming
                     segments = split_text_for_streaming(cleaned_tts_text)
                     self.logger.info(f"Idle TTS 分段流式: {len(segments)} 个分段")
 
@@ -495,7 +500,7 @@ class TTSManager:
                     self.logger.info(f"TTS Generating for room {room_id} (lang={room_lang}): {cleaned_tts_text}")
                     try:
                         # 分段流式：按句切分文本，逐句生成并立即送入播放队列
-                        from tts_src.utils.text_splitter import split_text_for_streaming
+                        from nachobot_multimodal.utils.text_splitter import split_text_for_streaming
                         segments = split_text_for_streaming(cleaned_tts_text)
                         self.logger.info(f"TTS 分段流式: {len(segments)} 个分段")
 

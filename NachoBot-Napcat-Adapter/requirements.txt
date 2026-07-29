@@ -1,8 +1,0 @@
-websockets
-aiohttp
-requests
-loguru
-pillow
-tomlkit
-rich
-sqlmodel

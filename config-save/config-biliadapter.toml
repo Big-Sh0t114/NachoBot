@@ -1,5 +1,5 @@
 [inner]
-version = "0.5.4"
+version = "0.6.0"
 
 [nachobot_server]
 host = "127.0.0.1"
@@ -18,18 +18,14 @@ user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 [live]
 enable = true
 enable_live2D = true
-live2d_transparent = true
-live2d_antialiasing = true
-live2d_width = 1600
-live2d_height = 2000
-live2d_scale = 1
-live2d_model_path = "./resources/NachoBot/Nachobot.model3.json"      # 示例地址填写，请使用你自己的路径
-live2d_mood_enable = false
-live2d_action_enable = true
+live2d_url = "ws://127.0.0.1:8766"
+live2d_token = ""
+live2d_reconnect_seconds = 3.0
 room_ids = [ ]       # 填写直播间id
 use_wss = true
 heartbeat_interval = 30
-live_person_profile_enabled = true  # Inject person profiles into the Bilibili bypass Replyer prompt
+network_search_enabled = true
+live_person_profile_enabled = true
 reconnect_seconds = 5
 max_reconnect_seconds = 60
 ws_proxy = "none"
@@ -48,14 +44,54 @@ resolve_user_nickname = true
 master_user_id = " "        # 直播戳一戳解析专用，建议填写QQ号，戳一戳操作是鼠标侧键点击Live2d
 master_user_name = " "      # 你希望自己在bot上下文中出现的名字
 
+[mic_asr]
+enable = true
+room_id = 
+subtitle_path = ""           # 语音识别字幕路径，用于obs直播       
+silence_threshold = 0.015
+silence_duration = 0.8
+sample_rate = 48000
+# Push-to-talk: 只有按住按键时才捕获麦克风音频
+push_to_talk = true
+ptt_key = "v"  # 按住此键说话 (支持: "v", "ctrl", "alt", "shift", "caps_lock", "f1"-"f12" 等)
+
+[comment]
+enable_reply_notice = true
+poll_interval_seconds = 20
+max_items_per_poll = 20
+resolve_user_nickname = true
+force_mention = true
+
+[private_message]
+enable = true
+poll_interval_seconds = 20
+sessions = []
+auto_sessions = true
+auto_session_types = [4]
+auto_session_refresh_seconds = 60
+auto_session_size = 100
+force_mention = true
+
+[response_filter]
+enable = true
+blocked_markers = []     # 违禁词配置，当bot输出内容符合违禁词时会被替换为Filtered
+
+[compat]
+disable_video_sender_plugin = true
+disable_command_trigger = true
+
 [live.screen_monitor]
 manual_enable = true
 manual_duration_minutes = 30
 manual_user_ids = []        # Bilibili侧管理员账号，填写自己的b站id
+capture_active_window = true # Windows 下仅捕获当前活动窗口
+capture_interval_seconds = 30 # 截图和视觉摘要刷新间隔（秒）
+excluded_exes = ["obs64.exe", "obs32.exe"] # 逗号列表，避免 OBS 递归捕获
 
-
-
-
+[live.idle_tts]
+enable = true
+min_seconds = 30
+max_seconds = 90
 
 [live.room_prompts." "]     # " "内填写自己的直播间号，除非你知道你在干什么，否则请不要修改自然语言以外的部分
 host = true
@@ -105,44 +141,3 @@ reply_prompt = """{identity}
 [live.room_prompts." ".tts]    # 引号内填入自己的直播间号
 enable = true                  # 同一时间只能开启一个直播间的TTS功能，否则适配器会报错
 subtitle_path = ""             # 字幕路径，用于obs直播
-
-[live.idle_tts]
-enable = true
-min_seconds = 30
-max_seconds = 90
-
-[mic_asr]
-enable = true
-room_id = 
-subtitle_path = ""           # 语音识别字幕路径，用于obs直播       
-silence_threshold = 0.015
-silence_duration = 0.8
-sample_rate = 48000
-# Push-to-talk: 只有按住按键时才捕获麦克风音频
-push_to_talk = true
-ptt_key = "v"  # 按住此键说话 (支持: "v", "ctrl", "alt", "shift", "caps_lock", "f1"-"f12" 等)
-
-[comment]
-enable_reply_notice = true
-poll_interval_seconds = 20
-max_items_per_poll = 20
-resolve_user_nickname = true
-force_mention = true
-
-[private_message]
-enable = true
-poll_interval_seconds = 20
-sessions = []
-auto_sessions = true
-auto_session_types = [4]
-auto_session_refresh_seconds = 60
-auto_session_size = 100
-force_mention = true
-
-[response_filter]
-enable = true
-blocked_markers = []     # 违禁词配置，当bot输出内容符合违禁词时会被替换为Filtered
-
-[compat]
-disable_video_sender_plugin = true
-disable_command_trigger = true

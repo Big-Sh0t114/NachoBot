@@ -11,26 +11,49 @@
     <link
         href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
         rel="stylesheet">
+    <link rel="icon" href="/nachobot.ico" type="image/x-icon" sizes="any">
     <link rel="shortcut icon" href="/nachobot.ico" type="image/x-icon">
     <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="/static/css/chat.css">
 </head>
 
 <body>
     <!-- Splash — inline HTML autoplays video before any JS loads -->
-    <div id="startup-screen" style="position:fixed;top:0;left:0;width:100vw;height:100vh;background:var(--bg-base,#0f172a);z-index:9999;display:flex;align-items:center;justify-content:center;transition:opacity 1s ease-in-out;opacity:1;">
-        <video id="startup-video" src="/resources/NachoBotLogoAnime.mp4" autoplay muted playsinline style="width:75%;height:auto;max-height:75vh;object-fit:contain;pointer-events:none;transform:translateZ(0);will-change:transform;-webkit-mask-image:radial-gradient(ellipse at center,black 60%,transparent 95%);mask-image:radial-gradient(ellipse at center,black 60%,transparent 95%);"></video>
+    <div id="startup-screen"
+        style="position:fixed;top:0;left:0;width:100vw;height:100vh;background:var(--bg-base,#0f172a);z-index:9999;display:flex;align-items:center;justify-content:center;transition:opacity 1s ease-in-out;opacity:1;">
+        <video id="startup-video" src="/resources/NachoBotLogoAnime.mp4" autoplay muted playsinline
+            style="width:75%;height:auto;max-height:75vh;object-fit:contain;pointer-events:none;transform:translateZ(0);will-change:transform;-webkit-mask-image:radial-gradient(ellipse at center,black 60%,transparent 95%);mask-image:radial-gradient(ellipse at center,black 60%,transparent 95%);"></video>
     </div>
 
     <!-- Sidebar Navigation -->
     <nav id="sidebar" class="sidebar">
-        <div class="sidebar-header">
-            <h1 class="sidebar-title">NachoBot</h1>
-            <span class="sidebar-subtitle">控制面板</span>
+        <div class="sidebar-header sidebar-brand-row">
+            <button type="button" class="sidebar-brand" id="sidebar-brand-button" aria-label="NachoBot">
+                <img src="/nachobot.ico" alt="NachoBot Logo" class="sidebar-logo">
+                <span class="sidebar-brand-copy">
+                    <strong>NachoBot</strong>
+                    <small>Chat & Control</small>
+                </span>
+            </button>
+            <button type="button" class="sidebar-collapse-button" id="sidebar-collapse-button" title="隐藏侧栏"
+                aria-label="隐藏侧栏">◀</button>
         </div>
 
-        <ul class="nav-list">
+        <div class="sidebar-tools">
+            <label class="sidebar-search" for="chat-history-search">
+                <span class="sidebar-search-icon">⌕</span>
+                <input type="search" id="chat-history-search" placeholder="搜索历史对话" autocomplete="off">
+            </label>
+            <button type="button" class="sidebar-new-chat" id="chat-new-button">
+                <span>＋</span>
+                <span>新对话</span>
+            </button>
+        </div>
+
+        <div class="sidebar-section-label">WebUI</div>
+        <ul class="nav-list sidebar-webui-menu">
             <li>
-                <a href="#" class="nav-item active" data-tab="config" id="nav-config">
+                <a href="#" class="nav-item" data-tab="config" id="nav-config">
                     <span class="nav-icon">📝</span>
                     <span class="nav-label">配置编辑</span>
                 </a>
@@ -79,14 +102,26 @@
             </li>
         </ul>
 
+        <div class="sidebar-chat-section" id="chat-history-panel">
+            <div class="sidebar-section-label sidebar-history-label">
+                <span>聊天历史</span>
+                <span class="sidebar-history-count" id="chat-history-count">0</span>
+            </div>
+            <div class="chat-history-list" id="chat-history-list"></div>
+            <div class="chat-history-empty" id="chat-history-empty">还没有历史对话</div>
+        </div>
+
         <div class="sidebar-footer">
             <!-- UI Settings -->
-            <div class="ui-settings" style="padding: 1rem; border-top: 1px solid var(--border-light); font-size: 0.85rem; color: var(--text-secondary);">
-                <label style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem; cursor: pointer;">
+            <div class="ui-settings"
+                style="padding: 1rem; border-top: 1px solid var(--border-light); font-size: 0.85rem; color: var(--text-secondary);">
+                <label
+                    style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem; cursor: pointer;">
                     <span>启动动画</span>
                     <input type="checkbox" id="toggle-startup" checked>
                 </label>
-                <label style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem; cursor: pointer;">
+                <label
+                    style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem; cursor: pointer;">
                     <span>背景音乐</span>
                     <input type="checkbox" id="toggle-bgm">
                 </label>
@@ -98,14 +133,83 @@
             <div class="status-bar" id="status-bar">
                 <div class="status-dot" id="status-dot"></div>
                 <span id="status-text">就绪</span>
+                <span class="sidebar-version" id="sidebar-version" aria-label="WebUI 版本">WebUI</span>
             </div>
         </div>
     </nav>
 
     <!-- Main Content Area -->
     <main id="main-content" class="main-content">
+        <!-- Chat Tab -->
+        <section id="tab-chat" class="tab-panel active chat-tab-panel">
+            <div class="chat-shell">
+                <div class="chat-workspace">
+                    <header class="chat-header">
+                        <div class="chat-header-left">
+                            <button type="button" class="chat-mobile-history-button" id="chat-mobile-history-button"
+                                aria-label="打开侧栏">☰</button>
+                            <div>
+                                <div class="chat-eyebrow">NachoBot Chat</div>
+                                <h2 id="chat-current-title">新对话</h2>
+                            </div>
+                        </div>
+                        <div class="chat-header-actions">
+                            <button type="button" class="chat-status-chip is-checking" id="chat-backend-status"
+                                aria-label="切换 NachoBot Core 运行状态" aria-pressed="false">正在检查服务</button>
+                            <button type="button" class="chat-header-button" id="chat-clear-button"
+                                title="清空当前对话">清空</button>
+                        </div>
+                    </header>
+
+                    <div class="chat-messages" id="chat-messages" aria-live="polite">
+                        <div class="chat-empty-state" id="chat-empty-state">
+                            <h3>主人，今天想聊些什么？</h3>
+                            <p id="chat-welcome-subtitle">正在准备今天的话题...</p>
+                            <div class="chat-suggestion-grid">
+                                <button type="button" class="chat-suggestion" data-chat-prompt="介绍一下当前 NachoBot 的运行状态">
+                                    <strong>查看状态</strong>
+                                    <span>了解当前服务运行情况</span>
+                                </button>
+                                <button type="button" class="chat-suggestion" data-chat-prompt="帮我分析最近的运行日志">
+                                    <strong>分析日志</strong>
+                                    <span>定位异常和可能原因</span>
+                                </button>
+                                <button type="button" class="chat-suggestion" data-chat-prompt="根据现有配置给出优化建议">
+                                    <strong>配置建议</strong>
+                                    <span>检查模型与适配器配置</span>
+                                </button>
+                                <button type="button" class="chat-suggestion" data-chat-prompt="总结知识库和长期记忆中的关键信息">
+                                    <strong>知识整理</strong>
+                                    <span>汇总已有知识与记忆</span>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="chat-composer-area">
+                        <form class="chat-composer" id="chat-composer-form">
+                            <textarea id="chat-input" rows="1" maxlength="12000" placeholder="给 Nacho 发送消息"
+                                aria-label="聊天消息"></textarea>
+                            <div class="chat-composer-toolbar">
+                                <div class="chat-composer-hint">
+                                    <span>Enter 发送 · Shift + Enter 换行</span>
+                                    <button type="button" class="chat-rename-button" id="chat-rename-button"
+                                        title="点击改名，或按 CapsLock + Tab">Tab+Caps 改名</button>
+                                </div>
+                                <button type="submit" class="chat-send-button" id="chat-send-button" disabled
+                                    aria-label="发送消息">
+                                    <span>↑</span>
+                                </button>
+                            </div>
+                        </form>
+                        <p class="chat-disclaimer">NachoBot 不是工具型AI，请善待她</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
         <!-- Config Tab -->
-        <section id="tab-config" class="tab-panel active">
+        <section id="tab-config" class="tab-panel">
             <div class="panel-header">
                 <h2>配置编辑器</h2>
                 <p class="panel-desc">管理所有 NachoBot 配置文件</p>
@@ -249,8 +353,7 @@
             <!-- Search -->
             <div class="memory-search-section">
                 <div class="memory-search-bar">
-                    <input type="text" class="form-input" id="memory-search-input"
-                        placeholder="输入关键词搜索长期记忆...">
+                    <input type="text" class="form-input" id="memory-search-input" placeholder="输入关键词搜索长期记忆...">
                     <button class="btn btn-primary" id="memory-search-btn">🔍 搜索</button>
                 </div>
                 <div class="memory-search-results" id="memory-search-results">
@@ -443,8 +546,8 @@
                                     <div class="component-card">
                                         <span class="component-icon">🎙️</span>
                                         <div class="component-info">
-                                            <span class="component-name">TTS 语音合成</span>
-                                            <span class="component-desc">GPT-SoVITS / VoxCPM 语音合成</span>
+                                            <span class="component-name">多模态语音与感知</span>
+                                            <span class="component-desc">GPT-SoVITS / VoxCPM 语音合成 + 本地 VLM / ASR</span>
                                         </div>
                                     </div>
                                 </label>
@@ -591,7 +694,7 @@
                             </div>
 
                             <div class="form-section" id="setup-tts-section" style="display:none">
-                                <div class="form-section-title">TTS 语音合成</div>
+                                <div class="form-section-title">多模态服务配置</div>
                                 <div class="form-row">
                                     <label class="form-label">TTS 引擎</label>
                                     <select class="form-select" id="setup-tts-engine">
@@ -839,18 +942,20 @@
     </div>
 
     <script>
-    // Inline startup toggle check — runs before module scripts
-    (function(){
-        try {
-            var s = localStorage.getItem('nacho_ui_settings');
-            if (s && JSON.parse(s).startup === false) {
-                var el = document.getElementById('startup-screen');
-                if (el) el.style.display = 'none';
-            }
-        } catch(e) {}
-    })();
+        // Inline startup toggle check — runs before module scripts
+        (function () {
+            try {
+                var s = localStorage.getItem('nacho_ui_settings');
+                if (s && JSON.parse(s).startup === false) {
+                    var el = document.getElementById('startup-screen');
+                    if (el) el.style.display = 'none';
+                }
+            } catch (e) { }
+        })();
     </script>
+    <script src="/static/js/chat.js"></script>
     <script src="/static/js/app.js"></script>
+    <script src="/static/js/bgm-player.js"></script>
     <script src="/static/js/ui.js"></script>
     <script src="/static/js/config.js"></script>
     <script src="/static/js/launcher.js"></script>

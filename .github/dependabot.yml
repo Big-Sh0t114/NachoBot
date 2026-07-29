@@ -1,0 +1,38 @@
+version: 2
+
+updates:
+  - package-ecosystem: "pip"
+    directories: 
+      - "NachoBot"
+      - "NachoBot-Bilibili-Adapter"
+      - "NachoBot-DiscordVC-Adapter"
+      - "NachoBot-Koishi-Adapter"
+      - "NachoBot-Live2D-Adapter" 
+      - "NachoBot-Multimodal-Adapter"
+      - "NachoBot-Napcat-Adapter"
+      - "NachoBot-UniversalVC-Adapter"
+      - "webui"
+    schedule:
+      interval: "daily"
+    target-branch: "dev"
+
+  - package-ecosystem: "uv"
+    directories: 
+      - "NachoBot"
+      - "NachoBot-Bilibili-Adapter"
+      - "NachoBot-DiscordVC-Adapter"
+      - "NachoBot-Koishi-Adapter"
+      - "NachoBot-Live2D-Adapter" 
+      - "NachoBot-Multimodal-Adapter"
+      - "NachoBot-Napcat-Adapter"
+      - "NachoBot-UniversalVC-Adapter"
+      - "webui"
+    schedule:
+      interval: "daily"
+    target-branch: "dev"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    target-branch: "dev"

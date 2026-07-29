@@ -28,8 +28,21 @@ from src.plugin_system.base.component_types import EventType, ActionInfo
 from src.plugin_system.core import events_manager
 from src.plugin_system.apis import generator_api, send_api, message_api, database_api
 from src.llm_models.exceptions import ReqAbortException
+from src.chat.focus.bypass_gate import (
+    FocusBypassDecisionGate,
+    FocusBypassDecisionKind,
+    FocusBypassGateError,
+)
 from src.chat.focus.coordinator import bind_lease, focus_coordinator, current_context_lease
-from src.chat.focus.models import EffectKind, FocusStoppedError, FocusTurn, StaleFocusLeaseError, TurnOutcome, TurnStatus, WakeReason
+from src.chat.focus.models import (
+    EffectKind,
+    FocusStoppedError,
+    FocusTurn,
+    StaleFocusLeaseError,
+    TurnOutcome,
+    TurnStatus,
+    WakeReason,
+)
 from src.chat.focus.reply_context import acquire_reply_context_request, release_reply_context
 from src.chat.focus.reply_delivery import settle_reply_context_delivery
 from src.chat.focus.message_repository import load_message_batch
@@ -117,6 +130,7 @@ class BrainChatting:
         self._planner_interrupt_requested: bool = False
         self._planner_interrupt_consecutive_count: int = 0
         self._last_message_received_at: float = time.time()
+        self._focus_bypass_gate: FocusBypassDecisionGate | None = None
 
         # 关系扫描器与记忆激活器
         self.relation_scanner = RelationScanner(chat_id=self.stream_id)
@@ -136,7 +150,7 @@ class BrainChatting:
 
             self._loop_task = asyncio.create_task(self._main_chat_loop())
             self._loop_task.add_done_callback(self._handle_loop_completion)
-            
+
             # 暂时停用群聊关系扫描
             # await self.relation_scanner.start()
             if not getattr(self.chat_stream, "group_info", None):
@@ -217,6 +231,126 @@ class BrainChatting:
                     f"({self._planner_interrupt_consecutive_count}/{planner_interrupt_max})"
                 )
 
+    @staticmethod
+    def _is_focus_event_only_turn(
+        focus_turn: FocusTurn,
+        recent_messages_list: List["DatabaseMessages"],
+    ) -> bool:
+        """Whether this turn has routing events but no local chat work."""
+
+        return bool(
+            focus_turn.events
+            and not recent_messages_list
+            and not focus_turn.handoff_ids
+            and focus_turn.read_through_row_id <= focus_turn.read_after_row_id
+        )
+
+    def _get_focus_bypass_gate(self) -> FocusBypassDecisionGate:
+        gate = self._focus_bypass_gate
+        if gate is None:
+            gate = FocusBypassDecisionGate(
+                self.action_planner.planner_llm,
+                timeout_seconds=global_config.focus.bypass_gate_timeout_seconds,
+                max_tokens=global_config.focus.bypass_gate_max_tokens,
+            )
+            self._focus_bypass_gate = gate
+        return gate
+
+    def _build_focus_gate_context(self) -> str:
+        """Build a small read-only context for the routing-only Focus Gate."""
+
+        is_group_chat, _, _ = self.action_planner.get_necessary_info()
+        context_size = global_config.chat.get_max_context_size(is_group_chat=is_group_chat)
+        messages = get_raw_msg_before_timestamp_with_chat(
+            chat_id=self.stream_id,
+            timestamp=time.time(),
+            limit=int(context_size * 0.6),
+        )
+        context, _ = build_readable_messages_with_id(
+            messages=messages,
+            timestamp_mode="normal_no_YMD",
+            read_mark=self.action_planner.last_obs_time_mark,
+            truncate=True,
+            show_actions=True,
+        )
+        return context
+
+    async def _route_focus_event_only_turn(self, focus_turn: FocusTurn) -> bool:
+        """Resolve an event-only wake without exposing historical actions to Planner."""
+
+        if not global_config.focus.bypass_gate_enabled:
+            logger.info(f"{self.log_prefix} [Focus Gate] disabled; event-only deterministic stay")
+            return True
+
+        try:
+            current_chat_context = self._build_focus_gate_context()
+        except Exception as exc:
+            logger.debug(f"{self.log_prefix} [Focus Gate] current context unavailable: {exc}")
+            current_chat_context = ""
+
+        decision = None
+        max_attempts = global_config.focus.bypass_gate_max_attempts
+        for attempt in range(1, max_attempts + 1):
+            try:
+                decision = await self._get_focus_bypass_gate().decide(
+                    events=focus_turn.events,
+                    current_chat_context=current_chat_context,
+                    event_only=True,
+                    allow_handoff=False,
+                )
+                break
+            except FocusBypassGateError as exc:
+                if attempt < max_attempts:
+                    retry_seconds = global_config.focus.bypass_gate_retry_seconds
+                    logger.warning(
+                        f"{self.log_prefix} Focus Gate failed on attempt "
+                        f"{attempt}/{max_attempts} ({exc}); retrying in {retry_seconds}s"
+                    )
+                    await asyncio.sleep(retry_seconds)
+                    continue
+
+                fallback_event = next(
+                    (event for event in focus_turn.events if event.is_mentioned or event.is_at),
+                    None,
+                )
+                if fallback_event is None:
+                    logger.warning(
+                        f"{self.log_prefix} Focus Gate failed after {max_attempts} attempts "
+                        f"({exc}); event-only deterministic stay"
+                    )
+                    return True
+
+                logger.warning(
+                    f"{self.log_prefix} Focus Gate failed after {max_attempts} attempts "
+                    f"({exc}); deterministic mentioned/at switch"
+                )
+                action_data = {"event_id": fallback_event.event_id}
+                reasoning = "Focus Gate unavailable; deterministic mentioned/at fallback"
+                break
+
+        if decision is not None:
+            logger.info(
+                f"{self.log_prefix} [Focus Gate] decision={decision.kind.value} "
+                f"event_id={decision.event_id or '-'}"
+            )
+            if decision.kind is FocusBypassDecisionKind.STAY:
+                logger.info(f"{self.log_prefix} [Focus Gate] event-only stay; skipping Brain Planner")
+                return True
+            action_data = dict(decision.action_data)
+            reasoning = decision.reasoning or "Focus Gate selected a pending event"
+
+        switch_result = await execute_switch_chat(
+            focus_coordinator,
+            lease=focus_turn.lease,
+            action_data=action_data,
+            reasoning=reasoning,
+        )
+        if switch_result.success:
+            logger.info(f"{self.log_prefix} [Focus Gate] terminal switch without Brain Planner")
+            return True
+        logger.warning(f"{self.log_prefix} [Focus Gate] switch failed: {switch_result.reason}")
+        return False
+
     async def _loopbody(self, focus_turn: FocusTurn | None = None):  # sourcery skip: hoist-if-from-if
         if focus_turn is not None:
             batch = load_message_batch(
@@ -246,6 +380,9 @@ class BrainChatting:
             )
         )
 
+        if focus_turn is not None and self._is_focus_event_only_turn(focus_turn, recent_messages_list):
+            return await self._route_focus_event_only_turn(focus_turn)
+
         if len(recent_messages_list) >= 1:
             self.last_read_time = time.time()
             self._last_message_received_at = time.time()
@@ -257,8 +394,7 @@ class BrainChatting:
                 and not self._planner_interrupt_requested
             ):
                 has_mentioned = any(
-                    getattr(msg, "is_mentioned", False) or getattr(msg, "is_at", False)
-                    for msg in recent_messages_list
+                    getattr(msg, "is_mentioned", False) or getattr(msg, "is_at", False) for msg in recent_messages_list
                 )
                 if not has_mentioned:
                     planner_interrupt_max = getattr(global_config.chat, "planner_interrupt_max_consecutive_count", 3)
@@ -272,12 +408,18 @@ class BrainChatting:
                             f"连续打断次数={self._planner_interrupt_consecutive_count}/{planner_interrupt_max}"
                         )
 
-            await self._observe(recent_messages_list=recent_messages_list)
+            await self._observe(
+                recent_messages_list=recent_messages_list,
+                focus_turn=focus_turn,
+            )
 
         else:
             # Normal模式：消息数量不足，等待
             if focus_requires_observe:
-                return await self._observe(recent_messages_list=[])
+                return await self._observe(
+                    recent_messages_list=[],
+                    focus_turn=focus_turn,
+                )
             if focus_turn is not None:
                 return True
             await asyncio.sleep(0.2)
@@ -347,9 +489,29 @@ class BrainChatting:
 
         return loop_info, reply_text, cycle_timers
 
+    @classmethod
+    def _fence_focus_event_only_actions(
+        cls,
+        focus_turn: FocusTurn | None,
+        recent_messages_list: List["DatabaseMessages"],
+        actions: List[ActionPlannerInfo],
+    ) -> List[ActionPlannerInfo]:
+        """Prevent an event-only Focus turn from acting on historical chat messages.
+
+        A FOCUS_EVENT wakes the active chat so Planner can decide whether to switch
+        to the chat named by the event. When the active chat itself supplied no
+        new messages, side-effecting actions would necessarily target historical
+        context. Only the terminal switch action is valid.
+        """
+        if focus_turn is None or not cls._is_focus_event_only_turn(focus_turn, recent_messages_list):
+            return actions
+
+        return [action for action in actions if action.action_type == SWITCH_CHAT_ACTION]
+
     async def _observe(
         self,  # interest_value: float = 0.0,
         recent_messages_list: Optional[List["DatabaseMessages"]] = None,
+        focus_turn: FocusTurn | None = None,
     ) -> bool:  # sourcery skip: merge-else-if-into-elif, remove-redundant-if
         if recent_messages_list is None:
             recent_messages_list = []
@@ -482,14 +644,16 @@ class BrainChatting:
                         self._focus_turn_interrupted = True
                         if not self._planner_interrupt_requested:
                             self._planner_interrupt_consecutive_count = 0
-                        logger.info(
-                            f"{self.log_prefix} Planner 被新消息打断，中止本轮思考，等待新消息重新触发"
-                        )
+                        logger.info(f"{self.log_prefix} Planner 被新消息打断，中止本轮思考，等待新消息重新触发")
                         return True
 
-            switch_actions = [
-                action for action in action_to_use_info if action.action_type == SWITCH_CHAT_ACTION
-            ]
+            action_to_use_info = self._fence_focus_event_only_actions(
+                focus_turn,
+                recent_messages_list,
+                action_to_use_info,
+            )
+
+            switch_actions = [action for action in action_to_use_info if action.action_type == SWITCH_CHAT_ACTION]
             terminal_switch_selected = bool(switch_actions)
             if terminal_switch_selected:
                 if len(switch_actions) > 1 or len(action_to_use_info) > 1:
@@ -686,7 +850,6 @@ class BrainChatting:
         logger.info(f"{self.log_prefix} Focus chat loop ended")
 
     async def _normal_chat_loop(self):
-
         """主循环，持续进行计划并可能回复消息，直到被外部取消。"""
         try:
             while self.running:
@@ -826,8 +989,7 @@ class BrainChatting:
                 await asyncio.shield(release_reply_context(context_refs, reason))
         except Exception as exc:
             logger.warning(
-                f"{self.log_prefix} Focus reply context release/settlement failed: "
-                f"reason={reason}, error={exc}"
+                f"{self.log_prefix} Focus reply context release/settlement failed: reason={reason}, error={exc}"
             )
 
     async def _send_response_permitted(
@@ -1039,15 +1201,17 @@ class BrainChatting:
                                 ]
 
                         # 整合模式：如果 planner 已经生成了回复，直接使用
-                        focus_replyer_required = (
-                            getattr(global_config.focus, "mode", "off") == "active"
-                            and focus_coordinator.is_managed(self.stream_id)
-                        )
+                        focus_replyer_required = getattr(
+                            global_config.focus, "mode", "off"
+                        ) == "active" and focus_coordinator.is_managed(self.stream_id)
                         if action_planner_info.reply_text and not focus_replyer_required:
                             logger.info(f"{self.log_prefix} 使用集成生成的回复内容")
                             # 将文本转换为 ReplySetModel
                             from src.plugin_system.apis.generator_api import process_human_text
-                            response_set = process_human_text(action_planner_info.reply_text, enable_splitter=True, enable_chinese_typo=True)
+
+                            response_set = process_human_text(
+                                action_planner_info.reply_text, enable_splitter=True, enable_chinese_typo=True
+                            )
                             if response_set:
                                 loop_info, reply_text, _ = await self._send_and_store_reply(
                                     response_set=response_set,
@@ -1055,7 +1219,7 @@ class BrainChatting:
                                     cycle_timers=cycle_timers,
                                     thinking_id=thinking_id,
                                     actions=chosen_action_plan_infos,
-                                    selected_expressions=None, # 集成模式暂不单独选表情，或由 planner 决定
+                                    selected_expressions=None,  # 集成模式暂不单独选表情，或由 planner 决定
                                 )
                                 return {
                                     "action_type": action_planner_info.action_type,

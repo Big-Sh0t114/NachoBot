@@ -54,15 +54,15 @@ class PromptContext:
             # 设置当前协程的新上下文
             token = self._current_context_var.set(context_id) if context_id else None
         else:
-            # 如果没有提供新上下文，保持当前上下文不变
+            # 显式重置为空上下文，防止通过 asyncio.create_task 继承的 contextvar 泄露
             previous_context = self._current_context
-            token = None
+            token = self._current_context_var.set(None)
 
         try:
             yield self
         finally:
             # 恢复之前的上下文，添加异常保护
-            if context_id is not None and token is not None:
+            if token is not None:
                 try:
                     self._current_context_var.reset(token)
                 except Exception as e:
@@ -151,7 +151,7 @@ class Prompt(str):
 
     @staticmethod
     def _process_escaped_braces(template) -> str:
-        """处理模板中的转义花括号，将 \{ 和 \} 替换为临时标记"""  # type: ignore
+        r"""处理模板中的转义花括号，将 \{ 和 \} 替换为临时标记"""  # type: ignore
         # 如果传入的是列表，将其转换为字符串
         if isinstance(template, list):
             template = "\n".join(str(item) for item in template)

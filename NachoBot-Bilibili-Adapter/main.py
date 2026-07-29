@@ -13,7 +13,8 @@ Modules:
 """
 
 import asyncio
-import logging
+from loguru import logger
+import sys
 from pathlib import Path
 
 from bili_src.core.config import AdapterConfig, load_config
@@ -21,14 +22,10 @@ from bili_src.core.config import AdapterConfig, load_config
 BUILD_TAG = "bilibili-adapter-v2.0-modular"
 
 
-def setup_logging(level: str = "INFO") -> logging.Logger:
-    """Set up logging with the specified level."""
-    logging.basicConfig(
-        level=getattr(logging, level.upper(), logging.INFO),
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-    return logging.getLogger("BilibiliAdapter")
+def setup_logging(level: str = "INFO"):
+    logger.remove()
+    logger.add(sys.stderr, level=level.upper())
+    return logger
 
 
 async def main() -> None:

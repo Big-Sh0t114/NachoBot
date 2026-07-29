@@ -8,7 +8,6 @@ import tomlkit
 
 from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime
-from src.mais4u.mai_think import mai_thinking_manager
 from src.common.logger import get_logger
 from src.common.data_models.database_data_model import DatabaseMessages
 from src.common.data_models.info_data_model import ActionPlannerInfo
@@ -822,11 +821,11 @@ class DefaultReplyer:
         duration = end_time - start_time
         return name, result, duration
 
-    def build_s4u_chat_history_prompts(
+    def build_split_chat_history_prompts(
         self, message_list_before_now: List[DatabaseMessages], target_user_id: str, sender: str
     ) -> Tuple[str, str]:
         """
-        构建 s4u 风格的分离对话 prompt
+        构建核心对话与背景对话分离的 prompt
 
         Args:
             message_list_before_now: 历史消息列表
@@ -897,51 +896,6 @@ class DefaultReplyer:
                 all_dialogue_prompt = f"{all_dialogue_prompt_str}"
 
         return core_dialogue_prompt, all_dialogue_prompt
-
-    def build_mai_think_context(
-        self,
-        chat_id: str,
-        memory_block: str,
-        relation_info: str,
-        time_block: str,
-        chat_target_1: str,
-        chat_target_2: str,
-        mood_prompt: str,
-        identity_block: str,
-        sender: str,
-        target: str,
-        chat_info: str,
-    ) -> Any:
-        """构建 mai_think 上下文信息
-
-        Args:
-            chat_id: 聊天ID
-            memory_block: 记忆块内容
-            relation_info: 关系信息
-            time_block: 时间块内容
-            chat_target_1: 聊天目标1
-            chat_target_2: 聊天目标2
-            mood_prompt: 情绪提示
-            identity_block: 身份块内容
-            sender: 发送者名称
-            target: 目标消息内容
-            chat_info: 聊天信息
-
-        Returns:
-            Any: mai_think 实例
-        """
-        mai_think = mai_thinking_manager.get_mai_think(chat_id)
-        mai_think.memory_block = memory_block
-        mai_think.relation_info_block = relation_info
-        mai_think.time_block = time_block
-        mai_think.chat_target = chat_target_1
-        mai_think.chat_target_2 = chat_target_2
-        mai_think.chat_info = chat_info
-        mai_think.mood_state = mood_prompt
-        mai_think.identity = identity_block
-        mai_think.sender = sender
-        mai_think.target = target
-        return mai_think
 
     async def build_actions_prompt(
         self, available_actions: Dict[str, ActionInfo], chosen_actions_info: Optional[List[ActionPlannerInfo]] = None
@@ -1300,7 +1254,7 @@ class DefaultReplyer:
             reply_target_block = ""
 
         # 构建分离的对话 prompt
-        core_dialogue_prompt, background_dialogue_prompt = self.build_s4u_chat_history_prompts(
+        core_dialogue_prompt, background_dialogue_prompt = self.build_split_chat_history_prompts(
             message_list_before_now_long, user_id, sender
         )
         core_dialogue_prompt, core_injection, _ = guard_user_content(core_dialogue_prompt, sender)

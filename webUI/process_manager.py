@@ -105,11 +105,11 @@ def _register_services():
         except Exception:
             pass
 
-    # 3. Parse TTS Adapter base.toml & enabled engine port
+    # 3. Parse multimodal adapter base.toml & enabled engine port
     tts_adapter_host = "127.0.0.1"
     tts_adapter_port = 8070
     tts_engine_port = 9880
-    tts_base_path = ROOT_DIR / "NachoBot-TTS-Adapter" / "configs" / "base.toml"
+    tts_base_path = ROOT_DIR / "NachoBot-Multimodal-Adapter" / "configs" / "base.toml"
     if tts_base_path.exists():
         try:
             doc = tomlkit.parse(tts_base_path.read_text(encoding="utf-8"))
@@ -136,7 +136,7 @@ def _register_services():
     # 4. Parse Perception configs/perception.toml
     perception_host = "127.0.0.1"
     perception_port = 9874
-    perception_config_path = ROOT_DIR / "NachoBot-TTS-Adapter" / "configs" / "perception.toml"
+    perception_config_path = ROOT_DIR / "NachoBot-Multimodal-Adapter" / "configs" / "perception.toml"
     if perception_config_path.exists():
         try:
             doc = tomlkit.parse(perception_config_path.read_text(encoding="utf-8"))
@@ -176,15 +176,15 @@ def _register_services():
 
         # ── TTS FULL ──
         ServiceDef("tts_engine_full",   "TTS Engine",          "tts_full", "",  [],  port=tts_engine_port, wait_port=True, order=1),  # dynamic
-        ServiceDef("tts_adapter_full",  "TTS Adapter",         "tts_full", "NachoBot-TTS-Adapter", ["uv", "run", "python", "main.py"], port=tts_adapter_port, order=2,
+        ServiceDef("tts_adapter_full",  "Multimodal Adapter",  "tts_full", "NachoBot-Multimodal-Adapter", ["uv", "run", "python", "main.py"], port=tts_adapter_port, order=2,
                    env_extra={"HOST": tts_adapter_host, "PORT": str(tts_adapter_port)}),
-        ServiceDef("perception",        "Perception API",      "tts_full", "NachoBot-TTS-Adapter",
-                   ["uv", "run", "python", "-m", "tts_src.plugins.Perception.api_server"], port=perception_port, order=3,
+        ServiceDef("perception",        "VLM / ASR API",       "tts_full", "NachoBot-Multimodal-Adapter",
+                   ["uv", "run", "python", "-m", "nachobot_multimodal.api_server"], port=perception_port, order=3,
                    env_extra={"HOST": perception_host, "PORT": str(perception_port)}),
 
         # ── TTS LITE ──
         ServiceDef("tts_engine_lite",   "TTS Engine",          "tts_lite", "",  [],  port=tts_engine_port, wait_port=True, order=1),
-        ServiceDef("tts_adapter_lite",  "TTS Adapter (Lite)",  "tts_lite", "NachoBot-TTS-Adapter", ["uv", "run", "python", "main.py"],
+        ServiceDef("tts_adapter_lite",  "Multimodal Adapter (Lite)", "tts_lite", "NachoBot-Multimodal-Adapter", ["uv", "run", "python", "main.py"],
                    port=tts_adapter_port, order=2, env_extra={"DISABLE_VLM_ASR": "1", "HOST": tts_adapter_host, "PORT": str(tts_adapter_port)}),
 
         # ── UniversalVC ──
@@ -205,8 +205,8 @@ def _register_services():
     groups = [
         GroupDef("core",        "核心",                "🧠", ["nachobot"]),
         GroupDef("qq_adapter",  "QQ 适配器",           "🐧", ["napcat_adapter", "napcat_shell"]),
-        GroupDef("tts_full",    "TTS 语音 (FULL)",     "🎙️", ["tts_engine_full", "tts_adapter_full", "perception"]),
-        GroupDef("tts_lite",    "TTS 语音 (LITE)",     "🎙️", ["tts_engine_lite", "tts_adapter_lite"]),
+        GroupDef("tts_full",    "多模态服务 (FULL)",     "🎙️", ["tts_engine_full", "tts_adapter_full", "perception"]),
+        GroupDef("tts_lite",    "语音服务 (LITE)",     "🎙️", ["tts_engine_lite", "tts_adapter_lite"]),
         GroupDef("universalvc", "全局语音适配器",       "🎤", ["universalvc"]),
         GroupDef("bilibili",    "Bilibili 适配器",     "📺", ["bilibili"]),
         GroupDef("discord",     "Discord 适配器",      "💬", ["koishi", "koishi_adapter", "discordvc"]),
@@ -549,7 +549,7 @@ class ProcessManager:
 
     def _resolve_tts_engine_cmd(self) -> tuple[list[str], str, dict[str, str]]:
         """Determine which TTS engine to start based on base.toml."""
-        base_toml = self.root / "NachoBot-TTS-Adapter" / "configs" / "base.toml"
+        base_toml = self.root / "NachoBot-Multimodal-Adapter" / "configs" / "base.toml"
         engine = "GPT_Sovits"  # default
         tts_engine_port = 9880
 
@@ -582,7 +582,7 @@ class ProcessManager:
                     f"VoxCPM 目录不存在: {voxcpm_dir}\n"
                     f"请在 WebUI 配置中修改 [paths].voxcpm_dir"
                 )
-            adapter_dir = self.root / "NachoBot-TTS-Adapter"
+            adapter_dir = self.root / "NachoBot-Multimodal-Adapter"
             ffmpeg_bin = self.root / "NachoBot" / "plugins" / "bilibili_video_sender_plugin" / "ffmpeg" / "bin"
             py_vox = voxcpm_dir / ".venv" / "Scripts" / "python.exe"
             if not py_vox.exists():
@@ -590,7 +590,7 @@ class ProcessManager:
                     f"VoxCPM Python 解释器不存在: {py_vox}\n"
                     f"请确认 VoxCPM 虚拟环境已正确安装"
                 )
-            vox_script = adapter_dir / "tts_src" / "plugins" / "Vox" / "vox_api_server.py"
+            vox_script = adapter_dir / "src" / "tts" / "backends" / "Vox" / "vox_api_server.py"
             # 读取 vox.toml 配置文件中的 LoRA 路径与模型路径
             model_dir = voxcpm_dir / "models" / "openbmb__VoxCPM2"
             lora = voxcpm_dir / "lora" / "ncnk"

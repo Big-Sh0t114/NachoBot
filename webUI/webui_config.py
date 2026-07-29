@@ -6,6 +6,9 @@ WEBUI_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = WEBUI_DIR / "webui_config.toml"
 
 DEFAULT_CONFIG = {
+    "webui": {
+        "version": "1.0.0"
+    },
     "server": {
         "host": "127.0.0.1",
         "port": 8088
@@ -50,6 +53,12 @@ class WebUIConfig:
         try:
             doc = tomlkit.document()
             
+            # WebUI metadata section
+            webui_table = tomlkit.table()
+            webui_table.add(tomlkit.comment("WebUI semantic version displayed in the sidebar"))
+            webui_table["version"] = DEFAULT_CONFIG["webui"]["version"]
+            doc["webui"] = webui_table
+
             # Server section
             server_table = tomlkit.table()
             server_table.add(tomlkit.comment("FastAPI/Uvicorn server hosting configuration"))
@@ -74,6 +83,11 @@ class WebUIConfig:
             CONFIG_PATH.write_text(tomlkit.dumps(doc), encoding="utf-8")
         except Exception:
             pass
+
+    @property
+    def version(self) -> str:
+        version = str(self.config["webui"]["version"] or "").strip()
+        return version or DEFAULT_CONFIG["webui"]["version"]
 
     @property
     def host(self) -> str:
