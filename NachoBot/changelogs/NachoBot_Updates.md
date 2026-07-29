@@ -1,5 +1,6 @@
 7/29
     优化WebUI音乐可视化表现
+    WebUI接入TTS
 7/28
     WebUI迎来大变
     依赖更新

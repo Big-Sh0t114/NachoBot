@@ -8,6 +8,7 @@ const UI = (() => {
     let particleAudioSource = null;
     let playlist = [];
     let currentTrackIndex = 0;
+    const LAST_BGM_TRACK_STORAGE_KEY = 'nacho_last_bgm_track';
     const OMEGA_TIP_TRACK = Object.freeze({
         name: 'Flower Man',
         kind: 'loop',
@@ -98,7 +99,7 @@ const UI = (() => {
             miniPlayer.style.display = settings.bgm ? 'flex' : 'none';
             bgm.volume = settings.volume;
             if (bgmVolumeSlider) bgmVolumeSlider.value = settings.volume;
-            loadTrack(0);
+            loadTrack(getSavedTrackIndex());
             renderPlaylist();
         } else {
             bgmTitle.innerText = "No Music Found";
@@ -243,6 +244,36 @@ const UI = (() => {
             });
         }
 
+        function getSavedTrackIndex() {
+            let savedLoopUrl;
+            try {
+                savedLoopUrl = localStorage.getItem(LAST_BGM_TRACK_STORAGE_KEY);
+            } catch (e) {
+                return 0;
+            }
+
+            // Flower Man is an OMEGA-tip-only hidden track and must never be restored.
+            if (!savedLoopUrl || savedLoopUrl === OMEGA_TIP_TRACK.loopUrl) {
+                if (savedLoopUrl === OMEGA_TIP_TRACK.loopUrl) {
+                    try {
+                        localStorage.removeItem(LAST_BGM_TRACK_STORAGE_KEY);
+                    } catch (e) { }
+                }
+                return 0;
+            }
+
+            const savedIndex = playlist.findIndex(track => track.loopUrl === savedLoopUrl);
+            return savedIndex >= 0 ? savedIndex : 0;
+        }
+
+        function saveLastTrack(track) {
+            if (!track?.loopUrl || track.loopUrl === OMEGA_TIP_TRACK.loopUrl) return;
+
+            try {
+                localStorage.setItem(LAST_BGM_TRACK_STORAGE_KEY, track.loopUrl);
+            } catch (e) { }
+        }
+
         function loadTrack(index) {
             if (omegaTipLocked) return;
 
@@ -250,6 +281,7 @@ const UI = (() => {
             if (!track) return;
 
             currentTrackIndex = index;
+            saveLastTrack(track);
             bgm.setTrack(track).catch(error => console.error('Failed to preload BGM:', error));
             bgmTitle.textContent = track.name;
             renderPlaylist();
