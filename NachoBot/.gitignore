@@ -10,6 +10,7 @@ plugins/external_service_monitor
 plugins/messenger/config.toml
 plugins/mus_library/config.toml
 plugins/Maizone/
+plugins/MaiBot_MCPBridgePlugin
 src/plugins/built_in/artwork_plugin/config.toml
 src/plugins/built_in/emoji_plugin/config.toml
 src/plugins/built_in/help_plugin/config.toml
