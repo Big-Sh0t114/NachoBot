@@ -471,7 +471,9 @@ class WebSocketClient(BaseConnection, ClientConnectionInterface):
             ws_kwargs = {
                 "heartbeat": self.heartbeat_interval,
                 "autoping": True,
-                "compress": 15,
+                # Avoid permessage-deflate on the internal link: Uvicorn
+                # WebSockets SansIO can otherwise emit unnegotiated RSV1 frames.
+                "compress": 0,
                 "autoclose": True,
                 "max_msg_size": self.max_message_size,
             }
@@ -569,8 +571,14 @@ class WebSocketClient(BaseConnection, ClientConnectionInterface):
                     elif msg.type == WSMsgType.PONG:
                         logger.debug("收到服务器 PONG 响应")
                     elif msg.type == WSMsgType.ERROR:
-                        logger.error(f"WebSocket 连接错误: {self.ws.exception()}")
+                        error = msg.data or self.ws.exception()
+                        error_type = type(error).__name__ if error else "UnknownError"
+                        logger.error(
+                            f"WebSocket protocol error: {error_type}: {error} "
+                            f"(close_code={self.ws.close_code}, extra={msg.extra!r})"
+                        )
                         self.ws_connected = False
+                        await self._cleanup_connection()
                         break
                     elif msg.type == WSMsgType.CLOSED:
                         logger.warning("WebSocket 连接已关闭")
