@@ -1188,7 +1188,7 @@ requires-dist = [
     { name = "sounddevice", specifier = ">=0.5.5" },
     { name = "sqlmodel", specifier = ">=0.0.22" },
     { name = "sse-starlette", specifier = ">=3.0.3" },
-    { name = "strawberry-graphql", extras = ["fastapi"], specifier = ">=0.275.5" },
+    { name = "strawberry-graphql", extras = ["fastapi"], specifier = ">=0.323.2" },
     { name = "structlog", specifier = ">=25.4.0" },
     { name = "tenacity", specifier = ">=8.0.0" },
     { name = "toml", specifier = ">=0.10.2" },
