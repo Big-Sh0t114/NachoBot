@@ -38,15 +38,35 @@ const App = (() => {
         const versionElement = document.getElementById('sidebar-version');
         if (!versionElement) return;
 
+        let version = '';
         try {
             const data = await apiGet('/api/webui/info');
-            const version = String(data.version || '').trim();
-            versionElement.textContent = version ? `WebUI v${version}` : 'WebUI';
-            versionElement.title = version ? `WebUI v${version}` : 'WebUI';
+            version = String(data.version || '').trim();
         } catch (error) {
-            versionElement.textContent = 'WebUI';
+            // Compatibility fallback for a WebUI process that has not yet been
+            // restarted after adding /api/webui/info.
+            try {
+                const config = await apiGet('/api/configs/webui_config');
+                version = parseWebUIVersion(config.raw);
+            } catch (fallbackError) {
+                version = '';
+            }
+        }
+
+        versionElement.textContent = version ? `WebUI v${version}` : 'WebUI';
+        if (version) {
+            versionElement.title = `WebUI v${version}`;
+        } else {
             versionElement.removeAttribute('title');
         }
+    }
+
+    function parseWebUIVersion(raw) {
+        const source = String(raw || '');
+        const sectionMatch = source.match(/^\s*\[webui\]\s*$([\s\S]*?)(?=^\s*\[|\s*$)/m);
+        if (!sectionMatch) return '';
+        const versionMatch = sectionMatch[1].match(/^\s*version\s*=\s*["']([^"']+)["']/m);
+        return versionMatch ? versionMatch[1].trim() : '';
     }
 
     function switchTab(tab) {

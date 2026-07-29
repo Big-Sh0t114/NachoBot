@@ -26,6 +26,7 @@ from memory_manager import is_available as memory_is_available
 import memory_manager
 from music_library import build_music_playlist
 from chat_backend import ChatBackendError, chat_backend
+from tts_manager import TTSGenerationError, TTSManager, TTSUnavailableError
 from setup_manager import EnvironmentChecker, ConfigInitializer, DependencyInstaller, PathVerifier, NapCatConfigurator
 
 logger = logging.getLogger("webui")
@@ -38,19 +39,24 @@ process_mgr = ProcessManager()
 plugin_mgr = PluginManager()
 db_mgr = DatabaseManager()
 knowledge_mgr = KnowledgeManager()
+tts_mgr = TTSManager()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifecycle."""
-    yield
-    await chat_backend.close()
-    # Shutdown: stop all running services
-    for sid in list(process_mgr.states.keys()):
-        try:
-            await process_mgr.stop_service(sid)
-        except Exception:
-            pass
+    await tts_mgr.start()
+    try:
+        yield
+    finally:
+        await tts_mgr.close()
+        await chat_backend.close()
+        # Shutdown: stop all running services
+        for sid in list(process_mgr.states.keys()):
+            try:
+                await process_mgr.stop_service(sid)
+            except Exception:
+                pass
 
 
 app = FastAPI(title="NachoBot WebUI", lifespan=lifespan)
@@ -222,9 +228,41 @@ class ChatMessageRequest(BaseModel):
     user_name: str = "WebUI"
 
 
+class ChatTTSRequest(BaseModel):
+    text: str
+
+
 @app.get("/api/chat/status")
 async def chat_status():
-    return await chat_backend.status(core_running=_is_core_running())
+    core_status = _get_core_status()
+    result = await chat_backend.status(core_running=core_status == "running")
+    result["core_status"] = core_status
+    return result
+
+
+@app.get("/api/chat/tts/status")
+async def chat_tts_status():
+    return await tts_mgr.status()
+
+
+@app.post("/api/chat/tts")
+async def chat_tts(body: ChatTTSRequest):
+    try:
+        audio_path, cache_hit = await tts_mgr.generate(body.text)
+        return FileResponse(
+            audio_path,
+            media_type="audio/wav",
+            headers={
+                "Cache-Control": "private, max-age=86400",
+                "X-TTS-Cache": "HIT" if cache_hit else "MISS",
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except TTSUnavailableError as exc:
+        raise HTTPException(503, str(exc))
+    except TTSGenerationError as exc:
+        raise HTTPException(502, str(exc))
 
 
 @app.post("/api/chat/message")
@@ -485,27 +523,37 @@ async def db_delete_row(table_name: str, row_id: int):
 # =========================================================================
 
 
-def _is_core_running() -> bool:
-    """Check if NachoBot Core is currently running."""
+def _get_core_status() -> str:
+    """Return stopped/starting/running/stopping/error for NachoBot Core."""
     from process_manager import ServiceStatus
 
     state = process_mgr.states.get("nachobot")
-    if state is not None and state.status in (
-        ServiceStatus.RUNNING,
-        ServiceStatus.STARTING,
-    ):
-        return True
+    if state is not None:
+        if state.status == ServiceStatus.STARTING:
+            return "starting"
+        if state.status == ServiceStatus.STOPPING:
+            return "stopping"
+        if state.status == ServiceStatus.ERROR:
+            return "error"
+        if state.status == ServiceStatus.STOPPED:
+            return "stopped"
 
     try:
         parsed = urlparse(memory_manager._get_core_base_url())
         host = parsed.hostname or "127.0.0.1"
         if parsed.port is None:
-            return False
-        port = parsed.port
-        with socket.create_connection((host, port), timeout=0.3):
-            return True
+            return "starting" if state is not None else "stopped"
+        with socket.create_connection((host, parsed.port), timeout=0.3):
+            return "running"
     except (OSError, RuntimeError):
-        return False
+        if state is not None and state.status == ServiceStatus.RUNNING:
+            return "starting"
+        return "stopped"
+
+
+def _is_core_running() -> bool:
+    """Check whether NachoBot Core has finished starting and accepts connections."""
+    return _get_core_status() == "running"
 
 
 @app.get("/api/knowledge/files")

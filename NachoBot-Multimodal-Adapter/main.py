@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import toml
+from fastapi import HTTPException, Response
+from pydantic import BaseModel, Field
 
 _NACHOBOT_PATH = Path(__file__).resolve().parents[1] / "NachoBot"
 if (_NACHOBOT_PATH / "ncnk_message").is_dir():
@@ -40,6 +42,14 @@ from nachobot_multimodal.utils.audio_encode import encode_audio, encode_audio_st
 from nachobot_multimodal.utils import post_process  # noqa: E402
 
 
+class WebUITTSRequest(BaseModel):
+    """Direct synthesis request from the local WebUI."""
+
+    text: str = Field(min_length=1, max_length=10_000)
+    platform: str = Field(default="webui", max_length=64)
+    text_lang: str | None = Field(default=None, max_length=32)
+
+
 class TTSPipeline:
 
     def __init__(self, config_path: str):  # sourcery skip: dict-comprehension
@@ -69,6 +79,7 @@ class TTSPipeline:
         # 按群/用户分组的文本缓冲队列和处理任务
         self.text_buffer_dict: Dict[str, asyncio.Queue[Tuple[str, MessageBase]]] = {}
         self.buffer_task_dict: Dict[str, asyncio.Task] = {}
+        self._webui_tts_lock = asyncio.Lock()
 
     def import_module(self):
         """动态导入TTS适配"""
@@ -153,7 +164,38 @@ class TTSPipeline:
                 "tts_backends": [type(t).__module__ for t in self.tts_list],
             }
 
-        logger.info("已注册 HTTP 接口: /api/emotion_preset, /api/health")
+        @app.post("/api/tts")
+        async def webui_tts_endpoint(body: WebUITTSRequest):
+            """Generate one complete WAV response for the local WebUI."""
+            text = body.text.strip()
+            if not text:
+                raise HTTPException(status_code=400, detail="TTS 文本不能为空")
+            if not self.tts_list:
+                raise HTTPException(status_code=503, detail="没有启用任何 TTS 引擎")
+
+            tts_model = self.tts_list[0]
+            try:
+                async with self._webui_tts_lock:
+                    preset_name = self._resolve_emotion_preset(text)
+                    audio_data = await tts_model.tts(
+                        text=text,
+                        platform=body.platform or "webui",
+                        text_lang=body.text_lang,
+                        preset_name=preset_name,
+                    )
+            except Exception as exc:
+                logger.exception("WebUI TTS 生成失败")
+                raise HTTPException(status_code=502, detail=f"TTS 生成失败：{exc}") from exc
+
+            if not audio_data:
+                raise HTTPException(status_code=502, detail="TTS 服务返回了空音频")
+            return Response(
+                content=audio_data,
+                media_type="audio/wav",
+                headers={"Cache-Control": "no-store"},
+            )
+
+        logger.info("已注册 HTTP 接口: /api/emotion_preset, /api/health, /api/tts")
 
     async def server_handle(self, message_data: dict):
         """处理服务器收到的消息"""

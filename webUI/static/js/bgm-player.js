@@ -108,8 +108,8 @@
 
             const now = this._audioContext.currentTime;
             const transient = bass - state.previousBass;
-            const threshold = Math.max(0.115, state.bassBaseline * 1.34 + 0.018);
-            const minTransient = Math.max(0.022, state.bassBaseline * 0.13);
+            const threshold = Math.max(0.06, state.bassBaseline * 1.1 + 0.01);
+            const minTransient = Math.max(0.015, state.bassBaseline * 0.08);
             const beat =
                 bass > threshold &&
                 transient > minTransient &&
@@ -117,14 +117,14 @@
 
             if (beat) {
                 state.lastBeatAt = now;
-                state.pulse = Math.min(1, 0.6 + bass * 0.8);
+                state.pulse = Math.min(1, 0.75 + bass * 1.0);
             } else {
-                state.pulse *= 0.84;
+                state.pulse *= 0.88;
             }
             state.previousBass = bass;
 
             const weightedEnergy = bass * 0.55 + mid * 0.3 + high * 0.15;
-            const intensity = Math.min(1, Math.sqrt(Math.max(0, weightedEnergy)) * 1.05);
+            const intensity = Math.min(1, Math.sqrt(Math.max(0, weightedEnergy)) * 0.95);
 
             return {
                 bass,
@@ -221,6 +221,7 @@
             }
 
             this._audioContext = new AudioContextConstructor();
+            this._inputNode = this._audioContext.createGain();
             this._masterGain = this._audioContext.createGain();
             this._analyser = this._audioContext.createAnalyser();
 
@@ -231,8 +232,9 @@
             this._analyser.maxDecibels = -10;
             this._frequencyData = new Uint8Array(this._analyser.frequencyBinCount);
 
-            this._masterGain.connect(this._analyser);
-            this._analyser.connect(this._audioContext.destination);
+            this._inputNode.connect(this._analyser);
+            this._inputNode.connect(this._masterGain);
+            this._masterGain.connect(this._audioContext.destination);
             return this._audioContext;
         }
 
@@ -300,7 +302,7 @@
             const source = this._audioContext.createBufferSource();
             const gain = this._audioContext.createGain();
             source.buffer = buffer;
-            source.connect(gain).connect(this._masterGain);
+            source.connect(gain).connect(this._inputNode);
             const node = { source, gain };
             this._nodes.push(node);
             return node;
@@ -374,7 +376,7 @@
     }
 
     function stripExtension(name) {
-        return name.replace(/\.[^/.]+$/, '');
+        return name.replace(/\.(?:mp3|wav|ogg|flac)$/i, '');
     }
 
     window.SeamlessBgmPlayer = SeamlessBgmPlayer;
