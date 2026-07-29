@@ -1459,6 +1459,11 @@ class HippocampusManager:
 
         return self._hippocampus
 
+    @property
+    def is_initialized(self) -> bool:
+        """海马体实例是否已完成初始化。"""
+        return self._initialized
+
     def get_hippocampus(self):
         if not self._initialized:
             raise RuntimeError("HippocampusManager 尚未初始化，请先调用 initialize 方法")

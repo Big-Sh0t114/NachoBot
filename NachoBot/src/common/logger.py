@@ -424,9 +424,6 @@ MODULE_COLORS = {
     "model_utils": "\033[38;5;164m",  # 紫红色
     "relationship_fetcher": "\033[38;5;170m",  # 浅紫色
     "relationship_builder": "\033[38;5;93m",  # 浅蓝色
-    # s4u
-    "context_web_api": "\033[38;5;240m",  # 深灰色
-    "S4U_chat": "\033[92m",  # 深灰色
 }
 
 # 定义模块别名映射 - 将真实的logger名称映射到显示的别名

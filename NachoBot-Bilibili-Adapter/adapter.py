@@ -1,8 +1,7 @@
 import asyncio
 import json
-import logging
+from loguru import logger
 import re
-import os
 import sys
 import time
 import uuid
@@ -47,12 +46,11 @@ from bili_src.live.live_worker import LiveRoomWorker  # noqa: E402
 from bili_src.live.screen_monitor import ScreenMonitor  # noqa: E402
 from bili_src.audio.mic_capture import MicCaptureWorker, MicConfig  # noqa: E402
 from bili_src.audio.audio_player import AudioPlayer  # noqa: E402
-# [DEPRECATED] Live Streamer mode moved to mais4u
 # from live_streamer import LiveStreamerController, PriorityEvent  # noqa: E402
 
 # Try to import TTS model
 # 修复：动态获取相对路径，替换硬编码的绝对路径
-tts_adapter_path = _root_dir / "NachoBot-TTS-Adapter"
+tts_adapter_path = _root_dir / "NachoBot-Multimodal-Adapter"
 TTSModel = None
 _tts_import_error = None
 
@@ -60,7 +58,7 @@ if tts_adapter_path.exists():
     if str(tts_adapter_path) not in sys.path:
         sys.path.insert(0, str(tts_adapter_path))
     try:
-        from tts_src.utils.tts_resolver import resolve_tts_model_class
+        from nachobot_multimodal.utils.tts_resolver import resolve_tts_model_class
         TTSModel, _tts_import_error = resolve_tts_model_class()
     except ImportError as e:
         _tts_import_error = str(e)
@@ -79,7 +77,7 @@ class BilibiliAdapter:
     def __init__(
         self,
         config: AdapterConfig,
-        logger: logging.Logger,
+        logger,
         config_path: Optional[Path] = None,
     ):
         self.config = config
@@ -90,7 +88,7 @@ class BilibiliAdapter:
                     url=f"ws://{self.config.nachobot_host}:{self.config.nachobot_port}/ws",
                     token=None,
                 ),
-                # 直播消息使用 bilibili.live 平台，走 S4U 系统
+                # Live messages use the standard HeartFlow pipeline.
                 "bilibili.live": TargetConfig(
                     url=f"ws://{self.config.nachobot_host}:{self.config.nachobot_port}/ws",
                     token=None,
@@ -174,7 +172,13 @@ class BilibiliAdapter:
         if self._screen_host_room_id is not None:
             monitor_configs = self._load_vlm_model_configs()
             if monitor_configs:
-                self._screen_monitor = ScreenMonitor(monitor_configs, logger)
+                self._screen_monitor = ScreenMonitor(
+                    monitor_configs,
+                    logger,
+                    min_interval_seconds=config.screen_capture_interval_seconds,
+                    capture_active_window=config.screen_capture_active_window,
+                    excluded_exes=config.screen_capture_excluded_exes,
+                )
             else:
                 self.logger.warning("Screen monitor disabled: VLM config unavailable")
         else:
@@ -183,7 +187,6 @@ class BilibiliAdapter:
         # Initialize AudioPlayer
         self.audio_player = AudioPlayer(logger)
 
-        # [DEPRECATED] Live Streamer mode moved to mais4u
         # self._live_streamer_controllers: Dict[int, LiveStreamerController] = {}
         # for room_id, streamer_config in config.live_streamer_configs.items():
         #     if streamer_config.enable:
@@ -194,14 +197,6 @@ class BilibiliAdapter:
         #             logger=logger,
         #         )
         #         self.logger.info(f"Live Streamer mode enabled for room {room_id}")
-
-        # Initialize ModelClient (for Live2D)
-        self.model_client = None
-        if self.config.live_live2d_enable:
-            _nachobot_path = Path(__file__).resolve().parents[1] / "NachoBot"
-            from bili_src.core.model_client import get_model_client
-
-            self.model_client = get_model_client(_nachobot_path, self.logger)
 
         from bili_src.live2d.live2d_manager import Live2DManager
 
@@ -214,13 +209,14 @@ class BilibiliAdapter:
 
             def _on_audio_stop():
                 self.live2d_manager.controller.set_speaking(False)
-                # Reset gaze to center after audio finishes
-                asyncio.ensure_future(
-                    self.live2d_manager.controller.on_reply_finished()
-                )
+                self.live2d_manager.controller.notify_reply_finished()
 
             self.audio_player.on_start = _on_audio_start
             self.audio_player.on_stop = _on_audio_stop
+            self.audio_player.remote_playback_callback = (
+                self.live2d_manager.controller.play_audio
+            )
+            self.audio_player.remote_stop_callback = self.live2d_manager.controller.stop_audio
 
         from bili_src.audio.tts_manager import TTSManager
 
@@ -298,13 +294,17 @@ class BilibiliAdapter:
         tasks.append(self.event_manager.gift_flush_loop())
         tasks.append(self.tts_manager.idle_tts_loop())
 
-        # [DEPRECATED] Live Streamer mode moved to mais4u
         # for controller in self._live_streamer_controllers.values():
         #     tasks.append(controller.start())
 
         self.audio_player.start()  # Start audio player loop
 
-        await asyncio.gather(*tasks)
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            if self.live2d_manager:
+                await self.live2d_manager.stop()
+            await self.api.close()
 
     async def _run_mic_worker_forever(self) -> None:
         """Keep mic worker running, restarting on failure"""
@@ -335,7 +335,6 @@ class BilibiliAdapter:
             try:
                 should_pause = True
 
-                # [DEPRECATED] Live Streamer mode moved to mais4u
                 # if room_id in self._live_streamer_controllers:
                 #     should_pause = True
                 #     self.logger.debug(
@@ -467,6 +466,14 @@ class BilibiliAdapter:
             return None
         return await self._screen_monitor.maybe_analyze(message_text)
 
+    async def refresh_screen_summary(self, room_id: int) -> Optional[str]:
+        """Refresh the local screen-summary cache used by live prompt templates."""
+        return await self._get_screen_summary(
+            room_id,
+            user_id="",
+            message_text="Periodic screen refresh",
+        )
+
     def _get_cached_screen_summary(self, room_id: int) -> Optional[str]:
         """Return cached screen summary without triggering VLM. Non-blocking."""
         if not self._screen_monitor:
@@ -533,9 +540,6 @@ class BilibiliAdapter:
             if self._screen_monitor:
                 self._screen_monitor._last_summary = None
 
-            # Directly clear the core's ScreenManager cache file on disk.
-            # The async message-based approach was unreliable (fire-and-forget could fail silently).
-            self._clear_core_screen_cache()
 
         action = "enabled" if enable else "permanently disabled"
         self.logger.info(
@@ -776,107 +780,6 @@ class BilibiliAdapter:
 
         return False
 
-    def _clear_core_screen_cache(self) -> None:
-        """Directly clear the core's ScreenManager cache file on disk.
-
-        This is more reliable than the async message-based approach,
-        which could fail silently if the message never reaches the core.
-        """
-        try:
-            # The cache file lives at NachoBot/src/mais4u/mais4u_chat/s4u_screen_cache.txt
-            # relative to the adapter: ../NachoBot/src/mais4u/mais4u_chat/s4u_screen_cache.txt
-            adapter_dir = os.path.dirname(os.path.abspath(__file__))
-            cache_file = os.path.join(
-                adapter_dir,
-                "..",
-                "NachoBot",
-                "src",
-                "mais4u",
-                "mais4u_chat",
-                "s4u_screen_cache.txt",
-            )
-            cache_file = os.path.abspath(cache_file)
-
-            if os.path.exists(cache_file):
-                with open(cache_file, "w", encoding="utf-8") as f:
-                    f.write("")
-                self.logger.info(
-                    "Cleared core ScreenManager cache file: %s", cache_file
-                )
-            else:
-                self.logger.warning(
-                    "Core ScreenManager cache file not found: %s", cache_file
-                )
-        except Exception as e:
-            self.logger.error("Failed to clear core screen cache: %s", e)
-
-    async def push_screen_update(
-        self,
-        room_id: int,
-        user_id: str = "0",
-        user_name: str = "System",
-        timestamp: float = 0.0,
-        existing_summary: Optional[str] = None,
-    ):
-        """
-        Proactively push screen info to Core.
-        If existing_summary is provided, use it. Otherwise, fetch new summary.
-        """
-        if timestamp == 0.0:
-            timestamp = time.time()
-
-        if existing_summary:
-            summary = existing_summary
-        else:
-            # Trigger VLM analysis with generic prompt
-            summary = await self._get_screen_summary(
-                room_id, user_id, "Checking screen content"
-            )
-
-        if summary:
-            try:
-                # [FIX] Include template_info so screen messages don't clobber
-                # last_messages with a template-less entry, which causes HFC
-                # to fall back to the wrong replyer_prompt.
-                template_info = await self._get_template_info(
-                    room_id, user_id, "screen_update"
-                )
-
-                screen_msg_info = BaseMessageInfo(
-                    platform="bilibili.live",
-                    message_id=f"screen_{uuid.uuid4().hex[:8]}",
-                    time=timestamp,
-                    user_info=UserInfo(
-                        platform="bilibili.live",
-                        user_id=user_id,
-                        user_nickname=user_name,
-                    ),
-                    group_info=GroupInfo(
-                        platform="bilibili.live",
-                        group_id=str(room_id),
-                        group_name=str(room_id),
-                    ),
-                    format_info=FormatInfo(
-                        content_format=["text"],
-                        accept_format=ACCEPT_FORMAT,
-                    ),
-                    additional_config={"room_id": room_id},
-                    template_info=template_info,
-                )
-                screen_message = MessageBase(
-                    message_info=screen_msg_info,
-                    # Send as 'screen' type so s4u_msg_processor recognized it and updates ScreenManager
-                    message_segment=Seg(type="screen", data=summary),
-                    raw_message=None,
-                )
-                # Priority 5 (Higher than Mic/SC) to ensure context update first
-                self.event_manager.push_to_event_queue(5, screen_message)
-                self.logger.info(
-                    f"Screen Info sent to Core for room {room_id} (Summary length: {len(summary)})"
-                )
-            except Exception as e:
-                self.logger.error(f"Failed to push screen update: {e}")
-
     async def handle_incoming_danmu(
         self,
         room_id: int,
@@ -921,7 +824,6 @@ class BilibiliAdapter:
                 )
             return
 
-        # [DEPRECATED] Live Streamer mode moved to mais4u
         # if room_id in self._live_streamer_controllers:
         #     controller = self._live_streamer_controllers[room_id]
         #     controller.add_danmu_from_params(
@@ -935,7 +837,7 @@ class BilibiliAdapter:
         #         f"[LiveStreamer] Danmu routed to buffer: {user_name}: {text[:30]}..."
         #     )
         #     return  # Don't process through normal path
-        # Use cached screen summary (non-blocking) — fresh VLM runs in _screen_push_loop
+        # Use cached screen summary (non-blocking); the worker refreshes it periodically.
         template_info = await self._get_template_info(room_id, user_id, text)
         if template_info:
             # Info logged inside _get_template_info
@@ -1004,33 +906,10 @@ class BilibiliAdapter:
             additional_config=additional_config,
         )
 
-        # Hook Live2D: Message Received
+        # Notify the standalone avatar without constructing NachoBot chat objects.
         if self.live2d_manager.controller:
             try:
-                # Construct a minimal MessageRecv compatible dict
-                # We need to map adapter's data to MessageRecv structure
-                msg_dict = {
-                    "message_info": message_info.to_dict(),
-                    "message_segment": {"type": "text", "data": processed_text},
-                    "raw_message": None,
-                    "processed_plain_text": processed_text,
-                }
-                # For dependencies like chat_stream, we rely on managers to handle missing streams or use chat_id from msg_info
-                from src.chat.message_receive.message import MessageRecv
-
-                msg_recv = MessageRecv(msg_dict)
-
-                # Inject chat_stream mock if needed by MoodManager?
-                # MoodManager uses message.chat_stream.stream_id.
-                # MessageRecv doesn't set chat_stream in __init__ from dict.
-                # We can monkey-patch it or use a mock object.
-                class MockStream:
-                    def __init__(self, room_id):
-                        self.stream_id = str(room_id)
-
-                msg_recv.chat_stream = MockStream(room_id)
-
-                await self.live2d_manager.controller.on_message_received(msg_recv)
+                await self.live2d_manager.controller.on_message_received()
             except Exception as e:
                 self.logger.error(f"Live2D hook error: {e}")
 
@@ -1130,7 +1009,7 @@ class BilibiliAdapter:
         )
 
         # Use seglist to include both gift info and text prompt
-        # Gift segment format for S4U: "name:count"
+        # Include gift metadata alongside readable HeartFlow text.
         gift_segment = Seg(type="gift", data=f"{gift_name}:{num}")
         text_segment = Seg(type="text", data=prompt_text)
 
@@ -1303,7 +1182,7 @@ class BilibiliAdapter:
         master_user_name = str(getattr(self.config, "live_master_user_name", "主人"))
 
         # [FIX] Include template_info so mic messages don't clobber
-        # last_messages with a template-less entry (same fix as push_screen_update)
+        # last_messages with a template-less entry.
         template_info = await self._get_template_info(room_id, master_user_id, text)
 
         message_info = BaseMessageInfo(
@@ -1354,7 +1233,6 @@ class BilibiliAdapter:
             f"SuperChat: [{room_id}] {user_name}({user_id}): {message_text} (Price: {price} CNY)"
         )
 
-        # [DEPRECATED] Live Streamer mode moved to mais4u
         # if room_id in self._live_streamer_controllers:
         #     controller = self._live_streamer_controllers[room_id]
         #     await controller.inject_priority_event(
@@ -1405,7 +1283,7 @@ class BilibiliAdapter:
             additional_config=additional_config,
         )
 
-        # Use superchat segment so S4U recognizes it
+        # Include structured SC metadata alongside readable HeartFlow text.
         # Superchat segment format: "price:text"
         sc_segment = Seg(type="superchat", data=f"{price}:{message_text}")
         text_segment = Seg(type="text", data=prompt_text)
@@ -1446,7 +1324,6 @@ class BilibiliAdapter:
             f"Guard: [{room_id}] {user_name}({user_id}) became {guard_name} (Level: {guard_level}) - PATCHED_VERIFIED"
         )
 
-        # [DEPRECATED] Live Streamer mode moved to mais4u
         # if room_id in self._live_streamer_controllers:
         #     controller = self._live_streamer_controllers[room_id]
         #     await controller.inject_priority_event(

@@ -459,7 +459,15 @@ class ActionPlanner:
                 actions_before_now_block = ""
 
             # 构建聊天上下文描述
-            chat_context_description = "你现在正在一个群聊中"
+            chat_context_description = (
+                "你现在正在一个群聊中"
+                if is_group_chat
+                else "你正在和一位尚未认识的用户私聊"
+            )
+            if chat_target_info:
+                chat_context_description = (
+                    f"你正在和 {chat_target_info.person_name or chat_target_info.user_nickname or '对方'} 聊天中"
+                )
 
             if is_group_chat:
                 reply_action_description = """reply\n动作描述：\n1.你可以选择呼叫了你的名字，但是你没有做出回应的消息进行回复\n2.你可以自然的顺着正在进行的聊天内容进行回复或自然的提出一个问题\n{\n    "action": "reply",\n    "target_message_id":"想要回复的消息id",\n    "reason":"回复的原因"\n}"""

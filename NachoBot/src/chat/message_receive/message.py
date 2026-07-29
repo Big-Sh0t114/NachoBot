@@ -294,27 +294,14 @@ class MessageRecv(Message):
                 return f"[文件: {file_name}]"
 
             elif segment.type == "screen":
-                # Update ScreenManager even in Normal Mode, but don't show as text
-                try:
-                    from src.mais4u.mais4u_chat.screen_manager import screen_manager
-
-                    screen_manager.set_screen(segment.data)
-                except ImportError:
-                    pass
+                # Legacy screen events are ignored by the regular HeartFlow message stream.
                 return ""
             elif segment.type == "text":
                 self.is_picid = False
                 self.is_emoji = False
                 text_data = str(segment.data)
                 if text_data.strip().startswith("<SCREEN_INFO>"):
-                    # Legacy support: Update ScreenManager, don't show as text
-                    try:
-                        from src.mais4u.mais4u_chat.screen_manager import screen_manager
-
-                        info = text_data.strip()[13:]
-                        screen_manager.set_screen(info)
-                    except ImportError:
-                        pass
+                    # Legacy screen payloads remain intentionally silent.
                     return ""
                 return text_data
             elif segment.type == "image":
@@ -378,154 +365,6 @@ class MessageRecv(Message):
                     }
                     """
                 return ""
-            else:
-                extracted_urls = _extract_urls_from_unknown_data(segment.data)
-                if extracted_urls:
-                    return extracted_urls
-                return ""
-        except Exception as e:
-            logger.error(f"处理消息段失败: {str(e)}, 类型: {segment.type}, 数据: {segment.data}")
-            return f"[处理失败的{segment.type}消息]"
-
-
-@dataclass
-class MessageRecvS4U(MessageRecv):
-    def __init__(self, message_dict: dict[str, Any]):
-        super().__init__(message_dict)
-        self.is_gift = False
-        self.is_fake_gift = False
-        self.is_superchat = False
-        self.gift_info = None
-        self.gift_name = None
-        self.gift_count: Optional[str] = None
-        self.superchat_info = None
-        self.superchat_price = None
-        self.superchat_message_text = None
-        self.is_screen = False
-        self.is_internal = False
-        self.voice_done = None
-
-        self.chat_info = None
-
-    async def process(self) -> None:
-        self.processed_plain_text = await self._process_message_segments(self.message_segment)
-
-    async def _process_single_segment(self, segment: Seg) -> str:
-        """处理单个消息段
-
-        Args:
-            segment: 消息段
-
-        Returns:
-            str: 处理后的文本
-        """
-        try:
-            if segment.type == "text":
-                self.is_voice = False
-                self.is_picid = False
-                self.is_emoji = False
-                text_data = str(segment.data)
-                # [DEBUG] Check for screen info prefix
-                if text_data.strip().startswith("<SCREEN_INFO>"):
-                    logger.info(f"[Message] Detected Screen Info Prefix in: {text_data[:20]}")
-                    self.is_screen = True
-                    self.screen_info = text_data.strip()[13:]
-                    return "屏幕信息"
-                return segment.data  # type: ignore
-            elif segment.type == "image":
-                self.is_voice = False
-                # 如果是base64图片数据
-                if isinstance(segment.data, str):
-                    self.has_picid = True
-                    self.is_picid = True
-                    self.is_emoji = False
-                    image_manager = get_image_manager()
-                    # print(f"segment.data: {segment.data}")
-                    _, processed_text = await image_manager.process_image(segment.data)
-                    return processed_text
-                return "[发了一张图片，网卡了加载不出来]"
-            elif segment.type == "emoji":
-                self.has_emoji = True
-                self.is_emoji = True
-                self.is_picid = False
-                if isinstance(segment.data, str):
-                    return await get_image_manager().get_emoji_description(segment.data)
-                return "[发了一个表情包，网卡了加载不出来]"
-            elif segment.type == "voice":
-                self.has_picid = False
-                self.is_picid = False
-                self.is_emoji = False
-                self.is_voice = True
-                self.is_video = False
-                if isinstance(segment.data, str):
-                    return await get_voice_text(segment.data)
-                return "[发了一段语音，网卡了加载不出来]"
-            elif segment.type == "video":
-                self.has_picid = False
-                self.is_picid = False
-                self.is_emoji = False
-                self.is_voice = False
-                self.is_video = True
-                try:
-                    from src.chat.utils.utils_video import get_video_manager
-
-                    manager = get_video_manager()
-                    return await manager.process_video(segment.data)  # type: ignore
-                except Exception as e:
-                    logger.error(f"处理视频段失败: {e}")
-                    return "[视频(接收失败)]"
-            elif segment.type == "mention_bot":
-                self.is_voice = False
-                self.is_picid = False
-                self.is_emoji = False
-                self.is_mentioned = float(segment.data)  # type: ignore
-                return ""
-            elif segment.type == "priority_info":
-                self.is_voice = False
-                self.is_picid = False
-                self.is_emoji = False
-                if isinstance(segment.data, dict):
-                    # 处理优先级信息
-                    self.priority_mode = "priority"
-                    self.priority_info = segment.data
-                    """
-                    {
-                        'message_type': 'vip', # vip or normal
-                        'message_priority': 1.0, # 优先级，大为优先，float
-                    }
-                    """
-                return ""
-            elif segment.type == "gift":
-                self.is_voice = False
-                self.is_gift = True
-                # 解析gift_info，格式为"名称:数量"
-                name, count = segment.data.split(":", 1)  # type: ignore
-                self.gift_info = segment.data
-                self.gift_name = name.strip()
-                self.gift_count = int(count.strip())
-                return ""
-            elif segment.type == "voice_done":
-                msg_id = segment.data
-                logger.info(f"voice_done: {msg_id}")
-                self.voice_done = msg_id
-                return ""
-            elif segment.type == "superchat":
-                self.is_superchat = True
-                self.superchat_info = segment.data
-                price, message_text = segment.data.split(":", 1)  # type: ignore
-                self.superchat_price = price.strip()
-                self.superchat_message_text = message_text.strip()
-
-                self.processed_plain_text = str(self.superchat_message_text)
-                self.processed_plain_text += (
-                    f"（注意：这是一条超级弹幕信息，价值{self.superchat_price}元，请你认真回复）"
-                )
-
-                return self.processed_plain_text
-            elif segment.type == "screen":
-                self.is_screen = True
-                self.screen_info = segment.data
-                return "屏幕信息"
             else:
                 extracted_urls = _extract_urls_from_unknown_data(segment.data)
                 if extracted_urls:

@@ -4,11 +4,13 @@
  */
 
 const App = (() => {
-    let currentTab = 'config';
+    let currentTab = 'chat';
     let statusInterval = null;
 
     // ---- Tab Routing ----
     function init() {
+        loadWebUIInfo();
+
         document.querySelectorAll('.nav-item').forEach(item => {
             item.addEventListener('click', (e) => {
                 e.preventDefault();
@@ -17,6 +19,7 @@ const App = (() => {
         });
 
         // Initialize modules
+        ChatModule.init();
         ConfigModule.init();
         LauncherModule.init();
         TerminalModule.init();
@@ -31,18 +34,60 @@ const App = (() => {
         pollStatus();
     }
 
+    async function loadWebUIInfo() {
+        const versionElement = document.getElementById('sidebar-version');
+        if (!versionElement) return;
+
+        let version = '';
+        try {
+            const data = await apiGet('/api/webui/info');
+            version = String(data.version || '').trim();
+        } catch (error) {
+            // Compatibility fallback for a WebUI process that has not yet been
+            // restarted after adding /api/webui/info.
+            try {
+                const config = await apiGet('/api/configs/webui_config');
+                version = parseWebUIVersion(config.raw);
+            } catch (fallbackError) {
+                version = '';
+            }
+        }
+
+        versionElement.textContent = version ? `WebUI v${version}` : 'WebUI';
+        if (version) {
+            versionElement.title = `WebUI v${version}`;
+        } else {
+            versionElement.removeAttribute('title');
+        }
+    }
+
+    function parseWebUIVersion(raw) {
+        const source = String(raw || '');
+        const sectionMatch = source.match(/^\s*\[webui\]\s*$([\s\S]*?)(?=^\s*\[|\s*$)/m);
+        if (!sectionMatch) return '';
+        const versionMatch = sectionMatch[1].match(/^\s*version\s*=\s*["']([^"']+)["']/m);
+        return versionMatch ? versionMatch[1].trim() : '';
+    }
+
     function switchTab(tab) {
         currentTab = tab;
 
-        // Update nav
+        // Update nav. Chat intentionally has no WebUI menu item.
         document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-        document.querySelector(`[data-tab="${tab}"]`).classList.add('active');
+        const navItem = document.querySelector(`.nav-item[data-tab="${tab}"]`);
+        navItem?.classList.add('active');
 
         // Update panels
+        const targetPanel = document.getElementById(`tab-${tab}`);
+        if (!targetPanel) {
+            console.warn(`Unknown tab: ${tab}`);
+            return;
+        }
         document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
-        document.getElementById(`tab-${tab}`).classList.add('active');
+        targetPanel.classList.add('active');
 
         // Trigger module refresh
+        if (tab === 'chat') ChatModule.refresh();
         if (tab === 'config') ConfigModule.refresh();
         if (tab === 'launcher') LauncherModule.refresh();
         if (tab === 'terminal') TerminalModule.refresh();
@@ -90,7 +135,7 @@ const App = (() => {
         }
     }
 
-    return { init, switchTab, pollStatus };
+    return { init, switchTab, pollStatus, loadWebUIInfo };
 })();
 
 // ---- Global Utilities ----
