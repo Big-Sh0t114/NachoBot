@@ -11,7 +11,7 @@ from src.common.logger import get_logger
 from src.config.config import global_config
 from src.mood.mood_manager import mood_manager  # 导入情绪管理器
 from src.chat.message_receive.chat_stream import get_chat_manager, ChatStream
-from src.chat.message_receive.message import MessageRecv, MessageRecvS4U
+from src.chat.message_receive.message import MessageRecv
 from src.chat.message_receive.storage import MessageStorage
 from src.chat.heart_flow.heartflow_message_processor import HeartFCMessageReceiver
 from src.chat.utils.prompt_builder import Prompt, global_prompt_manager
@@ -19,10 +19,8 @@ from src.chat.advanced.advanced_manager import advanced_manager
 from src.plugin_system.core import component_registry, events_manager, global_announcement_manager
 from src.plugin_system.base import BaseCommand, EventType
 from src.plugin_system.apis import send_api
-from src.mais4u.mais4u_chat.s4u_msg_processor import S4UMessageProcessor
-from src.person_info.person_info import Person
+from src.live.gift_value_tracker import track_gift_value
 from src.chat.keyword_cache import promise_cache_manager
-from src.mais4u.s4u_config import s4u_config_main
 from src.person_info.bind_manager import bind_manager  # 导入多平台绑定管理器
 
 # 定义日志配置
@@ -84,8 +82,6 @@ class ChatBot:
         self._started = False
         self.mood_manager = mood_manager  # 获取情绪管理器单例
         self.heartflow_message_receiver = HeartFCMessageReceiver()  # 新增
-
-        self.s4u_message_processor = S4UMessageProcessor()
 
     async def _ensure_started(self):
         """确保所有任务已启动"""
@@ -440,53 +436,6 @@ class ChatBot:
 
             return True
 
-    async def do_s4u(self, message_data: Dict[str, Any]):
-        message = MessageRecvS4U(message_data)
-        group_info = message.message_info.group_info
-        user_info = message.message_info.user_info
-
-        get_chat_manager().register_message(message)
-        chat = await get_chat_manager().get_or_create_stream(
-            platform=message.message_info.platform,  # type: ignore
-            user_info=user_info,  # type: ignore
-            group_info=group_info,
-        )
-
-        message.update_chat_stream(chat)
-
-        # 处理消息内容
-        await message.process()
-
-        _ = Person.register_person(
-            platform=message.message_info.platform,  # type: ignore
-            user_id=message.message_info.user_info.user_id,  # type: ignore
-            nickname=user_info.user_nickname,  # type: ignore
-            group_id=group_info.group_id if group_info else None,
-            group_cardname=user_info.user_cardname,  # type: ignore
-        )
-
-        # Handle Template Info for S4U (Streamer Mode Prompts)
-        template_group_name = None
-        if message.message_info.template_info and not message.message_info.template_info.template_default:
-            template_group_name = message.message_info.template_info.template_name
-            template_items = message.message_info.template_info.template_items
-            async with global_prompt_manager.async_message_scope(template_group_name):
-                if isinstance(template_items, dict):
-                    for k in template_items.keys():
-                        await Prompt.create_async(template_items[k], k)
-                        logger.debug(f"注册S4U Prompt: {k}")
-
-        async def process():
-            await self.s4u_message_processor.process_message(message)
-
-        if template_group_name:
-            async with global_prompt_manager.async_message_scope(template_group_name):
-                await process()
-        else:
-            await process()
-
-        return
-
     async def echo_message_process(self, raw_data: Dict[str, Any]) -> None:
         """
         用于专门处理回送消息ID的函数
@@ -530,25 +479,15 @@ class ChatBot:
             logger.debug(f"Incoming Message Platform: {platform}, Message Type: {message_data.get('type')}")
             logger.debug(f"Full message data: {message_data}")
 
-            if platform == "amaidesu_default":
-                await self.do_s4u(message_data)
-                return
-
             if platform == "bilibili.live":
-                # 检查是否启用主播模式
-                if s4u_config_main.streamer_mode.enable:
-                    await self.do_s4u(message_data)
-                    return
-                else:
-                    # 如果未启用主播模式，回落到 bilibili 平台（使用 HeartFlow）
-                    logger.info("主播模式未启用，bilibili.live 回落到 bilibili 平台处理")
-                    platform = "bilibili"
-                    message_data["message_info"]["platform"] = "bilibili"
-                    if message_data["message_info"].get("user_info"):
-                        message_data["message_info"]["user_info"]["platform"] = "bilibili"
-                    if message_data["message_info"].get("group_info"):
-                        message_data["message_info"]["group_info"]["platform"] = "bilibili"
-                    # 继续向下执行，走 standard HeartFlow 流程
+                # Normalize live traffic onto the regular HeartFlow platform.
+                platform = "bilibili"
+                message_info = message_data["message_info"]
+                message_info["platform"] = platform
+                if message_info.get("user_info"):
+                    message_info["user_info"]["platform"] = platform
+                if message_info.get("group_info"):
+                    message_info["group_info"]["platform"] = platform
 
             if message_data["message_info"].get("group_info") is not None:
                 message_data["message_info"]["group_info"]["group_id"] = str(
@@ -590,7 +529,7 @@ class ChatBot:
             await message.process()
 
             # 全局监听：处理打赏和VIP事件，保证无论主播模式开关与否都能记录
-            asyncio.create_task(self.s4u_message_processor._handle_gift_value_tracking(message))
+            asyncio.create_task(track_gift_value(message))
 
             # 约定/誓言缓存处理
             promise_cache_hits = promise_cache_manager.handle_message(message)

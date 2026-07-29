@@ -25,9 +25,13 @@ from audio_output import AudioOutput
 from audio_pipeline import AudioPipeline
 from tts_handler import TTSHandler
 
+_multimodal_adapter_path = Path(__file__).resolve().parents[1] / "NachoBot-Multimodal-Adapter"
+if _multimodal_adapter_path.exists() and str(_multimodal_adapter_path) not in sys.path:
+    sys.path.insert(0, str(_multimodal_adapter_path))
+
 # 独立的情感预设解析器（不依赖 TTS 模型实例）
 try:
-    from tts_src.utils.emotion_resolver import resolve_emotion_preset_remote
+    from nachobot_multimodal.utils.emotion_resolver import resolve_emotion_preset_remote
 except ImportError:
     resolve_emotion_preset_remote = None
 
@@ -356,7 +360,7 @@ class UniversalVCAdapter:
 
             # 分段流式：按句切分，逐句生成并立即送入播放队列
             try:
-                from tts_src.utils.text_splitter import split_text_for_streaming
+                from nachobot_multimodal.utils.text_splitter import split_text_for_streaming
                 segments = split_text_for_streaming(cleaned_text)
             except ImportError:
                 segments = [cleaned_text]

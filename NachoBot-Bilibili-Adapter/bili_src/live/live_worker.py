@@ -3,7 +3,7 @@
 import asyncio
 import contextlib
 import json
-import logging
+from loguru import logger
 import os
 import socket
 import time
@@ -35,7 +35,7 @@ class LiveRoomWorker:
         config: AdapterConfig,
         api: "BilibiliApi",
         adapter: "BilibiliAdapter",
-        logger: logging.Logger,
+        logger,
     ):
         self.room_id = room_id
         self.config = config
@@ -110,49 +110,41 @@ class LiveRoomWorker:
                     return True
         return False
 
-    async def _screen_push_loop(self) -> None:
-        """Background loop to periodically push screen info to Core."""
-        self.logger.info(f"Screen Push Loop started for room {self.room_id}")
+    async def _screen_refresh_loop(self) -> None:
+        """Periodically refresh the adapter's local screen-summary cache."""
+        self.logger.info(f"Screen refresh loop started for room {self.room_id}")
         while not self._stop_event.is_set():
             try:
-                # Interval: 30 seconds
-                # Ensure we don't spam if VLM is slow, but VLM call awaits, so it's serial.
-                await asyncio.sleep(30)
+                # VLM refreshes are serial, so this interval also bounds capture rate.
+                await asyncio.sleep(self.config.screen_capture_interval_seconds)
                 if self._stop_event.is_set():
                     break
 
-                # Check directly if we should push (e.g. is live?)
-                # We assume if worker is running, we want updates.
-                # However, maybe check if adapter has VLM enabled?
-                # _get_screen_summary checks config internally.
-
-                # Skip push if screen is manually disabled (#screen_off)
+                # Skip refresh if screen monitoring is manually disabled (#screen_off).
                 manual_state = self.adapter._get_screen_manual_state()
                 if manual_state is False:
                     continue
 
-                await self.adapter.push_screen_update(
-                    self.room_id, timestamp=time.time()
-                )
+                await self.adapter.refresh_screen_summary(self.room_id)
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                self.logger.error(f"Screen push error: {e}")
+                self.logger.error(f"Screen refresh error: {e}")
                 await asyncio.sleep(5)  # Error backoff
 
     async def run(self) -> None:
-        # Initial Screen Push to prime the cache (since we removed periodic updates)
+        # Prime the local summary cache before processing live messages.
         try:
             # Wait a bit for system to settle
             await asyncio.sleep(5)
-            self.logger.info(f"Performing initial screen push for room {self.room_id}")
-            await self.adapter.push_screen_update(self.room_id, timestamp=time.time())
+            self.logger.info(f"Performing initial screen refresh for room {self.room_id}")
+            await self.adapter.refresh_screen_summary(self.room_id)
         except Exception as e:
-            self.logger.warning(f"Initial screen push failed: {e}")
+            self.logger.warning(f"Initial screen refresh failed: {e}")
 
-        # Start Screen Push Loop
-        asyncio.create_task(self._screen_push_loop())
+        # Keep the local summary cache fresh for prompt construction.
+        asyncio.create_task(self._screen_refresh_loop())
 
         backoff = self.config.reconnect_seconds
         while not self._stop_event.is_set():
@@ -777,9 +769,6 @@ class LiveRoomWorker:
             guard_level=guard_level,
         )
 
-        # Update Screen Info for S4U System (Self-Talk Context)
-        # DEPRECATED: Screen update moved to independent loop
-        # await self.adapter.push_screen_update(self.room_id)
 
     @staticmethod
     def _pack(body: Any, op: int) -> bytes:

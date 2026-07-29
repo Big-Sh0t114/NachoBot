@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-import logging
+from loguru import logger
 import random
 import re
 import time
@@ -100,7 +100,7 @@ class LiveStreamerController:
         config: "LiveStreamerConfig",
         room_id: int,
         adapter: "BilibiliAdapter",
-        logger: logging.Logger,
+        logger,
     ):
         self._config = config
         self._room_id = room_id

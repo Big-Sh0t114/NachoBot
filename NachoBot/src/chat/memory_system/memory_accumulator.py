@@ -37,6 +37,12 @@ class MemoryAccumulator(AsyncTask):
             # logger.debug(f"{self.log_prefix} 关系系统未启用，跳过记忆沉淀器")
             return
 
+        # 正常启动流程会先初始化海马体再注册本任务；保留此检查以防任务被单独
+        # 启动或未来再次调整初始化顺序，避免对每个聊天流重复抛出异常。
+        if not hippocampus_manager.is_initialized:
+            logger.warning(f"{self.log_prefix} hippocampus_manager 尚未初始化，跳过本轮记忆沉淀")
+            return
+
         now = datetime.now()
         current_date_str = now.strftime("%Y-%m-%d")
 
@@ -108,10 +114,6 @@ class MemoryAccumulator(AsyncTask):
         try:
             # 第一阶段：压缩提取记忆主题和摘要
             hc = hippocampus_manager.get_hippocampus()
-            if not hc:
-                logger.warning(f"{self.log_prefix} hippocampus_manager 未初始化完毕！")
-                return
-
             pg = hc.parahippocampal_gyrus
 
             # 调用大模型生成压缩记忆 (压缩率按默认 0.1)
