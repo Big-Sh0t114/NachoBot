@@ -14,7 +14,7 @@ dependencies = [
     "PyOpenGL>=3.1.10,<4",
     "PyOpenGL-accelerate>=3.1.10,<4",
     "pywin32>=306; sys_platform == 'win32'",
-    "websockets>=11,<17",
+    "websockets>=17.0,<18",
     "loguru",
 ]
 
