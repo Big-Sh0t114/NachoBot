@@ -11,7 +11,7 @@ dependencies = [
     "fastapi>=0.141.1",
     "funasr>=1.3.1",
     "loguru>=0.7.3",
-    "modelscope>=1.34.0",
+    "modelscope>=1.39.0",
     "numba>=0.65.0",
     "numpy",
     "openai>=2.50.0",
