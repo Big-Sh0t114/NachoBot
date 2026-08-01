@@ -18,4 +18,9 @@ ENV PATH="/discord-adapter/.venv/bin:${PATH}"
 # 复制项目代码
 COPY . .
 
+# Shared ASR stays owned by Multimodal-Adapter. docker-compose supplies this
+# sibling directory as the named "multimodal" build context.
+COPY --from=multimodal /src /NachoBot-Multimodal-Adapter/src
+COPY --from=multimodal /configs /NachoBot-Multimodal-Adapter/configs
+
 ENTRYPOINT ["python", "main.py"]

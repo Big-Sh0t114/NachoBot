@@ -17,6 +17,7 @@ from src.llm_models.utils_model import LLMRequest
 from src.llm_models.exceptions import ReqAbortException
 from src.chat.message_receive.message import UserInfo, Seg, MessageRecv, MessageSending
 from src.chat.message_receive.chat_stream import ChatStream
+from src.chat.runtime_capabilities import runtime_capabilities_from_stream
 from src.chat.message_receive.uni_message_sender import UniversalMessageSender
 from src.chat.utils.timer_calculator import Timer  # <--- Import Timer
 from src.chat.utils.utils import get_chat_type_and_target_info
@@ -58,18 +59,15 @@ class DefaultReplyer:
     @property
     def express_model(self) -> LLMRequest:
         model_set = model_config.model_task_config.replyer
-        # 检测是否为 Bilibili 直播间：通过 template_name 以 bilibili_live_ 开头判断
-        try:
-            if self.chat_stream.context:
-                msg = self.chat_stream.context.message
-                if msg and msg.message_info and msg.message_info.template_info:
-                    tpl = msg.message_info.template_info.template_name
-                    if tpl and isinstance(tpl, str) and tpl.startswith("bilibili_live_"):
-                        bili_replyer = getattr(model_config.model_task_config, "bilibili_replyer", None)
-                        if bili_replyer and bili_replyer.model_list:
-                            model_set = bili_replyer
-        except Exception:
-            pass
+        capabilities = runtime_capabilities_from_stream(self.chat_stream)
+        if capabilities.reply_model_group:
+            declared_model_set = getattr(
+                model_config.model_task_config,
+                capabilities.reply_model_group,
+                None,
+            )
+            if declared_model_set and declared_model_set.model_list:
+                model_set = declared_model_set
         if getattr(self, "request_type", "replyer") == "file_edit":
             model_set = getattr(model_config.model_task_config, "file_edit", model_set)
         return LLMRequest(model_set=model_set, request_type=getattr(self, "request_type", "replyer"))
@@ -376,10 +374,8 @@ class DefaultReplyer:
             logger.warning(f"未找到用户 {sender} 的ID，跳过信息提取")
             return f"你完全不认识{sender}，不理解ta的相关信息。"
 
-        # 直播环境下跳过 LLM 分类选择，仅使用本地字符串匹配
-        # 与 heartFC_chat.py 的 Bypass Planner 条件一致：bilibili 群聊(直播弹幕) + discord_vc
-        _platform = getattr(self.chat_stream, "platform", "")
-        _skip_llm = _platform in {"bilibili", "discord_vc", "universal_vc"}
+        capabilities = runtime_capabilities_from_stream(self.chat_stream)
+        _skip_llm = not capabilities.relation_inference
 
         sender_relation = await person.build_relationship(chat_content, skip_llm=_skip_llm)
         if sender_relation:
@@ -454,15 +450,17 @@ class DefaultReplyer:
                     except Exception:
                         pass
 
-            # 按平台优先级排序：QQ > Discord > Bilibili > 其他
-            _platform_priority = {"qq": 0, "discord": 1, "bilibili": 2}
+            current_platform = str(getattr(self.chat_stream, "platform", "") or "").lower()
 
             def _get_priority(item):
                 _, pid = item
                 platform = person_info_manager.person_platform_list.get(pid, "")
                 # 处理 "koishi-qq" -> "qq" 这类复合平台名
                 platform_key = platform.split("-")[-1].lower() if platform else ""
-                return _platform_priority.get(platform_key, 3)
+                return (
+                    0 if platform_key == current_platform else 1,
+                    platform_key,
+                )
 
             mentioned_persons.sort(key=_get_priority)
             mentioned_persons = [(mp, pid) for mp, pid in mentioned_persons[:3]]
@@ -495,9 +493,7 @@ class DefaultReplyer:
         use_expression, _, _ = global_config.expression.get_expression_config_for_chat(self.chat_stream.stream_id)
         if not use_expression:
             return "", []
-        # 直播环境下跳过表达方式选取（与 heartFC Bypass 条件一致）
-        _platform = getattr(self.chat_stream, "platform", "")
-        if _platform in {"bilibili", "discord_vc", "universal_vc"}:
+        if not runtime_capabilities_from_stream(self.chat_stream).expression_selection:
             return "", []
         style_habits = []
         # 使用从处理器传来的选中表达方式
@@ -579,27 +575,19 @@ class DefaultReplyer:
             return ""
 
         try:
-            # 检测是否为开启TTS的Bilibili直播间，如果是则仅允许MCP工具
-            tts_mcp_only = False
-            try:
-                if self.chat_stream.platform == "bilibili" and self.chat_stream.context:
-                    msg = self.chat_stream.context.message
-                    if msg and msg.message_info and msg.message_info.template_info:
-                        template_name = msg.message_info.template_info.template_name
-                        if template_name and isinstance(template_name, str) and template_name.endswith("_tts"):
-                            tts_mcp_only = True
-                            logger.info("Bilibili TTS直播间检测到，仅允许MCP工具")
-            except Exception:
-                pass
+            capabilities = runtime_capabilities_from_stream(self.chat_stream)
+            mcp_only = capabilities.tool_mode == "mcp_only"
+            tools_disabled = capabilities.tool_mode == "disabled"
+            if mcp_only:
+                logger.info("适配器声明当前会话仅允许 MCP 工具")
 
             url_info = ""
             search_info = ""
             search_url_info = ""
             tool_results = []
             urls = []
-            tools_disabled = False
 
-            if not tts_mcp_only:
+            if not mcp_only and not tools_disabled:
                 urls = extract_urls(target)
                 if urls:
                     url_preview = ", ".join(urls[:3])
@@ -624,10 +612,13 @@ class DefaultReplyer:
             # === 并行执行：搜索 + 工具判定 ===
             parallel_tasks = {}
 
-            # 1. 搜索任务（仅在无 URL、非 TTS 模式、工具未禁用时触发）
-            # 对于Bilibili直播间，由其两阶段搜索逻辑自行处理搜索，此处跳过判定以降低延迟
-            is_bilibili = getattr(self.chat_stream, "platform", "") in ("bilibili", "bilibili.live")
-            if not tts_mcp_only and not urls and not tools_disabled and not is_bilibili:
+            # 两阶段搜索由 HeartFlow 在首轮回复后处理，标准搜索在这里处理。
+            if (
+                not mcp_only
+                and not urls
+                and not tools_disabled
+                and capabilities.web_search_mode == "standard"
+            ):
                 logger.info("未检测到URL，尝试联网搜索判定")
                 parallel_tasks["search"] = self.web_search_manager.build_search_info(
                     chat_history=chat_history,
@@ -636,15 +627,15 @@ class DefaultReplyer:
                     bot_name=global_config.bot.nickname,
                 )
 
-            # 2. 标准工具 (Standard) - TTS直播间下跳过
-            if not tts_mcp_only:
+            # 标准工具
+            if not mcp_only and not tools_disabled:
                 parallel_tasks["standard_tool"] = self.tool_executor.execute_from_chat_message(
                     sender=sender, target_message=target, chat_history=chat_history, return_details=False
                 )
 
-            # 3. MCP工具 - 始终允许（权限校验通过时）
+            # MCP 工具
             has_mcp_permission = self._check_mcp_permission(user_id=user_id)
-            if has_mcp_permission:
+            if has_mcp_permission and not tools_disabled:
                 parallel_tasks["mcp_tool"] = self.mcp_executor.execute_from_chat_message(
                     sender=sender, target_message=target, chat_history=chat_history, return_details=False
                 )
@@ -945,17 +936,8 @@ class DefaultReplyer:
 
     async def _build_mid_term_memory_block(self, chat_id: str, messages) -> str:
         """构建中期记忆召回文本块"""
-        platform = getattr(self.chat_stream, "platform", "")
-        if platform in {"bilibili", "bilibili.live", "discord_vc", "universal_vc"}:
-            add_cfg = {}
-            try:
-                ctx_msg = getattr(self.chat_stream.context, "message", None)
-                msg_info = getattr(ctx_msg, "message_info", None)
-                add_cfg = getattr(msg_info, "additional_config", None) or {}
-            except Exception:
-                pass
-            if not add_cfg.get("live_memory_search_enabled", True):
-                return ""
+        if not runtime_capabilities_from_stream(self.chat_stream).mid_term_memory:
+            return ""
         try:
             from src.memory_system.mid_term_memory import get_mid_term_memory_manager
 
@@ -1192,34 +1174,16 @@ class DefaultReplyer:
 
         extra_info_block_parts = []
 
-        if chat_stream.platform in ("bilibili", "bilibili.live"):
-            # 检查是否在适配器中被禁用了工具 (由 live_disable_network_search 控制)
-            disable_tools = False
-            if (
-                reply_message
-                and hasattr(reply_message, "additional_config")
-                and isinstance(reply_message.additional_config, dict)
-            ):
-                disable_tools = reply_message.additional_config.get("disable_tools", False)
-
-            # 注入联网搜索能力提示 (仅 Bilibili Live 群聊弹幕区，排除评论区，且未禁用网络搜索)
-            if (
-                is_group_chat
-                and not disable_tools
-                and not (
-                    chat_stream.group_info
-                    and getattr(chat_stream.group_info, "group_id", None)
-                    and str(chat_stream.group_info.group_id).startswith("comment:")
-                )
-            ):
-                extra_info_block_parts.append(
-                    "[联网搜索能力] 如果你认为需要联网实时查询才能回答当前问题"
-                    "（如实时新闻、价格、天气、特定事实查询等），"
-                    '请在你的回复中设置 "web_search" 字段为 true，并在 "search_query" 字段填入搜索关键词。'
-                    "同时在回复文本中写一段简短的话告诉观众你正在查询。"
-                    "如果不需要搜索，不需要包含这些字段。"
-                    "[联网搜索能力结束]"
-                )
+        capabilities = runtime_capabilities_from_stream(chat_stream)
+        if is_group_chat and capabilities.web_search_mode == "two_phase":
+            extra_info_block_parts.append(
+                "[联网搜索能力] 如果你认为需要联网实时查询才能回答当前问题"
+                "（如实时新闻、价格、天气、特定事实查询等），"
+                '请在你的回复中设置 "web_search" 字段为 true，并在 "search_query" 字段填入搜索关键词。'
+                "同时在回复文本中写一段简短的话告诉对方你正在查询。"
+                "如果不需要搜索，不需要包含这些字段。"
+                "[联网搜索能力结束]"
+            )
 
         if extra_info:
             extra_info_block_parts.append(
@@ -1528,13 +1492,8 @@ class DefaultReplyer:
                 logger.debug("LPMM知识库未启用，跳过获取知识库内容")
                 return ""
 
-            # Bypass LPMM for real-time platforms (Bilibili Live, Discord VC)
-            if hasattr(self, "chat_stream") and getattr(self.chat_stream, "platform", None) in [
-                "bilibili",
-                "discord_vc",
-                "universal_vc",
-            ]:
-                logger.debug(f"{self.chat_stream.platform} 直播/语音环境，跳过LPMM检索")
+            if not runtime_capabilities_from_stream(self.chat_stream).knowledge_retrieval:
+                logger.debug("适配器声明当前会话跳过知识库检索")
                 return ""
 
             time_now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())

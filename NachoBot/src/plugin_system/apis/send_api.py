@@ -148,7 +148,8 @@ def _should_suppress_reply_set(reply_set: "ReplySetModel") -> bool:
     return False
 
 
-def _get_silent_reply_texts(target_stream) -> List[str]:
+def _get_suppressed_reply_texts(target_stream) -> List[str]:
+    """Return exact reply texts suppressed by the adapter-declared policy."""
     try:
         context = getattr(target_stream, "context", None)
         last_message = getattr(context, "message", None) if context else None
@@ -158,23 +159,36 @@ def _get_silent_reply_texts(target_stream) -> List[str]:
         additional = getattr(message_info, "additional_config", None)
         if not isinstance(additional, dict):
             return []
-        if not additional.get("silent_reply"):
-            return []
-        if additional.get("source") not in ("koishi-slash", "koishi"):
-            return []
-        texts = additional.get("silent_reply_texts") or []
+
+        policy = additional.get("reply_policy")
+        if isinstance(policy, dict):
+            try:
+                schema_version = int(policy.get("schema_version", 1))
+            except (TypeError, ValueError):
+                return []
+            if schema_version != 1:
+                return []
+            texts = policy.get("suppress_exact_texts") or []
+        else:
+            # Transitional compatibility for adapters using the original fields.
+            if not additional.get("silent_reply"):
+                return []
+            texts = additional.get("silent_reply_texts") or []
+
         if isinstance(texts, str):
             texts = [texts]
-        cleaned = [str(text).strip() for text in texts if str(text).strip()]
-        return cleaned
+        if not isinstance(texts, (list, tuple, set)):
+            return []
+        cleaned = (str(text).strip() for text in texts)
+        return list(dict.fromkeys(text for text in cleaned if text))
     except Exception:
         return []
 
 
-def _should_suppress_silent_reply(target_stream, text: str) -> bool:
+def _should_suppress_reply_by_policy(target_stream, text: str) -> bool:
     if not text:
         return False
-    texts = _get_silent_reply_texts(target_stream)
+    texts = _get_suppressed_reply_texts(target_stream)
     if not texts:
         return False
     return text in texts
@@ -236,7 +250,7 @@ async def _send_to_target_receipt_permitted(
         message_segment:
         stream_id: 目标流ID
         display_message: 显示消息
-        typing: 是否模拟打字等待。
+        typing: 是否模拟打字等待
         reply_to: 回复消息，格式为"发送者:消息内容"
         storage_message: 是否存储消息到数据库
         show_log: 发送是否显示日志
@@ -266,9 +280,9 @@ async def _send_to_target_receipt_permitted(
         if not target_stream:
             logger.error(f"[SendAPI] 未找到聊天流: {stream_id}")
             return SendReceipt(SendStatus.FAILED, stream_id, detail="stream_not_found")
-        if text_data is not None and _should_suppress_silent_reply(target_stream, text_data):
-            logger.info("[SendAPI] 本次回复已被 silent_reply 抑制")
-            return SendReceipt(SendStatus.SUPPRESSED, stream_id, detail="silent_reply")
+        if text_data is not None and _should_suppress_reply_by_policy(target_stream, text_data):
+            logger.info("[SendAPI] 本次回复已被适配器回复策略抑制")
+            return SendReceipt(SendStatus.SUPPRESSED, stream_id, detail="reply_policy")
 
         # 创建发送器
         message_sender = UniversalMessageSender()

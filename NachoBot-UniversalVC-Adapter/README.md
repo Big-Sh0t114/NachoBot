@@ -10,13 +10,13 @@
 - 🔇 **智能批量去噪 (RNNoise)** — 内置基于 `pyrnnoise` 的深度学习降噪。VAD 触发后异步进行批量降噪，在保证低至毫秒级捕获延迟的同时，完美过滤游戏底噪、键盘声与环境噪音。
 - 🎙 **高精度语音活动检测 (Silero VAD)** — 通过 `sherpa-onnx` 运行，比传统 RMS 阈值拥有更高的精准度，能完美切分连续对话。
 - 👥 **实时声纹追踪 (WeSpeaker)** — 在多人频道中，能够通过声纹特征 (WeSpeaker ResNet34) 自动聚类并追踪说话人，给 NachoBot Core 提供说话人 ID 区分上下文！
-- ⚡ **本地流式语音识别 (Zipformer)** — 采用全本地化、支持流式的 Zipformer ASR 模型，无需网络调用，实现极致低延迟语音转文本。
-- 📦 **自动化部署** — 启动时自动从云端拉取所需的所有 ONNX 模型（含断点续传），内置 DLL 劫持防御，免管理员权限。
+- ⚡ **共享流式语音识别 (Zipformer)** — 复用 `NachoBot-Multimodal-Adapter` 的 2025 中文 xlarge INT8 模型，在 CPU 上逐块解码；VAD 结束时直接提交最终文本，无需重新识别整段语音。
+- 📦 **单一模型所有权** — UniversalVC 只管理 Silero VAD 与 WeSpeaker；ASR 配置、实现和模型下载统一由 Multimodal-Adapter 负责。
 
 ## 💻 前置要求
 
 1. **Windows 10/11** (20H1+)
-2. **Python 3.10+** (推荐使用 `uv` 管理依赖)
+2. **Python 3.11+** (推荐使用 `uv` 管理依赖)
 3. **虚拟声卡驱动** — 推荐 [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) 或 [VoiceMeeter](https://vb-audio.com/Voicemeeter/)
 4. **NachoBot Core** 处于运行状态
 
@@ -75,8 +75,18 @@ min_silence_duration = 0.3 # 控制切断语句的间隔
 enabled = true
 similarity_threshold = 0.6 # 声纹区分灵敏度
 
-[local_asr]
-mode = "local_streaming" # 可选: local_streaming 或 remote_api (后备方案)
+```
+
+流式 ASR 不再在 UniversalVC 中重复配置。请在相邻的
+`NachoBot-Multimodal-Adapter/configs/perception.toml` 中统一设置：
+
+```toml
+[asr]
+mode = "local_streaming"
+provider = "cpu"
+num_threads = 4
+models_dir = "models"
+auto_download = true
 ```
 
 ## 🧩 架构流水线工作原理
@@ -99,7 +109,7 @@ mode = "local_streaming" # 可选: local_streaming 或 remote_api (后备方案)
     │                                               │
     │ [5. 声纹特征] WeSpeaker 提取特征并分配 ID     │
     │                                               │
-    │ [6. 语音识别] 流式 Zipformer (本地高精度转换) │
+    │ [6. 语音识别] xlarge INT8 Zipformer (CPU流式) │
     └───────────────────────────────────────────────┘
                           │
                           ↓
@@ -114,12 +124,12 @@ mode = "local_streaming" # 可选: local_streaming 或 remote_api (后备方案)
 ```
 NachoBot-UniversalVC-Adapter/
 ├── main.py               # 入口程序，负责检查环境与依赖
-├── model_manager.py      # AI 模型自动下载与验证管理器
+├── model_manager.py      # VAD 与声纹模型下载管理器
+├── multimodal_bridge.py  # 接入 Multimodal 共享 ASR 包
 ├── audio_pipeline.py     # 核心组件: 异步音频调度流水线
 ├── denoise.py            # RNNoise 降噪封装
 ├── vad_processor.py      # Silero VAD 封装
 ├── speaker_tracker.py    # WeSpeaker 声纹与数据库聚类
-├── streaming_asr.py      # Sherpa-onnx 本地流式识别
 ├── adapter.py            # ncnk_message 发送与流程控制
 ├── audio_capture.py      # 进程音频捕获
 ├── audio_output.py       # 虚拟声卡音频输出

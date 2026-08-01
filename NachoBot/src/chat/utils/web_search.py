@@ -146,7 +146,7 @@ class WebSearchManager:
             logger.info(f"直接搜索无结果: query={query}")
             return ""
 
-        formatted = self._format_results(query, results, "bilibili_live_pass2")
+        formatted = self._format_results(query, results, "two_phase_pass2")
         self._set_cache(query, formatted)
         logger.info(f"直接搜索结果: {self._truncate_for_log(formatted)}")
         return formatted

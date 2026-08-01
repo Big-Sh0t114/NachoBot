@@ -19,7 +19,7 @@ from src.chat.advanced.advanced_manager import advanced_manager
 from src.plugin_system.core import component_registry, events_manager, global_announcement_manager
 from src.plugin_system.base import BaseCommand, EventType
 from src.plugin_system.apis import send_api
-from src.live.gift_value_tracker import track_gift_value
+from src.live.platform_event_tracker import track_platform_event
 from src.chat.keyword_cache import promise_cache_manager
 from src.person_info.bind_manager import bind_manager  # 导入多平台绑定管理器
 
@@ -479,16 +479,6 @@ class ChatBot:
             logger.debug(f"Incoming Message Platform: {platform}, Message Type: {message_data.get('type')}")
             logger.debug(f"Full message data: {message_data}")
 
-            if platform == "bilibili.live":
-                # Normalize live traffic onto the regular HeartFlow platform.
-                platform = "bilibili"
-                message_info = message_data["message_info"]
-                message_info["platform"] = platform
-                if message_info.get("user_info"):
-                    message_info["user_info"]["platform"] = platform
-                if message_info.get("group_info"):
-                    message_info["group_info"]["platform"] = platform
-
             if message_data["message_info"].get("group_info") is not None:
                 message_data["message_info"]["group_info"]["group_id"] = str(
                     message_data["message_info"]["group_info"]["group_id"]
@@ -528,8 +518,8 @@ class ChatBot:
             # 处理消息内容，生成纯文本
             await message.process()
 
-            # 全局监听：处理打赏和VIP事件，保证无论主播模式开关与否都能记录
-            asyncio.create_task(track_gift_value(message))
+            # 全局监听：处理适配器声明的打赏/会员事件
+            asyncio.create_task(track_platform_event(message))
 
             # 约定/誓言缓存处理
             promise_cache_hits = promise_cache_manager.handle_message(message)

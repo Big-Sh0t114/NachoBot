@@ -46,13 +46,6 @@ similarity_threshold = 0.5
 max_speakers = 24  # Set to 0 for unlimited
 db_path = "speaker_db.json"
 
-[local_asr]
-# Local streaming ASR (sherpa-onnx Zipformer Chinese)
-# mode = "local_streaming"  — ultra-low latency, runs locally
-# mode = "remote_api"       — fallback to HTTP ASR API (needs [stt] config)
-mode = "local_streaming"
-num_threads = 2
-
 [microphone]
 enabled = true
 device_name = "HECATE G4 S PRO"

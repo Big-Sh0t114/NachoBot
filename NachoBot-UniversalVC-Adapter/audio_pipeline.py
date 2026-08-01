@@ -6,17 +6,23 @@ processing chain, emitting (speaker_id, speaker_name, text) results via callback
 """
 
 import asyncio
+from collections import deque
 import logging
-from typing import Callable, Optional
+from typing import Callable, Deque, Dict, Optional
 
 import numpy as np
 from scipy.signal import resample_poly
+
+from multimodal_bridge import ensure_multimodal_import
+
+ensure_multimodal_import()
+
+from nachobot_multimodal.asr.streaming import StreamingASR  # noqa: E402
 
 from config import AdapterConfig
 from denoise import DenoiseProcessor
 from vad_processor import VADProcessor
 from speaker_tracker import SpeakerTracker
-from streaming_asr import StreamingASR
 
 
 class AudioPipeline:
@@ -24,6 +30,9 @@ class AudioPipeline:
 
     # Target sample rate for VAD / ASR / Speaker embedding
     TARGET_SR = 16000
+    ASR_PREROLL_SECONDS = 0.3
+    SYSTEM_STREAM_ID = "system"
+    MIC_STREAM_ID = "microphone"
 
     def __init__(
         self,
@@ -90,15 +99,8 @@ class AudioPipeline:
         )
 
         # ── Stage 4: ASR ──
-        asr_kwargs = {
-            "mode": config.local_asr.mode,
-            "tokens_path": config.local_asr.tokens_path,
-            "encoder_path": config.local_asr.encoder_path,
-            "decoder_path": config.local_asr.decoder_path,
-            "joiner_path": config.local_asr.joiner_path,
-            "num_threads": config.local_asr.num_threads,
-            "logger": logger,
-        }
+        # Model, provider and thread settings are owned by Multimodal-Adapter.
+        asr_kwargs = {"logger": logger}
         # Pass remote API config as fallback
         if config.stt.enabled:
             asr_kwargs["api_key"] = config.stt.api_key
@@ -106,10 +108,24 @@ class AudioPipeline:
             asr_kwargs["model"] = config.stt.model
         self.asr = StreamingASR(**asr_kwargs)
 
+        self._asr_active: Dict[str, bool] = {
+            self.SYSTEM_STREAM_ID: False,
+            self.MIC_STREAM_ID: False,
+        }
+        self._asr_preroll: Dict[str, Deque[np.ndarray]] = {
+            self.SYSTEM_STREAM_ID: deque(),
+            self.MIC_STREAM_ID: deque(),
+        }
+        self._asr_preroll_samples: Dict[str, int] = {
+            self.SYSTEM_STREAM_ID: 0,
+            self.MIC_STREAM_ID: 0,
+        }
+
         self.logger.info(
-            f"AudioPipeline initialized: denoise={config.denoise.enabled}, "
-            f"vad=Silero, speaker={config.speaker.enabled}, "
-            f"asr_mode={config.local_asr.mode}"
+            "AudioPipeline initialized: "
+            f"denoise={config.denoise.enabled}, vad=Silero, "
+            f"speaker={config.speaker.enabled}, asr_mode={self.asr.mode}, "
+            f"asr_provider={self.asr.provider}"
         )
 
     def set_loop(self, loop: asyncio.AbstractEventLoop):
@@ -157,23 +173,36 @@ class AudioPipeline:
             # Ensure 1D contiguous float32 for sherpa-onnx VAD
             mono_16k = np.ascontiguousarray(mono_16k.ravel(), dtype=np.float32)
 
-            # 4. Feed to VAD — returns completed speech segments
+            # 4. Feed VAD and incrementally decode while speech is in progress
+            was_speaking = self.vad.is_speaking
             segments = self.vad.feed(mono_16k)
+            is_speaking = self.vad.is_speaking
+            streaming_text = self._feed_streaming_asr(
+                self.SYSTEM_STREAM_ID,
+                mono_16k,
+                was_speaking,
+                is_speaking,
+            )
 
             # Notify speech start (for TTS interruption)
-            if self.vad.is_speaking and not self._speech_started_notified:
+            if is_speaking and not self._speech_started_notified:
                 self._speech_started_notified = True
                 if self.on_speech_start and self._loop:
                     asyncio.run_coroutine_threadsafe(self.on_speech_start(), self._loop)
 
-            if not self.vad.is_speaking:
+            if not is_speaking:
                 self._speech_started_notified = False
 
-            # 5. Process completed segments
-            for seg in segments:
+            # 5. Speaker identification uses the completed VAD segment. ASR has
+            # already been decoded incrementally, so no second decode is needed.
+            for index, seg in enumerate(segments):
                 if self._loop:
                     asyncio.run_coroutine_threadsafe(
-                        self._process_segment(seg.samples), self._loop
+                        self._process_segment(
+                            seg.samples,
+                            streaming_text if index == 0 else None,
+                        ),
+                        self._loop,
                     )
         except Exception as e:
             self.logger.error(f"Pipeline frame error: {e}")
@@ -204,35 +233,51 @@ class AudioPipeline:
 
             mono_16k = np.ascontiguousarray(mono_16k.ravel(), dtype=np.float32)
 
+            was_speaking = self.mic_vad.is_speaking
             segments = self.mic_vad.feed(mono_16k)
+            is_speaking = self.mic_vad.is_speaking
+            streaming_text = self._feed_streaming_asr(
+                self.MIC_STREAM_ID,
+                mono_16k,
+                was_speaking,
+                is_speaking,
+            )
 
-            if self.mic_vad.is_speaking and not self._mic_speech_started_notified:
+            if is_speaking and not self._mic_speech_started_notified:
                 self._mic_speech_started_notified = True
                 if self.on_mic_speech_start and self._loop:
                     asyncio.run_coroutine_threadsafe(self.on_mic_speech_start(), self._loop)
 
-            if not self.mic_vad.is_speaking and self._mic_speech_started_notified:
+            if not is_speaking and self._mic_speech_started_notified:
                 self._mic_speech_started_notified = False
                 if self.on_mic_speech_end and self._loop:
                     asyncio.run_coroutine_threadsafe(self.on_mic_speech_end(), self._loop)
 
-            for seg in segments:
+            for index, seg in enumerate(segments):
                 if self._loop:
                     asyncio.run_coroutine_threadsafe(
-                        self._process_mic_segment(seg.samples), self._loop
+                        self._process_mic_segment(
+                            seg.samples,
+                            streaming_text if index == 0 else None,
+                        ),
+                        self._loop,
                     )
         except Exception as e:
             self.logger.error(f"Mic pipeline frame error: {e}")
 
-    async def _process_segment(self, samples_16k: np.ndarray):
-        """Process a completed speech segment: Denoise -> Speaker ID + ASR."""
+    async def _process_segment(
+        self,
+        samples_16k: np.ndarray,
+        streaming_text: Optional[str] = None,
+    ):
+        """Finish speaker identification and publish a completed utterance."""
         try:
             duration = len(samples_16k) / self.TARGET_SR
             self.logger.info(f"Processing speech segment: {duration:.2f}s")
 
-            # 1. Denoise (run in executor to avoid blocking the event loop)
+            # Denoising is retained for speaker identification and one-shot
+            # fallback. The primary ASR path has already decoded incrementally.
             if self.denoiser.enabled:
-                import asyncio
                 loop = asyncio.get_running_loop()
                 samples_16k = await loop.run_in_executor(
                     None, self._denoise_segment, samples_16k
@@ -241,8 +286,11 @@ class AudioPipeline:
             # 2. Speaker identification
             speaker_id, speaker_name = self.speaker_tracker.identify(samples_16k)
 
-            # 3. ASR
-            text = await self.asr.recognize_segment_async(samples_16k)
+            # 3. Remote mode needs a complete-buffer request. Local online ASR
+            # never decodes the completed segment a second time.
+            text = streaming_text
+            if not text and not self.asr.supports_streaming:
+                text = await self.asr.recognize_segment_async(samples_16k)
 
             if text and self.on_result:
                 self.logger.info(f"[{speaker_name}] ({speaker_id}): {text}")
@@ -251,14 +299,17 @@ class AudioPipeline:
         except Exception as e:
             self.logger.error(f"Segment processing error: {e}", exc_info=True)
 
-    async def _process_mic_segment(self, samples_16k: np.ndarray):
-        """Process a microphone speech segment: Denoise -> ASR (Fixed Owner ID)."""
+    async def _process_mic_segment(
+        self,
+        samples_16k: np.ndarray,
+        streaming_text: Optional[str] = None,
+    ):
+        """Publish a completed microphone utterance with the fixed owner ID."""
         try:
             duration = len(samples_16k) / self.TARGET_SR
             self.logger.info(f"Processing mic segment: {duration:.2f}s")
 
             if self.denoiser.enabled:
-                import asyncio
                 loop = asyncio.get_running_loop()
                 samples_16k = await loop.run_in_executor(
                     None, self._denoise_segment, samples_16k
@@ -268,7 +319,9 @@ class AudioPipeline:
             speaker_id = self._owner_id
             speaker_name = self._owner_name
 
-            text = await self.asr.recognize_segment_async(samples_16k)
+            text = streaming_text
+            if not text and not self.asr.supports_streaming:
+                text = await self.asr.recognize_segment_async(samples_16k)
 
             if text and self.on_result:
                 self.logger.info(f"[{speaker_name}] ({speaker_id}) [Mic]: {text}")
@@ -276,6 +329,78 @@ class AudioPipeline:
 
         except Exception as e:
             self.logger.error(f"Mic segment processing error: {e}", exc_info=True)
+
+    def _feed_streaming_asr(
+        self,
+        stream_id: str,
+        samples_16k: np.ndarray,
+        was_speaking: bool,
+        is_speaking: bool,
+    ) -> Optional[str]:
+        """Advance one online recognizer stream from VAD state transitions."""
+        if not self.asr.supports_streaming:
+            return None
+
+        active = self._asr_active[stream_id]
+        if not active:
+            self._append_asr_preroll(stream_id, samples_16k)
+
+        if not was_speaking and is_speaking:
+            if not self.asr.start_stream(stream_id):
+                self._clear_asr_preroll(stream_id)
+                return None
+            self._asr_active[stream_id] = True
+            active = True
+            preroll = self._take_asr_preroll(stream_id)
+            if preroll.size:
+                self.asr.accept_stream_audio(stream_id, preroll)
+        elif active:
+            self.asr.accept_stream_audio(stream_id, samples_16k)
+
+        if active and was_speaking and not is_speaking:
+            final_text = self.asr.finish_stream(stream_id)
+            self._asr_active[stream_id] = False
+            self._clear_asr_preroll(stream_id)
+            return final_text
+
+        return None
+
+    def _append_asr_preroll(
+        self,
+        stream_id: str,
+        samples_16k: np.ndarray,
+    ) -> None:
+        """Keep a short lead-in so VAD activation does not clip first syllables."""
+        samples = np.ascontiguousarray(samples_16k, dtype=np.float32).ravel().copy()
+        if samples.size == 0:
+            return
+
+        buffer = self._asr_preroll[stream_id]
+        buffer.append(samples)
+        self._asr_preroll_samples[stream_id] += samples.size
+        max_samples = int(self.TARGET_SR * self.ASR_PREROLL_SECONDS)
+
+        while self._asr_preroll_samples[stream_id] > max_samples and buffer:
+            excess = self._asr_preroll_samples[stream_id] - max_samples
+            first = buffer[0]
+            if first.size <= excess:
+                buffer.popleft()
+                self._asr_preroll_samples[stream_id] -= first.size
+            else:
+                buffer[0] = first[excess:].copy()
+                self._asr_preroll_samples[stream_id] -= excess
+
+    def _take_asr_preroll(self, stream_id: str) -> np.ndarray:
+        buffer = self._asr_preroll[stream_id]
+        if not buffer:
+            return np.empty(0, dtype=np.float32)
+        samples = np.concatenate(tuple(buffer)).astype(np.float32, copy=False)
+        self._clear_asr_preroll(stream_id)
+        return np.ascontiguousarray(samples)
+
+    def _clear_asr_preroll(self, stream_id: str) -> None:
+        self._asr_preroll[stream_id].clear()
+        self._asr_preroll_samples[stream_id] = 0
 
     def _denoise_segment(self, samples_16k: np.ndarray) -> np.ndarray:
         """Upsample to 48kHz, denoise, and downsample to 16kHz."""
