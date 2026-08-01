@@ -8,6 +8,21 @@ const TerminalModule = (() => {
     let activeServiceId = 'all';
     let ws = null;
     let autoScroll = true;
+    // NapCat prints QR codes as Unicode half-block art. Browser text layout
+    // introduces gaps between those glyphs, so retain the raw rows briefly and
+    // redraw them as a pixel-perfect canvas once the QR URL marker arrives.
+    const napCatQrCaptures = new Map();
+    const NAPCAT_SHELL_ID = 'napcat_shell';
+    const NAPCAT_QR_START_RE = /请扫描下面的二维码/;
+    const NAPCAT_QR_END_RE = /二维码解码\s*URL\s*:/i;
+    const NAPCAT_QR_ART_RE = /^[█▀▄ ]+$/;
+    const NAPCAT_QR_ART_START_RE = /^▄{23,}$/;
+    const NAPCAT_QR_CELLS = {
+        '█': [false, false],
+        '▀': [false, true],
+        '▄': [true, false],
+        ' ': [true, true],
+    };
 
     function init() {
         // Toolbar events
@@ -75,6 +90,7 @@ const TerminalModule = (() => {
             ws.close();
             ws = null;
         }
+        napCatQrCaptures.clear();
 
         const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
         const url = `${proto}//${location.host}/ws/logs/${serviceId}`;
@@ -113,12 +129,52 @@ const TerminalModule = (() => {
         };
     }
 
-    function appendLogLine(text, showTag) {
+    function appendLogLine(text, showTag, skipQrHandling = false) {
         const output = document.getElementById('terminal-output');
 
         // Remove placeholder
         const ph = output.querySelector('.terminal-placeholder');
         if (ph) ph.remove();
+
+        let tag = null;
+        if (showTag) {
+            // Extract tag from "[service_id] ..." format before inspecting
+            // special log output so the merged terminal view works as well.
+            const match = text.match(/^\[([^\]]+)\]\s*/);
+            if (match) {
+                tag = match[1];
+                text = text.substring(match[0].length);
+            }
+        }
+
+        const sourceId = tag || (activeServiceId === 'all' ? null : activeServiceId);
+        if (!skipQrHandling && sourceId === NAPCAT_SHELL_ID) {
+            if (NAPCAT_QR_START_RE.test(text)) {
+                napCatQrCaptures.set(sourceId, { lines: [], showTag, tag });
+            } else if (isNapCatQrArtLine(text)) {
+                // The preceding warning line can be outside of a replayed log
+                // window. NapCat's all-▄ top border is unambiguous, so use it
+                // as a second capture trigger instead of rendering it as text.
+                if (!napCatQrCaptures.has(sourceId) && isNapCatQrArtStart(text)) {
+                    napCatQrCaptures.set(sourceId, { lines: [], showTag, tag });
+                }
+                const capture = napCatQrCaptures.get(sourceId);
+                if (capture) {
+                    // Do not place the font-rendered version in the DOM: its glyph
+                    // spacing corrupts the QR code before a scanner can see it.
+                    capture.lines.push(stripLineEnding(text));
+                    return;
+                }
+            } else if (napCatQrCaptures.has(sourceId) && NAPCAT_QR_END_RE.test(text)) {
+                const capture = napCatQrCaptures.get(sourceId);
+                napCatQrCaptures.delete(sourceId);
+                if (!appendNapCatQr(capture)) {
+                    // Keep the original output available if an upstream format
+                    // change ever prevents us from decoding the character art.
+                    appendNapCatQrFallback(capture);
+                }
+            }
+        }
 
         // Determine log level
         let level = 'info';
@@ -140,14 +196,8 @@ const TerminalModule = (() => {
         }
 
         let html = '';
-        if (showTag) {
-            // Extract tag from "[service_id] ..." format
-            const match = text.match(/^\[([^\]]+)\]\s*/);
-            if (match) {
-                const tag = match[1];
-                html += `<span class="log-tag ${tag}">${escapeHtml(tag)}</span>`;
-                text = text.substring(match[0].length);
-            }
+        if (tag) {
+            html += `<span class="log-tag ${tag}">${escapeHtml(tag)}</span>`;
         }
 
         html += escapeHtml(text);
@@ -161,6 +211,102 @@ const TerminalModule = (() => {
 
         if (autoScroll) {
             output.scrollTop = output.scrollHeight;
+        }
+    }
+
+    function stripLineEnding(text) {
+        return text.replace(/[\r\n]+$/, '');
+    }
+
+    function isNapCatQrArtLine(text) {
+        const line = stripLineEnding(text);
+        return line.length >= 3 && NAPCAT_QR_ART_RE.test(line) && /[█▀▄]/.test(line);
+    }
+
+    function isNapCatQrArtStart(text) {
+        return NAPCAT_QR_ART_START_RE.test(stripLineEnding(text));
+    }
+
+    function decodeNapCatQr(lines) {
+        if (lines.length < 2) return null;
+
+        const lineWidth = lines[0].length;
+        const moduleCount = lineWidth - 2; // NapCat adds one white cell at each side.
+        if (moduleCount < 21 || (moduleCount - 17) % 4 !== 0) return null;
+
+        const matrix = [];
+        // The first line is NapCat's terminal-only top border. Every remaining
+        // character row contains two QR matrix rows using half-block glyphs.
+        for (const line of lines.slice(1)) {
+            if (line.length !== lineWidth) return null;
+            const encodedCells = line.slice(1, -1);
+            const topRow = [];
+            const bottomRow = [];
+
+            for (const cell of encodedCells) {
+                const rows = NAPCAT_QR_CELLS[cell];
+                if (!rows) return null;
+                topRow.push(rows[0]);
+                bottomRow.push(rows[1]);
+            }
+
+            matrix.push(topRow);
+            if (matrix.length < moduleCount) matrix.push(bottomRow);
+            if (matrix.length >= moduleCount) break;
+        }
+
+        return matrix.length === moduleCount ? matrix : null;
+    }
+
+    function appendNapCatQr(capture) {
+        const matrix = decodeNapCatQr(capture.lines);
+        if (!matrix) return false;
+
+        const quietZone = 4;
+        const modulePixels = 8;
+        const moduleCount = matrix.length;
+        const canvasModules = moduleCount + quietZone * 2;
+        const canvas = document.createElement('canvas');
+        canvas.className = 'terminal-qr-canvas';
+        canvas.width = canvasModules * modulePixels;
+        canvas.height = canvasModules * modulePixels;
+        canvas.setAttribute('role', 'img');
+        canvas.setAttribute('aria-label', 'QQ 登录二维码');
+
+        const context = canvas.getContext('2d');
+        if (!context) return false;
+        context.fillStyle = '#ffffff';
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        context.fillStyle = '#000000';
+        matrix.forEach((row, y) => {
+            row.forEach((isDark, x) => {
+                if (isDark) {
+                    context.fillRect(
+                        (x + quietZone) * modulePixels,
+                        (y + quietZone) * modulePixels,
+                        modulePixels,
+                        modulePixels,
+                    );
+                }
+            });
+        });
+
+        const card = document.createElement('div');
+        card.className = 'terminal-qr';
+        card.appendChild(canvas);
+        document.getElementById('terminal-output').appendChild(card);
+
+        if (autoScroll) {
+            const output = document.getElementById('terminal-output');
+            output.scrollTop = output.scrollHeight;
+        }
+        return true;
+    }
+
+    function appendNapCatQrFallback(capture) {
+        for (const line of capture.lines) {
+            const taggedLine = capture.tag ? `[${capture.tag}] ${line}` : line;
+            appendLogLine(taggedLine, capture.showTag, true);
         }
     }
 
@@ -184,6 +330,7 @@ const TerminalModule = (() => {
     function clearLog() {
         const output = document.getElementById('terminal-output');
         output.innerHTML = '';
+        napCatQrCaptures.clear();
     }
 
     function exportLog() {

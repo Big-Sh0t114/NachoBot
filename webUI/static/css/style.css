@@ -655,6 +655,21 @@ body {
 .log-line.info    { color: #e2e8f0; }
 .log-line.warning { color: #f59e0b; }
 .log-line.error   { color: #ef4444; }
+.terminal-qr {
+    width: fit-content;
+    max-width: 100%;
+    margin: 8px 0;
+    padding: 0;
+    background: #fff;
+    line-height: 0;
+}
+.terminal-qr-canvas {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    background: #fff;
+    image-rendering: pixelated;
+}
 .log-line .log-tag {
     display: inline-block;
     padding: 0 6px;
