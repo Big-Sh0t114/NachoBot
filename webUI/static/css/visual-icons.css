@@ -1,0 +1,222 @@
+/*
+   NachoBot visual icon layer
+   Local SVGs keep the interface consistent across Windows, macOS, and Linux.
+*/
+
+.ui-icon {
+    width: 1.08em;
+    height: 1.08em;
+    display: inline-block;
+    flex: 0 0 auto;
+    vertical-align: -0.17em;
+    color: currentColor;
+    overflow: visible;
+}
+
+.ui-icon.icon-alert-triangle { color: var(--error) !important; }
+.ui-icon.icon-circle-check { color: var(--success) !important; }
+
+.ui-icon.is-leading { margin-inline-end: 0.42em; }
+.ui-icon.is-trailing { margin-inline-start: 0.42em; }
+.ui-icon.is-middle { margin-inline: 0.32em; }
+
+.icon-loader {
+    animation: nacho-icon-spin 0.9s linear infinite;
+}
+
+@keyframes nacho-icon-spin {
+    to { transform: rotate(360deg); }
+}
+
+/* Navigation and compact controls */
+.nav-icon,
+.sidebar-search-icon,
+.sidebar-collapse-button,
+.sidebar-new-chat,
+.chat-mobile-history-button,
+.chat-send-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.nav-icon .ui-icon,
+.sidebar-search-icon .ui-icon,
+.sidebar-collapse-button .ui-icon,
+.sidebar-new-chat .ui-icon,
+.chat-mobile-history-button .ui-icon,
+.chat-send-button .ui-icon {
+    margin: 0;
+}
+
+.nav-icon .ui-icon {
+    width: 1.22rem;
+    height: 1.22rem;
+    color: #8fe6dc;
+}
+
+.nav-item:hover .nav-icon .ui-icon,
+.nav-item.active .nav-icon .ui-icon {
+    color: var(--accent-lighter);
+    filter: drop-shadow(0 0 6px rgba(94, 234, 212, 0.32));
+}
+
+.sidebar-search-icon .ui-icon,
+.sidebar-collapse-button .ui-icon,
+.chat-mobile-history-button .ui-icon {
+    width: 1rem;
+    height: 1rem;
+}
+
+.sidebar-new-chat .ui-icon,
+.chat-send-button .ui-icon {
+    width: 1.12rem;
+    height: 1.12rem;
+}
+
+.chat-send-button.is-busy .ui-icon {
+    animation: chat-send-pulse 0.9s ease-in-out infinite alternate;
+}
+
+/* Primary visual anchors use softly framed line art instead of large emoji. */
+.placeholder-icon,
+.component-icon,
+.hint-icon,
+.path-check-icon,
+.memory-stat-card .stat-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--accent-dark);
+}
+
+.placeholder-icon {
+    width: 64px;
+    height: 64px;
+    border: 1px solid rgba(13, 148, 136, 0.15);
+    border-radius: 21px;
+    background: linear-gradient(145deg, rgba(20, 184, 166, 0.13), rgba(13, 148, 136, 0.035));
+    box-shadow: inset 0 1px rgba(255, 255, 255, 0.72);
+    opacity: 1;
+}
+
+.placeholder-icon .ui-icon {
+    width: 2rem;
+    height: 2rem;
+    margin: 0;
+}
+
+.component-icon {
+    width: 44px;
+    height: 44px;
+    border: 1px solid rgba(13, 148, 136, 0.13);
+    border-radius: 14px;
+    background: rgba(13, 148, 136, 0.07);
+    text-align: initial;
+}
+
+.component-icon .ui-icon {
+    width: 1.72rem;
+    height: 1.72rem;
+    margin: 0;
+}
+
+.component-option.checked .component-icon {
+    color: var(--accent-dark);
+    background: rgba(13, 148, 136, 0.12);
+    border-color: rgba(13, 148, 136, 0.26);
+}
+
+.hint-icon {
+    width: 30px;
+    height: 30px;
+    border-radius: 10px;
+    background: rgba(13, 148, 136, 0.09);
+}
+
+.hint-icon .ui-icon,
+.path-check-icon .ui-icon,
+.memory-stat-card .stat-icon .ui-icon {
+    width: 1.18rem;
+    height: 1.18rem;
+    margin: 0;
+}
+
+.path-check-icon {
+    width: 34px;
+    height: 34px;
+    border-radius: 10px;
+    background: rgba(13, 148, 136, 0.07);
+}
+
+.memory-stat-card .stat-icon {
+    width: 42px;
+    height: 42px;
+    border-radius: 13px;
+    background: rgba(13, 148, 136, 0.075);
+}
+
+/* Dense management screens retain compact, crisp inline symbols. */
+.editor-actions .ui-icon,
+.plugin-actions .ui-icon,
+.terminal-tab .ui-icon,
+.btn .ui-icon,
+.btn-sm .ui-icon,
+.btn-icon .ui-icon,
+.btn-download .ui-icon,
+.db-stats-bar .ui-icon,
+.db-filter-hint .ui-icon,
+.knowledge-stats .ui-icon,
+.knowledge-readonly-badge .ui-icon,
+.setup-card-header .ui-icon,
+.setup-nav .ui-icon,
+.form-section-title .ui-icon,
+.path-check-result .ui-icon,
+.deploy-item-icon .ui-icon,
+.check-icon .ui-icon,
+.port-status-icon .ui-icon,
+.config-status-icon .ui-icon {
+    margin-inline: 0;
+}
+
+.btn .ui-icon,
+.btn-sm .ui-icon,
+.btn-icon .ui-icon,
+.btn-download .ui-icon,
+.terminal-tab .ui-icon {
+    width: 1em;
+    height: 1em;
+    vertical-align: -0.13em;
+}
+
+.btn-icon .ui-icon { width: 1.12rem; height: 1.12rem; }
+
+.editor-placeholder .ui-icon,
+.memory-empty .placeholder-icon .ui-icon { color: var(--accent-dark); }
+
+.check-icon .ui-icon,
+.port-status-icon .ui-icon,
+.config-status-icon .ui-icon,
+.path-check-result .ui-icon,
+.deploy-item-icon .ui-icon {
+    width: 1.12rem;
+    height: 1.12rem;
+}
+
+.setup-check-item.ok .check-icon,
+.deploy-item.done .deploy-item-icon,
+.path-check-result.valid .ui-icon { color: var(--success); }
+
+.setup-check-item.warning .check-icon,
+.deploy-item.warning .deploy-item-icon { color: var(--warning); }
+
+.setup-check-item.error .check-icon,
+.deploy-item.error .deploy-item-icon,
+.path-check-result.invalid .ui-icon { color: var(--error); }
+
+@media (prefers-reduced-motion: reduce) {
+    .icon-loader,
+    .chat-send-button.is-busy .ui-icon {
+        animation: none;
+    }
+}

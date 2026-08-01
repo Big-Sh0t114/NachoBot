@@ -235,28 +235,28 @@ const SetupModule = (() => {
         }
         else if (vramGb > 4.0 && vramGb < 6.0) {
             // VRAM > 4GB and < 6GB
-            titleEl.textContent = 'gpt lite 方案';
-            descEl.textContent = '检测到可用显存介于 4G 到 6G 之间。推荐使用 gpt lite 方案部署（仅启用 GPT-SoVITS 合成，不启用本地 Florence-2 VLM 视觉与 FunASR 语音识别，以节约显存）。';
+            titleEl.textContent = 'GPT LITE 方案';
+            descEl.textContent = '检测到可用显存介于 4G 到 6G 之间。推荐使用 GPT LITE 方案部署（仅启用 GPT-SoVITS 合成，不启用本地 Florence-2 VLM 视觉与 FunASR 语音识别，以节约显存）。';
             recommendedLaunchGroup = '语音服务 (LITE)';
             createApplyButton('一键应用此方案', () => applyScheme('gpt_lite'));
         }
         else if (vramGb >= 6.0 && vramGb <= 8.0) {
             // VRAM in [6GB, 8GB]
-            titleEl.textContent = 'gpt FULL 方案';
-            descEl.textContent = '检测到可用显存介于 6G 到 8G 之间。推荐使用 gpt FULL 方案部署（启用 GPT-SoVITS 语音合成 + Florence-2 视觉大模型 + FunASR 语音识别，满足全功能交互需求）。';
+            titleEl.textContent = 'GPT FULL 方案';
+            descEl.textContent = '检测到可用显存介于 6G 到 8G 之间。推荐使用 GPT FULL 方案部署（启用 GPT-SoVITS 语音合成 + Florence-2 视觉大模型 + FunASR 语音识别，满足全功能交互需求）。';
             recommendedLaunchGroup = '多模态服务 (FULL)';
             createApplyButton('一键应用此方案', () => applyScheme('gpt_full'));
         }
         else if (vramGb > 8.0 && vramGb <= 12.0) {
             // VRAM in (8GB, 12GB]
-            titleEl.textContent = 'gpt FULL 方案 或 vox LITE 方案';
-            descEl.textContent = '检测到可用显存介于 8G 到 12G 之间。您可以选择使用轻量合成但全功能的 gpt FULL 方案，或者尝试使用高质量拟真拟音但消耗较大的 vox LITE 方案（仅使用 VoxCPM 语音合成，不开启视觉和语音识别）。';
+            titleEl.textContent = 'GPT FULL 方案 或 Vox LITE 方案';
+            descEl.textContent = '检测到可用显存介于 8G 到 12G 之间。您可以选择使用轻量合成但全功能的 GPT FULL 方案，或者尝试使用高质量拟真拟音但消耗较大的 Vox LITE 方案（仅使用 VoxCPM 语音合成，不开启视觉和语音识别）。';
             recommendedLaunchGroup = '多模态服务 (FULL)';
-            createApplyButton('应用 gpt FULL 方案', () => {
+            createApplyButton('应用 GPT FULL 方案', () => {
                 recommendedLaunchGroup = '多模态服务 (FULL)';
                 applyScheme('gpt_full');
             });
-            createApplyButton('应用 vox LITE 方案', () => {
+            createApplyButton('应用 Vox LITE 方案', () => {
                 recommendedLaunchGroup = '语音服务 (LITE)';
                 applyScheme('vox_lite');
             });

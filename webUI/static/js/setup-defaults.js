@@ -2,6 +2,11 @@
  * Template-backed configuration hydration for the setup wizard.
  */
 window.SetupDefaults = (() => {
+    // Models served by these built-in providers are managed by the local services.
+    // Keep this tied to the provider so replacing a local model in the template
+    // does not accidentally make that model editable in the setup wizard.
+    const LOCAL_MODEL_PROVIDERS = new Set(['localmodel', 'localmodellarge']);
+
     function create({
         apiGet,
         addProviderRow,
@@ -97,7 +102,7 @@ window.SetupDefaults = (() => {
                                     <a href="https://cloud.siliconflow.cn/i/vwQ4iW0r" target="_blank" class="btn btn-primary" style="margin-left: auto; text-decoration: none; font-size: 0.85rem; padding: 6px 14px; border-radius: var(--radius-sm); white-space: nowrap; box-shadow: var(--shadow-sm);">获取 API Key 🔗</a>
                                 `;
                                 row.insertBefore(hintBanner, row.firstChild);
-                            } else if ((p.name || '').toLowerCase() === 'localmodel' || (p.name || '').toLowerCase() === 'localmodellarge') {
+                            } else if (LOCAL_MODEL_PROVIDERS.has((p.name || '').trim().toLowerCase())) {
                                 row.querySelector('.setup-provider-name').readOnly = true;
                                 row.querySelector('.setup-provider-url').readOnly = true;
                                 row.querySelector('.setup-provider-key').readOnly = true;
@@ -160,8 +165,9 @@ window.SetupDefaults = (() => {
 
                             const mId = (m.model_identifier || '').toLowerCase();
                             const mName = (m.model_name || '').toLowerCase();
+                            const mProvider = (m.api_provider || '').trim().toLowerCase();
                             const isBge = mId.includes('bge-m3') || mName.includes('bge-m3');
-                            const isLocal = mName === 'sensevoice-small' || mName === 'florence-2' || mName === 'teleai/telespeechasr/silicon'; // Assuming SenseVoice and Florence
+                            const isLocal = LOCAL_MODEL_PROVIDERS.has(mProvider);
                             const isFree = mName.endsWith('/silicon');
 
                             if (isBge) {
@@ -186,7 +192,7 @@ window.SetupDefaults = (() => {
                                     </div>
                                 `;
                                 row.insertBefore(hintBanner, row.firstChild);
-                            } else if (mName === 'sensevoice-small' || mName === 'florence-2') {
+                            } else if (isLocal) {
                                 row.querySelector('.setup-model-id').readOnly = true;
                                 row.querySelector('.setup-model-name').readOnly = true;
                                 const sel = row.querySelector('.setup-model-provider');
@@ -231,7 +237,7 @@ window.SetupDefaults = (() => {
                                 badge.title = '此模型为硅基流动免费提供，部分模型可能停止服务，请以其官网政策为准';
                                 nameContainer.appendChild(badge);
                             }
-                            if (mName === 'sensevoice-small' || mName === 'florence-2') {
+                            if (isLocal) {
                                 const badge = document.createElement('span');
                                 badge.className = 'form-row-tag';
                                 badge.style.background = 'rgba(16, 185, 129, 0.1)';
