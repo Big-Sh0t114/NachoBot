@@ -1,22 +1,31 @@
 """
-Local Microphone Capture and ASR Worker for BilibiliAdapter
+Local microphone capture and streaming ASR worker for BilibiliAdapter.
 
-Captures audio from system default microphone, detects speech using energy-based VAD,
-and sends to SiliconFlow ASR API for transcription.
+Captures audio from the system default microphone, detects speech using
+energy-based VAD, and incrementally feeds Multimodal-Adapter's shared ASR.
 
 Supports Push-to-Talk (PTT) mode: when enabled, audio is only captured while
 the configured key is held down.
 """
 
 import asyncio
-import io
-from loguru import logger
-import wave
-import struct
+import logging
 import queue
+import struct
+import threading
 import time
+from collections import deque
 from dataclasses import dataclass
-from typing import Callable, Optional, Awaitable
+from typing import Awaitable, Callable, Optional
+
+import numpy as np
+from multimodal_bridge import ensure_multimodal_import
+from scipy.signal import resample_poly
+
+
+ensure_multimodal_import()
+
+from nachobot_multimodal.asr.streaming import StreamingASR  # noqa: E402
 
 try:
     import sounddevice as sd
@@ -144,46 +153,63 @@ class MicConfig:
     sample_rate: int = 16000
     channels: int = 1
     on_speech_start: Optional[Callable[[], Awaitable[None]]] = None
+    on_speech_end: Optional[Callable[[], Awaitable[None]]] = None
     push_to_talk: bool = False       # Enable push-to-talk mode
     ptt_key: str = "v"               # Key to hold for push-to-talk
 
 
 class MicCaptureWorker:
     """
-    Captures audio from local microphone and triggers ASR when speech is detected.
-    Uses energy-based Voice Activity Detection (VAD).
+    Capture local microphone audio and drive one incremental ASR stream.
 
     Supports Push-to-Talk (PTT) mode: when enabled, audio frames are only
     processed while the configured key is held down.
     """
+
+    ASR_SAMPLE_RATE = 16000
+    ASR_PREROLL_SECONDS = 0.3
+    STREAM_ID_PREFIX = "bilibili:microphone"
 
     def __init__(
         self,
         config: MicConfig,
         on_speech_recognized: Callable[[str], Awaitable[None]],
         logger,
+        asr: Optional[StreamingASR] = None,
     ):
         self.config = config
         self.on_speech_recognized = on_speech_recognized
         self.logger = logger
 
         self._running = False
-        self._audio_buffer: list = []
         self._is_speaking = False
         self._silence_samples = 0
         self._samples_per_chunk = int(config.sample_rate * 0.1)  # 100ms chunks
-        self._silence_sample_threshold = int(
-            config.silence_duration * config.sample_rate / self._samples_per_chunk
+        self._silence_sample_threshold = max(
+            1,
+            int(
+                config.silence_duration
+                * config.sample_rate
+                / self._samples_per_chunk
+            ),
+        )
+        self._preroll_max_chunks = self._calculate_preroll_chunks()
+        self._preroll_buffer: deque[bytes] = deque(
+            maxlen=self._preroll_max_chunks
         )
         self._last_activity = 0.0
+        self._state_lock = threading.RLock()
 
-        # Queue to pass complete audio segments from callback thread to main thread
-        self._processing_queue = queue.Queue()
+        # The sounddevice callback queues tiny lifecycle events. A coroutine
+        # consumes them in FIFO order and runs CPU ASR work in a worker thread.
+        self._processing_queue: queue.Queue[
+            tuple[str, Optional[bytes]]
+        ] = queue.Queue()
         self._paused = False
-
-        # ASR callback (to be set by adapter)
-        self._asr_callback: Optional[Callable[[bytes], Awaitable[Optional[str]]]] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._asr = asr
+        self._asr_stream_active = False
+        self._stream_id = f"{self.STREAM_ID_PREFIX}:{config.room_id}"
 
         # Push-to-Talk state
         self._ptt_monitor: Optional[PTTKeyMonitor] = None
@@ -194,16 +220,39 @@ class MicCaptureWorker:
                 logger.warning("PTT monitor failed to initialize, mic will use continuous capture mode")
                 self._ptt_monitor = None
 
-    def set_asr_callback(
-        self, callback: Callable[[bytes], Awaitable[Optional[str]]]
-    ) -> None:
-        """Set the ASR callback function"""
-        self._asr_callback = callback
+    def _calculate_preroll_chunks(self) -> int:
+        return max(
+            1,
+            int(
+                np.ceil(
+                    self.ASR_PREROLL_SECONDS
+                    * self.config.sample_rate
+                    / max(1, self._samples_per_chunk)
+                )
+            ),
+        )
+
+    def _ensure_asr(self) -> bool:
+        if self._asr is None:
+            self._asr = StreamingASR(
+                logger=logging.getLogger("BilibiliStreamingASR")
+            )
+        if not self._asr.supports_streaming:
+            self.logger.error(
+                "Bilibili microphone streaming ASR unavailable; check "
+                "Multimodal ASR model and CPU runtime"
+            )
+            return False
+        return True
 
     def pause(self) -> None:
         """Pause microphone capture"""
         if not self._paused:
             self._paused = True
+            if not self._ptt_monitor:
+                with self._state_lock:
+                    self._finish_capture_stream("microphone paused")
+                    self._preroll_buffer.clear()
             self.logger.info("Microphone capture paused")
 
     def resume(self) -> None:
@@ -230,7 +279,7 @@ class MicCaptureWorker:
         return rms / 32767.0
 
     def _audio_callback(self, indata, frames, time_info, status):
-        """Callback for sounddevice audio stream (runs in a separate thread)"""
+        """Queue PCM chunks from sounddevice's real-time callback thread."""
         self._last_activity = time.time()
         if status:
             self.logger.warning(f"Audio stream status: {status}")
@@ -239,121 +288,181 @@ class MicCaptureWorker:
         # (in PTT mode, the key press is the sole gate; the control loop's
         #  pause state should not block PTT-gated audio)
         if self._paused and not self._ptt_monitor:
+            with self._state_lock:
+                self._finish_capture_stream("microphone paused")
+                self._preroll_buffer.clear()
             return
 
         # PTT gate: skip frame if push-to-talk is enabled and key is not held
         if self._ptt_monitor and not self._ptt_monitor.is_held:
-            # Flush buffered audio when PTT key is released mid-speech
-            # (instead of discarding it, submit to processing queue for ASR)
-            if self._is_speaking:
-                self._is_speaking = False
-                if self._audio_buffer:
-                    audio_data = b"".join(self._audio_buffer)
-                    self._audio_buffer = []
-                    self._silence_samples = 0
-                    self.logger.info(
-                        f"PTT released, flushing {len(audio_data)} bytes to ASR"
-                    )
-                    self._processing_queue.put(audio_data)
-                else:
-                    self._silence_samples = 0
+            with self._state_lock:
+                self._finish_capture_stream("PTT released")
+                self._preroll_buffer.clear()
             return
 
-        # Convert to bytes
         audio_bytes = indata.tobytes()
-
-        # Calculate RMS for VAD
         rms = self._calculate_rms(audio_bytes)
+        is_speech = rms > self.config.silence_threshold
+        notify_speech_start = False
 
-        if rms > self.config.silence_threshold:
-            # Speech detected
+        with self._state_lock:
             if not self._is_speaking:
-                self._is_speaking = True
-                if self._ptt_monitor:
-                    self.logger.info(f"Speech started (PTT active, rms={rms:.4f})")
-                else:
-                    self.logger.debug("Speech started")
-                
-                if self.config.on_speech_start:
-                    # Execute callback in a thread-safe manner if needed,
-                    # but here we are in a different thread.
-                    # Use asyncio.run_coroutine_threadsafe if loop is available,
-                    # or just fire and forget if it's not critical to wait.
-                    # Since adapter logic is async, we need to bridge this.
-                    if self._loop and self._loop.is_running():
-                        asyncio.run_coroutine_threadsafe(
-                            self.config.on_speech_start(), self._loop
-                        )
+                self._preroll_buffer.append(audio_bytes)
 
-            self._audio_buffer.append(audio_bytes)
-            self._silence_samples = 0
-        else:
-            # Silence
-            if self._is_speaking:
-                self._audio_buffer.append(audio_bytes)
+            if is_speech:
+                if not self._is_speaking:
+                    self._is_speaking = True
+                    notify_speech_start = True
+                    self._processing_queue.put(("start", None))
+                    for chunk in self._preroll_buffer:
+                        self._processing_queue.put(("audio", chunk))
+                    self._preroll_buffer.clear()
+
+                    if self._ptt_monitor:
+                        self.logger.info(
+                            f"Speech started (PTT active, rms={rms:.4f})"
+                        )
+                    else:
+                        self.logger.debug("Speech started")
+                else:
+                    self._processing_queue.put(("audio", audio_bytes))
+                self._silence_samples = 0
+            elif self._is_speaking:
+                # Continue decoding trailing silence until the VAD endpoint.
+                self._processing_queue.put(("audio", audio_bytes))
                 self._silence_samples += 1
 
                 if self._silence_samples >= self._silence_sample_threshold:
-                    # End of speech segment
-                    self._is_speaking = False
-                    self.logger.debug(
-                        f"Speech ended, buffer size: {len(self._audio_buffer)} chunks"
-                    )
+                    self._finish_capture_stream("VAD endpoint")
 
-                    # Push to queue instead of processing directly
-                    if self._audio_buffer:
-                        audio_data = b"".join(self._audio_buffer)
-                        self._audio_buffer = []
-                        self._silence_samples = 0
-                        self._processing_queue.put(audio_data)
+        if (
+            notify_speech_start
+            and self.config.on_speech_start
+            and self._loop
+            and self._loop.is_running()
+        ):
+            asyncio.run_coroutine_threadsafe(
+                self.config.on_speech_start(),
+                self._loop,
+            )
+
+    def _finish_capture_stream(self, reason: str) -> None:
+        """Queue finalization for the current utterance; caller holds state lock."""
+        if not self._is_speaking:
+            return
+        self._is_speaking = False
+        self._silence_samples = 0
+        self._processing_queue.put(("finish", None))
+        self.logger.debug(f"Speech stream ended ({reason})")
 
     async def _process_queue_loop(self) -> None:
-        """Coroutine to process audio segments from the queue"""
-        while self._running:
+        """Consume ordered streaming-ASR events without blocking capture."""
+        while self._running or not self._processing_queue.empty():
             try:
-                # Check queue non-blocking
                 try:
-                    audio_data = self._processing_queue.get_nowait()
-                    await self._process_audio(audio_data)
+                    event_name, audio_data = self._processing_queue.get_nowait()
                 except queue.Empty:
-                    await asyncio.sleep(0.1)
-            except Exception as e:
-                self.logger.error(f"Error in processing loop: {e}")
-                await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.01)
+                    continue
 
-    async def _process_audio(self, audio_data: bytes) -> None:
-        """Process audio data through ASR"""
-        if not self._asr_callback:
-            self.logger.warning("ASR callback not set")
+                try:
+                    await self._process_stream_event(event_name, audio_data)
+                finally:
+                    self._processing_queue.task_done()
+            except Exception:
+                self.logger.exception("Error in streaming ASR loop")
+                if self._asr and self._asr_stream_active:
+                    await asyncio.to_thread(
+                        self._asr.abort_stream,
+                        self._stream_id,
+                    )
+                self._asr_stream_active = False
+
+    async def _process_stream_event(
+        self,
+        event_name: str,
+        audio_data: Optional[bytes],
+    ) -> None:
+        if not self._asr:
             return
 
-        try:
-            # Convert raw PCM to WAV format for API
-            wav_data = self._pcm_to_wav(audio_data)
+        if event_name == "start":
+            self._asr_stream_active = bool(
+                await asyncio.to_thread(
+                    self._asr.start_stream,
+                    self._stream_id,
+                )
+            )
+            return
 
-            # Call ASR
-            text = await self._asr_callback(wav_data)
+        if event_name == "audio":
+            if self._asr_stream_active and audio_data:
+                await asyncio.to_thread(
+                    self._accept_pcm_chunk,
+                    audio_data,
+                )
+            return
 
-            if text and text.strip():
-                self.logger.info(f"ASR recognized: {text}")
+        if event_name == "finish":
+            text = None
+            try:
+                if self._asr_stream_active:
+                    text = await asyncio.to_thread(
+                        self._asr.finish_stream,
+                        self._stream_id,
+                    )
+                self._asr_stream_active = False
+                text = self._sanitize_text(text)
+                if text:
+                    self.logger.info(f"Streaming ASR recognized: {text}")
+                    self._update_subtitle(text)
+                    await self.on_speech_recognized(text)
+            finally:
+                if self.config.on_speech_end:
+                    await self.config.on_speech_end()
+            return
 
-                # Update subtitle file
-                self._update_subtitle(text)
+        if event_name == "abort":
+            if self._asr_stream_active:
+                await asyncio.to_thread(
+                    self._asr.abort_stream,
+                    self._stream_id,
+                )
+            self._asr_stream_active = False
 
-                # Trigger callback
-                await self.on_speech_recognized(text)
-        except Exception as e:
-            self.logger.error(f"ASR processing failed: {e}")
+    def _accept_pcm_chunk(self, pcm_data: bytes) -> Optional[str]:
+        """Convert one int16 capture chunk and decode it incrementally."""
+        sample_width = 2 * self.config.channels
+        usable = len(pcm_data) - (len(pcm_data) % sample_width)
+        if usable <= 0 or not self._asr:
+            return None
 
-    def _pcm_to_wav(self, pcm_data: bytes) -> bytes:
-        """Convert raw PCM data to WAV format"""
-        buffer = io.BytesIO()
-        with wave.open(buffer, "wb") as wav_file:
-            wav_file.setnchannels(self.config.channels)
-            wav_file.setsampwidth(2)  # 16-bit
-            wav_file.setframerate(self.config.sample_rate)
-            wav_file.writeframes(pcm_data)
-        return buffer.getvalue()
+        samples = np.frombuffer(pcm_data[:usable], dtype=np.int16)
+        if self.config.channels > 1:
+            samples = samples.reshape(-1, self.config.channels).mean(axis=1)
+        samples = samples.astype(np.float32) / 32768.0
+        if self.config.sample_rate != self.ASR_SAMPLE_RATE:
+            samples = resample_poly(
+                samples,
+                self.ASR_SAMPLE_RATE,
+                self.config.sample_rate,
+            )
+        samples_16k = np.ascontiguousarray(samples, dtype=np.float32)
+        return self._asr.accept_stream_audio(
+            self._stream_id,
+            samples_16k,
+        )
+
+    @staticmethod
+    def _sanitize_text(text: Optional[str]) -> Optional[str]:
+        if not text:
+            return None
+        sanitized = "".join(
+            character
+            for character in text.strip()
+            if character.isprintable() or character in "\n\r\t"
+        )
+        return sanitized or None
 
     def _update_subtitle(self, text: str) -> None:
         """Write recognized text to subtitle file"""
@@ -374,21 +483,20 @@ class MicCaptureWorker:
             self.logger.info("Microphone capture disabled")
             return
 
-        self._running = True
-        self.logger.info(
-            f"Starting microphone capture (configured: sample_rate={self.config.sample_rate}, threshold={self.config.silence_threshold})"
-        )
         self._loop = asyncio.get_running_loop()
+        if not await asyncio.to_thread(self._ensure_asr):
+            return
 
-        # Start PTT keyboard listener if configured
-        if self._ptt_monitor:
-            self._ptt_monitor.start()
-            self.logger.info("Microphone in Push-to-Talk mode")
-        else:
-            self.logger.info("Microphone in continuous capture mode")
-
+        self._running = True
+        proc_task: Optional[asyncio.Task] = None
         try:
-            # Query default device to use native sample rate (prevents Exclusive Mode/OBS conflict)
+            self.logger.info(
+                "Starting streaming microphone capture "
+                f"(sample_rate={self.config.sample_rate}, "
+                f"threshold={self.config.silence_threshold})"
+            )
+
+            # Query the native rate to avoid exclusive-mode / OBS conflicts.
             try:
                 device_info = sd.query_devices(kind="input")
                 native_rate = int(device_info.get("default_samplerate", 16000))
@@ -399,20 +507,31 @@ class MicCaptureWorker:
 
                 # Recalculate VAD parameters dependent on sample rate
                 self._samples_per_chunk = int(self.config.sample_rate * 0.1)
-                self._silence_sample_threshold = int(
-                    self.config.silence_duration
-                    * self.config.sample_rate
-                    / self._samples_per_chunk
+                self._silence_sample_threshold = max(
+                    1,
+                    int(
+                        self.config.silence_duration
+                        * self.config.sample_rate
+                        / self._samples_per_chunk
+                    ),
+                )
+                self._preroll_max_chunks = self._calculate_preroll_chunks()
+                self._preroll_buffer = deque(
+                    maxlen=self._preroll_max_chunks
                 )
             except Exception as e:
                 self.logger.warning(
                     f"Failed to query device native rate, using default 16000: {e}"
                 )
 
-            # Start processing loop
+            if self._ptt_monitor:
+                self._ptt_monitor.start()
+                self.logger.info("Microphone in Push-to-Talk mode")
+            else:
+                self.logger.info("Microphone in continuous capture mode")
+
             proc_task = asyncio.create_task(self._process_queue_loop())
 
-            # Start audio stream using updated config.sample_rate
             with sd.InputStream(
                 samplerate=self.config.sample_rate,
                 channels=self.config.channels,
@@ -420,7 +539,6 @@ class MicCaptureWorker:
                 blocksize=self._samples_per_chunk,
                 callback=self._audio_callback,
             ) as stream:
-                # Wait for running flag to be cleared
                 self._last_activity = time.time()
                 while self._running:
                     if not stream.active:
@@ -435,21 +553,30 @@ class MicCaptureWorker:
                         break
 
                     await asyncio.sleep(0.5)
-
-            # Ensure flag is cleared so processing loop can exit
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self.logger.exception("Microphone capture error")
+        finally:
+            with self._state_lock:
+                self._finish_capture_stream("capture stopped")
             self._running = False
-
-            # Wait for processing loop to finish (it will exit when _running is False)
-            await proc_task
-
-        except Exception as e:
-            self.logger.error(f"Microphone capture error: {e}")
-            self._running = False
+            if proc_task:
+                await proc_task
+            if self._asr and self._asr_stream_active:
+                await asyncio.to_thread(
+                    self._asr.abort_stream,
+                    self._stream_id,
+                )
+                self._asr_stream_active = False
+            if self._ptt_monitor:
+                self._ptt_monitor.stop()
 
     def stop(self) -> None:
         """Stop microphone capture"""
+        with self._state_lock:
+            self._finish_capture_stream("worker stopped")
         self._running = False
-        # Stop PTT listener
         if self._ptt_monitor:
             self._ptt_monitor.stop()
         self.logger.info("Microphone capture stopped")

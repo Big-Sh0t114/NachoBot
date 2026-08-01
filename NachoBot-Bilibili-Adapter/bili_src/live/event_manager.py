@@ -81,7 +81,10 @@ class EventManager:
                         prompt_text = f"送出了 {gift_name} x{count}"
                         template_info = await self.adapter._get_template_info(room_id, user_id, prompt_text)
                         
-                        additional_config = {"is_mentioned": 1.0}
+                        additional_config = self.adapter._build_live_additional_config(
+                            room_id,
+                            {"is_mentioned": 1.0},
+                        )
                         
                         message_info = BaseMessageInfo(
                             platform=self.config.platform,

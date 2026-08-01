@@ -4,6 +4,9 @@ from src.plugin_system.base.component_types import ToolParamType
 from src.chat.sandbox.sandbox_manager import sandbox_manager
 from src.config.config import global_config
 from src.plugin_system.core.component_registry import component_registry
+from src.common.logger import get_logger
+
+_sandbox_tools_logger = get_logger("sandbox_tools")
 
 
 class ReadFileTool(BaseTool):
@@ -176,6 +179,18 @@ class WriteFileTool(BaseTool):
 
         if not filename or content is None:
             return {"error": "filename and content are required."}
+
+        # ── 防御性过滤：模型幻觉生成 "No tool needed" 文本文件 ──
+        # tool_use 模型组有时会错误地调用 write_file，内容仅为 "No tool needed"
+        # 这类文件没有实际意义，静默丢弃，不发送给用户
+        import re
+        content_stripped = content.strip().strip('"').strip("'").strip()
+        if re.fullmatch(r"no\s+tool\s+needed\.?", content_stripped, re.IGNORECASE):
+            _sandbox_tools_logger.warning(
+                f"[WriteFileTool] write_file 内容为 '{content_stripped}'，"
+                f"文件名 '{filename}'，已静默丢弃。"
+            )
+            return None
 
         try:
             sandbox = sandbox_manager.get_sandbox(stream_id)

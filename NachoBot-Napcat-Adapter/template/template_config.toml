@@ -1,5 +1,5 @@
 [inner]
-version = "0.1.2" # 版本号
+version = "0.1.4" # 版本号
 # 请勿修改版本号，除非你知道自己在做什么
 
 [nickname] # 现在没用
@@ -28,6 +28,22 @@ ban_user_id = []   # 全局禁止名单（全局禁止名单中的用户无法�
 ban_qq_bot = false # 是否屏蔽QQ官方机器人
 enable_poke = true # 是否启用戳一戳功能
 
+[visual] # QQ 视觉 prompt 固定由 Core 维护；这里只配置单次推理参数
+
+[visual.image]
+temperature = 0.1
+max_tokens = 220
+extra_params = { enable_thinking = false }
+
+[visual.emoji]
+temperature = 0.2
+max_tokens = 180
+extra_params = { enable_thinking = false }
+
+[visual.video]
+temperature = 0.1
+max_tokens = 280
+extra_params = { enable_thinking = false }
 [voice] # 发送语音设置
 use_tts = false # 是否使用tts语音（请确保你配置了tts并有对应的adapter）
 

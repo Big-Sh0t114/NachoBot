@@ -82,7 +82,9 @@ class ConfigBase:
                     raise TypeError(
                         f"Expected {len(field_args_type)} items for {field_type.__name__}, got {len(value)}"
                     )
-                return tuple(cls._convert_field(item, arg_type) for item, arg_type in zip(value, field_args_type))
+                return tuple(
+                    cls._convert_field(item, arg_type) for item, arg_type in zip(value, field_args_type, strict=True)
+                )
 
         if field_origin_type is dict:
             # 检查提供的value是否为dict
@@ -105,6 +107,9 @@ class ConfigBase:
                 raise TypeError(f"Expected {field_args_type} for {field_type.__name__}, got {type(value).__name__}")
             return cls._convert_field(value, field_args_type[0])
 
+        if field_type is Any:
+            return value
+
         # 处理int, str, float, bool等基础类型
         if field_origin_type is None:
             if isinstance(value, field_type):
@@ -120,10 +125,6 @@ class ConfigBase:
                 return value
             else:
                 raise TypeError(f"Value '{value}' is not in allowed values {allowed_values} for Literal type")
-
-        # 处理其他类型
-        if field_type is Any:
-            return value
 
         # 其他类型直接转换
         try:

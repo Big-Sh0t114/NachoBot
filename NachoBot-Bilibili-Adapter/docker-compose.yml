@@ -1,7 +1,10 @@
 services:
   bilibili-adapter:
     container_name: nacho-bot-bilibili-adapter
-    build: .
+    build:
+      context: .
+      additional_contexts:
+        multimodal: ../NachoBot-Multimodal-Adapter
     environment:
       - TZ=Asia/Shanghai
       # 使用 Xvfb 虚拟帧缓冲启动（屏幕监控所需）
