@@ -1,6 +1,8 @@
+import asyncio
 import logging
-from typing import Optional, Callable
 from collections import deque
+from typing import Callable, Optional
+
 import discord
 from discord.ext import commands
 
@@ -124,13 +126,13 @@ class NachoDiscordBot(discord.Bot):
     def set_speech_callback(self, callback: Callable):
         self.speech_callback = callback
 
-    async def _on_sink_callback(self, user_id: int, pcm_data: bytes, guild_id: int):
-        """Callback from Sink when speech is detected."""
-        self.logger.debug(f"Processing speech from user {user_id} in guild {guild_id}")
-
-        # Process audio to text
-        text = await self.voice_handler.process_audio(user_id, pcm_data)
-
+    async def _on_sink_callback(
+        self,
+        user_id: int,
+        text: Optional[str],
+        guild_id: int,
+    ):
+        """Publish the final text of an already-decoded streaming utterance."""
         if text and self.speech_callback:
             # Resolve user name
             user_name = f"User{user_id}"
@@ -208,16 +210,47 @@ class NachoDiscordBot(discord.Bot):
 
         self.logger.info(f"Starting to listen in guild {guild_id}")
 
-        # Create a callback wrapper to include guild_id
-        async def sink_callback(user_id, data):
-            await self._on_sink_callback(user_id, data, guild_id)
+        def stream_id(user_id: int) -> str:
+            return f"discord:{guild_id}:{user_id}"
+
+        async def sink_callback(user_id, text):
+            await self._on_sink_callback(user_id, text, guild_id)
 
         async def speech_start_callback(user_id):
             await self._on_speech_start_callback(user_id, guild_id)
 
+        async def stream_start_callback(user_id):
+            return await asyncio.to_thread(
+                self.voice_handler.start_stream,
+                stream_id(user_id),
+            )
+
+        async def stream_audio_callback(user_id, pcm_data):
+            return await asyncio.to_thread(
+                self.voice_handler.accept_pcm,
+                stream_id(user_id),
+                pcm_data,
+            )
+
+        async def stream_finish_callback(user_id):
+            return await asyncio.to_thread(
+                self.voice_handler.finish_stream,
+                stream_id(user_id),
+            )
+
+        async def stream_abort_callback(user_id):
+            await asyncio.to_thread(
+                self.voice_handler.abort_stream,
+                stream_id(user_id),
+            )
+
         sink = SilenceDetectingSink(
             callback=sink_callback,
             on_speech_start_callback=speech_start_callback,
+            on_stream_start_callback=stream_start_callback,
+            on_stream_audio_callback=stream_audio_callback,
+            on_stream_finish_callback=stream_finish_callback,
+            on_stream_abort_callback=stream_abort_callback,
             config=self.adapter_config.voice,
         )
 
@@ -230,8 +263,7 @@ class NachoDiscordBot(discord.Bot):
 
     async def _on_recording_stopped(self, sink: SilenceDetectingSink, *args):
         self.logger.info("Recording stopped.")
-        # We might want to restart? Or just let it end.
-        sink.cleanup()
+        await sink.aclose()
 
     def _play_next(self, guild_id: int, error=None):
         """Play the next audio in the queue for the given guild."""

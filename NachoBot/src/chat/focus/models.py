@@ -72,6 +72,7 @@ class FocusMember:
     allow_import: bool = True
     allow_export: bool = True
     platform: str = ""
+    planner_bypass: bool = False
 
 class FocusSessionPriority(IntEnum):
     """Deterministic preemption order for Focus-managed sessions."""
@@ -81,15 +82,8 @@ class FocusSessionPriority(IntEnum):
     PLANNER_BYPASS = 3
 
 
-def focus_platform_bypasses_planner(platform: str, kind: ChatKind) -> bool:
-    normalized = str(platform or "").strip().lower()
-    return normalized in {"discord_vc", "universal_vc"} or (
-        kind is ChatKind.GROUP and normalized in {"bilibili", "bilibili.live"}
-    )
-
-
 def focus_session_priority(member: FocusMember) -> FocusSessionPriority:
-    if focus_platform_bypasses_planner(member.platform, member.kind):
+    if member.planner_bypass:
         return FocusSessionPriority.PLANNER_BYPASS
     if member.kind is ChatKind.PRIVATE:
         return FocusSessionPriority.PRIVATE

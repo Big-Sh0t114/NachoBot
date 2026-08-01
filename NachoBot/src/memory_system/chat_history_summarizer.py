@@ -32,12 +32,11 @@ def is_bot_self(platform: str, user_id: str) -> bool:
     try:
         from src.config.config import global_config
 
-        bot_account_str = str(global_config.bot.qq_account)
-        if str(user_id) == bot_account_str:
-            return True
-        if hasattr(global_config, "bilibili") and hasattr(global_config.bilibili, "bilibili_bot_account"):
-            if str(user_id) == str(global_config.bilibili.bilibili_bot_account):
-                return True
+        return (
+            str(platform or "").strip().lower()
+            == str(global_config.bot.platform or "").strip().lower()
+            and str(user_id) == str(global_config.bot.qq_account)
+        )
     except Exception:
         pass
     return False

@@ -1,7 +1,10 @@
 services:
   discord-adapter:
     container_name: nacho-bot-discord-adapter
-    build: .
+    build:
+      context: .
+      additional_contexts:
+        multimodal: ../NachoBot-Multimodal-Adapter
     environment:
       - TZ=Asia/Shanghai
     volumes:

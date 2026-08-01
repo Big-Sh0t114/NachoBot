@@ -312,7 +312,10 @@ class MessageRecv(Message):
                     self.is_emoji = False
                     image_manager = get_image_manager()
                     # print(f"segment.data: {segment.data}")
-                    _, processed_text = await image_manager.process_image(segment.data)
+                    _, processed_text = await image_manager.process_image(
+                        segment.data,
+                        additional_config=self.message_info.additional_config,
+                    )
                     return processed_text
                 return "[发了一张图片，网卡了加载不出来]"
             elif segment.type == "emoji":
@@ -321,7 +324,10 @@ class MessageRecv(Message):
                 self.is_picid = False
                 self.is_voice = False
                 if isinstance(segment.data, str):
-                    return await get_image_manager().get_emoji_description(segment.data)
+                    return await get_image_manager().get_emoji_description(
+                        segment.data,
+                        additional_config=self.message_info.additional_config,
+                    )
                 return "[发了一个表情包，网卡了加载不出来]"
             elif segment.type == "voice":
                 self.is_picid = False
@@ -340,7 +346,10 @@ class MessageRecv(Message):
                     from src.chat.utils.utils_video import get_video_manager
 
                     manager = get_video_manager()
-                    return await manager.process_video(segment.data)  # type: ignore
+                    return await manager.process_video(
+                        segment.data,  # type: ignore
+                        additional_config=self.message_info.additional_config,
+                    )
                 except Exception as e:
                     logger.error(f"处理视频段失败: {e}")
                     return "[视频(接收失败)]"
