@@ -26,7 +26,7 @@ dependencies = [
     "toml>=0.10.2",
     "torch==2.7.1+cu118",
     "torchaudio==2.7.1+cu118",
-    "torchvision==0.22.1+cu118",
+    "torchvision==0.28.0",
     "transformers==4.51.3",
     "uvicorn>=0.41.0",
     "websockets>=12.0",
