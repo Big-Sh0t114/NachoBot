@@ -4,17 +4,16 @@ import os
 import sys
 from pathlib import Path
 
-# Windows DLL loading conflict mitigation:
-# Force loading of the venv's newer onnxruntime.dll rather than C:\Windows\System32\onnxruntime.dll
-if sys.platform == "win32":
-    try:
-        capi_path = Path(__file__).resolve().parent / ".venv" / "Lib" / "site-packages" / "onnxruntime" / "capi"
-        if capi_path.exists():
-            os.add_dll_directory(str(capi_path))
-    except Exception:
-        pass
-
 sys.path.append(str(Path(__file__).resolve().parent))
+
+from multimodal_bridge import ensure_multimodal_import
+
+ensure_multimodal_import()
+
+from nachobot_multimodal.asr.onnxruntime_compat import preload_onnxruntime  # noqa: E402
+
+# Prevent Windows' older System32 onnxruntime.dll from shadowing the venv copy.
+preload_onnxruntime()
 
 from config import load_config
 from adapter import UniversalVCAdapter
@@ -88,7 +87,7 @@ async def main():
     logger.info(f"NachoBot Core: ws://{config.nachobot.host}:{config.nachobot.port}/ws")
     logger.info(f"Denoise: {'ON' if config.denoise.enabled else 'OFF'}")
     logger.info(f"Speaker Tracking: {'ON' if config.speaker.enabled else 'OFF'}")
-    logger.info(f"ASR Mode: {config.local_asr.mode}")
+    logger.info("ASR: shared Multimodal streaming engine")
     logger.info(f"STT Remote API: {'ON' if config.stt.enabled else 'OFF (fallback)'}")
     logger.info(f"Microphone Capture: {'ON' if config.microphone.enabled else 'OFF'}")
     if config.microphone.enabled and config.microphone.push_to_talk:

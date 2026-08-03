@@ -2,7 +2,6 @@
 
 import asyncio
 import base64
-from loguru import logger
 import time
 from io import BytesIO
 from typing import Iterable, List, Optional
@@ -10,13 +9,17 @@ from typing import Iterable, List, Optional
 import aiohttp
 from PIL import ImageGrab
 
-from bili_src.core.config import VlmModelConfig
+from bili_src.core.config import ScreenVlmConfig, VlmModelConfig
 from bili_src.core.utils import _normalize_text
 from bili_src.live.active_window import (
     ActiveWindowInfo,
     WINDOWS_ACTIVE_WINDOW_SUPPORTED,
     get_active_window_info,
     normalise_executables,
+)
+from bili_src.visual_policy import (
+    BILIBILI_SCREEN_PROMPT,
+    BILIBILI_SCREEN_SYSTEM_PROMPT,
 )
 
 
@@ -25,12 +28,14 @@ class ScreenMonitor:
         self,
         configs: List[VlmModelConfig],
         logger,
+        profile: Optional[ScreenVlmConfig] = None,
         min_interval_seconds: int = 30,
         capture_active_window: bool = True,
         excluded_exes: Optional[Iterable[str]] = None,
     ):
         self.configs = configs
         self.logger = logger
+        self.profile = profile or ScreenVlmConfig()
         self.min_interval_seconds = max(1, int(min_interval_seconds))
         self.capture_active_window = bool(capture_active_window)
         self.excluded_exes = normalise_executables(excluded_exes)
@@ -47,6 +52,7 @@ class ScreenMonitor:
         cls,
         config: VlmModelConfig,
         logger,
+        profile: Optional[ScreenVlmConfig] = None,
         min_interval_seconds: int = 15,
         capture_active_window: bool = True,
         excluded_exes: Optional[Iterable[str]] = None,
@@ -54,9 +60,10 @@ class ScreenMonitor:
         return cls(
             [config],
             logger,
-            min_interval_seconds,
-            capture_active_window,
-            excluded_exes,
+            profile=profile,
+            min_interval_seconds=min_interval_seconds,
+            capture_active_window=capture_active_window,
+            excluded_exes=excluded_exes,
         )
 
     def get_cached_summary(self) -> Optional[str]:
@@ -142,20 +149,23 @@ class ScreenMonitor:
                 bbox = window_info.rect if window_info else None
                 image = ImageGrab.grab(bbox=bbox, all_screens=bool(bbox))
             except Exception as exc:
-                self.logger.warning("Screen capture failed: %s", exc)
+                self.logger.warning("Screen capture failed: {}", exc)
                 return None
         except Exception as exc:
             self.logger.warning(
-                "mss capture failed: %s, falling back to ImageGrab", exc
+                "mss capture failed: {}, falling back to ImageGrab", exc
             )
             try:
                 bbox = window_info.rect if window_info else None
                 image = ImageGrab.grab(bbox=bbox, all_screens=bool(bbox))
             except Exception as inner_exc:
-                self.logger.warning("Fallback screen capture failed: %s", inner_exc)
+                self.logger.warning(
+                    "Fallback screen capture failed: {}",
+                    inner_exc,
+                )
                 return None
 
-        max_dim = 1280
+        max_dim = self.profile.max_image_dimension
         width, height = image.size
         if max(width, height) > max_dim:
             scale = max_dim / max(width, height)
@@ -165,7 +175,12 @@ class ScreenMonitor:
 
         with BytesIO() as buffer:
             image = image.convert("RGB")
-            image.save(buffer, format="JPEG", quality=85)
+            image.save(
+                buffer,
+                format="JPEG",
+                quality=self.profile.jpeg_quality,
+                optimize=True,
+            )
             return buffer.getvalue()
 
     async def _call_vlm(
@@ -181,18 +196,9 @@ class ScreenMonitor:
 
         image_b64 = base64.b64encode(image_bytes).decode("utf-8")
         danmu_text = _normalize_text(message_text or "")
-        prompt_text = (
-            "你将收到当前活动窗口的截图和当前观众弹幕。先判断截图中是否存在与弹幕相关或需要特别注意的部分，"
-            "再用300到500字尽可能详细描述活动窗口内容、文字和界面状态。"
-            "只输出纯文本，不要使用markdown。"
-        )
-        if window_info:
-            prompt_text += (
-                f" 当前活动窗口标题：{window_info.title}；"
-                f"进程：{window_info.executable}；窗口类：{window_info.window_class}。"
-            )
-        if danmu_text:
-            prompt_text += f" 弹幕内容：{danmu_text}"
+        if self.profile.message_max_chars:
+            danmu_text = danmu_text[: self.profile.message_max_chars]
+        prompt_text = self._render_prompt(danmu_text, window_info)
 
         last_error: Optional[str] = None
 
@@ -202,7 +208,7 @@ class ScreenMonitor:
 
             if config.client_type != "openai":
                 self.logger.warning(
-                    "Unsupported VLM client_type: %s (model: %s), skipping",
+                    "Unsupported VLM client_type: {} (model: {}), skipping",
                     config.client_type,
                     config.model,
                 )
@@ -216,11 +222,32 @@ class ScreenMonitor:
             last_error = config.model
 
         self.logger.warning(
-            "All %d VLM model(s) failed. Last failed model: %s",
+            "All {} VLM model(s) failed. Last failed model: {}",
             len(self.configs),
             last_error,
         )
         return None
+
+    def _render_prompt(
+        self,
+        message_text: str,
+        window_info: Optional[ActiveWindowInfo],
+    ) -> str:
+        """Render only the placeholders owned by this adapter use case."""
+        values = {
+            "window_title": window_info.title if window_info else "未知",
+            "window_executable": (
+                window_info.executable if window_info else "未知"
+            ),
+            "window_class": (
+                window_info.window_class if window_info else "未知"
+            ),
+            "message_text": message_text or "（无）",
+        }
+        prompt = BILIBILI_SCREEN_PROMPT
+        for key, value in values.items():
+            prompt = prompt.replace(f"{{{key}}}", value)
+        return prompt.strip()
 
     async def _attempt_single_vlm(
         self,
@@ -236,7 +263,7 @@ class ScreenMonitor:
             "messages": [
                 {
                     "role": "system",
-                    "content": "你是一个专业的图像分析助手。",
+                    "content": BILIBILI_SCREEN_SYSTEM_PROMPT,
                 },
                 {
                     "role": "user",
@@ -252,10 +279,14 @@ class ScreenMonitor:
             "max_tokens": config.max_tokens,
             "temperature": config.temperature,
         }
+        reserved_keys = {"model", "messages", "max_tokens", "temperature"}
+        for key, value in config.extra_params.items():
+            if key not in reserved_keys:
+                payload[key] = value
         headers = {"Content-Type": "application/json"}
         if config.api_key:
             headers["Authorization"] = f"Bearer {config.api_key}"
-        timeout = aiohttp.ClientTimeout(total=max(5, config.timeout))
+        timeout = aiohttp.ClientTimeout(total=max(1, config.timeout))
 
         retries_left = max(1, config.max_retry)
 
@@ -268,7 +299,8 @@ class ScreenMonitor:
                             body = await resp.text()
                             retries_left -= 1
                             self.logger.warning(
-                                "VLM model [%d] '%s' transient error: status=%s body=%s. Retries left: %d",
+                                "VLM model [{}] '{}' transient error: "
+                                "status={} body={}. Retries left: {}",
                                 model_index,
                                 config.model,
                                 resp.status,
@@ -281,7 +313,8 @@ class ScreenMonitor:
                         if resp.status >= 400:
                             body = await resp.text()
                             self.logger.warning(
-                                "VLM model [%d] '%s' hard error: status=%s body=%s. Failing over.",
+                                "VLM model [{}] '{}' hard error: "
+                                "status={} body={}. Failing over.",
                                 model_index,
                                 config.model,
                                 resp.status,
@@ -291,7 +324,8 @@ class ScreenMonitor:
                         data = await resp.json(content_type=None)
             except getattr(aiohttp, "ClientConnectorError", Exception) as exc:
                 self.logger.warning(
-                    "VLM model [%d] '%s' connection failed: %s. Blacklisting model.",
+                    "VLM model [{}] '{}' connection failed: {}. "
+                    "Blacklisting model.",
                     model_index,
                     config.model,
                     exc,
@@ -302,7 +336,7 @@ class ScreenMonitor:
             except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
                 retries_left -= 1
                 self.logger.warning(
-                    "VLM model [%d] '%s' request error: %s. Retries left: %d",
+                    "VLM model [{}] '{}' request error: {}. Retries left: {}",
                     model_index,
                     config.model,
                     exc,
@@ -313,7 +347,7 @@ class ScreenMonitor:
                 continue
             except Exception as exc:
                 self.logger.warning(
-                    "VLM model [%d] '%s' unexpected error: %s. Failing over.",
+                    "VLM model [{}] '{}' unexpected error: {}. Failing over.",
                     model_index,
                     config.model,
                     exc,
@@ -324,7 +358,7 @@ class ScreenMonitor:
             choices = data.get("choices") if isinstance(data, dict) else None
             if not choices:
                 self.logger.warning(
-                    "VLM model [%d] '%s' response missing choices",
+                    "VLM model [{}] '{}' response missing choices",
                     model_index,
                     config.model,
                 )
@@ -333,14 +367,14 @@ class ScreenMonitor:
             content = message.get("content") if isinstance(message, dict) else None
             if not content:
                 self.logger.warning(
-                    "VLM model [%d] '%s' response missing content",
+                    "VLM model [{}] '{}' response missing content",
                     model_index,
                     config.model,
                 )
                 return None
 
             self.logger.info(
-                "VLM model [%d] '%s' succeeded",
+                "VLM model [{}] '{}' succeeded",
                 model_index,
                 config.model,
             )
@@ -348,7 +382,7 @@ class ScreenMonitor:
 
         # All retries exhausted for this model
         self.logger.warning(
-            "VLM model [%d] '%s' exhausted all %d retries. Failing over.",
+            "VLM model [{}] '{}' exhausted all {} retries. Failing over.",
             model_index,
             config.model,
             config.max_retry,

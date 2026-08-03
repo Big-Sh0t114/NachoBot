@@ -2,13 +2,17 @@ import base64
 import os
 import time
 import hashlib
-from typing import Optional
+from typing import Any, Optional
 
 from src.common.logger import get_logger
 from src.common.database.database import db
 from src.common.database.database_model import ImageDescriptions
 from src.config.config import model_config
 from src.llm_models.utils_model import LLMRequest
+from src.chat.utils.visual_policy import (
+    CORE_GENERIC_VIDEO_PROMPT,
+    resolve_visual_task_policy,
+)
 
 logger = get_logger("chat_video")
 
@@ -60,7 +64,11 @@ class VideoManager:
                 logger.error(f"下载视频失败: {e}")
         return None
 
-    async def process_video(self, video_info: dict) -> str:
+    async def process_video(
+        self,
+        video_info: dict,
+        additional_config: Any = None,
+    ) -> str:
         """从Napcat接收的video段结构进行处理获取视频内容描述"""
         try:
             video_bytes = await self._download_or_read_video(video_info)
@@ -69,10 +77,17 @@ class VideoManager:
 
             # 使用 MD5 哈希去重缓存
             video_hash = hashlib.md5(video_bytes).hexdigest()
+            policy = resolve_visual_task_policy(
+                additional_config,
+                "video",
+                default_prompt=CORE_GENERIC_VIDEO_PROMPT,
+                default_temperature=0.4,
+                default_max_tokens=int(getattr(self.vlm.model_for_task, "max_tokens", 800)),
+            )
 
             # 检查是否有缓存
             record = ImageDescriptions.get_or_none(
-                (ImageDescriptions.image_description_hash == video_hash) & (ImageDescriptions.type == "video")
+                (ImageDescriptions.image_description_hash == video_hash) & (ImageDescriptions.type == policy.cache_type)
             )
             if record and record.description:
                 logger.info(f"[缓存命中] 使用ImageDescriptions表中的视频描述: {record.description[:50]}...")
@@ -82,10 +97,13 @@ class VideoManager:
             video_base64 = base64.b64encode(video_bytes).decode("utf-8")
 
             # 请注意：由于不支持任意视频格式，一律先标注为 mp4 交由远端处理
-            prompt = "这是用户发送的一段视频，请仔细观看并详细清晰地描述视频的内容、场景、人物动作以及想要表达的意思。要求直接输出描述结果。"
-
             description, _ = await self.vlm.generate_response_for_video(
-                prompt=prompt, video_base64=video_base64, video_format="mp4", temperature=0.4
+                prompt=policy.prompt,
+                video_base64=video_base64,
+                video_format="mp4",
+                temperature=policy.temperature,
+                max_tokens=policy.max_tokens,
+                extra_params=dict(policy.extra_params),
             )
 
             if not description:
@@ -106,7 +124,7 @@ class VideoManager:
             try:
                 ImageDescriptions.create(
                     image_description_hash=video_hash,
-                    type="video",
+                    type=policy.cache_type,
                     description=description,
                     timestamp=current_timestamp,
                 )

@@ -355,6 +355,11 @@ module.exports = {
         .map((item) => String(item || '').trim())
         .filter(Boolean)
       if (silentReplyTexts.length) {
+        message.message_info.additional_config.reply_policy = {
+          schema_version: 1,
+          suppress_exact_texts: silentReplyTexts,
+        }
+        // Transitional compatibility for Core versions predating reply_policy.
         message.message_info.additional_config.silent_reply = true
         message.message_info.additional_config.silent_reply_texts = silentReplyTexts
       }

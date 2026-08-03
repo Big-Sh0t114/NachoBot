@@ -15,6 +15,10 @@ import toml
 
 logger = logging.getLogger("florence2_vlm")
 
+FLORENCE_DETAILED_CAPTION_TASK = "<MORE_DETAILED_CAPTION>"
+FLORENCE_DETAILED_CAPTION_MAX_NEW_TOKENS = 256
+FLORENCE_DETAILED_CAPTION_NUM_BEAMS = 3
+
 # ── Global model state (lazy-loaded) ──────────────────────────────────
 _model = None
 _processor = None
@@ -92,12 +96,25 @@ def load_model():
         logger.info("[Florence-2] Model loaded on %s (dtype=%s)", _device, dtype)
 
 
-def caption_image(image_bytes: bytes, task: str = "<MORE_DETAILED_CAPTION>") -> str:
-    """Generate a detailed caption for the given image bytes.
+def caption_image(
+    image_bytes: bytes,
+    task: str = FLORENCE_DETAILED_CAPTION_TASK,
+    text_input: str | None = None,
+    max_new_tokens: int = FLORENCE_DETAILED_CAPTION_MAX_NEW_TOKENS,
+    num_beams: int = FLORENCE_DETAILED_CAPTION_NUM_BEAMS,
+    do_sample: bool = False,
+    temperature: float | None = None,
+) -> str:
+    """Run a caller-selected Florence task for the given image bytes.
 
     Args:
         image_bytes: Raw image bytes (PNG, JPEG, etc.)
-        task: Florence-2 task prompt. Defaults to detailed captioning.
+        task: Florence-2 task token such as ``<CAPTION>`` or ``<OCR>``.
+        text_input: Optional task input for grounding/referring tasks.
+        max_new_tokens: Maximum output tokens selected by the caller.
+        num_beams: Beam count selected by the caller.
+        do_sample: Whether generation should sample.
+        temperature: Sampling temperature when sampling is enabled.
 
     Returns:
         Generated caption string.
@@ -106,6 +123,14 @@ def caption_image(image_bytes: bytes, task: str = "<MORE_DETAILED_CAPTION>") -> 
     from PIL import Image
 
     load_model()
+
+    task = str(task or "").strip()
+    if not task:
+        raise ValueError("Florence task must not be empty")
+    if max_new_tokens <= 0:
+        raise ValueError("max_new_tokens must be greater than zero")
+    if num_beams <= 0:
+        raise ValueError("num_beams must be greater than zero")
 
     raw_image = Image.open(BytesIO(image_bytes))
 
@@ -139,7 +164,14 @@ def caption_image(image_bytes: bytes, task: str = "<MORE_DETAILED_CAPTION>") -> 
     raw_image.close()
     dtype = torch.float16 if _device and "cuda" in str(_device) else torch.float32
 
-    inputs = _processor(text=task, images=image, return_tensors="pt")
+    processor_prompt = task
+    if text_input:
+        processor_prompt += str(text_input)
+    inputs = _processor(
+        text=processor_prompt,
+        images=image,
+        return_tensors="pt",
+    )
 
     # Debug logging
     logger.info("[Florence-2] Processor output keys: %s", list(inputs.keys()))
@@ -152,13 +184,16 @@ def caption_image(image_bytes: bytes, task: str = "<MORE_DETAILED_CAPTION>") -> 
         else:
             inputs[k] = v.to(_device)
 
+    generate_kwargs = {
+        "max_new_tokens": int(max_new_tokens),
+        "num_beams": int(num_beams),
+        "do_sample": bool(do_sample),
+    }
+    if do_sample and temperature is not None:
+        generate_kwargs["temperature"] = float(temperature)
+
     with torch.no_grad():
-        generated_ids = _model.generate(
-            **inputs,
-            max_new_tokens=1024,
-            num_beams=1,
-            do_sample=False,
-        )
+        generated_ids = _model.generate(**inputs, **generate_kwargs)
 
     generated_text = _processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
 
@@ -178,13 +213,27 @@ def caption_image(image_bytes: bytes, task: str = "<MORE_DETAILED_CAPTION>") -> 
     return result.strip()
 
 
-def caption_image_b64(image_b64: str, task: str = "<MORE_DETAILED_CAPTION>") -> str:
-    """Convenience wrapper: accepts base64-encoded image data."""
+def caption_image_b64(
+    image_b64: str,
+) -> str:
+    """Run the service-owned detailed-caption policy on a base64 image.
+
+    HTTP callers intentionally cannot select a shorter Florence task or
+    override generation settings through this service-facing entry point.
+    """
     # Strip optional data URI prefix like "data:image/png;base64,"
     if "," in image_b64:
         image_b64 = image_b64.split(",", 1)[1]
     image_bytes = base64.b64decode(image_b64)
-    return caption_image(image_bytes, task=task)
+    return caption_image(
+        image_bytes,
+        task=FLORENCE_DETAILED_CAPTION_TASK,
+        text_input=None,
+        max_new_tokens=FLORENCE_DETAILED_CAPTION_MAX_NEW_TOKENS,
+        num_beams=FLORENCE_DETAILED_CAPTION_NUM_BEAMS,
+        do_sample=False,
+        temperature=None,
+    )
 
 
 def is_loaded() -> bool:
