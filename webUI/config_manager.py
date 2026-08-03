@@ -10,6 +10,11 @@ from typing import Any
 
 import tomlkit
 
+try:
+    from .secure_paths import ensure_within, resolve_relative_to_root
+except ImportError:
+    from secure_paths import ensure_within, resolve_relative_to_root
+
 # Root of the Nacho-with-u project (parent of webui/)
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
@@ -71,7 +76,7 @@ class ConfigManager:
         """Return the registry with existence info."""
         result = []
         for entry in CONFIG_REGISTRY:
-            full = self.root / entry["path"]
+            full = self._entry_path(entry)
             result.append({
                 **entry,
                 "exists": full.exists(),
@@ -88,7 +93,7 @@ class ConfigManager:
         For `.toml` files, uses tomlkit to parse.
         """
         entry = self._find(file_id)
-        full = self.root / entry["path"]
+        full = self._entry_path(entry)
 
         if not full.exists():
             raise FileNotFoundError(f"Config file not found: {full}")
@@ -108,7 +113,7 @@ class ConfigManager:
     def read_config_raw(self, file_id: str) -> str:
         """Read raw text of a config file."""
         entry = self._find(file_id)
-        full = self.root / entry["path"]
+        full = self._entry_path(entry)
         return full.read_text(encoding="utf-8")
 
     # ---- writing ----
@@ -119,7 +124,7 @@ class ConfigManager:
         Creates a .bak backup before writing.
         """
         entry = self._find(file_id)
-        full = self.root / entry["path"]
+        full = self._entry_path(entry)
 
         # Backup
         self._backup(full)
@@ -138,12 +143,19 @@ class ConfigManager:
         self._update_tomlkit_doc(doc, data)
         full.write_text(tomlkit.dumps(doc), encoding="utf-8")
 
+    def write_config_raw(self, file_id: str, raw: str) -> None:
+        """Write raw config text to a registry-owned file."""
+        entry = self._find(file_id)
+        full = self._entry_path(entry)
+        self._backup(full)
+        full.write_text(raw, encoding="utf-8")
+
     # ---- backup ----
 
     def backup_config(self, file_id: str) -> str:
         """Create a timestamped backup. Returns backup path."""
         entry = self._find(file_id)
-        full = self.root / entry["path"]
+        full = self._entry_path(entry)
         return self._backup(full)
 
     # ---- internals ----
@@ -154,11 +166,14 @@ class ConfigManager:
                 return entry
         raise ValueError(f"Unknown config id: {file_id}")
 
+    def _entry_path(self, entry: dict[str, str]) -> Path:
+        return resolve_relative_to_root(self.root, entry["path"])
+
     def _backup(self, path: Path) -> str:
         if not path.exists():
             return ""
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        bak = path.with_suffix(f".{ts}.bak")
+        bak = ensure_within(self.root, path.with_suffix(f".{ts}.bak"))
         shutil.copy2(path, bak)
         return str(bak)
 

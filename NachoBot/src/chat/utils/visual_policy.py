@@ -215,4 +215,4 @@ def scoped_media_hash(raw_hash: str, policy: VisualTaskPolicy) -> str:
 
     if not policy.adapter_owned:
         return raw_hash
-    return hashlib.md5(f"{raw_hash}\0{policy.cache_type}".encode("utf-8")).hexdigest()
+    return hashlib.md5(f"{raw_hash}\0{policy.cache_type}".encode("utf-8"), usedforsecurity=False).hexdigest()

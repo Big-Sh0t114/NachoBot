@@ -41,6 +41,34 @@ logging.basicConfig(
 logger = logging.getLogger("vox_api_server")
 
 
+AUDIO_FILE_SUFFIXES = {".wav", ".flac", ".mp3", ".m4a", ".ogg", ".opus"}
+
+
+def _resolve_existing_dir(raw_path: str, label: str) -> Optional[Path]:
+    text = str(raw_path or "").strip()
+    if not text:
+        return None
+    path = Path(text).expanduser().resolve(strict=False)
+    if path.is_dir():
+        return path
+    logger.warning(f"{label}不存在或不是目录: {path}")
+    return None
+
+
+def _resolve_optional_audio_path(raw_path: str, label: str) -> Optional[str]:
+    text = str(raw_path or "").strip()
+    if not text:
+        return None
+    path = Path(text).expanduser().resolve(strict=False)
+    if path.suffix.lower() not in AUDIO_FILE_SUFFIXES:
+        logger.warning(f"{label}类型不支持: {path}")
+        return None
+    if not path.is_file():
+        logger.warning(f"{label}不存在: {path}")
+        return None
+    return str(path)
+
+
 # ======== 文本切句逻辑（仿 GPT-SoVITS） ========
 
 def _split_by_punctuation(text: str, punctuation_set: str) -> List[str]:
@@ -201,22 +229,27 @@ def load_model(
     import json
     from voxcpm.core import VoxCPM
 
-    logger.info(f"Loading VoxCPM model from: {model_dir}")
+    resolved_model_dir = _resolve_existing_dir(model_dir, "VoxCPM模型目录")
+    if resolved_model_dir is None:
+        raise FileNotFoundError(f"VoxCPM模型目录不存在: {model_dir}")
+
+    logger.info(f"Loading VoxCPM model from: {resolved_model_dir}")
 
     kwargs = dict(
-        voxcpm_model_path=model_dir,
+        voxcpm_model_path=str(resolved_model_dir),
         enable_denoiser=enable_denoiser,
         optimize=True,
     )
 
-    if lora_weights_path and os.path.exists(lora_weights_path):
-        logger.info(f"Loading LoRA weights from: {lora_weights_path}")
-        kwargs["lora_weights_path"] = lora_weights_path
+    lora_dir = _resolve_existing_dir(lora_weights_path, "LoRA权重目录")
+    if lora_dir:
+        logger.info(f"Loading LoRA weights from: {lora_dir}")
+        kwargs["lora_weights_path"] = str(lora_dir)
 
         # 从 lora_config.json 读取训练时的 LoRA 配置（rank/alpha 等）
-        lora_config_file = os.path.join(lora_weights_path, "lora_config.json")
-        if os.path.exists(lora_config_file):
-            with open(lora_config_file, "r", encoding="utf-8") as f:
+        lora_config_file = lora_dir / "lora_config.json"
+        if lora_config_file.is_file():
+            with lora_config_file.open("r", encoding="utf-8") as f:
                 saved_config = json.load(f)
             lora_cfg_data = saved_config.get("lora_config", {})
             logger.info(f"LoRA config from file: r={lora_cfg_data.get('r')}, alpha={lora_cfg_data.get('alpha')}")
@@ -278,23 +311,15 @@ async def tts(
     control = (control_instruction or "").strip()
 
     # 处理参考音频路径
-    ref_wav = (reference_wav_path or "").strip() or None
-    if ref_wav and not os.path.exists(ref_wav):
-        logger.warning(f"参考音频不存在: {ref_wav}")
-        ref_wav = None
+    ref_wav = _resolve_optional_audio_path(reference_wav_path, "参考音频")
 
     # 极致克隆: prompt_wav_path + prompt_text
-    p_wav = (prompt_wav_path or "").strip() or None
+    p_wav = _resolve_optional_audio_path(prompt_wav_path, "提示音频")
     p_text = (prompt_text or "").strip() or None
 
     # 如果有 prompt_text 但没指定 prompt_wav_path，则使用 reference_wav_path
     if p_text and not p_wav and ref_wav:
         p_wav = ref_wav
-
-    if p_wav and not os.path.exists(p_wav):
-        logger.warning(f"提示音频不存在: {p_wav}")
-        p_wav = None
-        p_text = None
 
     # prompt_wav_path 和 prompt_text 必须同时提供
     if (p_wav is None) != (p_text is None):
@@ -409,19 +434,12 @@ async def tts_stream(
     do_normalize = normalize.lower() in ("true", "1", "yes")
     control = (control_instruction or "").strip()
 
-    ref_wav = (reference_wav_path or "").strip() or None
-    if ref_wav and not os.path.exists(ref_wav):
-        logger.warning(f"参考音频不存在: {ref_wav}")
-        ref_wav = None
+    ref_wav = _resolve_optional_audio_path(reference_wav_path, "参考音频")
 
-    p_wav = (prompt_wav_path or "").strip() or None
+    p_wav = _resolve_optional_audio_path(prompt_wav_path, "提示音频")
     p_text = (prompt_text or "").strip() or None
     if p_text and not p_wav and ref_wav:
         p_wav = ref_wav
-    if p_wav and not os.path.exists(p_wav):
-        logger.warning(f"提示音频不存在: {p_wav}")
-        p_wav = None
-        p_text = None
     if (p_wav is None) != (p_text is None):
         p_wav = None
         p_text = None

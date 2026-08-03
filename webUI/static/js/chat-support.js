@@ -2,11 +2,24 @@
  * Pure chat helpers and the self-contained TTS playback controller.
  */
 window.ChatSupport = (() => {
+    let fallbackIdCounter = 0;
+
+    function randomHex(bytes) {
+        if (!window.crypto || typeof window.crypto.getRandomValues !== 'function') {
+            fallbackIdCounter += 1;
+            return `${Date.now().toString(16)}${fallbackIdCounter.toString(16)}`;
+        }
+        const values = new Uint8Array(bytes);
+        window.crypto.getRandomValues(values);
+        return Array.from(values, value => value.toString(16).padStart(2, '0')).join('');
+    }
+
     function createId() {
         if (window.crypto && typeof window.crypto.randomUUID === 'function') {
             return window.crypto.randomUUID();
         }
-        return `chat-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        fallbackIdCounter += 1;
+        return `chat-${Date.now()}-${fallbackIdCounter}-${randomHex(16)}`;
     }
 
     function createSession(title = '新对话') {
