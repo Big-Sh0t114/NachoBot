@@ -439,7 +439,7 @@ async def _wav_to_silk_py(wav_path: Path, bit_rate: int = 24000) -> Optional[byt
 def _silk_cache_path(wav_path: Path, bit_rate: int) -> Path:
     st = wav_path.stat()
     raw = f"{wav_path.resolve()}|{st.st_mtime_ns}|{st.st_size}|{int(bit_rate or 24000)}"
-    key = hashlib.md5(raw.encode("utf-8")).hexdigest()
+    key = hashlib.md5(raw.encode("utf-8"), usedforsecurity=False).hexdigest()
     cache_dir = PLUGIN_DIR / "cache_silk"
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir / f"{key}.silk"

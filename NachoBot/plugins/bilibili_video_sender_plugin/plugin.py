@@ -612,7 +612,7 @@ class BilibiliParser:
         if buvid3:
             # 生成 session: md5(buvid3 + 当前毫秒)
             ms = str(int(time.time() * 1000))
-            session_hash = hashlib.md5((buvid3 + ms).encode("utf-8")).hexdigest()
+            session_hash = hashlib.md5((buvid3 + ms).encode("utf-8"), usedforsecurity=False).hexdigest()
             params["session"] = session_hash
 
         # 添加gaia_source参数（有Cookie时非必要）
@@ -824,7 +824,7 @@ class BilibiliParser:
 
         if buvid3:
             ms = str(int(time.time() * 1000))
-            session_hash = hashlib.md5((buvid3 + ms).encode("utf-8")).hexdigest()
+            session_hash = hashlib.md5((buvid3 + ms).encode("utf-8"), usedforsecurity=False).hexdigest()
             params["session"] = session_hash
 
         # 添加gaia_source参数（有Cookie时非必要）
@@ -1984,7 +1984,7 @@ class BilibiliWbiSigner:
         # 排序并 urlencode
         items = sorted(safe_params.items(), key=lambda x: x[0])
         query = urllib.parse.urlencode(items, doseq=True)
-        w_rid = hashlib.md5((query + mixin_key).encode("utf-8")).hexdigest()
+        w_rid = hashlib.md5((query + mixin_key).encode("utf-8"), usedforsecurity=False).hexdigest()
         safe_params["w_rid"] = w_rid
         return safe_params
 

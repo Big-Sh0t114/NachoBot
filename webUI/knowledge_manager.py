@@ -8,6 +8,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+try:
+    from .secure_paths import ensure_within, resolve_named_file
+except ImportError:
+    from secure_paths import ensure_within, resolve_named_file
+
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT_DIR / "NachoBot" / "data"
 KNOWLEDGE_DIR = DATA_DIR / "lpmm_raw_data"
@@ -49,14 +54,9 @@ class KnowledgeManager:
 
     def create_file(self, filename: str, content: str = "") -> None:
         """Create a new knowledge file."""
-        if not filename.endswith(".txt"):
-            filename += ".txt"
-        path = KNOWLEDGE_DIR / filename
+        path = self._resolve_new_path(filename)
         if path.exists():
-            raise ValueError(f"File already exists: {filename}")
-        # Sanitize
-        if "/" in filename or "\\" in filename or ".." in filename:
-            raise ValueError(f"Invalid filename: {filename}")
+            raise ValueError(f"File already exists: {path.name}")
         KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
 
@@ -110,21 +110,20 @@ class KnowledgeManager:
 
     def _resolve_path(self, filename: str) -> Path:
         """Resolve and validate a knowledge file path."""
-        if "/" in filename or "\\" in filename or ".." in filename:
-            raise ValueError(f"Invalid filename: {filename}")
-        path = KNOWLEDGE_DIR / filename
-        if not path.exists():
+        path = resolve_named_file(KNOWLEDGE_DIR, filename, suffix=".txt", must_exist=True)
+        if not path.is_file():
             raise FileNotFoundError(f"Knowledge file not found: {filename}")
-        # Ensure it's inside KNOWLEDGE_DIR
-        if not path.resolve().is_relative_to(KNOWLEDGE_DIR.resolve()):
-            raise ValueError(f"Path traversal detected: {filename}")
         return path
+
+    def _resolve_new_path(self, filename: str) -> Path:
+        """Resolve and validate a new knowledge file path."""
+        return resolve_named_file(KNOWLEDGE_DIR, filename, suffix=".txt")
 
     def _backup(self, path: Path) -> None:
         """Create a timestamped backup of a file."""
         BACKUP_DIR.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_path = BACKUP_DIR / f"{path.stem}_{ts}{path.suffix}"
+        backup_path = ensure_within(BACKUP_DIR, BACKUP_DIR / f"{path.stem}_{ts}{path.suffix}")
         shutil.copy2(path, backup_path)
 
     def _format_size(self, size_bytes: int) -> str:

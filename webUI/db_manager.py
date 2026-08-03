@@ -5,6 +5,7 @@ Provides read/write access to the NachoBot SQLite database for the WebUI.
 
 import hashlib
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -47,6 +48,15 @@ TABLE_LABELS = {
 
 # Tables to exclude from browsing
 HIDDEN_TABLES = {"sqlite_stat1", "sqlite_stat4"}
+SQLITE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _quote_identifier(identifier: str) -> str:
+    """Quote a SQLite identifier after validation against existing schema."""
+    text = str(identifier)
+    if not SQLITE_IDENTIFIER_RE.fullmatch(text):
+        raise ValueError("Invalid SQLite identifier")
+    return f'"{text}"'
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -83,7 +93,8 @@ class DatabaseManager:
             tables = self._get_table_names(conn)
             table_stats = []
             for t in tables:
-                count = conn.execute(f"SELECT COUNT(*) FROM [{t}]").fetchone()[0]
+                t_ident = self._table_identifier(conn, t)
+                count = conn.execute(f"SELECT COUNT(*) FROM {t_ident}").fetchone()[0]
                 table_stats.append({
                     "name": t,
                     "label": TABLE_LABELS.get(t, t),
@@ -110,7 +121,8 @@ class DatabaseManager:
             result = []
             for t in tables:
                 cols = self._get_columns(conn, t)
-                count = conn.execute(f"SELECT COUNT(*) FROM [{t}]").fetchone()[0]
+                t_ident = self._table_identifier(conn, t)
+                count = conn.execute(f"SELECT COUNT(*) FROM {t_ident}").fetchone()[0]
                 result.append({
                     "name": t,
                     "label": TABLE_LABELS.get(t, t),
@@ -139,6 +151,7 @@ class DatabaseManager:
             if table not in tables:
                 raise ValueError(f"Table not found: {table}")
 
+            table_ident = self._table_identifier(conn, table)
             cols = self._get_columns(conn, table)
             col_names = [c["name"] for c in cols]
 
@@ -156,26 +169,28 @@ class DatabaseManager:
             if filters:
                 for col, val in filters.items():
                     if col in col_names and val != "":
-                        conditions.append(f"CAST([{col}] AS TEXT) = ?")
+                        col_ident = _quote_identifier(col)
+                        conditions.append(f"CAST({col_ident} AS TEXT) = ?")
                         params.append(val)
 
             # Legacy global search (fallback, searches across all text columns)
             if search:
                 text_cols = [c["name"] for c in cols if c["type"] in ("TEXT", "")]
                 if text_cols:
-                    or_parts = [f"CAST([{c}] AS TEXT) LIKE ?" for c in text_cols]
+                    or_parts = [f"CAST({_quote_identifier(c)} AS TEXT) LIKE ?" for c in text_cols]
                     conditions.append("(" + " OR ".join(or_parts) + ")")
                     params.extend([f"%{search}%"] * len(text_cols))
 
             where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
             # Get total count
-            count_sql = f"SELECT COUNT(*) FROM [{table}] {where_clause}"
+            count_sql = f"SELECT COUNT(*) FROM {table_ident} {where_clause}"
             total = conn.execute(count_sql, params).fetchone()[0]
 
             # Get page data
             offset = (page - 1) * page_size
-            data_sql = f"SELECT * FROM [{table}] {where_clause} ORDER BY [{sort_by}] {sort_order} LIMIT ? OFFSET ?"
+            sort_ident = _quote_identifier(sort_by)
+            data_sql = f"SELECT * FROM {table_ident} {where_clause} ORDER BY {sort_ident} {sort_order} LIMIT ? OFFSET ?"
             rows = conn.execute(data_sql, params + [page_size, offset]).fetchall()
 
             # Convert to dicts, truncating long fields
@@ -213,12 +228,14 @@ class DatabaseManager:
             tables = self._get_table_names(conn)
             if table not in tables:
                 raise ValueError(f"Table not found: {table}")
+            table_ident = self._table_identifier(conn, table)
             cols = self._get_columns(conn, table)
             col_names = [c["name"] for c in cols]
             if column not in col_names:
                 raise ValueError(f"Column not found: {column}")
 
-            sql = f"SELECT DISTINCT CAST([{column}] AS TEXT) AS val FROM [{table}] WHERE [{column}] IS NOT NULL ORDER BY val LIMIT ?"
+            column_ident = _quote_identifier(column)
+            sql = f"SELECT DISTINCT CAST({column_ident} AS TEXT) AS val FROM {table_ident} WHERE {column_ident} IS NOT NULL ORDER BY val LIMIT ?"
             rows = conn.execute(sql, (limit,)).fetchall()
             return [r["val"] for r in rows]
         finally:
@@ -232,7 +249,8 @@ class DatabaseManager:
             if table not in tables:
                 raise ValueError(f"Table not found: {table}")
 
-            row = conn.execute(f"SELECT * FROM [{table}] WHERE id = ?", (row_id,)).fetchone()
+            table_ident = self._table_identifier(conn, table)
+            row = conn.execute(f"SELECT * FROM {table_ident} WHERE id = ?", (row_id,)).fetchone()
             if not row:
                 raise ValueError(f"Row not found: {table}.{row_id}")
 
@@ -253,8 +271,9 @@ class DatabaseManager:
 
         conn = _get_rw_conn()
         try:
+            table_ident = self._editable_table_identifier(conn, table)
             # Verify row exists
-            existing = conn.execute(f"SELECT id FROM [{table}] WHERE id = ?", (row_id,)).fetchone()
+            existing = conn.execute(f"SELECT id FROM {table_ident} WHERE id = ?", (row_id,)).fetchone()
             if not existing:
                 raise ValueError(f"Row not found: {table}.{row_id}")
 
@@ -264,12 +283,16 @@ class DatabaseManager:
             cols = [c for c in cols if c != "id"]
             if not cols:
                 return
+            valid_columns = {c["name"] for c in self._get_columns(conn, table)}
+            invalid_columns = [c for c in cols if c not in valid_columns]
+            if invalid_columns:
+                raise ValueError(f"Column not found: {', '.join(invalid_columns)}")
 
-            set_clause = ", ".join(f"[{c}] = ?" for c in cols)
+            set_clause = ", ".join(f"{_quote_identifier(c)} = ?" for c in cols)
             values = [data[c] for c in cols]
             values.append(row_id)
 
-            conn.execute(f"UPDATE [{table}] SET {set_clause} WHERE id = ?", values)
+            conn.execute(f"UPDATE {table_ident} SET {set_clause} WHERE id = ?", values)
             conn.commit()
         finally:
             conn.close()
@@ -281,11 +304,12 @@ class DatabaseManager:
 
         conn = _get_rw_conn()
         try:
-            existing = conn.execute(f"SELECT id FROM [{table}] WHERE id = ?", (row_id,)).fetchone()
+            table_ident = self._editable_table_identifier(conn, table)
+            existing = conn.execute(f"SELECT id FROM {table_ident} WHERE id = ?", (row_id,)).fetchone()
             if not existing:
                 raise ValueError(f"Row not found: {table}.{row_id}")
 
-            conn.execute(f"DELETE FROM [{table}] WHERE id = ?", (row_id,))
+            conn.execute(f"DELETE FROM {table_ident} WHERE id = ?", (row_id,))
             conn.commit()
         finally:
             conn.close()
@@ -309,7 +333,8 @@ class DatabaseManager:
 
         platform = "local"
         stream_key = f"{platform}_{backend_user_id}_private"
-        stream_id = hashlib.md5(stream_key.encode()).hexdigest()
+        # Must match legacy Core stream IDs; not used for security.
+        stream_id = hashlib.md5(stream_key.encode(), usedforsecurity=False).hexdigest()
         person_payload = json.dumps(
             [platform, backend_user_id],
             ensure_ascii=False,
@@ -332,7 +357,7 @@ class DatabaseManager:
         def table_columns(table: str) -> set[str]:
             if not table_exists(table):
                 return set()
-            return {row[1] for row in conn.execute(f"PRAGMA table_info([{table}])").fetchall()}
+            return {row["name"] for row in conn.execute("SELECT name FROM pragma_table_info(?)", (table,)).fetchall()}
 
         def delete_any(table: str, matches: list[tuple[str, tuple[Any, ...]]]) -> int:
             columns = table_columns(table)
@@ -342,12 +367,13 @@ class DatabaseManager:
                 if column not in columns or not values:
                     continue
                 placeholders = ", ".join("?" for _ in values)
-                clauses.append(f"[{column}] IN ({placeholders})")
+                clauses.append(f"{_quote_identifier(column)} IN ({placeholders})")
                 params.extend(values)
             if not clauses:
                 return 0
+            table_ident = _quote_identifier(table)
             cursor = conn.execute(
-                f"DELETE FROM [{table}] WHERE " + " OR ".join(clauses),
+                f"DELETE FROM {table_ident} WHERE " + " OR ".join(clauses),
                 params,
             )
             count = max(0, cursor.rowcount)
@@ -474,8 +500,28 @@ class DatabaseManager:
 
     def _get_table_names(self, conn: sqlite3.Connection) -> list[str]:
         cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-        return [r[0] for r in cursor.fetchall() if r[0] not in HIDDEN_TABLES]
+        return [
+            r[0]
+            for r in cursor.fetchall()
+            if r[0] not in HIDDEN_TABLES and SQLITE_IDENTIFIER_RE.fullmatch(r[0])
+        ]
 
     def _get_columns(self, conn: sqlite3.Connection, table: str) -> list[dict[str, str]]:
-        cursor = conn.execute(f"PRAGMA table_info([{table}])")
-        return [{"name": r[1], "type": r[2], "notnull": bool(r[3]), "pk": bool(r[5])} for r in cursor.fetchall()]
+        if table not in self._get_table_names(conn):
+            raise ValueError(f"Table not found: {table}")
+        cursor = conn.execute("SELECT name, type, [notnull], pk FROM pragma_table_info(?)", (table,))
+        return [
+            {"name": r["name"], "type": r["type"], "notnull": bool(r["notnull"]), "pk": bool(r["pk"])}
+            for r in cursor.fetchall()
+            if SQLITE_IDENTIFIER_RE.fullmatch(r["name"])
+        ]
+
+    def _table_identifier(self, conn: sqlite3.Connection, table: str) -> str:
+        if table not in self._get_table_names(conn):
+            raise ValueError(f"Table not found: {table}")
+        return _quote_identifier(table)
+
+    def _editable_table_identifier(self, conn: sqlite3.Connection, table: str) -> str:
+        if table not in EDITABLE_TABLES:
+            raise PermissionError(f"Table '{table}' is not editable")
+        return self._table_identifier(conn, table)
