@@ -28,7 +28,7 @@ dependencies = [
     "torchaudio==2.7.1+cu118",
     "torchvision==0.22.1+cu118",
     "transformers==4.51.3",
-    "uvicorn>=0.41.0",
+    "uvicorn>=0.52.0",
     "websockets>=12.0",
 ]
 
