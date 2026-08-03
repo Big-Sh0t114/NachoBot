@@ -7,6 +7,7 @@
 - 评论回复发送（支持所有评论类型）。
 - 回复通知轮询与转发。
 - 私信轮询与发送（仅支持文本）。
+- 本地麦克风连续 VAD / PTT 流式语音识别。
 - 二维码登录辅助工具，用于更新 `config.toml` 中的 Cookies。
 
 ## 安装与运行
@@ -55,6 +56,54 @@ Live2D 渲染已拆分到独立的 `NachoBot-Live2D-Adapter`，本项目只通�
 - `live.proxy_check_timeout`：代理校验超时时间（秒）。
 - 当 `live.ws_proxy = "pool"` 时，每次连接尝试都会轮换到下一个代理。
 
+## 实时画面 VLM
+
+实时画面的 system/user prompt 固定维护在
+`bili_src/visual_policy.py` 的 `BILIBILI_SCREEN_*` 常量中，不写入 TOML。
+`[live.screen_monitor.vlm]` 只管理预处理与模型执行参数：
+
+- `max_image_dimension`、`jpeg_quality`：截图预处理设置。
+- `models`：按顺序尝试的模型及各自的 `max_tokens`、`temperature`、
+  超时、重试和 `extra_params`。例如 Qwen 可在这里关闭思考。
+
+模型名称、模型标识、服务地址和 API Key 仍统一注册在
+`NachoBot/config/model_config.toml`；本适配器只引用模型名称，不复制连接信息。
+普通 VLM 会消费上面的自然语言 prompt；Florence-2 只支持它定义的任务 token，
+其服务端固定使用 `<MORE_DETAILED_CAPTION>`、256 输出 token 和 3 beams，
+适配器配置不会覆盖这项详细描述策略。
+若没有配置 `live.screen_monitor.vlm.models`，当前版本会临时回退读取旧的
+核心 VLM 任务组并输出迁移警告。
+
+```toml
+[live.screen_monitor.vlm]
+max_image_dimension = 896
+jpeg_quality = 75
+message_max_chars = 300
+models = [
+  { name = "qwen/qwen3-vl-4b", max_tokens = 128, temperature = 0.1, timeout = 20, max_retry = 1, extra_params = { enable_thinking = false } },
+  { name = "Florence-2", timeout = 15, max_retry = 1 },
+]
+```
+
+## 私信图片 VLM
+
+Bilibili 私信图片 prompt 固定在 `bili_src/visual_policy.py` 的 `BILIBILI_PRIVATE_IMAGE_PROMPT`；
+`[private_message.visual.image]` 仅保存
+`temperature`、`max_tokens` 和 `extra_params`。适配器会把代码中的 prompt 与
+推理参数通过 `visual_policy` 交给 Core。修改代码 prompt 或参数后缓存指纹会
+自动变化，无需清理旧图片缓存。
+
+`[live.screen_monitor.vlm]` 与它相互独立：前者服务直播活动窗口截图，
+后者只服务用户私信图片，各自在适配器代码中维护场景 prompt。
+
+## 麦克风流式 ASR
+
+开启麦克风 ASR 后，采集到的 PCM 会按 100ms 音频块持续送入
+Multimodal-Adapter 的共享 `StreamingASR`。连续模式由 VAD 控制流的开始与
+结束，PTT 模式在按键释放时结束流；句末只读取最终结果，不会再生成整段 WAV
+或请求 `/audio/transcriptions`。ASR 模型、CPU provider 和线程数统一由
+`NachoBot-Multimodal-Adapter/configs/perception.toml` 管理。
+
 ## 私信（Private messages）
 - `private_message.sessions`：用于固定（pin）指定的会话（talker ID）。
 - 设置 `private_message.auto_sessions = true` 可自动轮询所有最近会话（推荐用于“任意用户”私信场景）。
@@ -90,6 +139,7 @@ docker compose up -d
 ```
 
 ### Docker 注意事项
+- **共享 ASR**：构建时会从相邻的 `NachoBot-Multimodal-Adapter` 复制共享 ASR 源码与配置；首次运行时若模型不存在，会按 `auto_download` 配置下载 CPU INT8 模型。
 - **屏幕监控**：本适配器的 Docker 镜像使用 `Xvfb` 支持无显示设备环境下的 `mss` 截屏。
 - **Live2D**：渲染不再由本容器负责。请单独部署 `NachoBot-Live2D-Adapter`，并将 `live.live2d_url` 指向其可访问的 WebSocket 地址；容器内不能使用 `127.0.0.1` 访问宿主机上的独立适配器。
 - **配置文件**：容器挂载使用宿主机的 `config.toml` 和日志目录，修改配置后重启容器即可生效。

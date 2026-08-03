@@ -71,9 +71,6 @@ class PersonalityConfig(ConfigBase):
     plan_style: str = ""
     """说话规则，行为风格"""
 
-    visual_style: str = ""
-    """图片提示词"""
-
     private_plan_style: str = ""
     """私聊说话规则，行为风格"""
 
@@ -771,6 +768,9 @@ class FocusMemberConfig(ConfigBase):
 
     allow_export: bool = True
     """是否允许该会话导出短期交接内容。私聊源在 v1 中仍会被策略拒绝。"""
+
+    planner_bypass: bool = False
+    """该会话是否由适配器声明为直答会话；用于启动时尚无消息上下文的 Focus 排序。"""
 
     def __post_init__(self) -> None:
         if not self.key.strip() or not self.platform.strip() or not self.external_id.strip():

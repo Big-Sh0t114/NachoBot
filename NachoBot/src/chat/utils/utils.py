@@ -662,6 +662,7 @@ def get_chat_type_and_target_info(chat_id: str) -> Tuple[bool, Optional["TargetP
                     user_nickname=user_info.user_nickname,  # type: ignore
                     person_id=None,
                     person_name=None,
+                    user_cardname=user_info.user_cardname,
                 )
 
                 # Try to fetch person info

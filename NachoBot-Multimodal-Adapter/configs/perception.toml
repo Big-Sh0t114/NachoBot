@@ -4,6 +4,14 @@ host = "127.0.0.1"
 port = 9874
 
 [perception.device]
-# 硬件设备配置
+# 视觉模型硬件配置
 vlm = "cuda:0"   # Florence-2 VLM 使用的设备
-asr = "cuda:0"   # FunASR 使用的设备
+
+[asr]
+# 所有 Adapter 共用的 sherpa-onnx 流式 ASR
+mode = "local_streaming"
+provider = "cpu"
+device = 0
+num_threads = 4
+models_dir = "models"
+auto_download = true

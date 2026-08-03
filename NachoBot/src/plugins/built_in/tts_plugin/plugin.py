@@ -363,6 +363,26 @@ class TTSAction(BaseAction):
     def _get_language_for_key(cls, key: str) -> str:
         return cls._language_preferences.setdefault(key, cls.DEFAULT_LANGUAGE)
 
+    @classmethod
+    async def get_language_for_chat(cls, chat_id: Optional[str], target_id: Optional[str] = None) -> str:
+        """供外部链路读取当前聊天的TTS语种。"""
+        key = cls.build_language_key(target_id, chat_id)
+        if key in cls._language_preferences:
+            return cls._language_preferences[key]
+
+        loaded = await cls._load_language_from_history_for_chat(chat_id=chat_id, key=key)
+        if loaded:
+            return loaded
+
+        cls._language_preferences[key] = cls.DEFAULT_LANGUAGE
+        return cls.DEFAULT_LANGUAGE
+
+    @classmethod
+    async def get_language_prompt_for_chat(cls, chat_id: Optional[str], target_id: Optional[str] = None) -> str:
+        """供 planner/replyer 注入的TTS语种约束提示。"""
+        language = await cls.get_language_for_chat(chat_id=chat_id, target_id=target_id)
+        return cls._get_language_internal_prompt(language)
+
     def _get_current_language(self) -> str:
         key = self._get_target_language_key()
         return self._get_language_for_key(key)
@@ -382,7 +402,14 @@ class TTSAction(BaseAction):
 
     async def _load_language_from_history(self, key: str) -> Optional[str]:
         """从最近的动作记录中恢复语言，避免缓存丢失导致的语种回退。"""
-        if not self.chat_id:
+        return await self._load_language_from_history_for_chat(self.chat_id, key, self.log_prefix)
+
+    @classmethod
+    async def _load_language_from_history_for_chat(
+        cls, chat_id: Optional[str], key: str, log_prefix: str = ""
+    ) -> Optional[str]:
+        """从最近动作记录中恢复指定聊天的TTS语种。"""
+        if not chat_id:
             return None
 
         try:
@@ -391,7 +418,7 @@ class TTSAction(BaseAction):
             records = await database_api.db_query(
                 ActionRecords,
                 query_type="get",
-                filters={"chat_id": self.chat_id},
+                filters={"chat_id": chat_id},
                 order_by=["-time"],
                 limit=10,
             )
@@ -403,11 +430,11 @@ class TTSAction(BaseAction):
                     continue
 
                 lang = data.get("tts_language")
-                if lang in self.LANGUAGE_INFO:
-                    self._language_preferences[key] = lang
+                if lang in cls.LANGUAGE_INFO:
+                    cls._language_preferences[key] = lang
                     return lang
         except Exception as e:
-            logger.warning(f"{self.log_prefix} 恢复TTS语言状态失败: {e}")
+            logger.warning(f"{log_prefix} 恢复TTS语言状态失败: {e}")
 
         return None
 

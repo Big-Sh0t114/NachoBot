@@ -54,9 +54,10 @@ try:
         TemplateInfo,
         UserInfo,
     )
-except ImportError:
+except ImportError as exc:
     print(
-        "Warning: ncnk_message not found. Please ensure NachoBot is adjacent to this folder."
+        "Warning: failed to import ncnk_message from the adjacent NachoBot core: "
+        f"{exc}"
     )
     BaseMessageInfo = FormatInfo = GroupInfo = MessageBase = Router = RouteConfig = (
         Seg
@@ -223,8 +224,19 @@ class UniversalVCAdapter:
         if self.config.disable_network_search:
             processed_text = _mask_urls(processed_text)
 
-        additional_config = {}
-        additional_config["disable_tools"] = True
+        additional_config = {
+            "disable_tools": True,
+            "runtime_capabilities": {
+                "schema_version": 1,
+                "planner_bypass": True,
+                "relation_inference": False,
+                "expression_selection": False,
+                "memory_retrieval": False,
+                "knowledge_retrieval": False,
+                "tool_mode": "disabled",
+                "web_search_mode": "disabled",
+            },
+        }
 
         # Custom Prompts
         template_info = None

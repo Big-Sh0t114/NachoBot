@@ -1,5 +1,5 @@
 [inner]
-version = "0.1.0"
+version = "0.1.2"
 
 [onebot_server]
 # If ws_url is empty, host/port/path will be used.
@@ -21,6 +21,14 @@ group_list = [2,20,1459291898132037763]
 private_list_type = "blacklist"
 private_list = []
 ban_user_id = []
+
+[visual]
+# 图片 prompt 固定在 visual_policy.py 中；这里只配置单次推理参数。
+
+[visual.image]
+temperature = 0.1
+max_tokens = 240
+extra_params = { enable_thinking = false }
 
 [voice]
 use_tts = true

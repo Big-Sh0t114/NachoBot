@@ -367,11 +367,23 @@ class PluginManager:
     def _find_missing_plugin_requirements(self, requirements: List[str]) -> List[str]:
         """检查插件 requirements.txt 中缺失或版本不满足的依赖。"""
         missing: List[str] = []
+        package_distributions = importlib.metadata.packages_distributions()
+
         for requirement in requirements:
             parsed = Requirement(requirement)
-            try:
-                installed_version = importlib.metadata.version(parsed.name)
-            except importlib.metadata.PackageNotFoundError:
+            installed_version = None
+            distribution_names = [parsed.name]
+            top_level_name = parsed.name.replace("-", "_").lower()
+            distribution_names.extend(package_distributions.get(top_level_name, []))
+
+            for distribution_name in dict.fromkeys(distribution_names):
+                try:
+                    installed_version = importlib.metadata.version(distribution_name)
+                    break
+                except importlib.metadata.PackageNotFoundError:
+                    continue
+
+            if installed_version is None:
                 missing.append(requirement)
                 continue
             if parsed.specifier and not parsed.specifier.contains(installed_version, prereleases=True):

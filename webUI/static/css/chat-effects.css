@@ -1,0 +1,202 @@
+/* ===================================================================
+   OMEGA Tip — rainbow chat-card border and glow
+   =================================================================== */
+@keyframes omegaChatCardFlow {
+    from { background-position: 0% 50%; }
+    to { background-position: 200% 50%; }
+}
+
+html[data-omega-tip-active="true"] .chat-message-user .chat-message-content {
+    position: relative;
+    isolation: isolate;
+    border: 1px solid transparent;
+    border-radius: 17px;
+    background: rgba(255, 255, 255, 0.70);
+    box-shadow: none;
+}
+
+html[data-omega-tip-active="true"] .chat-message-user .chat-message-content::before {
+    content: '';
+    position: absolute;
+    inset: -1px;
+    padding: 1px;
+    border-radius: inherit;
+    background: linear-gradient(
+        90deg,
+        #ff3d81 0%,
+        #ff9f1c 8.333%,
+        #ffe600 16.666%,
+        #2ed573 25%,
+        #00c2ff 33.333%,
+        #7d5fff 41.666%,
+        #ff3d81 50%,
+        #ff9f1c 58.333%,
+        #ffe600 66.666%,
+        #2ed573 75%,
+        #00c2ff 83.333%,
+        #7d5fff 91.666%,
+        #ff3d81 100%
+    );
+    background-size: 200% 100%;
+    animation: omegaChatCardFlow 2.8s linear infinite;
+    pointer-events: none;
+    z-index: -1;
+    -webkit-mask:
+        linear-gradient(#fff 0 0) content-box,
+        linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    html[data-omega-tip-active="true"] .chat-message-user .chat-message-content::before {
+        animation: none;
+    }
+}
+
+/* OMEGA Tip — guide cards and composer glow */
+html[data-omega-tip-active="true"] .chat-suggestion,
+html[data-omega-tip-active="true"] .chat-composer {
+    position: relative;
+    isolation: isolate;
+    overflow: visible;
+    border-color: transparent !important;
+    box-shadow: none;
+}
+
+html[data-omega-tip-active="true"] .chat-suggestion::before,
+html[data-omega-tip-active="true"] .chat-composer::before {
+    content: '';
+    position: absolute;
+    inset: -1px;
+    padding: 1px;
+    border-radius: inherit;
+    background: linear-gradient(
+        90deg,
+        #ff3d81 0%,
+        #ff9f1c 8.333%,
+        #ffe600 16.666%,
+        #2ed573 25%,
+        #00c2ff 33.333%,
+        #7d5fff 41.666%,
+        #ff3d81 50%,
+        #ff9f1c 58.333%,
+        #ffe600 66.666%,
+        #2ed573 75%,
+        #00c2ff 83.333%,
+        #7d5fff 91.666%,
+        #ff3d81 100%
+    );
+    background-size: 200% 100%;
+    animation: omegaChatCardFlow 2.8s linear infinite;
+    pointer-events: none;
+    z-index: -1;
+    -webkit-mask:
+        linear-gradient(#fff 0 0) content-box,
+        linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    html[data-omega-tip-active="true"] .chat-suggestion::before,
+    html[data-omega-tip-active="true"] .chat-composer::before {
+        animation: none;
+    }
+}
+
+/* ---- First-use chat name prompt ---- */
+.modal-overlay:has(.chat-name-modal) {
+    background: rgba(30, 41, 59, 0.28);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+}
+
+.chat-name-modal {
+    width: min(92vw, 460px);
+    max-height: none;
+    background: #fffaf3;
+    border: 1px solid rgba(203, 190, 171, 0.7);
+    box-shadow:
+        0 24px 70px rgba(30, 41, 59, 0.22),
+        0 2px 8px rgba(30, 41, 59, 0.08);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+}
+
+.chat-name-modal .modal-header {
+    padding-bottom: 14px;
+    background: rgba(250, 243, 232, 0.72);
+    border-bottom-color: rgba(203, 190, 171, 0.55);
+}
+
+.chat-name-modal .modal-header h3 {
+    color: var(--text-primary);
+}
+
+.chat-name-modal .modal-body {
+    padding-top: 18px;
+    padding-bottom: 12px;
+    overflow: visible;
+    background: #fffaf3;
+}
+
+.chat-name-prompt {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.chat-name-prompt > p:first-child {
+    color: #64748b;
+    font-size: 0.9rem;
+    line-height: 1.6;
+}
+
+.chat-name-input {
+    width: 100%;
+    min-height: 44px;
+    padding: 10px 13px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: #ffffff;
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 0.95rem;
+    outline: none;
+    transition: border-color var(--transition), box-shadow var(--transition);
+}
+
+.chat-name-input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.1);
+}
+
+.chat-name-error {
+    min-height: 1.3em;
+    color: var(--error);
+    font-size: 0.78rem;
+}
+
+.chat-name-modal .modal-footer {
+    padding-top: 12px;
+    background: rgba(250, 243, 232, 0.62);
+    border-top-color: rgba(203, 190, 171, 0.55);
+}
+
+.chat-name-modal .modal-footer .btn-primary {
+    min-width: 88px;
+}
+
+@media (max-width: 520px) {
+    .chat-name-modal {
+        width: calc(100vw - 28px);
+    }
+
+    .chat-name-modal .modal-header,
+    .chat-name-modal .modal-body,
+    .chat-name-modal .modal-footer {
+        padding-left: 18px;
+        padding-right: 18px;
+    }
+}
