@@ -16,6 +16,7 @@ from src.common.logger import get_logger
 from src.common.data_models.info_data_model import ActionPlannerInfo
 from src.chat.utils.prompt_builder import Prompt, global_prompt_manager
 from src.chat.utils.prompt_injection_guard import build_guardrail_instruction, guard_user_content
+from src.chat.utils.display_name import resolve_sender_name
 from src.chat.utils.chat_message_builder import (
     build_readable_actions,
     get_actions_by_timestamp_with_chat,
@@ -241,6 +242,7 @@ class ActionPlanner:
             latest_user_message = _pick_latest_user_message(message_id_list)
             target_message = None
             fallback_to_latest = False
+            target_message_explicitly_resolved = False
 
             if action == SWITCH_CHAT_ACTION:
                 target_message = None
@@ -250,6 +252,8 @@ class ActionPlanner:
                 if target_message is None:
                     logger.warning(f"{self.log_prefix}无法找到target_message_id '{target_message_id}' 对应的消息")
                     fallback_to_latest = True
+                else:
+                    target_message_explicitly_resolved = True
             else:
                 fallback_to_latest = True
                 logger.debug(f"{self.log_prefix}动作'{action}'缺少target_message_id，使用最新消息作为target_message")
@@ -259,6 +263,7 @@ class ActionPlanner:
 
             if _is_bot_message(target_message) and latest_user_message:
                 target_message = latest_user_message
+                target_message_explicitly_resolved = False
                 logger.debug(f"{self.log_prefix}target_message为机器人消息，改为最新用户消息")
 
             # 验证action是否可用
@@ -286,6 +291,12 @@ class ActionPlanner:
                     f" 原始理由: {reasoning}"
                 )
                 action = "reply"
+
+            # ban_user 会把 target_message 作为高风险身份解析依据。只有 LLM 提供的
+            # target_message_id 真正命中时才允许它作为该依据；通用的“最新消息”回退不能
+            # 导致错误禁言。
+            if action == "ban_user":
+                action_data["_target_message_resolved"] = target_message_explicitly_resolved
 
             # 创建ActionPlannerInfo对象
             # 将列表转换为字典格式
@@ -466,7 +477,7 @@ class ActionPlanner:
             )
             if chat_target_info:
                 chat_context_description = (
-                    f"你正在和 {chat_target_info.person_name or chat_target_info.user_nickname or '对方'} 聊天中"
+                    f"你正在和 {resolve_sender_name(user_info=chat_target_info, fallback='对方')} 聊天中"
                 )
 
             if is_group_chat:

@@ -33,6 +33,7 @@ from src.chat.utils.chat_message_builder import (
     replace_user_references,
     get_stepped_limit,
 )
+from src.chat.utils.display_name import resolve_sender_name
 from src.chat.express.expression_selector import expression_selector
 
 # from src.chat.memory_system.memory_activator import MemoryActivator
@@ -984,9 +985,10 @@ class DefaultReplyer:
         context_size = global_config.chat.get_max_context_size(is_group_chat=is_group_chat)
         platform = chat_stream.platform
 
-        user_id = "用户ID"
-        person_name = "用户"
-        sender = "用户"
+        current_user_info = chat_stream.user_info
+        user_id = str(getattr(current_user_info, "user_id", "") or "用户ID")
+        person_name = resolve_sender_name(user_info=current_user_info, user_id=user_id, fallback="用户")
+        sender = person_name
         target = "消息"
         if prompt_context is not None and prompt_context.target_chat_id != chat_id:
             raise ValueError("Focus ReplyPromptContext 不属于当前群聊 Replyer")
@@ -996,7 +998,12 @@ class DefaultReplyer:
         if reply_message:
             user_id = reply_message.user_info.user_id
             person = Person(platform=platform, user_id=user_id)
-            person_name = person.person_name or user_id
+            person_name = resolve_sender_name(
+                user_info=reply_message.user_info,
+                person_name=person.person_name,
+                user_id=user_id,
+                fallback="用户",
+            )
             sender = person_name
             target = reply_message.processed_plain_text
 
@@ -1166,9 +1173,8 @@ class DefaultReplyer:
                     target_id = str(chat_stream.group_info.group_id)
                 elif chat_stream.user_info and getattr(chat_stream.user_info, "user_id", None):
                     target_id = str(chat_stream.user_info.user_id)
-                    tts_language_prompt = await TTSAction.get_language_prompt_for_chat(
-                        chat_id=chat_id, target_id=target_id
-                    )
+
+                tts_language_prompt = await TTSAction.get_language_prompt_for_chat(chat_id=chat_id, target_id=target_id)
         except Exception as e:
             logger.debug(f"获取TTS语言提示失败: {e}")
 
@@ -1385,7 +1391,7 @@ class DefaultReplyer:
         else:
             chat_target_name = "对方"
             if self.chat_target_info:
-                chat_target_name = self.chat_target_info.person_name or self.chat_target_info.user_nickname or "对方"
+                chat_target_name = resolve_sender_name(user_info=self.chat_target_info, fallback="对方")
             chat_target_1 = await global_prompt_manager.format_prompt(
                 "chat_target_private1", sender_name=chat_target_name
             )

@@ -210,6 +210,105 @@ class HeartFChatting:
             logger.error(f"{self.log_prefix} 通过昵称解析QQ号失败: {e}")
         return None
 
+    @staticmethod
+    def _normalize_user_reference(value: object) -> str:
+        """规范化 LLM 可能附带 @ 或标准提及格式的用户昵称。"""
+        reference = str(value or "").strip()
+        if reference.startswith(("@", "＠")):
+            reference = reference[1:].lstrip()
+        if reference.startswith("<") and reference.endswith(">"):
+            nickname, separator, user_id = reference[1:-1].rpartition(":")
+            user_id = user_id.strip()
+            if separator and user_id.isascii() and user_id.isdecimal() and int(user_id) > 0:
+                reference = nickname.strip()
+        return reference
+
+    @classmethod
+    def _user_info_matches_reference(cls, reference: str, user_info: Any) -> bool:
+        """仅对平台昵称和群名片做精确匹配，避免禁言时模糊命中错误成员。"""
+        normalized_reference = cls._normalize_user_reference(reference)
+        if not normalized_reference or user_info is None:
+            return False
+        return any(
+            normalized_reference == cls._normalize_user_reference(value)
+            for value in (
+                getattr(user_info, "user_nickname", ""),
+                getattr(user_info, "user_cardname", ""),
+            )
+        )
+
+    @staticmethod
+    def _as_valid_qq_id(value: object) -> Optional[str]:
+        """将适配器可接受的正整数 QQ 号标准化；昵称绝不能透传为 qq_id。"""
+        user_id = str(value or "").strip()
+        if user_id.isascii() and user_id.isdecimal() and int(user_id) > 0:
+            return user_id
+        return None
+
+    def _resolve_ban_user_id_by_nickname(
+        self,
+        nickname: str,
+        action_message: Optional["DatabaseMessages"],
+    ) -> Optional[str]:
+        """在当前群中将昵称解析为唯一的 QQ 号。
+
+        已确认的 ``target_message_id`` 会由 Planner 映射到 ``action_message``，它是最
+        可靠的身份来源。只有该消息的昵称/群名片与 LLM 输入一致时才采用其 user_id；若
+        没有该证据，再从当前群消息历史中查找且必须唯一命中，避免重名时误禁言。
+        """
+        reference = self._normalize_user_reference(nickname)
+        if not reference:
+            return None
+
+        action_user_info = getattr(action_message, "user_info", None)
+        action_user_id = self._as_valid_qq_id(getattr(action_user_info, "user_id", ""))
+        if action_user_id and self._user_info_matches_reference(reference, action_user_info):
+            return action_user_id
+
+        # 聊天记录中的显示名通常是 Person 的内部称呼。仅在 Planner 已选中的
+        # 同一条目标消息上使用它，避免全局 Person 查找跨群命中同名用户。
+        if action_user_id and action_user_info is not None and not reference.isdecimal():
+            try:
+                person = Person(
+                    platform=str(getattr(action_user_info, "platform", "") or self.chat_stream.platform),
+                    user_id=action_user_id,
+                )
+                if any(
+                    reference == self._normalize_user_reference(value)
+                    for value in (
+                        getattr(person, "person_name", ""),
+                        getattr(person, "nickname", ""),
+                        getattr(person, "user_nickname", ""),
+                    )
+                ):
+                    return action_user_id
+            except Exception as e:
+                logger.debug(f"{self.log_prefix} ban_user 读取目标消息人物信息失败: {e}")
+
+        try:
+            recent_messages = get_raw_msg_before_timestamp_with_chat(
+                chat_id=self.stream_id,
+                timestamp=time.time(),
+                limit=100,
+            )
+            candidate_ids = {
+                user_id
+                for msg in recent_messages
+                if self._user_info_matches_reference(reference, getattr(msg, "user_info", None))
+                if (user_id := self._as_valid_qq_id(getattr(getattr(msg, "user_info", None), "user_id", "")))
+            }
+        except Exception as e:
+            logger.error(f"{self.log_prefix} ban_user 通过当前群消息解析昵称失败: {e}")
+            return None
+
+        if len(candidate_ids) == 1:
+            return candidate_ids.pop()
+        if candidate_ids:
+            logger.warning(
+                f"{self.log_prefix} ban_user 昵称 '{nickname}' 在当前群匹配到 {len(candidate_ids)} 个用户，拒绝执行"
+            )
+        return None
+
     async def start(self):
         """检查是否需要启动主循环，如果未激活则启动。"""
 
@@ -2316,7 +2415,13 @@ class HeartFChatting:
     ):
         """处理 ban_user 动作：禁言指定用户（由 Replyer 决策是否执行及时长）"""
         action_data = action_planner_info.action_data or {}
-        target_name = str(action_data.get("target_name", ""))
+        target_name = str(
+            action_data.get("target_name")
+            or action_data.get("target_user_id")
+            or action_data.get("target_qq")
+            or action_data.get("qq_id")
+            or ""
+        ).strip()
         planner_reason = action_planner_info.reasoning or action_data.get("reason", "未提供原因")
 
         # 1. 参数校验
@@ -2329,30 +2434,27 @@ class HeartFChatting:
             logger.warning(f"{self.log_prefix} ban_user 仅适用于群聊")
             return {"action_type": "ban_user", "success": False, "reply_text": ""}
 
-        # 3. 解析用户ID（复用 block_user 的解析逻辑）
-        if target_name.isdigit():
-            target_user_id = target_name
-            logger.info(f"{self.log_prefix} ban_user 直接使用QQ号 {target_user_id}")
+        # 3. 解析用户ID。target_name 的协议语义是昵称，因此即使昵称全为数字，
+        # 已确认的 target_message_id 仍优先作为身份依据；否则再兼容直接 QQ 号。
+        target_message = action_planner_info.action_message if action_data.get("_target_message_resolved") else None
+        target_user_id = None
+        target_user_info = getattr(target_message, "user_info", None)
+        if target_message and self._user_info_matches_reference(target_name, target_user_info):
+            target_user_id = self._as_valid_qq_id(getattr(target_user_info, "user_id", ""))
+            if target_user_id:
+                logger.info(f"{self.log_prefix} ban_user 通过目标消息昵称解析用户 '{target_name}' -> QQ号 {target_user_id}")
+
+        if not target_user_id:
+            target_user_id = self._as_valid_qq_id(target_name)
+        if target_user_id:
+            if not target_message or not self._user_info_matches_reference(target_name, target_user_info):
+                logger.info(f"{self.log_prefix} ban_user 直接使用QQ号 {target_user_id}")
         else:
-            try:
-                person = Person(person_name=target_name)
-                if person.is_known:
-                    target_user_id = person.get_user_id_for_platform(global_config.bot.platform) or str(person.user_id)
-                    logger.info(
-                        f"{self.log_prefix} ban_user 通过Person解析用户 '{target_name}' -> QQ号 {target_user_id}"
-                    )
-                else:
-                    resolved_id = self._resolve_user_id_by_nickname(target_name)
-                    if resolved_id:
-                        target_user_id = resolved_id
-                        logger.info(
-                            f"{self.log_prefix} ban_user 通过消息记录解析用户 '{target_name}' -> QQ号 {target_user_id}"
-                        )
-                    else:
-                        logger.warning(f"{self.log_prefix} ban_user 无法将 '{target_name}' 解析为有效的QQ号")
-                        return {"action_type": "ban_user", "success": False, "reply_text": ""}
-            except Exception as e:
-                logger.warning(f"{self.log_prefix} ban_user 解析用户 '{target_name}' 失败: {e}")
+            target_user_id = self._resolve_ban_user_id_by_nickname(target_name, target_message)
+            if target_user_id:
+                logger.info(f"{self.log_prefix} ban_user 通过昵称解析用户 '{target_name}' -> QQ号 {target_user_id}")
+            else:
+                logger.warning(f"{self.log_prefix} ban_user 无法将 '{target_name}' 解析为有效的QQ号")
                 return {"action_type": "ban_user", "success": False, "reply_text": ""}
 
         # 4. 不能禁言自己

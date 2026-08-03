@@ -26,6 +26,7 @@ from src.chat.utils.chat_message_builder import (
     get_stepped_limit,
 )
 from src.chat.utils.prompt_injection_guard import guard_user_content
+from src.chat.utils.display_name import resolve_sender_name
 from src.chat.utils.context_builder import build_tool_info, build_relation_info, build_lpmm_knowledge_info
 from src.memory_system.memory_retrieval import build_memory_retrieval_prompt
 from src.chat.utils.utils import get_chat_type_and_target_info
@@ -554,7 +555,7 @@ class BrainPlanner:
             if chat_target_info:
                 # 构建聊天上下文描述
                 chat_context_description = (
-                    f"你正在和 {chat_target_info.person_name or chat_target_info.user_nickname or '对方'} 聊天中"
+                    f"你正在和 {resolve_sender_name(user_info=chat_target_info, fallback='对方')} 聊天中"
                 )
 
             # 构建动作选项块
@@ -630,7 +631,7 @@ class BrainPlanner:
 
             sender_name = "对方"
             if chat_target_info:
-                sender_name = chat_target_info.person_name or chat_target_info.user_nickname or "对方"
+                sender_name = resolve_sender_name(user_info=chat_target_info, fallback="对方")
 
             # 构建动作选项块
             action_options_block = await self._build_action_options_block(current_available_actions)
