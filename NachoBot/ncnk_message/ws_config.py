@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, Optional, Set
 from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
 
+from .log_utils import redact_secret
 from .message import APIMessageBase, BaseMessageInfo, Seg, MessageDim
 
 logger = logging.getLogger(__name__)
@@ -99,7 +100,7 @@ class ServerConfig(ConfigValidator):
             """默认消息处理器：记录消息"""
             if self.enable_message_log:
                 logger.info(f"收到消息: {message.message_segment.data} "
-                           f"from {message.get_api_key()}")
+                           f"from {redact_secret(message.get_api_key())}")
         return default_message_handler
 
     

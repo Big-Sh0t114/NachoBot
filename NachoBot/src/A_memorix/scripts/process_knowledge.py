@@ -264,7 +264,7 @@ class AutoImporter:
             return f.read()
 
     def get_file_hash(self, content: str) -> str:
-        return hashlib.md5(content.encode("utf-8")).hexdigest()
+        return hashlib.md5(content.encode("utf-8"), usedforsecurity=False).hexdigest()
     
     def _parse_reference_time(self, value: Optional[str]) -> datetime:
         """解析 chat_log 模式的参考时间（用于相对时间语义解析）。"""

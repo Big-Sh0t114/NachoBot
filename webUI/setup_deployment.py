@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import re
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -11,8 +12,10 @@ import tomlkit
 
 try:
     from .setup_checks import EnvironmentChecker, ROOT_DIR, TEMPLATE_MAP
+    from .secure_paths import ensure_within, resolve_external_path, resolve_relative_to_root
 except ImportError:
     from setup_checks import EnvironmentChecker, ROOT_DIR, TEMPLATE_MAP
+    from secure_paths import ensure_within, resolve_external_path, resolve_relative_to_root
 
 BACKUP_DIR = ROOT_DIR / "config-save" / "setup_backups"
 MAX_BACKUPS_PER_FILE = 5
@@ -23,17 +26,24 @@ class BackupManager:
     @staticmethod
     def backup(file_path: Path) -> str | None:
         """Create a timestamped backup. Rotates old backups."""
+        file_path = resolve_external_path(file_path, base_dir=ROOT_DIR, must_exist=True, must_be_file=True)
         if not file_path.exists():
             return None
 
         BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 
         # Use a flat name: component__filename to avoid directory nesting
-        relative = file_path.relative_to(ROOT_DIR)
-        safe_name = str(relative).replace("/", "__").replace("\\", "__")
+        try:
+            relative = file_path.relative_to(ROOT_DIR)
+            raw_name = str(relative)
+        except ValueError:
+            raw_name = str(file_path)
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "__", raw_name).strip("._")
+        if not safe_name:
+            safe_name = "config"
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         bak_name = f"{safe_name}.{ts}.bak"
-        bak_path = BACKUP_DIR / bak_name
+        bak_path = ensure_within(BACKUP_DIR, BACKUP_DIR / bak_name)
 
         shutil.copy2(file_path, bak_path)
 
@@ -193,8 +203,8 @@ class ConfigInitializer:
         tts_enabled = "tts" in components
 
         for tmpl_rel, target_rel in TEMPLATE_MAP.items():
-            tmpl_path = ROOT_DIR / tmpl_rel
-            target_path = ROOT_DIR / target_rel
+            tmpl_path = resolve_relative_to_root(ROOT_DIR, tmpl_rel)
+            target_path = resolve_relative_to_root(ROOT_DIR, target_rel)
 
             # Skip components not selected
             component_id = target_rel.split("/")[0]
@@ -274,7 +284,7 @@ class ConfigInitializer:
             if component_id not in components:
                 continue
 
-            config_path = ROOT_DIR / rel_path
+            config_path = resolve_relative_to_root(ROOT_DIR, rel_path)
             if not config_path.exists():
                 continue
 
@@ -525,7 +535,11 @@ class NapCatConfigurator:
         Scan NapCat config directory for existing onebot11_<QQ>.json files.
         Returns list of QQ account numbers found.
         """
-        config_dir = Path(napcat_dir) / "config"
+        try:
+            napcat_root = resolve_external_path(napcat_dir, base_dir=ROOT_DIR, must_exist=True, must_be_dir=True)
+        except (FileNotFoundError, NotADirectoryError, ValueError):
+            return []
+        config_dir = ensure_within(napcat_root, napcat_root / "config")
         if not config_dir.exists():
             return []
 
@@ -557,7 +571,12 @@ class NapCatConfigurator:
             {"configured": [...], "skipped": [...], "errors": [...]}
         """
 
-        config_dir = Path(napcat_dir) / "config"
+        try:
+            napcat_root = resolve_external_path(napcat_dir, base_dir=ROOT_DIR, must_exist=True, must_be_dir=True)
+        except (FileNotFoundError, NotADirectoryError, ValueError) as e:
+            return {"configured": [], "skipped": [], "errors": [f"NapCat 目录无效: {e}"]}
+
+        config_dir = ensure_within(napcat_root, napcat_root / "config")
         configured = []
         skipped = []
         errors = []
@@ -577,7 +596,10 @@ class NapCatConfigurator:
 
         if qq_account and qq_account.strip():
             # Specific QQ account
-            target = config_dir / f"onebot11_{qq_account.strip()}.json"
+            account = qq_account.strip()
+            if not re.fullmatch(r"\d{5,20}", account):
+                return {"configured": [], "skipped": [], "errors": ["QQ 账号格式无效"]}
+            target = ensure_within(config_dir, config_dir / f"onebot11_{account}.json")
             target_files.append(target)
         else:
             # Auto-detect: scan for existing onebot11_*.json files
@@ -586,11 +608,11 @@ class NapCatConfigurator:
             pattern = re.compile(r"^onebot11_\d+\.json$")
             for f in config_dir.iterdir():
                 if pattern.match(f.name):
-                    target_files.append(f)
+                    target_files.append(ensure_within(config_dir, f))
 
             # Fallback: create default onebot11.json if nothing found
             if not target_files:
-                target_files.append(config_dir / "onebot11.json")
+                target_files.append(ensure_within(config_dir, config_dir / "onebot11.json"))
 
         for target_path in target_files:
             try:
@@ -613,6 +635,9 @@ class NapCatConfigurator:
         """
         import json as _json
 
+        target_path = ensure_within(target_path.parent, target_path)
+        if not re.fullmatch(r"onebot11(?:_\d{5,20})?\.json", target_path.name):
+            raise ValueError(f"非法 NapCat 配置文件名: {target_path.name}")
         if target_path.exists():
             raw = target_path.read_text(encoding="utf-8")
             try:
@@ -798,9 +823,12 @@ class DependencyInstaller:
         Run uv sync or npm install for a single project.
         Returns {"status": "ok"|"error", "message": "..."}.
         """
-        project_dir = ROOT_DIR / task["dir"]
+        try:
+            project_dir = DependencyInstaller._resolve_task_project(task)
+        except (KeyError, ValueError) as e:
+            return {"status": "error", "message": str(e)}
         if not project_dir.exists():
-            return {"status": "error", "message": f"目录不存在: {task['dir']}"}
+            return {"status": "error", "message": f"目录不存在: {project_dir}"}
 
         if task["type"] == "uv":
             return await DependencyInstaller._run_uv_sync(project_dir, callback)
@@ -808,6 +836,24 @@ class DependencyInstaller:
             return await DependencyInstaller._run_npm_install(project_dir, callback)
         else:
             return {"status": "error", "message": f"未知安装类型: {task['type']}"}
+
+    @staticmethod
+    def _resolve_task_project(task: dict[str, str]) -> Path:
+        task_id = str(task.get("id", "")).strip()
+        task_type = str(task.get("type", "")).strip()
+        requested_dir = str(task.get("dir", "")).strip()
+
+        if task_type == "uv":
+            expected_dir = DependencyInstaller.UV_PROJECTS.get(task_id)
+        elif task_type == "npm":
+            expected_dir = DependencyInstaller.NPM_PROJECTS.get(task_id)
+        else:
+            raise ValueError(f"未知安装类型: {task_type}")
+
+        if not expected_dir or requested_dir != expected_dir:
+            raise ValueError(f"安装任务无效: {task_id}")
+
+        return resolve_relative_to_root(ROOT_DIR, expected_dir)
 
     @staticmethod
     async def _run_uv_sync(

@@ -123,12 +123,7 @@ class ConfigUpdate(BaseModel):
 @app.put("/api/configs/{file_id}")
 async def update_config(file_id: str, body: ConfigUpdate):
     try:
-        entry = config_mgr._find(file_id)
-        full = config_mgr.root / entry["path"]
-        # Backup first
-        config_mgr._backup(full)
-        # Write raw text directly
-        full.write_text(body.raw, encoding="utf-8")
+        config_mgr.write_config_raw(file_id, body.raw)
         # Hot-reload configurations & services
         if file_id == "webui_config":
             from webui_config import webui_config
@@ -403,9 +398,10 @@ class PluginConfigUpdate(BaseModel):
 @app.put("/api/plugins/{plugin_id}/config")
 async def update_plugin_config(plugin_id: str, body: PluginConfigUpdate):
     try:
-        config_path = plugin_mgr.plugins_dir / plugin_id / "config.toml"
-        config_path.write_text(body.raw, encoding="utf-8")
+        plugin_mgr.write_plugin_config_raw(plugin_id, body.raw)
         return {"status": "ok"}
+    except (FileNotFoundError, ValueError) as e:
+        raise HTTPException(400, str(e))
     except Exception as e:
         raise HTTPException(500, str(e))
 

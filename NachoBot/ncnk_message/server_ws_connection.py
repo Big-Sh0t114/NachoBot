@@ -16,6 +16,8 @@ import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 
+from .log_utils import redact_secret
+
 logger = logging.getLogger(__name__)
 
 
@@ -311,7 +313,7 @@ class ServerNetworkDriver:
                     return
 
             logger.debug(
-                f"✅ Found metadata for {connection_uuid}: api_key={metadata.api_key}, platform={metadata.platform}"
+                f"✅ Found metadata for {connection_uuid}: api_key={redact_secret(metadata.api_key)}, platform={metadata.platform}"
             )
 
             event = NetworkEvent(

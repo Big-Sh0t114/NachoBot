@@ -251,7 +251,7 @@ class ChatIdResolver:
     def _get_config_hash(self, groups: List[str], privates: List[str]) -> str:
         """计算配置的哈希值,用于检测配置变更"""
         config_str = f"groups:{','.join(sorted(groups))};privates:{','.join(sorted(privates))}"
-        return hashlib.md5(config_str.encode()).hexdigest()
+        return hashlib.md5(config_str.encode(), usedforsecurity=False).hexdigest()
     
     def _load_cache(self) -> bool:
         """加载缓存文件"""

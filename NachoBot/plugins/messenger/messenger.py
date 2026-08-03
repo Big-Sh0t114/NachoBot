@@ -316,7 +316,7 @@ class MessengerRelayAction(BaseAction):
 
             # 计算私聊 stream_id: md5(platform_userId_private)
             key = f"{platform}_{user_id}_private"
-            stream_id = hashlib.md5(key.encode()).hexdigest()
+            stream_id = hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()
 
             # 验证该 stream 是否存在于 ChatManager
             chat_manager = get_chat_manager()
@@ -454,7 +454,7 @@ class ConveyCommand(BaseCommand):
 
         # 直接通过 QQ号 计算私聊 stream_id
         key = f"qq_{target_qq}_private"
-        target_stream_id = hashlib.md5(key.encode()).hexdigest()
+        target_stream_id = hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()
 
         # 验证 stream 存在
         chat_manager = get_chat_manager()
