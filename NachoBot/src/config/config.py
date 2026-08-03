@@ -189,6 +189,31 @@ def _update_dict(target: TOMLDocument | dict | Table, source: TOMLDocument | dic
                     target[key] = value
 
 
+def _migrate_renamed_model_task_groups(
+    target: TOMLDocument | dict,
+    source: TOMLDocument | dict,
+) -> bool:
+    """Copy legacy platform-specific model groups into their generic replacements."""
+    target_tasks = target.get("model_task_config")
+    source_tasks = source.get("model_task_config")
+    if not isinstance(target_tasks, (dict, Table)) or not isinstance(
+        source_tasks,
+        (dict, Table),
+    ):
+        return False
+
+    migrated = False
+    for legacy_name, generic_name in (
+        ("bilibili_replyer", "realtime_replyer"),
+    ):
+        if legacy_name not in source_tasks or generic_name not in target_tasks:
+            continue
+        _update_dict(target_tasks[generic_name], source_tasks[legacy_name])
+        logger.info(f"已迁移模型组 {legacy_name} -> {generic_name}")
+        migrated = True
+    return migrated
+
+
 def _update_config_generic(config_name: str, template_name: str):
     """
     通用的配置文件更新函数
@@ -286,13 +311,20 @@ def _update_config_generic(config_name: str, template_name: str):
             old_config = tomlkit.load(f)
     # new_config 已经读取
 
+    renamed_model_groups_migrated = (
+        config_name == "model_config"
+        and _migrate_renamed_model_task_groups(new_config, old_config)
+    )
+
     # 检查version是否相同
     if old_config and "inner" in old_config and "inner" in new_config:
         old_version = old_config["inner"].get("version")  # type: ignore
         new_version = new_config["inner"].get("version")  # type: ignore
         if old_version and new_version and old_version == new_version:
-            logger.info(f"检测到{config_name}配置文件版本号相同 (v{old_version})，跳过更新")
-            return
+            if not renamed_model_groups_migrated:
+                logger.info(f"检测到{config_name}配置文件版本号相同 (v{old_version})，跳过更新")
+                return
+            logger.info(f"检测到{config_name}存在待迁移的旧模型组，将重新生成配置")
         else:
             logger.info(
                 f"\n----------------------------------------\n检测到{config_name}版本号不同: 旧版本 v{old_version} -> 新版本 v{new_version}\n----------------------------------------"

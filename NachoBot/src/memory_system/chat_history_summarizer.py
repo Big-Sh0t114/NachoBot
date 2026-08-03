@@ -32,12 +32,11 @@ def is_bot_self(platform: str, user_id: str) -> bool:
     try:
         from src.config.config import global_config
 
-        bot_account_str = str(global_config.bot.qq_account)
-        if str(user_id) == bot_account_str:
-            return True
-        if hasattr(global_config, "bilibili") and hasattr(global_config.bilibili, "bilibili_bot_account"):
-            if str(user_id) == str(global_config.bilibili.bilibili_bot_account):
-                return True
+        return (
+            str(platform or "").strip().lower()
+            == str(global_config.bot.platform or "").strip().lower()
+            and str(user_id) == str(global_config.bot.qq_account)
+        )
     except Exception:
         pass
     return False
@@ -1033,8 +1032,6 @@ class ChatHistorySummarizer:
         """将聊天摘要异步写回 A_Memorix 长期记忆"""
         try:
             from src.memory_system.memory_service import memory_service
-            from datetime import datetime
-
             # 拼接为富文本：theme + summary + key_point
             text_parts = [f"话题：{theme}", f"概括：{summary}"]
             if key_point:
@@ -1045,8 +1042,8 @@ class ChatHistorySummarizer:
                 chat_id=chat_id,
                 text="\n".join(text_parts),
                 participants=participants,
-                time_start=datetime.fromtimestamp(start_time).isoformat() if start_time else None,
-                time_end=datetime.fromtimestamp(end_time).isoformat() if end_time else None,
+                time_start=start_time,
+                time_end=end_time,
                 tags=keywords,
                 metadata={
                     "source": "chat_history_summarizer",

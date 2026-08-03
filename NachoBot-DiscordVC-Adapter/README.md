@@ -5,7 +5,7 @@ NachoBot 的 Discord 语音频道适配器，支持在 Discord 语音频道中�
 ## 功能
 
 - Discord 语音频道实时语音对话
-- 语音识别（ASR）
+- 多用户逐块流式语音识别（ASR）
 - TTS 语音合成回复
 - 自动 FFmpeg 路径检测
 - 代理支持
@@ -18,6 +18,12 @@ NachoBot 的 Discord 语音频道适配器，支持在 Discord 语音频道中�
 - `discord.app_id`：Discord Application ID
 - `discord.proxy_url`：代理地址（如需）
 - `nachobot.host` / `nachobot.port`：NachoBot 核心地址
+
+语音包在说话期间持续送入
+`NachoBot-Multimodal-Adapter/src/asr/streaming.py`，VAD 结束时只读取
+当前流的最终文本，不再拼接 WAV 后调用 `/audio/transcriptions`。
+模型、CPU provider 和线程数统一由 Multimodal-Adapter 的
+`configs/perception.toml` 管理；本适配器只使用 `[voice].enabled` 作为启停开关。
 
 ## Docker 部署
 
@@ -35,6 +41,10 @@ docker compose up -d
 ```
 
 ### 注意事项
+
+> **共享 ASR**：构建上下文会从相邻的
+> `NachoBot-Multimodal-Adapter` 复制共享 ASR 源码与配置；首次运行时若模型
+> 不存在，会按 `auto_download` 配置下载 CPU INT8 模型。
 
 > **网络依赖**：Docker 构建过程中需要通过网络下载 `ffmpeg`、`libsodium-dev` 等系统依赖。如果你的部署环境有网络限制（如在国内服务器上构建），请确保：
 > - Docker 配置了可用的镜像加速器或代理

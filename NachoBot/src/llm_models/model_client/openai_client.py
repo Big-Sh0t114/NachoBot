@@ -4,7 +4,9 @@ import json
 import re
 import base64
 from collections.abc import Iterable
+from ipaddress import ip_address
 from typing import Callable, Any, Coroutine, Optional
+from urllib.parse import urlparse
 from json_repair import repair_json
 
 from openai import (
@@ -13,6 +15,7 @@ from openai import (
     APIStatusError,
     NOT_GIVEN,
     AsyncStream,
+    DefaultAsyncHttpxClient,
 )
 from openai.types.chat import (
     ChatCompletion,
@@ -37,6 +40,19 @@ from ..payload_content.resp_format import RespFormat
 from ..payload_content.tool_option import ToolOption, ToolParam, ToolCall
 
 logger = get_logger("OpenAI客户端")
+
+
+def _is_loopback_url(url: str) -> bool:
+    """Return whether an API URL targets this machine."""
+    hostname = urlparse(url).hostname
+    if not hostname:
+        return False
+    if hostname.lower() == "localhost":
+        return True
+    try:
+        return ip_address(hostname).is_loopback
+    except ValueError:
+        return False
 
 
 def _convert_messages(messages: list[Message]) -> list[ChatCompletionMessageParam]:
@@ -402,11 +418,19 @@ def _default_normal_response_parser(
 class OpenaiClient(BaseClient):
     def __init__(self, api_provider: APIProvider):
         super().__init__(api_provider)
+        client_options: dict[str, Any] = {}
+        if _is_loopback_url(api_provider.base_url):
+            # Local OpenAI-compatible services must not be routed through an
+            # HTTP(S)_PROXY inherited from the desktop/session environment.
+            client_options["http_client"] = DefaultAsyncHttpxClient(
+                trust_env=False
+            )
         self.client: AsyncOpenAI = AsyncOpenAI(
             base_url=api_provider.base_url,
             api_key=api_provider.api_key,
             max_retries=0,
             timeout=api_provider.timeout,
+            **client_options,
         )
 
     async def get_response(
@@ -595,7 +619,7 @@ class OpenaiClient(BaseClient):
             raise NetworkConnectionError() from e
         except APIStatusError as e:
             # 重封装APIError为RespNotOkException
-            raise RespNotOkException(e.status_code) from e
+            raise RespNotOkException(e.status_code, e.message) from e
         response = APIResponse()
         # 解析转录响应
         if hasattr(raw_response, "text"):

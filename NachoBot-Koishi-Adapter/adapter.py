@@ -21,6 +21,7 @@ from ncnk_message import (
 )
 
 from config import AdapterConfig
+from visual_policy import build_visual_policy
 from utils import (
     maybe_int,
     ws_is_closed,
@@ -174,6 +175,10 @@ class KoishiOneBotAdapter:
         )
         if not segments:
             return
+        if "image" in content_format:
+            additional_config["visual_policy"] = build_visual_policy(
+                self.config.visual.image
+            )
 
         sender = data.get("sender") or {}
         nickname = sender.get("card") or sender.get("nickname") or user_id

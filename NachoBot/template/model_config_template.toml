@@ -1,5 +1,5 @@
 [inner]
-version = "1.10.0_bs"
+version = "1.11.2_bs"
 
 [[api_providers]] # SiliconFlow的API服务商配置
 name = "SiliconFlow"
@@ -45,8 +45,8 @@ price_in = 0
 price_out = 0
 
 [[models]]  #本地模型(FULL模式下自带，无需修改)
-model_identifier = "sensevoice-small"
-name = "sensevoice-small"
+model_identifier = "zh-xlarge-int8-2025-06-30"
+name = "sherpa-onnx-streaming-zipformer"
 api_provider = "LocalModel"
 price_in = 0
 price_out = 0
@@ -227,11 +227,7 @@ max_tokens = 800
 model_list = ["Qwen/Qwen3.5-4B/Silicon","Florence-2"]
 max_tokens = 800
 
-[model_task_config.bilibili_vlm] # Bilibili 直播画面识别
-model_list = ["Florence-2"]
-max_tokens = 114514
-
-[model_task_config.bilibili_replyer] # Bilibili 直播间专属独立回复模型组
+[model_task_config.realtime_replyer] # 适配器实时会话专属独立回复模型组
 model_list = ["deepseek-v4-pro"]
 temperature = 0.5
 max_tokens = 800
@@ -241,7 +237,7 @@ model_list = [""]
 max_tokens = 4096
 
 [model_task_config.voice] # 语音识别模型
-model_list = ["sensevoice-small/Silicon","FunAudioLLM/SenseVoiceSmall/Silicon"]
+model_list = ["sherpa-onnx-streaming-zipformer","FunAudioLLM/SenseVoiceSmall/Silicon"]
 
 #嵌入模型（注意：不要在此填入多个模型，因为不同模型的向量维度和语义空间不同，混用会导致检索完全失效。更换模型前必须清空现有的向量数据库）
 [model_task_config.embedding]

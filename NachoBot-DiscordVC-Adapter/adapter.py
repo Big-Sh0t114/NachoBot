@@ -198,9 +198,19 @@ class DiscordAdapter:
         # Construct Message for NachoBot
         # Platform: 'discord_vc'
 
-        additional_config = {}
-        # Unconditionally disable tools/MCP for VC environment
-        additional_config["disable_tools"] = True
+        additional_config = {
+            "disable_tools": True,
+            "runtime_capabilities": {
+                "schema_version": 1,
+                "planner_bypass": True,
+                "relation_inference": False,
+                "expression_selection": False,
+                "memory_retrieval": False,
+                "knowledge_retrieval": False,
+                "tool_mode": "disabled",
+                "web_search_mode": "disabled",
+            },
+        }
 
         if self.config.disable_network_search:
             # We also mask URLs if specifically requested, though disable_tools usually covers search actions
