@@ -33,7 +33,7 @@ from ..utils.retrieval_tuning_manager import RetrievalTuningManager
 from ..utils.runtime_self_check import run_embedding_runtime_self_check
 from ..utils.search_execution_service import SearchExecutionRequest, SearchExecutionResult, SearchExecutionService
 from ..utils.summary_importer import SummaryImporter
-from ..utils.time_parser import format_timestamp, parse_query_datetime_to_timestamp
+from ..utils.time_parser import format_timestamp, parse_ingest_datetime_to_timestamp, parse_query_datetime_to_timestamp
 from ..utils.web_import_manager import ImportTaskManager
 from .search_runtime_initializer import SearchRuntimeBundle, build_search_runtime
 
@@ -1257,8 +1257,8 @@ class SDKMemoryKernel:
         chat_id: str,
         text: str,
         participants: Optional[Sequence[str]] = None,
-        time_start: Optional[float] = None,
-        time_end: Optional[float] = None,
+        time_start: Optional[str | float] = None,
+        time_end: Optional[str | float] = None,
         tags: Optional[Sequence[str]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         respect_filter: bool = True,
@@ -1321,9 +1321,9 @@ class SDKMemoryKernel:
         chat_id: str = "",
         person_ids: Optional[Sequence[str]] = None,
         participants: Optional[Sequence[str]] = None,
-        timestamp: Optional[float] = None,
-        time_start: Optional[float] = None,
-        time_end: Optional[float] = None,
+        timestamp: Optional[str | float] = None,
+        time_start: Optional[str | float] = None,
+        time_end: Optional[str | float] = None,
         tags: Optional[Sequence[str]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         entities: Optional[Sequence[str]] = None,
@@ -5799,14 +5799,18 @@ class SDKMemoryKernel:
         return "mixed"
 
     @staticmethod
-    def _time_meta(timestamp: Optional[float], time_start: Optional[float], time_end: Optional[float]) -> Dict[str, Any]:
+    def _time_meta(
+        timestamp: Optional[str | float],
+        time_start: Optional[str | float],
+        time_end: Optional[str | float],
+    ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {}
         if timestamp is not None:
-            payload["event_time"] = float(timestamp)
+            payload["event_time"] = parse_ingest_datetime_to_timestamp(timestamp)
         if time_start is not None:
-            payload["event_time_start"] = float(time_start)
+            payload["event_time_start"] = parse_ingest_datetime_to_timestamp(time_start, is_end=False)
         if time_end is not None:
-            payload["event_time_end"] = float(time_end)
+            payload["event_time_end"] = parse_ingest_datetime_to_timestamp(time_end, is_end=True)
         if payload:
             payload["time_granularity"] = "minute"
             payload["time_confidence"] = 0.95

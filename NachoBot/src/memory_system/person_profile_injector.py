@@ -31,6 +31,20 @@ def _clean_text(value: object) -> str:
     return str(value or "").strip()
 
 
+def _message_platform(message: object) -> str:
+    chat_info = getattr(message, "chat_info", None)
+    platform = getattr(chat_info, "platform", "") if chat_info is not None else ""
+    if platform:
+        return str(platform)
+
+    flat_platform = getattr(message, "chat_info_platform", "")
+    if flat_platform:
+        return str(flat_platform)
+
+    user_info = getattr(message, "user_info", None)
+    return str(getattr(user_info, "platform", "") or "")
+
+
 def _resolve_person_id(platform: str, user_id: str = "", person_name: str = "") -> str:
     """解析人物 ID，优先按名字查，回退到 platform+user_id 生成。"""
     clean_name = _clean_text(person_name)
@@ -82,7 +96,7 @@ def collect_person_candidates(
     for message in messages:
         if not message.user_info:
             continue
-        platform = message.chat_info_platform or getattr(message.user_info, "platform", "") or ""
+        platform = _message_platform(message)
         user_id = str(getattr(message.user_info, "user_id", "") or "")
         person_name = (
             getattr(message.user_info, "user_cardname", None)
