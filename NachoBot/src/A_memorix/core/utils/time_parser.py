@@ -94,6 +94,11 @@ def parse_ingest_datetime_to_timestamp(
     if _NUMERIC_RE.fullmatch(text):
         return float(text)
 
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        pass
+
     for fmt in _INGEST_FORMATS:
         try:
             dt = datetime.strptime(text, fmt)
