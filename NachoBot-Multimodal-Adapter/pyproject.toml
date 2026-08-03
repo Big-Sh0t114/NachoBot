@@ -11,7 +11,7 @@ dependencies = [
     "loguru>=0.7.3",
     "numpy",
     "onnxruntime>=1.27.0",
-    "openai>=2.50.0",
+    "openai>=2.52.0",
     "pillow>=12.1.1",
     "pydantic>=2.12.5",
     "pydub>=0.25.1",
