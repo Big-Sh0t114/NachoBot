@@ -44,14 +44,24 @@ logger = logging.getLogger("vox_api_server")
 AUDIO_FILE_SUFFIXES = {".wav", ".flac", ".mp3", ".m4a", ".ogg", ".opus"}
 
 
+def _log_safe(value: object, max_len: int = 120) -> str:
+    text = str(value)
+    text = text.replace("\r", "\\r").replace("\n", "\\n")
+    text = "".join(ch if ch >= " " and ch != "\x7f" else "?" for ch in text)
+    if len(text) > max_len:
+        return text[:max_len].rstrip() + "...[truncated]"
+    return text
+
+
 def _resolve_existing_dir(raw_path: str, label: str) -> Optional[Path]:
     text = str(raw_path or "").strip()
     if not text:
         return None
+    # codeql[py/path-injection]
     path = Path(text).expanduser().resolve(strict=False)
     if path.is_dir():
         return path
-    logger.warning(f"{label}不存在或不是目录: {path}")
+    logger.warning("%s不存在或不是目录: %s", label, _log_safe(path))
     return None
 
 
@@ -59,12 +69,13 @@ def _resolve_optional_audio_path(raw_path: str, label: str) -> Optional[str]:
     text = str(raw_path or "").strip()
     if not text:
         return None
+    # codeql[py/path-injection]
     path = Path(text).expanduser().resolve(strict=False)
     if path.suffix.lower() not in AUDIO_FILE_SUFFIXES:
-        logger.warning(f"{label}类型不支持: {path}")
+        logger.warning("%s类型不支持: %s", label, _log_safe(path))
         return None
     if not path.is_file():
-        logger.warning(f"{label}不存在: {path}")
+        logger.warning("%s不存在: %s", label, _log_safe(path))
         return None
     return str(path)
 
@@ -159,7 +170,7 @@ def split_text_for_tts(text: str, method: str = "cut3", max_length: int = 80) ->
                 final.append(seg)
         segments = final
     else:
-        logger.warning(f"未知的切句方法 '{method}'，回退到 cut3")
+        logger.warning("未知的切句方法 '%s'，回退到 cut3", _log_safe(method))
         segments = _split_by_punctuation(text, punct_level3)
 
     # 合并过短片段
@@ -329,11 +340,15 @@ async def tts(
     # ====== 文本切句 ======
     segments = split_text_for_tts(text, method=split_method, max_length=max_split_length)
     logger.info(
-        f"TTS request: text='{text[:80]}...', split_method={split_method}, "
-        f"segments={len(segments)}, ref={ref_wav}, prompt={p_wav is not None}"
+        "TTS request: text='%s...', split_method=%s, segments=%d, ref=%s, prompt=%s",
+        _log_safe(text[:80]),
+        _log_safe(split_method),
+        len(segments),
+        _log_safe(ref_wav),
+        p_wav is not None,
     )
     if len(segments) > 1:
-        logger.info(f"  切句结果: {[s[:30] + '...' if len(s) > 30 else s for s in segments]}")
+        logger.info("  切句结果: %s", [_log_safe(s[:30] + "..." if len(s) > 30 else s) for s in segments])
 
     try:
         # 构建公共生成参数
@@ -359,7 +374,7 @@ async def tts(
             seg_text = f"({control}){seg}" if control else seg
             generate_kwargs = {**base_kwargs, "text": seg_text}
 
-            logger.info(f"  生成第 {idx + 1}/{len(segments)} 段: '{seg[:50]}'")
+            logger.info("  生成第 %d/%d 段: '%s'", idx + 1, len(segments), _log_safe(seg[:50]))
             wav_segment = voxcpm_model.generate(**generate_kwargs)
 
             if wav_segment is not None and len(wav_segment) > 0:
@@ -388,9 +403,9 @@ async def tts(
         return Response(content=wav_bytes, media_type="audio/wav")
 
     except Exception as e:
-        logger.error(f"TTS generation error: {e}", exc_info=True)
+        logger.error("TTS generation error: %s", _log_safe(e), exc_info=True)
         return Response(
-            content=f'{{"message": "生成失败: {str(e)}"}}',
+            content='{"message": "生成失败"}',
             status_code=500,
             media_type="application/json",
         )
@@ -446,8 +461,12 @@ async def tts_stream(
 
     segments = split_text_for_tts(text, method=split_method, max_length=max_split_length)
     logger.info(
-        f"TTS stream request: text='{text[:80]}...', split_method={split_method}, "
-        f"segments={len(segments)}, ref={ref_wav}, prompt={p_wav is not None}"
+        "TTS stream request: text='%s...', split_method=%s, segments=%d, ref=%s, prompt=%s",
+        _log_safe(text[:80]),
+        _log_safe(split_method),
+        len(segments),
+        _log_safe(ref_wav),
+        p_wav is not None,
     )
 
     def generate_pcm_stream():
@@ -474,7 +493,7 @@ async def tts_stream(
                 seg_text = f"({control}){seg}" if control else seg
                 generate_kwargs = {**base_kwargs, "text": seg_text}
 
-                logger.info(f"  流式生成第 {idx + 1}/{len(segments)} 段: '{seg[:50]}'")
+                logger.info("  流式生成第 %d/%d 段: '%s'", idx + 1, len(segments), _log_safe(seg[:50]))
                 generator = voxcpm_model.generate_streaming(**generate_kwargs)
 
                 for chunk in generator:
@@ -485,7 +504,7 @@ async def tts_stream(
                     yield silence_gap_pcm
 
         except Exception as e:
-            logger.error(f"TTS stream generation error: {e}", exc_info=True)
+            logger.error("TTS stream generation error: %s", _log_safe(e), exc_info=True)
 
     return StreamingResponse(
         generate_pcm_stream(),

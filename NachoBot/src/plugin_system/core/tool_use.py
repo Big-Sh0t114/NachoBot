@@ -442,7 +442,7 @@ class ToolExecutor:
 
         # 使用消息内容和群聊状态生成唯一缓存键
         content = f"{target_message}_{chat_history}_{sender}"
-        return hashlib.md5(content.encode(), usedforsecurity=False).hexdigest()
+        return hashlib.sha256(content.encode()).hexdigest()
 
     def _get_from_cache(self, cache_key: str) -> Optional[List[Dict]]:
         """从缓存获取结果

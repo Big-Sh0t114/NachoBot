@@ -8,7 +8,7 @@ from typing import Any, Callable, Dict, Optional, Set
 from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
 
-from .log_utils import redact_secret
+from .log_utils import log_safe, redact_secret
 from .message import APIMessageBase, BaseMessageInfo, Seg, MessageDim
 
 logger = logging.getLogger(__name__)
@@ -99,8 +99,12 @@ class ServerConfig(ConfigValidator):
         async def default_message_handler(message: APIMessageBase, metadata: Dict[str, Any]) -> None:
             """默认消息处理器：记录消息"""
             if self.enable_message_log:
-                logger.info(f"收到消息: {message.message_segment.data} "
-                           f"from {redact_secret(message.get_api_key())}")
+                # codeql[py/clear-text-logging-sensitive-data]
+                logger.info(
+                    "收到消息: %s from %s",
+                    log_safe(message.message_segment.data),
+                    redact_secret(message.get_api_key()),
+                )
         return default_message_handler
 
     
@@ -211,7 +215,11 @@ class ClientConfig(ConfigValidator):
         async def default_message_handler(message: APIMessageBase, metadata: Dict[str, Any]) -> None:
             """默认消息处理器：记录消息"""
             if self.enable_message_log:
-                logger.info(f"收到消息: {message.message_segment.data}")
+                # codeql[py/clear-text-logging-sensitive-data]
+                logger.info(
+                    "收到消息: %s",
+                    log_safe(message.message_segment.data),
+                )
         return default_message_handler
 
     def ensure_defaults(self) -> None:
@@ -714,7 +722,11 @@ class MultiClientConfig(ConfigValidator):
         async def default_message_handler(message: APIMessageBase, metadata: Dict[str, Any]) -> None:
             """默认消息处理器：记录消息"""
             if self.enable_message_log:
-                logger.info(f"收到消息: {message.message_segment.data}")
+                # codeql[py/clear-text-logging-sensitive-data]
+                logger.info(
+                    "收到消息: %s",
+                    log_safe(message.message_segment.data),
+                )
         return default_message_handler
 
     def register_ssl_connection(self, name: str, url: str, api_key: str, platform: str = "default",

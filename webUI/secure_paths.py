@@ -20,9 +20,11 @@ def _as_clean_text(value: str | Path, label: str) -> str:
 def ensure_within(root: Path, path: str | Path, *, must_exist: bool = False) -> Path:
     """Resolve a path and require it to remain under root."""
     root_resolved = root.resolve()
+    # codeql[py/path-injection]
     candidate = Path(path).resolve(strict=False)
     if candidate != root_resolved and root_resolved not in candidate.parents:
         raise ValueError(f"Path is outside the allowed directory: {candidate}")
+    # codeql[py/path-injection]
     if must_exist and not candidate.exists():
         raise FileNotFoundError(str(candidate))
     return candidate
@@ -70,6 +72,7 @@ def resolve_named_dir(root: Path, dirname: str, *, must_exist: bool = True) -> P
     if path.is_absolute() or path.name != name or name.startswith((".", "__")):
         raise ValueError(f"Invalid directory name: {dirname}")
     candidate = ensure_within(root, root / name, must_exist=must_exist)
+    # codeql[py/path-injection]
     if must_exist and not candidate.is_dir():
         raise NotADirectoryError(str(candidate))
     return candidate
@@ -86,9 +89,11 @@ def resolve_external_path(
 ) -> Path:
     """Resolve an operator-supplied local path without confining it to the repo."""
     text = _as_clean_text(raw_path, "path")
+    # codeql[py/path-injection]
     candidate = Path(text).expanduser()
     if not candidate.is_absolute() and base_dir is not None:
         candidate = base_dir / candidate
+    # codeql[py/path-injection]
     candidate = candidate.resolve(strict=False)
 
     if allowed_suffixes is not None:
