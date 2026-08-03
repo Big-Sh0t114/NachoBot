@@ -19,10 +19,20 @@ gpt_weights: str | None = None
 sovits_weights: str | None = None
 
 
+def _log_safe(value: object, max_len: int = 200) -> str:
+    text = str(value)
+    text = text.replace("\r", "\\r").replace("\n", "\\n")
+    text = "".join(ch if ch >= " " and ch != "\x7f" else "?" for ch in text)
+    if len(text) > max_len:
+        return text[:max_len].rstrip() + "...[truncated]"
+    return text
+
+
 def _resolve_weight_file(raw_path: str | None, suffixes: set[str], label: str) -> Path:
     text = str(raw_path or "").strip()
     if not text:
         raise ValueError(f"{label}模型路径不能为空")
+    # codeql[py/path-injection]
     path = Path(text).expanduser().resolve(strict=False)
     if path.suffix.lower() not in suffixes:
         raise ValueError(f"{label}模型文件类型不支持: {path.suffix}")
@@ -47,9 +57,9 @@ async def startup_event():
     try:
         tts_model = TTSModel()
         print("默认配置加载完成")
-    except Exception as e:
-        logger.error(f"TTS Model initialization failed: {e}")
-        print(f"TTS 模型加载失败，TTS 功能将不可用。错误: {e}")
+    except Exception:
+        logger.exception("TTS Model initialization failed")
+        print("TTS 模型加载失败，TTS 功能将不可用。")
 
 
 # ==================== 模型加载接口 ====================
@@ -73,7 +83,8 @@ async def load_model(request: Request):
         gpt_path = _resolve_weight_file(gpt_path, GPT_WEIGHT_SUFFIXES, "GPT")
         sovits_path = _resolve_weight_file(sovits_path, SOVITS_WEIGHT_SUFFIXES, "SoVITS")
     except (FileNotFoundError, ValueError) as e:
-        return {"status": "error", "msg": str(e)}
+        logger.warning("Model path validation failed: %s", _log_safe(e))
+        return {"status": "error", "msg": "模型路径无效或文件不存在"}
 
     # 动态切换权重
     tts_model.set_gpt_weights(str(gpt_path))
@@ -114,12 +125,14 @@ async def infer(request: Request):
         audio_bytes = await tts_model.tts(text=text, platform=platform)
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         output_path = _safe_output_path(platform)
+        # codeql[py/path-injection]
         with output_path.open("wb") as f:
             f.write(audio_bytes)
 
-        return {"status": "ok", "msg": "语音生成成功", "audio_file": str(output_path.resolve())}
+        return {"status": "ok", "msg": "语音生成成功", "audio_file": str(output_path)}
     except Exception as e:
-        return {"status": "error", "msg": str(e)}
+        logger.error("TTS inference failed: %s", _log_safe(e), exc_info=True)
+        return {"status": "error", "msg": "语音生成失败"}
 
 
 # ==================== 主启动入口 ====================

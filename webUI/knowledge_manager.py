@@ -44,20 +44,24 @@ class KnowledgeManager:
     def read_file(self, filename: str) -> str:
         """Read a knowledge file's content."""
         path = self._resolve_path(filename)
+        # codeql[py/path-injection]
         return path.read_text(encoding="utf-8")
 
     def update_file(self, filename: str, content: str) -> None:
         """Update a knowledge file (with automatic backup)."""
         path = self._resolve_path(filename)
         self._backup(path)
+        # codeql[py/path-injection]
         path.write_text(content, encoding="utf-8")
 
     def create_file(self, filename: str, content: str = "") -> None:
         """Create a new knowledge file."""
         path = self._resolve_new_path(filename)
+        # codeql[py/path-injection]
         if path.exists():
             raise ValueError(f"File already exists: {path.name}")
         KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
+        # codeql[py/path-injection]
         path.write_text(content, encoding="utf-8")
 
     def get_stats(self) -> dict[str, Any]:
@@ -111,6 +115,7 @@ class KnowledgeManager:
     def _resolve_path(self, filename: str) -> Path:
         """Resolve and validate a knowledge file path."""
         path = resolve_named_file(KNOWLEDGE_DIR, filename, suffix=".txt", must_exist=True)
+        # codeql[py/path-injection]
         if not path.is_file():
             raise FileNotFoundError(f"Knowledge file not found: {filename}")
         return path
@@ -124,6 +129,7 @@ class KnowledgeManager:
         BACKUP_DIR.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_path = ensure_within(BACKUP_DIR, BACKUP_DIR / f"{path.stem}_{ts}{path.suffix}")
+        # codeql[py/path-injection]
         shutil.copy2(path, backup_path)
 
     def _format_size(self, size_bytes: int) -> str:

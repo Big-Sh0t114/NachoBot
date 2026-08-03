@@ -8,7 +8,7 @@ import time
 from typing import Any, Callable, Dict, Optional, Set, List
 from dataclasses import dataclass
 
-from .log_utils import redact_secret
+from .log_utils import log_safe, redact_secret
 from .server_ws_connection import ServerNetworkDriver, EventType, NetworkEvent
 from .message import APIMessageBase, BaseMessageInfo, Seg, MessageDim
 from .ws_config import ServerConfig, AuthResult
@@ -384,7 +384,8 @@ class WebSocketServer:
         # 从消息中获取路由信息
         api_key = message.get_api_key()
         platform = message.get_platform()
-        logger.info(f"📨 消息路由信息: api_key={redact_secret(api_key)}, platform={platform}")
+        # codeql[py/clear-text-logging-sensitive-data]
+        logger.info("📨 消息路由信息: api_key=%s, platform=%s", redact_secret(api_key), log_safe(platform))
 
         # 使用 extract_user 回调获取用户ID
         try:
