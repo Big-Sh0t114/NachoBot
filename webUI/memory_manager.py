@@ -15,6 +15,16 @@ import tomlkit
 
 logger = logging.getLogger("webui.memory")
 
+
+def _log_safe(value: object, max_len: int = 200) -> str:
+    text = str(value)
+    text = text.replace("\r", "\\r").replace("\n", "\\n")
+    text = "".join(ch if ch >= " " and ch != "\x7f" else "?" for ch in text)
+    if len(text) > max_len:
+        return text[:max_len].rstrip() + "...[truncated]"
+    return text
+
+
 MEMORY_SEARCH_TIMEOUT_SECONDS = 15
 MEMORY_STATS_TIMEOUT_SECONDS = 8
 MEMORY_MAINTAIN_TIMEOUT_SECONDS = 20
@@ -75,8 +85,8 @@ async def search_memory(query: str, chat_id: str = "", limit: int = 10, core_run
         logger.warning("Memory search timed out")
         return {"success": False, "error": "长期记忆检索超时", "results": []}
     except Exception as e:
-        logger.error(f"Memory search failed: {e}")
-        return {"success": False, "error": str(e), "results": []}
+        logger.error("Memory search failed: %s", _log_safe(e))
+        return {"success": False, "error": "长期记忆检索失败", "results": []}
 
 
 async def get_stats(core_running: bool = True) -> dict:
@@ -119,12 +129,12 @@ async def get_stats(core_running: bool = True) -> dict:
             "note": "A_Memorix 统计请求超时，已停止继续等待，避免页面一直加载。",
         }
     except Exception as e:
-        logger.debug(f"Memory stats failed via core API: {e}")
+        logger.debug("Memory stats failed via core API: %s", _log_safe(e))
         return {
             "enabled": True,
             "total_memories": "N/A (Core API 不可用)",
             "storage_dir": str(_NACHOBOT_ROOT / "data" / "a_memorix"),
-            "note": f"NachoBot Core 正在运行，但长期记忆 API 调用失败: {e}",
+            "note": "NachoBot Core 正在运行，但长期记忆 API 调用失败。",
         }
 
 
@@ -148,8 +158,8 @@ async def maintain(action: str, target: str = "", reason: str = "", core_running
         logger.warning("Memory maintain timed out: action=%s", action)
         return {"success": False, "error": "长期记忆维护请求超时"}
     except Exception as e:
-        logger.error(f"Memory maintain failed: {e}")
-        return {"success": False, "error": str(e)}
+        logger.error("Memory maintain failed: %s", _log_safe(e))
+        return {"success": False, "error": "长期记忆维护失败"}
 
 
 def _get_core_base_url() -> str:
@@ -169,7 +179,7 @@ def _get_core_base_url() -> str:
                 elif key == "PORT":
                     port = value or port
         except Exception as e:
-            logger.warning("Failed to read NachoBot .env for Core API address: %s", e)
+            logger.warning("Failed to read NachoBot .env for Core API address: %s", _log_safe(e))
 
     if not host or not port:
         try:
@@ -180,7 +190,7 @@ def _get_core_base_url() -> str:
                 host = host or core_service.env_extra.get("HOST") or "127.0.0.1"
                 port = port or str(core_service.port or core_service.env_extra.get("PORT") or "")
         except Exception as e:
-            logger.warning("Failed to read NachoBot Core service definition: %s", e)
+            logger.warning("Failed to read NachoBot Core service definition: %s", _log_safe(e))
 
     if not host:
         host = "127.0.0.1"

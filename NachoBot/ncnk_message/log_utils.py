@@ -79,14 +79,9 @@ def get_logger() -> logging.Logger:
     return _logger
 
 
-def redact_secret(value: object, visible: int = 4) -> str:
+def redact_secret(value: object) -> str:
     """Return a log-safe representation of a secret value."""
-    text = str(value or "")
-    if not text:
-        return "<empty>"
-    if len(text) <= visible * 2:
-        return "<redacted>"
-    return f"{text[:visible]}...{text[-visible:]}"
+    return "<redacted>" if value else "<empty>"
 
 
 def redact_mapping_secrets(data: dict[str, object] | None) -> dict[str, object]:
@@ -107,6 +102,16 @@ def redact_mapping_secrets(data: dict[str, object] | None) -> dict[str, object]:
         else:
             redacted[key_text] = value
     return redacted
+
+
+def log_safe(value: object, max_len: int = 200) -> str:
+    """Return a single-line string safe for logs."""
+    text = str(value)
+    text = text.replace("\r", "\\r").replace("\n", "\\n")
+    text = "".join(ch if ch >= " " and ch != "\x7f" else "?" for ch in text)
+    if len(text) > max_len:
+        return text[:max_len].rstrip() + "...[truncated]"
+    return text
 
 
 def set_external_logger(external_logger: logging.Logger):

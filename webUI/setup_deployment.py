@@ -638,7 +638,9 @@ class NapCatConfigurator:
         target_path = ensure_within(target_path.parent, target_path)
         if not re.fullmatch(r"onebot11(?:_\d{5,20})?\.json", target_path.name):
             raise ValueError(f"非法 NapCat 配置文件名: {target_path.name}")
+        # codeql[py/path-injection]
         if target_path.exists():
+            # codeql[py/path-injection]
             raw = target_path.read_text(encoding="utf-8")
             try:
                 doc = _json.loads(raw)
@@ -695,8 +697,10 @@ class NapCatConfigurator:
 
         if changed:
             # Backup existing file before writing
+            # codeql[py/path-injection]
             if target_path.exists():
                 BackupManager.backup(target_path)
+            # codeql[py/path-injection]
             target_path.write_text(
                 _json.dumps(doc, indent=2, ensure_ascii=False),
                 encoding="utf-8",

@@ -31,6 +31,16 @@ from setup_manager import EnvironmentChecker, ConfigInitializer, DependencyInsta
 
 logger = logging.getLogger("webui")
 
+
+def _log_safe(value: object, max_len: int = 200) -> str:
+    text = str(value)
+    text = text.replace("\r", "\\r").replace("\n", "\\n")
+    text = "".join(ch if ch >= " " and ch != "\x7f" else "?" for ch in text)
+    if len(text) > max_len:
+        return text[:max_len].rstrip() + "...[truncated]"
+    return text
+
+
 STATIC_DIR = Path(__file__).parent / "static"
 
 # Shared instances
@@ -134,8 +144,9 @@ async def update_config(file_id: str, body: ConfigUpdate):
         return {"status": "ok"}
     except ValueError as e:
         raise HTTPException(400, str(e))
-    except Exception as e:
-        raise HTTPException(500, str(e))
+    except Exception:
+        logger.exception("Config update failed: file_id=%s", _log_safe(file_id))
+        raise HTTPException(500, "配置保存失败")
 
 
 @app.post("/api/configs/{file_id}/backup")
@@ -292,16 +303,16 @@ async def delete_chat_conversation(conversation_id: str):
         chat_backend.forget_conversation(conversation_id)
         logger.info(
             "Deleted WebUI conversation %s: backend_user_id=%s, deleted_rows=%s",
-            conversation_id,
-            backend_user_id,
+            _log_safe(conversation_id),
+            _log_safe(backend_user_id),
             result.get("deleted_rows", 0),
         )
         return result
     except ValueError as e:
         raise HTTPException(409, str(e))
-    except Exception as e:
-        logger.exception("Failed to delete WebUI conversation %s", conversation_id)
-        raise HTTPException(500, f"删除会话数据库记录失败: {e}")
+    except Exception:
+        logger.exception("Failed to delete WebUI conversation %s", _log_safe(conversation_id))
+        raise HTTPException(500, "删除会话数据库记录失败")
 
 
 @app.websocket("/ws/chat/{conversation_id}")
@@ -402,8 +413,9 @@ async def update_plugin_config(plugin_id: str, body: PluginConfigUpdate):
         return {"status": "ok"}
     except (FileNotFoundError, ValueError) as e:
         raise HTTPException(400, str(e))
-    except Exception as e:
-        raise HTTPException(500, str(e))
+    except Exception:
+        logger.exception("Plugin config update failed: plugin_id=%s", _log_safe(plugin_id))
+        raise HTTPException(500, "插件配置保存失败")
 
 
 # =========================================================================
@@ -437,16 +449,18 @@ async def get_status():
 async def db_stats():
     try:
         return db_mgr.get_stats()
-    except Exception as e:
-        raise HTTPException(500, str(e))
+    except Exception:
+        logger.exception("Database stats failed")
+        raise HTTPException(500, "数据库统计读取失败")
 
 
 @app.get("/api/db/tables")
 async def db_list_tables():
     try:
         return db_mgr.list_tables()
-    except Exception as e:
-        raise HTTPException(500, str(e))
+    except Exception:
+        logger.exception("Database table list failed")
+        raise HTTPException(500, "数据库表列表读取失败")
 
 
 @app.get("/api/db/tables/{table_name}")
@@ -466,8 +480,9 @@ async def db_query_table(
         return db_mgr.query_table(table_name, page, size, search, sort_by, sort_order, filter_dict)
     except ValueError as e:
         raise HTTPException(404, str(e))
-    except Exception as e:
-        raise HTTPException(500, str(e))
+    except Exception:
+        logger.exception("Database table query failed: table=%s", _log_safe(table_name))
+        raise HTTPException(500, "数据库表查询失败")
 
 
 @app.get("/api/db/tables/{table_name}/columns/{column}/values")
@@ -476,8 +491,13 @@ async def db_column_values(table_name: str, column: str):
         return db_mgr.get_column_values(table_name, column)
     except ValueError as e:
         raise HTTPException(404, str(e))
-    except Exception as e:
-        raise HTTPException(500, str(e))
+    except Exception:
+        logger.exception(
+            "Database column values query failed: table=%s column=%s",
+            _log_safe(table_name),
+            _log_safe(column),
+        )
+        raise HTTPException(500, "数据库列值读取失败")
 
 
 @app.get("/api/db/tables/{table_name}/{row_id}")
@@ -626,8 +646,9 @@ async def memory_stats():
     """Get memory store statistics."""
     try:
         return await memory_manager.get_stats(core_running=_is_core_running())
-    except Exception as e:
-        raise HTTPException(500, str(e))
+    except Exception:
+        logger.exception("Memory stats endpoint failed")
+        raise HTTPException(500, "长期记忆统计失败")
 
 
 class MemorySearchRequest(BaseModel):
@@ -646,8 +667,9 @@ async def memory_search(body: MemorySearchRequest):
             limit=body.limit,
             core_running=_is_core_running(),
         )
-    except Exception as e:
-        raise HTTPException(500, str(e))
+    except Exception:
+        logger.exception("Memory search endpoint failed")
+        raise HTTPException(500, "长期记忆检索失败")
 
 
 class MemoryMaintainRequest(BaseModel):
@@ -666,8 +688,9 @@ async def memory_maintain(body: MemoryMaintainRequest):
             reason=body.reason,
             core_running=_is_core_running(),
         )
-    except Exception as e:
-        raise HTTPException(500, str(e))
+    except Exception:
+        logger.exception("Memory maintain endpoint failed")
+        raise HTTPException(500, "长期记忆维护失败")
 
 
 # =========================================================================
@@ -717,9 +740,9 @@ async def setup_generate_configs(body: SetupWizardData):
             len(result.get("generated", [])), result.get("errors", [])
         )
         return result
-    except Exception as e:
+    except Exception:
         logger.exception("[Setup] generate_configs failed")
-        raise HTTPException(500, str(e))
+        raise HTTPException(500, "配置生成失败")
 
 
 class VerifyPathRequest(BaseModel):
@@ -756,9 +779,9 @@ async def setup_configure_napcat(body: NapCatConfigRequest):
             result["configured"], result["skipped"], result["errors"]
         )
         return result
-    except Exception as e:
+    except Exception:
         logger.exception("[Setup] napcat configure failed")
-        raise HTTPException(500, str(e))
+        raise HTTPException(500, "NapCat 配置失败")
 
 
 @app.websocket("/ws/setup/install")

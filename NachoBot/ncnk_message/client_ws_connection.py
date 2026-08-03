@@ -15,7 +15,7 @@ from enum import Enum
 import websockets
 from websockets.exceptions import ConnectionClosed, ConnectionClosedError
 
-from .log_utils import redact_mapping_secrets, redact_secret
+from .log_utils import log_safe, redact_mapping_secrets, redact_secret
 
 logger = logging.getLogger(__name__)
 
@@ -270,8 +270,12 @@ class ClientNetworkDriver:
         logger.info(f"📋 连接前置条件: running={self.running}, connection_exists={connection_uuid in self.connections}, shutdown_not_set={not self._shutdown_event.is_set()}")
         config = self.connections[connection_uuid]
         reconnect_delay = config.reconnect_delay
+        # codeql[py/clear-text-logging-sensitive-data]
         logger.info(
-            f"📋 连接配置: url={config.url}, api_key={redact_secret(config.api_key)}, platform={config.platform}"
+            "📋 连接配置: url=%s, api_key=%s, platform=%s",
+            log_safe(config.url),
+            redact_secret(config.api_key),
+            log_safe(config.platform),
         )
         reconnect_attempts = 0
 
@@ -295,8 +299,9 @@ class ClientNetworkDriver:
                     **ws_kwargs,
                     "additional_headers": redact_mapping_secrets(ws_kwargs.get("additional_headers")),
                 }
-                logger.info(f"📋 连接参数: {safe_ws_kwargs}")
-                logger.info(f"📋 Headers: {config.get_headers()}")
+                logger.info("📋 连接参数: %s", safe_ws_kwargs)
+                # codeql[py/clear-text-logging-sensitive-data]
+                logger.info("📋 Headers: %s", redact_mapping_secrets(config.get_headers()))
 
                 # 添加SSL配置
                 if config.ssl_enabled:

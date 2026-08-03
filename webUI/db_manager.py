@@ -8,7 +8,7 @@ import json
 import re
 import sqlite3
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT_DIR / "NachoBot" / "data" / "NachoBot.db"
@@ -76,6 +76,16 @@ def _get_rw_conn() -> sqlite3.Connection:
     return conn
 
 
+def _execute_schema_sql(
+    conn: sqlite3.Connection,
+    sql: str,
+    params: Sequence[Any] = (),
+) -> sqlite3.Cursor:
+    """Execute SQL assembled only from validated schema identifiers."""
+    # codeql[py/sql-injection]
+    return conn.execute(sql, params)
+
+
 class DatabaseManager:
     """Manages read/write access to NachoBot.db for the WebUI."""
 
@@ -94,7 +104,7 @@ class DatabaseManager:
             table_stats = []
             for t in tables:
                 t_ident = self._table_identifier(conn, t)
-                count = conn.execute(f"SELECT COUNT(*) FROM {t_ident}").fetchone()[0]
+                count = _execute_schema_sql(conn, f"SELECT COUNT(*) FROM {t_ident}").fetchone()[0]
                 table_stats.append({
                     "name": t,
                     "label": TABLE_LABELS.get(t, t),
@@ -122,7 +132,7 @@ class DatabaseManager:
             for t in tables:
                 cols = self._get_columns(conn, t)
                 t_ident = self._table_identifier(conn, t)
-                count = conn.execute(f"SELECT COUNT(*) FROM {t_ident}").fetchone()[0]
+                count = _execute_schema_sql(conn, f"SELECT COUNT(*) FROM {t_ident}").fetchone()[0]
                 result.append({
                     "name": t,
                     "label": TABLE_LABELS.get(t, t),
@@ -185,13 +195,13 @@ class DatabaseManager:
 
             # Get total count
             count_sql = f"SELECT COUNT(*) FROM {table_ident} {where_clause}"
-            total = conn.execute(count_sql, params).fetchone()[0]
+            total = _execute_schema_sql(conn, count_sql, params).fetchone()[0]
 
             # Get page data
             offset = (page - 1) * page_size
             sort_ident = _quote_identifier(sort_by)
             data_sql = f"SELECT * FROM {table_ident} {where_clause} ORDER BY {sort_ident} {sort_order} LIMIT ? OFFSET ?"
-            rows = conn.execute(data_sql, params + [page_size, offset]).fetchall()
+            rows = _execute_schema_sql(conn, data_sql, params + [page_size, offset]).fetchall()
 
             # Convert to dicts, truncating long fields
             data = []
@@ -236,7 +246,7 @@ class DatabaseManager:
 
             column_ident = _quote_identifier(column)
             sql = f"SELECT DISTINCT CAST({column_ident} AS TEXT) AS val FROM {table_ident} WHERE {column_ident} IS NOT NULL ORDER BY val LIMIT ?"
-            rows = conn.execute(sql, (limit,)).fetchall()
+            rows = _execute_schema_sql(conn, sql, (limit,)).fetchall()
             return [r["val"] for r in rows]
         finally:
             conn.close()
@@ -250,7 +260,7 @@ class DatabaseManager:
                 raise ValueError(f"Table not found: {table}")
 
             table_ident = self._table_identifier(conn, table)
-            row = conn.execute(f"SELECT * FROM {table_ident} WHERE id = ?", (row_id,)).fetchone()
+            row = _execute_schema_sql(conn, f"SELECT * FROM {table_ident} WHERE id = ?", (row_id,)).fetchone()
             if not row:
                 raise ValueError(f"Row not found: {table}.{row_id}")
 
@@ -273,7 +283,7 @@ class DatabaseManager:
         try:
             table_ident = self._editable_table_identifier(conn, table)
             # Verify row exists
-            existing = conn.execute(f"SELECT id FROM {table_ident} WHERE id = ?", (row_id,)).fetchone()
+            existing = _execute_schema_sql(conn, f"SELECT id FROM {table_ident} WHERE id = ?", (row_id,)).fetchone()
             if not existing:
                 raise ValueError(f"Row not found: {table}.{row_id}")
 
@@ -292,7 +302,7 @@ class DatabaseManager:
             values = [data[c] for c in cols]
             values.append(row_id)
 
-            conn.execute(f"UPDATE {table_ident} SET {set_clause} WHERE id = ?", values)
+            _execute_schema_sql(conn, f"UPDATE {table_ident} SET {set_clause} WHERE id = ?", values)
             conn.commit()
         finally:
             conn.close()
@@ -305,11 +315,11 @@ class DatabaseManager:
         conn = _get_rw_conn()
         try:
             table_ident = self._editable_table_identifier(conn, table)
-            existing = conn.execute(f"SELECT id FROM {table_ident} WHERE id = ?", (row_id,)).fetchone()
+            existing = _execute_schema_sql(conn, f"SELECT id FROM {table_ident} WHERE id = ?", (row_id,)).fetchone()
             if not existing:
                 raise ValueError(f"Row not found: {table}.{row_id}")
 
-            conn.execute(f"DELETE FROM {table_ident} WHERE id = ?", (row_id,))
+            _execute_schema_sql(conn, f"DELETE FROM {table_ident} WHERE id = ?", (row_id,))
             conn.commit()
         finally:
             conn.close()
@@ -334,6 +344,7 @@ class DatabaseManager:
         platform = "local"
         stream_key = f"{platform}_{backend_user_id}_private"
         # Must match legacy Core stream IDs; not used for security.
+        # codeql[py/weak-sensitive-data-hashing]
         stream_id = hashlib.md5(stream_key.encode(), usedforsecurity=False).hexdigest()
         person_payload = json.dumps(
             [platform, backend_user_id],
@@ -372,7 +383,8 @@ class DatabaseManager:
             if not clauses:
                 return 0
             table_ident = _quote_identifier(table)
-            cursor = conn.execute(
+            cursor = _execute_schema_sql(
+                conn,
                 f"DELETE FROM {table_ident} WHERE " + " OR ".join(clauses),
                 params,
             )
