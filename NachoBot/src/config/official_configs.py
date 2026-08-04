@@ -164,7 +164,7 @@ class ChatConfig(ConfigBase):
 
             components = [platform, str(id_str)] if is_group else [platform, str(id_str), "private"]
             key = "_".join(components)
-            return hashlib.md5(key.encode()).hexdigest()
+            return hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()
         except (ValueError, IndexError):
             return None
 
@@ -334,7 +334,7 @@ class ExpressionConfig(ConfigBase):
             else:
                 components = [platform, str(id_str), "private"]
             key = "_".join(components)
-            return hashlib.md5(key.encode()).hexdigest()
+            return hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()
 
         except (ValueError, IndexError):
             return None

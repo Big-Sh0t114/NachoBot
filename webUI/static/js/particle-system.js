@@ -10,7 +10,7 @@ window.ParticleSystem = (() => {
         particleAudioSource = source;
     }
 
-function initParticles() {
+    function initParticles() {
         if (particleAnimationId) return;
 
         const canvas = document.getElementById('bg-canvas');
@@ -421,7 +421,7 @@ function initParticles() {
             };
 
             // 线性映射：将 0.5~1.0 之间的响度直接线性放大到 0~1.0，比二次方更敏感
-            const activeIntensity = Math.min(1, Math.max(0, reaction.intensity - 0.6) * 2.5);
+            const activeIntensity = Math.min(1, Math.max(0, reaction.intensity - 0.45) * 2.5);
             const intensityCurve = activeIntensity; // 取消二次方，使用线性响应
 
             const targetSpeedMultiplier = 0.5 + intensityCurve * 1.0;
