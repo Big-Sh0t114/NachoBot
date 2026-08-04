@@ -225,7 +225,7 @@ max_tokens = 800
 
 [model_task_config.vlm] # 图像识别模型（核心聊天图片/表情包描述）
 model_list = ["Qwen/Qwen3.5-4B/Silicon","Florence-2"]
-max_tokens = 800
+max_tokens = 8000
 
 [model_task_config.realtime_replyer] # 适配器实时会话专属独立回复模型组
 model_list = ["deepseek-v4-pro"]
