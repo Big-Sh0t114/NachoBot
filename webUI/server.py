@@ -117,13 +117,19 @@ async def list_configs():
 @app.get("/api/configs/{file_id}")
 async def get_config(file_id: str):
     try:
-        data = config_mgr.read_config(file_id, mask_sensitive=True)
         raw = config_mgr.read_config_raw(file_id)
-        return {"data": data, "raw": raw}
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+    try:
+        data = config_mgr.read_config(file_id, mask_sensitive=True)
+    except Exception as e:
+        logger.warning("Failed to parse config %s: %s", _log_safe(file_id), e)
+        data = None
+
+    return {"data": data, "raw": raw}
 
 
 class ConfigUpdate(BaseModel):
@@ -133,6 +139,13 @@ class ConfigUpdate(BaseModel):
 @app.put("/api/configs/{file_id}")
 async def update_config(file_id: str, body: ConfigUpdate):
     try:
+        if file_id != "env":
+            import tomlkit
+            try:
+                tomlkit.parse(body.raw)
+            except Exception as e:
+                raise HTTPException(400, f"配置存在错误，保存被拒绝 {e}")
+
         config_mgr.write_config_raw(file_id, body.raw)
         # Hot-reload configurations & services
         if file_id == "webui_config":
@@ -142,6 +155,8 @@ async def update_config(file_id: str, body: ConfigUpdate):
         from process_manager import _register_services
         _register_services()
         return {"status": "ok"}
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception:
@@ -153,9 +168,42 @@ async def update_config(file_id: str, body: ConfigUpdate):
 async def backup_config(file_id: str):
     try:
         bak = config_mgr.backup_config(file_id)
+        if not bak:
+            raise ValueError("当前配置文件包含语法错误，为了防止污染记录，已拒绝将其备份")
         return {"status": "ok", "backup": bak}
     except (ValueError, FileNotFoundError) as e:
         raise HTTPException(400, str(e))
+
+@app.get("/api/configs/{file_id}/backups")
+async def list_config_backups(file_id: str):
+    try:
+        backups = config_mgr.list_backups(file_id)
+        return {"status": "ok", "backups": backups}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"获取备份列表失败: {e}")
+
+class RestoreBackupRequest(BaseModel):
+    backup_file: str
+
+@app.post("/api/configs/{file_id}/restore")
+async def restore_config_backup(file_id: str, body: RestoreBackupRequest):
+    try:
+        bak_name = config_mgr.restore_backup(file_id, body.backup_file)
+        if file_id == "webui_config":
+            from webui_config import webui_config
+            webui_config.reload()
+        from process_manager import _register_services
+        _register_services()
+        return {"status": "ok", "backup": bak_name}
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        logger.exception("Restore failed")
+        raise HTTPException(500, f"恢复备份失败: {e}")
 
 
 # =========================================================================
@@ -395,11 +443,19 @@ async def list_plugins():
 @app.get("/api/plugins/{plugin_id}/config")
 async def get_plugin_config(plugin_id: str):
     try:
-        data = plugin_mgr.read_plugin_config(plugin_id)
         raw = plugin_mgr.read_plugin_config_raw(plugin_id)
-        return {"data": data, "raw": raw}
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    try:
+        data = plugin_mgr.read_plugin_config(plugin_id)
+    except Exception as e:
+        logger.warning("Failed to parse plugin config %s: %s", _log_safe(plugin_id), e)
+        data = None
+
+    return {"data": data, "raw": raw}
 
 
 class PluginConfigUpdate(BaseModel):
@@ -409,8 +465,16 @@ class PluginConfigUpdate(BaseModel):
 @app.put("/api/plugins/{plugin_id}/config")
 async def update_plugin_config(plugin_id: str, body: PluginConfigUpdate):
     try:
+        import tomlkit
+        try:
+            tomlkit.parse(body.raw)
+        except Exception as e:
+            raise HTTPException(400, f"插件配置存在错误，保存被拒绝 {e}")
+
         plugin_mgr.write_plugin_config_raw(plugin_id, body.raw)
         return {"status": "ok"}
+    except HTTPException:
+        raise
     except (FileNotFoundError, ValueError) as e:
         raise HTTPException(400, str(e))
     except Exception:

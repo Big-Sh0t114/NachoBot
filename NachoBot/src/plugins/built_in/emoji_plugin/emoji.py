@@ -75,11 +75,15 @@ class EmojiAction(BaseAction):
         # sourcery skip: assign-if-exp, introduce-default-else, swap-if-else-branches, use-named-expression
         """执行表情动作"""
         try:
-            # 1. 获取发送表情的原因
-            reason = self.action_data.get("reason", "表达当前情绪")
+            # 1. 当前目标消息优先于历史上下文，规划器 reasoning 保留具体要求
+            target_request = ""
+            if self.action_message:
+                target_request = self.action_message.processed_plain_text or self.action_message.display_message or ""
+            reason = self.action_data.get("reason") or self.reasoning or "表达当前情绪"
+            selection_query = target_request.strip() or reason.strip()
 
             # 2. 从全部有效标签中选择最符合语境的标签
-            available_emotions = emoji_api.get_available_emotions()
+            available_emotions = emoji_api.get_relevant_emotions(selection_query, limit=30)
             if not available_emotions:
                 logger.warning(f"{self.log_prefix} 没有带有效标签的表情包")
                 return False, "没有带有效标签的表情包"
@@ -95,11 +99,13 @@ class EmojiAction(BaseAction):
                 )
 
             prompt = f"""
-            你是一个正在进行聊天的网友。请根据发送理由和最近聊天记录，从给定标签中选择最匹配的一个。
+            你是一个正在进行聊天的网友。请根据当前用户请求，从给定标签中选择最匹配的一个。
+            当前用户请求（最高优先级）：{target_request or reason}
+            动作理由：{reason}
+
             最近的聊天记录：
             {messages_text}
 
-            发送理由：{reason}
             可用标签：{available_emotions}
             只返回列表中一个标签的原文，不要解释或添加其他文字。
             """
@@ -130,7 +136,13 @@ class EmojiAction(BaseAction):
                 logger.warning(f"{self.log_prefix} 标签模型返回无效，随机使用标签: {chosen_emotion}")
 
             # 3. 优先抽取所选标签，不足时由其他标签补足，并保留解码后备项
-            sampled_candidates = emoji_api.sample_candidates_by_emotion(chosen_emotion, count=10, backup_count=5)
+            sampled_candidates = emoji_api.sample_candidates_by_emotion(
+                chosen_emotion,
+                query=selection_query,
+                count=10,
+                backup_count=5,
+                max_tag_matches=4,
+            )
             collage = await asyncio.to_thread(build_emoji_collage, sampled_candidates, 10)
             if not collage or not collage.candidates:
                 logger.warning(f"{self.log_prefix} 没有可读取的表情包候选")
@@ -139,16 +151,31 @@ class EmojiAction(BaseAction):
             if len(collage.candidates) == 1:
                 selected_candidate = collage.candidates[0]
             else:
+                candidate_descriptions = "\n".join(
+                    f"{index}. {candidate.description or '无文字描述'}"
+                    for index, candidate in enumerate(collage.candidates, start=1)
+                )
                 visual_prompt = f"""
                 你正在为聊天选择一张表情包。图片是带连续编号的候选联系图。
+                当前用户请求（最高优先级）：{target_request or reason}
+                动作理由：{reason}
+
                 最近的聊天记录：
                 {messages_text}
 
-                发送理由：{reason}
                 已选择标签：{chosen_emotion}
+                编号对应的候选描述：
+                {candidate_descriptions}
+
+                当前用户请求优先于历史消息和已选择标签。优先满足用户指定的主体、角色、颜色、动作和情绪等视觉属性；
+                已选择标签只用于召回候选，不能覆盖当前用户请求。
                 请从 1 到 {len(collage.candidates)} 中选择最符合当前语境的一张。
                 只输出严格 JSON，例如 {{"index": 3}}，不要输出解释、Markdown 或其他字段。
                 """
+                if global_config.debug.show_prompt:
+                    logger.info(f"{self.log_prefix} 生成的 VLM 选图 Prompt: {visual_prompt}")
+                else:
+                    logger.debug(f"{self.log_prefix} 生成的 VLM 选图 Prompt: {visual_prompt}")
                 selected_index = None
                 try:
                     vlm = LLMRequest(model_set=model_config.model_task_config.vlm, request_type="emoji.select")
@@ -162,6 +189,10 @@ class EmojiAction(BaseAction):
                     selected_index = _parse_selected_index(response, len(collage.candidates))
                     if selected_index is None:
                         logger.warning(f"{self.log_prefix} VLM返回无效选择: {response[:200]}")
+                    else:
+                        logger.info(
+                            f"{self.log_prefix} VLM选图完成: index={selected_index + 1}, response={response[:100]}"
+                        )
                 except Exception as error:
                     logger.warning(f"{self.log_prefix} VLM选图失败，将在候选内随机选择: {error}")
 
@@ -173,7 +204,7 @@ class EmojiAction(BaseAction):
             emoji_base64 = image_path_to_base64(selected_candidate.full_path)
             emoji_description = selected_candidate.description
             logger.info(
-                f"{self.log_prefix} 发送表情包[{chosen_emotion}] "
+                f"{self.log_prefix} 发送表情包[{chosen_emotion}] 请求={target_request or reason!r} "
                 f"候选数={len(collage.candidates)} hash={selected_candidate.emoji_hash[:8]}，原因: {reason}"
             )
 
