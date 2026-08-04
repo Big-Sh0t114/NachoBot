@@ -8,14 +8,100 @@
     count = emoji_api.get_count()
 """
 
+import os
 import random
 
+from dataclasses import dataclass
 from typing import Optional, Tuple, List
 from src.common.logger import get_logger
 from src.chat.emoji_system.emoji_manager import get_emoji_manager
 from src.chat.utils.utils_image import image_path_to_base64
 
 logger = get_logger("emoji_api")
+
+
+@dataclass(frozen=True)
+class EmojiCandidate:
+    """A stable reference to an emoji considered for visual selection."""
+
+    emoji_hash: str
+    full_path: str
+    description: str
+    emotions: tuple[str, ...]
+    image_format: str
+    matched_tag: bool
+
+
+def _normalize_emotion(emotion: str) -> str:
+    return emotion.strip().casefold()
+
+
+def _get_valid_emojis():
+    emoji_manager = get_emoji_manager()
+    return [emoji for emoji in emoji_manager.emoji_objects if not emoji.is_deleted and os.path.isfile(emoji.full_path)]
+
+
+def get_available_emotions() -> List[str]:
+    """Return all usable emotion tags, normalized for duplicate detection."""
+    emotions_by_key: dict[str, str] = {}
+    for emoji in _get_valid_emojis():
+        for emotion in emoji.emotion:
+            cleaned = emotion.strip()
+            if cleaned:
+                emotions_by_key.setdefault(cleaned.casefold(), cleaned)
+    return sorted(emotions_by_key.values(), key=lambda value: value.casefold())
+
+
+def sample_candidates_by_emotion(
+    emotion: str,
+    count: int = 10,
+    backup_count: int = 5,
+) -> List[EmojiCandidate]:
+    """Sample tag matches first, then globally fill the pool without duplicates.
+
+    Extra candidates are returned as decode fallbacks. The collage builder still
+    displays at most ``count`` successfully decoded images.
+    """
+    if not isinstance(emotion, str):
+        raise TypeError("情感标签必须是字符串类型")
+    if not emotion.strip():
+        raise ValueError("情感标签不能为空")
+    if not isinstance(count, int) or not isinstance(backup_count, int):
+        raise TypeError("count 和 backup_count 必须是整数类型")
+    if count <= 0 or backup_count < 0:
+        raise ValueError("count 必须大于0且 backup_count 不能为负数")
+
+    target_tag = _normalize_emotion(emotion)
+    valid_emojis = _get_valid_emojis()
+    matching = [
+        emoji
+        for emoji in valid_emojis
+        if target_tag in {_normalize_emotion(tag) for tag in emoji.emotion if tag.strip()}
+    ]
+    non_matching = [emoji for emoji in valid_emojis if emoji not in matching]
+    pool_size = min(len(valid_emojis), count + backup_count)
+
+    selected = random.sample(matching, min(len(matching), pool_size))
+    remaining = pool_size - len(selected)
+    if remaining:
+        selected.extend(random.sample(non_matching, min(len(non_matching), remaining)))
+
+    return [
+        EmojiCandidate(
+            emoji_hash=emoji.hash,
+            full_path=emoji.full_path,
+            description=emoji.description,
+            emotions=tuple(emoji.emotion),
+            image_format=emoji.format,
+            matched_tag=emoji in matching,
+        )
+        for emoji in selected
+    ]
+
+
+def record_usage(emoji_hash: str) -> None:
+    """Record one successfully delivered emoji."""
+    get_emoji_manager().record_usage(emoji_hash)
 
 
 # =============================================================================
