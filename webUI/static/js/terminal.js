@@ -131,6 +131,7 @@ const TerminalModule = (() => {
 
     function appendLogLine(text, showTag, skipQrHandling = false) {
         const output = document.getElementById('terminal-output');
+        text = String(text ?? '');
 
         // Remove placeholder
         const ph = output.querySelector('.terminal-placeholder');
@@ -195,13 +196,14 @@ const TerminalModule = (() => {
             }
         }
 
-        let html = '';
         if (tag) {
-            html += `<span class="log-tag ${tag}">${escapeHtml(tag)}</span>`;
+            const tagEl = document.createElement('span');
+            tagEl.className = `log-tag ${sanitizeLogClassToken(tag)}`;
+            tagEl.textContent = tag;
+            line.appendChild(tagEl);
         }
 
-        html += escapeHtml(text);
-        line.innerHTML = html;
+        line.appendChild(document.createTextNode(text));
         output.appendChild(line);
 
         // Limit buffer (keep last 5000 lines in DOM)
@@ -212,6 +214,14 @@ const TerminalModule = (() => {
         if (autoScroll) {
             output.scrollTop = output.scrollHeight;
         }
+    }
+
+    function sanitizeLogClassToken(value) {
+        const token = String(value || '')
+            .toLowerCase()
+            .replace(/[^a-z0-9_-]+/g, '-')
+            .replace(/^-+|-+$/g, '');
+        return token || 'unknown';
     }
 
     function stripLineEnding(text) {

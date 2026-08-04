@@ -199,13 +199,13 @@ class PlaywrightSearchProvider:
             normalized = f"https:{normalized}"
 
         parsed = urlparse(normalized)
-        if engine == "duckduckgo" and parsed.netloc.lower().endswith("duckduckgo.com"):
+        if engine == "duckduckgo" and PlaywrightSearchProvider._is_host_or_subdomain(parsed, "duckduckgo.com"):
             redirect_target = parse_qs(parsed.query).get("uddg")
             if redirect_target:
                 normalized = redirect_target[0]
                 parsed = urlparse(normalized)
 
-        if engine == "bing" and parsed.netloc.lower().endswith("bing.com"):
+        if engine == "bing" and PlaywrightSearchProvider._is_host_or_subdomain(parsed, "bing.com"):
             redirect_target = PlaywrightSearchProvider._decode_bing_redirect(parsed)
             if redirect_target:
                 normalized = redirect_target
@@ -214,6 +214,12 @@ class PlaywrightSearchProvider:
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
             return ""
         return normalized
+
+    @staticmethod
+    def _is_host_or_subdomain(parsed_url, domain: str) -> bool:
+        host = (parsed_url.hostname or "").casefold().rstrip(".")
+        domain = domain.casefold()
+        return host == domain or host.endswith(f".{domain}")
 
     @staticmethod
     def _decode_bing_redirect(parsed_url) -> str:

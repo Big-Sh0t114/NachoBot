@@ -81,6 +81,9 @@ const PluginsModule = (() => {
                     { label: '保存', class: 'btn btn-primary', action: () => savePluginConfig(plugin.id) },
                 ]
             );
+            if (res.data === null) {
+                toast('⚠️ 该插件配置存在语法错误，请在弹窗中进行修复', 'warning');
+            }
         } catch (e) {
             toast('加载插件配置失败: ' + e.message, 'error');
         }

@@ -16,6 +16,8 @@ import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 
+from .log_utils import log_safe, redact_secret
+
 logger = logging.getLogger(__name__)
 
 
@@ -310,8 +312,12 @@ class ServerNetworkDriver:
                     )
                     return
 
+            # codeql[py/clear-text-logging-sensitive-data]
             logger.debug(
-                f"✅ Found metadata for {connection_uuid}: api_key={metadata.api_key}, platform={metadata.platform}"
+                "✅ Found metadata for %s: api_key=%s, platform=%s",
+                log_safe(connection_uuid),
+                redact_secret(metadata.api_key),
+                log_safe(metadata.platform),
             )
 
             event = NetworkEvent(
