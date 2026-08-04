@@ -10,6 +10,11 @@ from typing import Any
 
 import tomlkit
 
+try:
+    from .secure_paths import ensure_within, resolve_relative_to_root
+except ImportError:
+    from secure_paths import ensure_within, resolve_relative_to_root
+
 # Root of the Nacho-with-u project (parent of webui/)
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
@@ -71,7 +76,7 @@ class ConfigManager:
         """Return the registry with existence info."""
         result = []
         for entry in CONFIG_REGISTRY:
-            full = self.root / entry["path"]
+            full = self._entry_path(entry)
             result.append({
                 **entry,
                 "exists": full.exists(),
@@ -88,7 +93,7 @@ class ConfigManager:
         For `.toml` files, uses tomlkit to parse.
         """
         entry = self._find(file_id)
-        full = self.root / entry["path"]
+        full = self._entry_path(entry)
 
         if not full.exists():
             raise FileNotFoundError(f"Config file not found: {full}")
@@ -108,7 +113,7 @@ class ConfigManager:
     def read_config_raw(self, file_id: str) -> str:
         """Read raw text of a config file."""
         entry = self._find(file_id)
-        full = self.root / entry["path"]
+        full = self._entry_path(entry)
         return full.read_text(encoding="utf-8")
 
     # ---- writing ----
@@ -119,10 +124,10 @@ class ConfigManager:
         Creates a .bak backup before writing.
         """
         entry = self._find(file_id)
-        full = self.root / entry["path"]
+        full = self._entry_path(entry)
 
         # Backup
-        self._backup(full)
+        self._backup(full, backup_type="auto")
 
         if full.name == ".env":
             self._write_env(full, data)
@@ -138,13 +143,37 @@ class ConfigManager:
         self._update_tomlkit_doc(doc, data)
         full.write_text(tomlkit.dumps(doc), encoding="utf-8")
 
+    def write_config_raw(self, file_id: str, raw: str) -> None:
+        """Write raw config text to a registry-owned file."""
+        entry = self._find(file_id)
+        full = self._entry_path(entry)
+        self._backup(full, backup_type="auto")
+        full.write_text(raw, encoding="utf-8")
+
     # ---- backup ----
 
     def backup_config(self, file_id: str) -> str:
         """Create a timestamped backup. Returns backup path."""
         entry = self._find(file_id)
-        full = self.root / entry["path"]
-        return self._backup(full)
+        full = self._entry_path(entry)
+        return self._backup(full, backup_type="manual")
+
+    def restore_backup(self, file_id: str, backup_filename: str) -> str:
+        """Restore a specific backup file."""
+        entry = self._find(file_id)
+        full = self._entry_path(entry)
+        
+        directory = full.parent
+        target_backup = directory / backup_filename
+        
+        if not target_backup.exists() or not target_backup.name.endswith(".bak"):
+            raise FileNotFoundError(f"Backup file not found: {backup_filename}")
+            
+        self._backup(full, backup_type="auto")
+        
+        import shutil
+        shutil.copy2(target_backup, full)
+        return target_backup.name
 
     # ---- internals ----
 
@@ -154,13 +183,70 @@ class ConfigManager:
                 return entry
         raise ValueError(f"Unknown config id: {file_id}")
 
-    def _backup(self, path: Path) -> str:
+    def _entry_path(self, entry: dict[str, str]) -> Path:
+        return resolve_relative_to_root(self.root, entry["path"])
+
+    def _backup(self, path: Path, backup_type: str = "auto") -> str:
         if not path.exists():
             return ""
+            
+        if path.name != ".env":
+            import tomlkit
+            try:
+                tomlkit.parse(path.read_text(encoding="utf-8"))
+            except Exception:
+                # Do not backup invalid TOML files to prevent polluting the backup history
+                return ""
+                
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        bak = path.with_suffix(f".{ts}.bak")
+        try:
+            from .secure_paths import ensure_within
+        except ImportError:
+            from secure_paths import ensure_within
+            
+        bak = ensure_within(self.root, path.with_suffix(f".{backup_type}.{ts}.bak"))
+        import shutil
         shutil.copy2(path, bak)
+        
+        if backup_type == "auto":
+            # Keep only the newest 2 auto backups
+            directory = path.parent
+            prefix = path.stem
+            auto_backups = list(directory.glob(f"{prefix}.auto.*.bak"))
+            auto_backups.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            for old_bak in auto_backups[2:]:
+                try:
+                    old_bak.unlink()
+                except OSError:
+                    pass
+                    
         return str(bak)
+
+    def list_backups(self, file_id: str) -> list[dict]:
+        entry = self._find(file_id)
+        full = self._entry_path(entry)
+        directory = full.parent
+        prefix = full.stem
+        
+        # Match old format (*.bak) and new format (*.auto.*.bak, *.manual.*.bak)
+        backups = list(directory.glob(f"{prefix}.*.bak"))
+        
+        result = []
+        for b in backups:
+            name_parts = b.name.split('.')
+            if len(name_parts) >= 4 and name_parts[-2].isdigit() and name_parts[-3] in ("auto", "manual"):
+                btype = "手动备份" if name_parts[-3] == "manual" else "自动备份"
+            else:
+                btype = "备份"
+                
+            result.append({
+                "filename": b.name,
+                "type": btype,
+                "mtime": b.stat().st_mtime
+            })
+            
+        result.sort(key=lambda x: x["mtime"], reverse=True)
+        return result
 
     # ---- env helpers ----
 
