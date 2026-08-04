@@ -36,7 +36,7 @@ REPLACE_USAGE_HALFLIFE_DAYS = 30  # 替换候选权重的使用次数时效衰�
 """
 
 
-class MaiEmoji:
+class NcnkEmoji:
     """定义一个表情包"""
 
     def __init__(self, full_path: str):
@@ -161,7 +161,7 @@ class MaiEmoji:
                     query_count=0,  # Default value
                     is_registered=True,
                     is_banned=False,  # Default value
-                    record_time=self.register_time,  # Use MaiEmoji's register_time for DB record_time
+                    record_time=self.register_time,  # Use NcnkEmoji's register_time for DB record_time
                     register_time=self.register_time,
                     usage_count=self.usage_count,
                     last_used_time=self.last_used_time,
@@ -227,11 +227,11 @@ class MaiEmoji:
             return False
 
 
-def _emoji_objects_to_readable_list(emoji_objects: List["MaiEmoji"]) -> List[str]:
+def _emoji_objects_to_readable_list(emoji_objects: List["NcnkEmoji"]) -> List[str]:
     """将表情包对象列表转换为可读的字符串列表
 
     参数:
-        emoji_objects: MaiEmoji对象列表
+        emoji_objects: NcnkEmoji对象列表
 
     返回:
         list[str]: 可读的表情包信息字符串列表
@@ -246,7 +246,7 @@ def _emoji_objects_to_readable_list(emoji_objects: List["MaiEmoji"]) -> List[str
     return emoji_info_list
 
 
-def _to_emoji_objects(data: Any) -> Tuple[List["MaiEmoji"], int]:
+def _to_emoji_objects(data: Any) -> Tuple[List["NcnkEmoji"], int]:
     emoji_objects = []
     load_errors = 0
     # data is now an iterable of Peewee Emoji model instances
@@ -262,7 +262,7 @@ def _to_emoji_objects(data: Any) -> Tuple[List["MaiEmoji"], int]:
             continue
 
         try:
-            emoji = MaiEmoji(full_path=full_path)
+            emoji = NcnkEmoji(full_path=full_path)
 
             emoji.hash = emoji_data.emoji_hash
             if not emoji.hash:
@@ -278,9 +278,9 @@ def _to_emoji_objects(data: Any) -> Tuple[List["MaiEmoji"], int]:
             db_last_used_time = emoji_data.last_used_time
             db_register_time = emoji_data.register_time
 
-            # If last_used_time from DB is None, use MaiEmoji's initialized register_time or current time
+            # If last_used_time from DB is None, use NcnkEmoji's initialized register_time or current time
             emoji.last_used_time = db_last_used_time if db_last_used_time is not None else emoji.register_time
-            # If register_time from DB is None, use MaiEmoji's initialized register_time (which is time.time())
+            # If register_time from DB is None, use NcnkEmoji's initialized register_time (which is time.time())
             emoji.register_time = db_register_time if db_register_time is not None else emoji.register_time
 
             emoji.format = emoji_data.format
@@ -288,7 +288,7 @@ def _to_emoji_objects(data: Any) -> Tuple[List["MaiEmoji"], int]:
             emoji_objects.append(emoji)
 
         except ValueError as ve:
-            logger.error(f"[加载错误] 初始化 MaiEmoji 失败 ({full_path}): {ve}")
+            logger.error(f"[加载错误] 初始化 NcnkEmoji 失败 ({full_path}): {ve}")
             load_errors += 1
         except Exception as e:
             logger.error(f"[加载错误] 处理数据库记录时出错 ({full_path}): {str(e)}")
@@ -328,7 +328,7 @@ async def clear_temp_emoji() -> None:
                         logger.debug(f"[清理] 删除: {filename}")
 
 
-async def clean_unused_emojis(emoji_dir: str, emoji_objects: List["MaiEmoji"], removed_count: int) -> int:
+async def clean_unused_emojis(emoji_dir: str, emoji_objects: List["NcnkEmoji"], removed_count: int) -> int:
     """清理指定目录中未被 emoji_objects 追踪的表情包文件"""
     if not os.path.exists(emoji_dir):
         logger.warning(f"[清理] 目标目录不存在，跳过清理: {emoji_dir}")
@@ -390,7 +390,7 @@ class EmojiManager:
         self.emoji_num = 0
         self.emoji_num_max = global_config.emoji.max_reg_num
         self.emoji_num_max_reach_deletion = global_config.emoji.do_replace
-        self.emoji_objects: list[MaiEmoji] = []  # 存储MaiEmoji对象的列表，使用类型注解明确列表元素类型
+        self.emoji_objects: list[NcnkEmoji] = []  # 存储NcnkEmoji对象的列表，使用类型注解明确列表元素类型
 
         logger.info("启动表情包管理器")
 
@@ -652,7 +652,7 @@ class EmojiManager:
             await asyncio.sleep(global_config.emoji.check_interval * 60)
 
     async def get_all_emoji_from_db(self) -> None:
-        """获取所有表情包并初始化为MaiEmoji类对象，更新 self.emoji_objects"""
+        """获取所有表情包并初始化为NcnkEmoji类对象，更新 self.emoji_objects"""
         try:
             self._ensure_db()
             logger.debug("[数据库] 开始加载所有表情包记录 (Peewee)...")
@@ -673,14 +673,14 @@ class EmojiManager:
             self.emoji_objects = []  # 加载失败则清空列表
             self.emoji_num = 0
 
-    async def get_emoji_from_db(self, emoji_hash: Optional[str] = None) -> List["MaiEmoji"]:
-        """获取指定哈希值的表情包并初始化为MaiEmoji类对象列表 (主要用于调试或特定查找)
+    async def get_emoji_from_db(self, emoji_hash: Optional[str] = None) -> List["NcnkEmoji"]:
+        """获取指定哈希值的表情包并初始化为NcnkEmoji类对象列表 (主要用于调试或特定查找)
 
         参数:
             emoji_hash: 可选，如果提供则只返回指定哈希值的表情包
 
         返回:
-            list[MaiEmoji]: 表情包对象列表
+            list[NcnkEmoji]: 表情包对象列表
         """
         try:
             self._ensure_db()
@@ -705,14 +705,14 @@ class EmojiManager:
             logger.error(f"[错误] 从数据库获取表情包对象失败: {str(e)}")
             return []
 
-    async def get_emoji_from_manager(self, emoji_hash: str) -> Optional["MaiEmoji"]:
+    async def get_emoji_from_manager(self, emoji_hash: str) -> Optional["NcnkEmoji"]:
         # sourcery skip: use-next
         """从内存中的 emoji_objects 列表获取表情包
 
         参数:
             emoji_hash: 要查找的表情包哈希值
         返回:
-            MaiEmoji 或 None: 如果找到则返回 MaiEmoji 对象，否则返回 None
+            NcnkEmoji 或 None: 如果找到则返回 NcnkEmoji 对象，否则返回 None
         """
         for emoji in self.emoji_objects:
             # 确保对象未被标记为删除且哈希值匹配
@@ -803,7 +803,7 @@ class EmojiManager:
                 logger.warning(f"[警告] 未找到哈希值为 {emoji_hash} 的表情包")
                 return False
 
-            # 使用MaiEmoji对象的delete方法删除表情包
+            # 使用NcnkEmoji对象的delete方法删除表情包
             success = await emoji.delete()
 
             if success:
@@ -823,7 +823,7 @@ class EmojiManager:
             logger.error(traceback.format_exc())
             return False
 
-    async def replace_a_emoji(self, new_emoji: "MaiEmoji") -> bool:
+    async def replace_a_emoji(self, new_emoji: "NcnkEmoji") -> bool:
         # sourcery skip: use-getitem-for-re-match-groups
         """替换一个表情包
 
@@ -845,7 +845,7 @@ class EmojiManager:
             now = time.time()
             halflife_seconds = REPLACE_USAGE_HALFLIFE_DAYS * 86400
 
-            def _effective_usage(emoji: "MaiEmoji") -> float:
+            def _effective_usage(emoji: "NcnkEmoji") -> float:
                 idle_seconds = max(0.0, now - (emoji.last_used_time or emoji.register_time))
                 decay = 0.5 ** (idle_seconds / halflife_seconds) if halflife_seconds > 0 else 1.0
                 return emoji.usage_count * decay
@@ -1034,8 +1034,8 @@ class EmojiManager:
             return False
 
         try:
-            # 1. 创建 MaiEmoji 实例并初始化哈希和格式
-            new_emoji = MaiEmoji(full_path=file_full_path)
+            # 1. 创建 NcnkEmoji 实例并初始化哈希和格式
+            new_emoji = NcnkEmoji(full_path=file_full_path)
             init_result = await new_emoji.initialize_hash_format()
             if init_result is None or new_emoji.is_deleted:  # 初始化失败或文件读取错误
                 logger.error(f"[注册失败] 初始化哈希和格式失败: {filename}")
