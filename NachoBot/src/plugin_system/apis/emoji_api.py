@@ -10,9 +10,11 @@
 
 import os
 import random
+import re
 
 from dataclasses import dataclass
 from typing import Optional, Tuple, List
+from rapidfuzz.fuzz import partial_ratio
 from src.common.logger import get_logger
 from src.chat.emoji_system.emoji_manager import get_emoji_manager
 from src.chat.utils.utils_image import image_path_to_base64
@@ -52,12 +54,42 @@ def get_available_emotions() -> List[str]:
     return sorted(emotions_by_key.values(), key=lambda value: value.casefold())
 
 
+def _search_terms(text: str) -> set[str]:
+    normalized = text.casefold()
+    terms = set(re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]", normalized))
+    terms.update(
+        normalized[index : index + 2]
+        for index in range(len(normalized) - 1)
+        if "\u4e00" <= normalized[index] <= "\u9fff" and "\u4e00" <= normalized[index + 1] <= "\u9fff"
+    )
+    return terms
+
+
+def _relevance_score(query: str, searchable_text: str) -> float:
+    if not query.strip() or not searchable_text.strip():
+        return 0.0
+    query_terms = _search_terms(query)
+    text_terms = _search_terms(searchable_text)
+    overlap = len(query_terms & text_terms) / max(len(query_terms), 1)
+    return partial_ratio(query.casefold(), searchable_text.casefold()) / 100 + overlap * 2
+
+
+def get_relevant_emotions(query: str, limit: int = 30) -> List[str]:
+    """Return a compact tag list ranked against the current user request."""
+    emotions = get_available_emotions()
+    if not query.strip():
+        return emotions[:limit]
+    return sorted(emotions, key=lambda emotion: _relevance_score(query, emotion), reverse=True)[:limit]
+
+
 def sample_candidates_by_emotion(
     emotion: str,
+    query: str = "",
     count: int = 10,
     backup_count: int = 5,
+    max_tag_matches: int = 4,
 ) -> List[EmojiCandidate]:
-    """Sample tag matches first, then globally fill the pool without duplicates.
+    """Mix bounded tag matches with candidates relevant to the user request.
 
     Extra candidates are returned as decode fallbacks. The collage builder still
     displays at most ``count`` successfully decoded images.
@@ -66,10 +98,12 @@ def sample_candidates_by_emotion(
         raise TypeError("情感标签必须是字符串类型")
     if not emotion.strip():
         raise ValueError("情感标签不能为空")
-    if not isinstance(count, int) or not isinstance(backup_count, int):
-        raise TypeError("count 和 backup_count 必须是整数类型")
-    if count <= 0 or backup_count < 0:
-        raise ValueError("count 必须大于0且 backup_count 不能为负数")
+    if not isinstance(query, str):
+        raise TypeError("query 必须是字符串类型")
+    if not all(isinstance(value, int) for value in (count, backup_count, max_tag_matches)):
+        raise TypeError("count、backup_count 和 max_tag_matches 必须是整数类型")
+    if count <= 0 or backup_count < 0 or max_tag_matches < 0:
+        raise ValueError("count 必须大于0，backup_count 和 max_tag_matches 不能为负数")
 
     target_tag = _normalize_emotion(emotion)
     valid_emojis = _get_valid_emojis()
@@ -78,13 +112,26 @@ def sample_candidates_by_emotion(
         for emoji in valid_emojis
         if target_tag in {_normalize_emotion(tag) for tag in emoji.emotion if tag.strip()}
     ]
-    non_matching = [emoji for emoji in valid_emojis if emoji not in matching]
     pool_size = min(len(valid_emojis), count + backup_count)
 
-    selected = random.sample(matching, min(len(matching), pool_size))
-    remaining = pool_size - len(selected)
-    if remaining:
-        selected.extend(random.sample(non_matching, min(len(non_matching), remaining)))
+    tag_limit = min(len(matching), max_tag_matches, pool_size)
+    ranked_matches = sorted(
+        matching,
+        key=lambda emoji: _relevance_score(query, " ".join((emoji.description, *emoji.emotion))),
+        reverse=True,
+    )
+    selected_tag_matches = ranked_matches[:tag_limit]
+    ranked_non_matching = sorted(
+        (emoji for emoji in valid_emojis if emoji not in matching),
+        key=lambda emoji: _relevance_score(query, " ".join((emoji.description, *emoji.emotion))),
+        reverse=True,
+    )
+    ranked_remaining = ranked_non_matching + ranked_matches[tag_limit:]
+
+    primary = selected_tag_matches + ranked_remaining[: max(0, count - tag_limit)]
+    random.shuffle(primary)
+    backup = ranked_remaining[max(0, count - tag_limit) : max(0, count - tag_limit) + backup_count]
+    selected = (primary + backup)[:pool_size]
 
     return [
         EmojiCandidate(
