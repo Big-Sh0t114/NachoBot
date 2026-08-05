@@ -1,6 +1,4 @@
 *.html linguist-detectable=false
 *.h linguist-detectable=false
 
-NachoBot/plugins/bilibili_video_sender_plugin/ffmpeg/doc/** linguist-documentation
-NachoBot/plugins/bilibili_video_sender_plugin/ffmpeg/doc/** linguist-vendored
 koishi-app/node_modules/** linguist-vendored

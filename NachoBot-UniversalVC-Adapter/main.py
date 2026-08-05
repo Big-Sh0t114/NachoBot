@@ -1,8 +1,9 @@
 import asyncio
 import logging
-import os
 import sys
 from pathlib import Path
+
+from loguru import logger
 
 sys.path.append(str(Path(__file__).resolve().parent))
 
@@ -19,13 +20,46 @@ from config import load_config
 from adapter import UniversalVCAdapter
 
 
-def setup_logging(level: str = "INFO") -> logging.Logger:
-    logging.basicConfig(
-        level=getattr(logging, level.upper(), logging.INFO),
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
+class _InterceptHandler(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            level = logger.level(record.levelname).name
+        except ValueError:
+            level = record.levelno
+
+        frame = logging.currentframe()
+        depth = 2
+        while frame and frame.f_code.co_filename == logging.__file__:
+            frame = frame.f_back
+            depth += 1
+
+        logger.bind(name=record.name).opt(
+            depth=depth,
+            exception=record.exc_info,
+        ).log(level, record.getMessage())
+
+
+def setup_logging(level: str = "INFO"):
+    normalized_level = level.upper()
+    logger.remove()
+    logger.configure(extra={"name": "NachoBot-UniversalVC-Adapter"})
+    logger.add(
+        sys.stderr,
+        level=normalized_level,
+        colorize=True,
+        format=(
+            "<blue>{time:YYYY-MM-DD HH:mm:ss}</blue> | "
+            "<level>{level: <8}</level> | "
+            "<cyan>{extra[name]}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
+            "<level>{message}</level>"
+        ),
     )
-    return logging.getLogger("UniversalVCAdapter-DEV")
+    logging.basicConfig(
+        handlers=[_InterceptHandler()],
+        level=getattr(logging, normalized_level, logging.INFO),
+        force=True,
+    )
+    return logger.bind(name="NachoBot-UniversalVC-Adapter")
 
 
 async def main():
@@ -49,21 +83,6 @@ async def main():
 
     logger = setup_logging(config.log_level)
 
-    # Auto-configure FFmpeg if found in shared NachoBot plugins
-    project_root = current_dir.parent
-    possible_ffmpeg_paths = [
-        project_root / "NachoBot" / "plugins" / "bilibili_video_sender_plugin" / "ffmpeg",
-        current_dir / "ffmpeg",
-    ]
-
-    for p in possible_ffmpeg_paths:
-        if p.exists() and p.is_dir():
-            if (p / "bin").exists():
-                p = p / "bin"
-            logger.info(f"Found FFmpeg at {p}, adding to PATH")
-            os.environ["PATH"] += os.pathsep + str(p)
-            break
-
     # ── Download models if needed ──
     logger.info("Checking ML models...")
     try:
@@ -79,7 +98,7 @@ async def main():
         logger.warning(f"Model check failed: {e}")
 
     logger.info("=" * 60)
-    logger.info("  NachoBot Universal Voice Adapter (DEV)")
+    logger.info("  NachoBot Universal Voice Adapter")
     logger.info("  Platform: universal_vc")
     logger.info("=" * 60)
     logger.info(f"Target Process: {config.capture.target_process_name or config.capture.target_pid}")
@@ -104,7 +123,7 @@ async def main():
         logger.info("Stopping...")
         await adapter.stop()
     except Exception as e:
-        logger.error(f"Fatal error: {e}", exc_info=True)
+        logger.exception(f"Fatal error: {e}")
         await adapter.stop()
 
 

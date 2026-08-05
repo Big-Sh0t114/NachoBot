@@ -7,6 +7,9 @@ NachoBot 的 Koishi 适配器，允许 NachoBot 通过 Koishi 接入多种平台
 1. 启动 `koishi-app`
 2. 复制并重命名 `config.toml` 配置为适配器所用
 3. 确保配置中的 `onebot_server` 信息与 Koishi OneBot 插件的监听地址一致
+4. 音频转码默认由 `static-ffmpeg` 自动获取 FFmpeg；通常无需设置 `[ffmpeg].path`
+
+如需使用系统安装或自定义构建，可在 `config.toml` 中把 `[ffmpeg].path` 设置为 FFmpeg 可执行文件或其所在目录。留空时使用 `static-ffmpeg`。
 
 ## 图片视觉策略
 

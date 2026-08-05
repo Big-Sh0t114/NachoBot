@@ -427,7 +427,7 @@ class VoiceHandler:
             return self.asr.accept_stream_audio(stream_id, samples_16k)
         except Exception:
             self.logger.exception(
-                "Failed to feed Discord PCM into streaming ASR: %s",
+                "Failed to feed Discord PCM into streaming ASR: {}",
                 stream_id,
             )
             self.abort_stream(stream_id)
@@ -445,7 +445,7 @@ class VoiceHandler:
             if character.isprintable() or character in "\n\r\t"
         )
         if text:
-            self.logger.info("Discord ASR recognized: %s", text)
+            self.logger.info("Discord ASR recognized: {}", text)
             return text
         return None
 

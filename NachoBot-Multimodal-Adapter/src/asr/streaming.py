@@ -7,8 +7,10 @@ uses the same engine for uploaded audio compatibility.
 
 import asyncio
 from dataclasses import dataclass
+from functools import lru_cache
 import io
 import logging
+import os
 from pathlib import Path
 import threading
 from typing import Dict, Optional
@@ -19,6 +21,7 @@ import aiohttp
 import numpy as np
 from scipy.signal import resample_poly
 import toml
+from static_ffmpeg import run
 
 from .model_manager import ASRModelManager, DEFAULT_MODELS_DIR
 from .onnxruntime_compat import preload_onnxruntime
@@ -38,6 +41,34 @@ except (ImportError, OSError) as exc:
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "configs" / "perception.toml"
+
+
+@lru_cache(maxsize=1)
+def _configure_pydub_binaries() -> str:
+    """配置 pydub 使用项目共享目录中的 FFmpeg 与 FFprobe。"""
+    configured_dir = os.environ.get("NACHOBOT_FFMPEG_DIR", "").strip()
+    shared_root = (
+        Path(configured_dir).expanduser()
+        if configured_dir
+        else Path(__file__).resolve().parents[3] / ".runtime" / "ffmpeg"
+    )
+    platform_dir = shared_root.resolve() / run.get_platform_key()
+    platform_dir.mkdir(parents=True, exist_ok=True)
+    ffmpeg_path, ffprobe_path = run.get_or_fetch_platform_executables_else_raise(
+        download_dir=str(platform_dir)
+    )
+
+    managed_dirs = {
+        str(Path(ffmpeg_path).resolve().parent),
+        str(Path(ffprobe_path).resolve().parent),
+    }
+    current_path = os.environ.get("PATH", "")
+    current_dirs = set(current_path.split(os.pathsep)) if current_path else set()
+    missing_dirs = [directory for directory in managed_dirs if directory not in current_dirs]
+    if missing_dirs:
+        os.environ["PATH"] = os.pathsep.join([*missing_dirs, current_path])
+
+    return ffmpeg_path
 
 
 @dataclass(frozen=True)
@@ -429,6 +460,7 @@ def decode_audio_bytes(audio_bytes: bytes) -> np.ndarray:
     except Exception:
         from pydub import AudioSegment
 
+        AudioSegment.converter = _configure_pydub_binaries()
         audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
         audio = audio.set_channels(1).set_frame_rate(16000).set_sample_width(2)
         mono = (

@@ -6,7 +6,17 @@ set "PYTHONHOME="
 title Launch NachoBot Lite
 set "FINAL_RC=0"
 set "ROOT=%~dp0"
+set "NACHOBOT_FFMPEG_DIR=%ROOT%.runtime\ffmpeg"
 
+echo ===== Prepare Shared FFmpeg =====
+call :ENSURE_FFMPEG
+if errorlevel 1 (
+  set "FINAL_RC=1"
+  echo [FATAL] Shared FFmpeg preparation failed.
+  goto :EXIT
+)
+
+echo.
 echo ===== Start TTS Component =====
 call :START_TTS
 if errorlevel 1 (
@@ -20,6 +30,44 @@ echo ===== Start Main Bot Component =====
 call :START_MAIN
 set "FINAL_RC=%ERRORLEVEL%"
 goto :EXIT
+
+:ENSURE_FFMPEG
+setlocal EnableExtensions
+set "NACHOBOT_DIR=%ROOT%NachoBot"
+
+where uv >nul 2>&1
+if errorlevel 1 (
+  echo [INFO] uv not detected, installing...
+  powershell -NoProfile -ExecutionPolicy ByPass -Command "irm https://astral.sh/uv/install.ps1 | iex"
+  set "PATH=%USERPROFILE%\.local\bin;%USERPROFILE%\.cargo\bin;%PATH%"
+)
+
+if not exist "%NACHOBOT_DIR%\pyproject.toml" (
+  echo [FATAL] NachoBot pyproject.toml not found: %NACHOBOT_DIR%
+  endlocal & exit /b 1
+)
+
+if not exist "%ROOT%scripts\ensure_ffmpeg.py" (
+  echo [FATAL] FFmpeg preparation script not found: %ROOT%scripts\ensure_ffmpeg.py
+  endlocal & exit /b 1
+)
+
+echo [INFO] Syncing NachoBot dependencies for FFmpeg preparation...
+cd /d "%NACHOBOT_DIR%"
+uv sync --python ">=3.11,<=3.13"
+if errorlevel 1 (
+  echo [FATAL] NachoBot dependency sync failed.
+  endlocal & exit /b 1
+)
+
+echo [INFO] Checking shared FFmpeg binaries...
+uv run python "%ROOT%scripts\ensure_ffmpeg.py"
+if errorlevel 1 (
+  echo [FATAL] Shared FFmpeg download or verification failed.
+  endlocal & exit /b 1
+)
+
+endlocal & exit /b 0
 
 :START_TTS
 setlocal EnableDelayedExpansion
@@ -35,7 +83,6 @@ set "NAPCAT_DIR=%BASE_DIR%NachoBot-Napcat-Adapter"
 set "NAPCAT_SRC=%NAPCAT_DIR%\src"
 set "SOVITS_DIR=C:\Users\BigSh0t\GPT-SoVITS\GPT-SoVITS-v2pro-20250604"
 set "VOXCPM_DIR=C:\Users\BigSh0t\VoxCPM-2.0.2"
-set "FFMPEG_BIN=%BASE_DIR%NachoBot\plugins\bilibili_video_sender_plugin\ffmpeg\bin"
 
 set "PORT_SOVITS=9880"
 set "PORT_VOX=9880"
@@ -167,8 +214,7 @@ if exist "%VOX_TOML%" (
 )
 
 REM Use venv python directly to avoid uv run syncing back to CPU torch
-REM Inject FFmpeg DLLs into PATH for ZipEnhancer denoiser (torchcodec)
-start "VoxCPM API (%PORT_VOX%)" cmd /k "chcp 65001>nul && set PATH=%FFMPEG_BIN%;%PATH% && cd /d %VOXCPM_DIR% && %PY_VOX% %VOX_API_SCRIPT% --host 127.0.0.1 --port %PORT_VOX% --model-dir %VOX_MODEL_DIR% --lora-weights %VOX_LORA%"
+start "VoxCPM API (%PORT_VOX%)" cmd /k "chcp 65001>nul && cd /d %VOXCPM_DIR% && %PY_VOX% %VOX_API_SCRIPT% --host 127.0.0.1 --port %PORT_VOX% --model-dir %VOX_MODEL_DIR% --lora-weights %VOX_LORA%"
 
 set "READY="
 for /l %%I in (1,1,150) do (

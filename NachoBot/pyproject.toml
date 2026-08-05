@@ -41,6 +41,7 @@ dependencies = [
     "rich>=14.0.0",
     "ruff>=0.12.2",
     "scipy>=1.15.3",
+    "static-ffmpeg>=3.0,<4.0",
     "setuptools>=80.9.0",
     "structlog>=25.4.0",
     "toml>=0.10.2",

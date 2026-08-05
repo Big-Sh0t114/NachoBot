@@ -5,6 +5,7 @@ title Launch NachoBot Discord
 set "PYTHONNOUSERSITE=1"
 
 set "ROOT=%~dp0"
+set "NACHOBOT_FFMPEG_DIR=%ROOT%.runtime\ffmpeg"
 set "NACHOBOT_DIR=%ROOT%NachoBot"
 set "KOISHI_DIR=%ROOT%koishi-app"
 set "KOISHI_ADAPTER_DIR=%ROOT%NachoBot-Koishi-Adapter"
@@ -34,12 +35,34 @@ REM ===== sync deps =====
 echo [SYNC] NachoBot-Koishi-Adapter ...
 cd /d "%KOISHI_ADAPTER_DIR%"
 uv sync
-if errorlevel 1 echo [WARN] Koishi Adapter uv sync failed.
+if errorlevel 1 (
+  echo [ERROR] Koishi Adapter uv sync failed.
+  pause
+  exit /b 1
+)
+
+if not exist "%ROOT%scripts\ensure_ffmpeg.py" (
+  echo [ERROR] FFmpeg preparation script not found: %ROOT%scripts\ensure_ffmpeg.py
+  pause
+  exit /b 1
+)
+
+echo [FFMPEG] Checking shared FFmpeg binaries...
+uv run python "%ROOT%scripts\ensure_ffmpeg.py"
+if errorlevel 1 (
+  echo [ERROR] Shared FFmpeg download or verification failed.
+  pause
+  exit /b 1
+)
 
 echo [SYNC] NachoBot-DiscordVC-Adapter ...
 cd /d "%DISCORD_ADAPTER_DIR%"
 uv sync
-if errorlevel 1 echo [WARN] DiscordVC Adapter uv sync failed.
+if errorlevel 1 (
+  echo [ERROR] DiscordVC Adapter uv sync failed.
+  pause
+  exit /b 1
+)
 
 REM ===== start Koishi =====
 echo.

@@ -1,10 +1,10 @@
 """
-Universal Voice Adapter (DEV) — Core adapter logic.
+Universal Voice Adapter — Core adapter logic.
 
 Bridges audio capture (ProcTap) and audio output (virtual cable) with
 NachoBot Core via ncnk_message Router/WebSocket.
 
-DEV enhancements:
+Features:
   - Real-time denoising (DeepFilterNet)
   - Speaker diarization (WeSpeaker + online clustering)
   - Streaming ASR (sherpa-onnx)
@@ -177,7 +177,7 @@ class UniversalVCAdapter:
         if self.router:
             tasks.append(asyncio.create_task(self.router.run()))
 
-        self.logger.info("Universal Voice Adapter (DEV) is running!")
+        self.logger.info("Universal Voice Adapter is running!")
         self.logger.info(f"Session ID: {self._session_id}")
         self.logger.info(f"Platform: universal_vc")
 
@@ -190,7 +190,7 @@ class UniversalVCAdapter:
         except asyncio.CancelledError:
             self.logger.info("Adapter cancelled, cleaning up...")
         except Exception as e:
-            self.logger.error(f"Adapter error: {e}", exc_info=True)
+            self.logger.exception(f"Adapter error: {e}")
 
     async def stop(self):
         """Stop all components gracefully."""
@@ -393,4 +393,4 @@ class UniversalVCAdapter:
                     await self.audio_output.play(audio_path)
 
         except Exception as e:
-            self.logger.error(f"Error handling message from NachoBot: {e}", exc_info=True)
+            self.logger.exception(f"Error handling message from NachoBot: {e}")
