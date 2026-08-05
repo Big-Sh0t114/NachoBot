@@ -13,7 +13,7 @@
   </p>
 </div>
 <div align="center">
-<img src="./NachoBot/docs/Nachobot.png" alt="NachoBot 立绘" width="550" />
+<img src="./NachoBot/docs/nachobot-mascot.png" alt="NachoBot 立绘" width="550" />
 
 ## ✨ 这是什么？
 
