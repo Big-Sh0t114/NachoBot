@@ -14,7 +14,7 @@ dependencies = [
     "tomlkit>=0.14.0",
     "urllib3>=2.0.0",
     "uvicorn>=0.41.0",
-    "websockets>=16.0",
+    "websockets>=17.0.1",
 ]
 
 [tool.ruff]
