@@ -20,6 +20,7 @@ dependencies = [
     "scipy>=1.17.1",
     "sherpa-onnx>=1.13.4",
     "sounddevice>=0.5.1",
+    "static-ffmpeg>=3.0,<4.0",
     "toml>=0.10.2",
     "tomlkit>=0.13.2",
     "uvicorn>=0.35.0",

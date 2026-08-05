@@ -1,9 +1,13 @@
 import asyncio
 import logging
+import os
 from collections import deque
+from functools import lru_cache
+from pathlib import Path
 from typing import Callable, Optional
 
 import discord
+from static_ffmpeg import run
 from discord.ext import commands
 
 from config import AdapterConfig
@@ -12,6 +16,23 @@ from voice_handler import SilenceDetectingSink, VoiceHandler
 # Define intents
 intents = discord.Intents.default()
 # intents.message_content = True # If we need to read text messages
+
+
+@lru_cache(maxsize=1)
+def resolve_ffmpeg_executable() -> str:
+    """返回项目共享目录中的 FFmpeg 可执行文件路径。"""
+    configured_dir = os.environ.get("NACHOBOT_FFMPEG_DIR", "").strip()
+    shared_root = (
+        Path(configured_dir).expanduser()
+        if configured_dir
+        else Path(__file__).resolve().parent.parent / ".runtime" / "ffmpeg"
+    )
+    platform_dir = shared_root.resolve() / run.get_platform_key()
+    platform_dir.mkdir(parents=True, exist_ok=True)
+    ffmpeg_path, _ = run.get_or_fetch_platform_executables_else_raise(
+        download_dir=str(platform_dir)
+    )
+    return ffmpeg_path
 
 
 class VoiceCog(commands.Cog):
@@ -301,7 +322,10 @@ class NachoDiscordBot(discord.Bot):
         state["current_audio"] = audio_source
 
         try:
-            source = discord.FFmpegPCMAudio(audio_source)
+            source = discord.FFmpegPCMAudio(
+                audio_source,
+                executable=resolve_ffmpeg_executable(),
+            )
 
             def after_callback(e):
                 self.loop.call_soon_threadsafe(self._play_next, guild_id, e)

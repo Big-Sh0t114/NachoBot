@@ -583,7 +583,6 @@ class ProcessManager:
                     f"请在 WebUI 配置中修改 [paths].voxcpm_dir"
                 )
             adapter_dir = self.root / "NachoBot-Multimodal-Adapter"
-            ffmpeg_bin = self.root / "NachoBot" / "plugins" / "bilibili_video_sender_plugin" / "ffmpeg" / "bin"
             py_vox = voxcpm_dir / ".venv" / "Scripts" / "python.exe"
             if not py_vox.exists():
                 raise FileNotFoundError(
@@ -613,8 +612,7 @@ class ProcessManager:
                 "--model-dir", str(model_dir),
                 "--lora-weights", str(lora),
             ]
-            env_extra = {"PATH": f"{ffmpeg_bin};{os.environ.get('PATH', '')}"}
-            return cmd, str(voxcpm_dir), env_extra
+            return cmd, str(voxcpm_dir), {}
         else:
             # GPT-SoVITS
             sovits_dir = webui_config.sovits_dir

@@ -5,6 +5,7 @@ title Launch NachoBot Universal Voice Adapter
 set "PYTHONNOUSERSITE=1"
 
 set "ROOT=%~dp0"
+set "NACHOBOT_FFMPEG_DIR=%ROOT%.runtime\ffmpeg"
 set "UNIVERSALVC_ADAPTER_DIR=%ROOT%NachoBot-UniversalVC-Adapter"
 
 REM ===== check and install uv =====
@@ -31,7 +32,25 @@ REM ===== sync deps =====
 echo [SYNC] NachoBot-UniversalVC-Adapter ...
 cd /d "%UNIVERSALVC_ADAPTER_DIR%"
 uv sync
-if errorlevel 1 echo [WARN] UniversalVC Adapter uv sync failed.
+if errorlevel 1 (
+  echo [ERROR] UniversalVC Adapter uv sync failed.
+  pause
+  exit /b 1
+)
+
+if not exist "%ROOT%scripts\ensure_ffmpeg.py" (
+  echo [ERROR] FFmpeg preparation script not found: %ROOT%scripts\ensure_ffmpeg.py
+  pause
+  exit /b 1
+)
+
+echo [FFMPEG] Checking shared FFmpeg binaries...
+uv run python "%ROOT%scripts\ensure_ffmpeg.py"
+if errorlevel 1 (
+  echo [ERROR] Shared FFmpeg download or verification failed.
+  pause
+  exit /b 1
+)
 
 REM ===== download models =====
 echo [MODELS] Checking and downloading required ML models...
