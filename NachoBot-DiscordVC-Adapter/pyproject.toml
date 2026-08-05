@@ -20,5 +20,5 @@ dependencies = [
     "toml>=0.10.2",
     "tomlkit>=0.14.0",
     "uvicorn>=0.41.0",
-    "websockets>=16.0",
+    "websockets>=17.0.1",
 ]
