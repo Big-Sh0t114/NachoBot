@@ -12,5 +12,5 @@ dependencies = [
     "loguru>=0.7.3",
     "static-ffmpeg>=3.0,<4.0",
     "uvicorn>=0.41.0",
-    "websockets>=16.0",
+    "websockets>=17.0.1",
 ]
