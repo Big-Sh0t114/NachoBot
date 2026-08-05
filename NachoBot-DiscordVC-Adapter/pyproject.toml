@@ -16,6 +16,7 @@ dependencies = [
     "requests>=2.31.0",
     "scipy>=1.17.1",
     "sherpa-onnx>=1.13.4",
+    "static-ffmpeg>=3.0,<4.0",
     "toml>=0.10.2",
     "tomlkit>=0.14.0",
     "uvicorn>=0.41.0",
