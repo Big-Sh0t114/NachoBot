@@ -1,7 +1,10 @@
 import logging
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List
+
+from loguru import logger
 
 try:
     import tomllib as toml
@@ -97,12 +100,42 @@ def load_config(path: Path) -> AdapterConfig:
     )
 
 
-def setup_logging(level: str) -> logging.Logger:
-    logger = logging.getLogger("koishi-onebot-adapter")
-    if logger.handlers:
-        return logger
-    logging.basicConfig(
-        level=getattr(logging, level.upper(), logging.INFO),
-        format="%(asctime)s [%(levelname)s] %(message)s",
+class _InterceptHandler(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            level = logger.level(record.levelname).name
+        except ValueError:
+            level = record.levelno
+
+        frame = logging.currentframe()
+        depth = 2
+        while frame and frame.f_code.co_filename == logging.__file__:
+            frame = frame.f_back
+            depth += 1
+
+        logger.opt(depth=depth, exception=record.exc_info).log(
+            level, record.getMessage()
+        )
+
+
+def setup_logging(level: str):
+    normalized_level = level.upper()
+    logger.remove()
+    logger.configure(extra={"name": "NachoBot-Koishi-Adapter"})
+    logger.add(
+        sys.stderr,
+        level=normalized_level,
+        colorize=True,
+        format=(
+            "<blue>{time:YYYY-MM-DD HH:mm:ss}</blue> | "
+            "<level>{level: <8}</level> | "
+            "<cyan>{extra[name]}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
+            "<level>{message}</level>"
+        ),
     )
-    return logger
+    logging.basicConfig(
+        handlers=[_InterceptHandler()],
+        level=getattr(logging, normalized_level, logging.INFO),
+        force=True,
+    )
+    return logger.bind(name="NachoBot-Koishi-Adapter")

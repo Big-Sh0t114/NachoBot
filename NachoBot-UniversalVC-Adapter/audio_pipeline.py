@@ -297,7 +297,7 @@ class AudioPipeline:
                 await self.on_result(speaker_id, speaker_name, text)
 
         except Exception as e:
-            self.logger.error(f"Segment processing error: {e}", exc_info=True)
+            self.logger.exception(f"Segment processing error: {e}")
 
     async def _process_mic_segment(
         self,
@@ -328,7 +328,7 @@ class AudioPipeline:
                 await self.on_result(speaker_id, speaker_name, text)
 
         except Exception as e:
-            self.logger.error(f"Mic segment processing error: {e}", exc_info=True)
+            self.logger.exception(f"Mic segment processing error: {e}")
 
     def _feed_streaming_asr(
         self,

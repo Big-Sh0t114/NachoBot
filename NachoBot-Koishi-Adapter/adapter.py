@@ -1,6 +1,5 @@
 import asyncio
 import json
-import logging
 import time
 import urllib.parse
 import uuid
@@ -52,7 +51,7 @@ ACCEPT_FORMAT = [
 
 
 class KoishiOneBotAdapter:
-    def __init__(self, config: AdapterConfig, logger: logging.Logger):
+    def __init__(self, config: AdapterConfig, logger: Any):
         self.config = config
         self.logger = logger
         self.onebot_ws: Optional[websockets.WebSocketClientProtocol] = None
@@ -65,7 +64,7 @@ class KoishiOneBotAdapter:
                 )
             }
         )
-        self.router = Router(route_config)
+        self.router = Router(route_config, custom_logger=logger)
         self.router.register_class_handler(self.handle_from_nachobot)
 
     async def run(self) -> None:
@@ -306,7 +305,7 @@ class KoishiOneBotAdapter:
         ws = self.onebot_ws
         if ws_is_closed(ws):
             self.logger.warning(
-                "OneBot not connected, drop message (ws=%s closed=%s)",
+                "OneBot not connected, drop message (ws={} closed={})",
                 bool(ws),
                 getattr(ws, "closed", None),
             )

@@ -7,7 +7,7 @@ NachoBot 的 Discord 语音频道适配器，支持在 Discord 语音频道中�
 - Discord 语音频道实时语音对话
 - 多用户逐块流式语音识别（ASR）
 - TTS 语音合成回复
-- 自动 FFmpeg 路径检测
+- 通过 `static-ffmpeg` 自动获取并使用 FFmpeg
 - 代理支持
 
 ## 配置
@@ -55,6 +55,8 @@ docker compose up -d
 ## 本地运行
 
 ```bash
-uv sync --locked
-python main.py
+uv sync
+uv run python main.py
 ```
+
+本地运行时无需手动安装 FFmpeg。首次播放语音时，`static-ffmpeg` 会自动获取当前平台对应的 FFmpeg 可执行文件。Docker 镜像仍使用系统包形式安装 FFmpeg。
