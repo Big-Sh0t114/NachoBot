@@ -780,7 +780,7 @@ requires-dist = [
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "numpy" },
     { name = "onnxruntime", specifier = ">=1.27.0" },
-    { name = "openai", specifier = ">=2.50.0" },
+    { name = "openai", specifier = ">=2.53.0" },
     { name = "pillow", specifier = ">=12.1.1" },
     { name = "pydantic", specifier = ">=2.12.5" },
     { name = "pydub", specifier = ">=0.25.1" },
@@ -1000,7 +1000,7 @@ wheels = [
 
 [[package]]
 name = "openai"
-version = "2.50.0"
+version = "2.53.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -1012,9 +1012,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d8/f5/e7735f2af272ee179a287911a698b3cbdb59d7a4ac4874571363adf1e4de/openai-2.50.0.tar.gz", hash = "sha256:5128f7caf4a6b01aefd6e7e93efe170a2c3427b8de286b9af5cdff3aa47e02c8", size = 1081965, upload-time = "2026-07-28T22:16:31.674Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ef/cf/36e3e7235fdf6d125c052acc0970924611b17a20a4fe580596faf4566a65/openai-2.53.0.tar.gz", hash = "sha256:baf5802ad08980e1d9d561e1b996e800c8bcd14af5847c6d0e7a5cc59e4d4116", size = 1099435, upload-time = "2026-08-03T21:42:01.664Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/00/ca/db315b3bb748c26c644a3f85b7d509e774354d6518d47080b1446005ee41/openai-2.50.0-py3-none-any.whl", hash = "sha256:90bdddcc5a2fa529b350fac9c5780d87e5c361dcc6090ab57b0d470b0d7af7fa", size = 1650721, upload-time = "2026-07-28T22:16:29.48Z" },
+    { url = "https://files.pythonhosted.org/packages/78/0f/cc6afea3542a5142c5d8fc8211c5e059a8375105d004a41dfa2c7948dbb0/openai-2.53.0-py3-none-any.whl", hash = "sha256:c694ffc747a3c4d1663ef2b07b811315a476164ee5efa3a993967349ebca7618", size = 1659829, upload-time = "2026-08-03T21:41:59.581Z" },
 ]
 
 [[package]]
