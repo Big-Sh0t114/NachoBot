@@ -7,7 +7,7 @@ requires-python = ">=3.11"
 dependencies = [
     "aiohttp>=3.14.1",
     "brotli>=1.1.0",
-    "cryptography>=48.0.1",
+    "cryptography>=50.0.0",
     "fastapi>=0.140.13",
     "loguru>=0.7.3",
     "mss>=9.0.1",
@@ -20,6 +20,7 @@ dependencies = [
     "scipy>=1.17.1",
     "sherpa-onnx>=1.13.4",
     "sounddevice>=0.5.1",
+    "static-ffmpeg>=3.0,<4.0",
     "toml>=0.10.2",
     "tomlkit>=0.13.2",
     "uvicorn>=0.35.0",
