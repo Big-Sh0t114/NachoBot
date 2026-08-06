@@ -37,7 +37,8 @@ use_tts = true
 level = "INFO"
 
 [ffmpeg]
-path = "C:/Users/BigSh0t/Nacho-with-u/NachoBot/plugins/bilibili_video_sender_plugin/ffmpeg/bin"
+# 可选：设置自定义 FFmpeg 可执行文件或目录；留空时使用 static-ffmpeg。
+path = ""
 
 [network]
 proxy = "http://127.0.0.1:7897"

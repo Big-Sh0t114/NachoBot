@@ -5,6 +5,7 @@ title Launch NachoBot Bilibili
 set "PYTHONNOUSERSITE=1"
 
 set "ROOT=%~dp0"
+set "NACHOBOT_FFMPEG_DIR=%ROOT%.runtime\ffmpeg"
 set "NACHOBOT_DIR=%ROOT%NachoBot"
 set "BILIBILI_DIR=%ROOT%NachoBot-Bilibili-Adapter"
 set "LIVE2D_DIR=%ROOT%NachoBot-Live2D-Adapter"
@@ -65,7 +66,25 @@ REM ===== sync dependencies =====
 echo [SYNC] NachoBot ...
 cd /d "%NACHOBOT_DIR%"
 uv sync
-if errorlevel 1 echo [WARN] NachoBot uv sync failed.
+if errorlevel 1 (
+  echo [ERROR] NachoBot uv sync failed.
+  pause
+  exit /b 1
+)
+
+if not exist "%ROOT%scripts\ensure_ffmpeg.py" (
+  echo [ERROR] FFmpeg preparation script not found: %ROOT%scripts\ensure_ffmpeg.py
+  pause
+  exit /b 1
+)
+
+echo [FFMPEG] Checking shared FFmpeg binaries...
+uv run python "%ROOT%scripts\ensure_ffmpeg.py"
+if errorlevel 1 (
+  echo [ERROR] Shared FFmpeg download or verification failed.
+  pause
+  exit /b 1
+)
 
 if "%LIVE2D_ENABLED%"=="1" (
   echo [INFO] Live2D dependencies will be synced by launch_live2d.bat.

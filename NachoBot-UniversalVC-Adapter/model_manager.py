@@ -49,10 +49,10 @@ class ModelManager:
         info = _MODELS[model_key]
         target = self.models_dir / info["filename"]
         if target.is_file():
-            self.logger.info("✓ %s: %s", info["description"], target)
+            self.logger.info(f"✓ {info['description']}: {target}")
             return True
 
-        self.logger.info("Downloading %s...", info["description"])
+        self.logger.info(f"Downloading {info['description']}...")
         return self._download(info["url"], target)
 
     def _download(self, url: str, target: Path) -> bool:
@@ -72,17 +72,15 @@ class ModelManager:
                     if total > 0:
                         percent = downloaded / total * 100
                         if percent >= next_report:
-                            self.logger.info("  ... %.0f%%", percent)
+                            self.logger.info(f"  ... {percent:.0f}%")
                             next_report += 20
 
             self.logger.info(
-                "Downloaded: %s (%.1f MB)",
-                target,
-                downloaded / 1024 / 1024,
+                f"Downloaded: {target} ({downloaded / 1024 / 1024:.1f} MB)"
             )
             return True
         except Exception as exc:
-            self.logger.error("Download failed: %s → %s", url, exc)
+            self.logger.error(f"Download failed: {url} → {exc}")
             target.unlink(missing_ok=True)
             return False
 
