@@ -11,7 +11,6 @@ class VoxPreset:
     prompt_text: str = field(default="")
     cfg_value: float = field(default=2.0)
     inference_timesteps: int = field(default=10)
-    denoise: bool = field(default=True)
     normalize: bool = field(default=False)
     seed: int = field(default=-1)
 
@@ -24,7 +23,6 @@ class VoxConfig:
     lora_weights_path: str = field(default="")
     cfg_value: float = field(default=2.0)
     inference_timesteps: int = field(default=10)
-    denoise: bool = field(default=True)
     normalize: bool = field(default=False)
     seed: int = field(default=-1)
     split_method: str = field(default="cut3")

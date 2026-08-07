@@ -1,6 +1,6 @@
 """Florence-2-large VLM module for image captioning.
 
-Lazily loads the Microsoft Florence-2-large model on first call.
+Lazily loads the Transformers-native Florence-2-large model on first call.
 Independent of any TTS plugin — reads device config from perception.toml.
 """
 
@@ -55,20 +55,9 @@ def load_model():
             return
 
         import torch
-        from transformers import AutoModelForCausalLM, AutoProcessor
-        from unittest.mock import patch
-        from transformers.dynamic_module_utils import get_imports
+        from transformers import AutoProcessor, Florence2ForConditionalGeneration
 
-        # Patch get_imports to ignore flash_attn which is hard to install on Windows
-        # Florence-2 code has fallback for when flash_attn is missing, but
-        # transformers' check_imports is too strict.
-        def fixed_get_imports(filename: str | os.PathLike) -> list[str]:
-            imports = get_imports(filename)
-            if "flash_attn" in imports:
-                imports.remove("flash_attn")
-            return imports
-
-        model_id = "microsoft/Florence-2-large"
+        model_id = "florence-community/Florence-2-large"
         logger.info("[Florence-2] Loading model: %s ...", model_id)
 
         config_device = _read_device()
@@ -81,14 +70,12 @@ def load_model():
 
         dtype = torch.float16 if "cuda" in _device else torch.float32
 
-        # Apply the patch context explicitly during loading
-        with patch("transformers.dynamic_module_utils.get_imports", fixed_get_imports):
-            _processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
-            _model = AutoModelForCausalLM.from_pretrained(
-                model_id,
-                torch_dtype=dtype,
-                trust_remote_code=True,
-            ).to(_device)
+        _processor = AutoProcessor.from_pretrained(model_id)
+        _model = Florence2ForConditionalGeneration.from_pretrained(
+            model_id,
+            dtype=dtype,
+            use_safetensors=True,
+        ).to(_device)
 
         _model.eval()
 

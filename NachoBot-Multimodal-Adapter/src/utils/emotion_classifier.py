@@ -13,7 +13,6 @@ os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
 import torch
 from transformers import pipeline as hf_pipeline
-import logging
 from nachobot_multimodal.logger import logger
 
 # 抑制 transformers pipeline 默认在 CPU 时的警告 "Device set to use cpu"
@@ -63,7 +62,7 @@ class EmotionClassifier:
         }
 
         if use_fp16_effective:
-            kwargs["torch_dtype"] = torch.float16
+            kwargs["dtype"] = torch.float16
             logger.info("已启用 FP16 半精度推理")
         elif self._use_fp16 and self._device == "cpu":
             logger.warning("CPU 设备不支持 FP16，自动回退到 FP32")
