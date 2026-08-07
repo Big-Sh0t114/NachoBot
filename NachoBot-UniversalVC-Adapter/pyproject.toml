@@ -1,27 +1,26 @@
 [project]
-name = "nachobot-universalvc-adapter-dev"
+name = "nachobot-universalvc-adapter"
 version = "0.2.0"
-description = "NachoBot Universal Voice Channel Adapter (DEV) - Real-time Denoise + Speaker Diarization + Streaming ASR"
-requires-python = ">=3.10"
+description = "NachoBot Universal Voice Channel Adapter - Real-time Denoise + Speaker Diarization + Streaming ASR"
+requires-python = ">=3.11"
 dependencies = [
     "proc-tap",
+    "aiohttp",
     "numpy",
     "scipy",
-    "aiohttp",
     "tomlkit",
-    "websockets",
     "psutil",
     "sounddevice",
-    "uvicorn",
-    "fastapi",
-    "starlette",
-    "cryptography",
     "requests",
     "toml",
-    "pydub",
-    "loguru",
-    "sherpa-onnx",
+    "sherpa-onnx>=1.13.4",
+    "static-ffmpeg>=3.0,<4.0",
     "pyrnnoise",
-    "onnxruntime>=1.20",
+    "onnxruntime>=1.27.0",
     "pynput",
+    "websockets",
+    "cryptography",
+    "fastapi",
+    "loguru>=0.7.3",
+    "uvicorn",
 ]

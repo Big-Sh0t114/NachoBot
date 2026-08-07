@@ -5,6 +5,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from src.common.logger import get_logger
 from src.config.config import global_config, model_config
 from src.chat.utils.prompt_builder import Prompt, global_prompt_manager
+from src.chat.runtime_capabilities import runtime_capabilities_from_stream
 from src.chat.utils.prompt_variables import render_dynamic_prompt_template
 from src.plugin_system.apis import llm_api
 from src.common.database.database_model import ThinkingBack
@@ -1131,12 +1132,8 @@ async def build_memory_retrieval_prompt(
         stream_name = chat_stream.stream_id
     log_prefix = f"[{stream_name}] " if stream_name else ""
 
-    platform = getattr(chat_stream, "platform", None)
-    is_group_chat = bool(getattr(chat_stream, "group_info", None))
-
-    # Bypass Memory Retrieval for real-time platforms (Bilibili Live Group, Discord VC)
-    if (is_group_chat and platform in ["bilibili", "bilibili.live"]) or platform in {"discord_vc", "universal_vc"}:
-        logger.debug(f"{log_prefix}{platform} 直播/语音环境，跳过记忆检索")
+    if not runtime_capabilities_from_stream(chat_stream).memory_retrieval:
+        logger.debug(f"{log_prefix}适配器声明当前会话跳过记忆检索")
         return ""
 
     logger.info(f"{log_prefix}检测是否需要回忆，元消息：{message[:30]}...，消息长度: {len(message)}")

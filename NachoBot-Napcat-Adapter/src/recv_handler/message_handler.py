@@ -33,6 +33,24 @@ from ncnk_message import (
 from src.response_pool import get_response
 
 
+_VISUAL_SEGMENT_TYPES = {"image", "emoji", "video"}
+
+
+def _contains_visual_content(value: Any) -> bool:
+    """Return whether a parsed segment tree contains visual media."""
+    if isinstance(value, Seg):
+        if value.type in _VISUAL_SEGMENT_TYPES:
+            return True
+        return _contains_visual_content(value.data)
+    if isinstance(value, dict):
+        if value.get("type") in _VISUAL_SEGMENT_TYPES:
+            return True
+        return any(_contains_visual_content(item) for item in value.values() if isinstance(item, (dict, list, Seg)))
+    if isinstance(value, list):
+        return any(_contains_visual_content(item) for item in value)
+    return False
+
+
 class MessageHandler:
     def __init__(self):
         self.server_connection: Server.ServerConnection = None
@@ -368,6 +386,8 @@ class MessageHandler:
                         logger.warning("file处理失败")
                 case _:
                     logger.warning(f"未知消息类型: {sub_message_type}")
+        if _contains_visual_content(seg_message):
+            additional_config["visual_policy"] = global_config.visual.to_message_policy()
         return seg_message, additional_config
 
     async def handle_text_message(self, raw_message: dict) -> Seg:

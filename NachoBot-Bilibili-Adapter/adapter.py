@@ -31,15 +31,13 @@ from ncnk_message import (  # noqa: E402
 
 from bili_src.core.config import (  # noqa: E402
     AdapterConfig,
-    AsrModelConfig,
     PrivateSessionConfig,
-    _resolve_asr_model_config,
     _resolve_vlm_model_config_list,
 )
+from bili_src.core.runtime_profile import build_live_additional_config  # noqa: E402
 from bili_src.core.utils import (  # noqa: E402
     _guard_command_segment,
     _mask_urls,
-    _strip_emoji,
 )
 from bili_src.api.api import BilibiliApi  # noqa: E402
 from bili_src.live.live_worker import LiveRoomWorker  # noqa: E402
@@ -161,11 +159,11 @@ class BilibiliAdapter:
             # Define callback alias for thread-safe calling if needed,
             # though MicCaptureWorker handles thread-safety via asyncio.run_coroutine_threadsafe now
             mic_config.on_speech_start = self._on_speech_start
+            mic_config.on_speech_end = self._on_speech_end
 
             self.mic_worker = MicCaptureWorker(
                 mic_config, self._handle_mic_recognition, logger
             )
-            self.mic_worker.set_asr_callback(self._call_asr_api)
         self._self_danmu_texts: Dict[int, List[Tuple[str, float]]] = {}
         self._live_status_cache: Dict[int, Tuple[int, float]] = {}
         self._live_status_cache_seconds = 20
@@ -175,6 +173,7 @@ class BilibiliAdapter:
                 self._screen_monitor = ScreenMonitor(
                     monitor_configs,
                     logger,
+                    profile=config.screen_vlm,
                     min_interval_seconds=config.screen_capture_interval_seconds,
                     capture_active_window=config.screen_capture_active_window,
                     excluded_exes=config.screen_capture_excluded_exes,
@@ -364,17 +363,20 @@ class BilibiliAdapter:
     def _load_vlm_model_configs(self) -> list:
         root_dir = Path(__file__).resolve().parents[1]
         model_config_path = root_dir / "NachoBot" / "config" / "model_config.toml"
-        return _resolve_vlm_model_config_list(model_config_path, self.logger)
-
-    def _load_asr_model_config(self) -> Optional[AsrModelConfig]:
-        root_dir = Path(__file__).resolve().parents[1]
-        model_config_path = root_dir / "NachoBot" / "config" / "model_config.toml"
-        return _resolve_asr_model_config(model_config_path, self.logger)
+        return _resolve_vlm_model_config_list(
+            model_config_path,
+            self.logger,
+            self.config.screen_vlm,
+        )
 
     async def _on_speech_start(self):
         """Callback when user starts speaking."""
         # Stop audio player immediately
         self.audio_player.stop_and_pause()
+
+    async def _on_speech_end(self):
+        """Resume playback after the streaming ASR session is finalized."""
+        self.audio_player.resume()
 
     # ========== Danmu Cache and Filter Methods ==========
 
@@ -471,7 +473,7 @@ class BilibiliAdapter:
         return await self._get_screen_summary(
             room_id,
             user_id="",
-            message_text="Periodic screen refresh",
+            message_text="",
         )
 
     def _get_cached_screen_summary(self, room_id: int) -> Optional[str]:
@@ -614,6 +616,29 @@ class BilibiliAdapter:
             template_items=template_items,
             template_name=f"bilibili_live_{room_id}{template_suffix}",
             template_default=False,
+        )
+
+    def _build_live_additional_config(
+        self,
+        room_id: int,
+        base: Optional[Dict[str, Any]] = None,
+        platform_event: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        tts_enabled = self.tts_manager.is_tts_enabled(room_id)
+        tts_language = self.tts_manager.get_room_language(room_id) if tts_enabled else ""
+        additional = dict(base or {})
+        # Kept during the wire-contract transition for older Core versions.
+        additional.setdefault(
+            "live_person_profile_enabled",
+            self.config.live_person_profile_enabled,
+        )
+        return build_live_additional_config(
+            search_enabled=self.config.live_network_search_enabled,
+            person_profile_enabled=self.config.live_person_profile_enabled,
+            tts_enabled=tts_enabled,
+            tts_language=tts_language,
+            base=additional,
+            platform_event=platform_event,
         )
 
     # ========== Incoming Message Handlers ==========
@@ -842,12 +867,14 @@ class BilibiliAdapter:
         if template_info:
             # Info logged inside _get_template_info
             pass
-        additional_config = {
-            "room_id": room_id,
-            "reply_mid": reply_mid,
-            "reply_dmid": reply_dmid,
-            "live_person_profile_enabled": self.config.live_person_profile_enabled,
-        }
+        additional_config = self._build_live_additional_config(
+            room_id,
+            {
+                "room_id": room_id,
+                "reply_mid": reply_mid,
+                "reply_dmid": reply_dmid,
+            },
+        )
         if is_mentioned:
             additional_config["is_mentioned"] = 1.0
 
@@ -885,16 +912,16 @@ class BilibiliAdapter:
             )
 
         message_info = BaseMessageInfo(
-            platform="bilibili.live",
+            platform=self.config.platform,
             message_id=str(message_id),
             time=float(timestamp),
             user_info=UserInfo(
-                platform="bilibili.live",
+                platform=self.config.platform,
                 user_id=user_id,
                 user_nickname=user_name,
             ),
             group_info=GroupInfo(
-                platform="bilibili.live",
+                platform=self.config.platform,
                 group_id=str(room_id),
                 group_name=str(room_id),
             ),
@@ -977,9 +1004,7 @@ class BilibiliAdapter:
 
         # Prepare additional config for high value gifts logic if needed
         # Ensuring mention logic is consistent
-        additional_config = {
-            "live_person_profile_enabled": self.config.live_person_profile_enabled,
-        }
+        additional_config = self._build_live_additional_config(room_id)
         # if template_info:
         #    additional_config = template_info.additional_config or {}
 
@@ -987,16 +1012,16 @@ class BilibiliAdapter:
         additional_config["is_mentioned"] = 1.0
 
         message_info = BaseMessageInfo(
-            platform="bilibili.live",
+            platform=self.config.platform,
             message_id=str(uuid.uuid4()),
             time=timestamp,
             user_info=UserInfo(
-                platform="bilibili.live",
+                platform=self.config.platform,
                 user_id=user_id,
                 user_nickname=user_name,
             ),
             group_info=GroupInfo(
-                platform="bilibili.live",
+                platform=self.config.platform,
                 group_id=str(room_id),
                 group_name=str(room_id),
             ),
@@ -1039,9 +1064,6 @@ class BilibiliAdapter:
         room_id = self.mic_worker.config.room_id
         await self.handle_mic_message(room_id, text)
 
-        # Resume Audio Player after speech is acknowledged
-        self.audio_player.resume()
-
     async def handle_incoming_poke(
         self,
         room_id: int,
@@ -1062,23 +1084,23 @@ class BilibiliAdapter:
         # Resolve template info to ensuring correct persona/TTS settings
         template_info = await self._get_template_info(room_id, user_id, text)
 
-        additional_config = {
-            "room_id": room_id,
-            "live_person_profile_enabled": self.config.live_person_profile_enabled,
-        }
+        additional_config = self._build_live_additional_config(
+            room_id,
+            {"room_id": room_id},
+        )
 
         message_info = BaseMessageInfo(
-            platform="bilibili.live",
+            platform=self.config.platform,
             # Special ID for notice messages as seen in bot.py logic
             message_id="notice",
             time=timestamp,
             user_info=UserInfo(
-                platform="bilibili.live",
+                platform=self.config.platform,
                 user_id=user_id,
                 user_nickname=user_name,
             ),
             group_info=GroupInfo(
-                platform="bilibili.live",
+                platform=self.config.platform,
                 group_id=str(room_id),
                 group_name=str(room_id),
             ),
@@ -1099,83 +1121,16 @@ class BilibiliAdapter:
         # High priority to ensure immediate reaction
         self.event_manager.push_to_event_queue(20, message)
 
-    async def _call_asr_api(self, wav_data: bytes) -> Optional[str]:
-        import aiohttp
-
-        asr_config = self._load_asr_model_config()
-        if not asr_config:
-            self.logger.warning("ASR config not available, cannot process speech")
-            return None
-
-        try:
-            data = aiohttp.FormData()
-            data.add_field(
-                "file", wav_data, filename="audio.wav", content_type="audio/wav"
-            )
-            data.add_field("model", asr_config.model)
-            data.add_field("language", "zh")
-            # Use a proper Chinese context prompt to guide the model, which reduces hallucinations
-            # and improves recognition of Chinese over strange languages.
-            data.add_field("prompt", "这是一段中文普通话日常对话录音。")
-
-            headers = {"Authorization": f"Bearer {asr_config.api_key}"}
-            url = f"{asr_config.base_url}/audio/transcriptions"
-
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url, data=data, headers=headers, timeout=asr_config.timeout
-                ) as resp:
-                    if resp.status != 200:
-                        error_text = await resp.text()
-                        self.logger.error(
-                            f"ASR API error: {resp.status} - {error_text}"
-                        )
-                        return None
-
-                    result = await resp.json()
-                    text = str(result.get("text", "")).strip()
-                    if text:
-                        # First strip emojis properly
-                        text = _strip_emoji(text).strip()
-                        # Sanitize text to remove control characters (except newlines/tabs)
-                        text = "".join(
-                            ch for ch in text if ch.isprintable() or ch in "\n\r\t"
-                        )
-                        # Then remove trailing punctuation
-                        text = text.rstrip("。?.，,！!？ ")
-                        
-                        # Filter out common Whisper hallucinations for silence/noise
-                        lower_text = text.lower()
-                        hallucinations = [
-                            "그", "thank you", "you", "amara.org", "subtitles", 
-                            "啊", "嗯", "那", "这", "好的"
-                        ]
-                        
-                        # Also check if it contains Korean characters (common whisper hallucination)
-                        import re
-                        if re.search(r'[\uac00-\ud7a3]', text):
-                            self.logger.debug(f"Filtered out ASR hallucination (Korean): {text}")
-                            return None
-                            
-                        # Check exact matches or substrings for English hallucinations
-                        if any(h == lower_text for h in hallucinations) or "amara.org" in lower_text:
-                            self.logger.debug(f"Filtered out ASR hallucination: {text}")
-                            return None
-
-                    return text
-
-        except Exception as e:
-            self.logger.error(f"ASR API call failed: {e}")
-            return None
-
     async def handle_mic_message(self, room_id: int, text: str) -> None:
         self.tts_manager.reset_idle_timer()
-        additional_config = {
-            "room_id": room_id,
-            "is_mentioned": 2.0,
-            "source": "mic_asr",
-            "live_person_profile_enabled": self.config.live_person_profile_enabled,
-        }
+        additional_config = self._build_live_additional_config(
+            room_id,
+            {
+                "room_id": room_id,
+                "is_mentioned": 2.0,
+                "source": "mic_asr",
+            },
+        )
 
         # 修复：从配置动态读取主人的 ID 和名字，消除硬编码
         master_user_id = str(getattr(self.config, "live_master_user_id", "2146014839"))
@@ -1186,16 +1141,16 @@ class BilibiliAdapter:
         template_info = await self._get_template_info(room_id, master_user_id, text)
 
         message_info = BaseMessageInfo(
-            platform="bilibili.live",
+            platform=self.config.platform,
             message_id=f"mic_{int(time.time() * 1000)}",
             time=time.time(),
             user_info=UserInfo(
-                platform="bilibili.live",
+                platform=self.config.platform,
                 user_id=master_user_id,
                 user_nickname=master_user_name,
             ),
             group_info=GroupInfo(
-                platform="bilibili.live",
+                platform=self.config.platform,
                 group_id=str(room_id),
                 group_name=str(room_id),
             ),
@@ -1252,9 +1207,13 @@ class BilibiliAdapter:
         prompt_text = f"发送了超级弹幕(SC)：{message_text} (价值 {price} 元)"
         template_info = await self._get_template_info(room_id, user_id, prompt_text)
 
-        additional_config = {
-            "live_person_profile_enabled": self.config.live_person_profile_enabled,
-        }
+        additional_config = self._build_live_additional_config(
+            room_id,
+            platform_event={
+                "kind": "support",
+                "amount": max(0, price),
+            },
+        )
         # if template_info:
         #    additional_config = template_info.additional_config or {}
 
@@ -1262,16 +1221,16 @@ class BilibiliAdapter:
         additional_config["is_mentioned"] = 1.0
 
         message_info = BaseMessageInfo(
-            platform="bilibili.live",
+            platform=self.config.platform,
             message_id=str(uuid.uuid4()),
             time=timestamp,
             user_info=UserInfo(
-                platform="bilibili.live",
+                platform=self.config.platform,
                 user_id=user_id,
                 user_nickname=user_name,
             ),
             group_info=GroupInfo(
-                platform="bilibili.live",
+                platform=self.config.platform,
                 group_id=str(room_id),
                 group_name=str(room_id),
             ),
@@ -1342,9 +1301,14 @@ class BilibiliAdapter:
         prompt_text = f"开通了 {guard_name} ({num} 个月)"
         template_info = await self._get_template_info(room_id, user_id, prompt_text)
 
-        additional_config = {
-            "live_person_profile_enabled": self.config.live_person_profile_enabled,
-        }
+        additional_config = self._build_live_additional_config(
+            room_id,
+            platform_event={
+                "kind": "membership",
+                "amount": max(0, price),
+                "membership_days": 30,
+            },
+        )
         # if template_info:
         #    additional_config = template_info.additional_config or {}
 
@@ -1352,16 +1316,16 @@ class BilibiliAdapter:
         additional_config["is_mentioned"] = 1.0
 
         message_info = BaseMessageInfo(
-            platform="bilibili.live",
+            platform=self.config.platform,
             message_id=str(uuid.uuid4()),
             time=timestamp,
             user_info=UserInfo(
-                platform="bilibili.live",
+                platform=self.config.platform,
                 user_id=user_id,
                 user_nickname=user_name,
             ),
             group_info=GroupInfo(
-                platform="bilibili.live",
+                platform=self.config.platform,
                 group_id=str(room_id),
                 group_name=str(room_id),
             ),
@@ -1420,23 +1384,25 @@ class BilibiliAdapter:
         prompt_text = f"{guard_label} {user_name} 进入了直播间"
         template_info = await self._get_template_info(room_id, user_id, prompt_text)
 
-        additional_config = {
-            "room_id": room_id,
-            "is_mentioned": 1.0,
-            "live_person_profile_enabled": self.config.live_person_profile_enabled,
-        }
+        additional_config = self._build_live_additional_config(
+            room_id,
+            {
+                "room_id": room_id,
+                "is_mentioned": 1.0,
+            },
+        )
 
         message_info = BaseMessageInfo(
-            platform="bilibili.live",
+            platform=self.config.platform,
             message_id="notice",
             time=timestamp,
             user_info=UserInfo(
-                platform="bilibili.live",
+                platform=self.config.platform,
                 user_id=user_id,
                 user_nickname=user_name,
             ),
             group_info=GroupInfo(
-                platform="bilibili.live",
+                platform=self.config.platform,
                 group_id=str(room_id),
                 group_name=str(room_id),
             ),
@@ -1643,14 +1609,10 @@ class BilibiliAdapter:
         user_name: str,
         additional_config: Optional[Dict[str, Any]] = None,
     ) -> BaseMessageInfo:
-        # 直播消息使用 bilibili 平台
-        live_platform = "bilibili"
-
-        if additional_config is None:
-            additional_config = {}
-        additional_config.setdefault(
-            "live_person_profile_enabled",
-            self.config.live_person_profile_enabled,
+        live_platform = self.config.platform
+        additional_config = self._build_live_additional_config(
+            room_id,
+            additional_config,
         )
 
         return BaseMessageInfo(

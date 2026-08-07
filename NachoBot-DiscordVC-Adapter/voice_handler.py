@@ -1,293 +1,454 @@
+"""Discord voice capture, VAD, and incremental speech recognition."""
+
 import asyncio
 import logging
-import io
+import threading
 import time
-import wave
+from collections import deque
+from contextlib import suppress
+from typing import Callable, Optional
+
 import numpy as np
-from typing import Optional, Callable
-
-from discord.sinks import Sink, Filters
-import aiohttp
-
 from config import AdapterConfig, VoiceConfig
+from discord.sinks import Filters, Sink
+from multimodal_bridge import ensure_multimodal_import
+from scipy.signal import resample_poly
 
-# Discord sends stereo 48kHz PCM
+
+ensure_multimodal_import()
+
+from nachobot_multimodal.asr.streaming import StreamingASR  # noqa: E402
+
+
+# Discord sends stereo 48 kHz, signed 16-bit PCM.
 DISCORD_SAMPLE_RATE = 48000
 DISCORD_CHANNELS = 2
-DISCORD_WIDTH = 2  # 16-bit
+DISCORD_WIDTH = 2
+ASR_SAMPLE_RATE = 16000
 
 
 class SilenceDetectingSink(Sink):
-    """
-    A sink that detects silence and triggers a callback with the captured audio segment.
-    """
+    """Turn Discord PCM packets into ordered streaming-ASR lifecycle events."""
+
+    ASR_PREROLL_SECONDS = 0.3
 
     def __init__(
         self,
         filters=None,
-        callback: Callable = None,
-        on_speech_start_callback: Callable = None,
-        config: VoiceConfig = None,
+        callback: Optional[Callable] = None,
+        on_speech_start_callback: Optional[Callable] = None,
+        on_stream_start_callback: Optional[Callable] = None,
+        on_stream_audio_callback: Optional[Callable] = None,
+        on_stream_finish_callback: Optional[Callable] = None,
+        on_stream_abort_callback: Optional[Callable] = None,
+        config: Optional[VoiceConfig] = None,
     ):
-        if filters is None:
-            # filters = Filters.default() # Not valid
-            # filters = Filters() # Also not valid, Sink expects a dict
-            pass
-
         super().__init__(filters=filters)
 
+        # All callbacks are async and run on the Discord event loop. The audio
+        # callback only queues events, so sherpa decoding never blocks py-cord's
+        # DecodeManager thread.
         self.callback = callback
         self.on_speech_start_callback = on_speech_start_callback
+        self.on_stream_start_callback = on_stream_start_callback
+        self.on_stream_audio_callback = on_stream_audio_callback
+        self.on_stream_finish_callback = on_stream_finish_callback
+        self.on_stream_abort_callback = on_stream_abort_callback
         self.config = config
         self.vc = None
-        self.audio_data = {}  # User ID -> Bytearray
+        self.audio_data = {}
 
-        # VAD State per user
-        self.last_speech_time = {}  # User ID -> timestamp
-        self.is_speaking = {}  # User ID -> bool
-        self.silence_start = {}  # User ID -> timestamp
-
-        # Capture loop for thread-safe callbacks from DecodeManager thread
         try:
             self.loop = asyncio.get_running_loop()
         except RuntimeError:
             self.loop = asyncio.get_event_loop()
 
-        # Buffer for current utterance
-        self.utterance_buffer = {}  # User ID -> Bytearray
+        self.last_speech_time: dict[int, float] = {}
+        self.is_speaking: dict[int, bool] = {}
+        self.utterance_bytes: dict[int, int] = {}
+        self.voiced_bytes: dict[int, int] = {}
+        self.pre_roll_buffer: dict[int, deque[bytes]] = {}
+        self.pre_roll_bytes: dict[int, int] = {}
 
         self.vad_threshold = config.vad_threshold if config else 500
         self.silence_threshold = config.silence_threshold if config else 0.5
-        self.min_speech_duration = 0.3  # Minimum duration to consider speech
+        self.min_speech_duration = 0.3
+        self._bytes_per_second = (
+            DISCORD_SAMPLE_RATE * DISCORD_CHANNELS * DISCORD_WIDTH
+        )
+        self._max_preroll_bytes = int(
+            self._bytes_per_second * self.ASR_PREROLL_SECONDS
+        )
 
-        # Background task for checking silence
-        self.checker_task = None
+        self._state_lock = threading.RLock()
+        self._event_queue: asyncio.Queue = asyncio.Queue()
+        self._started_streams: set[int] = set()
+        self.checker_task: Optional[asyncio.Task] = None
+        self.stream_worker_task: Optional[asyncio.Task] = None
         self._stopped = False
+        self._shutdown_queued = False
+
         logging.getLogger("VoiceHandler").info(
-            f"SilenceDetectingSink initialized with loop: {self.loop}"
+            "SilenceDetectingSink initialized with incremental ASR"
         )
 
     def init(self, vc):
-        logging.getLogger("VoiceHandler").info(
-            f"SilenceDetectingSink initialized with loop: {self.loop}"
-        )
         self.vc = vc
-        if not self.checker_task:
-            self.checker_task = asyncio.create_task(self._silence_checker())
+        self.loop.call_soon_threadsafe(self._ensure_tasks)
+
+    def _ensure_tasks(self) -> None:
+        if self.checker_task is None:
+            self.checker_task = self.loop.create_task(self._silence_checker())
+        if self.stream_worker_task is None:
+            self.stream_worker_task = self.loop.create_task(
+                self._stream_event_worker()
+            )
 
     def cleanup(self):
+        """Request non-blocking cleanup for Sink compatibility."""
         self._stopped = True
+        if self.loop and self.loop.is_running():
+            self.loop.call_soon_threadsafe(self._begin_shutdown)
+
+    async def aclose(self) -> None:
+        """Drain queued audio and abort any unfinished streams."""
+        self._stopped = True
+        self._begin_shutdown()
+
+        if self.checker_task:
+            with suppress(asyncio.CancelledError):
+                await self.checker_task
+        if self.stream_worker_task:
+            with suppress(asyncio.CancelledError):
+                await self.stream_worker_task
+
+    def _begin_shutdown(self) -> None:
+        if self._shutdown_queued:
+            return
+        self._shutdown_queued = True
+        self._ensure_tasks()
+
         if self.checker_task:
             self.checker_task.cancel()
 
+        with self._state_lock:
+            active_users = [
+                user
+                for user, speaking in self.is_speaking.items()
+                if speaking
+            ]
+            for user in active_users:
+                self.is_speaking[user] = False
+
+        for user in active_users:
+            self._event_queue.put_nowait(("abort", user, None))
+        self._event_queue.put_nowait(("stop", None, None))
+
+    def _append_preroll(self, user: int, pcm_data: bytes) -> None:
+        buffer = self.pre_roll_buffer.setdefault(user, deque())
+        buffer.append(pcm_data)
+        total = self.pre_roll_bytes.get(user, 0) + len(pcm_data)
+        while total > self._max_preroll_bytes and len(buffer) > 1:
+            total -= len(buffer.popleft())
+        self.pre_roll_bytes[user] = total
+
+    def _take_preroll(self, user: int) -> list[bytes]:
+        chunks = list(self.pre_roll_buffer.get(user, ()))
+        self.pre_roll_buffer[user] = deque()
+        self.pre_roll_bytes[user] = 0
+        return chunks
+
+    def _queue_from_audio_thread(
+        self,
+        event: tuple[str, int, Optional[bytes]],
+    ) -> None:
+        if self._stopped or not self.loop or not self.loop.is_running():
+            return
+        self.loop.call_soon_threadsafe(self._event_queue.put_nowait, event)
+
     @Filters.container
     def write(self, data, user):
-        # py-cord 2.8+ passes VoiceData objects instead of raw bytes
-        # Extract PCM bytes from VoiceData if needed
-        if hasattr(data, 'pcm'):
-            pcm_data = data.pcm
-        else:
-            pcm_data = data
-
-        if not pcm_data:
+        """Receive one Discord PCM packet from py-cord's decoder thread."""
+        if self._stopped:
             return
 
-        # py-cord 2.8+ passes User/Member objects instead of integer IDs
-        # Extract the numeric ID for dict keys and downstream callbacks
-        if hasattr(user, 'id'):
+        pcm_data = data.pcm if hasattr(data, "pcm") else data
+        if not pcm_data:
+            return
+        if hasattr(user, "id"):
             user = user.id
 
-        # logging.getLogger("VoiceHandler").debug(f"Packet from {user} len={len(pcm_data)}")
-        if user not in self.utterance_buffer:
-            self.utterance_buffer[user] = bytearray()
-            self.is_speaking[user] = False
-
-        # Convert to simple RMS for VAD using numpy (audioop is deprecated)
-        # We process 20ms chunks usually, data length varies
         try:
             samples = np.frombuffer(pcm_data, dtype=np.int16)
-            rms = int(np.sqrt(np.mean(samples.astype(np.float64) ** 2))) if len(samples) > 0 else 0
+            rms = (
+                int(np.sqrt(np.mean(samples.astype(np.float64) ** 2)))
+                if samples.size
+                else 0
+            )
         except Exception:
             rms = 0
 
         is_speech = rms > self.vad_threshold
         now = time.time()
+        events: list[tuple[str, int, Optional[bytes]]] = []
+        notify_speech_start = False
 
-        # State Machine
-        if is_speech:
-            self.last_speech_time[user] = now
-            if not self.is_speaking[user]:
-                # Started speaking
-                self.is_speaking[user] = True
-                logging.getLogger("VoiceHandler").debug(
-                    f"User {user} started speaking (RMS: {rms})"
+        with self._state_lock:
+            speaking = self.is_speaking.setdefault(user, False)
+
+            if not speaking:
+                self._append_preroll(user, pcm_data)
+
+            if is_speech:
+                self.last_speech_time[user] = now
+                if not speaking:
+                    self.is_speaking[user] = True
+                    notify_speech_start = True
+                    preroll = self._take_preroll(user)
+                    self.utterance_bytes[user] = sum(map(len, preroll))
+                    self.voiced_bytes[user] = len(pcm_data)
+                    events.append(("start", user, None))
+                    events.extend(("audio", user, chunk) for chunk in preroll)
+                    logging.getLogger("VoiceHandler").debug(
+                        "User %s started speaking (RMS: %s)", user, rms
+                    )
+                else:
+                    self.utterance_bytes[user] = (
+                        self.utterance_bytes.get(user, 0) + len(pcm_data)
+                    )
+                    self.voiced_bytes[user] = (
+                        self.voiced_bytes.get(user, 0) + len(pcm_data)
+                    )
+                    events.append(("audio", user, pcm_data))
+            elif speaking:
+                # Keep feeding trailing silence until VAD closes the stream.
+                self.utterance_bytes[user] = (
+                    self.utterance_bytes.get(user, 0) + len(pcm_data)
                 )
-                if self.on_speech_start_callback:
-                    if self.loop and self.loop.is_running():
-                        asyncio.run_coroutine_threadsafe(
-                            self.on_speech_start_callback(user), self.loop
-                        )
+                events.append(("audio", user, pcm_data))
 
-        # Debug Log periodically
-        if int(now * 10) % 20 == 0:  # Log every ~2 seconds
-            logging.getLogger("VoiceHandler").debug(
-                f"Current RMS: {rms} | Threshold: {self.vad_threshold} | Speaking: {self.is_speaking.get(user)}"
+        for event in events:
+            self._queue_from_audio_thread(event)
+
+        if (
+            notify_speech_start
+            and self.on_speech_start_callback
+            and self.loop
+            and self.loop.is_running()
+        ):
+            asyncio.run_coroutine_threadsafe(
+                self.on_speech_start_callback(user),
+                self.loop,
             )
 
-        self.utterance_buffer[user].extend(pcm_data)
-
-    async def _silence_checker(self):
+    async def _silence_checker(self) -> None:
         logging.getLogger("VoiceHandler").info("Silence checker started")
         while not self._stopped:
             try:
                 await asyncio.sleep(0.1)
                 now = time.time()
+                completed: list[tuple[str, int, Optional[bytes]]] = []
 
-                # heartbeat log for checker every 10s
-                if int(now) % 10 == 0 and int(now * 10) % 10 == 0:
-                    logging.getLogger("VoiceHandler").debug(
-                        f"Silence checker heartbeat. Users: {list(self.utterance_buffer.keys())}"
-                    )
+                with self._state_lock:
+                    for user, speaking in list(self.is_speaking.items()):
+                        if not speaking:
+                            continue
+                        silence_duration = now - self.last_speech_time.get(user, 0)
+                        if silence_duration <= self.silence_threshold:
+                            continue
 
-                users = list(self.utterance_buffer.keys())
-                for user in users:
-                    if not self.is_speaking.get(user, False):
-                        continue
+                        self.is_speaking[user] = False
+                        total_duration = (
+                            self.utterance_bytes.pop(user, 0)
+                            / self._bytes_per_second
+                        )
+                        voiced_duration = (
+                            self.voiced_bytes.pop(user, 0)
+                            / self._bytes_per_second
+                        )
+                        self.last_speech_time.pop(user, None)
 
-                    last_speech = self.last_speech_time.get(user, 0)
-                    silence_duration = now - last_speech
-
-                    if silence_duration > self.silence_threshold:
-                        # Silence detected after speech
-                        logging.getLogger("VoiceHandler").debug(
-                            f"User {user} silence detected ({silence_duration:.2f}s > {self.silence_threshold}s). Processing..."
+                        event_name = (
+                            "finish"
+                            if voiced_duration >= self.min_speech_duration
+                            else "discard"
+                        )
+                        completed.append((event_name, user, None))
+                        logging.getLogger("VoiceHandler").info(
+                            "Discord speech ended for %s: %.2fs total, "
+                            "%.2fs voiced",
+                            user,
+                            total_duration,
+                            voiced_duration,
                         )
 
-                        # Retrieve and reset buffer *before* potential callback to avoid race conditions
-                        data_to_process = self.utterance_buffer.pop(user, bytearray())
-                        self.is_speaking[user] = False
-
-                        length_seconds = len(data_to_process) / (
-                            DISCORD_SAMPLE_RATE * DISCORD_CHANNELS * DISCORD_WIDTH
-                        )
-
-                        if length_seconds >= self.min_speech_duration:
-                            # Flush and callback
-                            logging.getLogger("VoiceHandler").info(
-                                f"Speech detected from {user}: {length_seconds:.2f}s"
-                            )
-                            if self.callback:
-                                # Run callback in background to not block loop
-                                asyncio.create_task(
-                                    self.callback(user, data_to_process)
-                                )
-                        else:
-                            logging.getLogger("VoiceHandler").debug(
-                                f"Snippet too short ({length_seconds:.2f}s < {self.min_speech_duration}s), ignoring."
-                            )
-
-                        # Reset (Ensure robust reset)
-                        self.utterance_buffer[user] = bytearray()
-                        self.is_speaking[user] = False
-            except Exception as e:
-                logging.getLogger("VoiceHandler").error(
-                    f"Silence checker error: {e}", exc_info=True
+                for event in completed:
+                    self._event_queue.put_nowait(event)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logging.getLogger("VoiceHandler").exception(
+                    "Silence checker error"
                 )
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.2)
+
+    async def _stream_event_worker(self) -> None:
+        """Run ordered ASR operations without blocking the capture thread."""
+        while True:
+            event_name, user, pcm_data = await self._event_queue.get()
+            try:
+                if event_name == "stop":
+                    break
+
+                if event_name == "start":
+                    started = bool(
+                        self.on_stream_start_callback
+                        and await self.on_stream_start_callback(user)
+                    )
+                    if started:
+                        self._started_streams.add(user)
+                elif event_name == "audio":
+                    if (
+                        user in self._started_streams
+                        and self.on_stream_audio_callback
+                        and pcm_data
+                    ):
+                        await self.on_stream_audio_callback(user, pcm_data)
+                elif event_name == "finish":
+                    text = None
+                    try:
+                        if (
+                            user in self._started_streams
+                            and self.on_stream_finish_callback
+                        ):
+                            text = await self.on_stream_finish_callback(user)
+                    except Exception:
+                        logging.getLogger("VoiceHandler").exception(
+                            "Failed to finalize streaming ASR for user %s",
+                            user,
+                        )
+                    finally:
+                        self._started_streams.discard(user)
+                        if self.callback:
+                            await self.callback(user, text)
+                elif event_name == "discard":
+                    try:
+                        if (
+                            user in self._started_streams
+                            and self.on_stream_abort_callback
+                        ):
+                            await self.on_stream_abort_callback(user)
+                    finally:
+                        self._started_streams.discard(user)
+                        if self.callback:
+                            await self.callback(user, None)
+                elif event_name == "abort":
+                    if (
+                        user in self._started_streams
+                        and self.on_stream_abort_callback
+                    ):
+                        await self.on_stream_abort_callback(user)
+                    self._started_streams.discard(user)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logging.getLogger("VoiceHandler").exception(
+                    "Streaming ASR event failed: event=%s user=%s",
+                    event_name,
+                    user,
+                )
+                self._started_streams.discard(user)
+            finally:
+                self._event_queue.task_done()
+
+        # The stop marker is queued after per-user aborts, but guard against a
+        # partially initialized stream if a callback raised.
+        if self.on_stream_abort_callback:
+            for user in list(self._started_streams):
+                with suppress(Exception):
+                    await self.on_stream_abort_callback(user)
+        self._started_streams.clear()
 
 
 class VoiceHandler:
+    """Convert Discord PCM chunks and drive Multimodal's shared ASR engine."""
+
     def __init__(self, config: AdapterConfig, logger: logging.Logger):
         self.config = config
         self.logger = logger
-        self.stt_config = config.stt
-        self.proxy_url = (
-            config.discord.proxy_url if config.discord.proxy_enabled else None
+        self.asr: Optional[StreamingASR] = None
+
+        if not config.voice.enabled:
+            self.logger.info("Discord streaming ASR disabled by configuration")
+            return
+
+        try:
+            self.asr = StreamingASR(logger=logger)
+            if not self.asr.supports_streaming:
+                self.logger.error(
+                    "Discord streaming ASR unavailable; check Multimodal ASR "
+                    "model and CPU runtime"
+                )
+        except Exception:
+            self.logger.exception("Failed to initialize Discord streaming ASR")
+            self.asr = None
+
+    @property
+    def supports_streaming(self) -> bool:
+        return self.asr is not None and self.asr.supports_streaming
+
+    def start_stream(self, stream_id: str) -> bool:
+        if not self.supports_streaming:
+            return False
+        return self.asr.start_stream(stream_id)
+
+    @staticmethod
+    def _pcm_to_16k(pcm_data: bytes) -> np.ndarray:
+        frame_width = DISCORD_CHANNELS * DISCORD_WIDTH
+        usable = len(pcm_data) - (len(pcm_data) % frame_width)
+        if usable <= 0:
+            return np.empty(0, dtype=np.float32)
+
+        samples = np.frombuffer(pcm_data[:usable], dtype=np.int16)
+        stereo = samples.reshape(-1, DISCORD_CHANNELS).astype(np.float32)
+        mono = stereo.mean(axis=1) / 32768.0
+        mono_16k = resample_poly(
+            mono,
+            ASR_SAMPLE_RATE,
+            DISCORD_SAMPLE_RATE,
         )
+        return np.ascontiguousarray(mono_16k, dtype=np.float32)
 
-    async def process_audio(self, user_id: int, pcm_data: bytes) -> Optional[str]:
-        """
-        Process PCM data: Convert to WAV -> Send to ASR -> Return Text
-        """
-        if not self.stt_config.enabled:
+    def accept_pcm(self, stream_id: str, pcm_data: bytes) -> Optional[str]:
+        if not self.supports_streaming:
             return None
-
-        # 1. Convert PCM to WAV
-        # Discord: Stereo, 48kHz, 16bit
-        # Most APIs process Mono 16kHz better, or just standard formats
-        # We'll save as Mono 16kHz for efficiency if we can, or just dump standard WAV
-
-        # Ensure correct length
-        if len(pcm_data) % (DISCORD_CHANNELS * DISCORD_WIDTH) != 0:
-            # Padding? or Trimming
-            trim_len = len(pcm_data) - (
-                len(pcm_data) % (DISCORD_CHANNELS * DISCORD_WIDTH)
+        try:
+            samples_16k = self._pcm_to_16k(pcm_data)
+            return self.asr.accept_stream_audio(stream_id, samples_16k)
+        except Exception:
+            self.logger.exception(
+                "Failed to feed Discord PCM into streaming ASR: {}",
+                stream_id,
             )
-            pcm_data = pcm_data[:trim_len]
-
-        try:
-            # We can use numpy to mix stereo to mono
-            audio_np = np.frombuffer(pcm_data, dtype=np.int16)
-            if DISCORD_CHANNELS == 2:
-                audio_np = audio_np.reshape(-1, 2)
-                # Average channels for mono
-                audio_mono = audio_np.mean(axis=1).astype(np.int16)
-            else:
-                audio_mono = audio_np
-
-            # Create in-memory WAV
-            wav_buffer = io.BytesIO()
-            with wave.open(wav_buffer, "wb") as wav_file:
-                wav_file.setnchannels(1)  # Mono
-                wav_file.setsampwidth(DISCORD_WIDTH)
-                wav_file.setframerate(DISCORD_SAMPLE_RATE)
-                wav_file.writeframes(audio_mono.tobytes())
-
-            wav_buffer.seek(0)
-            wav_data = wav_buffer.read()
-
-            # 2. Call ASR API
-            return await self._call_asr_api(wav_data)
-
-        except Exception as e:
-            self.logger.error(f"Error processing audio: {e}")
+            self.abort_stream(stream_id)
             return None
 
-    async def _call_asr_api(self, wav_data: bytes) -> Optional[str]:
-        if not self.stt_config.api_key:
-            self.logger.warning("No ASR API Key configured")
+    def finish_stream(self, stream_id: str) -> Optional[str]:
+        if not self.supports_streaming:
             return None
-
-        url = f"{self.stt_config.base_url}/audio/transcriptions"
-        headers = {"Authorization": f"Bearer {self.stt_config.api_key}"}
-
-        data = aiohttp.FormData()
-        # Name is important for OpenAI API to detect format
-        data.add_field("file", wav_data, filename="audio.wav", content_type="audio/wav")
-        data.add_field("model", self.stt_config.model)
-        # Optional: prompt, language
-
-        try:
-            # User requested Voice Processing NOT to use proxy
-
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, data=data) as resp:
-                    if resp.status != 200:
-                        text = await resp.text()
-                        self.logger.error(f"ASR API error {resp.status}: {text}")
-                        return None
-
-                    result = await resp.json()
-                    text = result.get("text", "").strip()
-                    if text:
-                        # Sanitize text to remove control characters (except newlines/tabs)
-                        # This prevents 400 Bad Request from LLM if ASR returns garbage
-                        text = "".join(
-                            ch for ch in text if ch.isprintable() or ch in "\n\r\t"
-                        )
-                        self.logger.info(f"ASR Recognized: {text}")
-                        return text
-                    return None
-        except Exception as e:
-            self.logger.error(f"ASR request failed: {e}")
+        text = self.asr.finish_stream(stream_id)
+        if not text:
             return None
+        text = "".join(
+            character
+            for character in text.strip()
+            if character.isprintable() or character in "\n\r\t"
+        )
+        if text:
+            self.logger.info("Discord ASR recognized: {}", text)
+            return text
+        return None
+
+    def abort_stream(self, stream_id: str) -> None:
+        if self.asr is not None:
+            self.asr.abort_stream(stream_id)

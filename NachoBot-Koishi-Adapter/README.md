@@ -7,6 +7,18 @@ NachoBot 的 Koishi 适配器，允许 NachoBot 通过 Koishi 接入多种平台
 1. 启动 `koishi-app`
 2. 复制并重命名 `config.toml` 配置为适配器所用
 3. 确保配置中的 `onebot_server` 信息与 Koishi OneBot 插件的监听地址一致
+4. 音频转码默认由 `static-ffmpeg` 自动获取 FFmpeg；通常无需设置 `[ffmpeg].path`
+
+如需使用系统安装或自定义构建，可在 `config.toml` 中把 `[ffmpeg].path` 设置为 FFmpeg 可执行文件或其所在目录。留空时使用 `static-ffmpeg`。
+
+## 图片视觉策略
+
+Koishi 入站图片 prompt 固定维护在 `visual_policy.py` 的
+`KOISHI_IMAGE_PROMPT`，不会从 TOML 读取。`[visual.image]` 只保留
+`temperature`、`max_tokens` 和 `extra_params` 等推理参数。
+适配器通过消息的 `visual_policy` 元数据把代码中的 prompt 与这些参数交给
+Core 执行。prompt 或参数变化后，策略指纹会自动形成新的缓存命名空间，
+无需清理旧图片缓存。
 
 ## Docker 部署
 

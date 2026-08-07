@@ -8,12 +8,11 @@
 
 1. 下载本插件。
 2. 将插件解压到麦麦的 `plugins` 目录。
-3. 下载 [ffmpeg](https://ffmpeg.org/)。
-4. 解压 ffmpeg。
-5. 将解压后的 ffmpeg 文件夹放到 `bilibili_video_sender_plugin` 目录下。
-6. 打开 `config.toml`，填入 `sessdata` 和 `buvid3`（获取方法见下方）。
-7. 在napcat上新建一个正向http,并在config.toml内填入端口
-8. 使用愉快 😊。
+3. 在 NachoBot 项目目录执行 `uv sync`，安装项目依赖。
+4. FFmpeg 和 FFprobe 由 `static-ffmpeg` 自动获取，无需手动下载或放入插件目录。
+5. 打开 `config.toml`，填入 `sessdata` 和 `buvid3`（获取方法见下方）。
+6. 在 NapCat 上新建一个正向 HTTP，并在 `config.toml` 内填入端口。
+7. 使用愉快 😊。
 
 ### 视频时长上限
 
@@ -58,8 +57,8 @@
 ### 务必仔细填写config.toml!!!!!!
 
 
-## 完成后的文件夹结构示例
-<img width="412" height="131" alt="image" src="https://github.com/user-attachments/assets/63ef60df-99f3-4c79-b124-da566fd15cd0" />
-<img width="659" height="182" alt="image" src="https://github.com/user-attachments/assets/ddeb422f-b9fc-49b6-a652-866d06eb812c" />
+## FFmpeg 说明
+
+插件不再要求仓库中包含 `ffmpeg` 文件夹。首次使用视频处理功能时，`static-ffmpeg` 会自动获取当前平台对应的 FFmpeg 和 FFprobe 可执行文件。
 
 

@@ -1,13 +1,27 @@
 import logging
-from dataclasses import dataclass
+import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List
+
+from loguru import logger
 
 try:
     import tomllib as toml
 except ImportError:  # pragma: no cover
     import toml  # type: ignore
 
+@dataclass(frozen=True)
+class VisualImageConfig:
+    temperature: float = 0.1
+    max_tokens: int = 240
+    extra_params: Dict[str, Any] = field(
+        default_factory=lambda: {"enable_thinking": False}
+    )
+
+@dataclass(frozen=True)
+class VisualPolicyConfig:
+    image: VisualImageConfig
 
 @dataclass
 class AdapterConfig:
@@ -26,6 +40,7 @@ class AdapterConfig:
     log_level: str
     ffmpeg_path: str
     network_proxy: str
+    visual: VisualPolicyConfig
 
 
 def _load_toml(path: Path) -> Dict[str, Any]:
@@ -44,6 +59,13 @@ def load_config(path: Path) -> AdapterConfig:
     debug = data.get("debug", {})
     ffmpeg = data.get("ffmpeg", {})
     network = data.get("network", {})
+    visual = data.get("visual", {}) or {}
+    visual_image = visual.get("image", {}) or {}
+    visual_extra_params = (
+        visual_image.get("extra_params", {"enable_thinking": False}) or {}
+    )
+    if not isinstance(visual_extra_params, dict):
+        visual_extra_params = {}
 
     ws_url = onebot.get("ws_url", "")
     if not ws_url:
@@ -68,15 +90,52 @@ def load_config(path: Path) -> AdapterConfig:
         log_level=str(debug.get("level", "INFO")),
         ffmpeg_path=str(ffmpeg.get("path", "") or ""),
         network_proxy=str(network.get("proxy", "") or ""),
+        visual=VisualPolicyConfig(
+            image=VisualImageConfig(
+                temperature=float(visual_image.get("temperature", 0.1)),
+                max_tokens=max(1, int(visual_image.get("max_tokens", 240))),
+                extra_params=dict(visual_extra_params),
+            ),
+        ),
     )
 
 
-def setup_logging(level: str) -> logging.Logger:
-    logger = logging.getLogger("koishi-onebot-adapter")
-    if logger.handlers:
-        return logger
+class _InterceptHandler(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            level = logger.level(record.levelname).name
+        except ValueError:
+            level = record.levelno
+
+        frame = logging.currentframe()
+        depth = 2
+        while frame and frame.f_code.co_filename == logging.__file__:
+            frame = frame.f_back
+            depth += 1
+
+        logger.opt(depth=depth, exception=record.exc_info).log(
+            level, record.getMessage()
+        )
+
+
+def setup_logging(level: str):
+    normalized_level = level.upper()
+    logger.remove()
+    logger.configure(extra={"name": "NachoBot-Koishi-Adapter"})
+    logger.add(
+        sys.stderr,
+        level=normalized_level,
+        colorize=True,
+        format=(
+            "<blue>{time:YYYY-MM-DD HH:mm:ss}</blue> | "
+            "<level>{level: <8}</level> | "
+            "<cyan>{extra[name]}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
+            "<level>{message}</level>"
+        ),
+    )
     logging.basicConfig(
-        level=getattr(logging, level.upper(), logging.INFO),
-        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[_InterceptHandler()],
+        level=getattr(logging, normalized_level, logging.INFO),
+        force=True,
     )
-    return logger
+    return logger.bind(name="NachoBot-Koishi-Adapter")

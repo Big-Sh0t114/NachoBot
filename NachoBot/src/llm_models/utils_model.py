@@ -67,6 +67,7 @@ class LLMRequest:
         image_format: str,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        extra_params: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, Tuple[str, str, Optional[List[ToolCall]]]]:
         """
         为图像生成响应
@@ -92,6 +93,7 @@ class LLMRequest:
             message_factory=message_factory,
             temperature=temperature,
             max_tokens=max_tokens,
+            extra_params=extra_params,
         )
         content = response.content or ""
         reasoning_content = response.reasoning_content or ""
@@ -117,6 +119,7 @@ class LLMRequest:
         video_format: str,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        extra_params: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, Tuple[str, str, Optional[List[ToolCall]]]]:
         """
         为视频生成响应
@@ -140,6 +143,7 @@ class LLMRequest:
             message_factory=message_factory,
             temperature=temperature,
             max_tokens=max_tokens,
+            extra_params=extra_params,
         )
         content = response.content or ""
         reasoning_content = response.reasoning_content or ""
@@ -311,6 +315,7 @@ class LLMRequest:
         max_tokens: Optional[int],
         embedding_input: str | None,
         audio_base64: str | None,
+        extra_params: Optional[Dict[str, Any]] = None,
         interrupt_flag: Optional[asyncio.Event] = None,
     ) -> APIResponse:
         """
@@ -319,6 +324,9 @@ class LLMRequest:
         """
         retry_remain = api_provider.max_retry
         compressed_messages: Optional[List[Message]] = None
+        merged_extra_params = dict(model_info.extra_params)
+        if extra_params:
+            merged_extra_params.update(extra_params)
 
         while retry_remain > 0:
             try:
@@ -332,7 +340,7 @@ class LLMRequest:
                         response_format=response_format,
                         stream_response_handler=stream_response_handler,
                         async_response_parser=async_response_parser,
-                        extra_params=model_info.extra_params,
+                        extra_params=merged_extra_params,
                         interrupt_flag=interrupt_flag,
                     )
                 elif request_type == RequestType.EMBEDDING:
@@ -403,6 +411,7 @@ class LLMRequest:
         async_response_parser: Optional[Callable] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        extra_params: Optional[Dict[str, Any]] = None,
         embedding_input: str | None = None,
         audio_base64: str | None = None,
         interrupt_flag: Optional[asyncio.Event] = None,
@@ -436,6 +445,7 @@ class LLMRequest:
                     max_tokens=max_tokens,
                     embedding_input=embedding_input,
                     audio_base64=audio_base64,
+                    extra_params=extra_params,
                     interrupt_flag=interrupt_flag,
                 )
                 return response, model_info

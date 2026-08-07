@@ -352,10 +352,10 @@ class BindManager:
         """
         import re
 
-        # 转为小写，并清除所有空白字符(含空格换行)以及常见的零宽不可见字符(应对Bilibili防拦截注入)
+        # 转为小写，并清除空白与常见零宽不可见字符。
         auth_code_clean = re.sub(r"[\s\u200b\u200c\u200d\u200e\u200f\ufeff]+", "", auth_code.lower())
 
-        if not re.match(r"^(qq|bilibili|discord)-\d{5}$", auth_code_clean):
+        if not re.fullmatch(r"[a-z0-9_.:-]+-\d{5}", auth_code_clean):
             return False, ""
 
         bind_info = BindRequest.get_or_none(BindRequest.auth_code == auth_code_clean)

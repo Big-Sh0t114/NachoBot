@@ -18,7 +18,7 @@ from .connection_interface import (
     ClientConnectionInterface,
     ServerConnectionInterface,
 )
-from .log_utils import configure_uvicorn_logging, get_logger, get_uvicorn_log_config
+from .log_utils import configure_uvicorn_logging, get_logger, get_uvicorn_log_config, log_safe
 
 logger = get_logger()
 
@@ -97,11 +97,12 @@ class WebSocketServer(BaseConnection, ServerConnectionInterface):
             await websocket.accept()
 
             platform = websocket.headers.get("platform", "unknown")
+            safe_platform = log_safe(platform)
 
             if self.enable_token:
                 auth_header = websocket.headers.get("authorization")
                 if not auth_header or not await self.verify_token(auth_header):
-                    logger.warning(f"拒绝平台 {platform} 的连接请求: 令牌无效")
+                    logger.warning("拒绝平台 %s 的连接请求: 令牌无效", safe_platform)
                     await websocket.close(code=1008, reason="无效的令牌")
                     return
 
@@ -110,18 +111,18 @@ class WebSocketServer(BaseConnection, ServerConnectionInterface):
             if platform != "unknown":
                 previous = self.platform_websockets.get(platform)
                 if previous and previous is not websocket:
-                    logger.warning(f"检测到平台 {platform} 已有连接，正在关闭旧连接以接受新连接")
+                    logger.warning("检测到平台 %s 已有连接，正在关闭旧连接以接受新连接", safe_platform)
                     try:
                         await previous.close(code=1000, reason="新的连接已建立")
                     except Exception:
                         logger.debug(
-                            f"关闭平台 {platform} 旧连接时出现异常", exc_info=True
+                            "关闭平台 %s 旧连接时出现异常", safe_platform, exc_info=True
                         )
                     finally:
                         self._remove_websocket(previous, platform, force=True)
 
                 self.platform_websockets[platform] = websocket
-                logger.info(f"平台 {platform} WebSocket 已连接")
+                logger.info("平台 %s WebSocket 已连接", safe_platform)
             else:
                 logger.info("收到未标记平台的 WebSocket 连接")
 
@@ -130,7 +131,7 @@ class WebSocketServer(BaseConnection, ServerConnectionInterface):
                     try:
                         message = await websocket.receive_json()
                     except ValueError as exc:
-                        logger.warning(f"平台 {platform} 收到无法解析的 JSON: {exc}")
+                        logger.warning("平台 %s 收到无法解析的 JSON: %s", safe_platform, log_safe(exc))
                         continue
 
                     if platform != "unknown":
@@ -141,19 +142,19 @@ class WebSocketServer(BaseConnection, ServerConnectionInterface):
                     task = asyncio.create_task(self.process_message(message))
                     self.add_background_task(task)
             except WebSocketDisconnect:
-                logger.info(f"平台 {platform} WebSocket 已断开")
+                logger.info("平台 %s WebSocket 已断开", safe_platform)
                 self._remove_websocket(websocket, platform, force=True)
             except ConnectionResetError:
-                logger.warning(f"平台 {platform} WebSocket 连接被重置")
+                logger.warning("平台 %s WebSocket 连接被重置", safe_platform)
                 self._remove_websocket(websocket, platform, force=True)
             except asyncio.CancelledError:
-                logger.debug(f"平台 {platform} WebSocket 任务被取消")
+                logger.debug("平台 %s WebSocket 任务被取消", safe_platform)
                 self._remove_websocket(websocket, platform, force=True)
             except Exception as exc:  # pylint: disable=broad-except
                 if _looks_like_connection_error(exc):
-                    logger.debug(f"平台 {platform} WebSocket 连接关闭: {exc}")
+                    logger.debug("平台 %s WebSocket 连接关闭: %s", safe_platform, log_safe(exc))
                 else:
-                    logger.exception(f"平台 {platform} WebSocket 处理异常")
+                    logger.exception("平台 %s WebSocket 处理异常", safe_platform)
                 self._remove_websocket(websocket, platform, force=True)
 
     def _remove_websocket(
@@ -471,7 +472,9 @@ class WebSocketClient(BaseConnection, ClientConnectionInterface):
             ws_kwargs = {
                 "heartbeat": self.heartbeat_interval,
                 "autoping": True,
-                "compress": 15,
+                # Avoid permessage-deflate on the internal link: Uvicorn
+                # WebSockets SansIO can otherwise emit unnegotiated RSV1 frames.
+                "compress": 0,
                 "autoclose": True,
                 "max_msg_size": self.max_message_size,
             }
@@ -569,8 +572,14 @@ class WebSocketClient(BaseConnection, ClientConnectionInterface):
                     elif msg.type == WSMsgType.PONG:
                         logger.debug("收到服务器 PONG 响应")
                     elif msg.type == WSMsgType.ERROR:
-                        logger.error(f"WebSocket 连接错误: {self.ws.exception()}")
+                        error = msg.data or self.ws.exception()
+                        error_type = type(error).__name__ if error else "UnknownError"
+                        logger.error(
+                            f"WebSocket protocol error: {error_type}: {error} "
+                            f"(close_code={self.ws.close_code}, extra={msg.extra!r})"
+                        )
                         self.ws_connected = False
+                        await self._cleanup_connection()
                         break
                     elif msg.type == WSMsgType.CLOSED:
                         logger.warning("WebSocket 连接已关闭")
