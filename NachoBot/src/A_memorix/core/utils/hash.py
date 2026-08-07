@@ -23,7 +23,8 @@ def compute_hash(text: str, hash_type: str = "sha256") -> str:
     if hash_type == "sha256":
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
     elif hash_type == "md5":
-        return hashlib.md5(text.encode("utf-8")).hexdigest()
+        # codeql[py/weak-sensitive-data-hashing]
+        return hashlib.md5(text.encode("utf-8"), usedforsecurity=False).hexdigest()
     else:
         raise ValueError(f"不支持的哈希算法: {hash_type}")
 

@@ -1,6 +1,5 @@
 import asyncio
 import json
-from loguru import logger
 import time
 import uuid
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -14,16 +13,23 @@ from ncnk_message import (
 )
 
 from bili_src.core.config import PrivateSessionConfig
-from bili_src.core.utils import _decode_image_base64, _normalize_text, _strip_emoji, _URL_RE
+from bili_src.core.utils import (
+    _decode_image_base64,
+    _normalize_text,
+    _strip_emoji,
+    _URL_RE,
+)
+from bili_src.visual_policy import build_private_visual_policy
 
 ACCEPT_FORMAT_PRIVATE = ["text", "image", "emoji", "reply", "command"]
+
 
 class PrivateHandler:
     def __init__(self, config: Any, logger, adapter_ref: Any):
         self.config = config
         self.logger = logger
         self.adapter = adapter_ref
-        
+
         self.dm_last_seqno: Dict[Tuple[int, int], int] = {}
         self.last_private_session: Optional[PrivateSessionConfig] = None
         self.private_session_by_group: Dict[str, PrivateSessionConfig] = {}
@@ -197,6 +203,10 @@ class PrivateHandler:
             }
             if image_url:
                 additional_config["image_url"] = image_url
+            if segment.type == "image":
+                additional_config["visual_policy"] = build_private_visual_policy(
+                    self.config.private_visual.image
+                )
             if self.config.private_force_mention:
                 additional_config["is_mentioned"] = 1.0
             message_info = BaseMessageInfo(
@@ -472,11 +482,13 @@ class PrivateHandler:
         self, args: Dict[str, Any], message: Optional[MessageBase]
     ) -> None:
         raw_msg = str(args.get("message") or "")
-        text, emotion, action = self.adapter.live2d_manager.extract_json_emotion_from_text(raw_msg)
+        text, emotion, action = (
+            self.adapter.live2d_manager.extract_json_emotion_from_text(raw_msg)
+        )
         text = _strip_emoji(text).strip()
-        
+
         self.adapter.live2d_manager.execute_extracted_live2d_action(emotion, action)
-            
+
         if not text:
             return
         talker_id = args.get("talker_id")

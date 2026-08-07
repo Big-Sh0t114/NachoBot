@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Dict, Literal
 
 from src.config.config_base import ConfigBase
 
@@ -12,6 +12,55 @@ from src.config.config_base import ConfigBase
 """
 
 ADAPTER_PLATFORM = "qq"
+QQ_CORE_VISUAL_PROFILE = "qq-core-v1"
+
+
+@dataclass
+class VisualTaskConfig(ConfigBase):
+    temperature: float = 0.2
+    max_tokens: int = 220
+    extra_params: Dict[str, Any] = field(default_factory=dict)
+
+    def to_message_policy(self) -> Dict[str, Any]:
+        return {
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "extra_params": dict(self.extra_params),
+        }
+
+
+@dataclass
+class VisualConfig(ConfigBase):
+    image: VisualTaskConfig = field(
+        default_factory=lambda: VisualTaskConfig(
+            temperature=0.1,
+            max_tokens=220,
+            extra_params={"enable_thinking": False},
+        )
+    )
+    emoji: VisualTaskConfig = field(
+        default_factory=lambda: VisualTaskConfig(
+            temperature=0.2,
+            max_tokens=180,
+            extra_params={"enable_thinking": False},
+        )
+    )
+    video: VisualTaskConfig = field(
+        default_factory=lambda: VisualTaskConfig(
+            temperature=0.1,
+            max_tokens=280,
+            extra_params={"enable_thinking": False},
+        )
+    )
+
+    def to_message_policy(self) -> Dict[str, Any]:
+        return {
+            "version": 1,
+            "profile": QQ_CORE_VISUAL_PROFILE,
+            "image": self.image.to_message_policy(),
+            "emoji": self.emoji.to_message_policy(),
+            "video": self.video.to_message_policy(),
+        }
 
 
 @dataclass
@@ -45,6 +94,7 @@ class NachobotServerConfig(ConfigBase):
 
     port: int = 8000
     """NachoCore的端口号"""
+
 
 @dataclass
 class ChatConfig(ConfigBase):

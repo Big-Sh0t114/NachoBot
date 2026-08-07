@@ -249,5 +249,5 @@ class AudioOutput:
         except FileNotFoundError:
             self.logger.error(f"WAV file not found: {wav_path}")
         except Exception as e:
-            self.logger.error(f"Error playing WAV: {e}", exc_info=True)
+            self.logger.exception(f"Error playing WAV: {e}")
 

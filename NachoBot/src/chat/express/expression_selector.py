@@ -243,7 +243,7 @@ class ExpressionSelector:
             else:
                 components = [platform, str(id_str), "private"]
             key = "_".join(components)
-            return hashlib.md5(key.encode()).hexdigest()
+            return hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()
         except Exception:
             return None
 

@@ -1,9 +1,12 @@
 import base64
 import logging
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from static_ffmpeg import run
 
 from ncnk_message import Seg
 from config import AdapterConfig
@@ -99,17 +102,15 @@ def contains_reply_segment(seg_data: Seg) -> bool:
 
 
 def resolve_ffmpeg_exe(config: AdapterConfig, logger: logging.Logger) -> Optional[str]:
+    """解析 FFmpeg 路径，显式覆盖优先，随后使用 static-ffmpeg。"""
     candidates = []
     if config.ffmpeg_path:
         candidates.append(config.ffmpeg_path)
     env_path = os.environ.get("FFMPEG_PATH")
     if env_path:
         candidates.append(env_path)
-    candidates.append("ffmpeg")
 
     for candidate in candidates:
-        if candidate == "ffmpeg":
-            return candidate
         candidate_path = Path(candidate)
         if candidate_path.exists():
             if candidate_path.is_dir():
@@ -125,9 +126,32 @@ def resolve_ffmpeg_exe(config: AdapterConfig, logger: logging.Logger) -> Optiona
                         return str(exe_path)
             else:
                 return str(candidate_path)
+
     if config.ffmpeg_path:
         logger.warning(f"ffmpeg path not found: {config.ffmpeg_path}")
-    return "ffmpeg"
+
+    try:
+        configured_dir = os.environ.get("NACHOBOT_FFMPEG_DIR", "").strip()
+        shared_root = (
+            Path(configured_dir).expanduser()
+            if configured_dir
+            else Path(__file__).resolve().parent.parent / ".runtime" / "ffmpeg"
+        )
+        platform_dir = shared_root.resolve() / run.get_platform_key()
+        platform_dir.mkdir(parents=True, exist_ok=True)
+        ffmpeg_path, _ = run.get_or_fetch_platform_executables_else_raise(
+            download_dir=str(platform_dir)
+        )
+        return ffmpeg_path
+    except Exception as exc:
+        logger.warning(f"static-ffmpeg 获取 ffmpeg 失败，尝试系统 PATH: {exc}")
+
+    system_ffmpeg = shutil.which("ffmpeg")
+    if system_ffmpeg:
+        return system_ffmpeg
+
+    logger.warning("ffmpeg not found")
+    return None
 
 
 def voice_to_record_file(
@@ -182,6 +206,10 @@ def convert_to_opus_data_url(
             logger.warning(f"Failed to decode SILK using rsilk: {exc}")
 
     ffmpeg_exe = resolve_ffmpeg_exe(config, logger)
+    if not ffmpeg_exe:
+        logger.warning("ffmpeg not found, cannot convert to opus/ogg")
+        return None
+
     cmd = [
         ffmpeg_exe,
         "-hide_banner",

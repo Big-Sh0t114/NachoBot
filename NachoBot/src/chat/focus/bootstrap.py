@@ -206,6 +206,7 @@ class FocusBootstrap:
                     allow_import=member_config.allow_import,
                     allow_export=member_config.allow_export,
                     platform=str(stream.platform or member_config.platform),
+                    planner_bypass=member_config.planner_bypass,
                 )
             )
             aliases[member_config.key] = chat_id
@@ -215,6 +216,7 @@ class FocusBootstrap:
                     "kind": expected_kind.value,
                     "allow_import": bool(member_config.allow_import),
                     "allow_export": bool(member_config.allow_export),
+                    "planner_bypass": bool(member_config.planner_bypass),
                 }
             )
 

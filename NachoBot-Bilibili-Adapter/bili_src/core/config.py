@@ -3,7 +3,7 @@
 import json
 from loguru import logger
 import requests
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -14,6 +14,47 @@ except ImportError:
         import tomli as toml
     except ImportError:
         import toml  # type: ignore
+
+
+
+
+@dataclass(frozen=True)
+class MessageVisualTaskConfig:
+    temperature: float = 0.1
+    max_tokens: int = 220
+    extra_params: Dict[str, Any] = field(
+        default_factory=lambda: {"enable_thinking": False}
+    )
+
+
+
+@dataclass(frozen=True)
+class MessageVisualConfig:
+    image: MessageVisualTaskConfig = field(default_factory=MessageVisualTaskConfig)
+
+
+
+@dataclass(frozen=True)
+class ScreenVlmModelConfig:
+    """Per-model inference policy owned by the screen-monitor use case."""
+
+    name: str
+    max_tokens: int = 160
+    temperature: float = 0.1
+    timeout: Optional[int] = None
+    max_retry: Optional[int] = None
+    retry_interval: Optional[float] = None
+    extra_params: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ScreenVlmConfig:
+    """Bilibili screen-analysis prompt, preprocessing and model policy."""
+
+    models: List[ScreenVlmModelConfig] = field(default_factory=list)
+    max_image_dimension: int = 960
+    jpeg_quality: int = 78
+    message_max_chars: int = 300
 
 
 @dataclass
@@ -72,6 +113,7 @@ class AdapterConfig:
     screen_capture_active_window: bool
     screen_capture_interval_seconds: int
     screen_capture_excluded_exes: List[str]
+    screen_vlm: ScreenVlmConfig
     live_resolve_user_nickname: bool
     enable_reply_notice: bool
     comment_resolve_user_nickname: bool
@@ -86,6 +128,7 @@ class AdapterConfig:
     private_auto_session_refresh_seconds: int
     private_auto_session_size: int
     private_force_mention: bool
+    private_visual: MessageVisualConfig
     disable_video_sender_plugin: bool
     disable_command_trigger: bool
     response_filter_enable: bool
@@ -120,6 +163,7 @@ class VlmModelConfig:
     client_type: str
     max_retry: int = 2
     retry_interval: float = 5.0
+    extra_params: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -212,9 +256,7 @@ def _proxy_dicts_to_urls(proxy_list: List[Dict[str, str]]) -> List[str]:
     return urls
 
 
-def _resolve_asr_model_config(
-    path: Path, logger
-) -> Optional[AsrModelConfig]:
+def _resolve_asr_model_config(path: Path, logger) -> Optional[AsrModelConfig]:
     if not path.exists():
         logger.warning(f"Model config not found at {path}")
         return None
@@ -275,6 +317,91 @@ def _resolve_asr_model_config(
         return None
 
 
+def _parse_screen_vlm_config(screen_monitor: Dict[str, Any]) -> ScreenVlmConfig:
+    """Parse the screen-monitor-owned VLM policy from adapter config."""
+    raw = screen_monitor.get("vlm", {}) or {}
+    if not isinstance(raw, dict):
+        raw = {}
+
+    default_max_tokens = max(1, int(raw.get("max_tokens", 160)))
+    default_temperature = float(raw.get("temperature", 0.1))
+    default_timeout = raw.get("timeout")
+    default_max_retry = raw.get("max_retry")
+    default_retry_interval = raw.get("retry_interval")
+    common_extra_params = raw.get("extra_params", {}) or {}
+    if not isinstance(common_extra_params, dict):
+        common_extra_params = {}
+
+    models_raw = raw.get("models") or raw.get("model_list") or []
+    if isinstance(models_raw, (str, dict)):
+        models_raw = [models_raw]
+
+    models: List[ScreenVlmModelConfig] = []
+    if isinstance(models_raw, list):
+        for item in models_raw:
+            if isinstance(item, str):
+                item = {"name": item}
+            if not isinstance(item, dict):
+                continue
+
+            name = str(item.get("name") or item.get("model") or "").strip()
+            if not name:
+                continue
+
+            item_extra_params = item.get("extra_params", {}) or {}
+            if not isinstance(item_extra_params, dict):
+                item_extra_params = {}
+            extra_params = dict(common_extra_params)
+            extra_params.update(item_extra_params)
+
+            timeout_raw = item.get("timeout", default_timeout)
+            max_retry_raw = item.get("max_retry", default_max_retry)
+            retry_interval_raw = item.get(
+                "retry_interval",
+                default_retry_interval,
+            )
+            models.append(
+                ScreenVlmModelConfig(
+                    name=name,
+                    max_tokens=max(
+                        1,
+                        int(item.get("max_tokens", default_max_tokens)),
+                    ),
+                    temperature=float(item.get("temperature", default_temperature)),
+                    timeout=(
+                        max(1, int(timeout_raw)) if timeout_raw is not None else None
+                    ),
+                    max_retry=(
+                        max(1, int(max_retry_raw))
+                        if max_retry_raw is not None
+                        else None
+                    ),
+                    retry_interval=(
+                        max(0.0, float(retry_interval_raw))
+                        if retry_interval_raw is not None
+                        else None
+                    ),
+                    extra_params=extra_params,
+                )
+            )
+
+    return ScreenVlmConfig(
+        models=models,
+        max_image_dimension=max(
+            256,
+            int(raw.get("max_image_dimension", 960)),
+        ),
+        jpeg_quality=min(
+            100,
+            max(1, int(raw.get("jpeg_quality", 78))),
+        ),
+        message_max_chars=max(
+            0,
+            int(raw.get("message_max_chars", 300)),
+        ),
+    )
+
+
 def load_config(path: Path) -> AdapterConfig:
     data = _load_toml(path)
     nachobot = data.get("nachobot_server", {})
@@ -282,11 +409,33 @@ def load_config(path: Path) -> AdapterConfig:
     live = data.get("live", {})
     comment = data.get("comment", {})
     private_message = data.get("private_message", {})
+    private_visual_raw = private_message.get("visual", {}) or {}
+    if not isinstance(private_visual_raw, dict):
+        private_visual_raw = {}
+    private_visual_image_raw = private_visual_raw.get("image", {}) or {}
+    if not isinstance(private_visual_image_raw, dict):
+        private_visual_image_raw = {}
+    private_visual_extra_params = (
+        private_visual_image_raw.get("extra_params", {"enable_thinking": False}) or {}
+    )
+    if not isinstance(private_visual_extra_params, dict):
+        private_visual_extra_params = {}
+    private_visual = MessageVisualConfig(
+        image=MessageVisualTaskConfig(
+            temperature=float(private_visual_image_raw.get("temperature", 0.1)),
+            max_tokens=max(
+                1,
+                int(private_visual_image_raw.get("max_tokens", 220)),
+            ),
+            extra_params=dict(private_visual_extra_params),
+        ),
+    )
     compat = data.get("compat", {})
     response_filter = data.get("response_filter", {})
     debug = data.get("debug", {})
     mic_asr = data.get("mic_asr") or {}
     screen_monitor = live.get("screen_monitor", {}) or {}
+    screen_vlm = _parse_screen_vlm_config(screen_monitor)
     idle_tts = live.get("idle_tts", {})
     idle_tts_texts = []
     idle_tts_file = idle_tts.get("file", "idle_texts.json")
@@ -296,13 +445,16 @@ def load_config(path: Path) -> AdapterConfig:
         if file_path.exists():
             try:
                 import json
+
                 with open(file_path, "r", encoding="utf-8") as f:
                     if file_path.suffix == ".json":
                         idle_tts_data = json.load(f)
                         if isinstance(idle_tts_data, list):
                             for item in idle_tts_data:
                                 if isinstance(item, dict):
-                                    idle_tts_texts.append(json.dumps(item, ensure_ascii=False))
+                                    idle_tts_texts.append(
+                                        json.dumps(item, ensure_ascii=False)
+                                    )
                                 else:
                                     idle_tts_texts.append(str(item).strip())
                     else:
@@ -310,7 +462,7 @@ def load_config(path: Path) -> AdapterConfig:
                             line = line.strip()
                             if line and not line.startswith("#"):
                                 idle_tts_texts.append(line)
-            except Exception as e:
+            except Exception:
                 pass
 
     idle_tts_texts_raw = idle_tts.get("texts", [])
@@ -345,11 +497,6 @@ def load_config(path: Path) -> AdapterConfig:
         auto_session_types = [int(auto_session_types_raw)]
     if not auto_session_types:
         auto_session_types = [4]
-
-    auto_session_size = int(private_message.get("auto_session_size", 100))
-    auto_session_refresh_seconds = int(
-        private_message.get("auto_session_refresh_seconds", 60)
-    )
 
     mention_keywords_raw = live.get("mention_keywords", [])
     if isinstance(mention_keywords_raw, list):
@@ -441,14 +588,10 @@ def load_config(path: Path) -> AdapterConfig:
     capture_interval_seconds = max(
         1, int(screen_monitor.get("capture_interval_seconds", 30))
     )
-    excluded_exes_raw = screen_monitor.get(
-        "excluded_exes", ["obs64.exe", "obs32.exe"]
-    )
+    excluded_exes_raw = screen_monitor.get("excluded_exes", ["obs64.exe", "obs32.exe"])
     if isinstance(excluded_exes_raw, list):
         capture_excluded_exes = [
-            str(value).strip()
-            for value in excluded_exes_raw
-            if str(value).strip()
+            str(value).strip() for value in excluded_exes_raw if str(value).strip()
         ]
     elif excluded_exes_raw is None:
         capture_excluded_exes = []
@@ -512,8 +655,7 @@ def load_config(path: Path) -> AdapterConfig:
         live_log_danmu=bool(live.get("log_danmu", False)),
         live_live2d_enable=bool(live.get("enable_live2D", False)),
         live_live2d_url=str(
-            live.get("live2d_url", "ws://127.0.0.1:8766")
-            or "ws://127.0.0.1:8766"
+            live.get("live2d_url", "ws://127.0.0.1:8766") or "ws://127.0.0.1:8766"
         ),
         live_live2d_token=str(live.get("live2d_token", "") or ""),
         live_live2d_reconnect_seconds=max(
@@ -547,6 +689,7 @@ def load_config(path: Path) -> AdapterConfig:
         screen_capture_active_window=capture_active_window,
         screen_capture_interval_seconds=capture_interval_seconds,
         screen_capture_excluded_exes=capture_excluded_exes,
+        screen_vlm=screen_vlm,
         live_resolve_user_nickname=bool(live.get("resolve_user_nickname", False)),
         enable_reply_notice=bool(comment.get("enable_reply_notice", True)),
         comment_poll_interval=int(comment.get("poll_interval_seconds", 20)),
@@ -563,6 +706,7 @@ def load_config(path: Path) -> AdapterConfig:
         ),
         private_auto_session_size=int(private_message.get("auto_session_size", 100)),
         private_force_mention=bool(private_message.get("force_mention", True)),
+        private_visual=private_visual,
         disable_video_sender_plugin=bool(
             compat.get("disable_video_sender_plugin", False)
         ),
@@ -586,13 +730,9 @@ def load_config(path: Path) -> AdapterConfig:
 
 def setup_logging(level: str = "INFO"):
     import sys
+
     logger.remove()
     logger.add(sys.stderr, level=level.upper())
-    return logger
-    logging.basicConfig(
-        level=getattr(logging, level.upper(), logging.INFO),
-        format="%(asctime)s [%(levelname)s] %(message)s",
-    )
     return logger
 
 
@@ -600,10 +740,10 @@ def _resolve_single_vlm_model(
     model_name: str,
     models: list,
     providers: list,
-    vlm_config: dict,
+    request_config: ScreenVlmModelConfig,
     logger,
 ) -> Optional[VlmModelConfig]:
-    """Resolve a single model name to a VlmModelConfig. Returns None on failure."""
+    """Join an adapter-owned request policy with shared connection metadata."""
     selected_model = None
     for item in models:
         if str(item.get("name") or "") == model_name:
@@ -615,7 +755,7 @@ def _resolve_single_vlm_model(
                 selected_model = item
                 break
     if selected_model is None:
-        logger.warning("VLM model not found in model_config: %s", model_name)
+        logger.warning("VLM model not found in model_config: {}", model_name)
         return None
     model_identifier = str(selected_model.get("model_identifier") or model_name)
     provider_name = str(selected_model.get("api_provider") or "")
@@ -625,65 +765,130 @@ def _resolve_single_vlm_model(
             provider = item
             break
     if provider is None:
-        logger.warning("VLM provider not found: %s", provider_name)
+        logger.warning("VLM provider not found: {}", provider_name)
         return None
     base_url = str(provider.get("base_url") or "")
     if not base_url:
-        logger.warning("VLM provider base_url empty for %s", provider_name)
+        logger.warning("VLM provider base_url empty for {}", provider_name)
         return None
     api_key = str(provider.get("api_key") or "")
     client_type = str(provider.get("client_type") or "openai")
-    timeout = int(provider.get("timeout") or 30)
-    max_retry = int(provider.get("max_retry") or 2)
-    retry_interval = float(provider.get("retry_interval") or 5.0)
-    max_tokens = int(vlm_config.get("max_tokens") or 800)
-    temperature = float(vlm_config.get("temperature") or 0.2)
+    timeout = (
+        request_config.timeout
+        if request_config.timeout is not None
+        else int(provider.get("timeout") or 30)
+    )
+    max_retry = (
+        request_config.max_retry
+        if request_config.max_retry is not None
+        else int(provider.get("max_retry") or 2)
+    )
+    retry_interval = (
+        request_config.retry_interval
+        if request_config.retry_interval is not None
+        else float(provider.get("retry_interval") or 5.0)
+    )
+    model_extra_params = selected_model.get("extra_params", {}) or {}
+    if not isinstance(model_extra_params, dict):
+        model_extra_params = {}
+    extra_params = dict(model_extra_params)
+    extra_params.update(request_config.extra_params)
     return VlmModelConfig(
         base_url=base_url,
         api_key=api_key,
         model=model_identifier,
-        max_tokens=max_tokens,
+        max_tokens=request_config.max_tokens,
         timeout=timeout,
-        temperature=temperature,
+        temperature=request_config.temperature,
         client_type=client_type,
         max_retry=max_retry,
         retry_interval=retry_interval,
+        extra_params=extra_params,
     )
 
 
 def _resolve_vlm_model_config_list(
-    model_config_path: Path, logger
+    model_config_path: Path,
+    logger,
+    screen_vlm: Optional[ScreenVlmConfig] = None,
 ) -> List[VlmModelConfig]:
-    """Resolve ALL models in bilibili_vlm.model_list to a list of VlmModelConfig."""
+    """Resolve adapter-selected models against the shared model registry.
+
+    ``model_config.toml`` remains the owner of model identifiers, provider URLs
+    and credentials. Prompt and inference policy come from the Bilibili
+    adapter's ``live.screen_monitor.vlm`` section.
+    """
     if not model_config_path.exists():
-        logger.warning("Model config not found: %s", model_config_path)
+        logger.warning("Model config not found: {}", model_config_path)
         return []
     try:
         data = _load_toml(model_config_path)
     except Exception as exc:
-        logger.warning("Failed to load model config: %s", exc)
+        logger.warning("Failed to load model config: {}", exc)
         return []
-    task_config = data.get("model_task_config", {}) or {}
-    vlm_config = task_config.get("bilibili_vlm") or task_config.get("vlm", {}) or {}
-    model_list = vlm_config.get("model_list", []) or []
-    if not model_list:
-        logger.warning("model_task_config.vlm.model_list is empty")
-        return []
+
+    request_configs = list(screen_vlm.models) if screen_vlm else []
+    if not request_configs:
+        # One-release compatibility path for existing installations. New
+        # configurations must keep this policy in the consuming adapter.
+        task_config = data.get("model_task_config", {}) or {}
+        legacy_vlm = (
+            task_config.get("realtime_vlm")
+            or task_config.get("bilibili_vlm")
+            or task_config.get("vlm", {})
+            or {}
+        )
+        legacy_model_list = legacy_vlm.get("model_list", []) or []
+        if not legacy_model_list:
+            logger.warning(
+                "live.screen_monitor.vlm.models is empty; screen VLM disabled"
+            )
+            return []
+        logger.warning(
+            "Using deprecated core VLM task settings; move them to "
+            "[live.screen_monitor.vlm] in the Bilibili adapter"
+        )
+        legacy_max_tokens = max(1, int(legacy_vlm.get("max_tokens", 160)))
+        legacy_temperature = float(legacy_vlm.get("temperature", 0.1))
+        request_configs = [
+            ScreenVlmModelConfig(
+                name=str(name),
+                max_tokens=legacy_max_tokens,
+                temperature=legacy_temperature,
+            )
+            for name in legacy_model_list
+        ]
+
     models = data.get("models", []) or []
     providers = data.get("api_providers", []) or []
     configs: List[VlmModelConfig] = []
-    for name in model_list:
-        cfg = _resolve_single_vlm_model(str(name), models, providers, vlm_config, logger)
+    for request_config in request_configs:
+        cfg = _resolve_single_vlm_model(
+            request_config.name,
+            models,
+            providers,
+            request_config,
+            logger,
+        )
         if cfg:
             configs.append(cfg)
         else:
-            logger.warning("Skipping unresolvable VLM model: %s", name)
+            logger.warning(
+                "Skipping unresolvable VLM model: {}",
+                request_config.name,
+            )
     return configs
 
 
 def _resolve_vlm_model_config(
-    model_config_path: Path, logger
+    model_config_path: Path,
+    logger,
+    screen_vlm: Optional[ScreenVlmConfig] = None,
 ) -> Optional[VlmModelConfig]:
     """Backward-compatible wrapper: returns the first resolved VLM config."""
-    configs = _resolve_vlm_model_config_list(model_config_path, logger)
+    configs = _resolve_vlm_model_config_list(
+        model_config_path,
+        logger,
+        screen_vlm,
+    )
     return configs[0] if configs else None

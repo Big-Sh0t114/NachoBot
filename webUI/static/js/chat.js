@@ -7,10 +7,10 @@
  * Response: { conversation_id?: string, message?: { role?: string, content: string }, reply?: string }
  */
 const ChatModule = (() => {
+    const { createSession, createTTS, escapeText, formatContent, formatTime, makeTitle } = window.ChatSupport;
+    const { setRandomWelcomeSubtitle } = window.EasterEggSystem;
     const STORAGE_KEY = 'nachobot_chat_sessions_v1';
     const SIDEBAR_STATE_KEY = 'nachobot_sidebar_collapsed_v1';
-    const USER_NAME_STORAGE_KEY = 'nachobot_chat_user_name_v1';
-    const BOT_AVATAR_STORAGE_KEY = 'nachobot_chat_bot_avatar_v1';
     const DEFAULT_USER_NAME = 'WebUI';
     const API_ENDPOINT = '/api/chat/message';
     const DELETE_CONVERSATION_ENDPOINT = '/api/chat/conversations';
@@ -38,52 +38,24 @@ const ChatModule = (() => {
         '你的一言，我的一切',
 
     ];
-    const WELCOME_EASTER_EGGS = [
-        { type: 'editable', text: 'Tip：你可以修改这条Tip', chance: 0.01 },
-        { type: 'evasive', text: '你跑不过我你信吗', chance: 0.01 },
-        { type: 'invisible', text: '你知道的太多了', chance: 0.01 },
-        { type: 'gradient', text: 'OMEGAAAA TIPPSSSS!!!', chance: 0.005 },
-    ];
 
     let initialized = false;
     let busy = false;
     let sessions = [];
     let activeSessionId = null;
     let historyQuery = '';
-    let userName = '';
-    let botAvatarDataUrl = '';
-    let namePromptOpen = false;
     let liveSocket = null;
     let liveConversationId = null;
     let liveReconnectTimer = null;
-    let ttsReady = false;
     let ttsStatusTimer = null;
-    let ttsLoadingMessageId = '';
-    let activeSpeechMessageId = '';
-    let activeSpeechAudio = null;
-    let activeSpeechUrl = '';
+    let profile = null;
+    let ttsController = null;
+    let modalOpen = false;
     let coreRunning = false;
     let coreToggleBusy = false;
     let coreStatusTimer = null;
     let coreStatusRequestSerial = 0;
     let els = {};
-
-    function createId() {
-        if (window.crypto && typeof window.crypto.randomUUID === 'function') {
-            return window.crypto.randomUUID();
-        }
-        return `chat-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    }
-
-    function createSession(title = '新对话') {
-        return {
-            id: createId(),
-            title,
-            createdAt: Date.now(),
-            updatedAt: Date.now(),
-            messages: [],
-        };
-    }
 
     function init() {
         if (initialized) return;
@@ -112,27 +84,42 @@ const ChatModule = (() => {
 
         if (!els.messages || !els.form || !els.input) return;
 
+        profile = window.ChatProfile.create({
+            getInput: () => els.input,
+            isModalOpen: () => modalOpen,
+            render: renderAll,
+            setModalOpen: value => { modalOpen = Boolean(value); },
+            escapeText,
+            toast,
+        });
+        ttsController = createTTS({
+            getActiveSession,
+            getMessagesElement: () => els.messages,
+            escapeText,
+            apiGet,
+            toast,
+        });
+
         loadSessions();
-        loadUserName();
-        loadBotAvatar();
+        profile.load();
         restoreSidebarState();
-        setRandomWelcomeSubtitle();
+        setRandomWelcomeSubtitle(els.welcomeSubtitle, WELCOME_SUBTITLES);
         bindEvents();
         renderAll();
         connectLiveStream(activeSessionId);
         updateBackendStatus();
-        updateTTSStatus();
+        ttsController.updateStatus();
         coreStatusTimer = window.setInterval(updateBackendStatus, 2_000);
-        ttsStatusTimer = window.setInterval(updateTTSStatus, 15_000);
+        ttsStatusTimer = window.setInterval(() => ttsController.updateStatus(), 15_000);
         initialized = true;
-        scheduleFirstUseNamePrompt();
+        profile.scheduleFirstUseNamePrompt();
     }
 
     function refresh() {
         if (!initialized) init();
         renderAll();
         updateBackendStatus();
-        updateTTSStatus();
+        ttsController.updateStatus();
     }
 
     function loadSessions() {
@@ -167,328 +154,27 @@ const ChatModule = (() => {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(sessions));
     }
 
-    function loadUserName() {
-        try {
-            userName = (localStorage.getItem(USER_NAME_STORAGE_KEY) || '').trim();
-        } catch (error) {
-            console.warn('Failed to load WebUI chat user name:', error);
-            userName = '';
-        }
-    }
-
-    function loadBotAvatar() {
-        try {
-            const savedAvatar = localStorage.getItem(BOT_AVATAR_STORAGE_KEY) || '';
-            botAvatarDataUrl = savedAvatar.startsWith('data:image/') ? savedAvatar : '';
-        } catch (error) {
-            console.warn('Failed to load WebUI bot avatar:', error);
-            botAvatarDataUrl = '';
-        }
-    }
-
-    function scheduleFirstUseNamePrompt() {
-        if (userName || namePromptOpen) return;
-
-        const startupScreen = document.getElementById('startup-screen');
-        if (!startupScreen || getComputedStyle(startupScreen).display === 'none') {
-            requestAnimationFrame(showFirstUseNamePrompt);
-            return;
-        }
-
-        const observer = new MutationObserver(() => {
-            if (getComputedStyle(startupScreen).display !== 'none') return;
-            observer.disconnect();
-            showFirstUseNamePrompt();
-        });
-        observer.observe(startupScreen, { attributes: true, attributeFilter: ['style'] });
-    }
-
-    function showFirstUseNamePrompt() {
-        if (userName || namePromptOpen) return;
-
-        const overlay = document.getElementById('modal-overlay');
-        const card = document.getElementById('modal-card');
-        const title = document.getElementById('modal-title');
-        const body = document.getElementById('modal-body');
-        const footer = document.getElementById('modal-footer');
-        const closeButton = document.getElementById('modal-close');
-        if (!overlay || !card || !title || !body || !footer || !closeButton) return;
-
-        namePromptOpen = true;
-        card.classList.add('chat-name-modal');
-        title.textContent = '你希望bot怎么称呼你';
-        body.innerHTML = `
-            <div class="chat-name-prompt">
-                <p>取一个你希望bot在聊天中使用的称呼。</p>
-                <input type="text" id="chat-user-name-input" class="chat-name-input"
-                    maxlength="32" autocomplete="nickname" placeholder="输入你的名字或昵称">
-                <p class="chat-name-error" id="chat-user-name-error" aria-live="polite"></p>
-            </div>
-        `;
-        footer.innerHTML = '';
-
-        const confirmButton = document.createElement('button');
-        confirmButton.type = 'button';
-        confirmButton.className = 'btn btn-primary';
-        confirmButton.textContent = '确认';
-        footer.appendChild(confirmButton);
-
-        closeButton.style.display = 'none';
-        closeButton.onclick = null;
-        overlay.classList.remove('hidden');
-
-        const input = document.getElementById('chat-user-name-input');
-        const error = document.getElementById('chat-user-name-error');
-
-        const saveName = () => {
-            const value = input?.value.trim() || '';
-            if (!value) {
-                if (error) error.textContent = '请输入一个称呼';
-                input?.focus();
-                return;
-            }
-
-            userName = value;
-            try {
-                localStorage.setItem(USER_NAME_STORAGE_KEY, userName);
-            } catch (storageError) {
-                console.warn('Failed to save WebUI chat user name:', storageError);
-            }
-            overlay.classList.add('hidden');
-            card.classList.remove('chat-name-modal');
-            closeButton.style.removeProperty('display');
-            namePromptOpen = false;
-            toast(`之后我会称呼你为「${userName}」`, 'success');
-            els.input?.focus();
-        };
-
-        confirmButton.addEventListener('click', saveName);
-        input?.addEventListener('input', () => {
-            if (error) error.textContent = '';
-        });
-        input?.addEventListener('keydown', event => {
-            if (event.key === 'Enter' && !event.isComposing) {
-                event.preventDefault();
-                saveName();
-            }
-        });
-        requestAnimationFrame(() => input?.focus());
-    }
-
-    function showRenamePrompt() {
-        if (namePromptOpen) return;
-
-        const overlay = document.getElementById('modal-overlay');
-        const card = document.getElementById('modal-card');
-        const title = document.getElementById('modal-title');
-        const body = document.getElementById('modal-body');
-        const footer = document.getElementById('modal-footer');
-        const closeButton = document.getElementById('modal-close');
-        if (!overlay || !card || !title || !body || !footer || !closeButton) return;
-
-        const closePrompt = () => {
-            overlay.classList.add('hidden');
-            card.classList.remove('chat-name-modal');
-            closeButton.style.removeProperty('display');
-            closeButton.onclick = null;
-            overlay.onclick = null;
-            namePromptOpen = false;
-            els.input?.focus();
-        };
-
-        namePromptOpen = true;
-        card.classList.add('chat-name-modal');
-        title.textContent = '修改称呼';
-        body.innerHTML = `
-            <div class="chat-name-prompt">
-                <p>修改后，bot 会从下一条消息开始使用新的称呼。</p>
-                <input type="text" id="chat-user-name-input" class="chat-name-input"
-                    maxlength="32" autocomplete="nickname" placeholder="输入你的名字或昵称">
-                <p class="chat-name-error" id="chat-user-name-error" aria-live="polite"></p>
-            </div>
-        `;
-        footer.innerHTML = '';
-
-        const cancelButton = document.createElement('button');
-        cancelButton.type = 'button';
-        cancelButton.className = 'btn btn-ghost';
-        cancelButton.textContent = '取消';
-        cancelButton.addEventListener('click', closePrompt);
-        footer.appendChild(cancelButton);
-
-        const saveButton = document.createElement('button');
-        saveButton.type = 'button';
-        saveButton.className = 'btn btn-primary';
-        saveButton.textContent = '保存';
-        footer.appendChild(saveButton);
-
-        closeButton.style.removeProperty('display');
-        closeButton.onclick = closePrompt;
-        overlay.onclick = event => {
-            if (event.target === overlay) closePrompt();
-        };
-        overlay.classList.remove('hidden');
-
-        const input = document.getElementById('chat-user-name-input');
-        const error = document.getElementById('chat-user-name-error');
-        if (input) input.value = userName;
-
-        const saveName = () => {
-            const value = input?.value.trim() || '';
-            if (!value) {
-                if (error) error.textContent = '请输入一个称呼';
-                input?.focus();
-                return;
-            }
-
-            userName = value;
-            try {
-                localStorage.setItem(USER_NAME_STORAGE_KEY, userName);
-            } catch (storageError) {
-                console.warn('Failed to save WebUI chat user name:', storageError);
-            }
-
-            closePrompt();
-            toast(`之后我会称呼你为「${userName}」`, 'success');
-        };
-
-        saveButton.addEventListener('click', saveName);
-        input?.addEventListener('input', () => {
-            if (error) error.textContent = '';
-        });
-        input?.addEventListener('keydown', event => {
-            if (event.key === 'Enter' && !event.isComposing) {
-                event.preventDefault();
-                saveName();
-            } else if (event.key === 'Escape') {
-                event.preventDefault();
-                closePrompt();
-            }
-        });
-
-        requestAnimationFrame(() => {
-            input?.focus();
-            input?.select();
-        });
-    }
-
     function getActiveSession() {
         return sessions.find(session => session.id === activeSessionId) || sessions[0] || null;
-    }
-
-    function setRandomWelcomeSubtitle() {
-        const subtitle = els.welcomeSubtitle;
-        if (!subtitle || WELCOME_SUBTITLES.length === 0) return;
-
-        resetWelcomeSubtitle(subtitle);
-
-        const roll = Math.random();
-        let threshold = 0;
-        const easterEgg = WELCOME_EASTER_EGGS.find(item => {
-            threshold += item.chance;
-            return roll < threshold;
-        });
-
-        if (!easterEgg) {
-            const index = Math.floor(Math.random() * WELCOME_SUBTITLES.length);
-            subtitle.textContent = WELCOME_SUBTITLES[index];
-            return;
-        }
-
-        subtitle.textContent = easterEgg.text;
-
-        if (easterEgg.type === 'editable') {
-            subtitle.classList.add('is-editable-tip');
-            subtitle.contentEditable = 'true';
-            subtitle.spellcheck = false;
-            subtitle.setAttribute('role', 'textbox');
-            subtitle.setAttribute('aria-label', '可编辑 Tip');
-            subtitle.onkeydown = event => {
-                if (event.key === 'Enter') {
-                    event.preventDefault();
-                    subtitle.blur();
-                }
-            };
-            return;
-        }
-
-        if (easterEgg.type === 'invisible') {
-            subtitle.classList.add('is-invisible-tip');
-            subtitle.style.setProperty('color', 'transparent');
-            subtitle.style.setProperty('text-shadow', 'none');
-            subtitle.style.setProperty('opacity', '1');
-            subtitle.style.setProperty('visibility', 'visible');
-            subtitle.style.setProperty('user-select', 'text');
-            subtitle.style.setProperty('cursor', 'text');
-            subtitle.setAttribute('aria-label', 'invisible');
-            return;
-        }
-
-        if (easterEgg.type === 'gradient') {
-            subtitle.classList.add('is-gradient-tip');
-            document.documentElement.dataset.omegaTipActive = 'true';
-            window.dispatchEvent(new CustomEvent('nachobot:omega-tip'));
-            return;
-        }
-
-        if (easterEgg.type === 'evasive') {
-            subtitle.classList.add('is-evasive-tip');
-            subtitle.title = '关注哔哩哔哩Big_Sh0t谢谢喵';
-            subtitle.onpointerenter = () => moveEvasiveSubtitle(subtitle);
-        }
-    }
-
-    function resetWelcomeSubtitle(subtitle) {
-        delete document.documentElement.dataset.omegaTipActive;
-        subtitle.classList.remove(
-            'is-editable-tip',
-            'is-gradient-tip',
-            'is-evasive-tip',
-            'is-invisible-tip'
-        );
-        subtitle.contentEditable = 'false';
-        subtitle.removeAttribute('role');
-        subtitle.removeAttribute('aria-label');
-        subtitle.removeAttribute('title');
-        subtitle.style.removeProperty('--tip-shift-x');
-        subtitle.style.removeProperty('--tip-shift-y');
-        subtitle.style.removeProperty('color');
-        subtitle.style.removeProperty('text-shadow');
-        subtitle.style.removeProperty('opacity');
-        subtitle.style.removeProperty('visibility');
-        subtitle.style.removeProperty('user-select');
-        subtitle.style.removeProperty('cursor');
-        subtitle.onkeydown = null;
-        subtitle.onpointerenter = null;
-    }
-
-    function moveEvasiveSubtitle(subtitle) {
-        const container = subtitle.parentElement;
-        const horizontalRange = Math.max(90, Math.min(260, (container?.clientWidth || 600) * 0.28));
-        const verticalRange = 72;
-        const x = (Math.random() * 2 - 1) * horizontalRange;
-        const y = (Math.random() * 2 - 1) * verticalRange;
-        subtitle.style.setProperty('--tip-shift-x', `${x.toFixed(0)}px`);
-        subtitle.style.setProperty('--tip-shift-y', `${y.toFixed(0)}px`);
     }
 
     function bindEvents() {
         els.newChat?.addEventListener('click', startNewChat);
         els.clearChat?.addEventListener('click', clearCurrentChat);
-        els.renameButton?.addEventListener('click', showRenamePrompt);
+        els.renameButton?.addEventListener('click', () => profile.showRenamePrompt());
         els.status?.addEventListener('click', toggleCoreService);
         els.form.addEventListener('submit', handleSubmit);
 
         els.messages.addEventListener('click', event => {
             const speechButton = event.target.closest('.chat-tts-button');
             if (speechButton && els.messages.contains(speechButton)) {
-                handleSpeechButton(speechButton);
+                ttsController.handleSpeechButton(speechButton);
                 return;
             }
 
             const avatar = event.target.closest('.chat-avatar-customizable');
             if (!avatar || !els.messages.contains(avatar)) return;
-            openBotAvatarPicker();
+            profile.openBotAvatarPicker();
         });
 
         document.addEventListener('keydown', event => {
@@ -502,7 +188,7 @@ const ChatModule = (() => {
                 && !event.metaKey
             ) {
                 event.preventDefault();
-                showRenamePrompt();
+                profile.showRenamePrompt();
             }
         });
 
@@ -563,7 +249,7 @@ const ChatModule = (() => {
     }
 
     function startNewChat() {
-        stopActiveSpeech();
+        ttsController.stop();
         const session = createSession();
         sessions.unshift(session);
         activeSessionId = session.id;
@@ -580,7 +266,7 @@ const ChatModule = (() => {
         if (!session || session.messages.length === 0) return;
         if (!window.confirm('清空当前对话中的全部消息？')) return;
 
-        stopActiveSpeech();
+        ttsController.stop();
         session.messages = [];
         session.title = '新对话';
         session.updatedAt = Date.now();
@@ -655,7 +341,7 @@ const ChatModule = (() => {
     }
 
     function confirmDeleteSession(session) {
-        if (namePromptOpen) {
+        if (modalOpen) {
             toast('请先关闭当前弹窗', 'error');
             return Promise.resolve(false);
         }
@@ -674,7 +360,7 @@ const ChatModule = (() => {
         }
 
         return new Promise(resolve => {
-            namePromptOpen = true;
+            modalOpen = true;
             card.classList.add('chat-name-modal');
             title.textContent = '永久删除此对话？';
             body.innerHTML = `
@@ -695,7 +381,7 @@ const ChatModule = (() => {
                 closeButton.style.removeProperty('display');
                 closeButton.onclick = null;
                 overlay.onclick = null;
-                namePromptOpen = false;
+                modalOpen = false;
                 resolve(result);
             };
 
@@ -725,7 +411,7 @@ const ChatModule = (() => {
 
     function switchSession(id) {
         if (!sessions.some(session => session.id === id)) return;
-        stopActiveSpeech();
+        ttsController.stop();
         activeSessionId = id;
         App.switchTab('chat');
         connectLiveStream(id);
@@ -769,7 +455,7 @@ const ChatModule = (() => {
                 body: JSON.stringify({
                     conversation_id: session.id,
                     message: text,
-                    user_name: userName || DEFAULT_USER_NAME,
+                    user_name: profile.getUserName() || DEFAULT_USER_NAME,
                 }),
             });
 
@@ -814,11 +500,6 @@ const ChatModule = (() => {
             renderAll();
             els.input.focus();
         }
-    }
-
-    function makeTitle(text) {
-        const compact = text.replace(/\s+/g, ' ').trim();
-        return compact.length > 24 ? `${compact.slice(0, 24)}…` : compact;
     }
 
     function connectLiveStream(conversationId) {
@@ -948,90 +629,6 @@ const ChatModule = (() => {
         });
     }
 
-    function openBotAvatarPicker() {
-        const picker = document.createElement('input');
-        picker.type = 'file';
-        picker.accept = 'image/png,image/jpeg,image/webp,image/gif';
-        picker.hidden = true;
-
-        picker.addEventListener('change', async () => {
-            const file = picker.files?.[0];
-            picker.remove();
-            if (!file) return;
-
-            if (!file.type.startsWith('image/')) {
-                toast('请选择有效的图片文件', 'error');
-                return;
-            }
-
-            if (file.size > 12 * 1024 * 1024) {
-                toast('头像图片不能超过 12 MB', 'error');
-                return;
-            }
-
-            try {
-                botAvatarDataUrl = await createAvatarDataUrl(file);
-                localStorage.setItem(BOT_AVATAR_STORAGE_KEY, botAvatarDataUrl);
-                renderAll();
-                toast('bot 头像已更新', 'success');
-            } catch (error) {
-                console.warn('Failed to update bot avatar:', error);
-                toast('无法读取这张图片', 'error');
-            }
-        }, { once: true });
-
-        document.body.appendChild(picker);
-        picker.click();
-    }
-
-    function createAvatarDataUrl(file) {
-        return new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onerror = () => reject(reader.error || new Error('读取图片失败'));
-            reader.onload = () => {
-                const image = new Image();
-                image.onerror = () => reject(new Error('图片格式不受支持'));
-                image.onload = () => {
-                    const size = 256;
-                    const canvas = document.createElement('canvas');
-                    const context = canvas.getContext('2d');
-                    if (!context) {
-                        reject(new Error('无法创建图片画布'));
-                        return;
-                    }
-
-                    canvas.width = size;
-                    canvas.height = size;
-                    const sourceSize = Math.min(image.naturalWidth, image.naturalHeight);
-                    const sourceX = (image.naturalWidth - sourceSize) / 2;
-                    const sourceY = (image.naturalHeight - sourceSize) / 2;
-                    context.drawImage(
-                        image,
-                        sourceX,
-                        sourceY,
-                        sourceSize,
-                        sourceSize,
-                        0,
-                        0,
-                        size,
-                        size,
-                    );
-                    resolve(canvas.toDataURL('image/webp', 0.9));
-                };
-                image.src = String(reader.result || '');
-            };
-            reader.readAsDataURL(file);
-        });
-    }
-
-    function createBotAvatarMarkup() {
-        const content = botAvatarDataUrl
-            ? `<img src="${escapeText(botAvatarDataUrl)}" alt="">`
-            : 'N';
-        return `<button type="button" class="chat-avatar chat-avatar-customizable"
-            aria-label="更换 bot 头像" title="点击更换 bot 头像">${content}</button>`;
-    }
-
     function renderMessages() {
         const session = getActiveSession();
         const messages = session?.messages || [];
@@ -1039,7 +636,7 @@ const ChatModule = (() => {
 
         els.messages.querySelectorAll('.chat-message, .chat-thinking').forEach(node => node.remove());
         messages.forEach(message => els.messages.appendChild(createMessageElement(message)));
-        syncSpeakerButtons();
+        ttsController.syncButtons();
         scrollToBottom();
     }
 
@@ -1064,7 +661,7 @@ const ChatModule = (() => {
                 ` : `
                     <div class="chat-message-body">
                         <div class="chat-message-content">
-                            ${formatContent(message.content)}${createSpeakerMarkup(message)}
+                            ${formatContent(message.content)}${ttsController.createSpeakerMarkup(message)}
                         </div>
                     </div>
                 `}
@@ -1073,203 +670,15 @@ const ChatModule = (() => {
         return article;
     }
 
-    function createSpeakerMarkup(message) {
-        return `
-            <button type="button" class="chat-tts-button"
-                data-message-id="${escapeText(String(message.id || ''))}"
-                aria-label="生成并播放语音" title="TTS 服务未就绪" disabled>
-                <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M4 9v6h4l5 4V5L8 9H4z"></path>
-                    <path class="chat-tts-wave chat-tts-wave-one"
-                        d="M16 9.5a4 4 0 0 1 0 5"></path>
-                    <path class="chat-tts-wave chat-tts-wave-two"
-                        d="M18.5 7a7 7 0 0 1 0 10"></path>
-                </svg>
-            </button>
-        `;
-    }
-
-    async function handleSpeechButton(button) {
-        const messageId = button.dataset.messageId || '';
-        const session = getActiveSession();
-        const message = session?.messages.find(item => item.id === messageId);
-        if (!message || !ttsReady || ttsLoadingMessageId) return;
-
-        if (
-            activeSpeechMessageId === messageId
-            && activeSpeechAudio
-            && !activeSpeechAudio.paused
-        ) {
-            stopActiveSpeech();
-            syncSpeakerButtons();
-            return;
-        }
-
-        stopActiveSpeech();
-        ttsLoadingMessageId = messageId;
-        syncSpeakerButtons();
-
-        try {
-            const response = await fetch('/api/chat/tts', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ text: message.content }),
-            });
-
-            if (!response.ok) {
-                const detail = await response.json().catch(() => null);
-                const error = new Error(detail?.detail || `HTTP ${response.status}`);
-                error.status = response.status;
-                throw error;
-            }
-
-            const audioBlob = await response.blob();
-            if (!audioBlob.size) throw new Error('TTS 服务返回了空音频');
-
-            const audioUrl = URL.createObjectURL(audioBlob);
-            const audio = new Audio(audioUrl);
-            activeSpeechMessageId = messageId;
-            activeSpeechAudio = audio;
-            activeSpeechUrl = audioUrl;
-
-            audio.addEventListener('ended', () => {
-                stopActiveSpeech();
-                syncSpeakerButtons();
-            }, { once: true });
-            audio.addEventListener('error', () => {
-                stopActiveSpeech();
-                syncSpeakerButtons();
-                toast('语音播放失败', 'error');
-            }, { once: true });
-
-            await audio.play();
-        } catch (error) {
-            console.warn('TTS generation or playback failed:', error);
-            stopActiveSpeech();
-            if (error.status === 503) {
-                ttsReady = false;
-            }
-            toast(`语音生成失败：${error.message}`, 'error');
-        } finally {
-            ttsLoadingMessageId = '';
-            syncSpeakerButtons();
-        }
-    }
-
-    function stopActiveSpeech() {
-        if (activeSpeechAudio) {
-            activeSpeechAudio.pause();
-            activeSpeechAudio.removeAttribute('src');
-            activeSpeechAudio.load();
-        }
-        if (activeSpeechUrl) URL.revokeObjectURL(activeSpeechUrl);
-        activeSpeechAudio = null;
-        activeSpeechUrl = '';
-        activeSpeechMessageId = '';
-    }
-
-    function syncSpeakerButtons() {
-        if (!els.messages) return;
-        els.messages.querySelectorAll('.chat-tts-button').forEach(button => {
-            const messageId = button.dataset.messageId || '';
-            const isLoading = ttsLoadingMessageId === messageId;
-            const isPlaying = activeSpeechMessageId === messageId
-                && activeSpeechAudio
-                && !activeSpeechAudio.paused;
-
-            button.classList.toggle('is-loading', isLoading);
-            button.classList.toggle('is-playing', Boolean(isPlaying));
-            button.disabled = !ttsReady || Boolean(ttsLoadingMessageId);
-
-            if (!ttsReady) {
-                button.title = 'TTS 服务未就绪';
-                button.setAttribute('aria-label', 'TTS 服务未就绪');
-            } else if (isLoading) {
-                button.title = '正在生成语音';
-                button.setAttribute('aria-label', '正在生成语音');
-            } else if (isPlaying) {
-                button.title = '停止播放';
-                button.setAttribute('aria-label', '停止播放');
-                button.disabled = false;
-            } else {
-                button.title = '生成并播放语音';
-                button.setAttribute('aria-label', '生成并播放语音');
-            }
-        });
-    }
-
-    async function updateTTSStatus() {
-        try {
-            const data = await apiGet('/api/chat/tts/status');
-            ttsReady = Boolean(data.ready);
-        } catch (error) {
-            ttsReady = false;
-        }
-        syncSpeakerButtons();
-    }
-
     function renderThinking() {
         const thinking = document.createElement('div');
         thinking.className = 'chat-thinking';
         thinking.innerHTML = `
-            ${createBotAvatarMarkup()}
+            ${profile.createBotAvatarMarkup()}
             <div class="chat-thinking-dots"><span></span><span></span><span></span></div>
         `;
         els.messages.appendChild(thinking);
         scrollToBottom();
-    }
-
-    function formatContent(content) {
-        const source = String(content);
-        const fragments = [];
-        const codeFence = /```([\w-]*)\n?([\s\S]*?)```/g;
-        let cursor = 0;
-        let match;
-
-        while ((match = codeFence.exec(source)) !== null) {
-            if (match.index > cursor) {
-                fragments.push(formatTextBlocks(source.slice(cursor, match.index)));
-            }
-
-            const language = escapeText(match[1] || '代码');
-            const code = escapeText(match[2].replace(/^\n|\n$/g, ''));
-            fragments.push(
-                `<pre class="chat-code"><div class="chat-code-header"><span>${language}</span></div><code>${code}</code></pre>`
-            );
-            cursor = codeFence.lastIndex;
-        }
-
-        if (cursor < source.length) {
-            fragments.push(formatTextBlocks(source.slice(cursor)));
-        }
-
-        return fragments.join('');
-    }
-
-    function formatTextBlocks(text) {
-        return escapeText(text)
-            .split(/\n{2,}/)
-            .filter(block => block.trim())
-            .map(block => `<p>${block.replace(/\n/g, '<br>')}</p>`)
-            .join('');
-    }
-
-    function escapeText(value) {
-        return value
-            .replaceAll('&', '&amp;')
-            .replaceAll('<', '&lt;')
-            .replaceAll('>', '&gt;')
-            .replaceAll('"', '&quot;')
-            .replaceAll("'", '&#039;');
-    }
-
-    function formatTime(timestamp) {
-        const date = new Date(timestamp || Date.now());
-        const today = new Date();
-        if (date.toDateString() === today.toDateString()) {
-            return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
-        }
-        return date.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' });
     }
 
     function scrollToBottom() {
@@ -1390,25 +799,17 @@ const ChatModule = (() => {
             if (coreStatus === 'starting') {
                 els.status.className = 'chat-status-chip is-checking';
                 els.status.textContent = '核心启动中';
-                els.status.title = 'NachoBot Core 正在启动并等待端口就绪';
                 els.status.disabled = true;
             } else if (coreStatus === 'stopping') {
                 els.status.className = 'chat-status-chip is-checking';
                 els.status.textContent = '核心关闭中';
-                els.status.title = 'NachoBot Core 正在关闭';
                 els.status.disabled = true;
             } else if (coreRunning) {
                 els.status.className = 'chat-status-chip is-online';
                 els.status.textContent = '核心服务运行中';
-                els.status.title = data.available
-                    ? '点击关闭 NachoBot Core'
-                    : `点击关闭 NachoBot Core；聊天后端异常：${data.error || '不可用'}`;
             } else {
                 els.status.className = 'chat-status-chip is-offline';
                 els.status.textContent = coreStatus === 'error' ? '核心启动失败' : '核心服务未运行';
-                els.status.title = coreStatus === 'error'
-                    ? '启动失败，点击重新启动 NachoBot Core'
-                    : '点击启动 NachoBot Core';
             }
         } catch (error) {
             if (coreToggleBusy || requestSerial !== coreStatusRequestSerial) return;

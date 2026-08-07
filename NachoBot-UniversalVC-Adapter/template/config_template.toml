@@ -27,7 +27,7 @@ sample_rate = 44100
 host = "localhost"
 port = 8000
 
-# ── DEV: Real-time Audio Pipeline ──────────────────────────────────
+# ── Real-time Audio Pipeline ───────────────────────────────────────
 
 [denoise]
 # Real-time denoising (DeepFilterNet). Removes background noise, game SFX, BGM.
@@ -45,13 +45,6 @@ enabled = true
 similarity_threshold = 0.5
 max_speakers = 24  # Set to 0 for unlimited
 db_path = "speaker_db.json"
-
-[local_asr]
-# Local streaming ASR (sherpa-onnx Zipformer Chinese)
-# mode = "local_streaming"  — ultra-low latency, runs locally
-# mode = "remote_api"       — fallback to HTTP ASR API (needs [stt] config)
-mode = "local_streaming"
-num_threads = 2
 
 [microphone]
 enabled = true

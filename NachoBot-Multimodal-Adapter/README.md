@@ -2,7 +2,7 @@
 
 本仓库基于 `maimbot_tts_adapter` 进行了深度定制与本地化改造，已成为 **NachoBot 生态的核心多媒体中继网关**。
 
-它不仅支持基于 **GPT-SoVITS** 与 **Vox (VoxCPM)** 的高性能文本转语音 (TTS) 功能，还集成了服务端**零样本情感分类系统**、跨模块**情感查询 API**，以及独立的**感知系统 (Perception API)** ── 提供符合 OpenAI 规范的 **ASR 语音识别 (FunASR)** 与 **VLM 视觉理解 (Florence-2)** 接口。
+它不仅支持基于 **GPT-SoVITS** 与 **Vox (VoxCPM)** 的高性能文本转语音 (TTS) 功能，还集成了服务端**零样本情感分类系统**、跨模块**情感查询 API**，以及独立的**感知系统 (Perception API)** ── 提供共享的 **Sherpa-ONNX 流式 ASR** 与符合 OpenAI 规范的转写接口，以及 **VLM 视觉理解 (Florence-2)** 接口。
 
 ---
 
@@ -25,10 +25,13 @@
 
 ### 4. 👁️ 独立感知服务 (Perception API - ASR & VLM)
 由 `src/api_server.py` 编排的独立多模态感知端，提供完全兼容 OpenAI 规范的 API 接口：
-*   **VLM (视觉理解)**：由大模型 `Florence-2-large` 驱动，解析 Base64 编码的图片并自动生成详细描述。
+*   **VLM (视觉理解)**：由 `Florence-2-large` 驱动并解析 Base64 图片；服务端固定执行 `<MORE_DETAILED_CAPTION>` 详细描述任务。
     *   **接口**：`POST /v1/chat/completions` (OpenAI 兼容)
-*   **ASR (语音识别)**：由 `FunASR (SenseVoice-small)` 驱动，提供快速、精准的语音转文字服务。
+    *   **服务端策略**：固定使用 256 输出 token、3 beams 并关闭采样。请求中的 Florence `task`、`text_input` 与生成参数不会覆盖该策略，避免调用方将结果降级为一句短标题。
+*   **ASR (语音识别)**：由 `sherpa-onnx` 的 `zh-xlarge-int8-2025-06-30` 在线 Zipformer 模型驱动，默认使用 CPU 推理。
+    *   **实时调用**：UniversalVC 直接复用本模块并逐块提交 16 kHz PCM，不在句尾重新识别整段音频。
     *   **接口**：`POST /v1/audio/transcriptions` (OpenAI 兼容)
+    *   **模型所有权**：配置、下载与模型文件统一位于本适配器，其他适配器不再保存 ASR 副本。
 *   **按需开启**：支持通过环境变量 `DISABLE_VLM_ASR=1` 跳过感知组件加载，极大地节省系统开销。
 
 ---
@@ -48,7 +51,9 @@ NachoBot-Multimodal-Adapter/
 │   ├── vlm/
 │   │   └── florence2.py      # Florence-2 视觉理解
 │   ├── asr/
-│   │   └── funasr.py         # FunASR 语音识别
+│   │   ├── streaming.py      # 共享 Sherpa-ONNX 流式识别引擎
+│   │   ├── model_manager.py  # xlarge INT8 模型下载与路径管理
+│   │   └── onnxruntime_compat.py # Windows ONNX Runtime 兼容加载
 │   ├── api_server.py         # OpenAI 兼容 VLM / ASR 路由
 │   └── utils/
 │       ├── emotion_classifier.py  # 零样本情感分类器
@@ -126,8 +131,15 @@ host = "127.0.0.1"
 port = 9874                 # Perception API 服务监听的端口
 
 [perception.device]
-vlm = "cuda:0"              # Florence-2 运行设备
-asr = "cuda:0"              # FunASR 运行设备
+vlm = "cuda:0"             # Florence-2 运行设备
+
+[asr]
+mode = "local_streaming"
+provider = "cpu"           # 流式模型默认使用 CPU
+device = 0
+num_threads = 4
+models_dir = "models"      # 相对于 Multimodal-Adapter 根目录
+auto_download = true
 ```
 
 ---
@@ -138,7 +150,7 @@ asr = "cuda:0"              # FunASR 运行设备
 回到 NachoBot 项目的根目录下，直接双击运行 **`launchbot.bat`**。
 启动脚本会按顺序并行启动并监控：
 1. **SoVITS/Vox API**：加载底层语音克隆引擎。
-2. **Perception API**：拉起 Florence-2 + FunASR 感知服务端（监听 `9874` 端口）。
+2. **Perception API**：拉起 Florence-2 + 共享 Sherpa-ONNX 流式 ASR 服务端（监听 `9874` 端口）。
 3. **Multimodal Adapter**：拉起本适配器（监听 `8070` 端口）并桥接 NachoBot 核心（`8000` 端口）。
 4. **NachoBot Core**：加载主控大脑逻辑。
 

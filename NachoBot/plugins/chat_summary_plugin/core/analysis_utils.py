@@ -20,18 +20,15 @@ logger = get_logger("chat_analysis_utils")
 class ChatAnalysisUtils:
     """聊天记录分析工具类"""
 
-    # Emoji 正则表达式（完整Unicode范围）
-    EMOJI_PATTERN = re.compile(
-        "["
-        "\U0001f600-\U0001f64f"  # emoticons
-        "\U0001f300-\U0001f5ff"  # symbols & pictographs
-        "\U0001f680-\U0001f6ff"  # transport & map symbols
-        "\U0001f1e0-\U0001f1ff"  # flags
-        "\U00002702-\U000027b0"
-        "\U000024c2-\U0001f251"
-        "\U0001f900-\U0001f9ff"  # supplemental symbols
-        "]+",
-        flags=re.UNICODE,
+    EMOJI_CODEPOINT_RANGES = (
+        (0x1F600, 0x1F64F),
+        (0x1F300, 0x1F5FF),
+        (0x1F680, 0x1F6FF),
+        (0x1F1E0, 0x1F1FF),
+        (0x2702, 0x27B0),
+        (0x24C2, 0x24FF),
+        (0x1F200, 0x1F251),
+        (0x1F900, 0x1F9FF),
     )
 
     @staticmethod
@@ -68,8 +65,14 @@ class ChatAnalysisUtils:
         Returns:
             emoji 数量
         """
-        matches = ChatAnalysisUtils.EMOJI_PATTERN.findall(text)
-        return len(matches)
+        return sum(
+            1
+            for ch in text
+            if any(
+                start <= ord(ch) <= end
+                for start, end in ChatAnalysisUtils.EMOJI_CODEPOINT_RANGES
+            )
+        )
 
     @staticmethod
     def analyze_user_stats(messages: List[dict]) -> Dict[str, Dict]:
