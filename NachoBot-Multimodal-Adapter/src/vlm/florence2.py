@@ -44,8 +44,9 @@ def load_model():
     """Load the Florence-2-large model into VRAM."""
     global _model, _processor, _device, _loaded
 
-    # Set HF Mirror for China users if connection fails
-    os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+    # Third-party mirrors may not expose the complete Florence community repo.
+    # Use the official Hugging Face endpoint by default while allowing an explicit override.
+    os.environ["HF_ENDPOINT"] = os.getenv("NACHOBOT_HF_ENDPOINT", "https://huggingface.co")
 
     if _loaded:
         return
@@ -58,7 +59,10 @@ def load_model():
         from transformers import AutoProcessor, Florence2ForConditionalGeneration
 
         model_id = "florence-community/Florence-2-large"
+        cache_dir = Path(__file__).resolve().parents[2] / "models" / "hf_cache" / "hub"
+        cache_dir.mkdir(parents=True, exist_ok=True)
         logger.info("[Florence-2] Loading model: %s ...", model_id)
+        logger.info("[Florence-2] Hugging Face cache: %s", cache_dir)
 
         config_device = _read_device()
 
@@ -70,9 +74,13 @@ def load_model():
 
         dtype = torch.float16 if "cuda" in _device else torch.float32
 
-        _processor = AutoProcessor.from_pretrained(model_id)
+        _processor = AutoProcessor.from_pretrained(
+            model_id,
+            cache_dir=str(cache_dir),
+        )
         _model = Florence2ForConditionalGeneration.from_pretrained(
             model_id,
+            cache_dir=str(cache_dir),
             dtype=dtype,
             use_safetensors=True,
         ).to(_device)

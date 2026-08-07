@@ -27,10 +27,10 @@ from ncnk_message import (  # noqa: E402
     FormatInfo,
 )
 
-# Set global Hugging Face cache directory to avoid re-downloading models in temp folders
-# and set the mirror for faster downloads in China
+# Keep all Hugging Face models in the adapter-owned cache directory.
+# Use the official endpoint by default; third-party mirrors may expose incomplete repositories.
 os.environ["HF_HOME"] = str(Path(__file__).parent / "models" / "hf_cache")
-os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+os.environ["HF_ENDPOINT"] = os.getenv("NACHOBOT_HF_ENDPOINT", "https://huggingface.co")
 
 # 隐藏 ncnk_message 的冗余日志
 logging.getLogger("ncnk_message").setLevel(logging.CRITICAL)

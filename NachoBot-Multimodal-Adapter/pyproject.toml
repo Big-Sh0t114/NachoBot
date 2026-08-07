@@ -8,6 +8,7 @@ dependencies = [
     "cryptography>=50.0.0",
     "einops>=0.8.2",
     "fastapi>=0.135.1",
+    "hf-xet>=1.5.2",
     "loguru>=0.7.3",
     "numpy",
     "onnxruntime>=1.27.0",
