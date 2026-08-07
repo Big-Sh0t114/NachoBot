@@ -1,3 +1,7 @@
+8/7
+    修复WebUI Chat中多段回复概率被吞的问题
+8/6
+    移除VoxCPM的denoise字段
 8/5
     更换项目内ffmpeg为pip包，优化仓库体积
 8/4
