@@ -21,7 +21,6 @@ lora_weights_path = ""
 # 默认生成参数
 cfg_value = 3.0               # CFG 引导强度
 inference_timesteps = 10       # LocDiT 流匹配迭代步数
-denoise = false                # 是否对参考音频进行降噪增强（需要FFmpeg，Windows暂不支持）
 normalize = false              # 是否进行文本规范化
 seed = -1               # 随机种子，-1 为随机
 
@@ -42,7 +41,6 @@ control_instruction = ""              # 可选声音描述（留空则纯克隆�
 prompt_text = ""                      # 极致克隆模式的参考音频文本（留空则不启用极致克隆）
 cfg_value = 3.0
 inference_timesteps = 10
-denoise = false
 normalize = false
 seed = -1
 
@@ -53,7 +51,6 @@ control_instruction = ""
 prompt_text = ""
 cfg_value = 3.0
 inference_timesteps = 10
-denoise = false
 normalize = false
 seed = -1
 
@@ -64,7 +61,6 @@ control_instruction = ""
 prompt_text = ""
 cfg_value = 3.0
 inference_timesteps = 10
-denoise = false
 normalize = false
 seed = -1
 
@@ -75,7 +71,6 @@ control_instruction = ""
 prompt_text = ""
 cfg_value = 3.0
 inference_timesteps = 10
-denoise = false
 normalize = false
 seed = -1
 
@@ -86,7 +81,6 @@ control_instruction = ""
 prompt_text = ""
 cfg_value = 3.0
 inference_timesteps = 10
-denoise = false
 normalize = false
 seed = -1
 
@@ -97,7 +91,6 @@ control_instruction = ""
 prompt_text = ""
 cfg_value = 3.0
 inference_timesteps = 10
-denoise = false
 normalize = false
 seed = -1
 
