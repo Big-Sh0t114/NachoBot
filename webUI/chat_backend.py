@@ -51,10 +51,6 @@ class LocalChatBackend:
         self._reader_task: asyncio.Task[None] | None = None
         self._endpoint: str | None = None
         self._conversation_by_user: dict[str, str] = {}
-        # Waiters are keyed by the exact incoming platform message ID. Keying
-        # only by user ID allows a late reply from the previous turn to wake
-        # the next HTTP request.
-        self._first_reply_waiters: dict[str, list[asyncio.Queue[dict[str, Any]]]] = {}
         self._subscribers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = {}
         # Keep a short replay window so multi-part replies are not lost while
         # the browser WebSocket is still connecting or briefly reconnecting.
@@ -168,9 +164,7 @@ class LocalChatBackend:
         conversation_id = conversation_id or "default"
         backend_user_id = self._resolve_user_id(conversation_id, user_id)
         message_id = str(request_message_id or "").strip() or f"webui-{uuid.uuid4().hex}"
-        reply_waiter: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1)
         self._conversation_by_user[backend_user_id] = conversation_id
-        self._first_reply_waiters.setdefault(message_id, []).append(reply_waiter)
 
         try:
             endpoint, token = self._get_ncnk_ws_settings()
@@ -186,19 +180,14 @@ class LocalChatBackend:
                 websocket = await self._ensure_connection(endpoint, token)
                 await websocket.send(json.dumps(payload, ensure_ascii=False))
 
-            try:
-                event = await asyncio.wait_for(
-                    reply_waiter.get(), timeout=DEFAULT_FIRST_REPLY_TIMEOUT_SECONDS
-                )
-            except asyncio.TimeoutError:
-                raise ChatBackendError("NachoBot Core 回复超时", status_code=504) from None
-
+            # POST 只负责可靠地把用户消息送入 Core。助手回复统一通过
+            # /ws/chat/{conversation_id} 推送，避免 HTTP 等待期间锁死输入框，
+            # 也避免首条回复同时经 HTTP 和 WebSocket 双通道竞争。
             return {
+                "status": "accepted",
                 "conversation_id": conversation_id,
                 "platform": LOCAL_PLATFORM,
                 "request_message_id": message_id,
-                "message_id": event["message_id"],
-                "message": event["message"],
             }
         except ChatBackendError:
             raise
@@ -213,8 +202,6 @@ class LocalChatBackend:
         except Exception as exc:
             logger.exception("Chat backend request failed")
             raise ChatBackendError(f"聊天后端请求失败: {exc}") from exc
-        finally:
-            self._remove_first_reply_waiter(message_id, reply_waiter)
 
     async def _ensure_connection(self, endpoint: str, token: str | None):
         async with self._connection_lock:
@@ -308,13 +295,9 @@ class LocalChatBackend:
         }
 
     def _publish_reply(self, event: dict[str, Any]) -> None:
-        request_message_id = str(event.get("reply_to_message_id") or "")
-        if request_message_id:
-            for waiter in self._first_reply_waiters.pop(request_message_id, []):
-                self._put_nowait(waiter, event)
-        else:
+        if not str(event.get("reply_to_message_id") or ""):
             logger.warning(
-                "Core reply %s has no reply_to_message_id; it will not satisfy an HTTP waiter",
+                "Core reply %s has no reply_to_message_id; WebUI will append it without a turn anchor",
                 event.get("message_id"),
             )
 
@@ -357,19 +340,6 @@ class LocalChatBackend:
             queue.put_nowait(event)
         except asyncio.QueueFull:
             pass
-
-    def _remove_first_reply_waiter(
-        self, request_message_id: str, waiter: asyncio.Queue[dict[str, Any]]
-    ) -> None:
-        waiters = self._first_reply_waiters.get(request_message_id)
-        if not waiters:
-            return
-        try:
-            waiters.remove(waiter)
-        except ValueError:
-            return
-        if not waiters:
-            self._first_reply_waiters.pop(request_message_id, None)
 
     def _get_ncnk_ws_settings(self) -> tuple[str, str | None]:
         ncnk_config = self._read_ncnk_config()
