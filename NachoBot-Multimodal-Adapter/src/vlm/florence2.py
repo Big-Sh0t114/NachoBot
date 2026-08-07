@@ -47,6 +47,9 @@ def load_model():
     # Third-party mirrors may not expose the complete Florence community repo.
     # Use the official Hugging Face endpoint by default while allowing an explicit override.
     os.environ["HF_ENDPOINT"] = os.getenv("NACHOBOT_HF_ENDPOINT", "https://huggingface.co")
+    # Fail fast when the Hub/mirror is unreachable, then fall back to local cache.
+    os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "3")
+    os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "5")
 
     if _loaded:
         return
@@ -74,16 +77,37 @@ def load_model():
 
         dtype = torch.float16 if "cuda" in _device else torch.float32
 
-        _processor = AutoProcessor.from_pretrained(
-            model_id,
-            cache_dir=str(cache_dir),
-        )
-        _model = Florence2ForConditionalGeneration.from_pretrained(
-            model_id,
-            cache_dir=str(cache_dir),
-            dtype=dtype,
-            use_safetensors=True,
-        ).to(_device)
+        try:
+            logger.info("[Florence-2] Loading model from local cache first")
+            _processor = AutoProcessor.from_pretrained(
+                model_id,
+                cache_dir=str(cache_dir),
+                local_files_only=True,
+            )
+            _model = Florence2ForConditionalGeneration.from_pretrained(
+                model_id,
+                cache_dir=str(cache_dir),
+                dtype=dtype,
+                use_safetensors=True,
+                local_files_only=True,
+            ).to(_device)
+            logger.info("[Florence-2] Model loaded from local cache")
+        except Exception as exc:
+            logger.warning(
+                "[Florence-2] Local cache unavailable; trying Hub: %s",
+                exc,
+            )
+            _processor = AutoProcessor.from_pretrained(
+                model_id,
+                cache_dir=str(cache_dir),
+            )
+            _model = Florence2ForConditionalGeneration.from_pretrained(
+                model_id,
+                cache_dir=str(cache_dir),
+                dtype=dtype,
+                use_safetensors=True,
+            ).to(_device)
+            logger.info("[Florence-2] Model loaded from Hub")
 
         _model.eval()
 
