@@ -278,6 +278,7 @@ async def send_service_input(service_id: str, body: ServiceInput):
 class ChatMessageRequest(BaseModel):
     conversation_id: str = ""
     message: str
+    request_message_id: str = ""
     user_id: str = "webui-user"
     user_name: str = "WebUI"
 
@@ -329,6 +330,7 @@ async def chat_message(body: ChatMessageRequest):
             text=body.message,
             user_id=body.user_id,
             user_name=body.user_name,
+            request_message_id=body.request_message_id,
         )
     except ChatBackendError as e:
         raise HTTPException(e.status_code, str(e))
@@ -385,7 +387,12 @@ async def ws_chat(ws: WebSocket, conversation_id: str):
                 if received["type"] == "websocket.disconnect":
                     break
             if event_task in done:
-                await ws.send_json(event_task.result())
+                event = event_task.result()
+                await ws.send_json(event)
+                chat_backend.acknowledge_live_delivery(
+                    conversation_id,
+                    str(event.get("message_id") or ""),
+                )
     except WebSocketDisconnect:
         pass
     finally:
