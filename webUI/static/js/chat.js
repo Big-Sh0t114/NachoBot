@@ -431,8 +431,9 @@ const ChatModule = (() => {
             activeSessionId = session.id;
         }
 
+        const requestMessageId = createId();
         session.messages.push({
-            id: createId(),
+            id: requestMessageId,
             role: 'user',
             content: text,
             createdAt: Date.now(),
@@ -455,6 +456,7 @@ const ChatModule = (() => {
                 body: JSON.stringify({
                     conversation_id: session.id,
                     message: text,
+                    request_message_id: requestMessageId,
                     user_name: profile.getUserName() || DEFAULT_USER_NAME,
                 }),
             });
@@ -478,6 +480,7 @@ const ChatModule = (() => {
 
             appendAssistantMessage(session, {
                 message_id: data?.message_id,
+                reply_to_message_id: data?.request_message_id || requestMessageId,
                 message: {
                     role: data?.message?.role || 'assistant',
                     content: reply,
@@ -553,13 +556,37 @@ const ChatModule = (() => {
             return false;
         }
 
-        session.messages.push({
+        const replyToMessageId = typeof event.reply_to_message_id === 'string'
+            ? event.reply_to_message_id
+            : '';
+        const assistantMessage = {
             id: createId(),
             backendMessageId,
+            replyToMessageId,
             role: event?.message?.role || 'assistant',
             content,
             createdAt: Date.now(),
-        });
+        };
+
+        // 多段回复可能在用户已经开始下一轮后才到达。将其插回触发它的
+        // 用户消息之后，并排在同轮已有回复之后，避免视觉上串到下一轮。
+        const anchorIndex = replyToMessageId
+            ? session.messages.findIndex(message => message.id === replyToMessageId && message.role === 'user')
+            : -1;
+        if (anchorIndex >= 0) {
+            let insertIndex = anchorIndex + 1;
+            while (
+                insertIndex < session.messages.length
+                && session.messages[insertIndex].role !== 'user'
+                && session.messages[insertIndex].replyToMessageId === replyToMessageId
+            ) {
+                insertIndex += 1;
+            }
+            session.messages.splice(insertIndex, 0, assistantMessage);
+        } else {
+            session.messages.push(assistantMessage);
+        }
+
         session.updatedAt = Date.now();
         return true;
     }
