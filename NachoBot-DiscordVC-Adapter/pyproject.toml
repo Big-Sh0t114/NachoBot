@@ -19,6 +19,6 @@ dependencies = [
     "static-ffmpeg>=3.0,<4.0",
     "toml>=0.10.2",
     "tomlkit>=0.14.0",
-    "uvicorn>=0.41.0",
+    "uvicorn>=0.52.1",
     "websockets>=16.0",
 ]
