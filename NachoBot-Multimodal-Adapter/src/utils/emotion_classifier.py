@@ -8,8 +8,8 @@ import logging
 import os
 from typing import List, Tuple
 
-# Set Hugging Face mirror to resolve connection timeouts in China
-os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+# Use the official endpoint by default; allow an explicit deployment override.
+os.environ["HF_ENDPOINT"] = os.getenv("NACHOBOT_HF_ENDPOINT", "https://huggingface.co")
 
 import torch
 from transformers import pipeline as hf_pipeline
