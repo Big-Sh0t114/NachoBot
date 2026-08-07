@@ -14,14 +14,19 @@
     <link rel="icon" href="/nachobot.ico" type="image/x-icon" sizes="any">
     <link rel="shortcut icon" href="/nachobot.ico" type="image/x-icon">
     <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="/static/css/style-data.css">
+    <link rel="stylesheet" href="/static/css/style-setup.css">
     <link rel="stylesheet" href="/static/css/chat.css">
+    <link rel="stylesheet" href="/static/css/chat-layout.css">
+    <link rel="stylesheet" href="/static/css/chat-effects.css">
+    <link rel="stylesheet" href="/static/css/visual-icons.css">
 </head>
 
 <body>
     <!-- Splash — inline HTML autoplays video before any JS loads -->
     <div id="startup-screen"
         style="position:fixed;top:0;left:0;width:100vw;height:100vh;background:var(--bg-base,#0f172a);z-index:9999;display:flex;align-items:center;justify-content:center;transition:opacity 1s ease-in-out;opacity:1;">
-        <video id="startup-video" src="/resources/NachoBotLogoAnime.mp4" autoplay muted playsinline
+        <video id="startup-video" src="/resources/NachoBotLogoAnimation.mp4" autoplay muted playsinline
             style="width:75%;height:auto;max-height:75vh;object-fit:contain;pointer-events:none;transform:translateZ(0);will-change:transform;-webkit-mask-image:radial-gradient(ellipse at center,black 60%,transparent 95%);mask-image:radial-gradient(ellipse at center,black 60%,transparent 95%);"></video>
     </div>
 
@@ -953,9 +958,14 @@
             } catch (e) { }
         })();
     </script>
+    <script src="/static/js/visual-icons.js"></script>
+    <script src="/static/js/chat-support.js"></script>
+    <script src="/static/js/chat-profile.js"></script>
+    <script src="/static/js/easter-eggs.js"></script>
     <script src="/static/js/chat.js"></script>
     <script src="/static/js/app.js"></script>
     <script src="/static/js/bgm-player.js"></script>
+    <script src="/static/js/particle-system.js"></script>
     <script src="/static/js/ui.js"></script>
     <script src="/static/js/config.js"></script>
     <script src="/static/js/launcher.js"></script>
@@ -964,6 +974,7 @@
     <script src="/static/js/database.js"></script>
     <script src="/static/js/knowledge.js"></script>
     <script src="/static/js/memory.js"></script>
+    <script src="/static/js/setup-defaults.js"></script>
     <script src="/static/js/setup.js"></script>
 </body>
 

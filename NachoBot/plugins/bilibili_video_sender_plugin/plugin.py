@@ -16,7 +16,11 @@ import aiohttp
 import uuid
 import time
 
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Tuple, Type
+
+from static_ffmpeg import run
 
 from src.common.logger import get_logger
 
@@ -27,7 +31,7 @@ _utils_logger = get_logger("plugin.bilibili_video_sender.utils")
 def convert_windows_to_wsl_path(windows_path: str) -> str:
     """将Windows路径转换为WSL路径
 
-    例如：E:\path\to\file.mp4 -> /mnt/e/path/to/file.mp4
+    例如：E:\\path\\to\\file.mp4 -> /mnt/e/path/to/file.mp4
     """
     try:
         # 尝试使用wslpath命令转换路径（从Windows调用WSL）
@@ -77,48 +81,52 @@ class FFmpegManager:
     def __init__(self):
         self.plugin_dir = os.path.dirname(os.path.abspath(__file__))
         self.system = platform.system().lower()
-        self.ffmpeg_dir = os.path.join(self.plugin_dir, "ffmpeg")
+
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def _get_managed_executables() -> Tuple[str, str]:
+        """获取项目共享目录中的 ffmpeg 与 ffprobe 路径。"""
+        configured_dir = os.environ.get("NACHOBOT_FFMPEG_DIR", "").strip()
+        shared_root = (
+            Path(configured_dir).expanduser()
+            if configured_dir
+            else Path(__file__).resolve().parents[3] / ".runtime" / "ffmpeg"
+        )
+        platform_dir = shared_root.resolve() / run.get_platform_key()
+        platform_dir.mkdir(parents=True, exist_ok=True)
+        return run.get_or_fetch_platform_executables_else_raise(
+            download_dir=str(platform_dir)
+        )
 
     def get_ffmpeg_path(self) -> Optional[str]:
-        """获取ffmpeg可执行文件路径"""
-        return self._get_executable_path("ffmpeg")
-
-    def get_ffprobe_path(self) -> Optional[str]:
-        """获取ffprobe可执行文件路径"""
-        return self._get_executable_path("ffprobe")
-
-    def _get_executable_path(self, executable_name: str) -> Optional[str]:
-        """根据操作系统获取可执行文件路径"""
-        # 确定可执行文件名称和路径
-        if self.system == "windows":
-            bin_dir = os.path.join(self.ffmpeg_dir, "bin")
-            executable_path = os.path.join(bin_dir, f"{executable_name}.exe")
-        elif self.system in ["linux", "darwin"]:  # Linux 和 macOS
-            # 优先检查平台特定的目录
-            platform_bin_dir = os.path.join(self.ffmpeg_dir, "bin", self.system)
-            executable_path = os.path.join(platform_bin_dir, executable_name)
-
-            # 如果平台特定目录不存在，检查通用bin目录
-            if not os.path.exists(executable_path):
-                bin_dir = os.path.join(self.ffmpeg_dir, "bin")
-                executable_path = os.path.join(bin_dir, executable_name)
-        else:
-            self._logger.warning(f"不支持的操作系统: {self.system}")
+        """获取 ffmpeg 可执行文件路径。"""
+        try:
+            ffmpeg_path, _ = self._get_managed_executables()
+            self._logger.debug(f"Found managed ffmpeg: {ffmpeg_path}")
+            return ffmpeg_path
+        except Exception as exc:
+            self._logger.warning(f"static-ffmpeg 获取 ffmpeg 失败，尝试系统 PATH: {exc}")
+            system_executable = shutil.which("ffmpeg")
+            if system_executable:
+                self._logger.debug(f"Found system ffmpeg: {system_executable}")
+                return system_executable
+            self._logger.warning("未找到 ffmpeg 可执行文件")
             return None
 
-        # 检查插件内置的ffmpeg
-        if os.path.exists(executable_path):
-            self._logger.debug(f"Found bundled {executable_name}: {executable_path}")
-            return executable_path
-
-        # 检查系统PATH中的ffmpeg
-        system_executable = shutil.which(executable_name)
-        if system_executable:
-            self._logger.debug(f"Found system {executable_name}: {system_executable}")
-            return system_executable
-
-        self._logger.warning(f"未找到{executable_name}可执行文件")
-        return None
+    def get_ffprobe_path(self) -> Optional[str]:
+        """获取 ffprobe 可执行文件路径。"""
+        try:
+            _, ffprobe_path = self._get_managed_executables()
+            self._logger.debug(f"Found managed ffprobe: {ffprobe_path}")
+            return ffprobe_path
+        except Exception as exc:
+            self._logger.warning(f"static-ffmpeg 获取 ffprobe 失败，尝试系统 PATH: {exc}")
+            system_executable = shutil.which("ffprobe")
+            if system_executable:
+                self._logger.debug(f"Found system ffprobe: {system_executable}")
+                return system_executable
+            self._logger.warning("未找到 ffprobe 可执行文件")
+            return None
 
     def check_hardware_encoders(self) -> Dict[str, Any]:
         """检测可用的硬件编码器"""
@@ -612,7 +620,7 @@ class BilibiliParser:
         if buvid3:
             # 生成 session: md5(buvid3 + 当前毫秒)
             ms = str(int(time.time() * 1000))
-            session_hash = hashlib.md5((buvid3 + ms).encode("utf-8")).hexdigest()
+            session_hash = hashlib.md5((buvid3 + ms).encode("utf-8"), usedforsecurity=False).hexdigest()
             params["session"] = session_hash
 
         # 添加gaia_source参数（有Cookie时非必要）
@@ -824,7 +832,7 @@ class BilibiliParser:
 
         if buvid3:
             ms = str(int(time.time() * 1000))
-            session_hash = hashlib.md5((buvid3 + ms).encode("utf-8")).hexdigest()
+            session_hash = hashlib.md5((buvid3 + ms).encode("utf-8"), usedforsecurity=False).hexdigest()
             params["session"] = session_hash
 
         # 添加gaia_source参数（有Cookie时非必要）
@@ -1984,7 +1992,7 @@ class BilibiliWbiSigner:
         # 排序并 urlencode
         items = sorted(safe_params.items(), key=lambda x: x[0])
         query = urllib.parse.urlencode(items, doseq=True)
-        w_rid = hashlib.md5((query + mixin_key).encode("utf-8")).hexdigest()
+        w_rid = hashlib.md5((query + mixin_key).encode("utf-8"), usedforsecurity=False).hexdigest()
         safe_params["w_rid"] = w_rid
         return safe_params
 

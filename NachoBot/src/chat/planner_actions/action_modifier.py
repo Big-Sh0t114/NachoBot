@@ -228,7 +228,7 @@ class ActionModifier:
     def _generate_context_hash(self, chat_content: str) -> str:
         """生成上下文的哈希值用于缓存"""
         context_content = f"{chat_content}"
-        return hashlib.md5(context_content.encode("utf-8")).hexdigest()
+        return hashlib.md5(context_content.encode("utf-8"), usedforsecurity=False).hexdigest()
 
     async def _process_llm_judge_actions_parallel(
         self,

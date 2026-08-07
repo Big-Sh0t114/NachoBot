@@ -79,6 +79,41 @@ def get_logger() -> logging.Logger:
     return _logger
 
 
+def redact_secret(value: object) -> str:
+    """Return a log-safe representation of a secret value."""
+    return "<redacted>" if value else "<empty>"
+
+
+def redact_mapping_secrets(data: dict[str, object] | None) -> dict[str, object]:
+    """Redact secret-like values in a mapping before logging."""
+    if not data:
+        return {}
+
+    redacted: dict[str, object] = {}
+    for key, value in data.items():
+        key_text = str(key)
+        lower_key = key_text.lower()
+        if (
+            lower_key in {"authorization", "x-apikey", "api_key", "token"}
+            or "secret" in lower_key
+            or "key" in lower_key
+        ):
+            redacted[key_text] = redact_secret(value)
+        else:
+            redacted[key_text] = value
+    return redacted
+
+
+def log_safe(value: object, max_len: int = 200) -> str:
+    """Return a single-line string safe for logs."""
+    text = str(value)
+    text = text.replace("\r", "\\r").replace("\n", "\\n")
+    text = "".join(ch if ch >= " " and ch != "\x7f" else "?" for ch in text)
+    if len(text) > max_len:
+        return text[:max_len].rstrip() + "...[truncated]"
+    return text
+
+
 def set_external_logger(external_logger: logging.Logger):
     """
     设置外部日志记录器作为全局日志记录器。这是外部系统集成的首选方法。

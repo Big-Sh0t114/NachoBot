@@ -11,6 +11,7 @@ from src.common.logger import get_logger
 from src.common.data_models.info_data_model import ActionPlannerInfo
 from src.common.data_models.message_data_model import ReplyContentType
 from src.chat.message_receive.chat_stream import ChatStream, get_chat_manager
+from src.chat.runtime_capabilities import runtime_capabilities_from_stream
 from src.chat.utils.prompt_builder import global_prompt_manager
 from src.chat.utils.prompt_variables import render_dynamic_prompt_template
 from src.chat.utils.timer_calculator import Timer
@@ -50,7 +51,6 @@ from src.chat.focus.models import (
     TurnOutcome,
     TurnStatus,
     WakeReason,
-    focus_platform_bypasses_planner,
     focus_session_priority,
 )
 from src.chat.focus.reply_context import acquire_reply_context_request, release_reply_context
@@ -210,6 +210,105 @@ class HeartFChatting:
             logger.error(f"{self.log_prefix} 通过昵称解析QQ号失败: {e}")
         return None
 
+    @staticmethod
+    def _normalize_user_reference(value: object) -> str:
+        """规范化 LLM 可能附带 @ 或标准提及格式的用户昵称。"""
+        reference = str(value or "").strip()
+        if reference.startswith(("@", "＠")):
+            reference = reference[1:].lstrip()
+        if reference.startswith("<") and reference.endswith(">"):
+            nickname, separator, user_id = reference[1:-1].rpartition(":")
+            user_id = user_id.strip()
+            if separator and user_id.isascii() and user_id.isdecimal() and int(user_id) > 0:
+                reference = nickname.strip()
+        return reference
+
+    @classmethod
+    def _user_info_matches_reference(cls, reference: str, user_info: Any) -> bool:
+        """仅对平台昵称和群名片做精确匹配，避免禁言时模糊命中错误成员。"""
+        normalized_reference = cls._normalize_user_reference(reference)
+        if not normalized_reference or user_info is None:
+            return False
+        return any(
+            normalized_reference == cls._normalize_user_reference(value)
+            for value in (
+                getattr(user_info, "user_nickname", ""),
+                getattr(user_info, "user_cardname", ""),
+            )
+        )
+
+    @staticmethod
+    def _as_valid_qq_id(value: object) -> Optional[str]:
+        """将适配器可接受的正整数 QQ 号标准化；昵称绝不能透传为 qq_id。"""
+        user_id = str(value or "").strip()
+        if user_id.isascii() and user_id.isdecimal() and int(user_id) > 0:
+            return user_id
+        return None
+
+    def _resolve_ban_user_id_by_nickname(
+        self,
+        nickname: str,
+        action_message: Optional["DatabaseMessages"],
+    ) -> Optional[str]:
+        """在当前群中将昵称解析为唯一的 QQ 号。
+
+        已确认的 ``target_message_id`` 会由 Planner 映射到 ``action_message``，它是最
+        可靠的身份来源。只有该消息的昵称/群名片与 LLM 输入一致时才采用其 user_id；若
+        没有该证据，再从当前群消息历史中查找且必须唯一命中，避免重名时误禁言。
+        """
+        reference = self._normalize_user_reference(nickname)
+        if not reference:
+            return None
+
+        action_user_info = getattr(action_message, "user_info", None)
+        action_user_id = self._as_valid_qq_id(getattr(action_user_info, "user_id", ""))
+        if action_user_id and self._user_info_matches_reference(reference, action_user_info):
+            return action_user_id
+
+        # 聊天记录中的显示名通常是 Person 的内部称呼。仅在 Planner 已选中的
+        # 同一条目标消息上使用它，避免全局 Person 查找跨群命中同名用户。
+        if action_user_id and action_user_info is not None and not reference.isdecimal():
+            try:
+                person = Person(
+                    platform=str(getattr(action_user_info, "platform", "") or self.chat_stream.platform),
+                    user_id=action_user_id,
+                )
+                if any(
+                    reference == self._normalize_user_reference(value)
+                    for value in (
+                        getattr(person, "person_name", ""),
+                        getattr(person, "nickname", ""),
+                        getattr(person, "user_nickname", ""),
+                    )
+                ):
+                    return action_user_id
+            except Exception as e:
+                logger.debug(f"{self.log_prefix} ban_user 读取目标消息人物信息失败: {e}")
+
+        try:
+            recent_messages = get_raw_msg_before_timestamp_with_chat(
+                chat_id=self.stream_id,
+                timestamp=time.time(),
+                limit=100,
+            )
+            candidate_ids = {
+                user_id
+                for msg in recent_messages
+                if self._user_info_matches_reference(reference, getattr(msg, "user_info", None))
+                if (user_id := self._as_valid_qq_id(getattr(getattr(msg, "user_info", None), "user_id", "")))
+            }
+        except Exception as e:
+            logger.error(f"{self.log_prefix} ban_user 通过当前群消息解析昵称失败: {e}")
+            return None
+
+        if len(candidate_ids) == 1:
+            return candidate_ids.pop()
+        if candidate_ids:
+            logger.warning(
+                f"{self.log_prefix} ban_user 昵称 '{nickname}' 在当前群匹配到 {len(candidate_ids)} 个用户，拒绝执行"
+            )
+        return None
+
     async def start(self):
         """检查是否需要启动主循环，如果未激活则启动。"""
 
@@ -226,7 +325,7 @@ class HeartFChatting:
             self._loop_task.add_done_callback(self._handle_loop_completion)
 
             # 启动聊天内容概括器的后台定期检查循环
-            if getattr(self.chat_stream, "platform", "") not in ("bilibili", "bilibili.live"):
+            if runtime_capabilities_from_stream(self.chat_stream).history_summarization:
                 await self.chat_history_summarizer.start()
 
             # 注册到中期记忆后台构建器
@@ -458,18 +557,8 @@ class HeartFChatting:
         return gate
 
     @staticmethod
-    def _focus_platform_bypasses_planner(platform: str, is_group_chat: bool) -> bool:
-        kind = ChatKind.GROUP if is_group_chat else ChatKind.PRIVATE
-        return focus_platform_bypasses_planner(platform, kind)
-
-
-
-    @classmethod
-    def _focus_member_bypasses_planner(cls, member: FocusMember) -> bool:
-        return cls._focus_platform_bypasses_planner(
-            member.platform,
-            member.kind is ChatKind.GROUP,
-        )
+    def _focus_member_bypasses_planner(member: FocusMember) -> bool:
+        return member.planner_bypass
 
     @staticmethod
     def _focus_switch_target_reply_action(
@@ -841,11 +930,9 @@ class HeartFChatting:
             cycle_timers, thinking_id = self.start_cycle()
             logger.info(f"{self.log_prefix} 开始第{self._cycle_counter}次思考")
 
-            # 优先检测是不是通知戳戳，直接旁路 (跳过Bilibili平台，因为不支持且不适用)
-            if len(recent_messages_list) > 0 and getattr(self.chat_stream, "platform", "") not in (
-                "bilibili",
-                "bilibili.live",
-            ):
+            # 仅在适配器声明支持通知动作时处理。
+            capabilities = runtime_capabilities_from_stream(self.chat_stream)
+            if len(recent_messages_list) > 0 and capabilities.notice_actions:
                 latest_msg = recent_messages_list[-1]
                 if getattr(latest_msg, "is_notify", False) and random.random() < 0.5:
                     logger.info(f"{self.log_prefix} 检测到戳戳动作，50%概率触发 active_poke")
@@ -927,10 +1014,8 @@ class HeartFChatting:
                     promise_block = "\n".join(["[约定缓存]"] + promise_snippets)
                     chat_content_block = f"{promise_block}\n----\n{chat_content_block}"
 
-                bypass_session = self._focus_platform_bypasses_planner(
-                    self.chat_stream.platform,
-                    is_group_chat,
-                )
+                capabilities = runtime_capabilities_from_stream(self.chat_stream)
+                bypass_session = capabilities.planner_bypass
                 event_only_focus_turn = bool(
                     focus_turn is not None and self._is_focus_event_only_turn(focus_turn, recent_messages_list)
                 )
@@ -1076,33 +1161,33 @@ class HeartFChatting:
                         logger.info(f"{self.log_prefix} [HFC] No non-bot message found, skipping reply")
                         return True
 
-                    # Build pending danmaku summary when multiple messages accumulated
+                    # Summarize accumulated messages for any direct-reply session.
                     bypass_extra_info = ""
                     if recent_messages_list and len(recent_messages_list) > 1:
-                        danmaku_lines = []
+                        pending_lines = []
                         for msg in recent_messages_list:
                             if str(msg.user_info.user_id) == bot_id:
                                 continue
                             nick = getattr(msg.user_info, "user_nickname", None) or str(msg.user_info.user_id)
                             text = getattr(msg, "processed_plain_text", "") or ""
                             if text:
-                                danmaku_lines.append(f"{nick}: {text}")
-                        if len(danmaku_lines) > 1:
-                            summary = "\n".join(danmaku_lines)
+                                pending_lines.append(f"{nick}: {text}")
+                        if len(pending_lines) > 1:
+                            summary = "\n".join(pending_lines)
                             bypass_extra_info = (
-                                f"[弹幕堆积提示] 以下是最近堆积的 {len(danmaku_lines)} 条弹幕，"
-                                "请在回复时综合考虑这些弹幕的内容，尽量涵盖多条弹幕而不只是最新的一条：\n"
+                                f"[消息堆积提示] 以下是最近堆积的 {len(pending_lines)} 条消息，"
+                                "请在回复时综合考虑这些消息的内容，尽量涵盖多条消息而不只是最新的一条：\n"
                                 f"{summary}\n"
-                                "[弹幕堆积提示结束]"
+                                "[消息堆积提示结束]"
                             )
                             logger.info(
-                                f"{self.log_prefix} [HFC] Bypass: {len(danmaku_lines)} pending danmaku detected"
+                                f"{self.log_prefix} [HFC] Bypass: {len(pending_lines)} pending messages detected"
                             )
 
                     action_to_use_info = [
                         ActionPlannerInfo(
                             action_type="reply",
-                            reasoning="Bilibili Live Bypass: Direct Reply",
+                            reasoning="Adapter capability: direct reply",
                             action_data={"bypass_extra_info": bypass_extra_info} if bypass_extra_info else {},
                             action_message=target_msg,
                             available_actions=available_actions,
@@ -1551,22 +1636,21 @@ class HeartFChatting:
             receipts.append(receipt)
             return ("Filtered" if receipt.delivered else ""), receipts
 
-        # Smart Aggregation for Bilibili TTS in HeartFC_Chat
-        # If platform is Bilibili AND message contains TTS tags (<ZH> or <JP>),
-        # aggregate all text into one message to prevent tag splitting.
-        is_bilibili = self.chat_stream.platform in ["bilibili", "bilibili.live"]
+        # Some adapters require tagged text to remain in one transport message.
+        aggregate_tagged_text = (
+            runtime_capabilities_from_stream(self.chat_stream).reply_delivery
+            == "aggregate_tagged_text"
+        )
         has_tts_tags = False
 
-        # DEBUG LOGGING (HeartFC)
         logger.debug(
-            f"{self.log_prefix} [HFC-SmartAggregation]Platform='{self.chat_stream.platform}' is_bilibili={is_bilibili}"
+            f"{self.log_prefix} [HFC-SmartAggregation] aggregate_tagged_text={aggregate_tagged_text}"
         )
 
-        if is_bilibili:
+        if aggregate_tagged_text:
             for i, reply_content in enumerate(reply_set.reply_data):
                 if reply_content.content_type == ReplyContentType.TEXT:
                     content = str(reply_content.content)
-                    # Relaxed check: case insensitive
                     if "<zh>" in content.lower() or "<jp>" in content.lower():
                         has_tts_tags = True
                         logger.debug(
@@ -1574,8 +1658,8 @@ class HeartFChatting:
                         )
                         break
 
-        if is_bilibili and has_tts_tags:
-            logger.debug(f"{self.log_prefix} [HFC] 检测到 Bilibili TTS 标签，启用智能聚合发送模式")
+        if aggregate_tagged_text and has_tts_tags:
+            logger.debug(f"{self.log_prefix} [HFC] 检测到 TTS 标签，启用适配器声明的聚合发送模式")
             full_text = ""
             for reply_content in reply_set.reply_data:
                 if reply_content.content_type == ReplyContentType.TEXT:
@@ -1759,37 +1843,24 @@ class HeartFChatting:
                             chat_id=self.chat_stream.stream_id, message_text=message_text_for_injection
                         )
 
-                        # --- Bilibili live bypass: dedicated Person Profile template block ---
-                        person_profile_block = await self._build_bilibili_live_person_profile_block(
+                        capabilities = runtime_capabilities_from_stream(self.chat_stream)
+                        person_profile_block = await self._build_low_latency_person_profile_block(
                             action_planner_info.action_message,
                         )
 
-                        # Inject pending danmaku summary from Bilibili/DiscordVC bypass
+                        # Inject pending-message summary from direct-reply sessions.
                         bypass_extra = (action_planner_info.action_data or {}).get("bypass_extra_info", "")
                         if bypass_extra:
                             injection_text = f"{bypass_extra}\n{injection_text}" if injection_text else bypass_extra
 
-                        # Logic to allow tools for Bilibili Comments while keeping disabled for Live Danmu
-                        # even if reasoning says "Bilibili Live Bypass: Direct Reply"
-                        current_enable_tool = global_config.tool.enable_tool
-                        current_enable_typo = (
+                        current_enable_tool = (
+                            global_config.tool.enable_tool
+                            and capabilities.tool_mode != "disabled"
+                        )
+                        configured_typo = (
                             global_config.chinese_typo.enable if hasattr(global_config, "chinese_typo") else True
                         )
-                        if action_planner_info.reasoning == "Bilibili Live Bypass: Direct Reply":
-                            current_enable_tool = False
-                            current_enable_typo = False
-                            # Check if it is a comment section (re-enable tools and typo)
-                            if (
-                                getattr(self.chat_stream, "group_info", None)
-                                and self.chat_stream.group_info.group_id
-                                and str(self.chat_stream.group_info.group_id).startswith("comment:")
-                            ):
-                                current_enable_tool = global_config.tool.enable_tool
-                                current_enable_typo = (
-                                    global_config.chinese_typo.enable
-                                    if hasattr(global_config, "chinese_typo")
-                                    else True
-                                )
+                        current_enable_typo = configured_typo and capabilities.typo_enabled
 
                         success, llm_response = await generator_api.generate_reply(
                             chat_stream=self.chat_stream,
@@ -1816,27 +1887,8 @@ class HeartFChatting:
                                 logger.info("回复生成失败")
                             return {"action_type": "reply", "success": False, "reply_text": "", "loop_info": None}
 
-                        # === Bilibili Live 两阶段联网搜索 ===
-                        # 检查是否禁用了工具
-                        disable_tools = False
-                        if (
-                            action_planner_info.action_message
-                            and hasattr(action_planner_info.action_message, "additional_config")
-                            and isinstance(action_planner_info.action_message.additional_config, dict)
-                        ):
-                            disable_tools = action_planner_info.action_message.additional_config.get(
-                                "disable_tools", False
-                            )
-
-                        # 检测 Pass 1 回复中是否包含 web_search JSON 请求
-                        is_bilibili_live_danmu = (
-                            not disable_tools
-                            and action_planner_info.reasoning == "Bilibili Live Bypass: Direct Reply"
-                            and getattr(self.chat_stream, "group_info", None)
-                            and not str(getattr(self.chat_stream.group_info, "group_id", "")).startswith("comment:")
-                        )
-                        if is_bilibili_live_danmu and llm_response.content:
-                            search_result = await self._handle_bilibili_live_search_reply(
+                        if capabilities.web_search_mode == "two_phase" and llm_response.content:
+                            search_result = await self._handle_two_phase_search_reply(
                                 llm_response=llm_response,
                                 action_planner_info=action_planner_info,
                                 chosen_action_plan_infos=chosen_action_plan_infos,
@@ -1847,7 +1899,6 @@ class HeartFChatting:
                             )
                             if search_result is not None:
                                 return search_result
-                        # === 两阶段联网搜索结束 ===
 
                     except asyncio.CancelledError:
                         logger.debug(f"{self.log_prefix} 并行执行：回复生成任务已被取消")
@@ -2364,7 +2415,13 @@ class HeartFChatting:
     ):
         """处理 ban_user 动作：禁言指定用户（由 Replyer 决策是否执行及时长）"""
         action_data = action_planner_info.action_data or {}
-        target_name = str(action_data.get("target_name", ""))
+        target_name = str(
+            action_data.get("target_name")
+            or action_data.get("target_user_id")
+            or action_data.get("target_qq")
+            or action_data.get("qq_id")
+            or ""
+        ).strip()
         planner_reason = action_planner_info.reasoning or action_data.get("reason", "未提供原因")
 
         # 1. 参数校验
@@ -2377,30 +2434,27 @@ class HeartFChatting:
             logger.warning(f"{self.log_prefix} ban_user 仅适用于群聊")
             return {"action_type": "ban_user", "success": False, "reply_text": ""}
 
-        # 3. 解析用户ID（复用 block_user 的解析逻辑）
-        if target_name.isdigit():
-            target_user_id = target_name
-            logger.info(f"{self.log_prefix} ban_user 直接使用QQ号 {target_user_id}")
+        # 3. 解析用户ID。target_name 的协议语义是昵称，因此即使昵称全为数字，
+        # 已确认的 target_message_id 仍优先作为身份依据；否则再兼容直接 QQ 号。
+        target_message = action_planner_info.action_message if action_data.get("_target_message_resolved") else None
+        target_user_id = None
+        target_user_info = getattr(target_message, "user_info", None)
+        if target_message and self._user_info_matches_reference(target_name, target_user_info):
+            target_user_id = self._as_valid_qq_id(getattr(target_user_info, "user_id", ""))
+            if target_user_id:
+                logger.info(f"{self.log_prefix} ban_user 通过目标消息昵称解析用户 '{target_name}' -> QQ号 {target_user_id}")
+
+        if not target_user_id:
+            target_user_id = self._as_valid_qq_id(target_name)
+        if target_user_id:
+            if not target_message or not self._user_info_matches_reference(target_name, target_user_info):
+                logger.info(f"{self.log_prefix} ban_user 直接使用QQ号 {target_user_id}")
         else:
-            try:
-                person = Person(person_name=target_name)
-                if person.is_known:
-                    target_user_id = person.get_user_id_for_platform(global_config.bot.platform) or str(person.user_id)
-                    logger.info(
-                        f"{self.log_prefix} ban_user 通过Person解析用户 '{target_name}' -> QQ号 {target_user_id}"
-                    )
-                else:
-                    resolved_id = self._resolve_user_id_by_nickname(target_name)
-                    if resolved_id:
-                        target_user_id = resolved_id
-                        logger.info(
-                            f"{self.log_prefix} ban_user 通过消息记录解析用户 '{target_name}' -> QQ号 {target_user_id}"
-                        )
-                    else:
-                        logger.warning(f"{self.log_prefix} ban_user 无法将 '{target_name}' 解析为有效的QQ号")
-                        return {"action_type": "ban_user", "success": False, "reply_text": ""}
-            except Exception as e:
-                logger.warning(f"{self.log_prefix} ban_user 解析用户 '{target_name}' 失败: {e}")
+            target_user_id = self._resolve_ban_user_id_by_nickname(target_name, target_message)
+            if target_user_id:
+                logger.info(f"{self.log_prefix} ban_user 通过昵称解析用户 '{target_name}' -> QQ号 {target_user_id}")
+            else:
+                logger.warning(f"{self.log_prefix} ban_user 无法将 '{target_name}' 解析为有效的QQ号")
                 return {"action_type": "ban_user", "success": False, "reply_text": ""}
 
         # 4. 不能禁言自己
@@ -2706,31 +2760,18 @@ class HeartFChatting:
         return {"action_type": "set_group_title", "success": True, "reply_text": reply_text}
 
     # =========================================================================
-    # Bilibili live bypass Person Profile injection
+    # Adapter-declared low-latency Person Profile injection
     # =========================================================================
 
-    def _is_bilibili_live_room(self) -> bool:
-        platform = str(getattr(self.chat_stream, "platform", "") or "").strip().lower()
-        group_info = getattr(self.chat_stream, "group_info", None)
-        group_id = str(getattr(group_info, "group_id", "") or "")
-        return (
-            platform in {"bilibili", "bilibili.live"}
-            and bool(group_id)
-            and not group_id.startswith("comment:")
-        )
-
-    async def _build_bilibili_live_person_profile_block(
+    async def _build_low_latency_person_profile_block(
         self,
         action_message,
     ) -> str:
-        """Build a dedicated Person Profile block only for Bilibili live bypass."""
-        if not self._is_bilibili_live_room() or action_message is None:
+        """Build a bounded-latency profile block when requested by the adapter."""
+        capabilities = runtime_capabilities_from_stream(self.chat_stream)
+        if capabilities.person_profile_mode != "low_latency" or action_message is None:
             return ""
-        add_cfg = getattr(action_message, "additional_config", None) or {}
-        if not add_cfg.get("live_person_profile_enabled", True):
-            return ""
-
-        timeout = add_cfg.get("live_memory_search_timeout_seconds", 0.5)
+        timeout = capabilities.person_profile_timeout_seconds
 
         try:
             from src.memory_system.person_profile_injector import inject_person_profiles
@@ -2757,14 +2798,14 @@ class HeartFChatting:
             return ""
 
     # =========================================================================
-    # Bilibili Live 两阶段联网搜索
+    # Adapter-declared two-phase web search
     # =========================================================================
 
-    _BILIBILI_SEARCH_FALLBACK_REPLY = (
+    _TWO_PHASE_SEARCH_FALLBACK_REPLY = (
         '{"reply": "<JP>ちょっと待ってにゃ、猫猫が調べるにゃ</JP><ZH>稍等喵，猫猫查查看~</ZH>", "emotion": "normal"}'
     )
 
-    async def _handle_bilibili_live_search_reply(
+    async def _handle_two_phase_search_reply(
         self,
         llm_response,
         action_planner_info: ActionPlannerInfo,
@@ -2774,8 +2815,7 @@ class HeartFChatting:
         available_actions: Dict[str, ActionInfo],
         cycle_timers: Dict[str, float],
     ) -> Optional[Dict[str, Any]]:
-        """处理 Bilibili 直播间两阶段联网搜索。
-
+        """处理适配器声明的两阶段联网搜索。
         检测 Pass 1 LLM 输出中是否包含 web_search JSON 请求。
         如果包含：发送初始回复 → 执行搜索 → 生成 Pass 2 回复。
         如果不包含：返回 None，让调用方继续正常发送流程。
@@ -2803,7 +2843,7 @@ class HeartFChatting:
         try:
             initial_reply_text = self._extract_initial_reply_from_response(llm_response)
             if not initial_reply_text:
-                initial_reply_text = self._BILIBILI_SEARCH_FALLBACK_REPLY
+                initial_reply_text = self._TWO_PHASE_SEARCH_FALLBACK_REPLY
 
             logger.info(f"{self.log_prefix} [两阶段搜索] 发送初始回复: {initial_reply_text[:50]}...")
             receipt = await send_api.text_to_stream_receipt(
@@ -2813,10 +2853,10 @@ class HeartFChatting:
                 storage_message=True,
             )
         except asyncio.CancelledError:
-            await self._settle_interrupted_reply_context(refs, [], "bilibili_pass1_cancelled")
+            await self._settle_interrupted_reply_context(refs, [], "two_phase_pass1_cancelled")
             raise
         except Exception as e:
-            await self._settle_interrupted_reply_context(refs, [], "bilibili_pass1_send_error")
+            await self._settle_interrupted_reply_context(refs, [], "two_phase_pass1_send_error")
             logger.error(f"{self.log_prefix} [两阶段搜索] Pass 1 发送失败: {e}")
             return {
                 "action_type": "reply",
@@ -2827,7 +2867,7 @@ class HeartFChatting:
 
         # Pass 1 is the reply produced from the reserved handoff context. Settle
         # it now from the real adapter receipt; Pass 2 must never ACK it again.
-        await self._settle_interrupted_reply_context(refs, [receipt], "bilibili_pass1_not_delivered")
+        await self._settle_interrupted_reply_context(refs, [receipt], "two_phase_pass1_not_delivered")
         if not receipt.delivered:
             logger.warning(
                 f"{self.log_prefix} [两阶段搜索] Pass 1 未投递，停止搜索: "
@@ -3062,14 +3102,14 @@ class HeartFChatting:
                 "loop_info": None,
             }
 
-        # 检测 TTS 模式：如果当前是 Bilibili TTS 直播间，追加 TTS 语言标签指令
+        # 按适配器声明的 TTS 语言追加输出格式指令。
         try:
             if chat_stream.context and chat_stream.context.message:
                 msg = chat_stream.context.message
-                if msg.message_info and msg.message_info.template_info:
-                    template_name = msg.message_info.template_info.template_name
-                    if template_name and isinstance(template_name, str):
-                        if template_name.endswith("_tts_ja"):
+                if msg.message_info:
+                    tts_language = runtime_capabilities_from_stream(chat_stream).tts_language
+                    if tts_language:
+                        if tts_language == "ja":
                             # 双语模式：要求输出 <JP>/<ZH> 标签
                             tts_instruction = (
                                 "\n\n非常重要：请必须同时输出中文回复和对应的日文翻译（用于语音播放），格式严格如下：\n"
@@ -3079,7 +3119,7 @@ class HeartFChatting:
                             )
                             prompt += tts_instruction
                             logger.info("[两阶段搜索] Pass 2 已追加 TTS 双语标签指令 (ja)")
-                        elif template_name.endswith("_tts_zh"):
+                        elif tts_language == "zh":
                             # 纯中文模式：不需要双语标签，直接输出中文
                             tts_instruction = (
                                 "\n\n请直接用中文回复，不需要输出日文翻译，不需要使用 <JP> <ZH> 等标签。\n"
@@ -3122,7 +3162,7 @@ class HeartFChatting:
 
         logger.info(f"{self.log_prefix} [两阶段搜索] Pass 2 回复: {response_content[:80]}...")
 
-        # 处理 Pass 2 内容 — 不分割、不加错字（直播场景简洁优先）
+        # 处理 Pass 2 内容 — 不分割、不加错字（低延迟场景简洁优先）
         from src.plugin_system.apis.generator_api import process_human_text
 
         reply_set = process_human_text(response_content, enable_splitter=True, enable_chinese_typo=False)

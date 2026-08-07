@@ -17,6 +17,7 @@ from src.llm_models.utils_model import LLMRequest
 from src.llm_models.exceptions import ReqAbortException
 from src.chat.message_receive.message import UserInfo, Seg, MessageRecv, MessageSending
 from src.chat.message_receive.chat_stream import ChatStream
+from src.chat.runtime_capabilities import runtime_capabilities_from_stream
 from src.chat.message_receive.uni_message_sender import UniversalMessageSender
 from src.chat.utils.timer_calculator import Timer  # <--- Import Timer
 from src.chat.utils.utils import get_chat_type_and_target_info
@@ -32,6 +33,7 @@ from src.chat.utils.chat_message_builder import (
     replace_user_references,
     get_stepped_limit,
 )
+from src.chat.utils.display_name import resolve_sender_name
 from src.chat.express.expression_selector import expression_selector
 
 # from src.chat.memory_system.memory_activator import MemoryActivator
@@ -60,18 +62,15 @@ class PrivateReplyer:
     def express_model(self) -> LLMRequest:
         # 默认使用 active_private_group 对应的私聊模型组（如果没有配置私聊模型组则内部会自动回退到普通 replyer）
         model_set = model_config.model_task_config.get_private_replyer(self.active_private_group)
-        # 检测是否为 Bilibili 直播间：通过 template_name 以 bilibili_live_ 开头判断
-        try:
-            if self.chat_stream.context:
-                msg = self.chat_stream.context.message
-                if msg and msg.message_info and msg.message_info.template_info:
-                    tpl = msg.message_info.template_info.template_name
-                    if tpl and isinstance(tpl, str) and tpl.startswith("bilibili_live_"):
-                        bili_replyer = getattr(model_config.model_task_config, "bilibili_replyer", None)
-                        if bili_replyer and bili_replyer.model_list:
-                            model_set = bili_replyer
-        except Exception:
-            pass
+        capabilities = runtime_capabilities_from_stream(self.chat_stream)
+        if capabilities.reply_model_group:
+            declared_model_set = getattr(
+                model_config.model_task_config,
+                capabilities.reply_model_group,
+                None,
+            )
+            if declared_model_set and declared_model_set.model_list:
+                model_set = declared_model_set
         if getattr(self, "request_type", "replyer") == "file_edit":
             model_set = getattr(model_config.model_task_config, "file_edit", model_set)
         return LLMRequest(model_set=model_set, request_type=getattr(self, "request_type", "replyer"))
@@ -415,11 +414,8 @@ class PrivateReplyer:
             logger.warning(f"未找到用户 {sender} 的ID，跳过信息提取")
             return f"你完全不认识{sender}，不理解ta的相关信息。"
 
-        # 直播环境下跳过 LLM 分类选择，仅使用本地字符串匹配
-        # 与 heartFC_chat.py 的 Bypass Planner 条件一致：bilibili 群聊(直播弹幕) + discord_vc
-        # 私聊场景下 bilibili 不跳过（heartFC 仅在 is_group_chat 时 bypass bilibili）
-        _platform = getattr(self.chat_stream, "platform", "")
-        _skip_llm = _platform in {"discord_vc", "universal_vc"}
+        capabilities = runtime_capabilities_from_stream(self.chat_stream)
+        _skip_llm = not capabilities.relation_inference
 
         sender_relation = await person.build_relationship(chat_content, skip_llm=_skip_llm)
 
@@ -440,9 +436,7 @@ class PrivateReplyer:
         use_expression, _, _ = global_config.expression.get_expression_config_for_chat(self.chat_stream.stream_id)
         if not use_expression:
             return "", []
-        # 直播环境下跳过表达方式选取（与 heartFC Bypass 条件一致）
-        _platform = getattr(self.chat_stream, "platform", "")
-        if _platform in {"discord_vc", "universal_vc"}:
+        if not runtime_capabilities_from_stream(self.chat_stream).expression_selection:
             return "", []
         style_habits = []
         # 使用从处理器传来的选中表达方式
@@ -778,17 +772,8 @@ class PrivateReplyer:
 
     async def _build_mid_term_memory_block(self, chat_id: str, messages) -> str:
         """构建中期记忆召回文本块"""
-        platform = getattr(self.chat_stream, "platform", "")
-        if platform in {"bilibili", "bilibili.live", "discord_vc", "universal_vc"}:
-            add_cfg = {}
-            try:
-                ctx_msg = getattr(self.chat_stream.context, "message", None)
-                msg_info = getattr(ctx_msg, "message_info", None)
-                add_cfg = getattr(msg_info, "additional_config", None) or {}
-            except Exception:
-                pass
-            if not add_cfg.get("live_memory_search_enabled", True):
-                return ""
+        if not runtime_capabilities_from_stream(self.chat_stream).mid_term_memory:
+            return ""
         try:
             from src.memory_system.mid_term_memory import get_mid_term_memory_manager
 
@@ -834,9 +819,10 @@ class PrivateReplyer:
         advanced_on = advanced_manager.is_on(chat_stream)
         context_size = global_config.chat.get_max_context_size(is_group_chat=bool(chat_stream.group_info))
 
-        user_id = "用户ID"
-        person_name = "用户"
-        sender = "用户"
+        current_user_info = chat_stream.user_info
+        user_id = str(getattr(current_user_info, "user_id", "") or "用户ID")
+        person_name = resolve_sender_name(user_info=current_user_info, user_id=user_id, fallback="用户")
+        sender = person_name
         target = "消息"
         if prompt_context is not None and prompt_context.target_chat_id != chat_id:
             raise ValueError("Focus ReplyPromptContext 不属于当前私聊 Replyer")
@@ -846,7 +832,12 @@ class PrivateReplyer:
         if reply_message:
             user_id = reply_message.user_info.user_id
             person = Person(platform=platform, user_id=user_id)
-            person_name = person.person_name or user_id
+            person_name = resolve_sender_name(
+                user_info=reply_message.user_info,
+                person_name=person.person_name,
+                user_id=user_id,
+                fallback="用户",
+            )
             sender = person_name
             target = reply_message.processed_plain_text
 
@@ -1217,7 +1208,7 @@ class PrivateReplyer:
         else:
             chat_target_name = "对方"
             if self.chat_target_info:
-                chat_target_name = self.chat_target_info.person_name or self.chat_target_info.user_nickname or "对方"
+                chat_target_name = resolve_sender_name(user_info=self.chat_target_info, fallback="对方")
             chat_target_1 = await global_prompt_manager.format_prompt(
                 "chat_target_private1", sender_name=chat_target_name
             )
@@ -1324,9 +1315,8 @@ class PrivateReplyer:
                 logger.debug("LPMM知识库未启用，跳过获取知识库内容")
                 return ""
             
-            # Bypass LPMM for real-time platforms (Bilibili Live, Discord VC)
-            if hasattr(self, "chat_stream") and getattr(self.chat_stream, "platform", None) in ["bilibili", "discord_vc", "universal_vc"]:
-                logger.debug(f"{self.chat_stream.platform} 直播/语音环境，跳过LPMM检索")
+            if not runtime_capabilities_from_stream(self.chat_stream).knowledge_retrieval:
+                logger.debug("适配器声明当前会话跳过知识库检索")
                 return ""
 
             time_now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())

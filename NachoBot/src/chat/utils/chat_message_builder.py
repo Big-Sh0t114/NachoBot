@@ -13,6 +13,7 @@ from src.common.data_models.message_data_model import MessageAndActionModel
 from src.common.database.database_model import ActionRecords
 from src.common.database.database_model import Images
 from src.person_info.person_info import Person, get_person_id
+from src.chat.utils.display_name import resolve_sender_name
 from src.chat.utils.utils import translate_timestamp_to_human_readable, assign_message_ids
 
 install(extra_lines=3)
@@ -47,7 +48,11 @@ def replace_user_references(
             if replace_bot_name and user_id == global_config.bot.qq_account:
                 return f"{global_config.bot.nickname}(你)"
             person = Person(platform=platform, user_id=user_id)
-            return person.person_name or user_id  # type: ignore
+            return resolve_sender_name(
+                user_nickname=getattr(person, "user_nickname", None),
+                person_name=person.person_name,
+                user_id=user_id,
+            )
 
         name_resolver = default_resolver
 
@@ -478,8 +483,11 @@ def _build_readable_messages_internal(
 
         person = Person(platform=platform, user_id=user_id)
         # 根据 replace_bot_name 参数决定是否替换机器人名称
-        person_name = (
-            person.person_name or f"{user_nickname}" or (f"昵称：{user_cardname}" if user_cardname else "某人")
+        person_name = resolve_sender_name(
+            user_cardname=user_cardname,
+            user_nickname=user_nickname,
+            person_name=person.person_name,
+            user_id=user_id,
         )
         if replace_bot_name and user_id == global_config.bot.qq_account:
             person_name = f"{global_config.bot.nickname}(你)"

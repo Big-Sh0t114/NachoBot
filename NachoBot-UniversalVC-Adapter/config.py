@@ -81,17 +81,6 @@ class SpeakerConfig:
 
 
 @dataclass
-class LocalASRConfig:
-    """Local streaming ASR settings (sherpa-onnx)."""
-    mode: str = "local_streaming"        # "local_streaming" | "remote_api"
-    tokens_path: str = "models/tokens.txt"
-    encoder_path: str = "models/encoder-epoch-99-avg-1.onnx"
-    decoder_path: str = "models/decoder-epoch-99-avg-1.onnx"
-    joiner_path: str = "models/joiner-epoch-99-avg-1.onnx"
-    num_threads: int = 2
-
-
-@dataclass
 class AdapterConfig:
     capture: AudioCaptureConfig
     output: AudioOutputConfig
@@ -101,7 +90,6 @@ class AdapterConfig:
     denoise: DenoiseConfig
     vad: VADConfig
     speaker: SpeakerConfig
-    local_asr: LocalASRConfig
     microphone: MicrophoneConfig
     log_level: str = "INFO"
     disable_network_search: bool = False
@@ -233,14 +221,12 @@ def load_config(path: Path) -> AdapterConfig:
     denoise_data = data.get("denoise", {})
     vad_data = data.get("vad", {})
     speaker_data = data.get("speaker", {})
-    local_asr_data = data.get("local_asr", {})
 
     # Resolve model paths relative to config file directory
     config_dir = path.parent
     for cfg_dict, path_keys in [
         (vad_data, ["model_path"]),
         (speaker_data, ["embedding_model_path", "db_path"]),
-        (local_asr_data, ["tokens_path", "encoder_path", "decoder_path", "joiner_path"]),
     ]:
         for key in path_keys:
             if key in cfg_dict:
@@ -259,7 +245,6 @@ def load_config(path: Path) -> AdapterConfig:
         denoise=DenoiseConfig(**denoise_data),
         vad=VADConfig(**vad_data),
         speaker=SpeakerConfig(**speaker_data),
-        local_asr=LocalASRConfig(**local_asr_data),
         microphone=MicrophoneConfig(**microphone_data),
         log_level=data.get("log_level", "INFO"),
         disable_network_search=data.get("disable_network_search", False),

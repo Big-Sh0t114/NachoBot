@@ -189,13 +189,15 @@ class ChatManager:
 
         # 使用MD5生成唯一ID
         key = "_".join(components)
-        return hashlib.md5(key.encode()).hexdigest()
+        # codeql[py/weak-sensitive-data-hashing]
+        return hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()
 
     def get_stream_id(self, platform: str, id: str, is_group: bool = True) -> str:
         """获取聊天流ID"""
         components = [platform, id] if is_group else [platform, id, "private"]
         key = "_".join(components)
-        return hashlib.md5(key.encode()).hexdigest()
+        # codeql[py/weak-sensitive-data-hashing]
+        return hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()
 
     async def get_or_create_stream(
         self, platform: str, user_info: UserInfo, group_info: Optional[GroupInfo] = None
@@ -236,15 +238,17 @@ class ChatManager:
 
             # 检查内存中是否存在
             if stream_id in self.streams:
-                stream = self.streams[stream_id]
+                cached_stream = self.streams[stream_id]
 
-                # 更新用户信息和群组信息
-                stream.update_active_time()
-                stream = copy.deepcopy(stream)  # 返回副本以避免外部修改影响缓存
+                # 先刷新缓存，再返回副本。旧逻辑只修改副本，导致后续 prompt
+                # 从 ChatManager 取到的始终是首次创建聊天流时的用户名称。
+                cached_stream.update_active_time()
                 if user_info and user_info.platform and user_info.user_id:
-                    stream.user_info = user_info
+                    cached_stream.user_info = copy.deepcopy(user_info)
                 if group_info:
-                    stream.group_info = group_info
+                    cached_stream.group_info = copy.deepcopy(group_info)
+
+                stream = copy.deepcopy(cached_stream)  # 返回副本以避免外部修改影响缓存
                 from .message import MessageRecv  # 延迟导入，避免循环引用
 
                 if stream_id in self.last_messages and isinstance(self.last_messages[stream_id], MessageRecv):

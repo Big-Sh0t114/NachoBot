@@ -14,6 +14,7 @@ class TargetPersonInfo(BaseDataModel):
     user_nickname: str = field(default_factory=str)
     person_id: Optional[str] = None
     person_name: Optional[str] = None
+    user_cardname: Optional[str] = None
 
 
 @dataclass

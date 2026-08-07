@@ -1,6 +1,5 @@
 import asyncio
 import json
-import logging
 import time
 import urllib.parse
 import uuid
@@ -21,6 +20,7 @@ from ncnk_message import (
 )
 
 from config import AdapterConfig
+from visual_policy import build_visual_policy
 from utils import (
     maybe_int,
     ws_is_closed,
@@ -51,7 +51,7 @@ ACCEPT_FORMAT = [
 
 
 class KoishiOneBotAdapter:
-    def __init__(self, config: AdapterConfig, logger: logging.Logger):
+    def __init__(self, config: AdapterConfig, logger: Any):
         self.config = config
         self.logger = logger
         self.onebot_ws: Optional[websockets.WebSocketClientProtocol] = None
@@ -64,7 +64,7 @@ class KoishiOneBotAdapter:
                 )
             }
         )
-        self.router = Router(route_config)
+        self.router = Router(route_config, custom_logger=logger)
         self.router.register_class_handler(self.handle_from_nachobot)
 
     async def run(self) -> None:
@@ -174,6 +174,10 @@ class KoishiOneBotAdapter:
         )
         if not segments:
             return
+        if "image" in content_format:
+            additional_config["visual_policy"] = build_visual_policy(
+                self.config.visual.image
+            )
 
         sender = data.get("sender") or {}
         nickname = sender.get("card") or sender.get("nickname") or user_id
@@ -301,7 +305,7 @@ class KoishiOneBotAdapter:
         ws = self.onebot_ws
         if ws_is_closed(ws):
             self.logger.warning(
-                "OneBot not connected, drop message (ws=%s closed=%s)",
+                "OneBot not connected, drop message (ws={} closed={})",
                 bool(ws),
                 getattr(ws, "closed", None),
             )

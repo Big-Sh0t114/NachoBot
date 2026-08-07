@@ -3,7 +3,7 @@
 
 Provides OpenAI-compatible endpoints for:
   - POST /v1/chat/completions   (Florence-2 image captioning)
-  - POST /v1/audio/transcriptions (FunASR speech recognition)
+  - POST /v1/audio/transcriptions (shared streaming speech recognition)
 
 Completely independent of any TTS plugin (GPT_Sovits / Vox).
 """
@@ -38,7 +38,7 @@ def _load_config() -> dict:
 async def startup_event():
     """预加载 VLM 和 ASR 模型（可通过 DISABLE_VLM_ASR=1 跳过）。"""
     from .vlm.florence2 import load_model as load_florence2
-    from .asr.funasr import load_model as load_funasr
+    from .asr.streaming import load_model as load_streaming_asr
 
     print("启动 Perception API 服务中 ...")
 
@@ -51,9 +51,9 @@ async def startup_event():
     await asyncio.to_thread(load_florence2)
     print("[Florence-2] VLM model loaded")
 
-    print("[FunASR] Preloading ASR model ...")
-    await asyncio.to_thread(load_funasr)
-    print("[FunASR] ASR model loaded")
+    print("[Streaming ASR] Preloading shared ASR model ...")
+    await asyncio.to_thread(load_streaming_asr)
+    print("[Streaming ASR] Shared ASR model loaded")
 
 
 # ==================== Florence-2 VLM 接口 ====================
@@ -83,9 +83,10 @@ def _extract_image_b64_from_messages(messages: list) -> str:
 async def vlm_chat_completions(request: Request):
     """OpenAI-compatible VLM endpoint backed by Florence-2-large.
 
-    Accepts standard OpenAI Chat Completions request with vision content,
-    extracts the base64 image, runs Florence-2 captioning, and returns
-    a standard OpenAI Chat Completions response.
+    The endpoint always uses Florence's detailed-caption task and fixed
+    deterministic generation settings. Caller-supplied Florence task and
+    generation fields are deliberately ignored so no adapter can downgrade
+    the lightweight fallback to a terse one-line caption.
     """
     from .vlm.florence2 import caption_image_b64
 
@@ -105,14 +106,17 @@ async def vlm_chat_completions(request: Request):
         )
 
     try:
-        caption = await asyncio.to_thread(caption_image_b64, image_b64)
-    except Exception as exc:
-        logger.error("[Florence-2] Inference error: %s", exc)
+        caption = await asyncio.to_thread(
+            caption_image_b64,
+            image_b64,
+        )
+    except Exception:
+        logger.exception("[Florence-2] Inference error")
         return JSONResponse(
             status_code=500,
             content={
                 "error": {
-                    "message": f"Florence-2 inference failed: {exc}",
+                    "message": "Florence-2 inference failed",
                     "type": "server_error",
                 }
             },
@@ -143,20 +147,20 @@ async def vlm_chat_completions(request: Request):
     }
 
 
-# ==================== FunASR 语音识别接口 ====================
+# ==================== 流式 ASR 语音识别接口 ====================
 
 
 @app.post("/v1/audio/transcriptions")
 async def audio_transcriptions(
     file: UploadFile = File(...),
-    model: str = Form("sensevoice-small"),
+    model: str = Form("zh-xlarge-int8-2025-06-30"),
 ):
-    """OpenAI-compatible audio transcription endpoint backed by FunASR.
+    """OpenAI-compatible upload endpoint backed by the shared online model.
 
     Accepts standard OpenAI Whisper API format (multipart/form-data with
     'file' and 'model' fields) and returns {"text": "..."} response.
     """
-    from .asr.funasr import transcribe
+    from .asr.streaming import transcribe
 
     audio_bytes = await file.read()
     if not audio_bytes:
@@ -172,13 +176,13 @@ async def audio_transcriptions(
 
     try:
         text = await asyncio.to_thread(transcribe, audio_bytes)
-    except Exception as exc:
-        logger.error("[FunASR] Transcription error: %s", exc)
+    except Exception:
+        logger.exception("[Streaming ASR] Transcription error")
         return JSONResponse(
             status_code=500,
             content={
                 "error": {
-                    "message": f"FunASR transcription failed: {exc}",
+                    "message": "Streaming ASR transcription failed",
                     "type": "server_error",
                 }
             },

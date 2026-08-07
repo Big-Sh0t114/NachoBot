@@ -1,5 +1,5 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 import tomlkit
@@ -18,6 +18,7 @@ from src.config.official_configs import (
     NapcatServerConfig,
     NicknameConfig,
     VoiceConfig,
+    VisualConfig,
 )
 
 install(extra_lines=3)
@@ -118,6 +119,7 @@ class Config(ConfigBase):
     chat: ChatConfig
     voice: VoiceConfig
     debug: DebugConfig
+    visual: VisualConfig = field(default_factory=VisualConfig)
 
 
 def load_config(config_path: str) -> Config:

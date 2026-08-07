@@ -1,7 +1,7 @@
 """
 Audio Capture Module — Per-process and system-wide audio capture.
 
-Enhanced DEV Version: Uses an asynchronous frame buffer queue to completely decouple
+Enhanced Version: Uses an asynchronous frame buffer queue to completely decouple
 WASAPI/sounddevice capture from heavy CPU pipeline processing, ensuring true real-time execution.
 """
 
@@ -209,7 +209,7 @@ class AudioCapture:
             self._sd_stream.start()
             self.logger.info(f"System capture started: {samplerate}Hz, {channels}ch")
         except Exception as e:
-            self.logger.error(f"Failed to start system capture: {e}", exc_info=True)
+            self.logger.exception(f"Failed to start system capture: {e}")
 
     def _system_audio_callback(self, indata, frames, time_info, status):
         """sounddevice callback — thread-safe injection into asyncio queue."""
@@ -275,7 +275,7 @@ class AudioCapture:
         except asyncio.CancelledError:
             self.logger.info("Capture loop cancelled")
         except Exception as e:
-            self.logger.error(f"Capture loop error: {e}", exc_info=True)
+            self.logger.exception(f"Capture loop error: {e}")
 
     async def _queue_worker_loop(self):
         """后台顺序工作线程：逐帧在线程池中处理音频，释放主事件循环，保持严格时序"""
@@ -294,7 +294,7 @@ class AudioCapture:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                self.logger.error(f"Pipeline worker sequence exception: {e}", exc_info=True)
+                self.logger.exception(f"Pipeline worker sequence exception: {e}")
 
     def get_application_name(self) -> str:
         """Get the friendly name of the captured application."""
@@ -538,7 +538,7 @@ class MicrophoneCapture:
             self._sd_stream.start()
             self.logger.info(f"Microphone capture started: {samplerate}Hz, {channels}ch")
         except Exception as e:
-            self.logger.error(f"Failed to start microphone capture: {e}", exc_info=True)
+            self.logger.exception(f"Failed to start microphone capture: {e}")
             self._running = False
 
     def _audio_callback(self, indata, frames, time_info, status):
@@ -598,4 +598,4 @@ class MicrophoneCapture:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                self.logger.error(f"Microphone worker exception: {e}", exc_info=True)
+                self.logger.exception(f"Microphone worker exception: {e}")
