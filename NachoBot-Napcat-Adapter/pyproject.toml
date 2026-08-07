@@ -13,7 +13,7 @@ dependencies = [
     "sqlmodel>=0.0.37",
     "tomlkit>=0.14.0",
     "urllib3>=2.0.0",
-    "uvicorn>=0.41.0",
+    "uvicorn>=0.52.1",
     "websockets>=16.0",
 ]
 
