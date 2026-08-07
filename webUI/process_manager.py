@@ -611,6 +611,7 @@ class ProcessManager:
                 "--host", "127.0.0.1", "--port", str(tts_engine_port),
                 "--model-dir", str(model_dir),
                 "--lora-weights", str(lora),
+                "--no-denoiser",
             ]
             return cmd, str(voxcpm_dir), {}
         else:

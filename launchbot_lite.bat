@@ -214,7 +214,7 @@ if exist "%VOX_TOML%" (
 )
 
 REM Use venv python directly to avoid uv run syncing back to CPU torch
-start "VoxCPM API (%PORT_VOX%)" cmd /k "chcp 65001>nul && cd /d %VOXCPM_DIR% && %PY_VOX% %VOX_API_SCRIPT% --host 127.0.0.1 --port %PORT_VOX% --model-dir %VOX_MODEL_DIR% --lora-weights %VOX_LORA%"
+start "VoxCPM API (%PORT_VOX%)" cmd /k "chcp 65001>nul && cd /d %VOXCPM_DIR% && %PY_VOX% %VOX_API_SCRIPT% --host 127.0.0.1 --port %PORT_VOX% --model-dir %VOX_MODEL_DIR% --lora-weights %VOX_LORA% --no-denoiser"
 
 set "READY="
 for /l %%I in (1,1,150) do (
