@@ -21,7 +21,6 @@ lora_weights_path = "C:/Users/BigSh0t/VoxCPM-2.0.2/lora/ncnk3"
 # 默认生成参数
 cfg_value = 3.0               # CFG 引导强度
 inference_timesteps = 10       # LocDiT 流匹配迭代步数
-denoise = false                # 是否对参考音频进行降噪增强（需要FFmpeg，Windows暂不支持）
 normalize = false              # 是否进行文本规范化
 seed = -1               # 随机种子，-1 为随机
 
@@ -42,7 +41,6 @@ control_instruction = ""              # 可选声音描述（留空则纯克隆�
 prompt_text = "おはようみんな、ミサイドっていうさ、女の子のゲームをやりたいんだけど"                      # 极致克隆模式的参考音频文本（留空则不启用极致克隆）
 cfg_value = 3.0
 inference_timesteps = 10
-denoise = false
 normalize = false
 seed = 0
 
@@ -53,7 +51,6 @@ control_instruction = ""
 prompt_text = "おにいるの？今配信中だから構えないよ。満足した？満足した？もういい？あるくんが外で待ってるよ。"
 cfg_value = 3.0
 inference_timesteps = 10
-denoise = false
 normalize = false
 seed = 3322597905
 
@@ -64,7 +61,6 @@ control_instruction = ""
 prompt_text = "マジで眠い。眠いなって思ってた。まあどうせみんなも寝る時間だろうなって"
 cfg_value = 3.0
 inference_timesteps = 10
-denoise = false
 normalize = false
 seed = 3322597905
 
@@ -75,7 +71,6 @@ control_instruction = ""
 prompt_text = "言うた、嫌だ、いうたさ、切り抜き禁止って言ってんのに、ま、YouTubeじゃないけど、切り抜きされて"
 cfg_value = 3.0
 inference_timesteps = 10
-denoise = false
 normalize = false
 seed = 737315733
 
@@ -86,7 +81,6 @@ control_instruction = ""
 prompt_text = "おい、お前も飲めよー。全然飲んでないじゃんかーって"
 cfg_value = 3.0
 inference_timesteps = 10
-denoise = false
 normalize = false
 seed = 3150204291
 
@@ -97,7 +91,6 @@ control_instruction = ""
 prompt_text = "いつたけなんですよ。ああ、早く走ってくださいー、早く走ってごらぁ！"
 cfg_value = 3.0
 inference_timesteps = 10
-denoise = false
 normalize = false
 seed = 1043031635
 

@@ -285,7 +285,7 @@ async def tts(
     prompt_wav_path: str = Query("", description="提示音频路径（极致克隆，默认同reference_wav_path）"),
     cfg_value: float = Query(2.0, description="CFG引导强度"),
     inference_timesteps: int = Query(10, description="LocDiT迭代步数"),
-    denoise: str = Query("true", description="是否降噪"),
+    denoise: str = Query("false", description="兼容参数，降噪功能已禁用"),
     normalize: str = Query("false", description="是否文本规范化"),
     media_type: str = Query("wav", description="音频格式（仅支持wav）"),
     streaming_mode: str = Query("false", description="流式模式（暂不支持）"),
@@ -314,8 +314,8 @@ async def tts(
             media_type="application/json",
         )
 
-    # 解析布尔值
-    do_denoise = denoise.lower() in ("true", "1", "yes")
+    # 降噪器在启动时被禁用；保留 denoise 参数仅用于旧客户端兼容
+    do_denoise = False
     do_normalize = normalize.lower() in ("true", "1", "yes")
 
     # 构建控制文本前缀（用于每一段）
@@ -445,7 +445,8 @@ async def tts_stream(
             media_type="application/json",
         )
 
-    do_denoise = denoise.lower() in ("true", "1", "yes")
+    # 降噪器在启动时被禁用；保留 denoise 参数仅用于旧客户端兼容
+    do_denoise = False
     do_normalize = normalize.lower() in ("true", "1", "yes")
     control = (control_instruction or "").strip()
 
