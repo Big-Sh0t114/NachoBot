@@ -42,6 +42,7 @@ from bili_src.core.utils import (  # noqa: E402
 from bili_src.api.api import BilibiliApi  # noqa: E402
 from bili_src.live.live_worker import LiveRoomWorker  # noqa: E402
 from bili_src.live.screen_monitor import ScreenMonitor  # noqa: E402
+from bili_src.live.two_phase_search import append_live_search_protocol  # noqa: E402
 from bili_src.audio.mic_capture import MicCaptureWorker, MicConfig  # noqa: E402
 from bili_src.audio.audio_player import AudioPlayer  # noqa: E402
 # from live_streamer import LiveStreamerController, PriorityEvent  # noqa: E402
@@ -1541,6 +1542,10 @@ class BilibiliAdapter:
                 reply_prompt += "\n{person_profile_block}"
         if reply_prompt:
             reply_prompt += "\n{moderation_prompt}"
+            reply_prompt = append_live_search_protocol(
+                reply_prompt,
+                enabled=self.config.live_network_search_enabled,
+            )
         if planner_prompt:
             planner_prompt += "\n{moderation_prompt}"
 

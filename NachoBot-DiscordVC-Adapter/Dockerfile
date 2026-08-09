@@ -1,26 +1,31 @@
 FROM python:3.13-slim-bookworm
+
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-WORKDIR /discord-adapter
+WORKDIR /workspace/NachoBot-DiscordVC-Adapter
 
-# 系统依赖：ffmpeg（音频处理）、libsodium-dev（pynacl/voice）
+# git is required for the pinned Pycord Git dependency.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
     ffmpeg \
+    git \
     libffi-dev \
+    libopus0 \
     libsodium-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# 复制依赖列表并安装
 COPY pyproject.toml uv.lock ./
 RUN uv sync --locked --no-dev --no-install-project
-ENV PATH="/discord-adapter/.venv/bin:${PATH}"
 
-# 复制项目代码
 COPY . .
 
-# Shared ASR stays owned by Multimodal-Adapter. docker-compose supplies this
-# sibling directory as the named "multimodal" build context.
-COPY --from=multimodal /src /NachoBot-Multimodal-Adapter/src
-COPY --from=multimodal /configs /NachoBot-Multimodal-Adapter/configs
+COPY --from=nachobot /ncnk_message /workspace/NachoBot/ncnk_message
+COPY --from=multimodal /src /workspace/NachoBot-Multimodal-Adapter/src
+COPY --from=multimodal /nachobot_multimodal /workspace/NachoBot-Multimodal-Adapter/nachobot_multimodal
+COPY --from=multimodal /configs /workspace/NachoBot-Multimodal-Adapter/configs
+
+ENV PATH="/workspace/NachoBot-DiscordVC-Adapter/.venv/bin:${PATH}" \
+    PYTHONUNBUFFERED=1
 
 ENTRYPOINT ["python", "main.py"]

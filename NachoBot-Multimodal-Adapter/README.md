@@ -184,8 +184,9 @@ auto_download = true
 docker compose up -d
 ```
 
-The Compose build uses the integrated workspace root and copies the canonical
-`NachoBot/ncnk_message` implementation. Keep `NachoBot` adjacent to this adapter.
+The Compose build uses this adapter as the main context and copies the canonical
+`NachoBot/ncnk_message` implementation through a named sibling context. Keep
+`NachoBot` adjacent to this adapter.
 
 
 ### 2. Docker 环境注意事项
@@ -193,5 +194,6 @@ The Compose build uses the integrated workspace root and copies the canonical
     ```bash
     docker network create nacho_bot
     ```
-*   **通信地址**：在 Docker 容器中连接宿主机的 GPT-SoVITS API 时，请将 `configs/base.toml` 或 `configs/vox.toml` 中的 `api_base`/`host` IP 改为 `host.docker.internal`（Windows 宿主机桥接）或宿主机实际局域网 IP。
-*   **路径映射**：容器会自动将宿主机的 `./configs` 与 `./logs` 目录挂载到容器内 `/nachobot_multimodal_adapter/` 对应路径下。修改宿主机配置文件后，执行 `docker compose restart` 即可热生效。
+*   **通信地址**：在 Docker 容器中连接宿主机的 TTS API 时，请将所用引擎配置（`configs/gpt-sovits.toml` 或 `configs/vox.toml`）中 `[tts].host` 改为 `host.docker.internal`（Windows 宿主机桥接）或宿主机实际局域网 IP。
+*   **路径映射**：容器会自动将宿主机的 `./configs`、`./models` 与 `./logs` 目录挂载到容器内对应路径下。修改宿主机配置文件后，执行 `docker compose restart` 即可热生效。
+*   **Python 版本**：镜像使用 Python 3.12，匹配本适配器 `requires-python = ">=3.11,<3.13"` 的约束。

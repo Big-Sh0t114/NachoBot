@@ -473,12 +473,13 @@ async def text_to_stream_receipt(
     reply_message: Optional["DatabaseMessages"] = None,
     storage_message: bool = True,
     selected_expressions: Optional[List[int]] = None,
+    display_message: str = "",
 ) -> SendReceipt:
     """发送文本并返回可用于 Focus handoff ACK 的真实投递回执。"""
     return await _send_to_target_receipt(
         message_segment=Seg(type="text", data=text),
         stream_id=stream_id,
-        display_message="",
+        display_message=display_message,
         typing=typing,
         set_reply=set_reply,
         reply_message=reply_message,

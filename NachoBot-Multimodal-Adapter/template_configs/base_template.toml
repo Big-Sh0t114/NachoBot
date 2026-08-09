@@ -16,19 +16,7 @@ enabled = ["Vox"]
 
 [tts_base_config]
 stream_mode = false  # 是否启用流式输出
-post_process = false # 是否启用后处理（现阶段无效）
+post_process = false # 是否启用电话语音后处理
 
 [debug]
 logging_level = "DEBUG" # 日志级别
-
-[plugins.GPT_Sovits]
-api_base = "http://127.0.0.1:9880" 
-gpt_weights    = "C:/Users/BigSh0t/Nacho-with-u/nachobot_tts_adapter/configs/ncnk.ckpt"
-sovits_weights = "C:/Users/BigSh0t/Nacho-with-u/nachobot_tts_adapter/configs/ncnk_fin.pth" 
-speaker = "NachoChan"
-
-[plugins.Vox]
-api_base = "http://127.0.0.1:9880"
-
-[perception_api]
-api_base = "http://127.0.0.1:9874"

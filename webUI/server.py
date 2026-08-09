@@ -823,7 +823,7 @@ class VerifyPathRequest(BaseModel):
 
 @app.post("/api/setup/verify-path")
 async def setup_verify_path(body: VerifyPathRequest):
-    """Verify an external dependency path."""
+    """Verify a setup dependency or project-managed runtime."""
     result = PathVerifier.verify_path(body.type, body.path)
     return result
 

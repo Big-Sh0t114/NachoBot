@@ -12,10 +12,10 @@ discord = "default"  # Discord平台使用default预设
 host = "127.0.0.1"
 port = 9880
 
-# VoxCPM 模型路径
+# VoxCPM 基础模型。留空时由托管运行时自动下载 openbmb/VoxCPM2
 model_dir = ""
 
-# LoRA 权重路径（留空则不使用LoRA）
+# LoRA 权重路径（可使用任意本地自定义权重；留空则不使用LoRA）
 lora_weights_path = ""
 
 # 默认生成参数

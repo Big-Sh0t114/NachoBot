@@ -13,6 +13,7 @@ from bili_src.core.utils import (
     BILIBILI_DANMU_MAX_LENGTH,
     BILIBILI_DANMU_SEND_DELAY_SECONDS,
 )
+from bili_src.live.two_phase_search import BilibiliLiveSearchOrchestrator
 
 
 class OutgoingHandler:
@@ -20,6 +21,7 @@ class OutgoingHandler:
         self.config = config
         self.logger = logger
         self.adapter = adapter_ref
+        self.live_search = BilibiliLiveSearchOrchestrator(adapter_ref, logger)
 
     async def handle_from_nachobot(self, raw_message_base_dict: dict) -> None:
         message = MessageBase.from_dict(raw_message_base_dict)
@@ -159,6 +161,35 @@ class OutgoingHandler:
 
     async def _handle_live_reply(self, args: Dict[str, Any]) -> None:
         raw_message = str(args.get("message") or "")
+        try:
+            room_id = int(args.get("room_id"))
+        except (TypeError, ValueError):
+            self.logger.warning("Invalid room_id for live reply")
+            return
+        reply_mid = str(args.get("reply_mid") or "")
+        reply_dmid = str(args.get("reply_dmid") or "")
+
+        handled = await self.live_search.handle(
+            raw_message,
+            room_id=room_id,
+            reply_mid=reply_mid,
+            reply_dmid=reply_dmid,
+            deliver=self._deliver_live_reply,
+        )
+        if handled:
+            return
+
+        await self._deliver_live_reply(raw_message, room_id, reply_mid, reply_dmid)
+
+    async def _deliver_live_reply(
+        self,
+        raw_message: str,
+        room_id: int,
+        reply_mid: str,
+        reply_dmid: str,
+    ) -> None:
+        """Deliver one already-orchestrated live reply through TTS/Live2D/danmu."""
+
         text, emotion, action = (
             self.adapter.live2d_manager.extract_json_emotion_from_text(raw_message)
         )
@@ -176,14 +207,6 @@ class OutgoingHandler:
         text = self.adapter._filter_outgoing_text(text)
         if not text:
             return
-
-        try:
-            room_id = int(args.get("room_id"))
-        except (TypeError, ValueError):
-            self.logger.warning("Invalid room_id for live reply")
-            return
-        reply_mid = str(args.get("reply_mid") or "")
-        reply_dmid = str(args.get("reply_dmid") or "")
 
         tts_enable = self.adapter.tts_manager.is_tts_enabled(room_id)
 

@@ -5,9 +5,13 @@ import os
 import queue
 import tempfile
 import wave
-import winsound
 from collections.abc import Awaitable, Callable
 from typing import Deque, Optional
+
+try:
+    import winsound
+except ImportError:  # Linux containers use the remote Live2D playback path.
+    winsound = None
 
 
 class AudioPlayer:
@@ -118,6 +122,12 @@ class AudioPlayer:
         self._play_sound_locally(audio_data)
 
     def _play_sound_locally(self, audio_data: bytes) -> None:
+        if winsound is None:
+            self.logger.warning(
+                "Local winsound playback is unavailable on this platform; "
+                "configure the remote Live2D audio callback for container use."
+            )
+            return
         try:
             # Save to temp
             temp_path = os.path.join(tempfile.gettempdir(), "nachobot_tts_player.wav")
@@ -134,6 +144,9 @@ class AudioPlayer:
                     return
             except Exception as e:
                 self.logger.warning(f"Live2D audio stop failed; stopping winsound: {e}")
+
+        if winsound is None:
+            return
 
         try:
             winsound.PlaySound(None, winsound.SND_PURGE)

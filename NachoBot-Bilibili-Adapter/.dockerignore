@@ -1,6 +1,8 @@
 .venv/
 __pycache__/
 logs/
+.runtime/
+.ruff_cache/
 .git/
 .gitignore
 *.dll
@@ -9,5 +11,5 @@ qr_login.png
 subtitles.txt
 subtitles1.txt
 config.toml
-uv.lock
 *.pyc
+tests/

@@ -202,7 +202,7 @@ body {
 }
 
 /* Logo watermark background */
-.tab-panel.active:not(#tab-terminal)::before {
+.main-content:not(:has(#tab-terminal.active))::before {
     content: '';
     position: fixed;
     top: 50%;
@@ -460,6 +460,13 @@ body {
     color: var(--text-primary);
 }
 
+.group-detail {
+    margin-top: 4px;
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    line-height: 1.35;
+}
+
 .group-status-badge {
     font-size: 0.75rem;
     font-weight: 500;
@@ -492,6 +499,14 @@ body {
     display: flex;
     align-items: center;
     gap: 10px;
+    min-width: 0;
+}
+
+.service-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
 }
 
 .service-dot {
@@ -510,6 +525,12 @@ body {
 .service-name {
     font-size: 0.85rem;
     color: var(--text-primary);
+}
+
+.service-detail {
+    color: var(--text-muted);
+    font-size: 0.72rem;
+    line-height: 1.35;
 }
 
 .service-port {

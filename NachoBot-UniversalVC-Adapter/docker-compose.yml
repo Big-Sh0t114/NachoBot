@@ -1,0 +1,39 @@
+services:
+  universal-vc-adapter:
+    container_name: nacho-bot-universal-vc-adapter
+    platform: windows/amd64
+    build:
+      context: .
+      additional_contexts:
+        nachobot: ../NachoBot
+        multimodal: ../NachoBot-Multimodal-Adapter
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      - type: bind
+        source: ./config.toml
+        target: C:/workspace/NachoBot-UniversalVC-Adapter/config.toml
+      - type: bind
+        source: ./models
+        target: C:/workspace/NachoBot-UniversalVC-Adapter/models
+      - type: bind
+        source: ./speaker_db.json
+        target: C:/workspace/NachoBot-UniversalVC-Adapter/speaker_db.json
+      - type: bind
+        source: ../NachoBot/config
+        target: C:/workspace/NachoBot/config
+        read_only: true
+      - type: bind
+        source: ../NachoBot-Multimodal-Adapter/configs
+        target: C:/workspace/NachoBot-Multimodal-Adapter/configs
+        read_only: true
+      - type: bind
+        source: ../NachoBot-Multimodal-Adapter/models
+        target: C:/workspace/NachoBot-Multimodal-Adapter/models
+    restart: always
+    networks:
+      - nacho_bot
+
+networks:
+  nacho_bot:
+    external: true

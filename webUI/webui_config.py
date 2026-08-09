@@ -13,10 +13,6 @@ DEFAULT_CONFIG = {
         "host": "127.0.0.1",
         "port": 8088
     },
-    "paths": {
-        "voxcpm_dir": "C:/Users/BigSh0t/VoxCPM-2.0.2",
-        "sovits_dir": "C:/Users/BigSh0t/GPT-SoVITS/GPT-SoVITS-v2pro-20250604"
-    },
     "proxy": {
         "http_proxy": "http://127.0.0.1:7897",
         "https_proxy": "http://127.0.0.1:7897"
@@ -66,13 +62,6 @@ class WebUIConfig:
             server_table["port"] = DEFAULT_CONFIG["server"]["port"]
             doc["server"] = server_table
 
-            # Paths section
-            paths_table = tomlkit.table()
-            paths_table.add(tomlkit.comment("Absolute paths to external model directories"))
-            paths_table["voxcpm_dir"] = DEFAULT_CONFIG["paths"]["voxcpm_dir"]
-            paths_table["sovits_dir"] = DEFAULT_CONFIG["paths"]["sovits_dir"]
-            doc["paths"] = paths_table
-
             # Proxy section
             proxy_table = tomlkit.table()
             proxy_table.add(tomlkit.comment("Proxy configuration for adapters like Koishi/Discord"))
@@ -96,14 +85,6 @@ class WebUIConfig:
     @property
     def port(self) -> int:
         return self.config["server"]["port"]
-
-    @property
-    def voxcpm_dir(self) -> Path:
-        return Path(self.config["paths"]["voxcpm_dir"])
-
-    @property
-    def sovits_dir(self) -> Path:
-        return Path(self.config["paths"]["sovits_dir"])
 
     @property
     def http_proxy(self) -> str:

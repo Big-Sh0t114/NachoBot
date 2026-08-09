@@ -687,7 +687,7 @@ body.sidebar-collapsed .sidebar-webui-menu .nav-icon {
     left: calc(50% + (var(--content-sidebar-width) / 2)) !important;
 }
 
-.tab-panel.active:not(#tab-terminal)::before {
+.main-content:not(:has(#tab-terminal.active))::before {
     left: calc(50% + (var(--content-sidebar-width) / 2));
 }
 
