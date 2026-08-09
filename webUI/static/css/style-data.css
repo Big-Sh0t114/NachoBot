@@ -359,6 +359,8 @@
 
 .db-table-container {
     flex: 1;
+    display: flex;
+    flex-direction: column;
     background: var(--bg-card);
     border-radius: var(--radius-lg);
     border: 1px solid var(--border-light);

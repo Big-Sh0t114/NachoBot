@@ -78,6 +78,26 @@
     animation: chat-send-pulse 0.9s ease-in-out infinite alternate;
 }
 
+/* Launcher cards use semantic marks, keeping service groups visually distinct without emoji. */
+.group-icon {
+    width: 44px;
+    height: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 44px;
+    color: var(--accent-dark);
+    background: linear-gradient(145deg, rgba(20, 184, 166, 0.13), rgba(13, 148, 136, 0.04));
+    border: 1px solid rgba(13, 148, 136, 0.16);
+    border-radius: 14px;
+}
+
+.group-icon .ui-icon {
+    width: 1.68rem;
+    height: 1.68rem;
+    margin: 0;
+}
+
 /* Primary visual anchors use softly framed line art instead of large emoji. */
 .placeholder-icon,
 .component-icon,

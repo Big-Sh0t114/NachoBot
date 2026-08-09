@@ -234,7 +234,7 @@
         <section id="tab-launcher" class="tab-panel">
             <div class="panel-header">
                 <h2>一键启动</h2>
-                <p class="panel-desc">按适配器组管理服务的启动与停止</p>
+                <p class="panel-desc">按核心、平台适配器和多模态服务组管理启动与停止；端口与连接用途会随配置显示</p>
             </div>
             <div class="launcher-grid" id="launcher-grid"></div>
         </section>
@@ -751,7 +751,7 @@
                 <div class="setup-step-panel" id="setup-step-4">
                     <div class="setup-hint-banner">
                         <span class="hint-icon">🔎</span>
-                        <span>请确认以下外部依赖已正确安装。验证通过后方可进入部署。</span>
+                        <span>请确认所选组件所需的外部运行依赖。验证通过后方可进入部署。</span>
                     </div>
                     <div class="setup-card">
                         <div class="setup-card-header">
@@ -817,52 +817,6 @@
                                     <a class="btn-download" id="dl-bilibili_dll"
                                         href="https://www.live2d.com/sdk/download/native/" target="_blank"
                                         style="display:none">📥 前往下载 Live2D SDK</a>
-                                </div>
-                            </div>
-
-                            <!-- GPT-SoVITS (tts + engine) -->
-                            <div class="path-check-card" id="path-check-sovits" data-type="sovits" style="display:none">
-                                <div class="path-check-header">
-                                    <span class="path-check-icon">🎙️</span>
-                                    <div class="path-check-info">
-                                        <span class="path-check-name">GPT-SoVITS</span>
-                                        <span class="path-check-hint">GPT-SoVITS 安装目录（包含 runtime/python.exe）</span>
-                                    </div>
-                                    <span class="path-check-status" id="status-sovits"></span>
-                                </div>
-                                <div class="path-check-body">
-                                    <div class="form-input-group">
-                                        <input type="text" class="form-input path-check-input" id="path-sovits"
-                                            placeholder="例如: C:\GPT-SoVITS\GPT-SoVITS-v2pro">
-                                        <button class="btn btn-outline btn-sm btn-verify" data-type="sovits">验证</button>
-                                    </div>
-                                    <div class="path-check-result" id="result-sovits"></div>
-                                    <a class="btn-download" id="dl-sovits"
-                                        href="https://www.yuque.com/baicaigongchang1145haoyuangong/ib3g1e/dkxgpiy9zb96hob4"
-                                        target="_blank" style="display:none">📥 前往下载 GPT-SoVITS</a>
-                                </div>
-                            </div>
-
-                            <!-- VoxCPM (tts + engine) -->
-                            <div class="path-check-card" id="path-check-voxcpm" data-type="voxcpm" style="display:none">
-                                <div class="path-check-header">
-                                    <span class="path-check-icon">🎙️</span>
-                                    <div class="path-check-info">
-                                        <span class="path-check-name">VoxCPM</span>
-                                        <span class="path-check-hint">VoxCPM 安装目录（包含 .venv/Scripts/python.exe）</span>
-                                    </div>
-                                    <span class="path-check-status" id="status-voxcpm"></span>
-                                </div>
-                                <div class="path-check-body">
-                                    <div class="form-input-group">
-                                        <input type="text" class="form-input path-check-input" id="path-voxcpm"
-                                            placeholder="例如: C:\VoxCPM-2.0.2">
-                                        <button class="btn btn-outline btn-sm btn-verify" data-type="voxcpm">验证</button>
-                                    </div>
-                                    <div class="path-check-result" id="result-voxcpm"></div>
-                                    <a class="btn-download" id="dl-voxcpm"
-                                        href="https://github.com/openbmb/VoxCPM/releases" target="_blank"
-                                        style="display:none">📥 前往下载 VoxCPM</a>
                                 </div>
                             </div>
 

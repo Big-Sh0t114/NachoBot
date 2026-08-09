@@ -613,7 +613,7 @@ class DefaultReplyer:
             # === 并行执行：搜索 + 工具判定 ===
             parallel_tasks = {}
 
-            # 两阶段搜索由 HeartFlow 在首轮回复后处理，标准搜索在这里处理。
+            # Core-owned standard search runs only when the adapter requests it.
             if (
                 not mcp_only
                 and not urls
@@ -1179,17 +1179,6 @@ class DefaultReplyer:
             logger.debug(f"获取TTS语言提示失败: {e}")
 
         extra_info_block_parts = []
-
-        capabilities = runtime_capabilities_from_stream(chat_stream)
-        if is_group_chat and capabilities.web_search_mode == "two_phase":
-            extra_info_block_parts.append(
-                "[联网搜索能力] 如果你认为需要联网实时查询才能回答当前问题"
-                "（如实时新闻、价格、天气、特定事实查询等），"
-                '请在你的回复中设置 "web_search" 字段为 true，并在 "search_query" 字段填入搜索关键词。'
-                "同时在回复文本中写一段简短的话告诉对方你正在查询。"
-                "如果不需要搜索，不需要包含这些字段。"
-                "[联网搜索能力结束]"
-            )
 
         if extra_info:
             extra_info_block_parts.append(

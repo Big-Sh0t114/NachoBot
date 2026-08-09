@@ -146,10 +146,12 @@ docker network create nacho_bot
 
 ```bash
 cd NachoBot
+# 可选：单独预构建核心镜像
+docker compose build core
 docker compose up -d
 ```
 
-核心服务包含：`core`（NachoBot 主进程）、`adapters`（Napcat 适配器）、`napcat`（QQ 协议端）、`sqlite-web`（数据库管理）。
+核心服务包含：`core`（NachoBot 主进程）、`adapters`（兼容旧版适配器镜像）、`napcat`（QQ 协议端）、`sqlite-web`（数据库管理）。`core` 现在由本目录的 Dockerfile 本地构建，使用现有 `pyproject.toml` 与 `uv.lock`，不再依赖旧的 `NachoBot-LPMM` 构建目录。
 
 ### 按需启动平台适配器
 
@@ -167,6 +169,15 @@ cd NachoBot-Koishi-Adapter && docker compose up -d
 
 # TTS 语音合成适配器
 cd NachoBot-Multimodal-Adapter && docker compose up -d
+
+# QQ / NapCat 消息适配器
+cd NachoBot-Napcat-Adapter && docker compose up -d
+
+# 独立 Live2D 渲染适配器（Windows 容器引擎）
+cd NachoBot-Live2D-Adapter && docker compose up -d
+
+# 通用语音频道适配器（Windows 容器引擎）
+cd NachoBot-UniversalVC-Adapter && docker compose up -d
 ```
 
 ### Docker 注意事项
@@ -174,7 +185,10 @@ cd NachoBot-Multimodal-Adapter && docker compose up -d
 - **网络**：所有服务通过 `nacho_bot` 外部网络互相通信。容器间使用服务名（如 `core`、`tts-adapter`）作为主机名，配置文件中的 `127.0.0.1` 需替换为对应服务名。
 - **配置持久化**：各适配器通过卷挂载持久化 `config.toml` 等配置文件，修改配置后重启容器即可生效.
 - **FFmpeg**：DiscordVC 适配器的 Docker 镜像已内置 FFmpeg，无需额外安装。
+- **核心镜像**：核心镜像使用 Python 3.12，并内置 FFmpeg；启用网页搜索时还会安装 Playwright Chromium。
 - **Xvfb**：Bilibili 适配器的 Docker 镜像已内置 Xvfb 虚拟帧缓冲，支持容器内屏幕监控。
+- **构建上下文**：适配器 Compose 会通过 `additional_contexts` 读取相邻的 `NachoBot` 与 `NachoBot-Multimodal-Adapter` 源码；核心配置和模型目录只在运行时挂载，不会打进镜像。
+- **Windows 专属适配器**：Live2D 依赖 Windows 原生 `live2d-py`，UniversalVC 依赖 Windows ProcTap/虚拟声卡。两者的 Compose 必须使用 Windows 容器引擎，且不能自动捕获宿主机 Linux 容器或宿主机桌面中的窗口、进程音频和声卡。
 
 ---
 

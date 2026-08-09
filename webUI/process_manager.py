@@ -23,6 +23,27 @@ _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
+_TTS_ENGINE_CONFIG_FILES = {
+    "GPT_Sovits": "gpt-sovits.toml",
+    "Vox": "vox.toml",
+}
+
+
+def _read_tts_engine_port(root_dir: Path, engine: str) -> int:
+    """Read the selected engine port from its dedicated TOML config."""
+    config_name = _TTS_ENGINE_CONFIG_FILES.get(engine)
+    if not config_name:
+        return 9880
+
+    config_path = root_dir / "NachoBot-Multimodal-Adapter" / "configs" / config_name
+    try:
+        import tomlkit
+
+        document = tomlkit.parse(config_path.read_text(encoding="utf-8"))
+        return int(document.get("tts", {}).get("port", 9880))
+    except Exception:
+        return 9880
+
 
 class ServiceStatus(str, Enum):
     STOPPED = "stopped"
@@ -44,6 +65,8 @@ class ServiceDef:
     env_extra: dict[str, str] = field(default_factory=dict)
     wait_port: bool = False     # Whether to wait for port before marking "running"
     order: int = 0              # Launch order within group
+    detail: str = ""            # User-facing role/connection hint
+    health_mode: str | None = None  # Optional /api/health mode required for readiness
 
 
 @dataclass
@@ -53,6 +76,7 @@ class GroupDef:
     name: str
     icon: str
     services: list[str]         # Service IDs in launch order
+    detail: str = ""            # User-facing group description
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +92,6 @@ def _register_services():
     global SERVICE_DEFS, GROUP_DEFS
     from webui_config import webui_config
     import tomlkit
-    from urllib.parse import urlparse
     import re
 
     # 1. Parse NachoBot .env
@@ -122,14 +145,8 @@ def _register_services():
             engine = "GPT_Sovits"
             if isinstance(enabled, list) and "Vox" in enabled:
                 engine = "Vox"
-            
-            # Read engine api_base port
-            plugins_sec = doc.get("plugins", {})
-            engine_sec = plugins_sec.get(engine, {})
-            api_base = engine_sec.get("api_base", "http://127.0.0.1:9880")
-            parsed_url = urlparse(api_base)
-            if parsed_url.port:
-                tts_engine_port = parsed_url.port
+
+            tts_engine_port = _read_tts_engine_port(ROOT_DIR, engine)
         except Exception:
             pass
 
@@ -146,7 +163,20 @@ def _register_services():
         except Exception:
             pass
 
-    # 5. Parse Koishi configs/koishi.yml
+    # 5. Parse standalone Live2D adapter config
+    live2d_host = "127.0.0.1"
+    live2d_port = 8766
+    live2d_config_path = ROOT_DIR / "NachoBot-Live2D-Adapter" / "config.toml"
+    if live2d_config_path.exists():
+        try:
+            doc = tomlkit.parse(live2d_config_path.read_text(encoding="utf-8"))
+            live2d_server = doc.get("server", {})
+            live2d_host = live2d_server.get("host", live2d_host)
+            live2d_port = int(live2d_server.get("port", live2d_port))
+        except Exception:
+            pass
+
+    # 6. Parse Koishi configs/koishi.yml
     koishi_port = 5140
     koishi_yml_path = ROOT_DIR / "koishi-app" / "koishi.yml"
     if koishi_yml_path.exists():
@@ -166,50 +196,112 @@ def _register_services():
 
     defs = [
         # ── Core ──
-        ServiceDef("nachobot",       "NachoBot Core",      "core", "NachoBot",                 ["uv", "run", "python", "bot.py"],      port=nachobot_port, wait_port=True, order=1,
-                   env_extra={"HOST": nachobot_env_host, "PORT": str(nachobot_port)}),
+        ServiceDef("nachobot", "NachoBot Core", "core", "NachoBot",
+                   ["uv", "run", "python", "bot.py"], port=nachobot_port,
+                   wait_port=True, order=1,
+                   env_extra={"HOST": nachobot_env_host, "PORT": str(nachobot_port)},
+                   detail=f"核心消息总线 · :{nachobot_port}"),
                    
         # ── QQ ──
-        ServiceDef("napcat_adapter", "Napcat Adapter",     "qq_adapter", "NachoBot-Napcat-Adapter",   ["uv", "run", "python", "main.py"],     port=napcat_port, wait_port=False, order=1,
-                   env_extra={"HOST": napcat_env_host, "PORT": str(napcat_port)}),
-        ServiceDef("napcat_shell",   "NapCat Shell",       "qq_adapter", "NapCat.Shell",              ["cmd", "/c", "launcher-user.bat"],      order=2),
+        ServiceDef("napcat_adapter", "NapCat 适配器", "qq_adapter", "NachoBot-Napcat-Adapter",
+                   ["uv", "run", "python", "main.py"], port=napcat_port,
+                   wait_port=True, order=1,
+                   env_extra={"HOST": napcat_env_host, "PORT": str(napcat_port)},
+                   detail=f"QQ 消息 WebSocket · :{napcat_port}"),
+        ServiceDef("napcat_shell", "NapCat Shell", "qq_adapter", "NapCat.Shell",
+                   ["cmd", "/c", "launcher-user.bat"], order=2,
+                   detail="QQ 客户端与登录窗口"),
 
-        # ── TTS FULL ──
-        ServiceDef("tts_engine_full",   "TTS Engine",          "tts_full", "",  [],  port=tts_engine_port, wait_port=True, order=1),  # dynamic
-        ServiceDef("tts_adapter_full",  "Multimodal Adapter",  "tts_full", "NachoBot-Multimodal-Adapter", ["uv", "run", "python", "main.py"], port=tts_adapter_port, order=2,
-                   env_extra={"HOST": tts_adapter_host, "PORT": str(tts_adapter_port)}),
-        ServiceDef("perception",        "VLM / ASR API",       "tts_full", "NachoBot-Multimodal-Adapter",
-                   ["uv", "run", "python", "-m", "nachobot_multimodal.api_server"], port=perception_port, order=3,
-                   env_extra={"HOST": perception_host, "PORT": str(perception_port)}),
+        # ── Multimodal FULL ──
+        ServiceDef("tts_engine_full", "TTS 推理运行时", "tts_full", "", [],
+                   port=tts_engine_port, wait_port=True, order=1,
+                   detail=f"GPT-SoVITS / VoxCPM · :{tts_engine_port}"),  # dynamic
+        ServiceDef("tts_adapter_full", "多模态适配器（TTS）", "tts_full",
+                   "NachoBot-Multimodal-Adapter", ["uv", "run", "python", "main.py"],
+                   port=tts_adapter_port, wait_port=True, order=2,
+                   env_extra={"HOST": tts_adapter_host, "PORT": str(tts_adapter_port)},
+                   detail=f"TTS 中继 · :{tts_adapter_port}"),
+        ServiceDef("perception", "感知 API（VLM / ASR）", "tts_full",
+                   "NachoBot-Multimodal-Adapter",
+                   ["uv", "run", "python", "-m", "nachobot_multimodal.api_server"],
+                   port=perception_port, order=3,
+                   env_extra={"HOST": perception_host, "PORT": str(perception_port)},
+                   detail=f"共享视觉与语音识别 · :{perception_port}"),
 
-        # ── TTS LITE ──
-        ServiceDef("tts_engine_lite",   "TTS Engine",          "tts_lite", "",  [],  port=tts_engine_port, wait_port=True, order=1),
-        ServiceDef("tts_adapter_lite",  "Multimodal Adapter (Lite)", "tts_lite", "NachoBot-Multimodal-Adapter", ["uv", "run", "python", "main.py"],
-                   port=tts_adapter_port, order=2, env_extra={"DISABLE_VLM_ASR": "1", "HOST": tts_adapter_host, "PORT": str(tts_adapter_port)}),
+        # ── Multimodal LITE ──
+        ServiceDef("tts_engine_lite", "TTS 推理运行时", "tts_lite", "", [],
+                   port=tts_engine_port, wait_port=True, order=1,
+                   detail=f"GPT-SoVITS / VoxCPM · :{tts_engine_port}"),
+        ServiceDef("tts_adapter_lite", "多模态适配器（Lite）", "tts_lite",
+                   "NachoBot-Multimodal-Adapter", ["uv", "run", "python", "main.py"],
+                   port=tts_adapter_port, wait_port=True, order=2,
+                   env_extra={"DISABLE_VLM_ASR": "1", "HOST": tts_adapter_host,
+                              "PORT": str(tts_adapter_port)},
+                   detail=f"TTS 中继（不启动 VLM / ASR） · :{tts_adapter_port}"),
+
+        # ── Potato ──
+        ServiceDef("potato_relay", "8070 无模型中继", "potato", "NachoBot-Multimodal-Adapter",
+                   ["uv", "run", "python", "main.py", "--no-local-models"],
+                   port=tts_adapter_port, wait_port=True, order=1,
+                   env_extra={"NACHOBOT_NO_LOCAL_MODELS": "1", "DISABLE_VLM_ASR": "1",
+                              "HOST": tts_adapter_host, "PORT": str(tts_adapter_port)},
+                   detail=f"仅消息转发，不加载 TTS / VLM / ASR · :{tts_adapter_port}",
+                   health_mode="relay_only"),
+
+        # ── Live2D ──
+        ServiceDef("live2d", "Live2D 渲染适配器", "live2d", "NachoBot-Live2D-Adapter",
+                   ["uv", "run", "python", "-m", "live2d_adapter", "--config", "config.toml"],
+                   port=live2d_port, wait_port=True, order=1,
+                   detail=f"独立渲染 WebSocket · :{live2d_port}"),
 
         # ── UniversalVC ──
-        ServiceDef("universalvc",   "UniversalVC Adapter", "universalvc", "NachoBot-UniversalVC-Adapter", ["uv", "run", "python", "main.py"], order=1),
+        ServiceDef("universalvc", "UniversalVC 语音适配器", "universalvc",
+                   "NachoBot-UniversalVC-Adapter", ["uv", "run", "python", "main.py"], order=1,
+                   detail="进程音频捕获 / 实时 ASR → Core"),
 
         # ── Bilibili ──
-        ServiceDef("bilibili",      "Bilibili Adapter",    "bilibili",    "NachoBot-Bilibili-Adapter",    ["uv", "run", "python", "main.py"], order=1),
+        ServiceDef("bilibili", "Bilibili 直播适配器", "bilibili", "NachoBot-Bilibili-Adapter",
+                   ["uv", "run", "python", "main.py"], order=1,
+                   detail="直播弹幕、评论与私信 → Core"),
 
         # ── Discord ──
-        ServiceDef("koishi",            "Koishi",              "discord", "koishi-app",              ["cmd", "/c", "npm", "start"],  port=koishi_port, wait_port=True, order=1,
-                   env_extra={"HTTPS_PROXY": webui_config.https_proxy, "HTTP_PROXY": webui_config.http_proxy}),
-        ServiceDef("koishi_adapter",    "Koishi Adapter",      "discord", "NachoBot-Koishi-Adapter", ["uv", "run", "python", "main.py"], order=2),
-        ServiceDef("discordvc",         "DiscordVC Adapter",   "discord", "NachoBot-DiscordVC-Adapter", ["uv", "run", "python", "main.py"], order=3),
+        ServiceDef("koishi", "Koishi 框架", "discord", "koishi-app",
+                   ["cmd", "/c", "npm", "start"], port=koishi_port, wait_port=True, order=1,
+                   env_extra={"HTTPS_PROXY": webui_config.https_proxy,
+                              "HTTP_PROXY": webui_config.http_proxy},
+                   detail=f"Discord / OneBot 平台网关 · :{koishi_port}"),
+        ServiceDef("koishi_adapter", "Koishi 适配器", "discord", "NachoBot-Koishi-Adapter",
+                   ["uv", "run", "python", "main.py"], order=2,
+                   detail="Koishi 消息桥接 → Core"),
+        ServiceDef("discordvc", "DiscordVC 语音适配器", "discord",
+                   "NachoBot-DiscordVC-Adapter", ["uv", "run", "python", "main.py"], order=3,
+                   detail="Discord 语音频道 → Core"),
     ]
 
     SERVICE_DEFS = {d.id: d for d in defs}
 
     groups = [
-        GroupDef("core",        "核心",                "🧠", ["nachobot"]),
-        GroupDef("qq_adapter",  "QQ 适配器",           "🐧", ["napcat_adapter", "napcat_shell"]),
-        GroupDef("tts_full",    "多模态服务 (FULL)",     "🎙️", ["tts_engine_full", "tts_adapter_full", "perception"]),
-        GroupDef("tts_lite",    "语音服务 (LITE)",     "🎙️", ["tts_engine_lite", "tts_adapter_lite"]),
-        GroupDef("universalvc", "全局语音适配器",       "🎤", ["universalvc"]),
-        GroupDef("bilibili",    "Bilibili 适配器",     "📺", ["bilibili"]),
-        GroupDef("discord",     "Discord 适配器",      "💬", ["koishi", "koishi_adapter", "discordvc"]),
+        GroupDef("core", "核心服务", "🧠", ["nachobot"],
+                  "NachoBot Core 消息总线"),
+        GroupDef("qq_adapter", "QQ / NapCat", "🐧", ["napcat_adapter", "napcat_shell"],
+                  "QQ 消息适配器与 NapCat 客户端"),
+        GroupDef("tts_full", "多模态服务（FULL）", "🎙️",
+                  ["tts_engine_full", "tts_adapter_full", "perception"],
+                  "TTS 推理 + 8070 多模态中继 + VLM / ASR 感知服务"),
+        GroupDef("tts_lite", "多模态服务（LITE）", "🎙️",
+                  ["tts_engine_lite", "tts_adapter_lite"],
+                  "TTS 推理 + 8070 中继，不启动 VLM / ASR"),
+        GroupDef("potato", "8070 无模型中继（POTATO）", "🥔", ["potato_relay"],
+                  "保留 8070 兼容通信，仅转发消息，不加载任何本地模型"),
+        GroupDef("bilibili", "Bilibili 直播", "📺", ["bilibili"],
+                  "直播弹幕、评论、私信与可选 Live2D 联动"),
+        GroupDef("live2d", "Live2D 渲染", "🖼️", ["live2d"],
+                  "独立 Live2D WebSocket 渲染服务"),
+        GroupDef("discord", "Discord / Koishi", "💬",
+                  ["koishi", "koishi_adapter", "discordvc"],
+                  "Koishi 平台网关、文字适配器与 Discord 语音适配器"),
+        GroupDef("universalvc", "UniversalVC 语音", "🎤", ["universalvc"],
+                  "进程音频捕获、实时 ASR 与虚拟声卡输出"),
     ]
     GROUP_DEFS = {g.id: g for g in groups}
 
@@ -253,6 +345,7 @@ class ProcessManager:
             "name": sdef.name,
             "group_id": sdef.group_id,
             "port": sdef.port,
+            "detail": sdef.detail,
             "status": state.status.value,
             "pid": state.pid,
             "started_at": state.started_at,
@@ -271,6 +364,7 @@ class ProcessManager:
                 "id": gid,
                 "name": gdef.name,
                 "icon": gdef.icon,
+                "detail": gdef.detail,
                 "services": services,
             })
         return result
@@ -346,7 +440,7 @@ class ProcessManager:
 
             # Optionally wait for port (background when started individually)
             if sdef.wait_port and sdef.port:
-                asyncio.create_task(self._wait_for_port(service_id, sdef.port))
+                asyncio.create_task(self._wait_for_port(service_id, sdef.port, timeout=180))
 
         except Exception as e:
             state.status = ServiceStatus.ERROR
@@ -401,14 +495,20 @@ class ProcessManager:
         if not gdef:
             raise ValueError(f"Unknown group: {group_id}")
 
-        # Check for TTS engine conflict
-        if group_id in ("tts_full", "tts_lite"):
-            other = "tts_lite" if group_id == "tts_full" else "tts_full"
-            other_gdef = GROUP_DEFS[other]
-            for sid in other_gdef.services:
-                st = self.states.get(sid)
-                if st and st.status in (ServiceStatus.RUNNING, ServiceStatus.STARTING):
-                    raise RuntimeError(f"Cannot start {gdef.name}: {GROUP_DEFS[other].name} is already running. Stop it first.")
+        # The FULL, LITE, and POTATO groups all own the 8070 adapter endpoint;
+        # only one of them can be active at a time.
+        multimodal_groups = ("tts_full", "tts_lite", "potato")
+        if group_id in multimodal_groups:
+            for other in multimodal_groups:
+                if other == group_id:
+                    continue
+                other_gdef = GROUP_DEFS[other]
+                for sid in other_gdef.services:
+                    st = self.states.get(sid)
+                    if st and st.status in (ServiceStatus.RUNNING, ServiceStatus.STARTING):
+                        raise RuntimeError(
+                            f"Cannot start {gdef.name}: {GROUP_DEFS[other].name} is already running. Stop it first."
+                        )
 
         for sid in gdef.services:
             await self.start_service(sid)
@@ -421,7 +521,7 @@ class ProcessManager:
             # before starting downstream services
             sdef = SERVICE_DEFS[sid]
             if sdef.wait_port and sdef.port:
-                ready = await self._wait_for_port(sid, sdef.port)
+                ready = await self._wait_for_port(sid, sdef.port, timeout=180)
                 if not ready:
                     state.status = ServiceStatus.ERROR
                     await self._broadcast(sid, f"[WebUI] {sdef.name} 端口 {sdef.port} 超时未就绪，中止启动组内后续服务\n")
@@ -516,9 +616,28 @@ class ProcessManager:
             state.status = ServiceStatus.ERROR if rc and rc != 0 else ServiceStatus.STOPPED
             await self._broadcast(service_id, f"[WebUI] Process exited (code: {rc})\n")
 
+    @staticmethod
+    def _health_mode_ready(port: int, expected_mode: str) -> bool:
+        """Return whether the local adapter health endpoint reports the expected mode."""
+        import json
+        from urllib.request import Request, ProxyHandler, build_opener
+
+        try:
+            opener = build_opener(ProxyHandler({}))
+            request = Request(
+                f"http://127.0.0.1:{port}/api/health",
+                headers={"Accept": "application/json"},
+            )
+            with opener.open(request, timeout=1) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            return payload.get("status") == "ok" and payload.get("mode") == expected_mode
+        except Exception:
+            return False
+
     async def _wait_for_port(self, service_id: str, port: int, timeout: int = 180) -> bool:
         """Wait for a port to become available. Returns True if ready, False if timed out."""
         import socket
+        sdef = SERVICE_DEFS.get(service_id)
         await self._broadcast(service_id, f"[WebUI] 等待端口 {port} 就绪 (最长 {timeout}s)...\n")
         for i in range(timeout):
             # Check if the process died while we're waiting
@@ -526,13 +645,30 @@ class ProcessManager:
             if state and state.status in (ServiceStatus.STOPPED, ServiceStatus.ERROR):
                 await self._broadcast(service_id, "[WebUI] 进程已退出，停止等待端口\n")
                 return False
-            try:
-                with socket.create_connection(("127.0.0.1", port), timeout=1):
-                    await self._broadcast(service_id, f"[WebUI] Port {port} is ready. ({i+1}s)\n")
+            if sdef and sdef.health_mode:
+                ready = await asyncio.to_thread(
+                    self._health_mode_ready,
+                    port,
+                    sdef.health_mode,
+                )
+                if ready:
+                    await self._broadcast(
+                        service_id,
+                        f"[WebUI] Port {port} is ready ({sdef.health_mode}). ({i+1}s)\n",
+                    )
                     return True
-            except (ConnectionRefusedError, OSError, socket.timeout):
-                await asyncio.sleep(1)
-        await self._broadcast(service_id, f"[WebUI] WARNING: Port {port} not ready after {timeout}s.\n")
+            else:
+                try:
+                    with socket.create_connection(("127.0.0.1", port), timeout=1):
+                        await self._broadcast(service_id, f"[WebUI] Port {port} is ready. ({i+1}s)\n")
+                        return True
+                except (ConnectionRefusedError, OSError, socket.timeout):
+                    pass
+            await asyncio.sleep(1)
+        message = f"[WebUI] WARNING: Port {port} not ready after {timeout}s."
+        if service_id in ("tts_engine_full", "tts_engine_lite"):
+            message += " 如果你是初次启动，等待模型下载完毕后重启该服务。"
+        await self._broadcast(service_id, message + "\n")
         return False
 
     def _resolve_cmd(self, sdef: ServiceDef) -> tuple[list[str], str, dict[str, str]]:
@@ -556,85 +692,26 @@ class ProcessManager:
         if base_toml.exists():
             try:
                 import tomlkit
-                from urllib.parse import urlparse
+
                 doc = tomlkit.parse(base_toml.read_text(encoding="utf-8"))
                 enabled = doc.get("enabled_tts", {}).get("enabled", ["GPT_Sovits"])
                 if isinstance(enabled, list) and "Vox" in enabled:
                     engine = "Vox"
-                
-                # Get dynamic port for the resolved engine
-                plugins_sec = doc.get("plugins", {})
-                engine_sec = plugins_sec.get(engine, {})
-                api_base = engine_sec.get("api_base", "http://127.0.0.1:9880")
-                parsed_url = urlparse(api_base)
-                if parsed_url.port:
-                    tts_engine_port = parsed_url.port
+
+                tts_engine_port = _read_tts_engine_port(self.root, engine)
             except Exception:
                 pass
 
-        from webui_config import webui_config
+        adapter_dir = self.root / "NachoBot-Multimodal-Adapter"
+        manager = adapter_dir / "scripts" / "tts_runtime_manager.py"
+        if not manager.is_file():
+            raise FileNotFoundError(f"TTS runtime manager 不存在: {manager}")
 
-        if engine == "Vox":
-            # VoxCPM
-            voxcpm_dir = webui_config.voxcpm_dir
-            if not voxcpm_dir.exists():
-                raise FileNotFoundError(
-                    f"VoxCPM 目录不存在: {voxcpm_dir}\n"
-                    f"请在 WebUI 配置中修改 [paths].voxcpm_dir"
-                )
-            adapter_dir = self.root / "NachoBot-Multimodal-Adapter"
-            py_vox = voxcpm_dir / ".venv" / "Scripts" / "python.exe"
-            if not py_vox.exists():
-                raise FileNotFoundError(
-                    f"VoxCPM Python 解释器不存在: {py_vox}\n"
-                    f"请确认 VoxCPM 虚拟环境已正确安装"
-                )
-            vox_script = adapter_dir / "src" / "tts" / "backends" / "Vox" / "vox_api_server.py"
-            # 读取 vox.toml 配置文件中的 LoRA 路径与模型路径
-            model_dir = voxcpm_dir / "models" / "openbmb__VoxCPM2"
-            lora = voxcpm_dir / "lora" / "ncnk"
-            vox_toml = adapter_dir / "configs" / "vox.toml"
-            if vox_toml.exists():
-                try:
-                    import tomlkit
-                    vox_doc = tomlkit.parse(vox_toml.read_text(encoding="utf-8"))
-                    tts_sec = vox_doc.get("tts", {})
-                    if tts_sec.get("model_dir"):
-                        model_dir = Path(tts_sec["model_dir"])
-                    if "lora_weights_path" in tts_sec:
-                        lora = tts_sec["lora_weights_path"]
-                except Exception:
-                    pass
-
-            cmd = [
-                str(py_vox), str(vox_script),
-                "--host", "127.0.0.1", "--port", str(tts_engine_port),
-                "--model-dir", str(model_dir),
-                "--lora-weights", str(lora),
-                "--no-denoiser",
-            ]
-            return cmd, str(voxcpm_dir), {}
-        else:
-            # GPT-SoVITS
-            sovits_dir = webui_config.sovits_dir
-            if not sovits_dir.exists():
-                raise FileNotFoundError(
-                    f"GPT-SoVITS 目录不存在: {sovits_dir}\n"
-                    f"请在 WebUI 配置中修改 [paths].sovits_dir"
-                )
-            py_gpt = sovits_dir / "runtime" / "python.exe"
-            if not py_gpt.exists():
-                raise FileNotFoundError(
-                    f"GPT-SoVITS Python 解释器不存在: {py_gpt}\n"
-                    f"请确认 GPT-SoVITS 整合包已正确安装"
-                )
-            api_file = sovits_dir / "api_v2.py"
-            if not api_file.exists():
-                api_file = sovits_dir / "api.py"
-
-            cmd = [str(py_gpt), "-s", str(api_file), "--port", str(tts_engine_port)]
-            env_extra = {
-                "PYTHONPATH": f"{sovits_dir};{sovits_dir / 'GPT_SoVITS'}",
-                "CUDA_VISIBLE_DEVICES": "0",
-            }
-            return cmd, str(sovits_dir), env_extra
+        managed_engine = "voxcpm" if engine == "Vox" else "gpt-sovits"
+        cmd = [
+            "uv", "run", "python", str(manager),
+            "serve",
+            "--engine", managed_engine,
+            "--port", str(tts_engine_port),
+        ]
+        return cmd, str(adapter_dir), {}

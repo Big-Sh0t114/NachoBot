@@ -43,4 +43,4 @@ docker compose up -d
 - 该服务会自动连接到名为 `nacho_bot` 的独立 docker 网络。
 - `config.toml` 等文件会被挂载到容器中，如果修改了配置，请执行 `docker compose restart` 使其生效。
 - **关联服务地址**：在 `config.toml` 中，如果你需要连接到其他 Docker 容器（如核心的 `8000` 端口），请将 `127.0.0.1` 替换为对应的服务名（如 `core`）。如果 Koishi 没有运行在当前的 Docker 网络中，请为其指定宿主机 IP 或者是相应的互相可达的地址。
-- 构建镜像时依赖父目录或其他目录下的 `ncnk_message` 库，Dockerfile 中会自动将本目录下的 `ncnk_message`（若不存在请从 NachoBot 拷贝）打包安装。
+- 构建镜像时通过 Compose 的 `additional_contexts` 从相邻的 `NachoBot/ncnk_message` 注入核心消息包，不需要在本目录复制一份。

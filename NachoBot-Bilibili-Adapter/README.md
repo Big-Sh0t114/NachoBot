@@ -143,4 +143,6 @@ docker compose up -d
 - **屏幕监控**：本适配器的 Docker 镜像使用 `Xvfb` 支持无显示设备环境下的 `mss` 截屏。
 - **Live2D**：渲染不再由本容器负责。请单独部署 `NachoBot-Live2D-Adapter`，并将 `live.live2d_url` 指向其可访问的 WebSocket 地址；容器内不能使用 `127.0.0.1` 访问宿主机上的独立适配器。
 - **配置文件**：容器挂载使用宿主机的 `config.toml` 和日志目录，修改配置后重启容器即可生效。
+- **构建上下文**：Compose 通过 `additional_contexts` 注入相邻的 `NachoBot/ncnk_message`、多模态源码、配置和模型目录；核心配置目录以只读卷挂载。
+- **Linux 音频**：Linux 容器不提供 Windows `winsound`，因此本地播放回退会跳过；请配置远程 Live2D 播放，或在宿主机运行本适配器以使用本地音频设备。
 - **核心连接**：确保 `NachoBot` 核心服务已启动在 `nacho_bot` 网络中，且 `config.toml` 里的 `nachobot_server.host` 设置为 `core`（或宿主机 IP）。

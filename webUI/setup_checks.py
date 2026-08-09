@@ -409,7 +409,7 @@ class EnvironmentChecker:
 
 
 class PathVerifier:
-    """Verify that external dependencies are installed at the given paths."""
+    """Verify external dependencies and project-managed runtimes."""
 
     # Each entry: (check_type, display_name, validation function, download_url)
     CHECKS = {
@@ -421,14 +421,14 @@ class PathVerifier:
         },
         "sovits": {
             "name": "GPT-SoVITS",
-            "hint": "GPT-SoVITS 安装目录（包含 runtime/python.exe）",
-            "download_url": "https://www.yuque.com/baicaigongchang1145haoyuangong/ib3g1e/dkxgpiy9zb96hob4",
+            "hint": "由 Multimodal Adapter 自动下载并管理运行时",
+            "download_url": "",
             "default_rel": None,
         },
         "voxcpm": {
             "name": "VoxCPM",
-            "hint": "VoxCPM 安装目录（包含 .venv/Scripts/python.exe）",
-            "download_url": "https://github.com/openbmb/VoxCPM/releases",
+            "hint": "由 Multimodal Adapter 自动下载并管理运行时",
+            "download_url": "",
             "default_rel": None,
         },
         "nodejs": {
@@ -477,6 +477,10 @@ class PathVerifier:
         if check_type == "bilibili_dll":
             return PathVerifier._check_bilibili_dll(download_url)
 
+        # -- Managed TTS runtimes: no user-supplied external path required --
+        if check_type in ("sovits", "voxcpm"):
+            return PathVerifier._check_managed_tts(check_type)
+
         # -- Path-based checks --
         if not path or not path.strip():
             return {
@@ -509,10 +513,6 @@ class PathVerifier:
 
         if check_type == "napcat":
             return PathVerifier._check_napcat(p, download_url)
-        elif check_type == "sovits":
-            return PathVerifier._check_sovits(p, download_url)
-        elif check_type == "voxcpm":
-            return PathVerifier._check_voxcpm(p, download_url)
         elif check_type == "vb_cable":
             return PathVerifier._check_vb_cable(p, download_url)
 
@@ -538,33 +538,26 @@ class PathVerifier:
         }
 
     @staticmethod
-    def _check_sovits(p: Path, download_url: str) -> dict:
-        py_exe = p / "runtime" / "python.exe"
-        if py_exe.exists():
-            return {"valid": True, "message": f"✅ GPT-SoVITS 已找到: {p}"}
-        # Alternative: check for api_v2.py
-        api_file = p / "api_v2.py"
-        if api_file.exists():
-            return {"valid": True, "message": f"✅ GPT-SoVITS 已找到: {p}"}
-        return {
-            "valid": False,
-            "message": f"❌ 未找到 runtime/python.exe 或 api_v2.py: {p}",
-            "download_url": download_url,
-        }
+    def _check_managed_tts(check_type: str) -> dict:
+        adapter = ROOT_DIR / "NachoBot-Multimodal-Adapter"
+        manager = adapter / "scripts" / "tts_runtime_manager.py"
+        if not manager.is_file():
+            return {
+                "valid": False,
+                "message": f"❌ TTS runtime manager 不存在: {manager}",
+                "download_url": "",
+            }
 
-    @staticmethod
-    def _check_voxcpm(p: Path, download_url: str) -> dict:
-        venv_py = p / ".venv" / "Scripts" / "python.exe"
-        if venv_py.exists():
-            return {"valid": True, "message": f"✅ VoxCPM 已找到: {p}"}
-        # Also accept if models dir exists
-        models_dir = p / "models"
-        if models_dir.exists():
-            return {"valid": True, "message": f"✅ VoxCPM 已找到 (models目录): {p}"}
+        engine = "gpt-sovits" if check_type == "sovits" else "voxcpm"
+        runtime = adapter / ".runtime" / "tts" / engine
+        if runtime.is_dir():
+            return {
+                "valid": True,
+                "message": f"✅ {engine} 托管运行时已创建: {runtime}",
+            }
         return {
-            "valid": False,
-            "message": f"❌ 未找到 .venv/Scripts/python.exe: {p}",
-            "download_url": download_url,
+            "valid": True,
+            "message": f"✅ {engine} 将在首次启动时自动下载并创建",
         }
 
     @staticmethod

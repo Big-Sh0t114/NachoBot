@@ -13,7 +13,6 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 import tomlkit
@@ -23,6 +22,10 @@ logger = logging.getLogger("webui.tts")
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = ROOT_DIR / "NachoBot-Multimodal-Adapter" / "configs" / "base.toml"
 DEFAULT_CACHE_DIR = Path(__file__).resolve().parent / "cache" / "tts"
+_TTS_ENGINE_CONFIG_FILES = {
+    "GPT_Sovits": "gpt-sovits.toml",
+    "Vox": "vox.toml",
+}
 
 
 class TTSUnavailableError(RuntimeError):
@@ -208,17 +211,31 @@ class TTSManager:
             raise ValueError("没有启用 TTS 引擎")
         engine = str(enabled[0])
 
-        engine_config = document.get("plugins", {}).get(engine, {})
-        engine_url = str(engine_config.get("api_base", "")).rstrip("/")
-        parsed_engine = urlparse(engine_url)
-        if not parsed_engine.hostname or parsed_engine.port is None:
-            raise ValueError(f"TTS 引擎 {engine} 的 api_base 配置无效")
+        engine_config_name = _TTS_ENGINE_CONFIG_FILES.get(engine)
+        if not engine_config_name:
+            raise ValueError(f"不支持的 TTS 引擎：{engine}")
+        engine_config_path = self.config_path.parent / engine_config_name
+        if not engine_config_path.exists():
+            raise ValueError(f"找不到 TTS 引擎配置：{engine_config_path.name}")
+        try:
+            engine_document = tomlkit.parse(
+                engine_config_path.read_text(encoding="utf-8")
+            )
+            engine_tts = engine_document.get("tts", {})
+            engine_host = self._connectable_host(
+                str(engine_tts.get("host", "127.0.0.1"))
+            )
+            engine_port = int(engine_tts.get("port", 9880))
+        except (OSError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"TTS 引擎配置无效：{engine_config_path.name}"
+            ) from exc
 
         return {
             "adapter_url": f"http://{adapter_host}:{adapter_port}",
             "engine": engine,
-            "engine_host": self._connectable_host(parsed_engine.hostname),
-            "engine_port": parsed_engine.port,
+            "engine_host": engine_host,
+            "engine_port": engine_port,
         }
 
     def _cache_key(self, text: str, engine: str) -> str:

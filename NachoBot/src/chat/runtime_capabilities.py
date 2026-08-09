@@ -16,8 +16,8 @@ PLATFORM_EVENT_KEY = "platform_event"
 SUPPORTED_SCHEMA_VERSION = 1
 
 _TOOL_MODES = {"standard", "mcp_only", "disabled"}
-_WEB_SEARCH_MODES = {"standard", "two_phase", "disabled"}
-_REPLY_DELIVERY_MODES = {"chunked", "aggregate_tagged_text"}
+_WEB_SEARCH_MODES = {"standard", "disabled"}
+_REPLY_DELIVERY_MODES = {"chunked", "aggregate_tagged_text", "json_envelope"}
 _PERSON_PROFILE_MODES = {"standard", "low_latency", "disabled"}
 _TTS_LANGUAGES = {"", "ja", "zh"}
 

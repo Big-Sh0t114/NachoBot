@@ -1,24 +1,21 @@
-FROM python:3.13.5-slim
-LABEL authors="infinitycat233"
+FROM python:3.13-slim-bookworm
 
-# Build from the integrated workspace root:
-# docker build -f NachoBot-Napcat-Adapter/Dockerfile .
-
-# Copy uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-COPY NachoBot-Napcat-Adapter/pyproject.toml NachoBot-Napcat-Adapter/uv.lock /adapters/
 
-# Install requirements
-WORKDIR /adapters
+WORKDIR /workspace/NachoBot-Napcat-Adapter
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml uv.lock ./
 RUN uv sync --locked --no-dev --no-install-project
-ENV PATH="/adapters/.venv/bin:${PATH}"
 
-COPY NachoBot/ncnk_message /NachoBot/ncnk_message
-ENV PYTHONPATH=/NachoBot
+COPY . .
+COPY --from=nachobot /ncnk_message /workspace/NachoBot/ncnk_message
 
-WORKDIR /adapters
-
-COPY NachoBot-Napcat-Adapter/ .
+ENV PATH="/workspace/NachoBot-Napcat-Adapter/.venv/bin:${PATH}" \
+    PYTHONUNBUFFERED=1
 
 EXPOSE 8095
 

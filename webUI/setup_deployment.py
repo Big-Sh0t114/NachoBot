@@ -243,8 +243,9 @@ class ConfigInitializer:
             except Exception as e:
                 errors.append(f"{target_rel}: {e}")
 
-        # Post-generation: patch TTS chain routing in ALL existing adapter configs
-        # This covers adapters that were not generated from templates (e.g. Koishi, Bilibili)
+        # Post-generation: patch TTS chain routing in ALL existing adapter configs.
+        # This covers adapters that were not generated from templates (e.g. Koishi, Bilibili).
+        # When TTS is not selected, keep the user's existing core port untouched.
         patch_results = ConfigInitializer._patch_tts_chain(tts_enabled, components)
         errors.extend(patch_results.get("errors", []))
 
@@ -272,8 +273,10 @@ class ConfigInitializer:
     ) -> dict[str, Any]:
         """
         Scan all known adapter configs and adjust TTS chain routing:
-        - nachobot_server.port → 8070 (with TTS) or 8000 (without TTS)
+        - nachobot_server.port → 8070 only when TTS is enabled
         - voice.use_tts → true/false
+        When TTS is disabled, do not rewrite nachobot_server.port. The adapter
+        should keep the core endpoint already configured by the user.
         Only patches adapters that were selected by the user.
         """
         patched = []
@@ -293,10 +296,9 @@ class ConfigInitializer:
                 doc = tomlkit.parse(raw)
                 changed = False
 
-                if "nachobot_server" in doc:
-                    target_port = 8070 if tts_enabled else 8000
-                    if doc["nachobot_server"].get("port") != target_port:
-                        doc["nachobot_server"]["port"] = target_port
+                if tts_enabled and "nachobot_server" in doc:
+                    if doc["nachobot_server"].get("port") != 8070:
+                        doc["nachobot_server"]["port"] = 8070
                         changed = True
 
                 if has_voice and "voice" in doc:
@@ -419,27 +421,25 @@ class ConfigInitializer:
         # -- Napcat adapter config.toml — TTS chain only --
         if "NachoBot-Napcat-Adapter" in target_rel and filename == "config.toml":
             # TTS chain routing
-            if "nachobot_server" in doc:
-                if tts_enabled:
+            if tts_enabled and "nachobot_server" in doc:
+                if doc["nachobot_server"].get("port") != 8070:
                     doc["nachobot_server"]["port"] = 8070
-                else:
-                    doc["nachobot_server"]["port"] = 8000
-                changed = True
+                    changed = True
             if "voice" in doc:
-                doc["voice"]["use_tts"] = tts_enabled
-                changed = True
+                if doc["voice"].get("use_tts") != tts_enabled:
+                    doc["voice"]["use_tts"] = tts_enabled
+                    changed = True
 
         # -- Koishi adapter config.toml --
         if "NachoBot-Koishi-Adapter" in target_rel and filename == "config.toml":
-            if "nachobot_server" in doc:
-                if tts_enabled:
+            if tts_enabled and "nachobot_server" in doc:
+                if doc["nachobot_server"].get("port") != 8070:
                     doc["nachobot_server"]["port"] = 8070
-                else:
-                    doc["nachobot_server"]["port"] = 8000
-                changed = True
+                    changed = True
             if "voice" in doc:
-                doc["voice"]["use_tts"] = tts_enabled
-                changed = True
+                if doc["voice"].get("use_tts") != tts_enabled:
+                    doc["voice"]["use_tts"] = tts_enabled
+                    changed = True
 
         # -- TTS base.toml --
         if "NachoBot-Multimodal-Adapter" in target_rel and "base" in filename:
@@ -481,7 +481,7 @@ class ConfigInitializer:
 
 
 # =========================================================================
-# Path Verifier — checks external dependency installation
+# Setup deployment helpers
 
 
 class NapCatConfigurator:
@@ -603,8 +603,6 @@ class NapCatConfigurator:
             target_files.append(target)
         else:
             # Auto-detect: scan for existing onebot11_*.json files
-            import re
-
             pattern = re.compile(r"^onebot11_\d+\.json$")
             for f in config_dir.iterdir():
                 if pattern.match(f.name):

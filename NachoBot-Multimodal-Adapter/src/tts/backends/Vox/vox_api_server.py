@@ -1,12 +1,9 @@
 """
 VoxCPM TTS API Server
 
-独立运行的 FastAPI 服务器，在 VoxCPM 的虚拟环境中启动。
-直接加载 VoxCPM 模型并提供 /tts HTTP 接口，供 TTS Adapter 的 Vox 插件调用。
-
-用法:
-    cd C:\\Users\\BigSh0t\\VoxCPM-2.0.2
-    uv run python C:\\Users\\BigSh0t\\Nacho-with-u\\NachoBot-Multimodal-Adapter\\src\\tts\\backends\\Vox\\vox_api_server.py --port 8808
+由 NachoBot TTS runtime manager 在 Adapter 自管理虚拟环境中启动。
+通过已安装的 voxcpm 包加载本地模型或 Hugging Face 模型 ID，
+不再依赖用户单独下载 VoxCPM 源码仓库或推理客户端。
 """
 
 import os
@@ -22,12 +19,6 @@ from typing import Optional, List
 from pathlib import Path
 
 torch.set_float32_matmul_precision('high')
-
-# 确保 VoxCPM src 目录在 sys.path 中
-VOXCPM_DIR = os.environ.get("VOXCPM_DIR", r"C:\Users\BigSh0t\VoxCPM-2.0.2")
-voxcpm_src = os.path.join(VOXCPM_DIR, "src")
-if voxcpm_src not in sys.path:
-    sys.path.insert(0, voxcpm_src)
 
 from fastapi import FastAPI, Query
 from fastapi.responses import Response, StreamingResponse
@@ -238,39 +229,53 @@ def load_model(
     global voxcpm_model, model_sample_rate
 
     import json
-    from voxcpm.core import VoxCPM
+    from voxcpm import VoxCPM
 
-    resolved_model_dir = _resolve_existing_dir(model_dir, "VoxCPM模型目录")
-    if resolved_model_dir is None:
-        raise FileNotFoundError(f"VoxCPM模型目录不存在: {model_dir}")
-
-    logger.info(f"Loading VoxCPM model from: {resolved_model_dir}")
+    model_source = str(model_dir or "").strip() or "openbmb/VoxCPM2"
+    local_model = Path(model_source).expanduser()
+    if local_model.is_dir():
+        model_source = str(local_model.resolve())
+        logger.info("Loading VoxCPM model from local directory: %s", model_source)
+    else:
+        logger.info("Loading VoxCPM model from pretrained ID: %s", model_source)
 
     kwargs = dict(
-        voxcpm_model_path=str(resolved_model_dir),
-        enable_denoiser=enable_denoiser,
+        hf_model_id=model_source,
+        load_denoiser=enable_denoiser,
         optimize=True,
     )
 
     lora_dir = _resolve_existing_dir(lora_weights_path, "LoRA权重目录")
     if lora_dir:
-        logger.info(f"Loading LoRA weights from: {lora_dir}")
+        logger.info("Loading LoRA weights from: %s", lora_dir)
         kwargs["lora_weights_path"] = str(lora_dir)
+        kwargs["optimize"] = False
 
-        # 从 lora_config.json 读取训练时的 LoRA 配置（rank/alpha 等）
+        from voxcpm.model.voxcpm import LoRAConfig
+
         lora_config_file = lora_dir / "lora_config.json"
         if lora_config_file.is_file():
             with lora_config_file.open("r", encoding="utf-8") as f:
                 saved_config = json.load(f)
             lora_cfg_data = saved_config.get("lora_config", {})
-            logger.info(f"LoRA config from file: r={lora_cfg_data.get('r')}, alpha={lora_cfg_data.get('alpha')}")
-
-            from voxcpm.model.voxcpm2 import LoRAConfig
+            logger.info(
+                "LoRA config from file: r=%s, alpha=%s",
+                lora_cfg_data.get("r"),
+                lora_cfg_data.get("alpha"),
+            )
             kwargs["lora_config"] = LoRAConfig(**lora_cfg_data)
         else:
-            logger.warning(f"lora_config.json not found at {lora_config_file}, using default LoRAConfig")
+            logger.warning("lora_config.json not found at %s; using VoxCPM default LoRA config", lora_config_file)
+            kwargs["lora_config"] = LoRAConfig(
+                enable_lm=True,
+                enable_dit=True,
+                r=32,
+                alpha=16,
+                target_modules_lm=["q_proj", "v_proj", "k_proj", "o_proj"],
+                target_modules_dit=["q_proj", "v_proj", "k_proj", "o_proj"],
+            )
 
-    voxcpm_model = VoxCPM(**kwargs)
+    voxcpm_model = VoxCPM.from_pretrained(**kwargs)
     model_sample_rate = voxcpm_model.tts_model.sample_rate
     logger.info(f"VoxCPM model loaded. Sample rate: {model_sample_rate}")
 
@@ -535,7 +540,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model-dir",
         type=str,
-        default=os.path.join(VOXCPM_DIR, "models", "openbmb__VoxCPM2"),
+        default="openbmb/VoxCPM2",
     )
     parser.add_argument("--lora-weights", type=str, default="")
     parser.add_argument("--no-denoiser", action="store_true", help="禁用降噪器")

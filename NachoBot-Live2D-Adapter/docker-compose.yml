@@ -1,0 +1,24 @@
+services:
+  live2d-adapter:
+    container_name: nacho-bot-live2d-adapter
+    platform: windows/amd64
+    build:
+      context: .
+    environment:
+      - TZ=Asia/Shanghai
+    ports:
+      - "8766:8766"
+    volumes:
+      - type: bind
+        source: ./config.toml
+        target: C:/workspace/NachoBot-Live2D-Adapter/config.toml
+      - type: bind
+        source: ./resources
+        target: C:/workspace/NachoBot-Live2D-Adapter/resources
+    restart: always
+    networks:
+      - nacho_bot
+
+networks:
+  nacho_bot:
+    external: true

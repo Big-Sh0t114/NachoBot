@@ -36,8 +36,8 @@ tts = "cuda:0"   # TTS使用的设备
 # 预设角色配置示例
 [tts.models.presets.default]
 name = "NachoChan"
-gpt_model = "ncnk.ckpt"
-sovits_model = "ncnk_fin.pth"
+gpt_model = "../models/tts/gpt-sovits/ncnk.ckpt"
+sovits_model = "../models/tts/gpt-sovits/ncnk.pth"
 ref_audio_path = "default.wav" # 参考音频路径
 aux_ref_audio_paths = []                   # 辅助参考音频路径列表
 prompt_text = ""        # 提示文本

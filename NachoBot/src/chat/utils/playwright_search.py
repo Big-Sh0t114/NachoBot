@@ -68,15 +68,20 @@ class PlaywrightSearchProvider:
 
     @staticmethod
     def is_available() -> bool:
+        """搜索 Provider 始终可用；Playwright 缺失时由 HTTP fallback 承担搜索。"""
+        return True
+
+    @staticmethod
+    def browser_available() -> bool:
+        """仅表示 Playwright 浏览器后端是否可用。"""
         return UrlContentFetcher.browser_available()
 
     async def search(self, query: str, max_results: int = 5) -> List[Dict[str, str]]:
         query = query.strip()
         if not query or max_results <= 0:
             return []
-        if not self.is_available():
-            logger.warning("Playwright 不可用，无法执行浏览器搜索")
-            return []
+        if not self.browser_available():
+            logger.warning("Playwright 不可用，将使用 HTTP fallback 执行搜索")
 
         for engine in self.engines:
             try:
@@ -92,22 +97,41 @@ class PlaywrightSearchProvider:
         return []
 
     async def _search_engine(self, engine: str, query: str, max_results: int) -> List[Dict[str, str]]:
-        browser = await UrlContentFetcher.get_shared_browser()
-        page = await browser.new_page(user_agent=self.user_agent)
         search_url = self._build_search_url(engine, query, max_results)
-        try:
+        html_text = ""
+
+        if self.browser_available():
             try:
-                await page.goto(
-                    search_url,
-                    wait_until="domcontentloaded",
-                    timeout=self.timeout_seconds * 1000,
-                )
+                browser = await UrlContentFetcher.get_shared_browser()
+                page = await browser.new_page(user_agent=self.user_agent)
+                try:
+                    try:
+                        await page.goto(
+                            search_url,
+                            wait_until="domcontentloaded",
+                            timeout=self.timeout_seconds * 1000,
+                        )
+                    except Exception as e:
+                        # 超时时页面经常已经包含可解析的结果，因此继续读取当前 DOM。
+                        logger.debug(f"搜索页导航未完整完成: engine={engine}, err={e}")
+                    html_text = await page.content()
+                finally:
+                    await page.close()
             except Exception as e:
-                # 超时时页面经常已经包含可解析的结果，因此继续读取当前 DOM。
-                logger.debug(f"搜索页导航未完整完成: engine={engine}, err={e}")
-            html_text = await page.content()
-        finally:
-            await page.close()
+                logger.warning(f"Playwright 搜索不可用，切换 HTTP fallback: engine={engine}, err={e}")
+
+        if not html_text:
+            fetcher = UrlContentFetcher(
+                timeout_seconds=self.timeout_seconds,
+                user_agent=self.user_agent,
+                prefer_browser=False,
+            )
+            html_text = await fetcher._fetch_with_http(search_url) or ""
+            if html_text:
+                logger.info(f"HTTP fallback 获取搜索页成功: engine={engine}")
+            else:
+                logger.warning(f"HTTP fallback 获取搜索页失败: engine={engine}")
+                return []
 
         results = self.parse_results(html_text, engine, max_results)
         if results and not self._results_match_query(query, results):

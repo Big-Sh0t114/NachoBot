@@ -4,11 +4,15 @@ services:
     build:
       context: .
       additional_contexts:
+        nachobot: ../NachoBot
         multimodal: ../NachoBot-Multimodal-Adapter
     environment:
       - TZ=Asia/Shanghai
     volumes:
-      - ./config.toml:/discord-adapter/config.toml  # 配置文件
+      - ./config.toml:/workspace/NachoBot-DiscordVC-Adapter/config.toml
+      - ../NachoBot/config:/workspace/NachoBot/config:ro
+      - ../NachoBot-Multimodal-Adapter/configs:/workspace/NachoBot-Multimodal-Adapter/configs:ro
+      - ../NachoBot-Multimodal-Adapter/models:/workspace/NachoBot-Multimodal-Adapter/models
     restart: always
     networks:
       - nacho_bot

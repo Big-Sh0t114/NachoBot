@@ -136,3 +136,18 @@ NachoBot-UniversalVC-Adapter/
 ├── speaker_db.json       # 本地声纹数据库 (运行时自动生成)
 └── download_models.py    # 手动触发模型下载脚本
 ```
+
+## Docker 部署
+
+本适配器提供 Windows 容器镜像：
+
+```bat
+docker network create nacho_bot
+docker compose up -d
+```
+
+镜像使用 Windows 容器引擎，因为 `proc-tap`、WASAPI 和虚拟声卡均依赖
+Windows。容器只能访问容器内部可见的进程和音频设备，不能直接捕获宿主机上的
+Discord/QQ/游戏进程或 VB-Audio 设备；如需这些能力，建议在宿主机直接运行。
+运行容器时请将 `config.toml` 中的核心地址改为 `core`（或可达的宿主机地址），
+并保留 `models`、`speaker_db.json` 及多模态模型卷。
