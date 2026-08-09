@@ -208,7 +208,7 @@ class TTSManager:
 
         if not allowed:
             self.logger.warning(
-                "TTS manual command rejected: room_id=%s user_id=%s user_name=%s",
+                "TTS manual command rejected: room_id={} user_id={} user_name={}",
                 room_id, user_id, user_name,
             )
             return True
@@ -220,7 +220,7 @@ class TTSManager:
             enable = command == "#idle_on"
             self.config.idle_tts_enable = enable
             action = "Enabled" if enable else "Disabled"
-            self.logger.info("Idle TTS %s manually by user_id=%s", action, user_id)
+            self.logger.info("Idle TTS {} manually by user_id={}", action, user_id)
             if self.config_path:
                 try:
                     self.save_idle_tts_config(enable)
@@ -238,7 +238,7 @@ class TTSManager:
             room_config["tts"]["enable"] = enable
 
         action = "Enabled" if enable else "Disabled"
-        self.logger.info("TTS %s manually by user_id=%s (Room: %s)", action, user_id, room_id)
+        self.logger.info("TTS {} manually by user_id={} (Room: {})", action, user_id, room_id)
 
         if self.config_path:
             try:
@@ -256,7 +256,7 @@ class TTSManager:
 
         lang_display = {"ja": "日本語 (bilingual)", "zh": "中文 (Chinese-only)"}
         self.logger.info(
-            "TTS language switched to %s by user_id=%s (Room: %s)",
+            "TTS language switched to {} by user_id={} (Room: {})",
             lang_display.get(new_lang, new_lang), user_id, room_id,
         )
         return True

@@ -249,7 +249,6 @@ def load_model(
     if lora_dir:
         logger.info("Loading LoRA weights from: %s", lora_dir)
         kwargs["lora_weights_path"] = str(lora_dir)
-        kwargs["optimize"] = False
 
         from voxcpm.model.voxcpm import LoRAConfig
 

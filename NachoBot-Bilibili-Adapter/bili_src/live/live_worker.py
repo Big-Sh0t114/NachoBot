@@ -61,7 +61,7 @@ class LiveRoomWorker:
             pool_path = Path(__file__).resolve().parent / pool_path
         proxy_list = _load_proxy_pool(pool_path)
         if not proxy_list:
-            self.logger.warning("Proxy pool is empty: %s", pool_path)
+            self.logger.warning("Proxy pool is empty: {}", pool_path)
             return None
         check_url = (self.config.live_proxy_check_url or "").strip()
         if check_url:
@@ -75,7 +75,7 @@ class LiveRoomWorker:
                 proxy_list = checked
         proxy_cycle = _proxy_dicts_to_urls(proxy_list)
         if not proxy_cycle:
-            self.logger.warning("Proxy pool has no usable entries: %s", pool_path)
+            self.logger.warning("Proxy pool has no usable entries: {}", pool_path)
             return None
         self._proxy_cycle = proxy_cycle
         return proxy_cycle
@@ -153,12 +153,11 @@ class LiveRoomWorker:
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                self.logger.warning(
-                    "Room %s error: %s (%s)",
+                self.logger.opt(exception=True).warning(
+                    "Room {} error: {} ({})",
                     self.room_id,
                     exc,
                     type(exc).__name__,
-                    exc_info=True,
                 )
             if self._stop_event.is_set():
                 break
@@ -173,7 +172,7 @@ class LiveRoomWorker:
         token = data.get("token")
         host_list = data.get("host_list") or []
         self.logger.info(
-            "Room %s getDanmuInfo: code=%s message=%s token=%s hosts=%s",
+            "Room {} getDanmuInfo: code={} message={} token={} hosts={}",
             self.room_id,
             info_code,
             info_msg,
@@ -192,7 +191,7 @@ class LiveRoomWorker:
             ]
             if host_preview:
                 self.logger.debug(
-                    "Room %s host_list preview: %s", self.room_id, host_preview
+                    "Room {} host_list preview: {}", self.room_id, host_preview
                 )
         if not token or not host_list:
             raise RuntimeError(
@@ -205,12 +204,12 @@ class LiveRoomWorker:
                 ws_uid = int(self.config.dede_user_id)
             except (TypeError, ValueError):
                 self.logger.warning(
-                    "Room %s has an invalid DedeUserID; using anonymous danmu auth",
+                    "Room {} has an invalid DedeUserID; using anonymous danmu auth",
                     self.room_id,
                 )
         elif self.config.dede_user_id:
             self.logger.warning(
-                "Room %s Bilibili login is invalid; using anonymous danmu auth",
+                "Room {} Bilibili login is invalid; using anonymous danmu auth",
                 self.room_id,
             )
 
@@ -262,7 +261,7 @@ class LiveRoomWorker:
                     "no_proxy",
                 )
             }
-            self.logger.info("Room %s ws_proxy=auto env=%s", self.room_id, env_flags)
+            self.logger.info("Room {} ws_proxy=auto env={}", self.room_id, env_flags)
         elif proxy_lower in {"pool", "file", "proxy_pool"}:
             proxy_cycle = self._get_proxy_cycle()
             proxy_setting = proxy_cycle[0] if proxy_cycle else None
@@ -277,7 +276,7 @@ class LiveRoomWorker:
 
         proxy_cycle_size = len(proxy_cycle) if proxy_cycle else 0
         self.logger.info(
-            "Room %s websocket proxy=%s use_wss=%s open_timeout=%s max_hosts=%s max_attempts=%s pool=%s",
+            "Room {} websocket proxy={} use_wss={} open_timeout={} max_hosts={} max_attempts={} pool={}",
             self.room_id,
             proxy_setting if proxy_setting is not True else "auto",
             self.config.use_wss,
@@ -311,7 +310,7 @@ class LiveRoomWorker:
                     else (proxy_setting if proxy_setting else "none")
                 )
                 self.logger.info(
-                    "Room %s connecting: %s (%s) proxy=%s",
+                    "Room {} connecting: {} ({}) proxy={}",
                     self.room_id,
                     uri,
                     variant_name,
@@ -338,7 +337,7 @@ class LiveRoomWorker:
                         if not done:
                             connect_task.cancel()
                             self.logger.warning(
-                                "Room %s connect timeout after %ss uri=%s variant=%s",
+                                "Room {} connect timeout after {}s uri={} variant={}",
                                 self.room_id,
                                 self.config.live_open_timeout,
                                 uri,
@@ -355,7 +354,7 @@ class LiveRoomWorker:
                         self._ws = ws
                         self._authed = False
                         self.logger.info(
-                            "Room %s websocket connected: %s (%s) proxy=%s",
+                            "Room {} websocket connected: {} ({}) proxy={}",
                             self.room_id,
                             uri,
                             variant_name,
@@ -371,7 +370,7 @@ class LiveRoomWorker:
                             "key": token,
                         }
                         await ws.send(self._pack(auth_body, op=7))
-                        self.logger.debug("Room %s auth packet sent", self.room_id)
+                        self.logger.debug("Room {} auth packet sent", self.room_id)
                         heartbeat_task = asyncio.create_task(self._heartbeat_loop(ws))
                         auth_sent = True
                         try:
@@ -383,7 +382,7 @@ class LiveRoomWorker:
                             with contextlib.suppress(asyncio.CancelledError):
                                 await heartbeat_task
                         self.logger.warning(
-                            "Room %s websocket closed: code=%s reason=%s",
+                            "Room {} websocket closed: code={} reason={}",
                             self.room_id,
                             ws.close_code,
                             ws.close_reason,
@@ -398,7 +397,7 @@ class LiveRoomWorker:
                 except Exception as exc:
                     if auth_sent and not self._authed and ws_uid:
                         self.logger.warning(
-                            "Room %s authenticated danmu identity was rejected; "
+                            "Room {} authenticated danmu identity was rejected; "
                             "retrying anonymously",
                             self.room_id,
                         )
@@ -407,14 +406,13 @@ class LiveRoomWorker:
                         self.api.login_valid = False
 
                     last_exc = exc
-                    self.logger.warning(
-                        "Room %s connect failed: %s (%s) uri=%s variant=%s",
+                    self.logger.opt(exception=True).warning(
+                        "Room {} connect failed: {} ({}) uri={} variant={}",
                         self.room_id,
                         exc,
                         type(exc).__name__,
                         uri,
                         variant_name,
-                        exc_info=True,
                     )
 
         if last_exc:
@@ -426,12 +424,11 @@ class LiveRoomWorker:
             try:
                 await ws.send(self._pack({}, op=2))
             except Exception as exc:
-                self.logger.warning(
-                    "Room %s heartbeat error: %s (%s)",
+                self.logger.opt(exception=True).warning(
+                    "Room {} heartbeat error: {} ({})",
                     self.room_id,
                     exc,
                     type(exc).__name__,
-                    exc_info=True,
                 )
                 break
 
@@ -449,7 +446,7 @@ class LiveRoomWorker:
                 except json.JSONDecodeError:
                     payload = {}
                 self._authed = True
-                self.logger.info("Room %s auth ok: %s", self.room_id, payload)
+                self.logger.info("Room {} auth ok: {}", self.room_id, payload)
 
     async def _handle_gift_event(self, payload: Dict[str, Any], cmd: str) -> None:
         data = payload.get("data") or {}
@@ -565,7 +562,7 @@ class LiveRoomWorker:
             parsed = self._decode_interact_word_pb(pb_b64)
             if parsed is None:
                 self.logger.warning(
-                    "INTERACT_WORD_V2 protobuf decode failed: room=%s", self.room_id
+                    "INTERACT_WORD_V2 protobuf decode failed: room={}", self.room_id
                 )
                 return
             uid, uname, msg_type, privilege_type, ts = parsed
@@ -587,7 +584,7 @@ class LiveRoomWorker:
 
         guard_label = {1: "总督", 2: "提督", 3: "舰长"}.get(privilege_type, "舰长")
         self.logger.info(
-            "Guard entry: room=%s user=%s(%s) level=%s(%s) -> dispatching",
+            "Guard entry: room={} user={}({}) level={}({}) -> dispatching",
             self.room_id,
             uname,
             uid,
@@ -722,7 +719,7 @@ class LiveRoomWorker:
                 if len(safe_text) > 120:
                     safe_text = safe_text[:117] + "..."
                 self.logger.info(
-                    "Danmu ignored (self): room_id=%s user_id=%s message_id=%s text=%s",
+                    "Danmu ignored (self): room_id={} user_id={} message_id={} text={}",
                     self.room_id,
                     user_id,
                     message_id,
@@ -734,7 +731,7 @@ class LiveRoomWorker:
             if len(safe_text) > 120:
                 safe_text = safe_text[:117] + "..."
             self.logger.info(
-                "Danmu received: room_id=%s user_id=%s message_id=%s text=%s",
+                "Danmu received: room_id={} user_id={} message_id={} text={}",
                 self.room_id,
                 user_id,
                 message_id,
@@ -743,7 +740,7 @@ class LiveRoomWorker:
         is_mentioned = self._should_mark_mention(message_text)
         if is_mentioned:
             self.logger.info(
-                "Danmu mention detected: room_id=%s user_id=%s message_id=%s",
+                "Danmu mention detected: room_id={} user_id={} message_id={}",
                 self.room_id,
                 user_id,
                 message_id,

@@ -149,7 +149,7 @@ class BilibiliApi:
             text = await resp.text()
             if resp.status >= 400:
                 self.logger.warning(
-                    "HTTP error: status=%s url=%s body=%s",
+                    "HTTP error: status={} url={} body={}",
                     resp.status,
                     url,
                     text[:200],
@@ -169,7 +169,7 @@ class BilibiliApi:
                         )
                     else:
                         self.logger.warning(
-                            "Bilibili API error: url=%s status=%s code=%s message=%s",
+                            "Bilibili API error: url={} status={} code={} message={}",
                             url,
                             resp.status,
                             code,
@@ -186,7 +186,7 @@ class BilibiliApi:
         async with self.session.get(url, headers=headers) as resp:
             if resp.status >= 400:
                 self.logger.warning(
-                    "HTTP error: status=%s url=%s",
+                    "HTTP error: status={} url={}",
                     resp.status,
                     url,
                 )
@@ -253,7 +253,7 @@ class BilibiliApi:
             text = await resp.text()
             if resp.status >= 400:
                 self.logger.warning(
-                    "HTTP error: status=%s url=%s body=%s",
+                    "HTTP error: status={} url={} body={}",
                     resp.status,
                     "https://api.bilibili.com/x/dynamic/feed/draw/upload_bfs",
                     text[:200],
@@ -262,14 +262,14 @@ class BilibiliApi:
                 payload = json.loads(text)
             except json.JSONDecodeError:
                 self.logger.warning(
-                    "Non-JSON response from upload_bfs: %s", text[:200]
+                    "Non-JSON response from upload_bfs: {}", text[:200]
                 )
                 return {}
             if isinstance(payload, dict):
                 code = payload.get("code")
                 if code not in (None, 0):
                     self.logger.warning(
-                        "Upload image failed: code=%s message=%s",
+                        "Upload image failed: code={} message={}",
                         code,
                         payload.get("message") or payload.get("msg"),
                     )
