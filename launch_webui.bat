@@ -7,11 +7,11 @@ set "NACHOBOT_DIR=%ROOT%NachoBot"
 set "WEBUI_DIR=%ROOT%webui"
 set "NACHOBOT_FFMPEG_DIR=%ROOT%.runtime\ffmpeg"
 
-REM ===== Hugging Face mirror =====
-if not defined HF_ENDPOINT (
-    set "HF_ENDPOINT=https://hf-mirror.com"
+REM ===== Hugging Face endpoint =====
+if not defined NACHOBOT_HF_ENDPOINT (
+    set "NACHOBOT_HF_ENDPOINT=https://hf-mirror.com"
 )
-echo [INFO] Hugging Face endpoint: %HF_ENDPOINT%
+echo [INFO] NachoBot Hugging Face endpoint: %NACHOBOT_HF_ENDPOINT%
 
 echo ===== NachoBot WebUI =====
 echo.
