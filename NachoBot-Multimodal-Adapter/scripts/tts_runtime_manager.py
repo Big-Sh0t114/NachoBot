@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from urllib.request import Request, urlopen
 
 ADAPTER_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = ADAPTER_ROOT.parent
@@ -97,6 +98,35 @@ def base_env() -> dict[str, str]:
                 env["PATH"] = str(executable.parent) + os.pathsep + env.get("PATH", "")
                 break
     return env
+
+
+def hf_endpoint() -> str:
+    return os.environ.get("NACHOBOT_HF_ENDPOINT", "").strip().rstrip("/")
+
+
+def use_hf_mirror_direct_download() -> bool:
+    return hf_endpoint().lower() in {"https://hf-mirror.com", "http://hf-mirror.com"}
+
+
+def download_http(url: str, destination: Path) -> None:
+    """Download with plain HTTP GET so mirror mode does not depend on Hub HEAD metadata."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".part")
+    request = Request(url, headers={"User-Agent": "NachoBot-TTS-Runtime/1.0"})
+    try:
+        with urlopen(request, timeout=60) as response, temporary.open("wb") as output:
+            shutil.copyfileobj(response, output, length=1024 * 1024)
+        temporary.replace(destination)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def download_hf_file_direct(repo_id: str, filename: str, destination: Path) -> None:
+    endpoint = hf_endpoint() or "https://huggingface.co"
+    url = f"{endpoint}/{repo_id}/resolve/main/{filename}"
+    log(f"HF 直链下载: {url}")
+    download_http(url, destination)
 
 
 def prepare_voxcpm() -> Path:
@@ -196,17 +226,58 @@ def ensure_gpt_source(runtime_dir: Path) -> Path:
 
 def ensure_gpt_assets(python: Path, source_dir: Path, runtime_dir: Path) -> None:
     pretrained_dir = source_dir / "GPT_SoVITS" / "pretrained_models"
-    v2pro_marker = pretrained_dir / "v2Pro" / "s2Gv2Pro.pth"
-    if not v2pro_marker.is_file():
+
+    # v2Pro inference-only assets. Do not fetch discriminator/training weights (s2D*)
+    # or unrelated model generations. SoVITS LoRA requires its matching generator base,
+    # while both Pro variants require the SV speaker encoder.
+    _, configured_sovits = resolve_gpt_preset_weights()
+    sovits_version = detect_sovits_version(configured_sovits) if configured_sovits else "v2Pro"
+    if sovits_version == "v2ProPlus":
+        sovits_base = "v2Pro/s2Gv2ProPlus.pth"
+    else:
+        sovits_base = "v2Pro/s2Gv2Pro.pth"
+
+    inference_patterns = [
+        "chinese-hubert-base/**",
+        "chinese-roberta-wwm-ext-large/**",
+        "s1v3.ckpt",
+        sovits_base,
+        "sv/pretrained_eres2netv2w24s4ep4.ckpt",
+    ]
+    inference_markers = [
+        pretrained_dir / "chinese-hubert-base" / "pytorch_model.bin",
+        pretrained_dir / "chinese-roberta-wwm-ext-large" / "pytorch_model.bin",
+        pretrained_dir / "s1v3.ckpt",
+        pretrained_dir / sovits_base,
+        pretrained_dir / "sv" / "pretrained_eres2netv2w24s4ep4.ckpt",
+    ]
+    if not all(path.is_file() for path in inference_markers):
         pretrained_dir.mkdir(parents=True, exist_ok=True)
-        script = (
-            "from huggingface_hub import snapshot_download;"
-            f"snapshot_download(repo_id='lj1995/GPT-SoVITS',local_dir=r'{pretrained_dir}',"
-            "allow_patterns=['chinese-hubert-base/**','chinese-roberta-wwm-ext-large/**',"
-            "'gsv-v2final-pretrained/**','v2Pro/**','sv/**'])"
-        )
-        log("下载 GPT-SoVITS 基础推理模型")
-        run([str(python), "-c", script], env=base_env())
+        log("下载 GPT-SoVITS v2Pro 推理必需基础模型")
+        if use_hf_mirror_direct_download():
+            log("检测到 hf-mirror：使用 resolve 直链 GET，绕过 Hugging Face HEAD 元数据")
+            direct_files = [
+                "chinese-hubert-base/config.json",
+                "chinese-hubert-base/preprocessor_config.json",
+                "chinese-hubert-base/pytorch_model.bin",
+                "chinese-roberta-wwm-ext-large/config.json",
+                "chinese-roberta-wwm-ext-large/tokenizer.json",
+                "chinese-roberta-wwm-ext-large/pytorch_model.bin",
+                "s1v3.ckpt",
+                sovits_base,
+                "sv/pretrained_eres2netv2w24s4ep4.ckpt",
+            ]
+            for filename in direct_files:
+                destination = pretrained_dir / filename
+                if not destination.is_file():
+                    download_hf_file_direct("lj1995/GPT-SoVITS", filename, destination)
+        else:
+            script = (
+                "from huggingface_hub import snapshot_download;"
+                f"snapshot_download(repo_id='lj1995/GPT-SoVITS',local_dir=r'{pretrained_dir}',"
+                f"allow_patterns={inference_patterns!r})"
+            )
+            run([str(python), "-c", script], env=base_env())
 
     fast_langdetect_dir = pretrained_dir / "fast_langdetect"
     fast_langdetect_model = fast_langdetect_dir / "lid.176.bin"
@@ -225,21 +296,38 @@ def ensure_gpt_assets(python: Path, source_dir: Path, runtime_dir: Path) -> None
 
     g2pw_dir = source_dir / "GPT_SoVITS" / "text" / "G2PWModel"
     if not g2pw_dir.is_dir():
+        import zipfile
+
         assets_dir = runtime_dir / "assets"
         assets_dir.mkdir(parents=True, exist_ok=True)
-        script = (
-            "from huggingface_hub import hf_hub_download;"
-            "import zipfile,pathlib,shutil;"
-            f"root=pathlib.Path(r'{assets_dir}');"
-            "p=hf_hub_download(repo_id='XXXXRT/GPT-SoVITS-Pretrained',filename='G2PWModel.zip',local_dir=root);"
-            f"dst=pathlib.Path(r'{source_dir / 'GPT_SoVITS' / 'text'}');"
-            "zipfile.ZipFile(p).extractall(dst);"
-            "c=[x for x in dst.iterdir() if x.is_dir() and x.name.startswith('G2PWModel')];"
-            "target=dst/'G2PWModel';"
-            "(shutil.move(str(c[0]),str(target)) if c and c[0]!=target and not target.exists() else None)"
-        )
+        archive = assets_dir / "G2PWModel.zip"
         log("下载 GPT-SoVITS G2PW 中文前端模型")
-        run([str(python), "-c", script], env=base_env())
+        if not archive.is_file():
+            if use_hf_mirror_direct_download():
+                download_hf_file_direct(
+                    "XXXXRT/GPT-SoVITS-Pretrained",
+                    "G2PWModel.zip",
+                    archive,
+                )
+            else:
+                script = (
+                    "from huggingface_hub import hf_hub_download;"
+                    f"hf_hub_download(repo_id='XXXXRT/GPT-SoVITS-Pretrained',filename='G2PWModel.zip',local_dir=r'{assets_dir}')"
+                )
+                run([str(python), "-c", script], env=base_env())
+
+        text_dir = source_dir / "GPT_SoVITS" / "text"
+        with zipfile.ZipFile(archive) as handle:
+            handle.extractall(text_dir)
+        candidates = [
+            path for path in text_dir.iterdir()
+            if path.is_dir() and path.name.startswith("G2PWModel")
+        ]
+        target = text_dir / "G2PWModel"
+        if candidates and candidates[0] != target and not target.exists():
+            shutil.move(str(candidates[0]), str(target))
+        if not target.is_dir():
+            raise FileNotFoundError(f"G2PW 模型解压后不存在: {target}")
 
 
 def patch_gpt_runtime_compat(source_dir: Path, runtime_dir: Path) -> Path:
