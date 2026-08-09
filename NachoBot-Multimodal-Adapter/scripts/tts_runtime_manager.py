@@ -102,16 +102,22 @@ def base_env() -> dict[str, str]:
 def prepare_voxcpm() -> Path:
     runtime_dir = RUNTIME_ROOT / "voxcpm"
     python = ensure_venv(runtime_dir, "3.11")
-    marker = runtime_dir / ".deps-voxcpm-2.0.3.ready"
+    marker = runtime_dir / ".deps-voxcpm-2.0.3-torch211-triton36.ready"
     if marker.is_file():
         return python
 
     index_url = torch_index_url()
-    log(f"安装 VoxCPM PyTorch: {index_url}")
+    log(f"安装 VoxCPM PyTorch 2.11: {index_url}")
     run([
         require_uv(), "pip", "install", "--python", str(python),
-        "torch>=2.5", "torchaudio", "--index-url", index_url,
+        "torch>=2.11,<2.12", "torchaudio>=2.11,<2.12", "--index-url", index_url,
     ])
+    if os.name == "nt" and index_url != "https://download.pytorch.org/whl/cpu":
+        log("安装 Windows torch.compile 后端: triton-windows 3.6.x")
+        run([
+            require_uv(), "pip", "install", "--python", str(python),
+            "triton-windows>=3.6,<3.7",
+        ])
     run([
         require_uv(), "pip", "install", "--python", str(python),
         "voxcpm==2.0.3",

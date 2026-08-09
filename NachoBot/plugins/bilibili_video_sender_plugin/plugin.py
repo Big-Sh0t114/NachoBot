@@ -2390,7 +2390,7 @@ class BilibiliAutoSendHandler(BaseEventHandler):
             self._logger.error(error_msg)
             if status == "video_duration_exceeds_configured_limit":
                 await self._send_text(
-                    f"视频超过{max_video_duration_minutes}分钟，猫猫搬不动啦        (；´-ω-`)", stream_id
+                    f"视频超过{max_video_duration_minutes}分钟，猫猫搬不动啦(；´-ω-`)", stream_id
                 )
                 return self._make_return_value(True, True, "视频过长，已丢弃")
             return self._make_return_value(True, True, "解析失败")

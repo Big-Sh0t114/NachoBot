@@ -26,7 +26,7 @@ class OutgoingHandler:
     async def handle_from_nachobot(self, raw_message_base_dict: dict) -> None:
         message = MessageBase.from_dict(raw_message_base_dict)
         self.logger.info(
-            "Incoming from NachoBot: platform=%s group_id=%s user_id=%s",
+            "Incoming from NachoBot: platform={} group_id={} user_id={}",
             message.message_info.platform,
             getattr(message.message_info.group_info, "group_id", None),
             getattr(message.message_info.user_info, "user_id", None),
@@ -260,7 +260,7 @@ class OutgoingHandler:
             self.logger.warning("Empty danmu after splitting")
             return
         self.logger.info(
-            "Send danmu: room_id=%s reply_mid=%s reply_dmid=%s text=%s",
+            "Send danmu: room_id={} reply_mid={} reply_dmid={} text={}",
             room_id,
             reply_mid or "",
             reply_dmid or "",

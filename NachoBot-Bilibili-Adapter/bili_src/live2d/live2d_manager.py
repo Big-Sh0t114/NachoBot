@@ -42,7 +42,7 @@ class Live2DManager:
                 self.controller = RemoteLive2DController(adapter_ref, logger)
             except Exception as exc:
                 self.logger.error(
-                    "Failed to initialize remote Live2D controller: %s",
+                    "Failed to initialize remote Live2D controller: {}",
                     exc,
                 )
 
@@ -80,7 +80,7 @@ class Live2DManager:
                 action = str(action_value) if action_value is not None else None
                 return parsed_text if parsed_text else text, emotion, action
             except Exception as exc:
-                self.logger.debug("JSON parsing failed; using raw reply: %s", exc)
+                self.logger.debug("JSON parsing failed; using raw reply: {}", exc)
 
         return text, None, None
 
@@ -115,8 +115,8 @@ class Live2DManager:
     def _schedule(self, coroutine: Any, description: str) -> None:
         try:
             asyncio.create_task(coroutine)
-            self.logger.info("Dispatched Live2D %s", description)
+            self.logger.info("Dispatched Live2D {}", description)
         except Exception as exc:
             if hasattr(coroutine, "close"):
                 coroutine.close()
-            self.logger.error("Failed to dispatch Live2D %s: %s", description, exc)
+            self.logger.error("Failed to dispatch Live2D {}: {}", description, exc)
