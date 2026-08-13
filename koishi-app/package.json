@@ -1,7 +1,7 @@
 {
   "name": "koishi-app",
   "version": "0.0.0",
-  "packageManager": "yarn@4.1.0",
+  "packageManager": "yarn@4.5.3",
   "private": true,
   "files": [
     ".env",
