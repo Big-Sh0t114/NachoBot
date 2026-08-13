@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass
 from typing import Dict, Any, List
 import toml
@@ -51,6 +52,18 @@ class Config:
     def __init__(self, config_path: str):
         self.config_path = config_path
         self.config_data = load_config(config_path)
+        server = self.config_data["server"]
+        server["host"] = os.getenv("NACHOBOT_MULTIMODAL_HOST", str(server["host"]))
+        server["port"] = int(
+            os.getenv("NACHOBOT_MULTIMODAL_PORT", str(server["port"]))
+        )
+        core_url = os.getenv("NACHOBOT_MULTIMODAL_CORE_URL", "").strip()
+        if core_url:
+            if not core_url.startswith(("ws://", "wss://")):
+                raise ValueError("NACHOBOT_MULTIMODAL_CORE_URL must use ws:// or wss://")
+            self.config_data["routes"] = {
+                platform: core_url for platform in self.config_data["routes"]
+            }
         self.base_config = BaseConfig.from_dict(self.config_data)
 
     def __getitem__(self, key: str) -> Any:

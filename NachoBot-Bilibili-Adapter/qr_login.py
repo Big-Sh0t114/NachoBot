@@ -1,18 +1,19 @@
+from __future__ import annotations
+
 import argparse
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 import qrcode
 import requests
+import toml as toml_writer
 
 try:
     import tomllib as toml_reader
 except ImportError:  # pragma: no cover
     import toml as toml_reader  # type: ignore
-
-import toml as toml_writer
 
 
 QR_GENERATE_URL = "https://passport.bilibili.com/x/passport-login/web/qrcode/generate"
@@ -27,19 +28,19 @@ DEFAULT_HEADERS = {
 }
 
 
-def load_config(path: Path) -> Dict[str, Any]:
+def load_config(path: Path) -> dict[str, Any]:
     raw = path.read_bytes()
     if hasattr(toml_reader, "loads"):
         return toml_reader.loads(raw.decode("utf-8"))
     return toml_reader.load(path)  # type: ignore[attr-defined]
 
 
-def save_config(path: Path, data: Dict[str, Any]) -> None:
+def save_config(path: Path, data: dict[str, Any]) -> None:
     payload = toml_writer.dumps(data)
     path.write_text(payload, encoding="utf-8")
 
 
-def generate_qr(session: requests.Session) -> Dict[str, str]:
+def generate_qr(session: requests.Session) -> dict[str, str]:
     resp = session.get(QR_GENERATE_URL, timeout=10, headers=DEFAULT_HEADERS)
     resp.raise_for_status()
     data = resp.json().get("data", {})
@@ -58,11 +59,11 @@ def print_qr(url: str, output_path: Path) -> None:
     print(f"QR saved to: {output_path}")
     try:
         qr.print_ascii(invert=True)
-    except Exception:
+    except Exception:  # noqa: BLE001 - 终端不支持时回退显示 URL
         print(f"QR URL: {url}")
 
 
-def poll_login(session: requests.Session, qrcode_key: str, timeout_seconds: int = 180) -> Dict[str, Any]:
+def poll_login(session: requests.Session, qrcode_key: str, timeout_seconds: int = 180) -> dict[str, Any]:
     start = time.time()
     while True:
         if time.time() - start > timeout_seconds:
@@ -90,11 +91,11 @@ def poll_login(session: requests.Session, qrcode_key: str, timeout_seconds: int 
         time.sleep(2)
 
 
-def extract_cookie(session: requests.Session, name: str) -> Optional[str]:
+def extract_cookie(session: requests.Session, name: str) -> str | None:
     return session.cookies.get(name)
 
 
-def fetch_buvid(session: requests.Session) -> Dict[str, str]:
+def fetch_buvid(session: requests.Session) -> dict[str, str]:
     try:
         resp = session.get(BUVID_URL, timeout=10, headers=DEFAULT_HEADERS)
         resp.raise_for_status()
@@ -103,7 +104,7 @@ def fetch_buvid(session: requests.Session) -> Dict[str, str]:
             "buvid3": data.get("b_3", "") or "",
             "buvid4": data.get("b_4", "") or "",
         }
-    except Exception:
+    except Exception:  # noqa: BLE001 - buvid 是可选补充数据
         return {"buvid3": "", "buvid4": ""}
 
 
@@ -157,13 +158,18 @@ def main() -> int:
 
     save_config(config_path, config)
     print("Login success. Updated config.toml.")
-    print(f"SESSDATA: {sessdata}")
-    print(f"bili_jct: {bili_jct}")
-    print(f"DedeUserID: {dede_user_id}")
-    if buvid.get("buvid3"):
-        print(f"buvid3: {buvid['buvid3']}")
-    if buvid.get("buvid4"):
-        print(f"buvid4: {buvid['buvid4']}")
+    updated_fields = [
+        name
+        for name, value in (
+            ("SESSDATA", sessdata),
+            ("bili_jct", bili_jct),
+            ("DedeUserID", dede_user_id),
+            ("buvid3", buvid.get("buvid3")),
+            ("buvid4", buvid.get("buvid4")),
+        )
+        if value
+    ]
+    print(f"Stored credential fields: {', '.join(updated_fields) or 'none'} (values hidden).")
     return 0
 
 

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from loguru import logger
 import queue
 import threading
 import time
@@ -17,6 +16,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from .config import AdapterConfig
+from .model_adapter import Live2DModelAdapter
 from .protocol import (
     AvatarCommand,
     AvatarEvent,
@@ -40,6 +40,7 @@ class AvatarRuntime:
         self.command_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.renderer: Live2DRenderer | None = None
         self.render_thread: threading.Thread | None = None
+        self.model_adapter: Live2DModelAdapter | None = None
         self._event_loop: asyncio.AbstractEventLoop | None = None
         self._interaction_sink: InteractionSink | None = None
         self._last_poke_time = 0.0
@@ -67,6 +68,24 @@ class AvatarRuntime:
                 f"Live2D model file not found: {renderer_config.model_path}"
             )
 
+        adaptation_config = self.config.adaptation
+        self.model_adapter = Live2DModelAdapter.from_model_path(
+            renderer_config.model_path,
+            enabled=adaptation_config.enabled,
+            parameter_mappings=adaptation_config.parameter_mappings,
+            expression_mappings=adaptation_config.expression_mappings,
+            action_mappings=self.config.action_mappings,
+            logger=self.logger,
+        )
+        moc_path = self.model_adapter.metadata.moc_path
+        if moc_path is None or not moc_path.is_file():
+            raise FileNotFoundError(f"Live2D model .moc3 file not found: {moc_path}")
+
+        for warning in self.model_adapter.metadata.warnings:
+            self.logger.warning("[Live2D] model metadata warning: {}", warning)
+        adaptation_report = self.model_adapter.describe()
+        self.logger.info("Live2D automatic adaptation: {}", adaptation_report)
+
         self._event_loop = asyncio.get_running_loop()
         self.renderer = Live2DRenderer(
             model_path=str(renderer_config.model_path),
@@ -79,6 +98,7 @@ class AvatarRuntime:
             scale=renderer_config.scale,
             track_mouse=renderer_config.track_mouse,
             on_click=self._on_renderer_click,
+            model_adapter=self.model_adapter,
         )
         self.render_thread = threading.Thread(
             target=self._run_renderer,
@@ -101,6 +121,7 @@ class AvatarRuntime:
                     "model_path": str(renderer_config.model_path),
                     "width": renderer_config.width,
                     "height": renderer_config.height,
+                    "adaptation": adaptation_report,
                 },
             )
         )
@@ -161,7 +182,11 @@ class AvatarRuntime:
 
         elif event is AvatarEvent.ACTION:
             action_id = self._required_string(payload, "action_id").upper()
-            motion_group = self.config.resolve_action(action_id)
+            motion_group = (
+                self.model_adapter.resolve_action(action_id)
+                if self.model_adapter is not None
+                else self.config.resolve_action(action_id)
+            )
             if not motion_group:
                 raise ProtocolError(f"unmapped canonical action: {action_id}")
             self._enqueue("body_action", motion_group)

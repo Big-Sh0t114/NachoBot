@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from loguru import logger
 import sys
 from pathlib import Path
-import sys
+
+from loguru import logger
 
 from .config import ConfigError, load_config
+from .model_adapter import ModelAdaptationError
 from .runtime import AvatarRuntime
 from .server import AvatarWebSocketServer
 
@@ -46,7 +47,7 @@ def main() -> int:
     args = _build_parser().parse_args()
     try:
         asyncio.run(_run(args.config))
-    except ConfigError as exc:
+    except (ConfigError, ModelAdaptationError) as exc:
         print(f"Live2D adapter configuration error: {exc}", file=sys.stderr)
         return 2
     except FileNotFoundError as exc:

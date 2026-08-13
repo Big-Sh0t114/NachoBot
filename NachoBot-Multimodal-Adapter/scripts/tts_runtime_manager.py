@@ -109,15 +109,48 @@ def use_hf_mirror_direct_download() -> bool:
 
 
 def download_http(url: str, destination: Path) -> None:
-    """Download with plain HTTP GET so mirror mode does not depend on Hub HEAD metadata."""
+    """Download with plain HTTP GET and show progress without Hub HEAD metadata."""
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(destination.suffix + ".part")
     request = Request(url, headers={"User-Agent": "NachoBot-TTS-Runtime/1.0"})
     try:
         with urlopen(request, timeout=60) as response, temporary.open("wb") as output:
-            shutil.copyfileobj(response, output, length=1024 * 1024)
+            total_raw = response.headers.get("Content-Length")
+            total = int(total_raw) if total_raw and total_raw.isdigit() else 0
+            downloaded = 0
+            chunk_size = 1024 * 1024
+            bar_width = 30
+
+            while True:
+                chunk = response.read(chunk_size)
+                if not chunk:
+                    break
+                output.write(chunk)
+                downloaded += len(chunk)
+
+                downloaded_mb = downloaded / (1024 * 1024)
+                if total > 0:
+                    ratio = min(downloaded / total, 1.0)
+                    filled = int(bar_width * ratio)
+                    bar = "#" * filled + "-" * (bar_width - filled)
+                    total_mb = total / (1024 * 1024)
+                    print(
+                        f"\r[TTS Runtime] [{bar}] {ratio * 100:6.2f}% "
+                        f"{downloaded_mb:.1f}/{total_mb:.1f} MiB",
+                        end="",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"\r[TTS Runtime] 下载中: {downloaded_mb:.1f} MiB",
+                        end="",
+                        flush=True,
+                    )
+
+            print(flush=True)
         temporary.replace(destination)
     except Exception:
+        print(flush=True)
         temporary.unlink(missing_ok=True)
         raise
 
