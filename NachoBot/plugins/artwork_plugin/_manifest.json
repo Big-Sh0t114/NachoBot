@@ -20,7 +20,7 @@
     "min_version": "0.10.0"
   },
   "plugin_info": {
-    "is_built_in": true,
+    "is_built_in": false,
     "plugin_type": "action_provider",
     "components": [
       {

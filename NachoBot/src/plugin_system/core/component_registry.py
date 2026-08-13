@@ -120,34 +120,42 @@ class ComponentRegistry:
             )
             return False
 
-        self._components[namespaced_name] = component_info  # 注册到通用注册表（使用命名空间化的名称）
-        self._components_by_type[component_type][component_name] = component_info  # 类型内部仍使用原名
-        self._components_classes[namespaced_name] = component_class
-
-        # 根据组件类型进行特定注册（使用原始名称）
+        # 先完成类型特定注册，成功后才提交到通用注册表，避免半注册状态。
         ret = False
-        match component_type:
-            case ComponentType.ACTION:
-                assert isinstance(component_info, ActionInfo)
-                assert issubclass(component_class, BaseAction)
-                ret = self._register_action_component(component_info, component_class)
-            case ComponentType.COMMAND:
-                assert isinstance(component_info, CommandInfo)
-                assert issubclass(component_class, BaseCommand)
-                ret = self._register_command_component(component_info, component_class)
-            case ComponentType.TOOL:
-                assert isinstance(component_info, ToolInfo)
-                assert issubclass(component_class, BaseTool)
-                ret = self._register_tool_component(component_info, component_class)
-            case ComponentType.EVENT_HANDLER:
-                assert isinstance(component_info, EventHandlerInfo)
-                assert issubclass(component_class, BaseEventHandler)
-                ret = self._register_event_handler_component(component_info, component_class)
-            case _:
-                logger.warning(f"未知组件类型: {component_type}")
+        try:
+            match component_type:
+                case ComponentType.ACTION if isinstance(component_info, ActionInfo) and issubclass(
+                    component_class, BaseAction
+                ):
+                    ret = self._register_action_component(component_info, component_class)
+                case ComponentType.COMMAND if isinstance(component_info, CommandInfo) and issubclass(
+                    component_class, BaseCommand
+                ):
+                    ret = self._register_command_component(component_info, component_class)
+                case ComponentType.TOOL if isinstance(component_info, ToolInfo) and issubclass(
+                    component_class, BaseTool
+                ):
+                    ret = self._register_tool_component(component_info, component_class)
+                case ComponentType.EVENT_HANDLER if isinstance(component_info, EventHandlerInfo) and issubclass(
+                    component_class, BaseEventHandler
+                ):
+                    ret = self._register_event_handler_component(component_info, component_class)
+                case _:
+                    logger.error(f"组件 {component_name} 的信息、类或类型不匹配: {component_type}")
+        except Exception as exc:
+            logger.error(f"注册组件 {component_name} 失败: {exc}")
+            # A type-specific registration may have mutated several indexes
+            # before an arbitrary exception was raised.  Roll back every
+            # index, including event admission, before reporting failure.
+            self.rollback_component_registration(component_name, component_type)
+            return False
 
         if not ret:
             return False
+
+        self._components[namespaced_name] = component_info
+        self._components_by_type[component_type][component_name] = component_info
+        self._components_classes[namespaced_name] = component_class
         logger.debug(
             f"已注册{component_type}组件: '{component_name}' -> '{namespaced_name}' "
             f"({component_class.__name__}) [插件: {plugin_name}]"
@@ -180,16 +188,18 @@ class ComponentRegistry:
             logger.error(f"注册失败: {command_name} 不是有效的Command")
             return False
 
-        self._command_registry[command_name] = command_class
-
         # 如果启用了且有匹配模式
+        compiled_pattern = None
         if command_info.enabled and command_info.command_pattern:
-            pattern = re.compile(command_info.command_pattern, re.IGNORECASE | re.DOTALL)
-            if pattern not in self._command_patterns:
-                self._command_patterns[pattern] = command_name
+            compiled_pattern = re.compile(command_info.command_pattern, re.IGNORECASE | re.DOTALL)
+
+        self._command_registry[command_name] = command_class
+        if compiled_pattern is not None:
+            if compiled_pattern not in self._command_patterns:
+                self._command_patterns[compiled_pattern] = command_name
             else:
                 logger.warning(
-                    f"'{command_name}' 对应的命令模式与 '{self._command_patterns[pattern]}' 重复，忽略此命令"
+                    f"'{command_name}' 对应的命令模式与 '{self._command_patterns[compiled_pattern]}' 重复，忽略此命令"
                 )
 
         return True
@@ -216,15 +226,15 @@ class ComponentRegistry:
             logger.error(f"注册失败: {handler_name} 不是有效的EventHandler")
             return False
 
-        self._event_handler_registry[handler_name] = handler_class
-
         if not handler_info.enabled:
+            self._event_handler_registry[handler_name] = handler_class
             logger.warning(f"EventHandler组件 {handler_name} 未启用")
             return True  # 未启用，但是也是注册成功
 
         from .events_manager import events_manager  # 延迟导入防止循环导入问题
 
         if events_manager.register_event_subscriber(handler_info, handler_class):
+            self._event_handler_registry[handler_name] = handler_class
             self._enabled_event_handlers[handler_name] = handler_class
             return True
         else:
@@ -234,41 +244,73 @@ class ComponentRegistry:
     # === 组件移除相关 ===
 
     async def remove_component(self, component_name: str, component_type: ComponentType, plugin_name: str) -> bool:
-        target_component_class = self.get_component_class(component_name, component_type)
-        if not target_component_class:
-            logger.warning(f"组件 {component_name} 未注册，无法移除")
+        namespaced_name = f"{component_type.value}.{component_name}"
+        target_component_info = self._components.get(namespaced_name)
+        if (
+            target_component_info is not None
+            and plugin_name
+            and target_component_info.plugin_name
+            and target_component_info.plugin_name != plugin_name
+        ):
+            logger.error(
+                f"插件 {plugin_name} 不能移除属于 {target_component_info.plugin_name} 的组件 {component_name}"
+            )
             return False
+
         try:
             match component_type:
                 case ComponentType.ACTION:
-                    self._action_registry.pop(component_name)
-                    self._default_actions.pop(component_name)
+                    self._action_registry.pop(component_name, None)
+                    self._default_actions.pop(component_name, None)
                 case ComponentType.COMMAND:
-                    self._command_registry.pop(component_name)
+                    self._command_registry.pop(component_name, None)
                     keys_to_remove = [k for k, v in self._command_patterns.items() if v == component_name]
                     for key in keys_to_remove:
-                        self._command_patterns.pop(key)
+                        self._command_patterns.pop(key, None)
                 case ComponentType.TOOL:
-                    self._tool_registry.pop(component_name)
-                    self._llm_available_tools.pop(component_name)
+                    self._tool_registry.pop(component_name, None)
+                    self._llm_available_tools.pop(component_name, None)
                 case ComponentType.EVENT_HANDLER:
                     from .events_manager import events_manager  # 延迟导入防止循环导入问题
 
-                    self._event_handler_registry.pop(component_name)
-                    self._enabled_event_handlers.pop(component_name)
-                    await events_manager.unregister_event_subscriber(component_name)
-            namespaced_name = f"{component_type}.{component_name}"
-            self._components.pop(namespaced_name)
-            self._components_by_type[component_type].pop(component_name)
-            self._components_classes.pop(namespaced_name)
+                    if not await events_manager.unregister_event_subscriber(component_name):
+                        logger.error(f"事件处理器 {component_name} 仍有执行中的任务，拒绝移除组件")
+                        return False
+                    self._event_handler_registry.pop(component_name, None)
+                    self._enabled_event_handlers.pop(component_name, None)
+            self._components.pop(namespaced_name, None)
+            self._components_by_type[component_type].pop(component_name, None)
+            self._components_classes.pop(namespaced_name, None)
             logger.info(f"组件 {component_name} 已移除")
             return True
-        except KeyError as e:
-            logger.warning(f"移除组件时未找到组件: {component_name}, 发生错误: {e}")
-            return False
         except Exception as e:
             logger.error(f"移除组件 {component_name} 时发生错误: {e}")
             return False
+
+    def rollback_component_registration(self, component_name: str, component_type: ComponentType) -> None:
+        """仅用于插件初始注册失败时的同步回滚；此时组件尚未对外运行。"""
+        namespaced_name = f"{component_type.value}.{component_name}"
+        match component_type:
+            case ComponentType.ACTION:
+                self._action_registry.pop(component_name, None)
+                self._default_actions.pop(component_name, None)
+            case ComponentType.COMMAND:
+                self._command_registry.pop(component_name, None)
+                self._command_patterns = {
+                    pattern: name for pattern, name in self._command_patterns.items() if name != component_name
+                }
+            case ComponentType.TOOL:
+                self._tool_registry.pop(component_name, None)
+                self._llm_available_tools.pop(component_name, None)
+            case ComponentType.EVENT_HANDLER:
+                from .events_manager import events_manager
+
+                events_manager.rollback_event_subscriber_registration(component_name)
+                self._event_handler_registry.pop(component_name, None)
+                self._enabled_event_handlers.pop(component_name, None)
+        self._components.pop(namespaced_name, None)
+        self._components_by_type[component_type].pop(component_name, None)
+        self._components_classes.pop(namespaced_name, None)
 
     def remove_plugin_registry(self, plugin_name: str) -> bool:
         """移除插件注册信息
@@ -280,9 +322,9 @@ class ComponentRegistry:
             bool: 是否成功移除
         """
         if plugin_name not in self._plugins:
-            logger.warning(f"插件 {plugin_name} 未注册，无法移除")
-            return False
-        del self._plugins[plugin_name]
+            logger.debug(f"插件 {plugin_name} 未注册，无需移除")
+            return True
+        self._plugins.pop(plugin_name, None)
         logger.info(f"插件 {plugin_name} 已移除")
         return True
 
@@ -301,31 +343,47 @@ class ComponentRegistry:
         if not target_component_class or not target_component_info:
             logger.warning(f"组件 {component_name} 未注册，无法启用")
             return False
-        target_component_info.enabled = True
-        match component_type:
-            case ComponentType.ACTION:
-                assert isinstance(target_component_info, ActionInfo)
-                self._default_actions[component_name] = target_component_info
-            case ComponentType.COMMAND:
-                assert isinstance(target_component_info, CommandInfo)
-                pattern = target_component_info.command_pattern
-                self._command_patterns[re.compile(pattern)] = component_name
-            case ComponentType.TOOL:
-                assert isinstance(target_component_info, ToolInfo)
-                assert issubclass(target_component_class, BaseTool)
-                self._llm_available_tools[component_name] = target_component_class
-            case ComponentType.EVENT_HANDLER:
-                assert isinstance(target_component_info, EventHandlerInfo)
-                assert issubclass(target_component_class, BaseEventHandler)
-                self._enabled_event_handlers[component_name] = target_component_class
-                from .events_manager import events_manager  # 延迟导入防止循环导入问题
+        try:
+            match component_type:
+                case ComponentType.ACTION:
+                    if not isinstance(target_component_info, ActionInfo):
+                        return False
+                    self._default_actions[component_name] = target_component_info
+                case ComponentType.COMMAND:
+                    if not isinstance(target_component_info, CommandInfo):
+                        return False
+                    if target_component_info.command_pattern:
+                        pattern = re.compile(
+                            target_component_info.command_pattern,
+                            re.IGNORECASE | re.DOTALL,
+                        )
+                        self._command_patterns[pattern] = component_name
+                case ComponentType.TOOL:
+                    if not isinstance(target_component_info, ToolInfo) or not issubclass(
+                        target_component_class, BaseTool
+                    ):
+                        return False
+                    self._llm_available_tools[component_name] = target_component_class
+                case ComponentType.EVENT_HANDLER:
+                    if not isinstance(target_component_info, EventHandlerInfo) or not issubclass(
+                        target_component_class, BaseEventHandler
+                    ):
+                        return False
+                    from .events_manager import events_manager  # 延迟导入防止循环导入问题
 
-                events_manager.register_event_subscriber(target_component_info, target_component_class)
-        namespaced_name = f"{component_type}.{component_name}"
-        self._components[namespaced_name].enabled = True
-        self._components_by_type[component_type][component_name].enabled = True
-        logger.info(f"组件 {component_name} 已启用")
-        return True
+                    if not events_manager.has_event_subscriber(component_name) and not events_manager.register_event_subscriber(
+                        target_component_info, target_component_class
+                    ):
+                        return False
+                    self._enabled_event_handlers[component_name] = target_component_class
+                case _:
+                    return False
+            target_component_info.enabled = True
+            logger.info(f"组件 {component_name} 已启用")
+            return True
+        except (TypeError, ValueError, re.error) as exc:
+            logger.error(f"启用组件 {component_name} 失败: {exc}")
+            return False
 
     async def disable_component(self, component_name: str, component_type: ComponentType) -> bool:
         """全局的禁用某个组件
@@ -340,27 +398,26 @@ class ComponentRegistry:
         if not target_component_class or not target_component_info:
             logger.warning(f"组件 {component_name} 未注册，无法禁用")
             return False
-        target_component_info.enabled = False
         try:
             match component_type:
                 case ComponentType.ACTION:
-                    self._default_actions.pop(component_name)
+                    self._default_actions.pop(component_name, None)
                 case ComponentType.COMMAND:
                     self._command_patterns = {k: v for k, v in self._command_patterns.items() if v != component_name}
                 case ComponentType.TOOL:
-                    self._llm_available_tools.pop(component_name)
+                    self._llm_available_tools.pop(component_name, None)
                 case ComponentType.EVENT_HANDLER:
-                    self._enabled_event_handlers.pop(component_name)
                     from .events_manager import events_manager  # 延迟导入防止循环导入问题
 
-                    await events_manager.unregister_event_subscriber(component_name)
-            self._components[component_name].enabled = False
-            self._components_by_type[component_type][component_name].enabled = False
+                    if not await events_manager.unregister_event_subscriber(component_name):
+                        logger.error(f"事件处理器 {component_name} 仍有执行中的任务，拒绝禁用组件")
+                        return False
+                    self._enabled_event_handlers.pop(component_name, None)
+                case _:
+                    return False
+            target_component_info.enabled = False
             logger.info(f"组件 {component_name} 已禁用")
             return True
-        except KeyError as e:
-            logger.warning(f"禁用组件时未找到组件或已禁用: {component_name}, 发生错误: {e}")
-            return False
         except Exception as e:
             logger.error(f"禁用组件 {component_name} 时发生错误: {e}")
             return False

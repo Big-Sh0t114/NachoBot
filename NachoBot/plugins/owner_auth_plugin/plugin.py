@@ -43,6 +43,11 @@ def _ensure_sys_path() -> None:
 _ensure_sys_path()
 
 try:
+    from src.chat.runtime_capabilities import runtime_capabilities_from_message
+except Exception:
+    runtime_capabilities_from_message = None
+
+try:
     from typing import override
 except ImportError:
     try:
@@ -648,6 +653,14 @@ class OwnerAuthHandler(BaseEventHandler):
             # 获取主人QQ号配置 - 安全类型转换
             # These platforms do not provide a QQ identity. Regular Discord is not skipped.
             platform = str(message.message_base_info.get("platform") or "").strip().lower()
+            if runtime_capabilities_from_message is not None:
+                try:
+                    capabilities = runtime_capabilities_from_message(message)
+                except Exception:
+                    capabilities = None
+                if capabilities is not None and getattr(capabilities, "identity_mode", "standard") == "external":
+                    logger.debug("[OwnerAuth] Platform %s advertises external identity; skipped", platform)
+                    return True, True, f"Platform {platform} uses external identity; skipped", None, message
             unsupported_platforms = {"local", "webui", "universal", "universal_vc", "discord_vc"}
             if platform in unsupported_platforms:
                 logger.debug(f"[OwnerAuth] Platform {platform} does not support QQ owner authentication; skipped")
