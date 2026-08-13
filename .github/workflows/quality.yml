@@ -26,7 +26,9 @@ jobs:
         with:
           python-version: "3.12"
 
-      - uses: astral-sh/setup-uv@v9
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          version: "0.9.5"
 
       - uses: actions/setup-node@v6
         with:
@@ -101,7 +103,9 @@ jobs:
         with:
           python-version: "3.12"
 
-      - uses: astral-sh/setup-uv@v9
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          version: "0.9.5"
 
       - name: Verify lock is current
         working-directory: ${{ matrix.project }}
@@ -161,7 +165,9 @@ jobs:
         with:
           python-version: "3.12"
 
-      - uses: astral-sh/setup-uv@v9
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          version: "0.9.5"
 
       - name: Install locked runtime dependencies
         working-directory: ${{ matrix.project }}
