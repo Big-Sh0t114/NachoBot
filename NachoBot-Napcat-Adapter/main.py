@@ -13,6 +13,7 @@ if (_NACHOBOT_PATH / "ncnk_message").is_dir():
         sys.path.insert(1, nachobot_path)
 
 import websockets as Server
+from src import version
 from src.logger import logger
 from src.recv_handler.message_handler import message_handler
 from src.recv_handler.meta_event_handler import meta_event_handler
@@ -23,6 +24,8 @@ from src.config import global_config
 from src.mmc_com_layer import mmc_start_com, mmc_stop_com, router
 from src.response_pool import put_response, check_timeout_response
 from src.listen_address import resolve_listen_address
+
+logger.info(f"版本\n\nNachobot-Napcat-Adapter 版本: {version}\n喜欢的话点个star喵~\n")
 
 message_queue = asyncio.Queue()
 

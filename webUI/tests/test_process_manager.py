@@ -630,7 +630,7 @@ class ProcessManagerTests(unittest.IsolatedAsyncioTestCase):
         kernel = _FakeWin32Library()
         ntdll = _FakeWin32Library()
         with patch.object(process_module.os, "name", "nt"), patch.object(
-            process_module.ctypes, "WinDLL", side_effect=[kernel, ntdll]
+            process_module.ctypes, "WinDLL", side_effect=[kernel, ntdll], create=True
         ):
             facade = process_module._WindowsJobFacade()
             capability = facade.create_assign_resume(9401)
@@ -718,7 +718,7 @@ class ProcessManagerTests(unittest.IsolatedAsyncioTestCase):
         kernel.CloseHandle.result = 0
         ntdll = _FakeWin32Library()
         with patch.object(process_module.os, "name", "nt"), patch.object(
-            process_module.ctypes, "WinDLL", side_effect=[kernel, ntdll]
+            process_module.ctypes, "WinDLL", side_effect=[kernel, ntdll], create=True
         ):
             facade = process_module._WindowsJobFacade()
             capability = process_module._WindowsJobCapability(0x100001234)
@@ -732,7 +732,7 @@ class ProcessManagerTests(unittest.IsolatedAsyncioTestCase):
         kernel.CloseHandle.side_effect = lambda *_args: next(close_results)
         ntdll = _FakeWin32Library()
         with patch.object(process_module.os, "name", "nt"), patch.object(
-            process_module.ctypes, "WinDLL", side_effect=[kernel, ntdll]
+            process_module.ctypes, "WinDLL", side_effect=[kernel, ntdll], create=True
         ):
             facade = process_module._WindowsJobFacade()
             with self.assertRaises(OSError) as raised:
