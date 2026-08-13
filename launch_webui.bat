@@ -45,6 +45,12 @@ if errorlevel 1 (
     exit /b 1
 )
 
+echo [INFO] Checking Playwright Chromium...
+uv run python scripts\ensure_playwright.py
+if errorlevel 1 (
+    echo [WARN] Playwright Chromium preparation failed; web search will use HTTP fallback.
+)
+
 echo [INFO] Checking shared FFmpeg binaries...
 uv run python "%ROOT%NachoBot\ensure_ffmpeg.py"
 if errorlevel 1 (

@@ -254,6 +254,10 @@ echo --- Syncing NachoBot...
 cd /d "%NACHOBOT_DIR%"
 uv sync --python ">=3.11,<=3.13"
 
+echo --- Checking Playwright Chromium...
+uv run python scripts\ensure_playwright.py
+if errorlevel 1 echo [WARN] Playwright Chromium preparation failed; web search will use HTTP fallback.
+
 echo --- Syncing Adapter...
 cd /d "%ADAPTER_DIR%"
 uv sync --python ">=3.11,<=3.13"

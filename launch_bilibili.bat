@@ -72,6 +72,12 @@ if errorlevel 1 (
   exit /b 1
 )
 
+echo [PLAYWRIGHT] Checking Chromium...
+uv run python scripts\ensure_playwright.py
+if errorlevel 1 (
+  echo [WARN] Playwright Chromium preparation failed; web search will use HTTP fallback.
+)
+
 if not exist "%ROOT%NachoBot\ensure_ffmpeg.py" (
   echo [ERROR] FFmpeg preparation script not found: %ROOT%NachoBot\ensure_ffmpeg.py
   pause
