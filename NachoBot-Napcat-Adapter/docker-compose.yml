@@ -7,12 +7,21 @@ services:
         nachobot: ../NachoBot
     environment:
       - TZ=Asia/Shanghai
+      - NACHOBOT_CORE_TOKEN=${NACHOBOT_CORE_TOKEN:-}
+      - NACHOBOT_NAPCAT_LISTEN_HOST=0.0.0.0
+      - NACHOBOT_NAPCAT_LISTEN_PORT=8095
     ports:
-      - "8095:8095"
+      - "127.0.0.1:8095:8095"
     volumes:
       - ./config.toml:/workspace/NachoBot-Napcat-Adapter/config.toml
       - ./data:/workspace/NachoBot-Napcat-Adapter/data
-    restart: always
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; connection = socket.create_connection(('127.0.0.1', 8095), 3); connection.close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
     networks:
       - nacho_bot
 

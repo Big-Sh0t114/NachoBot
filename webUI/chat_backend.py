@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from pathlib import Path
@@ -343,7 +344,9 @@ class LocalChatBackend:
 
     def _get_ncnk_ws_settings(self) -> tuple[str, str | None]:
         ncnk_config = self._read_ncnk_config()
-        token = self._first_auth_token(ncnk_config)
+        token = os.getenv("NACHOBOT_CORE_TOKEN", "").strip() or self._first_auth_token(
+            ncnk_config
+        )
 
         if bool(ncnk_config.get("use_custom", False)):
             mode = str(ncnk_config.get("mode", "ws")).lower()

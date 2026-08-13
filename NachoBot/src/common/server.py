@@ -1,5 +1,12 @@
-from fastapi import FastAPI, APIRouter
+import ipaddress
+import inspect
+import secrets
+import warnings
+from collections.abc import Iterable
+
+from fastapi import APIRouter, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware  # 新增导入
+from fastapi.responses import JSONResponse
 from typing import Optional
 from uvicorn import Config, Server as UvicornServer
 import os
@@ -8,12 +15,45 @@ from rich.traceback import install
 install(extra_lines=3)
 
 
+def is_loopback_host(host: str) -> bool:
+    """返回监听地址是否明确限定在本机。"""
+    normalized = host.strip().strip("[]").lower()
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def _extract_auth_token(authorization: str | None) -> str:
+    if not authorization:
+        return ""
+    scheme, separator, value = authorization.partition(" ")
+    if separator and scheme.lower() == "bearer":
+        return value.strip()
+    # ncnk_message 历史上使用裸令牌，HTTP 在过渡期保持兼容。
+    return authorization.strip()
+
+
+def supports_message_server_token_auth(server_class: type) -> bool:
+    """Check the imported implementation, not unrelated distribution metadata."""
+    try:
+        parameters = inspect.signature(server_class).parameters
+    except (TypeError, ValueError):
+        return False
+    return "enable_token" in parameters and callable(
+        getattr(server_class, "add_valid_token", None)
+    )
+
+
 class Server:
     def __init__(self, host: Optional[str] = None, port: Optional[int] = None, app_name: str = "NachoCore"):
         self.app = FastAPI(title=app_name)
         self._host: str = "127.0.0.1"
         self._port: int = 8080
         self._server: Optional[UvicornServer] = None
+        self._auth_tokens: tuple[str, ...] = ()
         self.set_address(host, port)
 
         # 配置 CORS
@@ -30,6 +70,68 @@ class Server:
             allow_methods=["*"],  # 允许所有 HTTP 方法
             allow_headers=["*"],  # 允许所有 HTTP 请求头
         )
+
+        @self.app.get("/health", include_in_schema=False)
+        async def health() -> dict[str, str]:
+            return {"status": "ok"}
+
+        @self.app.middleware("http")
+        async def authenticate_api(request: Request, call_next):
+            if (
+                self._auth_tokens
+                and request.method != "OPTIONS"
+                and request.url.path.startswith("/api")
+            ):
+                supplied_token = _extract_auth_token(
+                    request.headers.get("authorization")
+                )
+                if not any(
+                    secrets.compare_digest(supplied_token, expected)
+                    for expected in self._auth_tokens
+                ):
+                    return JSONResponse(
+                        status_code=401,
+                        content={"detail": "未授权"},
+                        headers={"WWW-Authenticate": "Bearer"},
+                    )
+            return await call_next(request)
+
+    def configure_auth(self, tokens: Iterable[str]) -> None:
+        """配置 Core HTTP API 和消息服务共用的令牌集合。"""
+        environment_token = os.getenv("NACHOBOT_CORE_TOKEN", "").strip()
+        self._auth_tokens = tuple(
+            dict.fromkeys(
+                [
+                    *(token.strip() for token in tokens if token and token.strip()),
+                    *([environment_token] if environment_token else []),
+                ]
+            )
+        )
+
+    @property
+    def auth_tokens(self) -> tuple[str, ...]:
+        """Return the normalized credentials shared by HTTP and WebSocket."""
+        return self._auth_tokens
+
+    def validate_security(self) -> None:
+        """防止在无认证时将 Core 控制面监听到非回环地址。"""
+        if not is_loopback_host(self._host) and not self._auth_tokens:
+            trusted_container_network = os.getenv(
+                "NACHOBOT_TRUSTED_CONTAINER_NETWORK", ""
+            ).strip().lower() in {"1", "true", "yes"}
+            if trusted_container_network:
+                warnings.warn(
+                    "Core 以无令牌模式监听容器网络；请确保宿主机端口仅绑定回环地址。",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                return
+            raise RuntimeError(
+                "Core 拒绝在无认证时监听非回环地址。"
+                "请设置 NACHOBOT_CORE_TOKEN 或在 [ncnk_message].auth_token 中配置令牌，"
+                "或将 HOST 设为 127.0.0.1。只有受信任的容器网络才可显式设置 "
+                "NACHOBOT_TRUSTED_CONTAINER_NETWORK=1。"
+            )
 
     def register_router(self, router: APIRouter, prefix: str = ""):
         """注册路由
@@ -64,6 +166,7 @@ class Server:
 
     async def run(self):
         """启动服务器"""
+        self.validate_security()
         # 禁用 uvicorn 默认日志和访问日志
         config = Config(app=self.app, host=self._host, port=self._port, log_config=None, access_log=False)
         self._server = UvicornServer(config=config)

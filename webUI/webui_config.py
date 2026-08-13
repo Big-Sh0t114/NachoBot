@@ -13,6 +13,10 @@ DEFAULT_CONFIG = {
         "host": "127.0.0.1",
         "port": 8088
     },
+    "security": {
+        "auth_token": "",
+        "allowed_origins": [],
+    },
     "proxy": {
         "http_proxy": "http://127.0.0.1:7897",
         "https_proxy": "http://127.0.0.1:7897"
@@ -62,6 +66,13 @@ class WebUIConfig:
             server_table["port"] = DEFAULT_CONFIG["server"]["port"]
             doc["server"] = server_table
 
+            security_table = tomlkit.table()
+            security_table.add(tomlkit.comment("Legacy field: keep empty; use NACHOBOT_WEBUI_TOKEN"))
+            security_table["auth_token"] = DEFAULT_CONFIG["security"]["auth_token"]
+            security_table.add(tomlkit.comment("Additional exact browser origins, e.g. https://panel.example.com"))
+            security_table["allowed_origins"] = DEFAULT_CONFIG["security"]["allowed_origins"]
+            doc["security"] = security_table
+
             # Proxy section
             proxy_table = tomlkit.table()
             proxy_table.add(tomlkit.comment("Proxy configuration for adapters like Koishi/Discord"))
@@ -85,6 +96,17 @@ class WebUIConfig:
     @property
     def port(self) -> int:
         return self.config["server"]["port"]
+
+    @property
+    def auth_token(self) -> str:
+        return str(self.config["security"]["auth_token"] or "")
+
+    @property
+    def allowed_origins(self) -> list[str]:
+        origins = self.config["security"]["allowed_origins"]
+        if not isinstance(origins, list):
+            return []
+        return [str(origin).strip() for origin in origins if str(origin).strip()]
 
     @property
     def http_proxy(self) -> str:

@@ -14,7 +14,18 @@ qwen3.5_launch.bat
 config-save/setup_backups/
 NachoBot-UniversalVC-Adapter-bak/
 temp/
+**/tests/
 .runtime/
 NachoBot-Multimodal-Adapter/.runtime/
 NachoBot-Multimodal-Adapter/models/hf_cache/
 NachoBot-Multimodal-Adapter/models/tts/
+
+# WebUI creates adjacent automatic/manual configuration backups. They may
+# contain API keys or tokens and must never appear as untracked Git content.
+*.auto.*.bak
+*.manual.*.bak
+
+# Temporary VRChat directories (parked locally)
+/NachoBot-VRChat-Adapter/
+/NachoBot/plugins/vrchat_control_plugin/
+launch_vrchat.bat

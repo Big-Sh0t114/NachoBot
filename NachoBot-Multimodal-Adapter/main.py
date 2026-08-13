@@ -25,6 +25,7 @@ from ncnk_message import (  # noqa: E402
     MessageBase,
     Seg,
     FormatInfo,
+    get_core_token_from_env,
 )
 
 # Keep all Hugging Face models in the adapter-owned cache directory.
@@ -78,7 +79,10 @@ class TTSPipeline:
         # 设置路由
         route_config = {}
         for platform, url in self.config.routes.items():
-            route_config[platform] = TargetConfig(url=url, token=None)
+            route_config[platform] = TargetConfig(
+                url=url,
+                token=get_core_token_from_env(),
+            )
 
         self.router = Router(RouteConfig(route_config))
 

@@ -7,6 +7,7 @@ via synchronous wrappers around the async MemoryService.
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 from urllib import error as urlerror
 from urllib import request as urlrequest
@@ -32,6 +33,27 @@ MEMORY_MAINTAIN_TIMEOUT_SECONDS = 20
 _NACHOBOT_ROOT = Path(__file__).resolve().parent.parent / "NachoBot"
 _BOT_CONFIG_PATH = _NACHOBOT_ROOT / "config" / "bot_config.toml"
 _NACHOBOT_ENV_PATH = _NACHOBOT_ROOT / ".env"
+
+
+def _get_core_auth_token() -> str:
+    """Read the first configured Core token without importing the bot runtime."""
+    environment_token = os.getenv("NACHOBOT_CORE_TOKEN", "").strip()
+    if environment_token:
+        return environment_token
+    if not _BOT_CONFIG_PATH.exists():
+        return ""
+    try:
+        doc = tomlkit.parse(_BOT_CONFIG_PATH.read_text(encoding="utf-8"))
+        tokens = doc.get("ncnk_message", {}).get("auth_token", []) or []
+        if isinstance(tokens, str):
+            tokens = [tokens]
+        for token in tokens:
+            value = str(token).strip()
+            if value:
+                return value
+    except Exception as exc:
+        logger.warning("Failed to read Core API authentication settings: %s", _log_safe(exc))
+    return ""
 
 
 def is_available() -> bool:
@@ -210,6 +232,8 @@ def _core_api_request_sync(method: str, path: str, body: dict | None = None) -> 
     url = f"{_get_core_base_url()}{path}"
     data = None
     headers = {"Accept": "application/json"}
+    if token := _get_core_auth_token():
+        headers["Authorization"] = f"Bearer {token}"
     if body is not None:
         data = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"

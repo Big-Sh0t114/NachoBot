@@ -525,7 +525,7 @@ const ChatModule = (() => {
 
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
         liveConversationId = conversationId;
-        liveSocket = new WebSocket(
+        liveSocket = createAuthenticatedWebSocket(
             `${protocol}//${location.host}/ws/chat/${encodeURIComponent(conversationId)}`
         );
 

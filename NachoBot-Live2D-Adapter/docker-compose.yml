@@ -6,8 +6,10 @@ services:
       context: .
     environment:
       - TZ=Asia/Shanghai
+      - NACHOBOT_LIVE2D_HOST=0.0.0.0
+      - NACHOBOT_LIVE2D_PORT=8766
     ports:
-      - "8766:8766"
+      - "127.0.0.1:8766:8766"
     volumes:
       - type: bind
         source: ./config.toml
@@ -15,7 +17,13 @@ services:
       - type: bind
         source: ./resources
         target: C:/workspace/NachoBot-Live2D-Adapter/resources
-    restart: always
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; connection = socket.create_connection(('127.0.0.1', 8766), 3); connection.close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
     networks:
       - nacho_bot
 

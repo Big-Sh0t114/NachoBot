@@ -356,7 +356,9 @@ class MessageClient(BaseMessageHandler):
         url: str,
         platform: str,
         token: Optional[str] = None,
-        ssl_verify: Optional[str] = None,
+        ssl_verify: Optional[str | bool] = None,
+        ca_file: Optional[str] = None,
+        insecure_skip_verify: bool = False,
     ):
         """设置连接参数并连接到服务器"""
         self.platform = platform
@@ -383,6 +385,8 @@ class MessageClient(BaseMessageHandler):
                 platform=platform,
                 token=token,
                 ssl_verify=ssl_verify,
+                ca_file=ca_file,
+                insecure_skip_verify=insecure_skip_verify,
             )
 
         # 标记连接已配置

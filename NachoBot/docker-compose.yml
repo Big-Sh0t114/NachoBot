@@ -1,15 +1,23 @@
-# 使用前请先创建外部网络: docker network create nacho_bot
 services:
   adapters:
     container_name: nacho-bot-adapters
     image: unclas/nachobot-adapter:latest
+    profiles: ["legacy-adapters"]
     environment:
       - TZ=Asia/Shanghai
 #    ports:
 #      - "8095:8095"
     volumes:
-      - ./docker-config/adapters/config.toml:/adapters/config.toml # 持久化adapters配置文件
-      - ./data/adapters:/adapters/data # adapters 数据持久化
+      - type: bind
+        source: ./docker-config/adapters/config.toml
+        target: /adapters/config.toml
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./data/adapters
+        target: /adapters/data
+        bind:
+          create_host_path: false
     restart: always
     networks:
       - nacho_bot
@@ -21,18 +29,47 @@ services:
     image: nachobot-core:local
     environment:
       - TZ=Asia/Shanghai
+      - NACHOBOT_CORE_TOKEN=${NACHOBOT_CORE_TOKEN:-}
       - HOST=0.0.0.0
       - PORT=8000
+        # Core 仅在本 Compose 管理的网络中为适配器提供无令牌通信。
+      # 若将端口暴露到非回环地址，必须删除此开关并配置 auth_token。
+      - NACHOBOT_TRUSTED_CONTAINER_NETWORK=1
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
-      - ./docker-config/mmc/.env:/NachoBot/.env # 持久化env配置文件
-      - ./docker-config/mmc:/NachoBot/config # 持久化bot配置文件
-      - ./data/NachoBot/Nachobot_statistics.html:/NachoBot/Nachobot_statistics.html #统计数据输出
-      - ./data/NachoBot:/NachoBot/data # 共享目录
-      - ./data/NachoBot/plugins:/NachoBot/plugins # 插件目录
-      - ./data/NachoBot/logs:/NachoBot/logs # 日志目录
-    restart: always
+      - type: bind
+        source: ./docker-config/mmc/.env
+        target: /NachoBot/.env
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./docker-config/mmc
+        target: /NachoBot/config
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./data/NachoBot/nachobot_statistics.html
+        target: /NachoBot/nachobot_statistics.html
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./data/NachoBot
+        target: /NachoBot/data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./data/NachoBot/logs
+        target: /NachoBot/logs
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
     networks:
       - nacho_bot
   napcat:
@@ -41,11 +78,23 @@ services:
       - NAPCAT_GID=1000
       - TZ=Asia/Shanghai
     ports:
-      - "6099:6099"
+      - "127.0.0.1:6099:6099"
     volumes:
-      - ./docker-config/napcat:/app/napcat/config # 持久化napcat配置文件
-      - ./data/qq:/app/.config/QQ # 持久化QQ本体
-      - ./data/NachoBot:/NachoBot/data # 共享目录
+      - type: bind
+        source: ./docker-config/napcat
+        target: /app/napcat/config
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./data/qq
+        target: /app/.config/QQ
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./data/NachoBot
+        target: /NachoBot/data
+        bind:
+          create_host_path: false
     container_name: nacho-bot-napcat
     restart: always
     image: mlikiowa/napcat-docker:latest
@@ -55,11 +104,17 @@ services:
     # 注意：coleifer/sqlite-web 镜像不支持arm64
     image: coleifer/sqlite-web
     container_name: sqlite-web
-    restart: always
+    profiles: ["debug"]
+    restart: unless-stopped
     ports:
-      - "8120:8080"
+      - "127.0.0.1:8120:8080"
     volumes:
-      - ./data/NachoBot:/data/NachoBot
+      - type: bind
+        source: ./data/NachoBot
+        target: /data/NachoBot
+        read_only: true
+        bind:
+          create_host_path: false
     environment:
       - SQLITE_DATABASE=NachoBot/NachoBot.db  # 你的数据库文件
     networks:
@@ -79,5 +134,7 @@ services:
   #     - nacho_bot
   
 networks:
+  # 同一 Docker daemon 上加入此网络的容器都处于 Core 的受信任边界内。
+  # 网络名保持为 nacho_bot，供其他适配器 Compose 以 external: true 加入。
   nacho_bot:
-    external: true
+    name: nacho_bot

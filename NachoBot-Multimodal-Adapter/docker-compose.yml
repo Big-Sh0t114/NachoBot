@@ -8,13 +8,23 @@ services:
         nachobot: ../NachoBot
     environment:
       - TZ=Asia/Shanghai
+      - NACHOBOT_CORE_TOKEN=${NACHOBOT_CORE_TOKEN:-}
+      - NACHOBOT_MULTIMODAL_HOST=0.0.0.0
+      - NACHOBOT_MULTIMODAL_PORT=8070
+      - NACHOBOT_MULTIMODAL_CORE_URL=ws://core:8000/ws
     ports:
-      - "8070:8070"
+      - "127.0.0.1:8070:8070"
     volumes:
       - ./configs:/workspace/NachoBot-Multimodal-Adapter/configs
       - ./models:/workspace/NachoBot-Multimodal-Adapter/models
       - ./logs:/workspace/NachoBot-Multimodal-Adapter/logs
-    restart: always
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8070/api/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 120s
+    restart: unless-stopped
     networks:
       - nacho_bot
 

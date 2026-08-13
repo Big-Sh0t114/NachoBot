@@ -11,8 +11,20 @@ import tomlkit
 
 try:
     from .secure_paths import ensure_within, resolve_named_dir
+    from .config_manager import (
+        SECRET_PLACEHOLDER,
+        ConfigManager,
+        merge_toml_secrets,
+        sanitize_toml_for_edit,
+    )
 except ImportError:
     from secure_paths import ensure_within, resolve_named_dir
+    from config_manager import (
+        SECRET_PLACEHOLDER,
+        ConfigManager,
+        merge_toml_secrets,
+        sanitize_toml_for_edit,
+    )
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
@@ -75,7 +87,7 @@ class PluginManager:
 
         return plugins
 
-    def read_plugin_config(self, plugin_id: str) -> dict[str, Any]:
+    def read_plugin_config(self, plugin_id: str, mask_sensitive: bool = True) -> dict[str, Any]:
         """Read a plugin's config.toml as a dict."""
         config_path = self._resolve_config_path(plugin_id, must_exist=True)
         # codeql[py/path-injection]
@@ -85,16 +97,24 @@ class PluginManager:
         # codeql[py/path-injection]
         raw = config_path.read_text(encoding="utf-8")
         doc = tomlkit.parse(raw)
-        return self._tomlkit_to_dict(doc)
+        data = self._tomlkit_to_dict(doc)
+        if mask_sensitive:
+            ConfigManager._mask_dict(data)
+        return data
 
     def read_plugin_config_raw(self, plugin_id: str) -> str:
-        """Read raw text of a plugin's config.toml."""
+        """Read editable plugin TOML without disclosing existing secrets."""
         config_path = self._resolve_config_path(plugin_id, must_exist=True)
         # codeql[py/path-injection]
         if not config_path.exists():
             raise FileNotFoundError(f"No config.toml for plugin: {plugin_id}")
         # codeql[py/path-injection]
-        return config_path.read_text(encoding="utf-8")
+        try:
+            return sanitize_toml_for_edit(config_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise ValueError(
+                "插件配置语法错误，无法在不泄露秘密的前提下显示原始内容"
+            ) from exc
 
     def write_plugin_config(self, plugin_id: str, data: dict[str, Any]) -> None:
         """Write updated config to a plugin's config.toml."""
@@ -114,10 +134,16 @@ class PluginManager:
         config_path.write_text(tomlkit.dumps(doc), encoding="utf-8")
 
     def write_plugin_config_raw(self, plugin_id: str, raw: str) -> None:
-        """Write raw TOML text to a plugin's config.toml."""
+        """Write plugin TOML while preserving values represented by sentinels."""
         config_path = self._resolve_config_path(plugin_id)
+        existing_raw = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+        raw = merge_toml_secrets(raw, existing_raw)
         # codeql[py/path-injection]
         config_path.write_text(raw, encoding="utf-8")
+
+    @property
+    def secret_placeholder(self) -> str:
+        return SECRET_PLACEHOLDER
 
     def _resolve_config_path(self, plugin_id: str, *, must_exist: bool = False) -> Path:
         plugin_dir = resolve_named_dir(self.plugins_dir, plugin_id, must_exist=True)
