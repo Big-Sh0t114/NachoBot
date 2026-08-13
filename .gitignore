@@ -14,7 +14,6 @@ qwen3.5_launch.bat
 config-save/setup_backups/
 NachoBot-UniversalVC-Adapter-bak/
 temp/
-**/tests/
 .runtime/
 NachoBot-Multimodal-Adapter/.runtime/
 NachoBot-Multimodal-Adapter/models/hf_cache/
