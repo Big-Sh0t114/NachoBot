@@ -52,10 +52,19 @@ class WebUITTSRequest(BaseModel):
 
 class TTSPipeline:
 
-    def __init__(self, config_path: str):  # sourcery skip: dict-comprehension
+    def __init__(
+        self,
+        config_path: str,
+        no_local_models: bool | None = None,
+    ):  # sourcery skip: dict-comprehension
         self.tts_list: List[BaseTTSModel] = []
         self._emotion_classifier = None
         self._emotion_config = None
+        self.no_local_models = (
+            no_local_models
+            if no_local_models is not None
+            else os.environ.get("NACHOBOT_NO_LOCAL_MODELS") == "1"
+        )
         self.config: Config = Config(config_path)
         # 根据配置刷新日志级别
         from nachobot_multimodal.logger import set_logging_level
@@ -83,6 +92,10 @@ class TTSPipeline:
 
     def import_module(self):
         """动态导入TTS适配"""
+        if self.no_local_models:
+            logger.info("无模型模式已启用，跳过 TTS 和情感分类模型加载")
+            return
+
         enabled = self.config.enabled_plugin.enabled
         # 互斥校验：GPT_Sovits 和 Vox 不可同时启用
         if "GPT_Sovits" in enabled and "Vox" in enabled:
@@ -160,6 +173,7 @@ class TTSPipeline:
         async def health_endpoint():
             return {
                 "status": "ok",
+                "mode": "relay_only" if self.no_local_models else "tts",
                 "emotion_classifier": self._emotion_classifier is not None,
                 "tts_backends": [type(t).__module__ for t in self.tts_list],
             }
@@ -195,12 +209,22 @@ class TTSPipeline:
                 headers={"Cache-Control": "no-store"},
             )
 
-        logger.info("已注册 HTTP 接口: /api/emotion_preset, /api/health, /api/tts")
+        if self.no_local_models:
+            logger.info(
+                "已注册 HTTP 兼容接口（无模型模式：TTS 和情感分类均禁用）: "
+                "/api/emotion_preset, /api/health, /api/tts"
+            )
+        else:
+            logger.info("已注册 HTTP 接口: /api/emotion_preset, /api/health, /api/tts")
 
     async def server_handle(self, message_data: dict):
         """处理服务器收到的消息"""
         message = MessageBase.from_dict(message_data)
-        if message.message_info.format_info and "voice" in message.message_info.format_info.accept_format:
+        if (
+            not self.no_local_models
+            and message.message_info.format_info
+            and "voice" in message.message_info.format_info.accept_format
+        ):
             message.message_info.format_info.accept_format.append("tts_text")
         await self.router.send_message(message)
 
@@ -226,6 +250,10 @@ class TTSPipeline:
         # sourcery skip: remove-redundant-if
         """处理客户端收到的消息并进行TTS转换（分群缓冲）"""
         message = MessageBase.from_dict(message_dict)
+        if self.no_local_models:
+            await self.server.send_message(message)
+            return
+
         stream_mode = self.config.tts_base_config.stream_mode
         if message.message_segment.type != "tts_text" and random.random() > self.config.probability.voice_probability:
             #  如果概率不满足，直接透传消息
@@ -452,7 +480,7 @@ class TTSPipeline:
 
     async def stop(self):
         """停止服务器和路由"""
-        logger.info("正在停止TTS服务...")
+        logger.info("正在停止{}...", "8070 无模型中继服务" if self.no_local_models else "TTS服务")
         # 停止所有正在运行的缓冲任务
         for _, task in list(self.buffer_task_dict.items()):
             if not task.done() and not task.cancelled():
@@ -496,19 +524,28 @@ class TTSPipeline:
         # 给一点时间让连接完全关闭
         await asyncio.sleep(0.1)
 
-        logger.info("TTS服务已停止")
+        logger.info("{}已停止", "8070 无模型中继服务" if self.no_local_models else "TTS服务")
 
 
 async def main():
     """主程序入口"""
     config_path = Path(__file__).parent / "configs" / "base.toml"
-    pipeline = TTSPipeline(str(config_path))
+    pipeline = TTSPipeline(
+        str(config_path),
+        no_local_models="--no-local-models" in sys.argv[1:],
+    )
 
     try:
-        logger.info("正在启动TTS服务...")
+        logger.info(
+            "正在启动{}...",
+            "8070 无模型中继服务" if pipeline.no_local_models else "TTS服务",
+        )
         # 启动服务
         server_task, router_task = await pipeline.start()
-        logger.info("TTS服务已启动，按 Ctrl+C 退出")
+        logger.info(
+            "{}已启动，按 Ctrl+C 退出",
+            "8070 无模型中继服务" if pipeline.no_local_models else "TTS服务",
+        )
 
         # 等待任务完成或中断
         await asyncio.gather(server_task, router_task)

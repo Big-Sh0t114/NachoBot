@@ -41,14 +41,14 @@ if errorlevel 1 (
   exit /b 1
 )
 
-if not exist "%ROOT%scripts\ensure_ffmpeg.py" (
-  echo [ERROR] FFmpeg preparation script not found: %ROOT%scripts\ensure_ffmpeg.py
+if not exist "%ROOT%NachoBot\ensure_ffmpeg.py" (
+  echo [ERROR] FFmpeg preparation script not found: %ROOT%NachoBot\ensure_ffmpeg.py
   pause
   exit /b 1
 )
 
 echo [FFMPEG] Checking shared FFmpeg binaries...
-uv run python "%ROOT%scripts\ensure_ffmpeg.py"
+uv run python "%ROOT%NachoBot\ensure_ffmpeg.py"
 if errorlevel 1 (
   echo [ERROR] Shared FFmpeg download or verification failed.
   pause

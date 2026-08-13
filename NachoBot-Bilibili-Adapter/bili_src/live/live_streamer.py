@@ -137,7 +137,7 @@ class LiveStreamerController:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                self._logger.error(f"[LiveStreamer] Chain error: {e}", exc_info=True)
+                self._logger.exception("[LiveStreamer] Chain error: {}", e)
                 await asyncio.sleep(2)
 
             # Wait after chain ends

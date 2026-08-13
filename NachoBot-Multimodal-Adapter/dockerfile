@@ -1,33 +1,37 @@
-FROM python:3.13-slim-bookworm
+FROM python:3.12-slim-bookworm
+
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-# Use the integrated workspace root as the Docker build context.
-COPY NachoBot/ncnk_message /NachoBot/ncnk_message
-ENV PYTHONPATH=/NachoBot
+WORKDIR /workspace/NachoBot-Multimodal-Adapter
 
+# Python 3.12 is required by this adapter's <3.13 project constraint.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    ffmpeg \
+    libgomp1 \
+    libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
 
-# 设置工作目录
-WORKDIR /nachobot_multimodal_adapter
-
-
-# 安装依赖
-COPY NachoBot-Multimodal-Adapter/pyproject.toml NachoBot-Multimodal-Adapter/uv.lock ./
+COPY pyproject.toml uv.lock ./
 RUN uv sync --locked --no-dev --no-install-project
-ENV PATH="/nachobot_multimodal_adapter/.venv/bin:${PATH}"
 
-# 复制项目代码
-COPY NachoBot-Multimodal-Adapter/ .
+COPY . .
+COPY --from=nachobot /ncnk_message /workspace/NachoBot/ncnk_message
 
-# 创建配置目录并从模板复制默认配置
-RUN mkdir -p /nachobot_multimodal_adapter/configs && \
-    cp /nachobot_multimodal_adapter/template_configs/base_template.toml /nachobot_multimodal_adapter/configs/base.toml && \
-    cp /nachobot_multimodal_adapter/template_configs/gpt-sovits_template.toml /nachobot_multimodal_adapter/configs/gpt-sovits.toml
+# Keep a runnable default in the image; Compose normally replaces this with
+# the host's persistent configs volume.
+RUN mkdir -p configs && \
+    cp template_configs/base_template.toml configs/base.toml && \
+    cp template_configs/perception_template.toml configs/perception.toml && \
+    cp template_configs/gpt-sovits_template.toml configs/gpt-sovits.toml && \
+    cp template_configs/vox_template.toml configs/vox.toml
 
-# 暴露端口
+ENV PATH="/workspace/NachoBot-Multimodal-Adapter/.venv/bin:${PATH}" \
+    PYTHONPATH=/workspace/NachoBot \
+    PYTHONUNBUFFERED=1
+
 EXPOSE 8070
 
-# 定义可以被映射的卷
-VOLUME ["/nachobot_multimodal_adapter/configs"]
+VOLUME ["/workspace/NachoBot-Multimodal-Adapter/configs", "/workspace/NachoBot-Multimodal-Adapter/models", "/workspace/NachoBot-Multimodal-Adapter/logs"]
 
-# 运行应用
-CMD ["python", "main.py"]
+ENTRYPOINT ["python", "main.py"]

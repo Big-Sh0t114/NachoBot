@@ -211,3 +211,18 @@ live2d_reconnect_seconds = 3.0
 ### 动作命令返回 `unmapped canonical action`
 
 在 `[actions]` 中为该 canonical action ID 配置模型实际存在的 Motion Group。
+
+## Docker 部署
+
+本适配器提供 Windows 容器镜像：
+
+```bat
+docker network create nacho_bot
+docker compose up -d
+```
+
+`live2d-py` 仅提供 Windows 原生 wheel，因此必须切换 Docker Desktop 的
+Windows containers 引擎。容器不会自动获得宿主机的桌面窗口、OBS 捕获链路或
+音频设备；需要实际显示模型并联动 OBS 时，仍建议在宿主机直接运行本适配器。
+容器配置需将 `[server].host` 改为 `0.0.0.0`，Bilibili 侧的
+`live2d_url` 使用容器可达的地址，而不是 `127.0.0.1`。

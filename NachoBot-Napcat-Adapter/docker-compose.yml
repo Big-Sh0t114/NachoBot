@@ -1,0 +1,21 @@
+services:
+  napcat-adapter:
+    container_name: nacho-bot-napcat-adapter
+    build:
+      context: .
+      additional_contexts:
+        nachobot: ../NachoBot
+    environment:
+      - TZ=Asia/Shanghai
+    ports:
+      - "8095:8095"
+    volumes:
+      - ./config.toml:/workspace/NachoBot-Napcat-Adapter/config.toml
+      - ./data:/workspace/NachoBot-Napcat-Adapter/data
+    restart: always
+    networks:
+      - nacho_bot
+
+networks:
+  nacho_bot:
+    external: true

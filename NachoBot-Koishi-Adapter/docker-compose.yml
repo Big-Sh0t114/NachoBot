@@ -1,11 +1,16 @@
 services:
   koishi-adapter:
     container_name: nacho-bot-koishi-adapter
-    build: .
+    build:
+      context: .
+      additional_contexts:
+        nachobot: ../NachoBot
     environment:
       - TZ=Asia/Shanghai
+      - NACHOBOT_FFMPEG_DIR=/usr/bin
     volumes:
-      - ./config.toml:/koishi-adapter/config.toml  # 配置文件
+      - ./config.toml:/workspace/NachoBot-Koishi-Adapter/config.toml
+      - ../NachoBot/config:/workspace/NachoBot/config:ro
     restart: always
     networks:
       - nacho_bot

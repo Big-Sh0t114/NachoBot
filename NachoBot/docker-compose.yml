@@ -15,9 +15,16 @@ services:
       - nacho_bot
   core:
     container_name: nacho-bot-core
-    image: BigSh0t/NachoBot:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nachobot-core:local
     environment:
       - TZ=Asia/Shanghai
+      - HOST=0.0.0.0
+      - PORT=8000
+    ports:
+      - "8000:8000"
     volumes:
       - ./docker-config/mmc/.env:/NachoBot/.env # 持久化env配置文件
       - ./docker-config/mmc:/NachoBot/config # 持久化bot配置文件
@@ -25,7 +32,6 @@ services:
       - ./data/NachoBot:/NachoBot/data # 共享目录
       - ./data/NachoBot/plugins:/NachoBot/plugins # 插件目录
       - ./data/NachoBot/logs:/NachoBot/logs # 日志目录
-      - site-packages:/usr/local/lib/python3.13/site-packages # 持久化Python包
     restart: always
     networks:
       - nacho_bot
@@ -72,8 +78,6 @@ services:
   #   networks:
   #     - nacho_bot
   
-volumes:
-  site-packages:
 networks:
   nacho_bot:
     external: true

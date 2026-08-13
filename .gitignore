@@ -15,3 +15,6 @@ config-save/setup_backups/
 NachoBot-UniversalVC-Adapter-bak/
 temp/
 .runtime/
+NachoBot-Multimodal-Adapter/.runtime/
+NachoBot-Multimodal-Adapter/models/hf_cache/
+NachoBot-Multimodal-Adapter/models/tts/

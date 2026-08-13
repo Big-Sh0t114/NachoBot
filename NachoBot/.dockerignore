@@ -1,5 +1,11 @@
 .git
+.gitignore
+.venv/
+.runtime/
+.pytest_cache/
+.ruff_cache/
 __pycache__
+*.py[cod]
 *.pyo
 *.pyd
 .DS_Store
@@ -7,4 +13,11 @@ mongodb
 napcat
 docs/
 .github/
-# test
+docker-config/
+config/*
+!config/.gitkeep
+logs/
+data/
+temp/
+nachobot_statistics.html
+plugins/**/config.toml

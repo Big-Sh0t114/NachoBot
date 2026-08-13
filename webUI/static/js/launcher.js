@@ -7,6 +7,24 @@ const LauncherModule = (() => {
     let groups = [];
     let pollInterval = null;
 
+    const GROUP_ICON_NAMES = Object.freeze({
+        core: 'brain',
+        qq_adapter: 'message-circle',
+        tts_full: 'audio-lines',
+        tts_lite: 'audio-lines',
+        potato: 'cpu',
+        bilibili: 'monitor-play',
+        live2d: 'monitor-play',
+        discord: 'message-circle',
+        universalvc: 'microphone',
+        // Temporarily hidden from WebUI; restore when VRChat is exposed.
+        // vrchat: 'orbit',
+    });
+
+    function svgIcon(name) {
+        return typeof window.NachoIcon === 'function' ? window.NachoIcon(name) : '';
+    }
+
     function init() {
         refresh();
         // Poll every 2s when launcher tab is active
@@ -28,17 +46,31 @@ const LauncherModule = (() => {
 
     function render() {
         const grid = document.getElementById('launcher-grid');
-        grid.innerHTML = '';
 
+        // Build a set of current group IDs for cleanup
+        const currentIds = new Set(groups.map(g => g.id));
+
+        // Remove cards for groups that no longer exist
+        for (const card of [...grid.children]) {
+            if (!currentIds.has(card.dataset.groupId)) {
+                card.remove();
+            }
+        }
+
+        // Update or create cards
         for (const g of groups) {
-            grid.appendChild(createGroupCard(g));
+            let card = grid.querySelector(`[data-group-id="${g.id}"]`);
+            if (card) {
+                updateGroupCard(card, g);
+            } else {
+                card = createGroupCard(g);
+                grid.appendChild(card);
+            }
         }
     }
 
-    function createGroupCard(group) {
-        const card = document.createElement('div');
-        card.className = 'group-card';
-
+    /** Generate the inner HTML for a group card (without the wrapper div). */
+    function groupCardInnerHTML(group) {
         const runCount = group.services.filter(s => s.status === 'running').length;
         const errCount = group.services.filter(s => s.status === 'error').length;
         const total = group.services.length;
@@ -51,13 +83,17 @@ const LauncherModule = (() => {
 
         const anyRunning = runCount > 0;
         const allStarting = group.services.some(s => s.status === 'starting');
+        const groupIcon = svgIcon(GROUP_ICON_NAMES[group.id] || 'component');
+        const primaryActionIcon = svgIcon(anyRunning ? 'rotate-ccw' : 'play');
+        const stopIcon = svgIcon('square');
 
-        card.innerHTML = `
+        return `
             <div class="group-card-header">
                 <div class="group-info">
-                    <span class="group-icon">${group.icon}</span>
+                    <span class="group-icon">${groupIcon}</span>
                     <div>
                         <div class="group-name">${escapeHtml(group.name)}</div>
+                        ${group.detail ? `<div class="group-detail">${escapeHtml(group.detail)}</div>` : ''}
                     </div>
                 </div>
                 <span class="group-status-badge ${badgeClass}">${badgeText}</span>
@@ -67,9 +103,12 @@ const LauncherModule = (() => {
                     <div class="service-row">
                         <div class="service-info">
                             <div class="service-dot ${s.status}"></div>
-                            <span class="service-name">${escapeHtml(s.name)}</span>
+                            <div class="service-text">
+                                <span class="service-name">${escapeHtml(s.name)}</span>
+                                ${s.detail ? `<span class="service-detail">${escapeHtml(s.detail)}</span>` : ''}
+                            </div>
                         </div>
-                        <span class="service-port">${s.port ? ':' + s.port : ''}</span>
+                        ${!s.detail && s.port ? `<span class="service-port">:${s.port}</span>` : ''}
                     </div>
                 `).join('')}
             </div>
@@ -77,26 +116,50 @@ const LauncherModule = (() => {
                 <button class="btn ${anyRunning ? 'btn-outline' : 'btn-primary'} btn-full"
                         id="btn-start-${group.id}"
                         ${allStarting ? 'disabled' : ''}>
-                    ${anyRunning ? '⟳ 重启组' : '▶ 启动组'}
+                    ${primaryActionIcon}${anyRunning ? '重启组' : '启动组'}
                 </button>
                 ${anyRunning ? `
                     <button class="btn btn-danger" id="btn-stop-${group.id}">
-                        ■ 停止
+                        ${stopIcon}停止
                     </button>
                 ` : ''}
             </div>
         `;
+    }
 
-        // Bind events
+    /** Update an existing card's content in-place (preserves hover state). */
+    function updateGroupCard(card, group) {
+        const newHTML = groupCardInnerHTML(group);
+        // Only touch the DOM if something actually changed
+        if (card._lastHTML !== newHTML) {
+            card._lastHTML = newHTML;
+            card.innerHTML = newHTML;
+            bindCardEvents(card, group);
+        }
+    }
+
+    function createGroupCard(group) {
+        const card = document.createElement('div');
+        card.className = 'group-card';
+        card.dataset.groupId = group.id;
+        card._lastHTML = groupCardInnerHTML(group);
+        card.innerHTML = card._lastHTML;
+        bindCardEvents(card, group);
+        return card;
+    }
+
+    function bindCardEvents(card, group) {
+        const anyRunning = group.services.some(s => s.status === 'running');
+
         const startBtn = card.querySelector(`#btn-start-${group.id}`);
-        startBtn.addEventListener('click', () => startGroup(group.id, anyRunning));
+        if (startBtn) {
+            startBtn.addEventListener('click', () => startGroup(group.id, anyRunning));
+        }
 
         const stopBtn = card.querySelector(`#btn-stop-${group.id}`);
         if (stopBtn) {
             stopBtn.addEventListener('click', () => stopGroup(group.id));
         }
-
-        return card;
     }
 
     async function startGroup(groupId, isRestart) {

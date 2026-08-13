@@ -35,8 +35,14 @@ def build_live_additional_config(
         "knowledge_retrieval": False,
         "reply_model_group": "realtime_replyer",
         "tool_mode": "mcp_only" if tts_enabled else "disabled",
-        "web_search_mode": "two_phase" if search_enabled else "disabled",
-        "reply_delivery": "aggregate_tagged_text" if tts_enabled else "chunked",
+        # Search orchestration is adapter-owned.  Core only transports the
+        # adapter's JSON envelope when the live search protocol is enabled.
+        "web_search_mode": "disabled",
+        "reply_delivery": (
+            "json_envelope"
+            if search_enabled
+            else ("aggregate_tagged_text" if tts_enabled else "chunked")
+        ),
         "person_profile_mode": "low_latency" if person_profile_enabled else "disabled",
         "person_profile_timeout_seconds": 0.5,
         "typo_enabled": False,

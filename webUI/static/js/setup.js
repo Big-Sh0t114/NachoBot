@@ -603,25 +603,18 @@ const SetupModule = (() => {
         if (selectedComponents.includes('qq')) checks.push('napcat');
         if (selectedComponents.includes('discord')) checks.push('nodejs');
         if (selectedComponents.includes('bilibili')) checks.push('bilibili_dll');
-        if (selectedComponents.includes('tts')) {
-            const engine = document.getElementById('setup-tts-engine')?.value || 'GPT_Sovits';
-            if (engine === 'GPT_Sovits') checks.push('sovits');
-            else if (engine === 'Vox') checks.push('voxcpm');
-        }
         if (selectedComponents.includes('universalvc')) checks.push('vb_cable');
         return checks;
     }
 
     function updatePathCheckVisibility() {
         const checks = getRequiredChecks();
-        const allTypes = ['napcat', 'nodejs', 'bilibili_dll', 'sovits', 'voxcpm', 'vb_cable'];
+        const allTypes = ['napcat', 'nodejs', 'bilibili_dll', 'vb_cable'];
         // Map type to card ID
         const cardMap = {
             napcat: 'path-check-napcat',
             nodejs: 'path-check-nodejs',
             bilibili_dll: 'path-check-bilibili',
-            sovits: 'path-check-sovits',
-            voxcpm: 'path-check-voxcpm',
             vb_cable: 'path-check-vb-cable',
         };
         allTypes.forEach(t => {
@@ -722,7 +715,7 @@ const SetupModule = (() => {
             }
             configResult.generated.forEach(f => addLogLine(logDiv, `[Setup] 已生成: ${f}\n`));
             if (configResult.patched && configResult.patched.length) {
-                configResult.patched.forEach(f => addLogLine(logDiv, `[Setup] TTS链路已调整: ${f}\n`));
+                configResult.patched.forEach(f => addLogLine(logDiv, `[Setup] 适配器链路配置已更新: ${f}\n`));
             }
             if (configResult.backups.length) {
                 addLogLine(logDiv, `[Setup] 已备份 ${configResult.backups.length} 个旧配置\n`);

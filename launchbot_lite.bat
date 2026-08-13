@@ -8,6 +8,12 @@ set "FINAL_RC=0"
 set "ROOT=%~dp0"
 set "NACHOBOT_FFMPEG_DIR=%ROOT%.runtime\ffmpeg"
 
+REM ===== Hugging Face endpoint =====
+if not defined NACHOBOT_HF_ENDPOINT (
+  set "NACHOBOT_HF_ENDPOINT=https://hf-mirror.com"
+)
+echo [INFO] NachoBot Hugging Face endpoint: %NACHOBOT_HF_ENDPOINT%
+
 echo ===== Prepare Shared FFmpeg =====
 call :ENSURE_FFMPEG
 if errorlevel 1 (
@@ -47,8 +53,8 @@ if not exist "%NACHOBOT_DIR%\pyproject.toml" (
   endlocal & exit /b 1
 )
 
-if not exist "%ROOT%scripts\ensure_ffmpeg.py" (
-  echo [FATAL] FFmpeg preparation script not found: %ROOT%scripts\ensure_ffmpeg.py
+if not exist "%ROOT%NachoBot\ensure_ffmpeg.py" (
+  echo [FATAL] FFmpeg preparation script not found: %ROOT%NachoBot\ensure_ffmpeg.py
   endlocal & exit /b 1
 )
 
@@ -61,7 +67,7 @@ if errorlevel 1 (
 )
 
 echo [INFO] Checking shared FFmpeg binaries...
-uv run python "%ROOT%scripts\ensure_ffmpeg.py"
+uv run python "%ROOT%NachoBot\ensure_ffmpeg.py"
 if errorlevel 1 (
   echo [FATAL] Shared FFmpeg download or verification failed.
   endlocal & exit /b 1
@@ -81,17 +87,12 @@ set "BASE_DIR=%ROOT%"
 set "ADAPTER_DIR=%BASE_DIR%NachoBot-Multimodal-Adapter"
 set "NAPCAT_DIR=%BASE_DIR%NachoBot-Napcat-Adapter"
 set "NAPCAT_SRC=%NAPCAT_DIR%\src"
-set "SOVITS_DIR=C:\Users\BigSh0t\GPT-SoVITS\GPT-SoVITS-v2pro-20250604"
-set "VOXCPM_DIR=C:\Users\BigSh0t\VoxCPM-2.0.2"
+set "TTS_RUNTIME_MANAGER=%ADAPTER_DIR%\scripts\tts_runtime_manager.py"
 
 set "PORT_SOVITS=9880"
 set "PORT_VOX=9880"
 set "PORT_ADAPTER=8070"
 set "PORT_PERCEPTION=9874"
-
-set "PY_GPT=%SOVITS_DIR%\runtime\python.exe"
-set "PY_ADAPTER=%ADAPTER_DIR%\.venv\Scripts\python.exe"
-set "PY_VOX=%VOXCPM_DIR%\.venv\Scripts\python.exe"
 
 set "PYTHONNOUSERSITE=1"
 set "HTTP_PROXY="
@@ -149,21 +150,18 @@ echo.
 
 if "%TTS_ENGINE%"=="Vox" goto :START_VOX
 
-REM ---- GPT-SoVITS start logic ----
-set "API_FILE=%SOVITS_DIR%\api_v2.py"
-if not exist "%API_FILE%" set "API_FILE=%SOVITS_DIR%\api.py"
+REM ---- GPT-SoVITS managed runtime ----
+if not exist "%TTS_RUNTIME_MANAGER%" (
+  echo [ERROR] TTS runtime manager not found: %TTS_RUNTIME_MANAGER%
+  set "TTS_RC=1"
+  goto :TTS_FAIL
+)
 
-set "TTS_GPU_ID=0"
-set "TTS_TOML=%ADAPTER_DIR%\configs\gpt-sovits.toml"
-powershell -NoProfile -ExecutionPolicy Bypass -File "%ADAPTER_DIR%\get_gpu_id.ps1" -TomlPath "%TTS_TOML%" > "%TEMP%\_gpu_id.txt" 2>nul
-set /p TTS_GPU_ID=<"%TEMP%\_gpu_id.txt"
-del "%TEMP%\_gpu_id.txt" 2>nul
-echo [INFO] TTS (SoVITS) will use GPU: %TTS_GPU_ID%
-
-start "SoVITS API (%PORT_SOVITS%)" cmd /k "chcp 65001>nul && set CUDA_VISIBLE_DEVICES=%TTS_GPU_ID% && set PYTHONPATH=%SOVITS_DIR%;%SOVITS_DIR%\GPT_SoVITS && cd /d %SOVITS_DIR% && %PY_GPT% -s %API_FILE% --port %PORT_SOVITS%"
+echo [INFO] Starting managed GPT-SoVITS runtime...
+start "SoVITS API (%PORT_SOVITS%)" /D "%ADAPTER_DIR%" cmd /k "chcp 65001>nul && uv run python scripts\tts_runtime_manager.py serve --engine gpt-sovits --port %PORT_SOVITS%"
 
 set "READY="
-for /l %%I in (1,1,60) do (
+for /l %%I in (1,1,180) do (
   netstat -ano | findstr /r /c:":%PORT_SOVITS% " | findstr /i LISTENING >nul
   if not errorlevel 1 (
     set "READY=1"
@@ -171,7 +169,7 @@ for /l %%I in (1,1,60) do (
   )
   timeout /t 1 /nobreak >nul
 )
-echo [ERROR] SoVITS timeout.
+echo [ERROR] SoVITS timeout. If this is your first startup, wait for the model download to finish, then restart this service.
 set "TTS_RC=1"
 goto :TTS_FAIL
 
@@ -179,45 +177,19 @@ goto :TTS_FAIL
 echo [OK] SoVITS ready.
 goto :START_ADAPTER_SOVITS
 
-REM ---- VoxCPM API Server start logic ----
+REM ---- VoxCPM managed runtime ----
 :START_VOX
-echo [INFO] Checking VoxCPM CUDA torch...
-"%PY_VOX%" -c "import torch; exit(0 if torch.cuda.is_available() else 1)" >nul 2>&1
-if errorlevel 1 (
-  echo [INFO] CUDA torch not found, installing cu128 version...
-  cd /d "%VOXCPM_DIR%"
-  uv pip install torch torchaudio --reinstall --index-url https://download.pytorch.org/whl/cu128 >> "%SETUP_LOG%" 2>&1
-  if errorlevel 1 (
-    echo [ERROR] Failed to install CUDA torch for VoxCPM.
-    set "TTS_RC=1"
-    goto :TTS_FAIL
-  )
-  echo [OK] CUDA torch installed.
-) else (
-  echo [OK] CUDA torch already available.
+if not exist "%TTS_RUNTIME_MANAGER%" (
+  echo [ERROR] TTS runtime manager not found: %TTS_RUNTIME_MANAGER%
+  set "TTS_RC=1"
+  goto :TTS_FAIL
 )
 
-echo [INFO] Starting VoxCPM API Server on port %PORT_VOX%...
-
-set "VOX_API_SCRIPT=%ADAPTER_DIR%\src\tts\backends\Vox\vox_api_server.py"
-set "VOX_MODEL_DIR=%VOXCPM_DIR%\models\openbmb__VoxCPM2"
-set "VOX_LORA=%VOXCPM_DIR%\lora\ncnk"
-
-set "VOX_TOML=%ADAPTER_DIR%\configs\vox.toml"
-if exist "%VOX_TOML%" (
-  for /f "usebackq tokens=1,* delims==" %%A in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "Write-Output ('VAL=' + (Get-Content '%VOX_TOML%' | Select-String 'model_dir\s*=\s*\x22(.*)\x22').Matches.Groups[1].Value)"`) do (
-    if "%%A"=="VAL" set "VOX_MODEL_DIR=%%B"
-  )
-  for /f "usebackq tokens=1,* delims==" %%A in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "Write-Output ('VAL=' + (Get-Content '%VOX_TOML%' | Select-String 'lora_weights_path\s*=\s*\x22(.*)\x22').Matches.Groups[1].Value)"`) do (
-    if "%%A"=="VAL" set "VOX_LORA=%%B"
-  )
-)
-
-REM Use venv python directly to avoid uv run syncing back to CPU torch
-start "VoxCPM API (%PORT_VOX%)" cmd /k "chcp 65001>nul && cd /d %VOXCPM_DIR% && %PY_VOX% %VOX_API_SCRIPT% --host 127.0.0.1 --port %PORT_VOX% --model-dir %VOX_MODEL_DIR% --lora-weights %VOX_LORA% --no-denoiser"
+echo [INFO] Starting managed VoxCPM runtime...
+start "VoxCPM API (%PORT_VOX%)" /D "%ADAPTER_DIR%" cmd /k "chcp 65001>nul && uv run python scripts\tts_runtime_manager.py serve --engine voxcpm --port %PORT_VOX%"
 
 set "READY="
-for /l %%I in (1,1,150) do (
+for /l %%I in (1,1,180) do (
   netstat -ano | findstr /r /c:":%PORT_VOX% " | findstr /i LISTENING >nul
   if not errorlevel 1 (
     set "READY=1"
@@ -225,7 +197,7 @@ for /l %%I in (1,1,150) do (
   )
   timeout /t 1 /nobreak >nul
 )
-echo [ERROR] VoxCPM timeout.
+echo [ERROR] VoxCPM timeout. If this is your first startup, wait for the model download to finish, then restart this service.
 set "TTS_RC=1"
 goto :TTS_FAIL
 
@@ -281,6 +253,10 @@ set "MAX_WAIT=60"
 echo --- Syncing NachoBot...
 cd /d "%NACHOBOT_DIR%"
 uv sync --python ">=3.11,<=3.13"
+
+echo --- Checking Playwright Chromium...
+uv run python scripts\ensure_playwright.py
+if errorlevel 1 echo [WARN] Playwright Chromium preparation failed; web search will use HTTP fallback.
 
 echo --- Syncing Adapter...
 cd /d "%ADAPTER_DIR%"

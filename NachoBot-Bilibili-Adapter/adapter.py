@@ -42,6 +42,7 @@ from bili_src.core.utils import (  # noqa: E402
 from bili_src.api.api import BilibiliApi  # noqa: E402
 from bili_src.live.live_worker import LiveRoomWorker  # noqa: E402
 from bili_src.live.screen_monitor import ScreenMonitor  # noqa: E402
+from bili_src.live.two_phase_search import append_live_search_protocol  # noqa: E402
 from bili_src.audio.mic_capture import MicCaptureWorker, MicConfig  # noqa: E402
 from bili_src.audio.audio_player import AudioPlayer  # noqa: E402
 # from live_streamer import LiveStreamerController, PriorityEvent  # noqa: E402
@@ -437,7 +438,7 @@ class BilibiliAdapter:
             return cached[0]
         status = await self.api.get_live_status(room_id)
         if status is None:
-            self.logger.warning("Live status check failed: room_id=%s", room_id)
+            self.logger.warning("Live status check failed: room_id={}", room_id)
             return None
         self._live_status_cache[room_id] = (status, now)
         return status
@@ -522,7 +523,7 @@ class BilibiliAdapter:
             return False
         if self._screen_manual_user_ids and user_id not in self._screen_manual_user_ids:
             self.logger.warning(
-                "Screen monitor manual command rejected: room_id=%s user_id=%s user_name=%s",
+                "Screen monitor manual command rejected: room_id={} user_id={} user_name={}",
                 room_id,
                 user_id,
                 user_name,
@@ -545,7 +546,7 @@ class BilibiliAdapter:
 
         action = "enabled" if enable else "permanently disabled"
         self.logger.info(
-            "Screen monitor manual %s for %s seconds by user_id=%s",
+            "Screen monitor manual {} for {} seconds by user_id={}",
             action,
             self._screen_manual_duration_seconds,
             user_id,
@@ -571,7 +572,7 @@ class BilibiliAdapter:
 
         if self._screen_manual_user_ids and user_id not in self._screen_manual_user_ids:
             self.logger.warning(
-                "Mic manual command rejected: room_id=%s user_id=%s user_name=%s",
+                "Mic manual command rejected: room_id={} user_id={} user_name={}",
                 room_id,
                 user_id,
                 user_name,
@@ -582,7 +583,7 @@ class BilibiliAdapter:
         self._mic_manual_state = enable
 
         action = "force enabled" if enable else "force disabled"
-        self.logger.info("Mic capture %s by user_id=%s", action, user_id)
+        self.logger.info("Mic capture {} by user_id={}", action, user_id)
         return True
 
     async def _get_template_info(
@@ -842,7 +843,7 @@ class BilibiliAdapter:
         if self.config.bot_account and str(user_id) == str(self.config.bot_account):
             if self.config.live_log_danmu:
                 self.logger.info(
-                    "Danmu ignored (bot_account match): room_id=%s user_id=%s message_id=%s",
+                    "Danmu ignored (bot_account match): room_id={} user_id={} message_id={}",
                     room_id,
                     user_id,
                     message_id,
@@ -1541,6 +1542,10 @@ class BilibiliAdapter:
                 reply_prompt += "\n{person_profile_block}"
         if reply_prompt:
             reply_prompt += "\n{moderation_prompt}"
+            reply_prompt = append_live_search_protocol(
+                reply_prompt,
+                enabled=self.config.live_network_search_enabled,
+            )
         if planner_prompt:
             planner_prompt += "\n{moderation_prompt}"
 
@@ -1576,7 +1581,7 @@ class BilibiliAdapter:
 
     async def _send_to_nachobot(self, message: MessageBase) -> None:
         self.logger.info(
-            "Forward to NachoBot: platform=%s group_id=%s message_id=%s",
+            "Forward to NachoBot: platform={} group_id={} message_id={}",
             message.message_info.platform,
             getattr(message.message_info.group_info, "group_id", None),
             message.message_info.message_id,

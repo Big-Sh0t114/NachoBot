@@ -46,6 +46,9 @@ docker compose up -d
 > `NachoBot-Multimodal-Adapter` 复制共享 ASR 源码与配置；首次运行时若模型
 > 不存在，会按 `auto_download` 配置下载 CPU INT8 模型。
 
+> **构建上下文**：Compose 还会从相邻的 `NachoBot` 注入 canonical
+> `ncnk_message` 包；核心配置和多模态模型目录通过运行时卷挂载。
+
 > **网络依赖**：Docker 构建过程中需要通过网络下载 `ffmpeg`、`libsodium-dev` 等系统依赖。如果你的部署环境有网络限制（如在国内服务器上构建），请确保：
 > - Docker 配置了可用的镜像加速器或代理
 > - 或使用预构建的镜像

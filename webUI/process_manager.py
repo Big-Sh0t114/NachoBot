@@ -4,24 +4,312 @@ Manages service subprocess lifecycles, log capture, and WebSocket broadcasting.
 """
 
 import asyncio
+import ctypes
+import errno
 import locale
+import logging
 import os
 import re
+import secrets
 import signal
+import subprocess
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
+
+from ctypes import wintypes
 
 import psutil
+
+VRCHAT_CAPABILITY_ENV = "NACHOBOT_VRCHAT_CONTROL_TOKEN"
+logger = logging.getLogger("webui.process_manager")
 
 # Regex to strip ANSI escape sequences (colors, cursor moves, etc.)
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
 
+# Process-group shutdown is deliberately bounded. These values are shortened
+# by isolated lifecycle tests without creating real subprocesses.
+_PROCESS_GROUP_TERM_TIMEOUT = 10.0
+_PROCESS_GROUP_KILL_TIMEOUT = 2.0
+_PROCESS_REAP_TIMEOUT = 2.0
+_PROCESS_GROUP_POLL_INTERVAL = 0.05
+_WINDOWS_JOB_POLL_INTERVAL = 0.05
+
+
+class _WindowsJobBasicLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_longlong),
+        ("PerJobUserTimeLimit", ctypes.c_longlong),
+        ("LimitFlags", wintypes.DWORD),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", wintypes.DWORD),
+        ("Affinity", ctypes.c_size_t),
+        ("PriorityClass", wintypes.DWORD),
+        ("SchedulingClass", wintypes.DWORD),
+    ]
+
+
+class _WindowsJobIoCounters(ctypes.Structure):
+    _fields_ = [
+        ("ReadOperationCount", ctypes.c_ulonglong),
+        ("WriteOperationCount", ctypes.c_ulonglong),
+        ("OtherOperationCount", ctypes.c_ulonglong),
+        ("ReadTransferCount", ctypes.c_ulonglong),
+        ("WriteTransferCount", ctypes.c_ulonglong),
+        ("OtherTransferCount", ctypes.c_ulonglong),
+    ]
+
+
+class _WindowsJobExtendedLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("BasicLimitInformation", _WindowsJobBasicLimitInformation),
+        ("IoInfo", _WindowsJobIoCounters),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+_WINDOWS_CREATE_SUSPENDED = 0x00000004
+_WINDOWS_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+_WINDOWS_JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
+_WINDOWS_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+_WINDOWS_TH32CS_SNAPTHREAD = 0x00000004
+_WINDOWS_THREAD_SUSPEND_RESUME = 0x0002
+_WINDOWS_THREAD_QUERY_INFORMATION = 0x0040
+_WINDOWS_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
+
+_TTS_ENGINE_CONFIG_FILES = {
+    "GPT_Sovits": "gpt-sovits.toml",
+    "Vox": "vox.toml",
+}
+
+
+@dataclass
+class _WindowsJobCapability:
+    """Opaque manager-owned Windows Job Object capability."""
+
+    handle: int
+    closed: bool = False
+
+
+class _WindowsJobFacade:
+    """Small stdlib-only Win32 Job Object facade.
+
+    The facade is never loaded on POSIX.  Keeping all ctypes declarations and
+    calls here gives tests a narrow injectable seam and keeps module import
+    safe on non-Windows hosts.
+    """
+
+    _PROCESS_TERMINATE = 0x0001
+    _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    _PROCESS_SET_QUOTA = 0x0100
+    _PROCESS_SUSPEND_RESUME = 0x0800
+
+    class _BasicAccounting(ctypes.Structure):
+        _fields_ = [
+            ("TotalUserTime", ctypes.c_longlong),
+            ("TotalKernelTime", ctypes.c_longlong),
+            ("ThisPeriodTotalUserTime", ctypes.c_longlong),
+            ("ThisPeriodTotalKernelTime", ctypes.c_longlong),
+            ("TotalPageFaultCount", wintypes.DWORD),
+            ("TotalProcesses", wintypes.DWORD),
+            ("ActiveProcesses", wintypes.DWORD),
+            ("TotalTerminatedProcesses", wintypes.DWORD),
+        ]
+
+
+    def __init__(self) -> None:
+        if os.name != "nt":
+            raise OSError("Windows Job Objects are unavailable on this platform")
+        self.kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        self.ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
+        self._bind("CreateJobObjectW", wintypes.HANDLE, [wintypes.LPVOID, wintypes.LPCWSTR], library=self.kernel32)
+        self._bind(
+            "SetInformationJobObject",
+            wintypes.BOOL,
+            [wintypes.HANDLE, wintypes.INT, wintypes.LPVOID, wintypes.DWORD], library=self.kernel32,
+        )
+        self._bind("OpenProcess", wintypes.HANDLE, [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD], library=self.kernel32)
+        self._bind("AssignProcessToJobObject", wintypes.BOOL, [wintypes.HANDLE, wintypes.HANDLE], library=self.kernel32)
+        self._bind("CloseHandle", wintypes.BOOL, [wintypes.HANDLE], library=self.kernel32)
+        self._bind("TerminateProcess", wintypes.BOOL, [wintypes.HANDLE, wintypes.UINT], library=self.kernel32)
+        self._bind("TerminateJobObject", wintypes.BOOL, [wintypes.HANDLE, wintypes.UINT], library=self.kernel32)
+        self._bind(
+            "QueryInformationJobObject",
+            wintypes.BOOL,
+            [wintypes.HANDLE, wintypes.INT, wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)], library=self.kernel32,
+        )
+        self._bind("NtResumeProcess", ctypes.c_long, [wintypes.HANDLE], library=self.ntdll)
+
+    @staticmethod
+    def _bind(name: str, restype: Any, argtypes: list[Any], *, library: Any) -> None:
+        function = getattr(library, name)
+        function.restype = restype
+        function.argtypes = argtypes
+
+    @staticmethod
+    def _raise_last_error(message: str) -> None:
+        error = ctypes.get_last_error()
+        raise OSError(error, f"{message} (WinError {error})")
+
+    @staticmethod
+    def _handle_value(handle: Any) -> int:
+        """Normalize ctypes HANDLE values without truncating Win64 pointers."""
+        value = getattr(handle, "value", handle)
+        if value is None:
+            return 0
+        return int(value)
+
+    def _open_process(self, pid: int, access: int) -> int:
+        handle = self.kernel32.OpenProcess(access, False, int(pid))
+        if not handle:
+            self._raise_last_error(f"OpenProcess({pid}) failed")
+        return self._handle_value(handle)
+
+    def _close_raw(self, handle: int) -> None:
+        if handle:
+            if not self.kernel32.CloseHandle(ctypes.c_void_p(handle)):
+                self._raise_last_error("CloseHandle failed")
+
+    def create_assign_resume(self, pid: int) -> _WindowsJobCapability:
+        job_handle = self.kernel32.CreateJobObjectW(None, None)
+        if not job_handle:
+            self._raise_last_error("CreateJobObjectW failed")
+        capability = _WindowsJobCapability(self._handle_value(job_handle))
+        process_handle = 0
+        resume_handle = 0
+        assigned = False
+        uncertain_handles: list[tuple[str, int]] = []
+        try:
+            limits = _WindowsJobExtendedLimitInformation()
+            limits.BasicLimitInformation.LimitFlags = _WINDOWS_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            if not self.kernel32.SetInformationJobObject(
+                ctypes.c_void_p(capability.handle),
+                _WINDOWS_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+                ctypes.byref(limits),
+                ctypes.sizeof(limits),
+            ):
+                self._raise_last_error("SetInformationJobObject failed")
+            process_handle = self._open_process(
+                pid,
+                self._PROCESS_TERMINATE | self._PROCESS_SET_QUOTA | self._PROCESS_QUERY_LIMITED_INFORMATION,
+            )
+            if not self.kernel32.AssignProcessToJobObject(
+                ctypes.c_void_p(capability.handle), ctypes.c_void_p(process_handle)
+            ):
+                self._raise_last_error("AssignProcessToJobObject failed")
+            assigned = True
+            assigned_process_handle = process_handle
+            process_handle = 0
+            try:
+                self._close_raw(assigned_process_handle)
+            except Exception:
+                uncertain_handles.append(("assigned process", assigned_process_handle))
+                raise
+            resume_handle = self._open_process(pid, self._PROCESS_SUSPEND_RESUME)
+            try:
+                status = self.ntdll.NtResumeProcess(ctypes.c_void_p(resume_handle))
+                if status != 0:
+                    raise OSError(status, "NtResumeProcess failed")
+            finally:
+                owned_resume_handle = resume_handle
+                resume_handle = 0
+                try:
+                    self._close_raw(owned_resume_handle)
+                except Exception:
+                    uncertain_handles.append(("resume", owned_resume_handle))
+                    raise
+            return capability
+        except Exception as setup_error:
+            cleanup_errors: list[BaseException] = []
+            if process_handle:
+                owned_process_handle = process_handle
+                process_handle = 0
+                if not assigned:
+                    try:
+                        if not self.kernel32.TerminateProcess(ctypes.c_void_p(owned_process_handle), 1):
+                            self._raise_last_error("TerminateProcess failed")
+                    except Exception as cleanup_error:
+                        cleanup_errors.append(cleanup_error)
+                try:
+                    self._close_raw(owned_process_handle)
+                except Exception as cleanup_error:
+                    cleanup_errors.append(cleanup_error)
+            if resume_handle:
+                owned_resume_handle = resume_handle
+                resume_handle = 0
+                try:
+                    self._close_raw(owned_resume_handle)
+                except Exception as cleanup_error:
+                    cleanup_errors.append(cleanup_error)
+            try:
+                self.terminate(capability)
+            except Exception as cleanup_error:
+                cleanup_errors.append(cleanup_error)
+            try:
+                self.close(capability)
+            except Exception as close_error:
+                cleanup_errors.append(close_error)
+            if uncertain_handles:
+                setattr(setup_error, "uncertain_windows_handles", tuple(uncertain_handles))
+            if cleanup_errors:
+                setattr(setup_error, "windows_cleanup_errors", tuple(cleanup_errors))
+            if not capability.closed:
+                # A failed Job termination/close remains manager-owned.  The
+                # caller must retain this capability and retry stop rather
+                # than clearing process state and orphaning descendants.
+                setattr(setup_error, "windows_job", capability)
+            raise
+
+    def terminate(self, capability: _WindowsJobCapability) -> None:
+        if capability.closed:
+            raise RuntimeError("Windows Job Object capability is already closed")
+        if not self.kernel32.TerminateJobObject(ctypes.c_void_p(capability.handle), 1):
+            self._raise_last_error("TerminateJobObject failed")
+
+    def active_processes(self, capability: _WindowsJobCapability) -> int:
+        if capability.closed:
+            raise RuntimeError("Windows Job Object capability is already closed")
+        info = self._BasicAccounting()
+        returned = wintypes.DWORD()
+        if not self.kernel32.QueryInformationJobObject(
+            ctypes.c_void_p(capability.handle),
+            _WINDOWS_JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+            ctypes.byref(returned),
+        ):
+            self._raise_last_error("QueryInformationJobObject failed")
+        return int(info.ActiveProcesses)
+
+    def close(self, capability: _WindowsJobCapability) -> None:
+        if capability.closed:
+            return
+        self._close_raw(capability.handle)
+        capability.closed = True
+
+
+def _read_tts_engine_port(root_dir: Path, engine: str) -> int:
+    """Read the selected engine port from its dedicated TOML config."""
+    config_name = _TTS_ENGINE_CONFIG_FILES.get(engine)
+    if not config_name:
+        return 9880
+
+    config_path = root_dir / "NachoBot-Multimodal-Adapter" / "configs" / config_name
+    try:
+        import tomlkit
+
+        document = tomlkit.parse(config_path.read_text(encoding="utf-8"))
+        return int(document.get("tts", {}).get("port", 9880))
+    except Exception:
+        return 9880
 
 
 class ServiceStatus(str, Enum):
@@ -44,6 +332,8 @@ class ServiceDef:
     env_extra: dict[str, str] = field(default_factory=dict)
     wait_port: bool = False     # Whether to wait for port before marking "running"
     order: int = 0              # Launch order within group
+    detail: str = ""            # User-facing role/connection hint
+    health_mode: str | None = None  # Optional /api/health mode required for readiness
 
 
 @dataclass
@@ -53,6 +343,7 @@ class GroupDef:
     name: str
     icon: str
     services: list[str]         # Service IDs in launch order
+    detail: str = ""            # User-facing group description
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +359,6 @@ def _register_services():
     global SERVICE_DEFS, GROUP_DEFS
     from webui_config import webui_config
     import tomlkit
-    from urllib.parse import urlparse
     import re
 
     # 1. Parse NachoBot .env
@@ -122,14 +412,8 @@ def _register_services():
             engine = "GPT_Sovits"
             if isinstance(enabled, list) and "Vox" in enabled:
                 engine = "Vox"
-            
-            # Read engine api_base port
-            plugins_sec = doc.get("plugins", {})
-            engine_sec = plugins_sec.get(engine, {})
-            api_base = engine_sec.get("api_base", "http://127.0.0.1:9880")
-            parsed_url = urlparse(api_base)
-            if parsed_url.port:
-                tts_engine_port = parsed_url.port
+
+            tts_engine_port = _read_tts_engine_port(ROOT_DIR, engine)
         except Exception:
             pass
 
@@ -146,7 +430,20 @@ def _register_services():
         except Exception:
             pass
 
-    # 5. Parse Koishi configs/koishi.yml
+    # 5. Parse standalone Live2D adapter config
+    live2d_host = "127.0.0.1"
+    live2d_port = 8766
+    live2d_config_path = ROOT_DIR / "NachoBot-Live2D-Adapter" / "config.toml"
+    if live2d_config_path.exists():
+        try:
+            doc = tomlkit.parse(live2d_config_path.read_text(encoding="utf-8"))
+            live2d_server = doc.get("server", {})
+            live2d_host = live2d_server.get("host", live2d_host)
+            live2d_port = int(live2d_server.get("port", live2d_port))
+        except Exception:
+            pass
+
+    # 6. Parse Koishi configs/koishi.yml
     koishi_port = 5140
     koishi_yml_path = ROOT_DIR / "koishi-app" / "koishi.yml"
     if koishi_yml_path.exists():
@@ -164,52 +461,135 @@ def _register_services():
     nachobot_env_host = nachobot_host
     napcat_env_host = napcat_host
 
+    koishi_command = (
+        ["cmd", "/c", "corepack", "yarn", "start"]
+        if os.name == "nt"
+        else ["corepack", "yarn", "start"]
+    )
+
     defs = [
         # ── Core ──
-        ServiceDef("nachobot",       "NachoBot Core",      "core", "NachoBot",                 ["uv", "run", "python", "bot.py"],      port=nachobot_port, wait_port=True, order=1,
-                   env_extra={"HOST": nachobot_env_host, "PORT": str(nachobot_port)}),
+        ServiceDef("nachobot", "NachoBot Core", "core", "NachoBot",
+                   ["uv", "run", "python", "bot.py"], port=nachobot_port,
+                   wait_port=True, order=1,
+                   env_extra={"HOST": nachobot_env_host, "PORT": str(nachobot_port)},
+                   detail=f"核心消息总线 · :{nachobot_port}"),
                    
         # ── QQ ──
-        ServiceDef("napcat_adapter", "Napcat Adapter",     "qq_adapter", "NachoBot-Napcat-Adapter",   ["uv", "run", "python", "main.py"],     port=napcat_port, wait_port=False, order=1,
-                   env_extra={"HOST": napcat_env_host, "PORT": str(napcat_port)}),
-        ServiceDef("napcat_shell",   "NapCat Shell",       "qq_adapter", "NapCat.Shell",              ["cmd", "/c", "launcher-user.bat"],      order=2),
+        ServiceDef("napcat_adapter", "NapCat 适配器", "qq_adapter", "NachoBot-Napcat-Adapter",
+                   ["uv", "run", "python", "main.py"], port=napcat_port,
+                   wait_port=True, order=1,
+                   env_extra={"HOST": napcat_env_host, "PORT": str(napcat_port)},
+                   detail=f"QQ 消息 WebSocket · :{napcat_port}"),
+        ServiceDef("napcat_shell", "NapCat Shell", "qq_adapter", "NapCat.Shell",
+                   ["cmd", "/c", "launcher-user.bat"], order=2,
+                   detail="QQ 客户端与登录窗口"),
 
-        # ── TTS FULL ──
-        ServiceDef("tts_engine_full",   "TTS Engine",          "tts_full", "",  [],  port=tts_engine_port, wait_port=True, order=1),  # dynamic
-        ServiceDef("tts_adapter_full",  "Multimodal Adapter",  "tts_full", "NachoBot-Multimodal-Adapter", ["uv", "run", "python", "main.py"], port=tts_adapter_port, order=2,
-                   env_extra={"HOST": tts_adapter_host, "PORT": str(tts_adapter_port)}),
-        ServiceDef("perception",        "VLM / ASR API",       "tts_full", "NachoBot-Multimodal-Adapter",
-                   ["uv", "run", "python", "-m", "nachobot_multimodal.api_server"], port=perception_port, order=3,
-                   env_extra={"HOST": perception_host, "PORT": str(perception_port)}),
+        # ── Multimodal FULL ──
+        ServiceDef("tts_engine_full", "TTS 推理运行时", "tts_full", "", [],
+                   port=tts_engine_port, wait_port=True, order=1,
+                   detail=f"GPT-SoVITS / VoxCPM · :{tts_engine_port}"),  # dynamic
+        ServiceDef("tts_adapter_full", "多模态适配器（TTS）", "tts_full",
+                   "NachoBot-Multimodal-Adapter", ["uv", "run", "python", "main.py"],
+                   port=tts_adapter_port, wait_port=True, order=2,
+                   env_extra={"HOST": tts_adapter_host, "PORT": str(tts_adapter_port)},
+                   detail=f"TTS 中继 · :{tts_adapter_port}"),
+        ServiceDef("perception", "感知 API（VLM / ASR）", "tts_full",
+                   "NachoBot-Multimodal-Adapter",
+                   ["uv", "run", "python", "-m", "nachobot_multimodal.api_server"],
+                   port=perception_port, order=3,
+                   env_extra={"HOST": perception_host, "PORT": str(perception_port)},
+                   detail=f"共享视觉与语音识别 · :{perception_port}"),
 
-        # ── TTS LITE ──
-        ServiceDef("tts_engine_lite",   "TTS Engine",          "tts_lite", "",  [],  port=tts_engine_port, wait_port=True, order=1),
-        ServiceDef("tts_adapter_lite",  "Multimodal Adapter (Lite)", "tts_lite", "NachoBot-Multimodal-Adapter", ["uv", "run", "python", "main.py"],
-                   port=tts_adapter_port, order=2, env_extra={"DISABLE_VLM_ASR": "1", "HOST": tts_adapter_host, "PORT": str(tts_adapter_port)}),
+        # ── Multimodal LITE ──
+        ServiceDef("tts_engine_lite", "TTS 推理运行时", "tts_lite", "", [],
+                   port=tts_engine_port, wait_port=True, order=1,
+                   detail=f"GPT-SoVITS / VoxCPM · :{tts_engine_port}"),
+        ServiceDef("tts_adapter_lite", "多模态适配器（Lite）", "tts_lite",
+                   "NachoBot-Multimodal-Adapter", ["uv", "run", "python", "main.py"],
+                   port=tts_adapter_port, wait_port=True, order=2,
+                   env_extra={"DISABLE_VLM_ASR": "1", "HOST": tts_adapter_host,
+                              "PORT": str(tts_adapter_port)},
+                   detail=f"TTS 中继（不启动 VLM / ASR） · :{tts_adapter_port}"),
+
+        # ── Potato ──
+        ServiceDef("potato_relay", "8070 无模型中继", "potato", "NachoBot-Multimodal-Adapter",
+                   ["uv", "run", "python", "main.py", "--no-local-models"],
+                   port=tts_adapter_port, wait_port=True, order=1,
+                   env_extra={"NACHOBOT_NO_LOCAL_MODELS": "1", "DISABLE_VLM_ASR": "1",
+                              "HOST": tts_adapter_host, "PORT": str(tts_adapter_port)},
+                   detail=f"仅消息转发，不加载 TTS / VLM / ASR · :{tts_adapter_port}",
+                   health_mode="relay_only"),
+
+        # ── Live2D ──
+        ServiceDef("live2d", "Live2D 渲染适配器", "live2d", "NachoBot-Live2D-Adapter",
+                   ["uv", "run", "python", "-m", "live2d_adapter", "--config", "config.toml"],
+                   port=live2d_port, wait_port=True, order=1,
+                   detail=f"独立渲染 WebSocket · :{live2d_port}"),
 
         # ── UniversalVC ──
-        ServiceDef("universalvc",   "UniversalVC Adapter", "universalvc", "NachoBot-UniversalVC-Adapter", ["uv", "run", "python", "main.py"], order=1),
+        ServiceDef("universalvc", "UniversalVC 语音适配器", "universalvc",
+                   "NachoBot-UniversalVC-Adapter", ["uv", "run", "python", "main.py"], order=1,
+                   detail="进程音频捕获 / 实时 ASR → Core"),
+
+        # ── VRChat ──
+        # WebUI intentionally omits the explicit autonomy acknowledgement
+        # flag. The guardian idles fail-closed; launch_vrchat.bat is the only
+        # bundled path that can authorize motion.
+        # Temporarily hidden from WebUI; restore these definitions to expose VRChat.
+        # ServiceDef("vrchat_guardian", "VRChat Lease Guardian", "vrchat",
+        #            "NachoBot-VRChat-Adapter", ["uv", "run", "python", "main.py", "--guardian"], order=1,
+        #            detail="loopback lease guardian · OSC/AnyaDance zero-on-failure"),
+        # ServiceDef("vrchat_adapter", "VRChat 语音适配器", "vrchat",
+        #            "NachoBot-VRChat-Adapter", ["uv", "run", "python", "main.py"], order=2,
+        #            detail="UniversalVC 音频/ASR/TTS → Core (voice/chat by default)"),
 
         # ── Bilibili ──
-        ServiceDef("bilibili",      "Bilibili Adapter",    "bilibili",    "NachoBot-Bilibili-Adapter",    ["uv", "run", "python", "main.py"], order=1),
+        ServiceDef("bilibili", "Bilibili 直播适配器", "bilibili", "NachoBot-Bilibili-Adapter",
+                   ["uv", "run", "python", "main.py"], order=1,
+                   detail="直播弹幕、评论与私信 → Core"),
 
         # ── Discord ──
-        ServiceDef("koishi",            "Koishi",              "discord", "koishi-app",              ["cmd", "/c", "npm", "start"],  port=koishi_port, wait_port=True, order=1,
-                   env_extra={"HTTPS_PROXY": webui_config.https_proxy, "HTTP_PROXY": webui_config.http_proxy}),
-        ServiceDef("koishi_adapter",    "Koishi Adapter",      "discord", "NachoBot-Koishi-Adapter", ["uv", "run", "python", "main.py"], order=2),
-        ServiceDef("discordvc",         "DiscordVC Adapter",   "discord", "NachoBot-DiscordVC-Adapter", ["uv", "run", "python", "main.py"], order=3),
+        ServiceDef("koishi", "Koishi 框架", "discord", "koishi-app",
+                   koishi_command, port=koishi_port, wait_port=True, order=1,
+                   env_extra={"HTTPS_PROXY": webui_config.https_proxy,
+                              "HTTP_PROXY": webui_config.http_proxy},
+                   detail=f"Discord / OneBot 平台网关 · :{koishi_port}"),
+        ServiceDef("koishi_adapter", "Koishi 适配器", "discord", "NachoBot-Koishi-Adapter",
+                   ["uv", "run", "python", "main.py"], order=2,
+                   detail="Koishi 消息桥接 → Core"),
+        ServiceDef("discordvc", "DiscordVC 语音适配器", "discord",
+                   "NachoBot-DiscordVC-Adapter", ["uv", "run", "python", "main.py"], order=3,
+                   detail="Discord 语音频道 → Core"),
     ]
 
     SERVICE_DEFS = {d.id: d for d in defs}
 
     groups = [
-        GroupDef("core",        "核心",                "🧠", ["nachobot"]),
-        GroupDef("qq_adapter",  "QQ 适配器",           "🐧", ["napcat_adapter", "napcat_shell"]),
-        GroupDef("tts_full",    "多模态服务 (FULL)",     "🎙️", ["tts_engine_full", "tts_adapter_full", "perception"]),
-        GroupDef("tts_lite",    "语音服务 (LITE)",     "🎙️", ["tts_engine_lite", "tts_adapter_lite"]),
-        GroupDef("universalvc", "全局语音适配器",       "🎤", ["universalvc"]),
-        GroupDef("bilibili",    "Bilibili 适配器",     "📺", ["bilibili"]),
-        GroupDef("discord",     "Discord 适配器",      "💬", ["koishi", "koishi_adapter", "discordvc"]),
+        GroupDef("core", "核心服务", "🧠", ["nachobot"],
+                  "NachoBot Core 消息总线"),
+        GroupDef("qq_adapter", "QQ / NapCat", "🐧", ["napcat_adapter", "napcat_shell"],
+                  "QQ 消息适配器与 NapCat 客户端"),
+        GroupDef("tts_full", "多模态服务（FULL）", "🎙️",
+                  ["tts_engine_full", "tts_adapter_full", "perception"],
+                  "TTS 推理 + 8070 多模态中继 + VLM / ASR 感知服务"),
+        GroupDef("tts_lite", "多模态服务（LITE）", "🎙️",
+                  ["tts_engine_lite", "tts_adapter_lite"],
+                  "TTS 推理 + 8070 中继，不启动 VLM / ASR"),
+        GroupDef("potato", "8070 无模型中继（POTATO）", "🥔", ["potato_relay"],
+                  "保留 8070 兼容通信，仅转发消息，不加载任何本地模型"),
+        GroupDef("bilibili", "Bilibili 直播", "📺", ["bilibili"],
+                  "直播弹幕、评论、私信与可选 Live2D 联动"),
+        GroupDef("live2d", "Live2D 渲染", "🖼️", ["live2d"],
+                  "独立 Live2D WebSocket 渲染服务"),
+        GroupDef("discord", "Discord / Koishi", "💬",
+                  ["koishi", "koishi_adapter", "discordvc"],
+                  "Koishi 平台网关、文字适配器与 Discord 语音适配器"),
+        GroupDef("universalvc", "UniversalVC 语音", "🎤", ["universalvc"],
+                  "进程音频捕获、实时 ASR 与虚拟声卡输出"),
+        # Temporarily hidden from WebUI; restore to expose the VRChat group.
+        # GroupDef("vrchat", "VRChat 语音与安全控制", "orbit", ["vrchat_guardian", "vrchat_adapter"],
+        #          "语音/聊天默认；独立 guardian 的 bounded follow/wander/stop"),
     ]
     GROUP_DEFS = {g.id: g for g in groups}
 
@@ -226,6 +606,14 @@ class ServiceState:
     status: ServiceStatus = ServiceStatus.STOPPED
     process: asyncio.subprocess.Process | None = None
     pid: int | None = None
+    # POSIX only: this is populated solely for a process spawned with
+    # ``start_new_session=True`` and is never inferred from an arbitrary PID.
+    process_group_id: int | None = None
+    # Windows only: psutil handles captured before shutdown signals.  Keeping
+    # these across a failed stop lets a retry reap descendants even after the
+    # leader has disappeared from the process table.
+    windows_owned_processes: list[Any] = field(default_factory=list, repr=False)
+    windows_job: _WindowsJobCapability | None = field(default=None, repr=False)
     started_at: float | None = None
     log_buffer: deque = field(default_factory=lambda: deque(maxlen=10000))
     _read_task: asyncio.Task | None = None
@@ -239,6 +627,20 @@ class ProcessManager:
         self.states: dict[str, ServiceState] = {}
         self._ws_subscribers: dict[str, list[Callable]] = {}  # service_id -> [callback]
         self._all_subscribers: list[Callable] = []  # "all" channel
+        # Ephemeral per-group capability values are held only in memory and
+        # injected into the paired VRChat processes. They are never logged or
+        # written to TOML/config files.
+        self._active_group_env: dict[str, dict[str, str]] = {}
+        self._operation_tasks: dict[str, asyncio.Task[None]] = {}
+        self._operation_kinds: dict[str, str] = {}
+        self._service_locks: dict[str, asyncio.Lock] = {}
+        # Lazy so importing/testing on non-Windows never loads Win32 DLLs.
+        self._windows_job_facade: _WindowsJobFacade | Any | None = None
+
+    def _get_windows_job_facade(self) -> _WindowsJobFacade | Any:
+        if self._windows_job_facade is None:
+            self._windows_job_facade = _WindowsJobFacade()
+        return self._windows_job_facade
 
     # ---- public API ----
 
@@ -253,6 +655,7 @@ class ProcessManager:
             "name": sdef.name,
             "group_id": sdef.group_id,
             "port": sdef.port,
+            "detail": sdef.detail,
             "status": state.status.value,
             "pid": state.pid,
             "started_at": state.started_at,
@@ -271,6 +674,7 @@ class ProcessManager:
                 "id": gid,
                 "name": gdef.name,
                 "icon": gdef.icon,
+                "detail": gdef.detail,
                 "services": services,
             })
         return result
@@ -284,18 +688,216 @@ class ProcessManager:
 
     # ---- start / stop ----
 
-    async def start_service(self, service_id: str) -> None:
+    def _schedule_operation(
+        self,
+        key: str,
+        operation: Callable[[], Awaitable[None]],
+        affected_services: tuple[str, ...],
+        *,
+        operation_kind: str,
+        replace: bool = False,
+    ) -> asyncio.Task[None]:
+        existing = self._operation_tasks.get(key)
+        if existing and not existing.done():
+            if not replace:
+                return existing
+            existing.cancel()
+
+        task = asyncio.create_task(operation(), name=f"webui:{key}")
+        self._operation_tasks[key] = task
+        self._operation_kinds[key] = operation_kind
+
+        def operation_done(completed: asyncio.Task[None]) -> None:
+            if self._operation_tasks.get(key) is completed:
+                self._operation_tasks.pop(key, None)
+                self._operation_kinds.pop(key, None)
+            if completed.cancelled():
+                return
+            try:
+                error = completed.exception()
+            except asyncio.CancelledError:
+                return
+            if error is None:
+                return
+            logger.error("Managed WebUI operation %s failed: %s", key, error, exc_info=error)
+            for service_id in affected_services:
+                state = self.states.get(service_id)
+                if state and state.status != ServiceStatus.STOPPED:
+                    state.status = ServiceStatus.ERROR
+
+        task.add_done_callback(operation_done)
+        return task
+
+    def request_start_service(self, service_id: str) -> None:
+        """Validate and schedule a service start whose failures remain observable."""
+        _register_services()
+        sdef = SERVICE_DEFS.get(service_id)
+        if sdef is None:
+            raise ValueError(f"Unknown service: {service_id}")
+        state = self.states.get(service_id)
+        if state and state.status in (ServiceStatus.RUNNING, ServiceStatus.STARTING):
+            return
+        group_task = self._operation_tasks.get(f"group:{sdef.group_id}")
+        service_task = self._operation_tasks.get(f"service:{service_id}")
+        if (group_task and not group_task.done()) or (service_task and not service_task.done()):
+            raise RuntimeError(f"Service {service_id} is already changing state")
+        if state is None:
+            state = ServiceState()
+            self.states[service_id] = state
+        state.status = ServiceStatus.STARTING
+        self._schedule_operation(
+            f"service:{service_id}",
+            lambda: self.start_service(service_id, _prepared=True),
+            (service_id,),
+            operation_kind="start",
+        )
+
+    def request_stop_service(self, service_id: str) -> None:
+        """Cancel an in-flight start and schedule an orderly service stop."""
+        _register_services()
+        sdef = SERVICE_DEFS.get(service_id)
+        if sdef is None:
+            raise ValueError(f"Unknown service: {service_id}")
+        group_task = self._operation_tasks.get(f"group:{sdef.group_id}")
+        if group_task and not group_task.done():
+            group_task.cancel()
+        state = self.states.get(service_id)
+        if not state:
+            return
+        if (
+            state.status == ServiceStatus.STOPPED
+            and state.process_group_id is None
+            and not state.windows_owned_processes
+            and state.windows_job is None
+            and state.process is None
+        ):
+            return
+        if state.status == ServiceStatus.STOPPING:
+            operation = self._operation_tasks.get(f"service:{service_id}")
+            if operation and not operation.done():
+                return
+        state.status = ServiceStatus.STOPPING
+        self._schedule_operation(
+            f"service:{service_id}",
+            lambda: self.stop_service(service_id, _prepared=True),
+            (service_id,),
+            operation_kind="stop",
+            replace=True,
+        )
+
+    def request_start_group(self, group_id: str) -> None:
+        """Validate and schedule a group start as one managed operation."""
+        _register_services()
+        gdef = GROUP_DEFS.get(group_id)
+        if gdef is None:
+            raise ValueError(f"Unknown group: {group_id}")
+        existing = self._operation_tasks.get(f"group:{group_id}")
+        if existing and not existing.done():
+            raise RuntimeError(f"Group {group_id} is already changing state")
+        self._validate_group_start(group_id)
+        self._schedule_operation(
+            f"group:{group_id}",
+            lambda: self.start_group(group_id),
+            tuple(gdef.services),
+            operation_kind="start",
+        )
+
+    def request_stop_group(self, group_id: str) -> None:
+        """Cancel an in-flight group start and schedule reverse-order shutdown."""
+        _register_services()
+        gdef = GROUP_DEFS.get(group_id)
+        if gdef is None:
+            raise ValueError(f"Unknown group: {group_id}")
+        existing = self._operation_tasks.get(f"group:{group_id}")
+        if (
+            existing
+            and not existing.done()
+            and self._operation_kinds.get(f"group:{group_id}") == "stop"
+        ):
+            return
+        self._schedule_operation(
+            f"group:{group_id}",
+            lambda: self.stop_group(group_id),
+            tuple(gdef.services),
+            operation_kind="stop",
+            replace=True,
+        )
+
+    def _validate_group_start(self, group_id: str) -> None:
+        gdef = GROUP_DEFS[group_id]
+        for service_id in gdef.services:
+            operation = self._operation_tasks.get(f"service:{service_id}")
+            if operation and not operation.done():
+                raise RuntimeError(
+                    f"Cannot start {gdef.name}: {SERVICE_DEFS[service_id].name} is already changing state."
+                )
+        multimodal_groups = ("tts_full", "tts_lite", "potato")
+        if group_id not in multimodal_groups:
+            return
+        for other in multimodal_groups:
+            if other == group_id:
+                continue
+            operation = self._operation_tasks.get(f"group:{other}")
+            if operation and not operation.done():
+                raise RuntimeError(
+                    f"Cannot start {gdef.name}: {GROUP_DEFS[other].name} is already changing state."
+                )
+            for sid in GROUP_DEFS[other].services:
+                state = self.states.get(sid)
+                if state and state.status in (ServiceStatus.RUNNING, ServiceStatus.STARTING):
+                    raise RuntimeError(
+                        f"Cannot start {gdef.name}: {GROUP_DEFS[other].name} is already running. Stop it first."
+                    )
+
+    async def start_service(self, service_id: str, *, _prepared: bool = False) -> None:
         _register_services()
         sdef = SERVICE_DEFS.get(service_id)
         if not sdef:
             raise ValueError(f"Unknown service: {service_id}")
 
-        state = self.states.get(service_id)
-        if state and state.status in (ServiceStatus.RUNNING, ServiceStatus.STARTING):
-            return  # Already running
+        lock = self._service_locks.setdefault(service_id, asyncio.Lock())
+        async with lock:
+            await self._start_service_locked(service_id, sdef, _prepared=_prepared)
 
-        state = ServiceState(status=ServiceStatus.STARTING)
-        self.states[service_id] = state
+    async def _start_service_locked(
+        self,
+        service_id: str,
+        sdef: ServiceDef,
+        *,
+        _prepared: bool,
+    ) -> None:
+        state = self.states.get(service_id)
+        if state:
+            process_live = state.process is not None and getattr(state.process, "returncode", None) is None
+            group_owned = state.process_group_id is not None
+            windows_owned = bool(state.windows_owned_processes)
+            windows_job_owned = state.windows_job is not None
+            if state.status == ServiceStatus.RUNNING:
+                return
+            if state.status == ServiceStatus.STARTING and not _prepared:
+                return
+            if process_live or group_owned or windows_owned or windows_job_owned:
+                state.status = ServiceStatus.ERROR
+                await self._broadcast(
+                    service_id,
+                    "[WebUI] ERROR: previous process/group still requires stop before starting again\n",
+                )
+                return
+        if state is None:
+            state = ServiceState()
+            self.states[service_id] = state
+        state.status = ServiceStatus.STARTING
+        state.process = None
+        state.pid = None
+        state.process_group_id = None
+
+        if sdef.wait_port and sdef.port and await asyncio.to_thread(self._port_is_open, sdef.port):
+            state.status = ServiceStatus.ERROR
+            await self._broadcast(
+                service_id,
+                f"[WebUI] ERROR: 端口 {sdef.port} 已被其他进程占用，已拒绝启动 {sdef.name}\n",
+            )
+            return
 
         await self._broadcast(service_id, f"[WebUI] Starting {sdef.name}...\n")
 
@@ -323,6 +925,17 @@ class ProcessManager:
         env["PYTHONUTF8"] = "1"
         env.update(sdef.env_extra)
         env.update(env_extra)
+        env.update(self._active_group_env.get(sdef.group_id, {}))
+        # The WebUI control-plane token is never a child-service credential,
+        # including when a service/group override attempts to inject it.
+        env.pop("NACHOBOT_WEBUI_TOKEN", None)
+
+        if service_id == "nachobot":
+            try:
+                await self._prepare_playwright_chromium(service_id, full_cwd, env)
+            except asyncio.CancelledError:
+                state.status = ServiceStatus.STOPPED
+                raise
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -332,64 +945,160 @@ class ProcessManager:
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=str(full_cwd),
                 env=env,
-                creationflags=getattr(signal, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0,
+                creationflags=(
+                    getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | _WINDOWS_CREATE_SUSPENDED
+                    if os.name == "nt"
+                    else 0
+                ),
+                start_new_session=os.name != "nt",
             )
             state.process = proc
             state.pid = proc.pid
+            state.process_group_id = proc.pid if os.name != "nt" else None
+            if os.name == "nt":
+                try:
+                    if not proc.pid:
+                        raise RuntimeError("Windows child has no PID for Job Object assignment")
+                    state.windows_job = await asyncio.to_thread(
+                        self._get_windows_job_facade().create_assign_resume,
+                        proc.pid,
+                    )
+                except Exception as exc:
+                    pending_job = getattr(exc, "windows_job", None)
+                    if pending_job is not None and not getattr(pending_job, "closed", False):
+                        state.windows_job = pending_job
+                    cleanup_ok = await self._reap_leader_after_start_failure(proc)
+                    state.status = ServiceStatus.ERROR
+                    if cleanup_ok:
+                        state.process = None
+                        state.pid = None
+                    await self._broadcast(service_id, f"[WebUI] ERROR: cannot create Windows Job Object: {exc}\n")
+                    return
+                # Capture the manager-owned tree while the leader is known
+                # alive.  This survives a later leader EOF/exit and avoids
+                # making an unprovable descendant claim from a reused PID.
+                if state.windows_job is None:
+                    try:
+                        owned_parent = psutil.Process(proc.pid)
+                        state.windows_owned_processes = [owned_parent, *owned_parent.children(recursive=True)]
+                    except psutil.NoSuchProcess:
+                        state.windows_owned_processes = []
+                    except Exception as exc:
+                        state.status = ServiceStatus.ERROR
+                        await self._broadcast(
+                            service_id,
+                            f"[WebUI] ERROR: cannot capture Windows process ownership: {exc}\n",
+                        )
+                        return
             state.started_at = time.time()
-            state.status = ServiceStatus.RUNNING
 
             # Start reading output
-            state._read_task = asyncio.create_task(self._read_output(service_id, proc))
+            state._read_task = asyncio.create_task(
+                self._read_output(service_id, proc),
+                name=f"webui:output:{service_id}",
+            )
 
-            await self._broadcast(service_id, f"[WebUI] {sdef.name} started (PID: {proc.pid})\n")
-
-            # Optionally wait for port (background when started individually)
+            await self._broadcast(service_id, f"[WebUI] {sdef.name} spawned (PID: {proc.pid})\n")
             if sdef.wait_port and sdef.port:
-                asyncio.create_task(self._wait_for_port(service_id, sdef.port))
+                ready = await self._wait_for_port(service_id, sdef.port, timeout=180)
+                if not ready:
+                    await self._terminate_state_process(state)
+                    state.status = ServiceStatus.ERROR
+                    state.process = None
+                    state.pid = None
+                    await self._broadcast(
+                        service_id,
+                        f"[WebUI] ERROR: {sdef.name} 未通过就绪检查，进程已终止\n",
+                    )
+                    return
+            # The output reader may observe EOF (or another failure) while
+            # this readiness/broadcast await is yielding.  Never overwrite
+            # that state with RUNNING, and retain the live process handle so
+            # the caller can still request a bounded stop.
+            if (
+                state.status != ServiceStatus.STARTING
+                or proc.returncode is not None
+                or state.process is not proc
+            ):
+                if state.status == ServiceStatus.STARTING:
+                    state.status = ServiceStatus.ERROR
+                return
+            state.status = ServiceStatus.RUNNING
+            await self._broadcast(service_id, f"[WebUI] {sdef.name} is ready.\n")
 
+        except asyncio.CancelledError:
+            await self._terminate_state_process(state)
+            if state.status != ServiceStatus.STOPPING:
+                state.status = ServiceStatus.STOPPED
+            state.process = None
+            state.pid = None
+            raise
         except Exception as e:
+            try:
+                await self._terminate_state_process(state)
+            except Exception:
+                state.status = ServiceStatus.ERROR
+                await self._broadcast(service_id, f"[WebUI] ERROR starting {sdef.name}: {e}\n")
+                return
             state.status = ServiceStatus.ERROR
+            state.process = None
+            state.pid = None
             await self._broadcast(service_id, f"[WebUI] ERROR starting {sdef.name}: {e}\n")
 
-    async def stop_service(self, service_id: str) -> None:
+    async def _reap_leader_after_start_failure(self, process: asyncio.subprocess.Process) -> bool:
+        """Bounded terminate/kill/reap for a process that never became RUNNING."""
+        try:
+            if getattr(process, "returncode", None) is None:
+                process.terminate()
+            await asyncio.wait_for(process.wait(), timeout=_PROCESS_REAP_TIMEOUT)
+            return True
+        except asyncio.TimeoutError:
+            try:
+                process.kill()
+                await asyncio.wait_for(process.wait(), timeout=_PROCESS_REAP_TIMEOUT)
+                return True
+            except Exception:
+                return False
+        except ProcessLookupError:
+            return True
+        except Exception:
+            return False
+
+    async def stop_service(self, service_id: str, *, _prepared: bool = False) -> None:
+        _register_services()
+        if service_id not in SERVICE_DEFS:
+            raise ValueError(f"Unknown service: {service_id}")
+        lock = self._service_locks.setdefault(service_id, asyncio.Lock())
+        async with lock:
+            await self._stop_service_locked(service_id, _prepared=_prepared)
+
+    async def _stop_service_locked(self, service_id: str, *, _prepared: bool) -> None:
         state = self.states.get(service_id)
-        if not state or state.status == ServiceStatus.STOPPED:
+        if not state:
+            return
+        if (
+            state.status == ServiceStatus.STOPPED
+            and state.process_group_id is None
+            and not state.windows_owned_processes
+            and state.windows_job is None
+            and state.process is None
+        ):
             return
 
         sdef = SERVICE_DEFS[service_id]
+        if state.status == ServiceStatus.STOPPING and not _prepared:
+            return
         state.status = ServiceStatus.STOPPING
         await self._broadcast(service_id, f"[WebUI] Stopping {sdef.name}...\n")
-
-        if state.process and state.process.returncode is None:
-            try:
-                # On Windows, terminate the process tree
-                if os.name == "nt" and state.pid:
-                    try:
-                        parent = psutil.Process(state.pid)
-                        for child in parent.children(recursive=True):
-                            try:
-                                child.terminate()
-                            except psutil.NoSuchProcess:
-                                pass
-                        parent.terminate()
-                        # Wait a bit, then kill if needed
-                        gone, alive = psutil.wait_procs([parent] + parent.children(recursive=True), timeout=5)
-                        for p in alive:
-                            p.kill()
-                    except psutil.NoSuchProcess:
-                        pass
-                else:
-                    state.process.terminate()
-                    try:
-                        await asyncio.wait_for(state.process.wait(), timeout=10)
-                    except asyncio.TimeoutError:
-                        state.process.kill()
-            except ProcessLookupError:
-                pass
-
-        if state._read_task and not state._read_task.done():
-            state._read_task.cancel()
+        try:
+            await self._terminate_state_process(state)
+        except Exception:
+            state.status = ServiceStatus.ERROR
+            await self._broadcast(
+                service_id,
+                f"[WebUI] ERROR: {sdef.name} 停止失败，可再次请求停止\n",
+            )
+            raise
 
         state.status = ServiceStatus.STOPPED
         state.process = None
@@ -397,40 +1106,56 @@ class ProcessManager:
         await self._broadcast(service_id, f"[WebUI] {sdef.name} stopped.\n")
 
     async def start_group(self, group_id: str) -> None:
+        _register_services()
         gdef = GROUP_DEFS.get(group_id)
         if not gdef:
             raise ValueError(f"Unknown group: {group_id}")
 
-        # Check for TTS engine conflict
-        if group_id in ("tts_full", "tts_lite"):
-            other = "tts_lite" if group_id == "tts_full" else "tts_full"
-            other_gdef = GROUP_DEFS[other]
-            for sid in other_gdef.services:
-                st = self.states.get(sid)
-                if st and st.status in (ServiceStatus.RUNNING, ServiceStatus.STARTING):
-                    raise RuntimeError(f"Cannot start {gdef.name}: {GROUP_DEFS[other].name} is already running. Stop it first.")
+        # The FULL, LITE, and POTATO groups all own the 8070 adapter endpoint;
+        # only one of them can be active at a time.
+        self._validate_group_start(group_id)
 
-        for sid in gdef.services:
-            await self.start_service(sid)
-            # Check if the service actually started; abort group if it failed
-            state = self.states.get(sid)
-            if state and state.status == ServiceStatus.ERROR:
-                await self._broadcast(sid, f"[WebUI] {SERVICE_DEFS[sid].name} 启动失败，中止启动组内后续服务\n")
-                return
-            # If this service has a port dependency, wait until it's ready
-            # before starting downstream services
-            sdef = SERVICE_DEFS[sid]
-            if sdef.wait_port and sdef.port:
-                ready = await self._wait_for_port(sid, sdef.port)
-                if not ready:
-                    state.status = ServiceStatus.ERROR
-                    await self._broadcast(sid, f"[WebUI] {sdef.name} 端口 {sdef.port} 超时未就绪，中止启动组内后续服务\n")
+        started_here: list[str] = []
+        try:
+            if group_id == "vrchat":
+                self._active_group_env[group_id] = {
+                    VRCHAT_CAPABILITY_ENV: secrets.token_hex(32),
+                }
+
+            for sid in gdef.services:
+                prior = self.states.get(sid)
+                was_running = bool(prior and prior.status == ServiceStatus.RUNNING)
+                await self.start_service(sid)
+                state = self.states.get(sid)
+                if state and state.status == ServiceStatus.ERROR:
+                    await self._broadcast(
+                        sid,
+                        f"[WebUI] {SERVICE_DEFS[sid].name} 启动失败，回滚本次已启动服务\n",
+                    )
+                    for started_id in reversed(started_here):
+                        await self.stop_service(started_id)
+                    self._active_group_env.pop(group_id, None)
                     return
-            else:
-                # Small delay between services without port checks
-                await asyncio.sleep(2)
+                if not was_running and state and state.status == ServiceStatus.RUNNING:
+                    started_here.append(sid)
+                # start_service does not return until its readiness check succeeds.
+                sdef = SERVICE_DEFS[sid]
+                if not (sdef.wait_port and sdef.port):
+                    await asyncio.sleep(2)
+                    state = self.states.get(sid)
+                    if not state or state.status != ServiceStatus.RUNNING:
+                        for started_id in reversed(started_here):
+                            await self.stop_service(started_id)
+                        self._active_group_env.pop(group_id, None)
+                        return
+        except asyncio.CancelledError:
+            for started_id in reversed(started_here):
+                await self.stop_service(started_id)
+            self._active_group_env.pop(group_id, None)
+            raise
 
     async def stop_group(self, group_id: str) -> None:
+        _register_services()
         gdef = GROUP_DEFS.get(group_id)
         if not gdef:
             raise ValueError(f"Unknown group: {group_id}")
@@ -438,6 +1163,22 @@ class ProcessManager:
         # Stop in reverse order
         for sid in reversed(gdef.services):
             await self.stop_service(sid)
+        self._active_group_env.pop(group_id, None)
+
+    async def shutdown(self) -> None:
+        """Cancel managed operations, then stop every owned subprocess."""
+        tasks = [task for task in self._operation_tasks.values() if not task.done()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._operation_tasks.clear()
+        self._operation_kinds.clear()
+        for service_id in list(self.states):
+            try:
+                await self.stop_service(service_id, _prepared=True)
+            except Exception:
+                logger.exception("Failed to stop WebUI service %s during shutdown", service_id)
 
     async def send_input(self, service_id: str, text: str) -> None:
         state = self.states.get(service_id)
@@ -465,6 +1206,62 @@ class ProcessManager:
             self._ws_subscribers[service_id] = [c for c in subs if c is not callback]
 
     # ---- internal helpers ----
+
+    async def _prepare_playwright_chromium(
+        self,
+        service_id: str,
+        cwd: Path,
+        env: dict[str, str],
+    ) -> None:
+        """Prepare Core's optional browser backend without blocking Core fallback startup."""
+        script = cwd / "scripts" / "ensure_playwright.py"
+        if not script.is_file():
+            await self._broadcast(
+                service_id,
+                "[WebUI] WARN: Playwright preparation script is missing; web search may use HTTP fallback\n",
+            )
+            return
+
+        await self._broadcast(service_id, "[WebUI] Checking Playwright Chromium...\n")
+        proc = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "uv",
+                "run",
+                "python",
+                "scripts/ensure_playwright.py",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=str(cwd),
+                env=env,
+            )
+            fallback_enc = locale.getpreferredencoding(False) or "gbk"
+            while True:
+                line = await proc.stdout.readline()
+                if not line:
+                    break
+                try:
+                    text = line.decode("utf-8")
+                except UnicodeDecodeError:
+                    text = line.decode(fallback_enc, errors="replace")
+                await self._broadcast(service_id, _ANSI_RE.sub("", text))
+            await proc.wait()
+            if proc.returncode != 0:
+                await self._broadcast(
+                    service_id,
+                    "[WebUI] WARN: Playwright Chromium preparation failed; web search will use HTTP fallback\n",
+                )
+        except asyncio.CancelledError:
+            if proc is not None and proc.returncode is None:
+                proc.terminate()
+                await proc.wait()
+            raise
+        except Exception as exc:
+            await self._broadcast(
+                service_id,
+                f"[WebUI] WARN: Playwright Chromium preparation failed: {exc}; "
+                "web search will use HTTP fallback\n",
+            )
 
     async def _broadcast(self, service_id: str, line: str):
         """Push a log line to subscribers and the buffer."""
@@ -511,14 +1308,335 @@ class ProcessManager:
 
         # Process ended
         state = self.states.get(service_id)
-        if state and state.status not in (ServiceStatus.STOPPED, ServiceStatus.STOPPING):
+        if state and state.process is proc:
             rc = proc.returncode
-            state.status = ServiceStatus.ERROR if rc and rc != 0 else ServiceStatus.STOPPED
-            await self._broadcast(service_id, f"[WebUI] Process exited (code: {rc})\n")
+            if rc is None:
+                # A closed stdout pipe is not proof that the child exited.
+                # Retain the process handle (and any owned POSIX group) so a
+                # subsequent stop can still terminate it safely.
+                if state.status != ServiceStatus.STOPPING:
+                    state.status = ServiceStatus.ERROR
+                    await self._broadcast(
+                        service_id,
+                        "[WebUI] Output stream closed while process is still running; stop required\n",
+                    )
+                return
+            retain_windows_handle = os.name == "nt" and (
+                state.status == ServiceStatus.STOPPING
+                or bool(state.windows_owned_processes)
+                or state.windows_job is not None
+            )
+            if not retain_windows_handle:
+                state.process = None
+                state.pid = None
+            group_alive = False
+            if os.name != "nt" and state.process_group_id is not None:
+                try:
+                    group_alive = self._posix_process_group_exists(state.process_group_id)
+                except Exception as exc:
+                    state.status = ServiceStatus.ERROR
+                    await self._broadcast(
+                        service_id,
+                        f"[WebUI] Process leader exited (code: {rc}); cannot verify process group: {exc}\n",
+                    )
+                    return
+                if not group_alive:
+                    state.process_group_id = None
+            if group_alive:
+                # The leader is gone but descendants still own the group. Do
+                # not report a clean STOPPED state; stop/shutdown can still
+                # use the retained manager-owned group id.
+                state.status = ServiceStatus.ERROR
+                await self._broadcast(
+                    service_id,
+                    f"[WebUI] Process leader exited (code: {rc}); process group remains\n",
+                )
+            else:
+                if os.name == "nt" and (state.windows_owned_processes or state.windows_job is not None):
+                    # The leader's EOF/exit does not prove that the captured
+                    # descendants are gone.  Keep the owned capability and
+                    # require an explicit stop/reap pass.
+                    state.status = ServiceStatus.ERROR
+                    await self._broadcast(
+                        service_id,
+                        f"[WebUI] Process leader exited (code: {rc}); captured descendants require stop\n",
+                    )
+                else:
+                    state.status = ServiceStatus.ERROR if rc and rc != 0 else ServiceStatus.STOPPED
+                    await self._broadcast(service_id, f"[WebUI] Process exited (code: {rc})\n")
+
+    @staticmethod
+    def _port_is_open(port: int) -> bool:
+        import socket
+
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.3):
+                return True
+        except (ConnectionRefusedError, OSError, socket.timeout):
+            return False
+
+    async def _terminate_state_process(self, state: ServiceState) -> None:
+        process = state.process
+        if os.name == "nt":
+            job_managed = state.windows_job is not None
+            if state.windows_job is not None:
+                job = state.windows_job
+                facade = self._get_windows_job_facade()
+                try:
+                    await asyncio.to_thread(facade.terminate, job)
+                    deadline = asyncio.get_running_loop().time() + _PROCESS_REAP_TIMEOUT
+                    while True:
+                        active = await asyncio.to_thread(facade.active_processes, job)
+                        if active == 0:
+                            break
+                        if asyncio.get_running_loop().time() >= deadline:
+                            raise RuntimeError("Windows Job Object still has active processes")
+                        await asyncio.sleep(min(_WINDOWS_JOB_POLL_INTERVAL, deadline - asyncio.get_running_loop().time()))
+                except Exception:
+                    # Retain the capability for a later retry.  The caller
+                    # will set ERROR and keep process/pid intact.
+                    raise
+                await asyncio.to_thread(facade.close, job)
+                state.windows_job = None
+                state.windows_owned_processes = []
+
+            captured: list[Any] = [] if job_managed else list(state.windows_owned_processes)
+            captured_by_pid: set[int] = {
+                int(owned_pid)
+                for owned_pid in (getattr(item, "pid", None) for item in captured)
+                if owned_pid is not None
+            }
+            pid = state.pid or getattr(process, "pid", None)
+
+            # Capture the complete manager-owned tree before sending any
+            # signal.  The asyncio leader may exit as a side effect of the
+            # first terminate, but these psutil handles remain usable for the
+            # descendant kill/reap pass.
+            if pid and not job_managed:
+                try:
+                    parent = psutil.Process(pid)
+                except psutil.NoSuchProcess:
+                    parent = None
+                except Exception as exc:
+                    raise RuntimeError(f"cannot inspect managed Windows process {pid}") from exc
+                if parent is not None:
+                    # Refresh descendants immediately before signalling; the
+                    # initially captured set remains included even if the
+                    # leader exits during this enumeration.
+                    parent_pid = int(getattr(parent, "pid", pid))
+                    if parent_pid not in captured_by_pid:
+                        captured.append(parent)
+                        captured_by_pid.add(parent_pid)
+                    try:
+                        descendants = parent.children(recursive=True)
+                    except psutil.NoSuchProcess:
+                        # The leader can disappear between Process() and
+                        # children().  Retain the parent handle and continue;
+                        # this must not discard any handles captured earlier.
+                        descendants = []
+                    except Exception as exc:
+                        raise RuntimeError(f"cannot enumerate descendants of managed process {pid}") from exc
+                    for child in descendants:
+                        child_pid = getattr(child, "pid", None)
+                        if child_pid is None or int(child_pid) in captured_by_pid:
+                            continue
+                        captured.append(child)
+                        captured_by_pid.add(int(child_pid))
+
+            if captured:
+                state.windows_owned_processes = captured
+                for owned in captured:
+                    try:
+                        owned.terminate()
+                    except psutil.NoSuchProcess:
+                        continue
+                    except Exception as exc:
+                        raise RuntimeError("cannot terminate a managed Windows process") from exc
+
+                try:
+                    _, survivors = await asyncio.to_thread(
+                        psutil.wait_procs,
+                        captured,
+                        timeout=_PROCESS_REAP_TIMEOUT,
+                    )
+                except psutil.NoSuchProcess:
+                    survivors = []
+                except Exception as exc:
+                    raise RuntimeError("cannot verify managed Windows process termination") from exc
+                survivors = list(survivors or [])
+
+                for remaining in survivors:
+                    try:
+                        remaining.kill()
+                    except psutil.NoSuchProcess:
+                        continue
+                    except Exception as exc:
+                        raise RuntimeError("cannot kill surviving managed Windows process") from exc
+
+                if survivors:
+                    try:
+                        _, survivors_after_kill = await asyncio.to_thread(
+                            psutil.wait_procs,
+                            survivors,
+                            timeout=_PROCESS_REAP_TIMEOUT,
+                        )
+                    except psutil.NoSuchProcess:
+                        survivors_after_kill = []
+                    except Exception as exc:
+                        raise RuntimeError("cannot verify managed Windows process kill") from exc
+                    survivors_after_kill = list(survivors_after_kill or [])
+                else:
+                    survivors_after_kill = []
+
+                # wait_procs is advisory; verify each captured handle.  An
+                # AccessDenied/unknown error is intentionally not interpreted
+                # as success because STOPPED must mean confirmed gone.
+                if survivors_after_kill:
+                    raise RuntimeError("managed Windows process survived kill")
+                for owned in captured:
+                    try:
+                        is_running = getattr(owned, "is_running", None)
+                        if is_running is None:
+                            raise RuntimeError("managed Windows process liveness API unavailable")
+                        if is_running():
+                            raise RuntimeError("managed Windows process remained alive")
+                    except psutil.NoSuchProcess:
+                        continue
+                    except RuntimeError:
+                        raise
+                    except Exception as exc:
+                        raise RuntimeError("cannot confirm managed Windows process liveness") from exc
+
+                state.windows_owned_processes = []
+
+            if process is not None:
+                # Always reap the asyncio handle, including the case where the
+                # leader exited before shutdown entered and psutil.Process(pid)
+                # was already gone.  Without a PID/tree capability, this is
+                # only leader cleanup; unknown descendants are not claimed.
+                try:
+                    if not captured and getattr(process, "returncode", None) is None:
+                        try:
+                            process.terminate()
+                        except ProcessLookupError:
+                            pass
+                        except Exception as exc:
+                            raise RuntimeError("cannot terminate managed Windows process leader") from exc
+                    await asyncio.wait_for(process.wait(), timeout=_PROCESS_REAP_TIMEOUT)
+                except ProcessLookupError:
+                    pass
+                except asyncio.TimeoutError as exc:
+                    try:
+                        process.kill()
+                        await asyncio.wait_for(process.wait(), timeout=_PROCESS_REAP_TIMEOUT)
+                    except ProcessLookupError:
+                        pass
+                    except asyncio.TimeoutError as kill_exc:
+                        raise RuntimeError("managed Windows process leader was not reaped") from kill_exc
+                    except Exception as kill_exc:
+                        raise RuntimeError("cannot reap managed Windows process leader") from kill_exc
+                except Exception as exc:
+                    raise RuntimeError("cannot reap managed Windows process leader") from exc
+        else:
+            pgid = state.process_group_id
+            group_gone = pgid is None
+            if pgid is not None:
+                try:
+                    os.killpg(pgid, signal.SIGTERM)
+                except ProcessLookupError:
+                    group_gone = True
+                if not group_gone:
+                    group_gone = await self._wait_for_posix_process_group_exit(
+                        pgid,
+                        _PROCESS_GROUP_TERM_TIMEOUT,
+                    )
+                if not group_gone:
+                    try:
+                        os.killpg(pgid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        group_gone = True
+                    if not group_gone:
+                        group_gone = await self._wait_for_posix_process_group_exit(
+                            pgid,
+                            _PROCESS_GROUP_KILL_TIMEOUT,
+                        )
+                if not group_gone:
+                    raise RuntimeError(f"process group {pgid} remained alive after SIGKILL")
+                # Clear only after liveness confirmation. A failed shutdown
+                # deliberately retains this capability for retry.
+                state.process_group_id = None
+
+            if process and process.returncode is None:
+                try:
+                    if pgid is None:
+                        # Defensive fallback for a state assembled outside
+                        # this manager. Real POSIX starts always have an owned
+                        # pgid, so this path never derives one from a PID.
+                        process.terminate()
+                    await asyncio.wait_for(process.wait(), timeout=_PROCESS_REAP_TIMEOUT)
+                except asyncio.TimeoutError as exc:
+                    if pgid is None:
+                        process.kill()
+                        try:
+                            await asyncio.wait_for(process.wait(), timeout=_PROCESS_REAP_TIMEOUT)
+                        except asyncio.TimeoutError:
+                            raise RuntimeError("managed process leader was not reaped") from exc
+                    else:
+                        raise RuntimeError("managed process leader was not reaped") from exc
+
+        read_task = state._read_task
+        if read_task and not read_task.done():
+            read_task.cancel()
+            await asyncio.gather(read_task, return_exceptions=True)
+        state._read_task = None
+
+    @staticmethod
+    def _posix_process_group_exists(pgid: int) -> bool:
+        """Check a manager-owned POSIX process group without signalling it."""
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            raise
+        except OSError as exc:
+            if exc.errno == errno.ESRCH:
+                return False
+            raise
+        return True
+
+    async def _wait_for_posix_process_group_exit(self, pgid: int, timeout: float) -> bool:
+        deadline = asyncio.get_running_loop().time() + max(0.0, timeout)
+        while True:
+            if not self._posix_process_group_exists(pgid):
+                return True
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(_PROCESS_GROUP_POLL_INTERVAL, remaining))
+
+    @staticmethod
+    def _health_mode_ready(port: int, expected_mode: str) -> bool:
+        """Return whether the local adapter health endpoint reports the expected mode."""
+        import json
+        from urllib.request import Request, ProxyHandler, build_opener
+
+        try:
+            opener = build_opener(ProxyHandler({}))
+            request = Request(
+                f"http://127.0.0.1:{port}/api/health",
+                headers={"Accept": "application/json"},
+            )
+            with opener.open(request, timeout=1) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            return payload.get("status") == "ok" and payload.get("mode") == expected_mode
+        except Exception:
+            return False
 
     async def _wait_for_port(self, service_id: str, port: int, timeout: int = 180) -> bool:
         """Wait for a port to become available. Returns True if ready, False if timed out."""
         import socket
+        sdef = SERVICE_DEFS.get(service_id)
         await self._broadcast(service_id, f"[WebUI] 等待端口 {port} 就绪 (最长 {timeout}s)...\n")
         for i in range(timeout):
             # Check if the process died while we're waiting
@@ -526,13 +1644,30 @@ class ProcessManager:
             if state and state.status in (ServiceStatus.STOPPED, ServiceStatus.ERROR):
                 await self._broadcast(service_id, "[WebUI] 进程已退出，停止等待端口\n")
                 return False
-            try:
-                with socket.create_connection(("127.0.0.1", port), timeout=1):
-                    await self._broadcast(service_id, f"[WebUI] Port {port} is ready. ({i+1}s)\n")
+            if sdef and sdef.health_mode:
+                ready = await asyncio.to_thread(
+                    self._health_mode_ready,
+                    port,
+                    sdef.health_mode,
+                )
+                if ready:
+                    await self._broadcast(
+                        service_id,
+                        f"[WebUI] Port {port} is ready ({sdef.health_mode}). ({i+1}s)\n",
+                    )
                     return True
-            except (ConnectionRefusedError, OSError, socket.timeout):
-                await asyncio.sleep(1)
-        await self._broadcast(service_id, f"[WebUI] WARNING: Port {port} not ready after {timeout}s.\n")
+            else:
+                try:
+                    with socket.create_connection(("127.0.0.1", port), timeout=1):
+                        await self._broadcast(service_id, f"[WebUI] Port {port} is ready. ({i+1}s)\n")
+                        return True
+                except (ConnectionRefusedError, OSError, socket.timeout):
+                    pass
+            await asyncio.sleep(1)
+        message = f"[WebUI] WARNING: Port {port} not ready after {timeout}s."
+        if service_id in ("tts_engine_full", "tts_engine_lite"):
+            message += " 如果你是初次启动，等待模型下载完毕后重启该服务。"
+        await self._broadcast(service_id, message + "\n")
         return False
 
     def _resolve_cmd(self, sdef: ServiceDef) -> tuple[list[str], str, dict[str, str]]:
@@ -556,85 +1691,26 @@ class ProcessManager:
         if base_toml.exists():
             try:
                 import tomlkit
-                from urllib.parse import urlparse
+
                 doc = tomlkit.parse(base_toml.read_text(encoding="utf-8"))
                 enabled = doc.get("enabled_tts", {}).get("enabled", ["GPT_Sovits"])
                 if isinstance(enabled, list) and "Vox" in enabled:
                     engine = "Vox"
-                
-                # Get dynamic port for the resolved engine
-                plugins_sec = doc.get("plugins", {})
-                engine_sec = plugins_sec.get(engine, {})
-                api_base = engine_sec.get("api_base", "http://127.0.0.1:9880")
-                parsed_url = urlparse(api_base)
-                if parsed_url.port:
-                    tts_engine_port = parsed_url.port
+
+                tts_engine_port = _read_tts_engine_port(self.root, engine)
             except Exception:
                 pass
 
-        from webui_config import webui_config
+        adapter_dir = self.root / "NachoBot-Multimodal-Adapter"
+        manager = adapter_dir / "scripts" / "tts_runtime_manager.py"
+        if not manager.is_file():
+            raise FileNotFoundError(f"TTS runtime manager 不存在: {manager}")
 
-        if engine == "Vox":
-            # VoxCPM
-            voxcpm_dir = webui_config.voxcpm_dir
-            if not voxcpm_dir.exists():
-                raise FileNotFoundError(
-                    f"VoxCPM 目录不存在: {voxcpm_dir}\n"
-                    f"请在 WebUI 配置中修改 [paths].voxcpm_dir"
-                )
-            adapter_dir = self.root / "NachoBot-Multimodal-Adapter"
-            py_vox = voxcpm_dir / ".venv" / "Scripts" / "python.exe"
-            if not py_vox.exists():
-                raise FileNotFoundError(
-                    f"VoxCPM Python 解释器不存在: {py_vox}\n"
-                    f"请确认 VoxCPM 虚拟环境已正确安装"
-                )
-            vox_script = adapter_dir / "src" / "tts" / "backends" / "Vox" / "vox_api_server.py"
-            # 读取 vox.toml 配置文件中的 LoRA 路径与模型路径
-            model_dir = voxcpm_dir / "models" / "openbmb__VoxCPM2"
-            lora = voxcpm_dir / "lora" / "ncnk"
-            vox_toml = adapter_dir / "configs" / "vox.toml"
-            if vox_toml.exists():
-                try:
-                    import tomlkit
-                    vox_doc = tomlkit.parse(vox_toml.read_text(encoding="utf-8"))
-                    tts_sec = vox_doc.get("tts", {})
-                    if tts_sec.get("model_dir"):
-                        model_dir = Path(tts_sec["model_dir"])
-                    if "lora_weights_path" in tts_sec:
-                        lora = tts_sec["lora_weights_path"]
-                except Exception:
-                    pass
-
-            cmd = [
-                str(py_vox), str(vox_script),
-                "--host", "127.0.0.1", "--port", str(tts_engine_port),
-                "--model-dir", str(model_dir),
-                "--lora-weights", str(lora),
-                "--no-denoiser",
-            ]
-            return cmd, str(voxcpm_dir), {}
-        else:
-            # GPT-SoVITS
-            sovits_dir = webui_config.sovits_dir
-            if not sovits_dir.exists():
-                raise FileNotFoundError(
-                    f"GPT-SoVITS 目录不存在: {sovits_dir}\n"
-                    f"请在 WebUI 配置中修改 [paths].sovits_dir"
-                )
-            py_gpt = sovits_dir / "runtime" / "python.exe"
-            if not py_gpt.exists():
-                raise FileNotFoundError(
-                    f"GPT-SoVITS Python 解释器不存在: {py_gpt}\n"
-                    f"请确认 GPT-SoVITS 整合包已正确安装"
-                )
-            api_file = sovits_dir / "api_v2.py"
-            if not api_file.exists():
-                api_file = sovits_dir / "api.py"
-
-            cmd = [str(py_gpt), "-s", str(api_file), "--port", str(tts_engine_port)]
-            env_extra = {
-                "PYTHONPATH": f"{sovits_dir};{sovits_dir / 'GPT_SoVITS'}",
-                "CUDA_VISIBLE_DEVICES": "0",
-            }
-            return cmd, str(sovits_dir), env_extra
+        managed_engine = "voxcpm" if engine == "Vox" else "gpt-sovits"
+        cmd = [
+            "uv", "run", "python", str(manager),
+            "serve",
+            "--engine", managed_engine,
+            "--port", str(tts_engine_port),
+        ]
+        return cmd, str(adapter_dir), {}

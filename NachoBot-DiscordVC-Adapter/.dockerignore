@@ -1,8 +1,9 @@
 .venv/
 __pycache__/
+.runtime/
+.ruff_cache/
 .git/
 .gitignore
 config.toml
 config.toml.example
-uv.lock
 *.pyc

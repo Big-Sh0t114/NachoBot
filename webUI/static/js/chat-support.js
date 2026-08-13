@@ -242,6 +242,7 @@ window.ChatSupport = (() => {
     }
 
     return {
+        createId,
         createSession,
         createTTS,
         escapeText,
