@@ -719,11 +719,14 @@ class ProcessManagerTests(unittest.IsolatedAsyncioTestCase):
         ntdll = _FakeWin32Library()
         with patch.object(process_module.os, "name", "nt"), patch.object(
             process_module.ctypes, "WinDLL", side_effect=[kernel, ntdll], create=True
+        ), patch.object(
+            process_module.ctypes, "get_last_error", return_value=5, create=True
         ):
             facade = process_module._WindowsJobFacade()
             capability = process_module._WindowsJobCapability(0x100001234)
-            with self.assertRaises(OSError):
+            with self.assertRaises(OSError) as raised:
                 facade.close(capability)
+            self.assertEqual(raised.exception.errno, 5)
             self.assertFalse(capability.closed)
 
     async def test_windows_job_temporary_handle_close_failure_keeps_job_cleanup_ownership(self) -> None:
@@ -733,6 +736,8 @@ class ProcessManagerTests(unittest.IsolatedAsyncioTestCase):
         ntdll = _FakeWin32Library()
         with patch.object(process_module.os, "name", "nt"), patch.object(
             process_module.ctypes, "WinDLL", side_effect=[kernel, ntdll], create=True
+        ), patch.object(
+            process_module.ctypes, "get_last_error", return_value=5, create=True
         ):
             facade = process_module._WindowsJobFacade()
             with self.assertRaises(OSError) as raised:
