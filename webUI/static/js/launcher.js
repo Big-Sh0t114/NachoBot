@@ -17,6 +17,8 @@ const LauncherModule = (() => {
         live2d: 'monitor-play',
         discord: 'message-circle',
         universalvc: 'microphone',
+        // Temporarily hidden from WebUI; restore when VRChat is exposed.
+        // vrchat: 'orbit',
     });
 
     function svgIcon(name) {

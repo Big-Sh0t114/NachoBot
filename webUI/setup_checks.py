@@ -3,6 +3,7 @@
 import os
 import socket
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -525,16 +526,41 @@ class PathVerifier:
     @staticmethod
     def _check_napcat(p: Path, download_url: str) -> dict:
         launcher = p / "launcher-user.bat"
-        if launcher.exists():
-            return {"valid": True, "message": f"✅ NapCat Shell 已找到: {p}"}
-        # Also try napcat.bat as fallback
         napcat_bat = p / "napcat.bat"
-        if napcat_bat.exists():
-            return {"valid": True, "message": f"✅ NapCat Shell 已找到: {p}"}
+        if not launcher.exists() and not napcat_bat.exists():
+            return {
+                "valid": False,
+                "message": f"❌ 未找到 launcher-user.bat 或 napcat.bat: {p}",
+                "download_url": download_url,
+            }
+
+        # The setup wizard edits <NapCat>/config/onebot11_*.json directly.
+        # Verify that the directory can actually be created and written now,
+        # instead of passing the path check and failing later during deployment.
+        config_dir = p / "config"
+        try:
+            config_dir.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                prefix=".nachobot-write-test-",
+                suffix=".tmp",
+                dir=config_dir,
+                delete=False,
+            ) as test_file:
+                test_file.write("ok")
+                test_path = Path(test_file.name)
+            test_path.unlink(missing_ok=True)
+        except Exception as e:
+            return {
+                "valid": False,
+                "message": f"❌ NapCat 配置目录不可写: {config_dir} ({e})",
+                "download_url": download_url,
+            }
+
         return {
-            "valid": False,
-            "message": f"❌ 未找到 launcher-user.bat: {p}",
-            "download_url": download_url,
+            "valid": True,
+            "message": f"✅ NapCat Shell 已找到且配置目录可写: {p}",
         }
 
     @staticmethod

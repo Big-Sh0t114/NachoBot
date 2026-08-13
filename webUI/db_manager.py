@@ -24,6 +24,8 @@ TRUNCATE_FIELDS = {"memory_points", "member_list", "group_impression", "topic",
                    "selected_expressions", "additional_config", "description",
                    "key_words", "key_words_lite", "context", "answer"}
 TRUNCATE_LENGTH = 80
+MAX_PAGE_SIZE = 200
+MAX_PAGE_NUMBER = 1_000_000
 
 # Human-readable table name mapping
 TABLE_LABELS = {
@@ -155,6 +157,10 @@ class DatabaseManager:
         filters: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Query a table with pagination, column filters, and sorting."""
+        if not isinstance(page, int) or isinstance(page, bool) or not 1 <= page <= MAX_PAGE_NUMBER:
+            raise ValueError(f"page must be between 1 and {MAX_PAGE_NUMBER}")
+        if not isinstance(page_size, int) or isinstance(page_size, bool) or not 1 <= page_size <= MAX_PAGE_SIZE:
+            raise ValueError(f"page_size must be between 1 and {MAX_PAGE_SIZE}")
         conn = _get_conn()
         try:
             tables = self._get_table_names(conn)
@@ -233,6 +239,8 @@ class DatabaseManager:
         limit: int = 200,
     ) -> list[str]:
         """Get distinct non-null values for a column (for filter dropdowns)."""
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_PAGE_SIZE:
+            raise ValueError(f"limit must be between 1 and {MAX_PAGE_SIZE}")
         conn = _get_conn()
         try:
             tables = self._get_table_names(conn)
