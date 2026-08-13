@@ -27,6 +27,11 @@ from src.chat.utils.prompt_injection_guard import build_guardrail_instruction, g
 from src.chat.focus.reply_context import ReplyPromptContext
 from src.chat.utils.url_fetcher import UrlContentFetcher, extract_urls
 from src.chat.utils.web_search import WebSearchManager
+from src.chat.utils.capability_router import (
+    CapabilityRouter,
+    build_search_after_decision,
+    execute_mcp_after_decision,
+)
 from src.chat.utils.chat_message_builder import (
     build_readable_messages,
     get_raw_msg_before_timestamp_with_chat,
@@ -85,6 +90,7 @@ class DefaultReplyer:
         # self.memory_activator = MemoryActivator()
 
         from src.plugin_system.core.tool_use import ToolExecutor  # 延迟导入ToolExecutor，不然会循环依赖
+        from src.plugin_system.core.mcp_tool_executor import MCPToolExecutor
 
         tool_model_set = model_config.model_task_config.tool_use
         if request_type == "file_edit":
@@ -105,15 +111,14 @@ class DefaultReplyer:
         except Exception:
             logger.warning("MCP Executor Config Read Failed")
 
-        self.mcp_executor = ToolExecutor(
+        self.mcp_executor = MCPToolExecutor(
             chat_id=self.chat_stream.stream_id,
-            enable_cache=True,
-            cache_ttl=3,
             model_set=model_config.model_task_config.mcp,
             include_prefix="mcp",
             prompt_template="mcp_tool_executor_prompt",
         )
         self.web_search_manager = WebSearchManager(chat_id=self.chat_stream.stream_id, enable_cache=True, cache_ttl=2)
+        self.capability_router = CapabilityRouter(chat_id=self.chat_stream.stream_id)
         self.url_fetcher = UrlContentFetcher()
 
     def _check_mcp_permission(self, user_id: str = "") -> bool:
@@ -613,15 +618,40 @@ class DefaultReplyer:
             # === 并行执行：搜索 + 工具判定 ===
             parallel_tasks = {}
 
-            # Core-owned standard search runs only when the adapter requests it.
-            if (
+            # Web search and MCP share one capability decision. The ordinary
+            # tool executor remains unchanged and continues to run in parallel.
+            allow_web_search = (
                 not mcp_only
                 and not urls
                 and not tools_disabled
                 and capabilities.web_search_mode == "standard"
-            ):
+                and self.web_search_manager.is_available
+            )
+            has_mcp_permission = (
+                self._check_mcp_permission(user_id=user_id) if not tools_disabled else False
+            )
+            mcp_catalog = self.mcp_executor.get_tool_catalog_summary() if has_mcp_permission else ""
+            allow_mcp = bool(has_mcp_permission and not tools_disabled and mcp_catalog)
+
+            decision_task = None
+            if allow_web_search or allow_mcp:
+                decision_task = asyncio.create_task(
+                    self.capability_router.decide(
+                        chat_history=chat_history,
+                        sender=sender,
+                        target=target,
+                        bot_name=global_config.bot.nickname,
+                        allow_web_search=allow_web_search,
+                        allow_mcp=allow_mcp,
+                        mcp_catalog=mcp_catalog,
+                    )
+                )
+
+            if allow_web_search and decision_task:
                 logger.info("未检测到URL，尝试联网搜索判定")
-                parallel_tasks["search"] = self.web_search_manager.build_search_info(
+                parallel_tasks["search"] = build_search_after_decision(
+                    decision_task,
+                    self.web_search_manager,
                     chat_history=chat_history,
                     sender=sender,
                     target=target,
@@ -634,21 +664,27 @@ class DefaultReplyer:
                     sender=sender, target_message=target, chat_history=chat_history, return_details=False
                 )
 
-            # MCP 工具
-            has_mcp_permission = self._check_mcp_permission(user_id=user_id)
-            if has_mcp_permission and not tools_disabled:
-                parallel_tasks["mcp_tool"] = self.mcp_executor.execute_from_chat_message(
-                    sender=sender, target_message=target, chat_history=chat_history, return_details=False
+            # MCP 独立工具链：只有能力路由判定 need_mcp=true 才真正调用模型。
+            if allow_mcp and decision_task:
+                parallel_tasks["mcp_tool"] = execute_mcp_after_decision(
+                    decision_task,
+                    self.mcp_executor,
+                    sender=sender,
+                    target=target,
+                    chat_history=chat_history,
+                    return_details=False,
                 )
+            elif has_mcp_permission and not mcp_catalog and not tools_disabled:
+                logger.info("当前没有可用 MCP 工具，跳过 MCP 能力检查")
             else:
-                logger.info(f"用户无 MCP 权限，跳过 MCP 执行器")
+                logger.info("用户无 MCP 权限或工具已禁用，跳过 MCP 能力检查")
 
             # 并行执行所有任务
             if parallel_tasks:
                 task_keys = list(parallel_tasks.keys())
                 task_coros = list(parallel_tasks.values())
                 raw_results = await asyncio.gather(*task_coros, return_exceptions=True)
-                results_map = dict(zip(task_keys, raw_results))
+                results_map = dict(zip(task_keys, raw_results, strict=True))
             else:
                 results_map = {}
 

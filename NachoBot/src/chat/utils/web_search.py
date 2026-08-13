@@ -1,4 +1,3 @@
-import asyncio
 import json
 import re
 import time
@@ -62,7 +61,18 @@ class WebSearchManager:
         )
         self._search_enabled = search_provider is not None or self._search_provider.is_available()
 
-    async def build_search_info(self, chat_history: str, sender: str, target: str, bot_name: str) -> str:
+    @property
+    def is_available(self) -> bool:
+        return self._search_enabled
+
+    async def build_search_info(
+        self,
+        chat_history: str,
+        sender: str,
+        target: str,
+        bot_name: str,
+        decision: Optional[Dict[str, Any]] = None,
+    ) -> str:
         if not target:
             return ""
         if not self._search_enabled:
@@ -70,7 +80,8 @@ class WebSearchManager:
                 logger.warning("联网搜索未启用：Playwright 不可用")
                 self._warned_disabled = True
             return ""
-        if not self._decider_enabled and not self._warned_decider:
+        has_precomputed_decision = decision is not None
+        if not has_precomputed_decision and not self._decider_enabled and not self._warned_decider:
             logger.warning("联网搜索判定未启用：model_task_config.tool_use 为空或未配置，将仅使用关键词触发")
             self._warned_decider = True
 
@@ -78,11 +89,19 @@ class WebSearchManager:
         logger.info(f"联网搜索检查: target={target_preview}")
 
         keyword_hit = self._keyword_hit(target)
-        decision_task = asyncio.create_task(self._decide_need_search(chat_history, sender, target, bot_name))
-        decision = await decision_task
+        if decision is None:
+            decision = await self._decide_need_search(chat_history, sender, target, bot_name)
+        else:
+            decision = dict(decision)
         if decision is None:
             decision = {"need_search": False, "query": "", "reason": ""}
-        if self._decider_enabled:
+        need_search_value = decision.get("need_search")
+        if isinstance(need_search_value, str):
+            decision["need_search"] = need_search_value.lower() in ("true", "yes", "1")
+        elif not isinstance(need_search_value, bool):
+            decision["need_search"] = False
+
+        if has_precomputed_decision or self._decider_enabled:
             need_search = bool(decision.get("need_search"))
         else:
             need_search = bool(keyword_hit)

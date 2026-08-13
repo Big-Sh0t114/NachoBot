@@ -1,4 +1,5 @@
 import asyncio
+from collections import deque
 import json
 import time
 import traceback
@@ -13,7 +14,6 @@ from src.common.data_models.message_data_model import ReplyContentType
 from src.chat.message_receive.chat_stream import ChatStream, get_chat_manager
 from src.chat.runtime_capabilities import runtime_capabilities_from_stream
 from src.chat.utils.prompt_builder import global_prompt_manager
-from src.chat.utils.prompt_variables import render_dynamic_prompt_template
 from src.chat.utils.timer_calculator import Timer
 from src.chat.planner_actions.planner import ActionPlanner
 from src.chat.planner_actions.action_modifier import ActionModifier
@@ -125,9 +125,10 @@ class HeartFChatting:
         # 循环控制内部状态
         self.running: bool = False
         self._loop_task: Optional[asyncio.Task] = None  # 主循环任务
+        self._in_flight_operations: int = 0
 
         # 添加循环信息管理相关的属性
-        self.history_loop: List[CycleDetail] = []
+        self.history_loop: deque[CycleDetail] = deque(maxlen=200)
         self._cycle_counter = 0
         self._current_cycle_detail: CycleDetail = None  # type: ignore
 
@@ -346,9 +347,8 @@ class HeartFChatting:
             logger.info(f"{self.log_prefix} HeartFChatting 启动完成")
 
         except Exception as e:
-            # 启动失败时重置状态
-            self.running = False
-            self._loop_task = None
+            # start() 已经可能创建多个后台任务；统一走幂等 stop 回滚。
+            await self.stop()
             logger.error(f"{self.log_prefix} HeartFChatting 启动失败: {e}")
             raise
 
@@ -1381,7 +1381,7 @@ class HeartFChatting:
         self._focus_turn_interrupted = False
         try:
             with bind_lease(turn.lease):
-                success = await self._loopbody(turn)
+                success = await self._run_tracked_loopbody(turn)
             if not await focus_coordinator.is_current(turn.lease):
                 status = TurnStatus.SWITCHED
             elif self._focus_turn_interrupted or self._planner_interrupt_requested:
@@ -1453,12 +1453,20 @@ class HeartFChatting:
             logger.info(f"{self.log_prefix} Focus chat loop stopped")
         logger.info(f"{self.log_prefix} Focus chat loop ended")
 
+    async def _run_tracked_loopbody(self, focus_turn: FocusTurn | None = None) -> bool:
+        """记录 Planner/动作执行在途状态，防止运行时被 TTL/LRU 回收。"""
+        self._in_flight_operations += 1
+        try:
+            return await self._loopbody(focus_turn)
+        finally:
+            self._in_flight_operations = max(0, self._in_flight_operations - 1)
+
     async def _normal_chat_loop(self):
         """主循环，持续进行计划并可能回复消息，直到被外部取消。"""
         try:
             while self.running:
                 # 主循环
-                success = await self._loopbody()
+                success = await self._run_tracked_loopbody()
                 await asyncio.sleep(0.1)
                 if not success:
                     break
