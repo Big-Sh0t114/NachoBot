@@ -2,6 +2,8 @@
 
 NachoBot 的 Discord 语音频道适配器，支持在 Discord 语音频道中进行实时语音对话。
 
+Discord 文字消息由 Koishi Adapter 负责；本目录只处理语音频道、共享 ASR 与 TTS 播放。
+
 ## 功能
 
 - Discord 语音频道实时语音对话
@@ -18,6 +20,8 @@ NachoBot 的 Discord 语音频道适配器，支持在 Discord 语音频道中�
 - `discord.app_id`：Discord Application ID
 - `discord.proxy_url`：代理地址（如需）
 - `nachobot.host` / `nachobot.port`：NachoBot 核心地址
+
+推荐在仓库根目录运行 `launch_discord.bat`，一次启动 Koishi、文字适配器和 DiscordVC；单独调试本适配器时再使用文末命令。
 
 语音包在说话期间持续送入
 `NachoBot-Multimodal-Adapter/src/asr/streaming.py`，VAD 结束时只读取

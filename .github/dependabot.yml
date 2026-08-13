@@ -11,7 +11,7 @@ updates:
       - "NachoBot-Multimodal-Adapter"
       - "NachoBot-Napcat-Adapter"
       - "NachoBot-UniversalVC-Adapter"
-      - "webui"
+      - "webUI"
 
     schedule:
       interval: "monthly"
@@ -27,4 +27,10 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    target-branch: "dev"
+
+  - package-ecosystem: "npm"
+    directory: "/koishi-app"
+    schedule:
+      interval: "monthly"
     target-branch: "dev"
