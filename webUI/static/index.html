@@ -26,7 +26,7 @@
     <!-- Splash — inline HTML autoplays video before any JS loads -->
     <div id="startup-screen"
         style="position:fixed;top:0;left:0;width:100vw;height:100vh;background:var(--bg-base,#0f172a);z-index:9999;display:flex;align-items:center;justify-content:center;transition:opacity 1s ease-in-out;opacity:1;">
-        <video id="startup-video" src="/resources/NachoBotLogoAnimation.mp4" autoplay muted playsinline
+        <video id="startup-video" src="/resources/NachoBotLogoAnimation.mp4" autoplay muted playsinline preload="auto"
             style="width:75%;height:auto;max-height:75vh;object-fit:contain;pointer-events:none;transform:translateZ(0);will-change:transform;-webkit-mask-image:radial-gradient(ellipse at center,black 60%,transparent 95%);mask-image:radial-gradient(ellipse at center,black 60%,transparent 95%);"></video>
     </div>
 
