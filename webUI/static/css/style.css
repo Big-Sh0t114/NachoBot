@@ -436,6 +436,240 @@ body {
     box-shadow: var(--shadow-md);
 }
 
+/* Primary NachoBot launch unit: Core + exactly one runtime profile. */
+.launch-card {
+    grid-column: 1 / -1;
+    border-color: rgba(13, 148, 136, 0.22);
+}
+
+.launch-card:hover {
+    transform: none;
+}
+
+.launch-card-header {
+    background: linear-gradient(135deg, rgba(13, 148, 136, 0.08), rgba(59, 130, 246, 0.05));
+}
+
+.launch-card-body {
+    padding: 20px;
+    flex: 1;
+}
+
+.launch-profile-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 16px;
+}
+
+.launch-profile-title {
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.launch-profile-hint {
+    margin-top: 3px;
+    font-size: 0.78rem;
+    color: var(--text-muted);
+}
+
+.launch-exclusive-badge {
+    flex-shrink: 0;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: #dbeafe;
+    color: #1d4ed8;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+}
+
+.launch-profile-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.launch-profile {
+    position: relative;
+    min-width: 0;
+    padding: 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: rgba(255, 255, 255, 0.5);
+    color: var(--text-primary);
+    text-align: left;
+    font: inherit;
+    cursor: pointer;
+    transition: border-color var(--transition), background var(--transition), box-shadow var(--transition), transform var(--transition);
+}
+
+.launch-profile:not(:disabled):hover {
+    transform: translateY(-1px);
+    border-color: rgba(13, 148, 136, 0.45);
+    background: rgba(255, 255, 255, 0.72);
+}
+
+.launch-profile.selected {
+    border-color: var(--accent);
+    background: var(--accent-bg);
+    box-shadow: 0 0 0 2px rgba(13, 148, 136, 0.10);
+}
+
+.launch-profile.active {
+    border-color: var(--success);
+}
+
+.launch-profile:disabled {
+    cursor: default;
+}
+
+.launch-profile-topline {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+.launch-profile-radio {
+    width: 15px;
+    height: 15px;
+    flex-shrink: 0;
+    border: 2px solid var(--text-muted);
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: inset 0 0 0 3px #fff;
+}
+
+.launch-profile.selected .launch-profile-radio {
+    border-color: var(--accent);
+    background: var(--accent);
+}
+
+.launch-profile-name {
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.launch-profile-code {
+    color: var(--text-muted);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem;
+    font-weight: 600;
+}
+
+.launch-profile-tag {
+    margin-left: auto;
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: #f1f5f9;
+    color: var(--text-secondary);
+    font-size: 0.68rem;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.launch-profile.selected .launch-profile-tag {
+    background: rgba(13, 148, 136, 0.12);
+    color: var(--accent-dark);
+}
+
+.launch-profile-summary {
+    margin-top: 14px;
+    font-size: 0.85rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.launch-profile-detail {
+    margin-top: 4px;
+    min-height: 34px;
+    color: var(--text-secondary);
+    font-size: 0.76rem;
+    line-height: 1.45;
+}
+
+.launch-profile-resource {
+    margin-top: 12px;
+    color: var(--text-muted);
+    font-size: 0.72rem;
+}
+
+.launch-profile-state {
+    position: absolute;
+    right: 12px;
+    bottom: 12px;
+    font-size: 0.68rem;
+    font-weight: 700;
+    color: var(--success);
+}
+
+.launch-selection-summary {
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border-light);
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+}
+
+.launch-progress {
+    margin-top: 16px;
+    padding: 14px 16px;
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-md);
+    background: rgba(255, 255, 255, 0.34);
+}
+
+.launch-progress-title {
+    margin-bottom: 6px;
+    color: var(--text-muted);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+}
+
+.launch-progress-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 9px 0;
+    border-bottom: 1px solid var(--border-light);
+}
+
+.launch-progress-row:last-child {
+    border-bottom: none;
+}
+
+.launch-progress-status {
+    flex-shrink: 0;
+    font-size: 0.72rem;
+    font-weight: 700;
+}
+
+.launch-progress-status.stopped  { color: var(--text-muted); }
+.launch-progress-status.starting { color: var(--info); }
+.launch-progress-status.running  { color: var(--success); }
+.launch-progress-status.stopping { color: var(--warning); }
+.launch-progress-status.error    { color: var(--error); }
+
+.launch-card-footer {
+    align-items: stretch;
+}
+
+@media (max-width: 900px) {
+    .launch-profile-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .launch-profile-detail {
+        min-height: 0;
+    }
+}
+
 .group-card-header {
     padding: 20px;
     display: flex;
@@ -475,10 +709,11 @@ body {
     letter-spacing: 0.03em;
 }
 
-.group-status-badge.stopped { background: #f1f5f9; color: var(--text-muted); }
-.group-status-badge.partial { background: #fef3c7; color: #92400e; }
-.group-status-badge.running { background: #dcfce7; color: #166534; }
-.group-status-badge.error   { background: #fee2e2; color: #991b1b; }
+.group-status-badge.stopped  { background: #f1f5f9; color: var(--text-muted); }
+.group-status-badge.starting { background: #dbeafe; color: #1d4ed8; }
+.group-status-badge.partial  { background: #fef3c7; color: #92400e; }
+.group-status-badge.running  { background: #dcfce7; color: #166534; }
+.group-status-badge.error    { background: #fee2e2; color: #991b1b; }
 
 .group-card-body {
     padding: 16px 20px;

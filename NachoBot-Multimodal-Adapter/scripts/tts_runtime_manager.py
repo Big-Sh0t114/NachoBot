@@ -345,11 +345,19 @@ def ensure_gpt_assets(python: Path, source_dir: Path, runtime_dir: Path) -> None
     else:
         sovits_base = "v2Pro/s2Gv2Pro.pth"
 
+    # Keep the upstream v2 default inference weights available as a fallback.
+    # If a user-configured preset is missing, make_gpt_infer_config() falls back
+    # to GPT-SoVITS' bundled tts_infer.yaml, which references these two files.
+    fallback_t2s = "gsv-v2final-pretrained/s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt"
+    fallback_vits = "gsv-v2final-pretrained/s2G2333k.pth"
+
     inference_patterns = [
         "chinese-hubert-base/**",
         "chinese-roberta-wwm-ext-large/**",
         "s1v3.ckpt",
         sovits_base,
+        fallback_t2s,
+        fallback_vits,
         "sv/pretrained_eres2netv2w24s4ep4.ckpt",
     ]
     inference_markers = [
@@ -357,6 +365,8 @@ def ensure_gpt_assets(python: Path, source_dir: Path, runtime_dir: Path) -> None
         pretrained_dir / "chinese-roberta-wwm-ext-large" / "pytorch_model.bin",
         pretrained_dir / "s1v3.ckpt",
         pretrained_dir / sovits_base,
+        pretrained_dir / fallback_t2s,
+        pretrained_dir / fallback_vits,
         pretrained_dir / "sv" / "pretrained_eres2netv2w24s4ep4.ckpt",
     ]
     if not all(path.is_file() for path in inference_markers):
@@ -373,6 +383,8 @@ def ensure_gpt_assets(python: Path, source_dir: Path, runtime_dir: Path) -> None
                 "chinese-roberta-wwm-ext-large/pytorch_model.bin",
                 "s1v3.ckpt",
                 sovits_base,
+                fallback_t2s,
+                fallback_vits,
                 "sv/pretrained_eres2netv2w24s4ep4.ckpt",
             ]
             for filename in direct_files:

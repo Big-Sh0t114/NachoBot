@@ -353,6 +353,14 @@ class GroupDef:
 SERVICE_DEFS: dict[str, ServiceDef] = {}
 GROUP_DEFS: dict[str, GroupDef] = {}
 
+# User-facing NachoBot launch profiles.  These remain backed by the existing
+# groups so older group/service API callers continue to work unchanged.
+LAUNCH_PROFILE_GROUPS: dict[str, str] = {
+    "full": "tts_full",
+    "lite": "tts_lite",
+    "potato": "potato",
+}
+
 
 def _register_services():
     """Build the service and group lookup tables by dynamically reading adapter configs."""
@@ -685,6 +693,75 @@ class ProcessManager:
             })
         return result
 
+    def get_launch_status(self) -> dict[str, Any]:
+        """Return the user-facing Core + mutually-exclusive runtime profile state."""
+        _register_services()
+        core = self.get_service_status("nachobot")
+        profiles: list[dict[str, Any]] = []
+        active_profile: str | None = None
+        error_profile: str | None = None
+
+        for profile_id, group_id in LAUNCH_PROFILE_GROUPS.items():
+            gdef = GROUP_DEFS[group_id]
+            services = [self.get_service_status(sid) for sid in gdef.services]
+            statuses = [service["status"] for service in services]
+            if any(status == ServiceStatus.ERROR.value for status in statuses):
+                status = ServiceStatus.ERROR.value
+                error_profile = error_profile or profile_id
+            elif any(status == ServiceStatus.STOPPING.value for status in statuses):
+                status = ServiceStatus.STOPPING.value
+                active_profile = active_profile or profile_id
+            elif any(status == ServiceStatus.STARTING.value for status in statuses):
+                status = ServiceStatus.STARTING.value
+                active_profile = active_profile or profile_id
+            elif services and all(status == ServiceStatus.RUNNING.value for status in statuses):
+                status = ServiceStatus.RUNNING.value
+                active_profile = active_profile or profile_id
+            elif any(status == ServiceStatus.RUNNING.value for status in statuses):
+                status = "partial"
+                active_profile = active_profile or profile_id
+            else:
+                status = ServiceStatus.STOPPED.value
+
+            profiles.append({
+                "id": profile_id,
+                "group_id": group_id,
+                "status": status,
+                "services": services,
+            })
+
+        launch_task = self._operation_tasks.get("launch")
+        launch_kind = self._operation_kinds.get("launch") if launch_task and not launch_task.done() else None
+        if launch_kind == "start":
+            status = ServiceStatus.STARTING.value
+        elif launch_kind == "stop":
+            status = ServiceStatus.STOPPING.value
+        elif core["status"] == ServiceStatus.ERROR.value:
+            status = ServiceStatus.ERROR.value
+        elif core["status"] == ServiceStatus.RUNNING.value and active_profile and any(
+            profile["id"] == active_profile and profile["status"] == ServiceStatus.RUNNING.value
+            for profile in profiles
+        ):
+            # A currently active healthy profile wins over stale ERROR state left
+            # behind by another mutually-exclusive profile.
+            status = ServiceStatus.RUNNING.value
+        elif active_profile:
+            status = "partial"
+        elif error_profile:
+            status = ServiceStatus.ERROR.value
+        elif core["status"] != ServiceStatus.STOPPED.value:
+            status = "partial"
+        else:
+            status = ServiceStatus.STOPPED.value
+
+        return {
+            "status": status,
+            "active_profile": active_profile or error_profile,
+            "operation": launch_kind,
+            "core": core,
+            "profiles": profiles,
+        }
+
     def get_log_history(self, service_id: str) -> list[str]:
         """Return buffered log lines for a service."""
         state = self.states.get(service_id)
@@ -829,6 +906,96 @@ class ProcessManager:
             operation_kind="stop",
             replace=True,
         )
+
+    def request_start_launch(self, profile_id: str) -> None:
+        """Start Core and exactly one runtime profile as one managed operation."""
+        _register_services()
+        profile_id = str(profile_id or "").strip().lower()
+        group_id = LAUNCH_PROFILE_GROUPS.get(profile_id)
+        if group_id is None:
+            raise ValueError(f"Unknown launch profile: {profile_id}")
+
+        existing = self._operation_tasks.get("launch")
+        if existing and not existing.done():
+            raise RuntimeError("NachoBot launch is already changing state")
+        for group in ("core", *LAUNCH_PROFILE_GROUPS.values()):
+            operation = self._operation_tasks.get(f"group:{group}")
+            if operation and not operation.done():
+                raise RuntimeError(f"Group {group} is already changing state")
+
+        self._validate_group_start(group_id)
+        affected = tuple(GROUP_DEFS["core"].services + GROUP_DEFS[group_id].services)
+        self._schedule_operation(
+            "launch",
+            lambda: self.start_launch(profile_id),
+            affected,
+            operation_kind="start",
+        )
+
+    def request_stop_launch(self) -> None:
+        """Cancel an in-flight launch and stop every runtime profile plus Core."""
+        _register_services()
+        existing = self._operation_tasks.get("launch")
+        if existing and not existing.done() and self._operation_kinds.get("launch") == "stop":
+            return
+        affected: list[str] = list(GROUP_DEFS["core"].services)
+        for group_id in LAUNCH_PROFILE_GROUPS.values():
+            affected.extend(GROUP_DEFS[group_id].services)
+        self._schedule_operation(
+            "launch",
+            self.stop_launch,
+            tuple(affected),
+            operation_kind="stop",
+            replace=True,
+        )
+
+    async def start_launch(self, profile_id: str) -> None:
+        """Run Core + selected profile transactionally, rolling back this launch on failure."""
+        _register_services()
+        group_id = LAUNCH_PROFILE_GROUPS.get(profile_id)
+        if group_id is None:
+            raise ValueError(f"Unknown launch profile: {profile_id}")
+
+        core_state = self.states.get("nachobot")
+        core_was_running = bool(core_state and core_state.status == ServiceStatus.RUNNING)
+        try:
+            await self.start_group("core")
+            core_state = self.states.get("nachobot")
+            if not core_state or core_state.status != ServiceStatus.RUNNING:
+                return
+
+            await self.start_group(group_id)
+            profile_ready = all(
+                self.states.get(service_id)
+                and self.states[service_id].status == ServiceStatus.RUNNING
+                for service_id in GROUP_DEFS[group_id].services
+            )
+            if profile_ready:
+                return
+
+            await self.stop_group(group_id)
+            if not core_was_running:
+                await self.stop_group("core")
+        except asyncio.CancelledError:
+            await self.stop_group(group_id)
+            if not core_was_running:
+                await self.stop_group("core")
+            raise
+        except Exception:
+            try:
+                await self.stop_group(group_id)
+                if not core_was_running:
+                    await self.stop_group("core")
+            except Exception:
+                logger.exception("Failed to roll back launch profile %s", profile_id)
+            raise
+
+    async def stop_launch(self) -> None:
+        """Stop all mutually-exclusive runtime profiles, then stop Core."""
+        _register_services()
+        for group_id in LAUNCH_PROFILE_GROUPS.values():
+            await self.stop_group(group_id)
+        await self.stop_group("core")
 
     def _active_relay_port(self) -> int | None:
         """Return the port actually used when the current relay owner started."""
@@ -1083,7 +1250,11 @@ class ProcessManager:
 
             await self._broadcast(service_id, f"[WebUI] {sdef.name} spawned (PID: {proc.pid})\n")
             if sdef.wait_port and sdef.port:
-                ready = await self._wait_for_port(service_id, sdef.port, timeout=180)
+                # TTS engines may spend an arbitrary amount of time downloading
+                # model assets on first launch. Do not treat a fixed readiness
+                # deadline as a startup failure while the managed process is alive.
+                readiness_timeout = None if service_id in ("tts_engine_full", "tts_engine_lite") else 180
+                ready = await self._wait_for_port(service_id, sdef.port, timeout=readiness_timeout)
                 if not ready:
                     await self._terminate_state_process(state)
                     state.status = ServiceStatus.ERROR
@@ -1727,17 +1898,24 @@ class ProcessManager:
         except Exception:
             return False
 
-    async def _wait_for_port(self, service_id: str, port: int, timeout: int = 180) -> bool:
-        """Wait for a port to become available. Returns True if ready, False if timed out."""
+    async def _wait_for_port(self, service_id: str, port: int, timeout: int | None = 180) -> bool:
+        """Wait for a port to become available until ready, process exit, or timeout."""
         import socket
+
         sdef = SERVICE_DEFS.get(service_id)
-        await self._broadcast(service_id, f"[WebUI] 等待端口 {port} 就绪 (最长 {timeout}s)...\n")
-        for i in range(timeout):
-            # Check if the process died while we're waiting
+        if timeout is None:
+            await self._broadcast(service_id, f"[WebUI] 等待端口 {port} 就绪（模型下载期间不会超时）...\n")
+        else:
+            await self._broadcast(service_id, f"[WebUI] 等待端口 {port} 就绪 (最长 {timeout}s)...\n")
+
+        elapsed = 0
+        while timeout is None or elapsed < timeout:
+            # Check if the process died while we're waiting.
             state = self.states.get(service_id)
             if state and state.status in (ServiceStatus.STOPPED, ServiceStatus.ERROR):
                 await self._broadcast(service_id, "[WebUI] 进程已退出，停止等待端口\n")
                 return False
+
             if sdef and sdef.health_mode:
                 ready = await asyncio.to_thread(
                     self._health_mode_ready,
@@ -1747,21 +1925,27 @@ class ProcessManager:
                 if ready:
                     await self._broadcast(
                         service_id,
-                        f"[WebUI] Port {port} is ready ({sdef.health_mode}). ({i+1}s)\n",
+                        f"[WebUI] Port {port} is ready ({sdef.health_mode}). ({elapsed + 1}s)\n",
                     )
                     return True
             else:
                 try:
                     with socket.create_connection(("127.0.0.1", port), timeout=1):
-                        await self._broadcast(service_id, f"[WebUI] Port {port} is ready. ({i+1}s)\n")
+                        await self._broadcast(
+                            service_id,
+                            f"[WebUI] Port {port} is ready. ({elapsed + 1}s)\n",
+                        )
                         return True
                 except (ConnectionRefusedError, OSError, socket.timeout):
                     pass
+
             await asyncio.sleep(1)
-        message = f"[WebUI] WARNING: Port {port} not ready after {timeout}s."
-        if service_id in ("tts_engine_full", "tts_engine_lite"):
-            message += " 如果你是初次启动，等待模型下载完毕后重启该服务。"
-        await self._broadcast(service_id, message + "\n")
+            elapsed += 1
+
+        await self._broadcast(
+            service_id,
+            f"[WebUI] WARNING: Port {port} not ready after {timeout}s.\n",
+        )
         return False
 
     def _resolve_cmd(self, sdef: ServiceDef) -> tuple[list[str], str, dict[str, str]]:

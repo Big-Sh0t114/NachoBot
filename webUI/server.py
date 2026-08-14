@@ -254,6 +254,33 @@ async def get_services():
     return process_mgr.get_all_statuses()
 
 
+@app.get("/api/launch")
+async def get_launch_status():
+    return process_mgr.get_launch_status()
+
+
+class LaunchStartRequest(BaseModel):
+    profile: str
+
+
+@app.post("/api/launch/start")
+async def start_launch(body: LaunchStartRequest):
+    try:
+        process_mgr.request_start_launch(body.profile)
+        return {"status": "starting", "profile": body.profile.strip().lower()}
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/launch/stop")
+async def stop_launch():
+    try:
+        process_mgr.request_stop_launch()
+        return {"status": "stopping"}
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(400, str(e))
+
+
 @app.post("/api/groups/{group_id}/start")
 async def start_group(group_id: str):
     try:
