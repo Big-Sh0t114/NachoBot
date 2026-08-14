@@ -90,10 +90,10 @@ class NachobotServerConfig(ConfigBase):
     """平台名称，“qq”"""
 
     host: str = "localhost"
-    """NachoCore的主机地址"""
+    """Multimodal Adapter 消息中继的主机地址"""
 
-    port: int = 8000
-    """NachoCore的端口号"""
+    port: int = 8070
+    """消息中继端口，默认 8070，可按部署需要修改"""
 
 
 @dataclass

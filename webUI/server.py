@@ -159,7 +159,6 @@ async def get_config(file_id: str):
     return {
         "data": data,
         "raw": raw,
-        "secret_placeholder": config_mgr.secret_placeholder,
     }
 
 
@@ -501,7 +500,6 @@ async def get_plugin_config(plugin_id: str):
     return {
         "data": data,
         "raw": raw,
-        "secret_placeholder": plugin_mgr.secret_placeholder,
     }
 
 

@@ -3,14 +3,8 @@ NachoBot WebUI — Configuration Manager
 Handles TOML config file reading, writing, and backup with comment preservation.
 """
 
-import base64
-import hashlib
-import hmac
-import json
-import secrets
 import shutil
-from copy import deepcopy
-from collections.abc import Mapping, MutableMapping, MutableSequence
+from collections.abc import Mapping, MutableSequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -60,10 +54,6 @@ SENSITIVE_FIELDS = {
     "password", "passwd", "cookie", "cookies", "authorization",
     "credential", "credentials", "cert_file", "key_file",
 }
-SECRET_PLACEHOLDER = "__NACHOBOT_KEEP_EXISTING_SECRET__:"
-_SECRET_PLACEHOLDER_KEY = secrets.token_bytes(32)
-
-
 def _is_sensitive(key: str) -> bool:
     """Check whether a key name is considered sensitive."""
     k = key.lower()
@@ -85,163 +75,7 @@ def _mask_secret_value(value: Any) -> Any:
         return [_mask_secret_value(item) for item in value]
     if value in (None, ""):
         return value
-    return SECRET_PLACEHOLDER
-
-
-def _make_secret_placeholder(path: tuple[str | int, ...], value: Any) -> str:
-    path_payload = json.dumps(path, ensure_ascii=False, separators=(",", ":"))
-    payload = f"{path_payload}\0{type(value).__name__}\0{value}".encode()
-    digest = hmac.new(_SECRET_PLACEHOLDER_KEY, payload, hashlib.sha256).digest()
-    token = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
-    return SECRET_PLACEHOLDER + token
-
-
-def _tokenize_secret_value(value: Any, path: tuple[str | int, ...]) -> Any:
-    if isinstance(value, Mapping):
-        return {
-            key: _tokenize_secret_value(item, path + (str(key),))
-            for key, item in value.items()
-        }
-    if isinstance(value, (list, tuple, MutableSequence)):
-        return [
-            _tokenize_secret_value(item, path + (index,))
-            for index, item in enumerate(value)
-        ]
-    if value in (None, ""):
-        return value
-    return _make_secret_placeholder(path, value)
-
-
-def _redact_toml_node(node: Any, path: tuple[str | int, ...] = ()) -> None:
-    if isinstance(node, MutableMapping):
-        for key in list(node.keys()):
-            value = node[key]
-            child_path = path + (str(key),)
-            if _is_sensitive(str(key)):
-                node[key] = _tokenize_secret_value(value, child_path)
-            else:
-                _redact_toml_node(value, child_path)
-    elif isinstance(node, MutableSequence):
-        for index, item in enumerate(node):
-            _redact_toml_node(item, path + (index,))
-
-
-def sanitize_toml_for_edit(raw: str) -> str:
-    """Return editable TOML with every recognized secret replaced by a sentinel."""
-    doc = tomlkit.parse(raw)
-    _redact_toml_node(doc)
-    return tomlkit.dumps(doc)
-
-
-def _collect_secret_tokens(
-    node: Any,
-    tokens: dict[str, Any],
-    path: tuple[str | int, ...] = (),
-) -> None:
-    if isinstance(node, Mapping):
-        for key, value in node.items():
-            child_path = path + (str(key),)
-            if _is_sensitive(str(key)):
-                _collect_secret_value_tokens(value, tokens, child_path)
-            else:
-                _collect_secret_tokens(value, tokens, child_path)
-    elif isinstance(node, (list, tuple, MutableSequence)):
-        for index, value in enumerate(node):
-            _collect_secret_tokens(value, tokens, path + (index,))
-
-
-def _collect_secret_value_tokens(
-    value: Any,
-    tokens: dict[str, Any],
-    path: tuple[str | int, ...],
-) -> None:
-    if isinstance(value, Mapping):
-        for key, item in value.items():
-            _collect_secret_value_tokens(item, tokens, path + (str(key),))
-    elif isinstance(value, (list, tuple, MutableSequence)):
-        for index, item in enumerate(value):
-            _collect_secret_value_tokens(item, tokens, path + (index,))
-    elif value not in (None, ""):
-        tokens[_make_secret_placeholder(path, value)] = deepcopy(value)
-
-
-def _restore_secret_placeholders(
-    node: Any,
-    tokens: Mapping[str, Any],
-    *,
-    in_sensitive_field: bool = False,
-) -> Any:
-    if isinstance(node, MutableMapping):
-        for key in list(node.keys()):
-            node[key] = _restore_secret_placeholders(
-                node[key],
-                tokens,
-                in_sensitive_field=in_sensitive_field or _is_sensitive(str(key)),
-            )
-        return node
-    if isinstance(node, MutableSequence):
-        for index, value in enumerate(list(node)):
-            node[index] = _restore_secret_placeholders(
-                value,
-                tokens,
-                in_sensitive_field=in_sensitive_field,
-            )
-        return node
-    if isinstance(node, str) and node.startswith(SECRET_PLACEHOLDER):
-        if not in_sensitive_field:
-            raise ValueError("秘密占位符只能用于秘密字段")
-        if node not in tokens:
-            raise ValueError("秘密占位符已失效；请重新加载配置后再保存")
-        return deepcopy(tokens[node])
-    return node
-
-
-def merge_toml_secrets(raw: str, existing_raw: str) -> str:
-    """Resolve secret sentinels against the current file before persisting."""
-    incoming = tomlkit.parse(raw)
-    existing = tomlkit.parse(existing_raw) if existing_raw else tomlkit.document()
-    tokens: dict[str, Any] = {}
-    _collect_secret_tokens(existing, tokens)
-    _restore_secret_placeholders(incoming, tokens)
-    return tomlkit.dumps(incoming)
-
-
-def _sanitize_env_for_edit(raw: str) -> str:
-    lines: list[str] = []
-    for line in raw.splitlines(keepends=True):
-        content = line.rstrip("\r\n")
-        ending = line[len(content):]
-        prefix, separator, value = content.partition("=")
-        key = prefix.strip()
-        if separator and _is_sensitive(key) and value.strip():
-            content = f"{prefix}={_make_secret_placeholder(('env', key), value)}"
-        lines.append(content + ending)
-    return "".join(lines)
-
-
-def _merge_env_secrets(raw: str, existing_raw: str) -> str:
-    existing_tokens: dict[str, str] = {}
-    for line in existing_raw.splitlines():
-        prefix, separator, value = line.partition("=")
-        key = prefix.strip()
-        if separator and _is_sensitive(key) and value.strip():
-            existing_tokens[_make_secret_placeholder(("env", key), value)] = value
-
-    lines: list[str] = []
-    for line in raw.splitlines(keepends=True):
-        content = line.rstrip("\r\n")
-        ending = line[len(content):]
-        prefix, separator, value = content.partition("=")
-        key = prefix.strip()
-        candidate = value.strip()
-        if separator and candidate.startswith(SECRET_PLACEHOLDER):
-            if not _is_sensitive(key):
-                raise ValueError("秘密占位符只能用于秘密字段")
-            if candidate not in existing_tokens:
-                raise ValueError(f"秘密占位符 {key} 已失效；请重新加载配置后再保存")
-            content = f"{prefix}={existing_tokens[candidate]}"
-        lines.append(content + ending)
-    return "".join(lines)
+    return "****"
 
 
 class ConfigManager:
@@ -249,10 +83,6 @@ class ConfigManager:
 
     def __init__(self, root_dir: Path | None = None):
         self.root = root_dir or ROOT_DIR
-
-    @property
-    def secret_placeholder(self) -> str:
-        return SECRET_PLACEHOLDER
 
     # ---- listing ----
 
@@ -298,19 +128,10 @@ class ConfigManager:
         return data
 
     def read_config_raw(self, file_id: str) -> str:
-        """Read editable config text without disclosing existing secrets."""
+        """Read raw config text for the local WebUI editor."""
         entry = self._find(file_id)
         full = self._entry_path(entry)
-        raw = full.read_text(encoding="utf-8")
-        if full.name == ".env":
-            return _sanitize_env_for_edit(raw)
-        try:
-            return sanitize_toml_for_edit(raw)
-        except Exception as exc:
-            raise ValueError(
-                "配置语法错误，无法在不泄露秘密的前提下显示原始内容；"
-                "请恢复有效备份或在本机编辑文件"
-            ) from exc
+        return full.read_text(encoding="utf-8")
 
     # ---- writing ----
 
@@ -346,14 +167,9 @@ class ConfigManager:
         *,
         validator: Callable[[str], None] | None = None,
     ) -> None:
-        """Write editable text, resolving secret sentinels against current data."""
+        """Write raw config text from the local WebUI editor."""
         entry = self._find(file_id)
         full = self._entry_path(entry)
-        existing_raw = full.read_text(encoding="utf-8") if full.exists() else ""
-        if full.name == ".env":
-            raw = _merge_env_secrets(raw, existing_raw)
-        else:
-            raw = merge_toml_secrets(raw, existing_raw)
         if validator is not None:
             validator(raw)
         self._backup(full, backup_type="auto")

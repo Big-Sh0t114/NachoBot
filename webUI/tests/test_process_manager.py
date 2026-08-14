@@ -11,7 +11,20 @@ if str(WEBUI_DIR) not in sys.path:
     sys.path.insert(0, str(WEBUI_DIR))
 
 import process_manager as process_module
+import setup_checks as setup_checks_module
 from process_manager import ProcessManager, ServiceDef, ServiceStatus
+
+
+class FakeStdin:
+    def __init__(self):
+        self.writes: list[bytes] = []
+        self.drain_calls = 0
+
+    def write(self, data: bytes) -> None:
+        self.writes.append(data)
+
+    async def drain(self) -> None:
+        self.drain_calls += 1
 
 
 class FakeProcess:
@@ -174,6 +187,27 @@ class ProcessManagerTests(unittest.IsolatedAsyncioTestCase):
         await self.manager.stop_service("svc")
         self.assertEqual(self.manager.states["svc"].status, ServiceStatus.STOPPED)
 
+    async def test_send_input_accepts_starting_service_with_live_stdin(self) -> None:
+        process = FakeProcess()
+        process.stdin = FakeStdin()
+        self.manager.states["svc"] = process_module.ServiceState(
+            status=ServiceStatus.STARTING,
+            process=process,
+        )
+
+        await self.manager.send_input("svc", "confirmed\n")
+
+        self.assertEqual(process.stdin.writes, [b"confirmed\n"])
+        self.assertEqual(process.stdin.drain_calls, 1)
+
+    async def test_send_input_rejects_service_without_live_process(self) -> None:
+        self.manager.states["svc"] = process_module.ServiceState(
+            status=ServiceStatus.STOPPED,
+            process=None,
+        )
+        with self.assertRaisesRegex(ValueError, "not accepting input"):
+            await self.manager.send_input("svc", "confirmed\n")
+
     async def test_windows_job_setup_without_pid_is_error_and_reaps_leader(self) -> None:
         process = FakeProcess()
         facade = FakeWindowsJobFacade()
@@ -241,6 +275,147 @@ class ProcessManagerTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             self.manager.request_start_service("missing")
         self.assertFalse(self.manager._operation_tasks)
+
+    async def test_running_service_start_is_idempotent_before_relay_validation(self) -> None:
+        adapter = ServiceDef(
+            "napcat_adapter",
+            "NapCat Adapter",
+            "qq_adapter",
+            ".",
+            ["fake"],
+        )
+        process_module.SERVICE_DEFS = {"napcat_adapter": adapter}
+        self.manager.states["napcat_adapter"] = process_module.ServiceState(
+            status=ServiceStatus.RUNNING
+        )
+        with patch.object(
+            self.manager,
+            "_validate_service_start",
+            side_effect=RuntimeError("should not validate"),
+        ) as validate:
+            self.manager.request_start_service("napcat_adapter")
+
+        validate.assert_not_called()
+        self.assertFalse(self.manager._operation_tasks)
+
+    async def test_configured_consumer_relay_port_uses_adapter_config(self) -> None:
+        process_module.SERVICE_DEFS = {
+            "potato_relay": ServiceDef(
+                "potato_relay", "Relay", "potato", ".", ["fake"], port=9000
+            ),
+            "napcat_adapter": ServiceDef(
+                "napcat_adapter", "NapCat Adapter", "qq_adapter", ".", ["fake"]
+            ),
+        }
+        with patch.object(
+            Path,
+            "read_text",
+            return_value="[nachobot_server]\nhost = \"127.0.0.1\"\nport = 9123\n",
+        ):
+            port = self.manager._configured_consumer_relay_port("napcat_adapter")
+
+        self.assertEqual(port, 9123)
+
+    async def test_relay_consumer_rejects_configured_port_mismatch(self) -> None:
+        process_module.SERVICE_DEFS = {
+            "potato_relay": ServiceDef(
+                "potato_relay", "Relay", "potato", ".", ["fake"], port=9000
+            ),
+            "napcat_adapter": ServiceDef(
+                "napcat_adapter", "NapCat Adapter", "qq_adapter", ".", ["fake"]
+            ),
+        }
+        self.manager.states["potato_relay"] = process_module.ServiceState(
+            status=ServiceStatus.RUNNING
+        )
+        with patch.object(
+            self.manager,
+            "_configured_consumer_relay_port",
+            return_value=9123,
+        ):
+            with self.assertRaisesRegex(RuntimeError, r":9123.*:9000"):
+                self.manager._require_relay_owner("napcat_adapter")
+
+    async def test_direct_relay_start_rejects_existing_owner(self) -> None:
+        process_module.SERVICE_DEFS = {
+            "tts_adapter_full": ServiceDef(
+                "tts_adapter_full", "Full Relay", "tts_full", ".", ["fake"], port=9000
+            ),
+            "potato_relay": ServiceDef(
+                "potato_relay", "Potato Relay", "potato", ".", ["fake"], port=9000
+            ),
+        }
+        self.manager.states["potato_relay"] = process_module.ServiceState(
+            status=ServiceStatus.RUNNING
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "already owns the shared endpoint"):
+            self.manager._validate_service_start("tts_adapter_full")
+
+    async def test_active_relay_port_uses_start_snapshot_after_config_reload(self) -> None:
+        process_module.SERVICE_DEFS = {
+            "potato_relay": ServiceDef(
+                "potato_relay", "Relay", "potato", ".", ["fake"], port=9100
+            ),
+            "napcat_adapter": ServiceDef(
+                "napcat_adapter", "NapCat Adapter", "qq_adapter", ".", ["fake"]
+            ),
+        }
+        self.manager.states["potato_relay"] = process_module.ServiceState(
+            status=ServiceStatus.RUNNING,
+            started_port=9000,
+        )
+
+        self.assertEqual(self.manager._active_relay_port(), 9000)
+        with patch.object(
+            self.manager,
+            "_configured_consumer_relay_port",
+            return_value=9100,
+        ):
+            with self.assertRaisesRegex(RuntimeError, r":9100.*:9000"):
+                self.manager._require_relay_owner("napcat_adapter")
+
+    async def test_setup_port_check_uses_configured_service_ports(self) -> None:
+        probed_ports = []
+
+        def read_config(path: Path, *args, **kwargs):
+            normalized = str(path).replace("\\", "/")
+            if normalized.endswith("NachoBot/.env"):
+                return "HOST=127.0.0.1\nPORT=8100\n"
+            if normalized.endswith("NachoBot-Napcat-Adapter/config.toml"):
+                return "[napcat_server]\nhost = \"127.0.0.1\"\nport = 8195\n"
+            if normalized.endswith("NachoBot-Multimodal-Adapter/configs/base.toml"):
+                return "[server]\nhost = \"127.0.0.1\"\nport = 9123\n[enabled_tts]\nenabled = [\"GPT_Sovits\"]\n"
+            if normalized.endswith("NachoBot-Multimodal-Adapter/configs/gpt-sovits.toml"):
+                return "[tts]\nport = 9980\n"
+            if normalized.endswith("NachoBot-Multimodal-Adapter/configs/perception.toml"):
+                return "[perception]\nport = 9974\n"
+            if normalized.endswith("koishi-app/koishi.yml"):
+                return "group:server:\n  port: 5240\n"
+            raise AssertionError(f"unexpected config read: {path}")
+
+        def probe(address, timeout=1):
+            probed_ports.append(address[1])
+            raise ConnectionRefusedError
+
+        with (
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", autospec=True, side_effect=read_config),
+            patch.object(setup_checks_module.socket, "create_connection", side_effect=probe),
+        ):
+            results = setup_checks_module.EnvironmentChecker.check_ports()
+
+        ports = {item["name"]: item["port"] for item in results}
+        self.assertEqual(ports["NachoBot Core"], 8100)
+        self.assertEqual(ports["Napcat Adapter"], 8195)
+        self.assertEqual(ports["Multimodal Adapter"], 9123)
+        self.assertEqual(ports["TTS Engine"], 9980)
+        self.assertEqual(ports["VLM / ASR API"], 9974)
+        self.assertEqual(ports["Koishi"], 5240)
+        for configured in (8100, 8195, 9123, 9980, 9974, 5240):
+            self.assertIn(configured, probed_ports)
+        for default in (8000, 8095, 8070, 9880, 9874, 5140):
+            self.assertNotIn(default, probed_ports)
 
     async def test_failed_stop_is_retryable_and_visible(self) -> None:
         state = process_module.ServiceState(

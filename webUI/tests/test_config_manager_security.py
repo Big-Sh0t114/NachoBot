@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import re
 import sys
 import tempfile
 import unittest
@@ -11,7 +10,7 @@ WEBUI_DIR = Path(__file__).resolve().parents[1]
 if str(WEBUI_DIR) not in sys.path:
     sys.path.insert(0, str(WEBUI_DIR))
 
-from config_manager import ConfigManager, SECRET_PLACEHOLDER  # noqa: E402
+from config_manager import ConfigManager  # noqa: E402
 from plugin_manager import PluginManager  # noqa: E402
 
 
@@ -34,26 +33,24 @@ class ConfigManagerSecurityTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def test_raw_editor_never_receives_secret_fragments(self) -> None:
+    def test_raw_editor_receives_real_values_while_structured_view_is_masked(self) -> None:
         editable = self.manager.read_config_raw("bot_config")
-        self.assertNotIn("top-secret", editable)
-        self.assertNotIn("alpha", editable)
-        self.assertNotIn("beta", editable)
-        self.assertNotIn("password-secret", editable)
-        self.assertNotIn("credential-user", editable)
-        self.assertNotIn("credential-secret", editable)
-        self.assertEqual(editable.count(SECRET_PLACEHOLDER), 6)
+        self.assertIn("top-secret", editable)
+        self.assertIn("alpha", editable)
+        self.assertIn("beta", editable)
+        self.assertIn("password-secret", editable)
+        self.assertIn("credential-user", editable)
+        self.assertIn("credential-secret", editable)
 
         structured = self.manager.read_config("bot_config", mask_sensitive=True)
         self.assertNotIn("top-secret", str(structured))
         self.assertNotIn("credential-user", str(structured))
-        self.assertEqual(structured["credentials"]["username"], SECRET_PLACEHOLDER)
+        self.assertEqual(structured["credentials"]["username"], "****")
 
         env_editable = self.manager.read_config_raw("env")
-        self.assertNotIn("env-secret", env_editable)
-        self.assertIn(f"API_KEY={SECRET_PLACEHOLDER}", env_editable)
+        self.assertIn("API_KEY=env-secret", env_editable)
 
-    def test_saving_placeholders_preserves_existing_secrets(self) -> None:
+    def test_saving_raw_editor_text_preserves_unmodified_secrets(self) -> None:
         editable = self.manager.read_config_raw("bot_config")
         self.manager.write_config_raw("bot_config", editable.replace("visible", "changed"))
         saved = self.config_path.read_text(encoding="utf-8")
@@ -69,14 +66,12 @@ class ConfigManagerSecurityTests(unittest.TestCase):
 
     def test_secret_can_be_explicitly_replaced_or_cleared(self) -> None:
         editable = self.manager.read_config_raw("bot_config")
-        token = re.search(re.escape(SECRET_PLACEHOLDER) + r"[A-Za-z0-9_-]+", editable).group()
-        replaced = editable.replace(token, "replacement", 1)
+        replaced = editable.replace("top-secret", "replacement", 1)
         self.manager.write_config_raw("bot_config", replaced)
         self.assertIn('api_key = "replacement"', self.config_path.read_text(encoding="utf-8"))
 
         editable = self.manager.read_config_raw("bot_config")
-        token = re.search(re.escape(SECRET_PLACEHOLDER) + r"[A-Za-z0-9_-]+", editable).group()
-        cleared = editable.replace(token, "", 1)
+        cleared = editable.replace("replacement", "", 1)
         self.manager.write_config_raw("bot_config", cleared)
         self.assertIn('api_key = ""', self.config_path.read_text(encoding="utf-8"))
 
@@ -96,17 +91,6 @@ class ConfigManagerSecurityTests(unittest.TestCase):
             [(item["name"], item["api_key"]) for item in saved["providers"]],
             [("second", "second-secret"), ("first", "first-secret")],
         )
-
-    def test_stale_placeholder_cannot_overwrite_a_concurrent_secret_change(self) -> None:
-        editable = self.manager.read_config_raw("bot_config")
-        current = self.config_path.read_text(encoding="utf-8")
-        self.config_path.write_text(
-            current.replace("top-secret", "newer-secret"),
-            encoding="utf-8",
-        )
-        with self.assertRaisesRegex(ValueError, "重新加载配置"):
-            self.manager.write_config_raw("bot_config", editable)
-        self.assertIn("newer-secret", self.config_path.read_text(encoding="utf-8"))
 
     def test_restore_rejects_absolute_traversal_and_unrelated_backups(self) -> None:
         backup_name = Path(self.manager.backup_config("bot_config")).name
@@ -133,7 +117,7 @@ class ConfigManagerSecurityTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.manager.restore_backup("bot_config", link.name)
 
-    def test_write_validator_sees_merged_secret_before_disk_change(self) -> None:
+    def test_write_validator_sees_raw_editor_text_before_disk_change(self) -> None:
         editable = self.manager.read_config_raw("bot_config")
         original = self.config_path.read_text(encoding="utf-8")
 
@@ -175,13 +159,12 @@ class ConfigManagerSecurityTests(unittest.TestCase):
             self.manager.restore_backup("bot_config", backup.name)
         self.assertEqual(self.config_path.read_text(encoding="utf-8"), original)
 
-    def test_invalid_toml_fails_closed_instead_of_returning_raw_secrets(self) -> None:
-        self.config_path.write_text('api_key = "leaked"\n[broken\n', encoding="utf-8")
-        with self.assertRaises(ValueError) as raised:
-            self.manager.read_config_raw("bot_config")
-        self.assertNotIn("leaked", str(raised.exception))
+    def test_invalid_toml_raw_editor_returns_source_for_repair(self) -> None:
+        invalid_raw = 'api_key = "leaked"\n[broken\n'
+        self.config_path.write_text(invalid_raw, encoding="utf-8")
+        self.assertEqual(self.manager.read_config_raw("bot_config"), invalid_raw)
 
-    def test_plugin_editor_uses_the_same_secret_preservation_contract(self) -> None:
+    def test_plugin_editor_reads_and_writes_raw_config(self) -> None:
         plugin_dir = self.root / "NachoBot" / "plugins" / "example"
         plugin_dir.mkdir(parents=True)
         plugin_config = plugin_dir / "config.toml"
@@ -191,7 +174,7 @@ class ConfigManagerSecurityTests(unittest.TestCase):
         )
         manager = PluginManager(self.root)
         editable = manager.read_plugin_config_raw("example")
-        self.assertNotIn("plugin-secret", editable)
+        self.assertIn("plugin-secret", editable)
         manager.write_plugin_config_raw("example", editable.replace("local", "updated"))
         saved = plugin_config.read_text(encoding="utf-8")
         self.assertIn('token = "plugin-secret"', saved)

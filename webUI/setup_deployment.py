@@ -199,7 +199,8 @@ class ConfigInitializer:
         backups = []
         errors = []
 
-        # Determine TTS enablement for chain routing
+        # Determine whether platform adapters should advertise/use TTS.
+        # Relay host/port are independent persistent adapter settings.
         tts_enabled = "tts" in components
 
         for tmpl_rel, target_rel in TEMPLATE_MAP.items():
@@ -224,6 +225,7 @@ class ConfigInitializer:
                 # the NapCat adapter, keep the user's existing inbound WS contract:
                 # NapCat's websocketClient must use the same host/port/token.
                 preserved_napcat_server: dict[str, Any] | None = None
+                preserved_nachobot_server: dict[str, Any] | None = None
                 if (
                     target_rel == "NachoBot-Napcat-Adapter/config.toml"
                     and target_path.exists()
@@ -236,6 +238,13 @@ class ConfigInitializer:
                                 key: existing_server.get(key)
                                 for key in ("host", "port", "token", "heartbeat_interval")
                                 if key in existing_server
+                            }
+                        existing_upstream = existing_doc.get("nachobot_server")
+                        if existing_upstream is not None:
+                            preserved_nachobot_server = {
+                                key: existing_upstream.get(key)
+                                for key in ("host", "port")
+                                if key in existing_upstream
                             }
                     except Exception as e:
                         raise ValueError(
@@ -254,16 +263,23 @@ class ConfigInitializer:
                 # Copy template to target
                 shutil.copy2(tmpl_path, target_path)
 
-                # Restore the existing NapCat connection/authentication contract.
-                # The template intentionally contains generic defaults (including
-                # an empty token), which must not erase a working local setup.
-                if preserved_napcat_server:
+                # Restore the existing NapCat inbound connection/authentication
+                # contract and the independently configurable upstream relay endpoint.
+                # Template defaults must not erase a working local deployment.
+                if preserved_napcat_server or preserved_nachobot_server:
                     generated_doc = tomlkit.parse(target_path.read_text(encoding="utf-8"))
-                    generated_server = generated_doc.get("napcat_server")
-                    if generated_server is None:
-                        raise ValueError("NapCat Adapter 模板缺少 [napcat_server]")
-                    for key, value in preserved_napcat_server.items():
-                        generated_server[key] = value
+                    if preserved_napcat_server:
+                        generated_server = generated_doc.get("napcat_server")
+                        if generated_server is None:
+                            raise ValueError("NapCat Adapter 模板缺少 [napcat_server]")
+                        for key, value in preserved_napcat_server.items():
+                            generated_server[key] = value
+                    if preserved_nachobot_server:
+                        generated_upstream = generated_doc.get("nachobot_server")
+                        if generated_upstream is None:
+                            raise ValueError("NapCat Adapter 模板缺少 [nachobot_server]")
+                        for key, value in preserved_nachobot_server.items():
+                            generated_upstream[key] = value
                     target_path.write_text(tomlkit.dumps(generated_doc), encoding="utf-8")
 
                 # Apply wizard data overrides
@@ -277,9 +293,8 @@ class ConfigInitializer:
             except Exception as e:
                 errors.append(f"{target_rel}: {e}")
 
-        # Post-generation: patch TTS chain routing in ALL existing adapter configs.
-        # This covers adapters that were not generated from templates (e.g. Koishi, Bilibili).
-        # When TTS is not selected, keep the user's existing core port untouched.
+        # Post-generation: synchronize adapter TTS flags in existing configs.
+        # Relay host/port are not rewritten here; adapter configs retain their values.
         patch_results = ConfigInitializer._patch_tts_chain(tts_enabled, components)
         errors.extend(patch_results.get("errors", []))
 
@@ -291,8 +306,8 @@ class ConfigInitializer:
             "patched": patch_results.get("patched", []),
         }
 
-    # Adapter configs that may need TTS chain patching.
-    # Each entry: (config path, has nachobot_server port, has voice.use_tts)
+    # Adapter configs whose voice.use_tts flag follows the wizard TTS selection.
+    # Platform relay routing remains independently configurable.
     _TTS_CHAIN_ADAPTERS: list[tuple[str, str, bool]] = [
         ("NachoBot-Napcat-Adapter/config.toml", "qq", True),
         ("NachoBot-Koishi-Adapter/config.toml", "discord", True),
@@ -306,12 +321,10 @@ class ConfigInitializer:
         components: set,
     ) -> dict[str, Any]:
         """
-        Scan all known adapter configs and adjust TTS chain routing:
-        - nachobot_server.port → 8070 only when TTS is enabled
-        - voice.use_tts → true/false
-        When TTS is disabled, do not rewrite nachobot_server.port. The adapter
-        should keep the core endpoint already configured by the user.
-        Only patches adapters that were selected by the user.
+        Synchronize voice.use_tts for selected adapters.
+
+        Platform adapters connect to their configured relay endpoint.
+        This setup step must never rewrite nachobot_server.host/port.
         """
         patched = []
         errors = []
@@ -329,11 +342,6 @@ class ConfigInitializer:
                 raw = config_path.read_text(encoding="utf-8")
                 doc = tomlkit.parse(raw)
                 changed = False
-
-                if tts_enabled and "nachobot_server" in doc:
-                    if doc["nachobot_server"].get("port") != 8070:
-                        doc["nachobot_server"]["port"] = 8070
-                        changed = True
 
                 if has_voice and "voice" in doc:
                     if doc["voice"].get("use_tts") != tts_enabled:
@@ -452,24 +460,17 @@ class ConfigInitializer:
                 doc["models"] = aot
                 changed = True
 
-        # -- Napcat adapter config.toml — TTS chain only --
+        # -- Napcat adapter config.toml --
+        # Upstream relay routing remains whatever is configured in nachobot_server.
         if "NachoBot-Napcat-Adapter" in target_rel and filename == "config.toml":
-            # TTS chain routing
-            if tts_enabled and "nachobot_server" in doc:
-                if doc["nachobot_server"].get("port") != 8070:
-                    doc["nachobot_server"]["port"] = 8070
-                    changed = True
             if "voice" in doc:
                 if doc["voice"].get("use_tts") != tts_enabled:
                     doc["voice"]["use_tts"] = tts_enabled
                     changed = True
 
         # -- Koishi adapter config.toml --
+        # Upstream relay routing remains whatever is configured in nachobot_server.
         if "NachoBot-Koishi-Adapter" in target_rel and filename == "config.toml":
-            if tts_enabled and "nachobot_server" in doc:
-                if doc["nachobot_server"].get("port") != 8070:
-                    doc["nachobot_server"]["port"] = 8070
-                    changed = True
             if "voice" in doc:
                 if doc["voice"].get("use_tts") != tts_enabled:
                     doc["voice"]["use_tts"] = tts_enabled
