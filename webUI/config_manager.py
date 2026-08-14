@@ -34,6 +34,7 @@ CONFIG_REGISTRY: list[dict[str, str]] = [
     {"id": "bot_config",    "group": "NachoBot 核心",  "path": "NachoBot/config/bot_config.toml",           "label": "机器人主配置"},
     {"id": "model_config",  "group": "NachoBot 核心",  "path": "NachoBot/config/model_config.toml",         "label": "模型与 API 配置"},
     {"id": "topics_config", "group": "NachoBot 核心",  "path": "NachoBot/config/topics_config.toml",        "label": "话题系统配置"},
+    {"id": "mcp_config",    "group": "NachoBot 核心",  "path": "NachoBot/config/mcp_config.toml",           "label": "MCP 配置"},
     {"id": "env",           "group": "NachoBot 核心",  "path": "NachoBot/.env",                             "label": "环境变量"},
     # 多模态适配器
     {"id": "tts_base",      "group": "多模态适配器", "path": "NachoBot-Multimodal-Adapter/configs/base.toml",       "label": "TTS 基础配置"},

@@ -29,9 +29,17 @@ from ncnk_message import (  # noqa: E402
 )
 
 # Keep all Hugging Face models in the adapter-owned cache directory.
-# Use the official endpoint by default; third-party mirrors may expose incomplete repositories.
+# Honour both the NachoBot-specific endpoint and an existing standard
+# HF_ENDPOINT instead of forcing the official Hub. launchbot.bat defaults
+# NACHOBOT_HF_ENDPOINT to hf-mirror.com for mainland-China deployments.
 os.environ["HF_HOME"] = str(Path(__file__).parent / "models" / "hf_cache")
-os.environ["HF_ENDPOINT"] = os.getenv("NACHOBOT_HF_ENDPOINT", "https://huggingface.co")
+if os.getenv("NACHOBOT_HF_ENDPOINT", "").strip():
+    os.environ["HF_ENDPOINT"] = os.environ["NACHOBOT_HF_ENDPOINT"].strip()
+else:
+    os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "10")
+os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
 
 # 隐藏 ncnk_message 的冗余日志
 logging.getLogger("ncnk_message").setLevel(logging.CRITICAL)

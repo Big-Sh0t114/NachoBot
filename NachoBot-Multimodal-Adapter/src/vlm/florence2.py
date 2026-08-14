@@ -13,6 +13,14 @@ from pathlib import Path
 
 import toml
 
+# Configure Hugging Face download behaviour before Transformers or
+# huggingface_hub can be imported. This is especially important on mainland
+# China networks where Xet CAS endpoints may be less reliable than ordinary
+# HTTP downloads through a mirror.
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "10")
+os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
+
 logger = logging.getLogger("florence2_vlm")
 
 FLORENCE_DETAILED_CAPTION_TASK = "<MORE_DETAILED_CAPTION>"
@@ -40,16 +48,95 @@ def _read_device() -> str:
         return "cuda"
 
 
-def load_model():
-    """Load the Florence-2-large model into VRAM."""
-    global _model, _processor, _device, _loaded
+def _hub_endpoints() -> list[str]:
+    """Return Hugging Face endpoints in download priority order.
 
-    # Third-party mirrors may not expose the complete Florence community repo.
-    # Use the official Hugging Face endpoint by default while allowing an explicit override.
-    os.environ["HF_ENDPOINT"] = os.getenv("NACHOBOT_HF_ENDPOINT", "https://huggingface.co")
-    # Fail fast when the Hub/mirror is unreachable, then fall back to local cache.
-    os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "3")
-    os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "5")
+    Mainland-China deployments prefer hf-mirror.com, while an explicitly
+    configured NACHOBOT_HF_ENDPOINT always gets first priority. The official
+    Hub remains the final fallback for networks where it is reachable.
+    """
+    endpoints: list[str] = []
+
+    # NachoBot-specific override has the highest priority. Also honour the
+    # standard Hugging Face variable so existing deployments do not need to
+    # change their environment configuration.
+    for env_name in ("NACHOBOT_HF_ENDPOINT", "HF_ENDPOINT"):
+        configured = os.getenv(env_name, "").strip().rstrip("/")
+        if configured:
+            endpoints.append(configured)
+
+    endpoints.extend(("https://hf-mirror.com", "https://huggingface.co"))
+
+    # Preserve order while removing duplicates.
+    return list(dict.fromkeys(endpoint for endpoint in endpoints if endpoint))
+
+
+def _validate_florence_snapshot(snapshot_dir: Path) -> None:
+    """Reject incomplete/partial Florence-2 snapshots before model loading."""
+    required_files = (
+        "config.json",
+        "preprocessor_config.json",
+        "processor_config.json",
+        "tokenizer_config.json",
+        "tokenizer.json",
+        "model.safetensors",
+    )
+    missing = [name for name in required_files if not (snapshot_dir / name).is_file()]
+    if missing:
+        raise RuntimeError(f"incomplete snapshot, missing: {', '.join(missing)}")
+
+    # The real Florence-2-large safetensors weight is about 1.55 GB. A tiny
+    # file here usually means an unresolved Xet/LFS pointer or interrupted download.
+    weight_file = snapshot_dir / "model.safetensors"
+    if weight_file.stat().st_size < 1_000_000_000:
+        raise RuntimeError(
+            f"incomplete model.safetensors ({weight_file.stat().st_size} bytes)"
+        )
+
+
+def _resolve_florence_snapshot(model_id: str, cache_dir: Path) -> Path:
+    """Resolve a complete local Florence-2 snapshot, downloading if needed."""
+    from huggingface_hub import snapshot_download
+
+    download_kwargs = {
+        "repo_id": model_id,
+        "cache_dir": str(cache_dir),
+        "allow_patterns": ["*.json", "*.txt", "*.safetensors"],
+        "max_workers": 4,
+    }
+
+    # First reuse a complete cache without touching the network.
+    try:
+        cached = Path(snapshot_download(local_files_only=True, **download_kwargs))
+        _validate_florence_snapshot(cached)
+        logger.info("[Florence-2] Using complete local snapshot: %s", cached)
+        return cached
+    except Exception as exc:
+        logger.info("[Florence-2] No complete local snapshot: %s", exc)
+
+    failures: list[str] = []
+    for endpoint in _hub_endpoints():
+        try:
+            logger.info("[Florence-2] Downloading snapshot via %s", endpoint)
+            snapshot = Path(snapshot_download(endpoint=endpoint, **download_kwargs))
+            _validate_florence_snapshot(snapshot)
+            logger.info("[Florence-2] Snapshot ready via %s: %s", endpoint, snapshot)
+            return snapshot
+        except Exception as exc:
+            failures.append(f"{endpoint}: {exc}")
+            logger.warning("[Florence-2] Download via %s failed: %s", endpoint, exc)
+
+    details = " | ".join(failures)
+    raise RuntimeError(
+        "Unable to obtain a complete Florence-2 snapshot. "
+        "Tried the configured endpoint, hf-mirror.com and huggingface.co. "
+        f"Failures: {details}"
+    )
+
+
+def load_model():
+    """Load Florence-2-large from a verified local snapshot into VRAM."""
+    global _model, _processor, _device, _loaded
 
     if _loaded:
         return
@@ -68,7 +155,6 @@ def load_model():
         logger.info("[Florence-2] Hugging Face cache: %s", cache_dir)
 
         config_device = _read_device()
-
         if "cuda" in config_device and not torch.cuda.is_available():
             logger.warning("[Florence-2] CUDA is not available, falling back to CPU")
             _device = "cpu"
@@ -76,39 +162,21 @@ def load_model():
             _device = config_device
 
         dtype = torch.float16 if "cuda" in _device else torch.float32
+        snapshot_dir = _resolve_florence_snapshot(model_id, cache_dir)
 
-        try:
-            logger.info("[Florence-2] Loading model from local cache first")
-            _processor = AutoProcessor.from_pretrained(
-                model_id,
-                cache_dir=str(cache_dir),
-                local_files_only=True,
-            )
-            _model = Florence2ForConditionalGeneration.from_pretrained(
-                model_id,
-                cache_dir=str(cache_dir),
-                dtype=dtype,
-                use_safetensors=True,
-                local_files_only=True,
-            ).to(_device)
-            logger.info("[Florence-2] Model loaded from local cache")
-        except Exception as exc:
-            logger.warning(
-                "[Florence-2] Local cache unavailable; trying Hub: %s",
-                exc,
-            )
-            _processor = AutoProcessor.from_pretrained(
-                model_id,
-                cache_dir=str(cache_dir),
-            )
-            _model = Florence2ForConditionalGeneration.from_pretrained(
-                model_id,
-                cache_dir=str(cache_dir),
-                dtype=dtype,
-                use_safetensors=True,
-            ).to(_device)
-            logger.info("[Florence-2] Model loaded from Hub")
-
+        # Load only from the verified local snapshot. This deliberately keeps
+        # Transformers away from remote metadata/safetensors-conversion probes,
+        # which can be unreliable when a third-party mirror is incomplete.
+        _processor = AutoProcessor.from_pretrained(
+            str(snapshot_dir),
+            local_files_only=True,
+        )
+        _model = Florence2ForConditionalGeneration.from_pretrained(
+            str(snapshot_dir),
+            dtype=dtype,
+            use_safetensors=True,
+            local_files_only=True,
+        ).to(_device)
         _model.eval()
 
         _loaded = True

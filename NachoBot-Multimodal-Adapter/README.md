@@ -30,6 +30,40 @@ NachoBot 的 TTS、情感预设、流式 ASR 与 VLM 服务。自 v1.0.0-pre-C �
 
 脚本会优先复用 `models/` 与 `models/hf_cache/` 中的本地内容，缺失时再下载。默认可通过 `NACHOBOT_HF_ENDPOINT` 指定 Hugging Face 端点；根启动脚本默认使用 `https://hf-mirror.com`。
 
+### 中国大陆模型下载
+
+本项目对首次模型下载采用“本地缓存优先 + 多端点回退”策略。Hugging Face 模型的端点顺序为：
+
+```text
+NACHOBOT_HF_ENDPOINT / HF_ENDPOINT（用户显式设置）
+        ↓
+hf-mirror.com
+        ↓
+huggingface.co
+```
+
+`NACHOBOT_HF_ENDPOINT` 的优先级高于标准 `HF_ENDPOINT`。如需使用自己的 Hugging Face 反向代理、企业镜像或其他兼容端点，可在启动前设置：
+
+```bat
+set NACHOBOT_HF_ENDPOINT=https://your-huggingface-mirror.example.com
+```
+
+也可以使用标准变量：
+
+```bat
+set HF_ENDPOINT=https://your-huggingface-mirror.example.com
+```
+
+模型下载行为如下：
+
+- **Florence-2 VLM**：先下载完整 snapshot 并校验关键 processor/tokenizer 文件及 `model.safetensors`，随后只从本地 snapshot 加载，避免镜像元数据不完整触发 Transformers 的远程 safetensors 转换探测。
+- **情感分类模型**：本地缓存不可用时依次尝试自定义端点、`hf-mirror.com` 与 Hugging Face 官方站；下载完成后从本地 snapshot 加载。
+- **VoxCPM2**：托管 Runtime 在启动模型服务前完成整个 Hugging Face snapshot 下载和端点故障转移，再把本地模型目录交给 VoxCPM。
+- **Sherpa-ONNX ASR**：优先从 Hugging Face 上游镜像逐文件获取所需 ONNX/token 文件；所有 Hugging Face 端点失败后才回退到 sherpa-onnx GitHub Releases 压缩包。
+- **GPT-SoVITS 基础权重**：使用 `hf-mirror.com` 时继续采用已有的 `resolve` 直链 GET 下载逻辑，绕过不稳定的 Hub HEAD 元数据请求。
+
+默认关闭 Hugging Face Xet 下载路径，并把 Hub 元数据/文件下载超时调整为更适合大模型下载的值，以减少部分中国大陆网络访问 CAS/Xet 节点失败导致的首次启动问题。
+
 要求 Python 3.11 或 3.12。首次运行需要下载较大的模型和运行时，请观察 `logs/boot_setup.log` 与对应终端。
 
 ## 配置

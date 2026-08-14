@@ -12,6 +12,12 @@ PROJECT_ROOT = ADAPTER_ROOT.parent
 RUNTIME_ROOT = ADAPTER_ROOT / ".runtime" / "tts"
 HF_CACHE = ADAPTER_ROOT / "models" / "hf_cache"
 
+# Keep Hub behaviour predictable on mainland-China networks. These values are
+# also propagated to every managed TTS subprocess by base_env().
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "10")
+os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
+
 GPT_REF = os.environ.get("NACHOBOT_GPT_SOVITS_REF", "20250606v2pro")
 GPT_REPO = "https://github.com/RVC-Boss/GPT-SoVITS.git"
 
@@ -78,6 +84,16 @@ def read_toml(path: Path) -> dict:
         return tomllib.load(handle)
 
 
+def hf_endpoints() -> list[str]:
+    endpoints: list[str] = []
+    for env_name in ("NACHOBOT_HF_ENDPOINT", "HF_ENDPOINT"):
+        endpoint = os.environ.get(env_name, "").strip().rstrip("/")
+        if endpoint:
+            endpoints.append(endpoint)
+    endpoints.extend(("https://hf-mirror.com", "https://huggingface.co"))
+    return list(dict.fromkeys(endpoints))
+
+
 def base_env() -> dict[str, str]:
     env = os.environ.copy()
     env.pop("VIRTUAL_ENV", None)
@@ -85,9 +101,15 @@ def base_env() -> dict[str, str]:
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
     env["HF_HOME"] = str(HF_CACHE)
-    endpoint = os.environ.get("NACHOBOT_HF_ENDPOINT", "").strip()
-    if endpoint:
-        env["HF_ENDPOINT"] = endpoint
+    env["HF_HUB_DISABLE_XET"] = os.environ.get("HF_HUB_DISABLE_XET", "1")
+    env["HF_HUB_ETAG_TIMEOUT"] = os.environ.get("HF_HUB_ETAG_TIMEOUT", "10")
+    env["HF_HUB_DOWNLOAD_TIMEOUT"] = os.environ.get("HF_HUB_DOWNLOAD_TIMEOUT", "60")
+
+    # Managed subprocesses use the first endpoint as their ordinary Hub
+    # endpoint. Components that need failover resolve snapshots before launch.
+    endpoints = hf_endpoints()
+    if endpoints:
+        env["HF_ENDPOINT"] = endpoints[0]
 
     ffmpeg_runtime = PROJECT_ROOT / ".runtime" / "ffmpeg"
     if ffmpeg_runtime.is_dir():
@@ -101,7 +123,52 @@ def base_env() -> dict[str, str]:
 
 
 def hf_endpoint() -> str:
-    return os.environ.get("NACHOBOT_HF_ENDPOINT", "").strip().rstrip("/")
+    endpoints = hf_endpoints()
+    return endpoints[0] if endpoints else "https://huggingface.co"
+
+
+def resolve_hf_snapshot(repo_id: str) -> Path:
+    """Return a complete cached Hub snapshot, with endpoint failover."""
+    from huggingface_hub import snapshot_download
+
+    cache_dir = HF_CACHE / "hub"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        cached = Path(
+            snapshot_download(
+                repo_id=repo_id,
+                cache_dir=str(cache_dir),
+                local_files_only=True,
+            )
+        )
+        log(f"使用本地 Hugging Face 模型缓存: {repo_id} -> {cached}")
+        return cached
+    except Exception as exc:
+        log(f"本地模型缓存不完整，将尝试在线下载: {repo_id} ({exc})")
+
+    failures: list[str] = []
+    for endpoint in hf_endpoints():
+        try:
+            log(f"通过 {endpoint} 下载模型快照: {repo_id}")
+            snapshot = Path(
+                snapshot_download(
+                    repo_id=repo_id,
+                    cache_dir=str(cache_dir),
+                    endpoint=endpoint,
+                    max_workers=4,
+                )
+            )
+            log(f"模型快照下载完成: {snapshot}")
+            return snapshot
+        except Exception as exc:
+            failures.append(f"{endpoint}: {exc}")
+            log(f"通过 {endpoint} 下载失败: {exc}")
+
+    raise RuntimeError(
+        f"无法下载 Hugging Face 模型 {repo_id}；已尝试自定义端点、"
+        f"hf-mirror.com 和 huggingface.co。{' | '.join(failures)}"
+    )
 
 
 def use_hf_mirror_direct_download() -> bool:
@@ -218,6 +285,14 @@ def resolve_vox_model_and_lora() -> tuple[str, str]:
 def serve_voxcpm(port: int) -> int:
     python = prepare_voxcpm()
     model, lora = resolve_vox_model_and_lora()
+
+    # VoxCPM.from_pretrained ultimately uses huggingface_hub.snapshot_download.
+    # Resolve remote model IDs here first so we can fail over between mirrors
+    # and then give VoxCPM a stable local directory.
+    model_path = Path(model).expanduser()
+    if not model_path.is_dir():
+        model = str(resolve_hf_snapshot(model))
+
     server = ADAPTER_ROOT / "src" / "tts" / "backends" / "Vox" / "vox_api_server.py"
     cmd = [
         str(python), str(server),

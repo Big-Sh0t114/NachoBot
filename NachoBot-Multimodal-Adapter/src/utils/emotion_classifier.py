@@ -9,12 +9,22 @@ import os
 import threading
 from typing import List, Tuple
 
-# Use the official endpoint by default; allow an explicit deployment override.
-os.environ["HF_ENDPOINT"] = os.getenv("NACHOBOT_HF_ENDPOINT", "https://huggingface.co")
-# Do not let an unreachable Hub/mirror stall adapter startup for ~60 seconds.
-# After these short network timeouts, model loading falls back to the local cache.
-os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "3")
-os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "5")
+# Configure Hugging Face before Transformers is imported. Prefer predictable
+# HTTP downloads on mainland-China networks and honour existing deployment
+# overrides instead of forcing the official Hub.
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "10")
+os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
+
+
+def _hf_endpoints() -> list[str]:
+    endpoints: list[str] = []
+    for env_name in ("NACHOBOT_HF_ENDPOINT", "HF_ENDPOINT"):
+        endpoint = os.environ.get(env_name, "").strip().rstrip("/")
+        if endpoint:
+            endpoints.append(endpoint)
+    endpoints.extend(("https://hf-mirror.com", "https://huggingface.co"))
+    return list(dict.fromkeys(endpoints))
 
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer, pipeline as hf_pipeline
@@ -85,14 +95,42 @@ class EmotionClassifier:
                     **model_kwargs,
                 )
                 logger.info("情感分类模型已从本地缓存加载")
-            except Exception as exc:
-                logger.warning("本地情感分类模型缓存不可用，尝试在线加载: %s", exc)
-                tokenizer = AutoTokenizer.from_pretrained(self._model_name)
+            except Exception as cache_exc:
+                logger.warning("本地情感分类模型缓存不可用: %s", cache_exc)
+
+                from huggingface_hub import snapshot_download
+
+                failures: list[str] = []
+                snapshot_dir = None
+                for endpoint in _hf_endpoints():
+                    try:
+                        logger.info("尝试通过 %s 下载情感分类模型", endpoint)
+                        snapshot_dir = snapshot_download(
+                            repo_id=self._model_name,
+                            endpoint=endpoint,
+                        )
+                        logger.info("情感分类模型已通过 %s 下载完成", endpoint)
+                        break
+                    except Exception as exc:
+                        failures.append(f"{endpoint}: {exc}")
+                        logger.warning("通过 %s 下载情感分类模型失败: %s", endpoint, exc)
+
+                if snapshot_dir is None:
+                    raise RuntimeError(
+                        "无法下载情感分类模型；已尝试自定义端点、hf-mirror.com 和 huggingface.co。"
+                        + " | ".join(failures)
+                    )
+
+                tokenizer = AutoTokenizer.from_pretrained(
+                    snapshot_dir,
+                    local_files_only=True,
+                )
                 model = AutoModelForSequenceClassification.from_pretrained(
-                    self._model_name,
+                    snapshot_dir,
+                    local_files_only=True,
                     **model_kwargs,
                 )
-                logger.info("情感分类模型已通过 Hub 在线加载")
+                logger.info("情感分类模型已从下载完成的本地快照加载")
 
             self._classifier = hf_pipeline(
                 task="zero-shot-classification",
