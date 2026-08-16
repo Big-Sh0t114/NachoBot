@@ -12,6 +12,12 @@ PROJECT_ROOT = ADAPTER_ROOT.parent
 RUNTIME_ROOT = ADAPTER_ROOT / ".runtime" / "tts"
 HF_CACHE = ADAPTER_ROOT / "models" / "hf_cache"
 
+# Keep Hub behaviour predictable on mainland-China networks. These values are
+# also propagated to every managed TTS subprocess by base_env().
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "10")
+os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
+
 GPT_REF = os.environ.get("NACHOBOT_GPT_SOVITS_REF", "20250606v2pro")
 GPT_REPO = "https://github.com/RVC-Boss/GPT-SoVITS.git"
 
@@ -78,6 +84,16 @@ def read_toml(path: Path) -> dict:
         return tomllib.load(handle)
 
 
+def hf_endpoints() -> list[str]:
+    endpoints: list[str] = []
+    for env_name in ("NACHOBOT_HF_ENDPOINT", "HF_ENDPOINT"):
+        endpoint = os.environ.get(env_name, "").strip().rstrip("/")
+        if endpoint:
+            endpoints.append(endpoint)
+    endpoints.extend(("https://hf-mirror.com", "https://huggingface.co"))
+    return list(dict.fromkeys(endpoints))
+
+
 def base_env() -> dict[str, str]:
     env = os.environ.copy()
     env.pop("VIRTUAL_ENV", None)
@@ -85,9 +101,15 @@ def base_env() -> dict[str, str]:
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
     env["HF_HOME"] = str(HF_CACHE)
-    endpoint = os.environ.get("NACHOBOT_HF_ENDPOINT", "").strip()
-    if endpoint:
-        env["HF_ENDPOINT"] = endpoint
+    env["HF_HUB_DISABLE_XET"] = os.environ.get("HF_HUB_DISABLE_XET", "1")
+    env["HF_HUB_ETAG_TIMEOUT"] = os.environ.get("HF_HUB_ETAG_TIMEOUT", "10")
+    env["HF_HUB_DOWNLOAD_TIMEOUT"] = os.environ.get("HF_HUB_DOWNLOAD_TIMEOUT", "60")
+
+    # Managed subprocesses use the first endpoint as their ordinary Hub
+    # endpoint. Components that need failover resolve snapshots before launch.
+    endpoints = hf_endpoints()
+    if endpoints:
+        env["HF_ENDPOINT"] = endpoints[0]
 
     ffmpeg_runtime = PROJECT_ROOT / ".runtime" / "ffmpeg"
     if ffmpeg_runtime.is_dir():
@@ -101,7 +123,52 @@ def base_env() -> dict[str, str]:
 
 
 def hf_endpoint() -> str:
-    return os.environ.get("NACHOBOT_HF_ENDPOINT", "").strip().rstrip("/")
+    endpoints = hf_endpoints()
+    return endpoints[0] if endpoints else "https://huggingface.co"
+
+
+def resolve_hf_snapshot(repo_id: str) -> Path:
+    """Return a complete cached Hub snapshot, with endpoint failover."""
+    from huggingface_hub import snapshot_download
+
+    cache_dir = HF_CACHE / "hub"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        cached = Path(
+            snapshot_download(
+                repo_id=repo_id,
+                cache_dir=str(cache_dir),
+                local_files_only=True,
+            )
+        )
+        log(f"使用本地 Hugging Face 模型缓存: {repo_id} -> {cached}")
+        return cached
+    except Exception as exc:
+        log(f"本地模型缓存不完整，将尝试在线下载: {repo_id} ({exc})")
+
+    failures: list[str] = []
+    for endpoint in hf_endpoints():
+        try:
+            log(f"通过 {endpoint} 下载模型快照: {repo_id}")
+            snapshot = Path(
+                snapshot_download(
+                    repo_id=repo_id,
+                    cache_dir=str(cache_dir),
+                    endpoint=endpoint,
+                    max_workers=4,
+                )
+            )
+            log(f"模型快照下载完成: {snapshot}")
+            return snapshot
+        except Exception as exc:
+            failures.append(f"{endpoint}: {exc}")
+            log(f"通过 {endpoint} 下载失败: {exc}")
+
+    raise RuntimeError(
+        f"无法下载 Hugging Face 模型 {repo_id}；已尝试自定义端点、"
+        f"hf-mirror.com 和 huggingface.co。{' | '.join(failures)}"
+    )
 
 
 def use_hf_mirror_direct_download() -> bool:
@@ -109,15 +176,48 @@ def use_hf_mirror_direct_download() -> bool:
 
 
 def download_http(url: str, destination: Path) -> None:
-    """Download with plain HTTP GET so mirror mode does not depend on Hub HEAD metadata."""
+    """Download with plain HTTP GET and show progress without Hub HEAD metadata."""
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(destination.suffix + ".part")
     request = Request(url, headers={"User-Agent": "NachoBot-TTS-Runtime/1.0"})
     try:
         with urlopen(request, timeout=60) as response, temporary.open("wb") as output:
-            shutil.copyfileobj(response, output, length=1024 * 1024)
+            total_raw = response.headers.get("Content-Length")
+            total = int(total_raw) if total_raw and total_raw.isdigit() else 0
+            downloaded = 0
+            chunk_size = 1024 * 1024
+            bar_width = 30
+
+            while True:
+                chunk = response.read(chunk_size)
+                if not chunk:
+                    break
+                output.write(chunk)
+                downloaded += len(chunk)
+
+                downloaded_mb = downloaded / (1024 * 1024)
+                if total > 0:
+                    ratio = min(downloaded / total, 1.0)
+                    filled = int(bar_width * ratio)
+                    bar = "#" * filled + "-" * (bar_width - filled)
+                    total_mb = total / (1024 * 1024)
+                    print(
+                        f"\r[TTS Runtime] [{bar}] {ratio * 100:6.2f}% "
+                        f"{downloaded_mb:.1f}/{total_mb:.1f} MiB",
+                        end="",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"\r[TTS Runtime] 下载中: {downloaded_mb:.1f} MiB",
+                        end="",
+                        flush=True,
+                    )
+
+            print(flush=True)
         temporary.replace(destination)
     except Exception:
+        print(flush=True)
         temporary.unlink(missing_ok=True)
         raise
 
@@ -185,6 +285,14 @@ def resolve_vox_model_and_lora() -> tuple[str, str]:
 def serve_voxcpm(port: int) -> int:
     python = prepare_voxcpm()
     model, lora = resolve_vox_model_and_lora()
+
+    # VoxCPM.from_pretrained ultimately uses huggingface_hub.snapshot_download.
+    # Resolve remote model IDs here first so we can fail over between mirrors
+    # and then give VoxCPM a stable local directory.
+    model_path = Path(model).expanduser()
+    if not model_path.is_dir():
+        model = str(resolve_hf_snapshot(model))
+
     server = ADAPTER_ROOT / "src" / "tts" / "backends" / "Vox" / "vox_api_server.py"
     cmd = [
         str(python), str(server),
@@ -237,11 +345,19 @@ def ensure_gpt_assets(python: Path, source_dir: Path, runtime_dir: Path) -> None
     else:
         sovits_base = "v2Pro/s2Gv2Pro.pth"
 
+    # Keep the upstream v2 default inference weights available as a fallback.
+    # If a user-configured preset is missing, make_gpt_infer_config() falls back
+    # to GPT-SoVITS' bundled tts_infer.yaml, which references these two files.
+    fallback_t2s = "gsv-v2final-pretrained/s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt"
+    fallback_vits = "gsv-v2final-pretrained/s2G2333k.pth"
+
     inference_patterns = [
         "chinese-hubert-base/**",
         "chinese-roberta-wwm-ext-large/**",
         "s1v3.ckpt",
         sovits_base,
+        fallback_t2s,
+        fallback_vits,
         "sv/pretrained_eres2netv2w24s4ep4.ckpt",
     ]
     inference_markers = [
@@ -249,6 +365,8 @@ def ensure_gpt_assets(python: Path, source_dir: Path, runtime_dir: Path) -> None
         pretrained_dir / "chinese-roberta-wwm-ext-large" / "pytorch_model.bin",
         pretrained_dir / "s1v3.ckpt",
         pretrained_dir / sovits_base,
+        pretrained_dir / fallback_t2s,
+        pretrained_dir / fallback_vits,
         pretrained_dir / "sv" / "pretrained_eres2netv2w24s4ep4.ckpt",
     ]
     if not all(path.is_file() for path in inference_markers):
@@ -265,6 +383,8 @@ def ensure_gpt_assets(python: Path, source_dir: Path, runtime_dir: Path) -> None
                 "chinese-roberta-wwm-ext-large/pytorch_model.bin",
                 "s1v3.ckpt",
                 sovits_base,
+                fallback_t2s,
+                fallback_vits,
                 "sv/pretrained_eres2netv2w24s4ep4.ckpt",
             ]
             for filename in direct_files:
@@ -342,8 +462,14 @@ def patch_gpt_runtime_compat(source_dir: Path, runtime_dir: Path) -> Path:
     # GPT-SoVITS 自带英文 CMU 字典。g2p_en 的 import-time nltk.download()
     # 和 cmudict.dict() 对当前 en_G2p 都是冗余依赖，因此所有平台都禁用。
     venv_dir = runtime_dir / ".venv"
-    for g2p_py in venv_dir.rglob("g2p.py") if venv_dir.is_dir() else []:
-        if g2p_py.parent.name != "g2p_en":
+    g2p_candidates = [
+        venv_dir / "Lib" / "site-packages" / "g2p_en" / "g2p.py",
+    ]
+    g2p_candidates.extend(
+        venv_dir.glob("lib/python*/site-packages/g2p_en/g2p.py")
+    )
+    for g2p_py in g2p_candidates:
+        if not g2p_py.is_file():
             continue
         content = g2p_py.read_text(encoding="utf-8")
         patched = content

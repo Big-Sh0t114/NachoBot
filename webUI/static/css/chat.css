@@ -336,6 +336,95 @@ button.chat-status-chip:disabled {
     opacity: 0.72;
 }
 
+/* ---- Chat launch profile chooser ---- */
+.chat-launch-modal {
+    width: min(760px, calc(100vw - 32px));
+    max-width: 760px;
+}
+
+.chat-launch-profile-intro {
+    margin-bottom: 14px;
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+    line-height: 1.55;
+}
+
+.chat-launch-profile-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.chat-launch-profile {
+    min-width: 0;
+    min-height: 132px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 7px;
+    padding: 15px;
+    border: 1px solid var(--border);
+    border-radius: 13px;
+    background: rgba(255, 255, 255, 0.52);
+    color: var(--text-primary);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: transform var(--transition), border-color var(--transition), background var(--transition), box-shadow var(--transition);
+}
+
+.chat-launch-profile:hover,
+.chat-launch-profile:focus-visible {
+    transform: translateY(-1px);
+    border-color: var(--accent);
+    background: var(--accent-bg);
+    box-shadow: 0 0 0 2px rgba(13, 148, 136, 0.08);
+    outline: none;
+}
+
+.chat-launch-profile-main {
+    width: 100%;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.chat-launch-profile-main strong {
+    font-size: 0.9rem;
+    font-weight: 700;
+}
+
+.chat-launch-profile-code {
+    color: var(--accent-dark);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem;
+    font-weight: 700;
+}
+
+.chat-launch-profile-summary {
+    margin-top: 5px;
+    color: var(--text-primary);
+    font-size: 0.78rem;
+    font-weight: 650;
+}
+
+.chat-launch-profile-detail {
+    color: var(--text-muted);
+    font-size: 0.72rem;
+    line-height: 1.45;
+}
+
+@media (max-width: 720px) {
+    .chat-launch-profile-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .chat-launch-profile {
+        min-height: 0;
+    }
+}
+
 .chat-header-button,
 .chat-mobile-history-button {
     min-height: 32px;

@@ -18,6 +18,7 @@ TEMPLATE_MAP: dict[str, str] = {
     "NachoBot/template/bot_config_template.toml": "NachoBot/config/bot_config.toml",
     "NachoBot/template/model_config_template.toml": "NachoBot/config/model_config.toml",
     "NachoBot/template/topics_config_template.toml": "NachoBot/config/topics_config.toml",
+    "NachoBot/template/mcp_config_template.toml": "NachoBot/config/mcp_config.toml",
     "NachoBot/template/template.env": "NachoBot/.env",
     "NachoBot-Napcat-Adapter/template/template_config.toml": "NachoBot-Napcat-Adapter/config.toml",
     "NachoBot-Multimodal-Adapter/template_configs/base_template.toml": "NachoBot-Multimodal-Adapter/configs/base.toml",
@@ -27,7 +28,7 @@ TEMPLATE_MAP: dict[str, str] = {
     "NachoBot-Multimodal-Adapter/template_configs/perception_template.toml": "NachoBot-Multimodal-Adapter/configs/perception.toml",
 }
 
-KNOWN_PORTS: dict[str, int] = {
+DEFAULT_PORTS: dict[str, int] = {
     "NachoBot Core": 8000,
     "Napcat Adapter": 8095,
     "Multimodal Adapter": 8070,
@@ -205,8 +206,87 @@ class EnvironmentChecker:
         return result
 
     @staticmethod
+    def _configured_ports() -> dict[str, int]:
+        """Resolve configured service ports, keeping defaults only as fallbacks."""
+        import re
+        import tomllib
+
+        ports = dict(DEFAULT_PORTS)
+
+        # NachoBot Core (.env)
+        env_path = ROOT_DIR / "NachoBot" / ".env"
+        if env_path.exists():
+            try:
+                for line in env_path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        key, _, value = line.partition("=")
+                        if key.strip() == "PORT":
+                            ports["NachoBot Core"] = int(value.strip())
+                            break
+            except Exception:
+                pass
+
+        # NapCat adapter inbound server
+        napcat_path = ROOT_DIR / "NachoBot-Napcat-Adapter" / "config.toml"
+        if napcat_path.exists():
+            try:
+                document = tomllib.loads(napcat_path.read_text(encoding="utf-8"))
+                ports["Napcat Adapter"] = int(
+                    document.get("napcat_server", {}).get("port", ports["Napcat Adapter"])
+                )
+            except Exception:
+                pass
+
+        # Multimodal relay and selected TTS engine
+        multimodal_dir = ROOT_DIR / "NachoBot-Multimodal-Adapter"
+        base_path = multimodal_dir / "configs" / "base.toml"
+        if base_path.exists():
+            try:
+                base = tomllib.loads(base_path.read_text(encoding="utf-8"))
+                ports["Multimodal Adapter"] = int(
+                    base.get("server", {}).get("port", ports["Multimodal Adapter"])
+                )
+                enabled = base.get("enabled_tts", {}).get("enabled", ["GPT_Sovits"])
+                engine_config = "vox.toml" if isinstance(enabled, list) and "Vox" in enabled else "gpt-sovits.toml"
+                engine_path = multimodal_dir / "configs" / engine_config
+                if engine_path.exists():
+                    engine = tomllib.loads(engine_path.read_text(encoding="utf-8"))
+                    ports["TTS Engine"] = int(
+                        engine.get("tts", {}).get("port", ports["TTS Engine"])
+                    )
+            except Exception:
+                pass
+
+        # Perception API
+        perception_path = multimodal_dir / "configs" / "perception.toml"
+        if perception_path.exists():
+            try:
+                perception = tomllib.loads(perception_path.read_text(encoding="utf-8"))
+                ports["VLM / ASR API"] = int(
+                    perception.get("perception", {}).get("port", ports["VLM / ASR API"])
+                )
+            except Exception:
+                pass
+
+        # Koishi gateway
+        koishi_path = ROOT_DIR / "koishi-app" / "koishi.yml"
+        if koishi_path.exists():
+            try:
+                content = koishi_path.read_text(encoding="utf-8")
+                server_idx = content.find("group:server:")
+                if server_idx != -1:
+                    match = re.search(r"port:\s*(\d+)", content[server_idx:server_idx + 200])
+                    if match:
+                        ports["Koishi"] = int(match.group(1))
+            except Exception:
+                pass
+
+        return ports
+
+    @staticmethod
     def check_ports() -> list[dict[str, Any]]:
-        """Check port availability for all known services."""
+        """Check port availability for all configured services."""
         # Dynamically retrieve current WebUI port
         try:
             from webui_config import webui_config
@@ -220,8 +300,10 @@ class EnvironmentChecker:
             except Exception:
                 webui_port = 8088
 
+        ports = EnvironmentChecker._configured_ports()
+
         results = []
-        for name, port in KNOWN_PORTS.items():
+        for name, port in ports.items():
             if name == "WebUI":
                 port = webui_port
             entry = {

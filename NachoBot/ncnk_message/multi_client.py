@@ -8,7 +8,7 @@ import time
 from typing import Any, Callable, Dict, Optional
 
 from .client_base import WebSocketClientBase
-from .client_ws_connection import ConnectionConfig
+from .client_ws_connection import ConnectionConfig, NetworkEvent
 from .log_utils import log_safe, redact_secret
 from .message import APIMessageBase
 from .ws_config import MultiClientConfig, ConnectionEntry

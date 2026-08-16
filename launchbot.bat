@@ -86,11 +86,16 @@ set "ADAPTER_DIR=%BASE_DIR%NachoBot-Multimodal-Adapter"
 set "NAPCAT_DIR=%BASE_DIR%NachoBot-Napcat-Adapter"
 set "NAPCAT_SRC=%NAPCAT_DIR%\src"
 set "TTS_RUNTIME_MANAGER=%ADAPTER_DIR%\scripts\tts_runtime_manager.py"
+set "BASE_TOML=%ADAPTER_DIR%\configs\base.toml"
 
 set "PORT_SOVITS=9880"
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$p='%ADAPTER_DIR%\configs\gpt-sovits.toml'; if (Test-Path $p) { $c=Get-Content -Raw $p; if ($c -match '(?ms)^\[tts\]\s*.*?^port\s*=\s*(\d+)') { $Matches[1] } else { '9880' } } else { '9880' }"`) do set "PORT_SOVITS=%%P"
 set "PORT_VOX=9880"
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$p='%ADAPTER_DIR%\configs\vox.toml'; if (Test-Path $p) { $c=Get-Content -Raw $p; if ($c -match '(?ms)^\[tts\]\s*.*?^port\s*=\s*(\d+)') { $Matches[1] } else { '9880' } } else { '9880' }"`) do set "PORT_VOX=%%P"
 set "PORT_ADAPTER=8070"
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$c = Get-Content -Raw '%BASE_TOML%'; if ($c -match '(?ms)^\[server\]\s*.*?^port\s*=\s*(\d+)') { $Matches[1] } else { '8070' }"`) do set "PORT_ADAPTER=%%P"
 set "PORT_PERCEPTION=9874"
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$p='%ADAPTER_DIR%\configs\perception.toml'; if (Test-Path $p) { $c=Get-Content -Raw $p; if ($c -match '(?ms)^\[perception\]\s*.*?^port\s*=\s*(\d+)') { $Matches[1] } else { '9874' } } else { '9874' }"`) do set "PORT_PERCEPTION=%%P"
 
 set "PYTHONNOUSERSITE=1"
 set "HTTP_PROXY="
@@ -122,7 +127,6 @@ if errorlevel 1 (
 
 REM -- Read base.toml enabled_tts to decide which TTS engine to start --
 set "TTS_ENGINE=GPT_Sovits"
-set "BASE_TOML=%ADAPTER_DIR%\configs\base.toml"
 for /f "usebackq tokens=*" %%L in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "(Get-Content '%BASE_TOML%' | Select-String 'enabled\s*=').Line"`) do (
   echo %%L | findstr /i "Vox" >nul
   if not errorlevel 1 (
@@ -206,6 +210,11 @@ goto :START_ADAPTER_VOX
 REM ---- Adapter for GPT-SoVITS ----
 :START_ADAPTER_SOVITS
 start "Multimodal Adapter (%PORT_ADAPTER%)" cmd /k "chcp 65001>nul && cd /d %ADAPTER_DIR% && uv run python main.py"
+call :WAIT_ADAPTER_READY
+if errorlevel 1 (
+  set "TTS_RC=1"
+  goto :TTS_FAIL
+)
 
 echo [OK] Starting Perception API (VLM + ASR)...
 start "Perception API (%PORT_PERCEPTION%)" cmd /k "chcp 65001>nul && cd /d %ADAPTER_DIR% && uv run python -m nachobot_multimodal.api_server"
@@ -218,6 +227,11 @@ goto :TTS_END
 REM ---- Adapter for VoxCPM ----
 :START_ADAPTER_VOX
 start "Multimodal Adapter (%PORT_ADAPTER%)" cmd /k "chcp 65001>nul && cd /d %ADAPTER_DIR% && uv run python main.py"
+call :WAIT_ADAPTER_READY
+if errorlevel 1 (
+  set "TTS_RC=1"
+  goto :TTS_FAIL
+)
 
 echo [OK] Starting Perception API (VLM + ASR)...
 start "Perception API (%PORT_PERCEPTION%)" cmd /k "chcp 65001>nul && cd /d %ADAPTER_DIR% && uv run python -m nachobot_multimodal.api_server"
@@ -235,6 +249,25 @@ set "TTS_RC=1"
 :TTS_END
 endlocal & exit /b %TTS_RC%
 
+:WAIT_ADAPTER_READY
+set "ADAPTER_READY="
+for /l %%I in (1,1,60) do (
+  if not defined ADAPTER_READY (
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $r = Invoke-RestMethod -UseBasicParsing -TimeoutSec 1 'http://127.0.0.1:%PORT_ADAPTER%/api/health'; if ($r.status -eq 'ok' -and $r.mode -eq 'tts') { exit 0 } else { exit 1 } } catch { exit 1 }" >nul 2>&1
+    if not errorlevel 1 (
+      set "ADAPTER_READY=1"
+      echo [OK] Multimodal relay :%PORT_ADAPTER% is ready in TTS mode.
+    ) else (
+      timeout /t 1 /nobreak >nul
+    )
+  )
+)
+if not defined ADAPTER_READY (
+  echo [ERROR] Multimodal relay :%PORT_ADAPTER% did not become ready in TTS mode within 60 seconds.
+  exit /b 1
+)
+exit /b 0
+
 :START_MAIN
 setlocal EnableExtensions
 title Launch Process
@@ -243,10 +276,12 @@ chcp 65001 >nul
 set "NACHOBOT_DIR=%ROOT%NachoBot"
 set "NACHOBOT_MAIN=bot.py"
 set "NACHOBOT_PORT=8000"
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$p='%NACHOBOT_DIR%\.env'; if (Test-Path $p) { $m=Get-Content $p | Where-Object { $_ -match '^\s*PORT\s*=\s*(\d+)\s*$' } | Select-Object -First 1; if ($m -and $m -match '^\s*PORT\s*=\s*(\d+)\s*$') { $Matches[1] } else { '8000' } } else { '8000' }"`) do set "NACHOBOT_PORT=%%P"
 
 set "ADAPTER_DIR=%ROOT%NachoBot-Napcat-Adapter"
 set "ADAPTER_MAIN=main.py"
 set "ADAPTER_PORT=8095"
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$p='%ADAPTER_DIR%\config.toml'; if (Test-Path $p) { $c=Get-Content -Raw $p; if ($c -match '(?ms)^\[napcat_server\]\s*.*?^port\s*=\s*(\d+)') { $Matches[1] } else { '8095' } } else { '8095' }"`) do set "ADAPTER_PORT=%%P"
 
 set "NAPCAT_SHELL_DIR=%ROOT%NapCat.Shell"
 set "NAPCAT_SHELL_BAT=launcher-user.bat"

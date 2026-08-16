@@ -6,7 +6,7 @@ environment/path checks and deployment/configuration.
 
 try:
     from .setup_checks import (
-        KNOWN_PORTS,
+        DEFAULT_PORTS,
         ROOT_DIR,
         TEMPLATE_MAP,
         EnvironmentChecker,
@@ -22,7 +22,7 @@ try:
     )
 except ImportError:
     from setup_checks import (
-        KNOWN_PORTS,
+        DEFAULT_PORTS,
         ROOT_DIR,
         TEMPLATE_MAP,
         EnvironmentChecker,
@@ -37,8 +37,13 @@ except ImportError:
         NapCatConfigurator,
     )
 
+# Backward-compatible public alias. These are defaults only; runtime checks
+# resolve configured ports through EnvironmentChecker._configured_ports().
+KNOWN_PORTS = DEFAULT_PORTS
+
 __all__ = [
     "BACKUP_DIR",
+    "DEFAULT_PORTS",
     "KNOWN_PORTS",
     "MAX_BACKUPS_PER_FILE",
     "ROOT_DIR",

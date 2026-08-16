@@ -95,7 +95,7 @@ class SendArtworkAction(BaseAction):
         configured = self.get_config("artwork.directory", "artwork")
         path = Path(configured)
         if not path.is_absolute():
-            repo_root = Path(__file__).resolve().parents[4]
+            repo_root = Path(__file__).resolve().parents[2]
             path = repo_root / path
         return path
 

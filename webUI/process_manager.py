@@ -353,6 +353,14 @@ class GroupDef:
 SERVICE_DEFS: dict[str, ServiceDef] = {}
 GROUP_DEFS: dict[str, GroupDef] = {}
 
+# User-facing NachoBot launch profiles.  These remain backed by the existing
+# groups so older group/service API callers continue to work unchanged.
+LAUNCH_PROFILE_GROUPS: dict[str, str] = {
+    "full": "tts_full",
+    "lite": "tts_lite",
+    "potato": "potato",
+}
+
 
 def _register_services():
     """Build the service and group lookup tables by dynamically reading adapter configs."""
@@ -492,8 +500,10 @@ def _register_services():
         ServiceDef("tts_adapter_full", "多模态适配器（TTS）", "tts_full",
                    "NachoBot-Multimodal-Adapter", ["uv", "run", "python", "main.py"],
                    port=tts_adapter_port, wait_port=True, order=2,
-                   env_extra={"HOST": tts_adapter_host, "PORT": str(tts_adapter_port)},
-                   detail=f"TTS 中继 · :{tts_adapter_port}"),
+                   env_extra={"NACHOBOT_MULTIMODAL_HOST": tts_adapter_host,
+                              "NACHOBOT_MULTIMODAL_PORT": str(tts_adapter_port)},
+                   detail=f"TTS 中继 · :{tts_adapter_port}",
+                   health_mode="tts"),
         ServiceDef("perception", "感知 API（VLM / ASR）", "tts_full",
                    "NachoBot-Multimodal-Adapter",
                    ["uv", "run", "python", "-m", "nachobot_multimodal.api_server"],
@@ -508,16 +518,19 @@ def _register_services():
         ServiceDef("tts_adapter_lite", "多模态适配器（Lite）", "tts_lite",
                    "NachoBot-Multimodal-Adapter", ["uv", "run", "python", "main.py"],
                    port=tts_adapter_port, wait_port=True, order=2,
-                   env_extra={"DISABLE_VLM_ASR": "1", "HOST": tts_adapter_host,
-                              "PORT": str(tts_adapter_port)},
-                   detail=f"TTS 中继（不启动 VLM / ASR） · :{tts_adapter_port}"),
+                   env_extra={"DISABLE_VLM_ASR": "1",
+                              "NACHOBOT_MULTIMODAL_HOST": tts_adapter_host,
+                              "NACHOBOT_MULTIMODAL_PORT": str(tts_adapter_port)},
+                   detail=f"TTS 中继（不启动 VLM / ASR） · :{tts_adapter_port}",
+                   health_mode="tts"),
 
         # ── Potato ──
-        ServiceDef("potato_relay", "8070 无模型中继", "potato", "NachoBot-Multimodal-Adapter",
+        ServiceDef("potato_relay", "无模型中继（POTATO）", "potato", "NachoBot-Multimodal-Adapter",
                    ["uv", "run", "python", "main.py", "--no-local-models"],
                    port=tts_adapter_port, wait_port=True, order=1,
                    env_extra={"NACHOBOT_NO_LOCAL_MODELS": "1", "DISABLE_VLM_ASR": "1",
-                              "HOST": tts_adapter_host, "PORT": str(tts_adapter_port)},
+                              "NACHOBOT_MULTIMODAL_HOST": tts_adapter_host,
+                              "NACHOBOT_MULTIMODAL_PORT": str(tts_adapter_port)},
                    detail=f"仅消息转发，不加载 TTS / VLM / ASR · :{tts_adapter_port}",
                    health_mode="relay_only"),
 
@@ -557,7 +570,7 @@ def _register_services():
                    detail=f"Discord / OneBot 平台网关 · :{koishi_port}"),
         ServiceDef("koishi_adapter", "Koishi 适配器", "discord", "NachoBot-Koishi-Adapter",
                    ["uv", "run", "python", "main.py"], order=2,
-                   detail="Koishi 消息桥接 → Core"),
+                   detail="Koishi 消息桥接 → Multimodal 中继"),
         ServiceDef("discordvc", "DiscordVC 语音适配器", "discord",
                    "NachoBot-DiscordVC-Adapter", ["uv", "run", "python", "main.py"], order=3,
                    detail="Discord 语音频道 → Core"),
@@ -571,13 +584,13 @@ def _register_services():
         GroupDef("qq_adapter", "QQ / NapCat", "🐧", ["napcat_adapter", "napcat_shell"],
                   "QQ 消息适配器与 NapCat 客户端"),
         GroupDef("tts_full", "多模态服务（FULL）", "🎙️",
-                  ["tts_engine_full", "tts_adapter_full", "perception"],
-                  "TTS 推理 + 8070 多模态中继 + VLM / ASR 感知服务"),
+                   ["tts_engine_full", "tts_adapter_full", "perception"],
+                   f"TTS 推理 + :{tts_adapter_port} 多模态中继 + VLM / ASR 感知服务"),
         GroupDef("tts_lite", "多模态服务（LITE）", "🎙️",
-                  ["tts_engine_lite", "tts_adapter_lite"],
-                  "TTS 推理 + 8070 中继，不启动 VLM / ASR"),
-        GroupDef("potato", "8070 无模型中继（POTATO）", "🥔", ["potato_relay"],
-                  "保留 8070 兼容通信，仅转发消息，不加载任何本地模型"),
+                   ["tts_engine_lite", "tts_adapter_lite"],
+                   f"TTS 推理 + :{tts_adapter_port} 中继，不启动 VLM / ASR"),
+        GroupDef("potato", "无模型中继（POTATO）", "🥔", ["potato_relay"],
+                   f"保留 :{tts_adapter_port} 兼容通信，仅转发消息，不加载任何本地模型"),
         GroupDef("bilibili", "Bilibili 直播", "📺", ["bilibili"],
                   "直播弹幕、评论、私信与可选 Live2D 联动"),
         GroupDef("live2d", "Live2D 渲染", "🖼️", ["live2d"],
@@ -615,6 +628,7 @@ class ServiceState:
     windows_owned_processes: list[Any] = field(default_factory=list, repr=False)
     windows_job: _WindowsJobCapability | None = field(default=None, repr=False)
     started_at: float | None = None
+    started_port: int | None = None
     log_buffer: deque = field(default_factory=lambda: deque(maxlen=10000))
     _read_task: asyncio.Task | None = None
 
@@ -654,7 +668,7 @@ class ProcessManager:
             "id": service_id,
             "name": sdef.name,
             "group_id": sdef.group_id,
-            "port": sdef.port,
+            "port": state.started_port if state.status == ServiceStatus.RUNNING and state.started_port is not None else sdef.port,
             "detail": sdef.detail,
             "status": state.status.value,
             "pid": state.pid,
@@ -678,6 +692,75 @@ class ProcessManager:
                 "services": services,
             })
         return result
+
+    def get_launch_status(self) -> dict[str, Any]:
+        """Return the user-facing Core + mutually-exclusive runtime profile state."""
+        _register_services()
+        core = self.get_service_status("nachobot")
+        profiles: list[dict[str, Any]] = []
+        active_profile: str | None = None
+        error_profile: str | None = None
+
+        for profile_id, group_id in LAUNCH_PROFILE_GROUPS.items():
+            gdef = GROUP_DEFS[group_id]
+            services = [self.get_service_status(sid) for sid in gdef.services]
+            statuses = [service["status"] for service in services]
+            if any(status == ServiceStatus.ERROR.value for status in statuses):
+                status = ServiceStatus.ERROR.value
+                error_profile = error_profile or profile_id
+            elif any(status == ServiceStatus.STOPPING.value for status in statuses):
+                status = ServiceStatus.STOPPING.value
+                active_profile = active_profile or profile_id
+            elif any(status == ServiceStatus.STARTING.value for status in statuses):
+                status = ServiceStatus.STARTING.value
+                active_profile = active_profile or profile_id
+            elif services and all(status == ServiceStatus.RUNNING.value for status in statuses):
+                status = ServiceStatus.RUNNING.value
+                active_profile = active_profile or profile_id
+            elif any(status == ServiceStatus.RUNNING.value for status in statuses):
+                status = "partial"
+                active_profile = active_profile or profile_id
+            else:
+                status = ServiceStatus.STOPPED.value
+
+            profiles.append({
+                "id": profile_id,
+                "group_id": group_id,
+                "status": status,
+                "services": services,
+            })
+
+        launch_task = self._operation_tasks.get("launch")
+        launch_kind = self._operation_kinds.get("launch") if launch_task and not launch_task.done() else None
+        if launch_kind == "start":
+            status = ServiceStatus.STARTING.value
+        elif launch_kind == "stop":
+            status = ServiceStatus.STOPPING.value
+        elif core["status"] == ServiceStatus.ERROR.value:
+            status = ServiceStatus.ERROR.value
+        elif core["status"] == ServiceStatus.RUNNING.value and active_profile and any(
+            profile["id"] == active_profile and profile["status"] == ServiceStatus.RUNNING.value
+            for profile in profiles
+        ):
+            # A currently active healthy profile wins over stale ERROR state left
+            # behind by another mutually-exclusive profile.
+            status = ServiceStatus.RUNNING.value
+        elif active_profile:
+            status = "partial"
+        elif error_profile:
+            status = ServiceStatus.ERROR.value
+        elif core["status"] != ServiceStatus.STOPPED.value:
+            status = "partial"
+        else:
+            status = ServiceStatus.STOPPED.value
+
+        return {
+            "status": status,
+            "active_profile": active_profile or error_profile,
+            "operation": launch_kind,
+            "core": core,
+            "profiles": profiles,
+        }
 
     def get_log_history(self, service_id: str) -> list[str]:
         """Return buffered log lines for a service."""
@@ -737,6 +820,7 @@ class ProcessManager:
         state = self.states.get(service_id)
         if state and state.status in (ServiceStatus.RUNNING, ServiceStatus.STARTING):
             return
+        self._validate_service_start(service_id)
         group_task = self._operation_tasks.get(f"group:{sdef.group_id}")
         service_task = self._operation_tasks.get(f"service:{service_id}")
         if (group_task and not group_task.done()) or (service_task and not service_task.done()):
@@ -823,9 +907,175 @@ class ProcessManager:
             replace=True,
         )
 
+    def request_start_launch(self, profile_id: str) -> None:
+        """Start Core and exactly one runtime profile as one managed operation."""
+        _register_services()
+        profile_id = str(profile_id or "").strip().lower()
+        group_id = LAUNCH_PROFILE_GROUPS.get(profile_id)
+        if group_id is None:
+            raise ValueError(f"Unknown launch profile: {profile_id}")
+
+        existing = self._operation_tasks.get("launch")
+        if existing and not existing.done():
+            raise RuntimeError("NachoBot launch is already changing state")
+        for group in ("core", *LAUNCH_PROFILE_GROUPS.values()):
+            operation = self._operation_tasks.get(f"group:{group}")
+            if operation and not operation.done():
+                raise RuntimeError(f"Group {group} is already changing state")
+
+        self._validate_group_start(group_id)
+        affected = tuple(GROUP_DEFS["core"].services + GROUP_DEFS[group_id].services)
+        self._schedule_operation(
+            "launch",
+            lambda: self.start_launch(profile_id),
+            affected,
+            operation_kind="start",
+        )
+
+    def request_stop_launch(self) -> None:
+        """Cancel an in-flight launch and stop every runtime profile plus Core."""
+        _register_services()
+        existing = self._operation_tasks.get("launch")
+        if existing and not existing.done() and self._operation_kinds.get("launch") == "stop":
+            return
+        affected: list[str] = list(GROUP_DEFS["core"].services)
+        for group_id in LAUNCH_PROFILE_GROUPS.values():
+            affected.extend(GROUP_DEFS[group_id].services)
+        self._schedule_operation(
+            "launch",
+            self.stop_launch,
+            tuple(affected),
+            operation_kind="stop",
+            replace=True,
+        )
+
+    async def start_launch(self, profile_id: str) -> None:
+        """Run Core + selected profile transactionally, rolling back this launch on failure."""
+        _register_services()
+        group_id = LAUNCH_PROFILE_GROUPS.get(profile_id)
+        if group_id is None:
+            raise ValueError(f"Unknown launch profile: {profile_id}")
+
+        core_state = self.states.get("nachobot")
+        core_was_running = bool(core_state and core_state.status == ServiceStatus.RUNNING)
+        try:
+            await self.start_group("core")
+            core_state = self.states.get("nachobot")
+            if not core_state or core_state.status != ServiceStatus.RUNNING:
+                return
+
+            await self.start_group(group_id)
+            profile_ready = all(
+                self.states.get(service_id)
+                and self.states[service_id].status == ServiceStatus.RUNNING
+                for service_id in GROUP_DEFS[group_id].services
+            )
+            if profile_ready:
+                return
+
+            await self.stop_group(group_id)
+            if not core_was_running:
+                await self.stop_group("core")
+        except asyncio.CancelledError:
+            await self.stop_group(group_id)
+            if not core_was_running:
+                await self.stop_group("core")
+            raise
+        except Exception:
+            try:
+                await self.stop_group(group_id)
+                if not core_was_running:
+                    await self.stop_group("core")
+            except Exception:
+                logger.exception("Failed to roll back launch profile %s", profile_id)
+            raise
+
+    async def stop_launch(self) -> None:
+        """Stop all mutually-exclusive runtime profiles, then stop Core."""
+        _register_services()
+        for group_id in LAUNCH_PROFILE_GROUPS.values():
+            await self.stop_group(group_id)
+        await self.stop_group("core")
+
+    def _active_relay_port(self) -> int | None:
+        """Return the port actually used when the current relay owner started."""
+        for service_id in ("tts_adapter_full", "tts_adapter_lite", "potato_relay"):
+            state = self.states.get(service_id)
+            if state and state.status == ServiceStatus.RUNNING:
+                if state.started_port is not None:
+                    return state.started_port
+                return SERVICE_DEFS[service_id].port
+        return None
+
+    def _configured_consumer_relay_port(self, service_id: str) -> int:
+        """Read the platform adapter's configured upstream relay port."""
+        relay_port = SERVICE_DEFS["potato_relay"].port
+        config_paths = {
+            "napcat_adapter": self.root / "NachoBot-Napcat-Adapter" / "config.toml",
+            "koishi_adapter": self.root / "NachoBot-Koishi-Adapter" / "config.toml",
+        }
+        config_path = config_paths.get(service_id)
+        if config_path is None:
+            return relay_port
+        try:
+            import tomlkit
+
+            document = tomlkit.parse(config_path.read_text(encoding="utf-8"))
+            return int(document.get("nachobot_server", {}).get("port", relay_port))
+        except Exception as exc:
+            raise RuntimeError(
+                f"Cannot read relay endpoint from {config_path}: {exc}"
+            ) from exc
+
+    def _require_relay_owner(self, consumer_service_id: str) -> None:
+        consumer_name = SERVICE_DEFS[consumer_service_id].name
+        configured_relay_port = SERVICE_DEFS["potato_relay"].port
+        relay_port = self._active_relay_port()
+        if relay_port is None:
+            raise RuntimeError(
+                f"Cannot start {consumer_name}: relay :{configured_relay_port} is not ready. "
+                "Start one of FULL, LITE, or POTATO first."
+            )
+
+        consumer_port = self._configured_consumer_relay_port(consumer_service_id)
+        if consumer_port != relay_port:
+            raise RuntimeError(
+                f"Cannot start {consumer_name}: configured upstream port :{consumer_port} "
+                f"does not match the active Multimodal relay port :{relay_port}."
+            )
+
+    def _validate_service_start(self, service_id: str) -> None:
+        # QQ/Koishi text adapters target the configured Multimodal relay endpoint.
+        if service_id in ("napcat_adapter", "koishi_adapter"):
+            self._require_relay_owner(service_id)
+
+        # Direct service starts must preserve the same mutual exclusion that
+        # group starts enforce for the configured relay and shared TTS engine resources.
+        relay_services = ("tts_adapter_full", "tts_adapter_lite", "potato_relay")
+        engine_services = ("tts_engine_full", "tts_engine_lite")
+        conflict_set = relay_services if service_id in relay_services else engine_services if service_id in engine_services else ()
+        for other_id in conflict_set:
+            if other_id == service_id:
+                continue
+            operation = self._operation_tasks.get(f"service:{other_id}")
+            if operation and not operation.done():
+                raise RuntimeError(
+                    f"Cannot start {SERVICE_DEFS[service_id].name}: "
+                    f"{SERVICE_DEFS[other_id].name} is already changing state."
+                )
+            state = self.states.get(other_id)
+            if state and state.status in (ServiceStatus.RUNNING, ServiceStatus.STARTING):
+                raise RuntimeError(
+                    f"Cannot start {SERVICE_DEFS[service_id].name}: "
+                    f"{SERVICE_DEFS[other_id].name} already owns the shared endpoint."
+                )
+
     def _validate_group_start(self, group_id: str) -> None:
         gdef = GROUP_DEFS[group_id]
         for service_id in gdef.services:
+            state = self.states.get(service_id)
+            if not state or state.status not in (ServiceStatus.RUNNING, ServiceStatus.STARTING):
+                self._validate_service_start(service_id)
             operation = self._operation_tasks.get(f"service:{service_id}")
             if operation and not operation.done():
                 raise RuntimeError(
@@ -1000,7 +1250,11 @@ class ProcessManager:
 
             await self._broadcast(service_id, f"[WebUI] {sdef.name} spawned (PID: {proc.pid})\n")
             if sdef.wait_port and sdef.port:
-                ready = await self._wait_for_port(service_id, sdef.port, timeout=180)
+                # TTS engines may spend an arbitrary amount of time downloading
+                # model assets on first launch. Do not treat a fixed readiness
+                # deadline as a startup failure while the managed process is alive.
+                readiness_timeout = None if service_id in ("tts_engine_full", "tts_engine_lite") else 180
+                ready = await self._wait_for_port(service_id, sdef.port, timeout=readiness_timeout)
                 if not ready:
                     await self._terminate_state_process(state)
                     state.status = ServiceStatus.ERROR
@@ -1024,6 +1278,7 @@ class ProcessManager:
                     state.status = ServiceStatus.ERROR
                 return
             state.status = ServiceStatus.RUNNING
+            state.started_port = sdef.port
             await self._broadcast(service_id, f"[WebUI] {sdef.name} is ready.\n")
 
         except asyncio.CancelledError:
@@ -1032,6 +1287,7 @@ class ProcessManager:
                 state.status = ServiceStatus.STOPPED
             state.process = None
             state.pid = None
+            state.started_port = None
             raise
         except Exception as e:
             try:
@@ -1043,6 +1299,7 @@ class ProcessManager:
             state.status = ServiceStatus.ERROR
             state.process = None
             state.pid = None
+            state.started_port = None
             await self._broadcast(service_id, f"[WebUI] ERROR starting {sdef.name}: {e}\n")
 
     async def _reap_leader_after_start_failure(self, process: asyncio.subprocess.Process) -> bool:
@@ -1103,6 +1360,7 @@ class ProcessManager:
         state.status = ServiceStatus.STOPPED
         state.process = None
         state.pid = None
+        state.started_port = None
         await self._broadcast(service_id, f"[WebUI] {sdef.name} stopped.\n")
 
     async def start_group(self, group_id: str) -> None:
@@ -1111,7 +1369,7 @@ class ProcessManager:
         if not gdef:
             raise ValueError(f"Unknown group: {group_id}")
 
-        # The FULL, LITE, and POTATO groups all own the 8070 adapter endpoint;
+        # FULL, LITE, and POTATO all own the configured relay endpoint;
         # only one of them can be active at a time.
         self._validate_group_start(group_id)
 
@@ -1182,11 +1440,18 @@ class ProcessManager:
 
     async def send_input(self, service_id: str, text: str) -> None:
         state = self.states.get(service_id)
-        if not state or state.status != ServiceStatus.RUNNING or not state.process:
-            raise ValueError(f"Service {service_id} is not running")
+        # Interactive startup prompts (notably NachoBot's EULA confirmation)
+        # occur before the service readiness check can mark it RUNNING.  Once
+        # the managed child exists, STARTING is therefore a valid stdin state.
+        if (
+            not state
+            or state.status not in (ServiceStatus.STARTING, ServiceStatus.RUNNING)
+            or not state.process
+        ):
+            raise ValueError(f"Service {service_id} is not accepting input")
         if not state.process.stdin:
             raise ValueError(f"Service {service_id} does not accept input")
-        
+
         state.process.stdin.write(text.encode("utf-8"))
         await state.process.stdin.drain()
 
@@ -1633,17 +1898,24 @@ class ProcessManager:
         except Exception:
             return False
 
-    async def _wait_for_port(self, service_id: str, port: int, timeout: int = 180) -> bool:
-        """Wait for a port to become available. Returns True if ready, False if timed out."""
+    async def _wait_for_port(self, service_id: str, port: int, timeout: int | None = 180) -> bool:
+        """Wait for a port to become available until ready, process exit, or timeout."""
         import socket
+
         sdef = SERVICE_DEFS.get(service_id)
-        await self._broadcast(service_id, f"[WebUI] 等待端口 {port} 就绪 (最长 {timeout}s)...\n")
-        for i in range(timeout):
-            # Check if the process died while we're waiting
+        if timeout is None:
+            await self._broadcast(service_id, f"[WebUI] 等待端口 {port} 就绪（模型下载期间不会超时）...\n")
+        else:
+            await self._broadcast(service_id, f"[WebUI] 等待端口 {port} 就绪 (最长 {timeout}s)...\n")
+
+        elapsed = 0
+        while timeout is None or elapsed < timeout:
+            # Check if the process died while we're waiting.
             state = self.states.get(service_id)
             if state and state.status in (ServiceStatus.STOPPED, ServiceStatus.ERROR):
                 await self._broadcast(service_id, "[WebUI] 进程已退出，停止等待端口\n")
                 return False
+
             if sdef and sdef.health_mode:
                 ready = await asyncio.to_thread(
                     self._health_mode_ready,
@@ -1653,21 +1925,27 @@ class ProcessManager:
                 if ready:
                     await self._broadcast(
                         service_id,
-                        f"[WebUI] Port {port} is ready ({sdef.health_mode}). ({i+1}s)\n",
+                        f"[WebUI] Port {port} is ready ({sdef.health_mode}). ({elapsed + 1}s)\n",
                     )
                     return True
             else:
                 try:
                     with socket.create_connection(("127.0.0.1", port), timeout=1):
-                        await self._broadcast(service_id, f"[WebUI] Port {port} is ready. ({i+1}s)\n")
+                        await self._broadcast(
+                            service_id,
+                            f"[WebUI] Port {port} is ready. ({elapsed + 1}s)\n",
+                        )
                         return True
                 except (ConnectionRefusedError, OSError, socket.timeout):
                     pass
+
             await asyncio.sleep(1)
-        message = f"[WebUI] WARNING: Port {port} not ready after {timeout}s."
-        if service_id in ("tts_engine_full", "tts_engine_lite"):
-            message += " 如果你是初次启动，等待模型下载完毕后重启该服务。"
-        await self._broadcast(service_id, message + "\n")
+            elapsed += 1
+
+        await self._broadcast(
+            service_id,
+            f"[WebUI] WARNING: Port {port} not ready after {timeout}s.\n",
+        )
         return False
 
     def _resolve_cmd(self, sdef: ServiceDef) -> tuple[list[str], str, dict[str, str]]:

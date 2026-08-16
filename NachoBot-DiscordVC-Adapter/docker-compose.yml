@@ -8,6 +8,7 @@ services:
         multimodal: ../NachoBot-Multimodal-Adapter
     environment:
       - TZ=Asia/Shanghai
+      - NACHOBOT_CORE_TOKEN=${NACHOBOT_CORE_TOKEN:-}
     volumes:
       - ./config.toml:/workspace/NachoBot-DiscordVC-Adapter/config.toml
       - ../NachoBot/config:/workspace/NachoBot/config:ro

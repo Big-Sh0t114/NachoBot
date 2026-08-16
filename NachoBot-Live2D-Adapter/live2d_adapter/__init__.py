@@ -1,6 +1,12 @@
 """Standalone Live2D rendering adapter for NachoBot."""
 
-from .config import AdapterConfig, ConfigError, load_config
+from .config import AdapterConfig, ConfigError, ModelAdaptationConfig, load_config
+from .model_adapter import (
+    Live2DModelAdapter,
+    ModelAdaptationError,
+    ModelMetadata,
+    inspect_model,
+)
 from .protocol import (
     PROTOCOL_VERSION,
     AvatarCommand,
@@ -24,6 +30,11 @@ __all__ = [
     "AvatarWebSocketServer",
     "ConfigError",
     "InteractionEvent",
+    "Live2DModelAdapter",
+    "ModelAdaptationConfig",
+    "ModelAdaptationError",
+    "ModelMetadata",
     "ProtocolError",
+    "inspect_model",
     "load_config",
 ]

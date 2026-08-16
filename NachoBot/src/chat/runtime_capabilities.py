@@ -20,6 +20,7 @@ _WEB_SEARCH_MODES = {"standard", "disabled"}
 _REPLY_DELIVERY_MODES = {"chunked", "aggregate_tagged_text", "json_envelope"}
 _PERSON_PROFILE_MODES = {"standard", "low_latency", "disabled"}
 _TTS_LANGUAGES = {"", "ja", "zh"}
+_IDENTITY_MODES = {"standard", "external"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +44,7 @@ class RuntimeCapabilities:
     person_profile_timeout_seconds: float = 0.5
     typo_enabled: bool = True
     tts_language: str = ""
+    identity_mode: str = "standard"
 
     @classmethod
     def from_mapping(cls, value: Any) -> "RuntimeCapabilities":
@@ -81,6 +83,7 @@ class RuntimeCapabilities:
             ),
             typo_enabled=_bool(value, "typo_enabled", True),
             tts_language=_choice(value.get("tts_language"), _TTS_LANGUAGES, ""),
+            identity_mode=_choice(value.get("identity_mode"), _IDENTITY_MODES, "standard"),
         )
 
 
@@ -111,9 +114,25 @@ class PlatformEvent:
 
 
 def additional_config_from_message(message: Any) -> Mapping[str, Any]:
+    if isinstance(message, Mapping):
+        direct = message.get("additional_config")
+        if isinstance(direct, Mapping) and direct:
+            return direct
+        additional_data = message.get("additional_data")
+        if isinstance(additional_data, Mapping) and additional_data:
+            return additional_data
+        base_info = message.get("message_base_info")
+        if isinstance(base_info, Mapping) and isinstance(base_info.get("additional_config"), Mapping):
+            return base_info["additional_config"]
     direct = getattr(message, "additional_config", None)
-    if isinstance(direct, Mapping):
+    if isinstance(direct, Mapping) and direct:
         return direct
+    additional_data = getattr(message, "additional_data", None)
+    if isinstance(additional_data, Mapping) and additional_data:
+        return additional_data
+    base_info = getattr(message, "message_base_info", None)
+    if isinstance(base_info, Mapping) and isinstance(base_info.get("additional_config"), Mapping):
+        return base_info["additional_config"]
     message_info = getattr(message, "message_info", None)
     nested = getattr(message_info, "additional_config", None)
     return nested if isinstance(nested, Mapping) else {}

@@ -10,9 +10,12 @@ from urllib.parse import urljoin
 from src.plugin_system import BasePlugin, register_plugin, BaseCommand
 
 
-PLUGIN_DIR = Path(__file__).parent
+PLUGIN_DIR = Path(__file__).resolve().parent
+CORE_DIR = Path(__file__).resolve().parents[2]
+MUSIC_DIR = CORE_DIR / "music"
+
 LIB_PATH = PLUGIN_DIR / "music_library.json"
-AUDIO_DIR = PLUGIN_DIR / "audio"
+AUDIO_DIR = MUSIC_DIR
 TODO_LIST_PATH = PLUGIN_DIR / "list.txt"
 DUMP_LIST_PATH = PLUGIN_DIR / "dump.txt"
 AUDIO_EXT_WHITELIST = {".wav"}
@@ -56,72 +59,91 @@ def _normalize_file_key(rel_path: str) -> str:
 
 
 def _sync_library_with_audio(library: List[dict]) -> List[dict]:
-    """保证 music_library.json 覆盖 audio 目录下新增的 WAV 文件。"""
-    updated = list(library)
+    """让 music_library.json 与核心 music 目录双向同步。"""
+    if not AUDIO_DIR.exists():
+        # 目录不存在更可能是部署/挂载异常，不在这种情况下清空已有曲库。
+        return list(library)
+
+    audio_files = sorted(
+        (
+            path
+            for path in AUDIO_DIR.iterdir()
+            if path.is_file() and path.suffix.lower() in AUDIO_EXT_WHITELIST
+        ),
+        key=lambda path: path.name.casefold(),
+    )
+
+    files_by_name = {path.name.casefold(): path for path in audio_files}
+    files_by_title: Dict[str, Path] = {}
+    for path in audio_files:
+        title_key = _normalize_query(path.stem)
+        if title_key and title_key not in files_by_title:
+            files_by_title[title_key] = path
+
+    synced: List[dict] = []
+    used_files: set[str] = set()
     changed = False
 
-    if not AUDIO_DIR.exists():
-        return updated
-
-    known_files = set()
-    known_titles = set()
-
-    for item in updated:
+    for item in library:
         if not isinstance(item, dict):
+            changed = True
             continue
-        title_key = _normalize_query(item.get("title", ""))
+
         file_key = _normalize_file_key(str(item.get("file", "")))
-        if title_key:
-            known_titles.add(title_key)
-        if file_key:
-            known_files.add(file_key)
+        audio_file = files_by_name.get(file_key) if file_key else None
 
-    added: List[dict] = []
-    for audio_file in AUDIO_DIR.iterdir():
-        if not audio_file.is_file() or audio_file.suffix.lower() not in AUDIO_EXT_WHITELIST:
+        # 同一文件只保留一条 JSON 记录。
+        if audio_file is not None and audio_file.name.casefold() in used_files:
+            audio_file = None
+
+        # 兼容缺少 file 或仅路径发生变化的旧记录：尝试按标题匹配现有文件。
+        if audio_file is None:
+            title_key = _normalize_query(item.get("title", ""))
+            candidate = files_by_title.get(title_key) if title_key else None
+            if candidate is not None and candidate.name.casefold() not in used_files:
+                audio_file = candidate
+
+        # JSON 中存在但 music 目录已不存在的曲目，自动移除。
+        if audio_file is None:
+            changed = True
             continue
 
+        normalized_path = audio_file.relative_to(CORE_DIR).as_posix()
+        normalized_item = dict(item)
+        if str(normalized_item.get("file", "")) != normalized_path:
+            normalized_item["file"] = normalized_path
+            changed = True
+
+        synced.append(normalized_item)
+        used_files.add(audio_file.name.casefold())
+
+    # music 目录中新出现但 JSON 尚未登记的文件，自动追加。
+    added: List[dict] = []
+    for audio_file in audio_files:
         file_key = audio_file.name.casefold()
-        if file_key in known_files:
+        if file_key in used_files:
             continue
 
         title = audio_file.stem.strip() or audio_file.name
-        title_key = _normalize_query(title)
-
-        # 如果库里已有同名歌曲但未记录文件，则补全文件路径
-        if title_key and title_key in known_titles:
-            for item in updated:
-                if _normalize_query(item.get("title", "")) == title_key and not _normalize_file_key(
-                    str(item.get("file", ""))
-                ):
-                    item["file"] = audio_file.relative_to(PLUGIN_DIR).as_posix()
-                    known_files.add(file_key)
-                    changed = True
-                    break
-            continue
-
         added.append(
             {
                 "title": title,
                 "artist": "",
                 "aliases": [title],
-                "file": audio_file.relative_to(PLUGIN_DIR).as_posix(),
+                "file": audio_file.relative_to(CORE_DIR).as_posix(),
             }
         )
-        known_files.add(file_key)
-        if title_key:
-            known_titles.add(title_key)
+        used_files.add(file_key)
         changed = True
 
     if added:
-        # 保持输出稳定：新增的按名称排序后插入末尾
-        added.sort(key=lambda s: _normalize_query(s.get("title", "")))
-        updated.extend(added)
+        added.sort(key=lambda song: _normalize_query(song.get("title", "")))
+        synced.extend(added)
 
     if changed:
-        _persist_library(updated)
+        _persist_library(synced)
 
-    return updated
+    return synced
 
 
 def _match_best(query: str, library: List[dict]) -> Tuple[Optional[dict], float]:
@@ -253,7 +275,7 @@ def _fuzzy_contains(query: str, candidates: set[str], threshold: float) -> Tuple
 async def _play_song(cmd: BaseCommand, song: dict) -> Tuple[bool, Optional[str], bool]:
     """共用播放流程：根据 song dict 发送语音/文件。"""
     rel = song.get("file") or ""
-    wav = (PLUGIN_DIR / rel).resolve() if rel else (AUDIO_DIR / f"{song.get('title', '')}.wav").resolve()
+    wav = (CORE_DIR / rel).resolve() if rel else (AUDIO_DIR / f"{song.get('title', '')}.wav").resolve()
     if not wav.exists():
         await cmd.send_text(f"找到歌曲 {song.get('title', '?')}，但音频缺失：{wav.name}")
         return True, f"file_missing:{wav.name}", True

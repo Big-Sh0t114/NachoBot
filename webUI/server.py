@@ -12,7 +12,7 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -28,6 +28,8 @@ from music_library import build_music_playlist
 from chat_backend import ChatBackendError, chat_backend
 from tts_manager import TTSGenerationError, TTSManager, TTSUnavailableError
 from setup_manager import EnvironmentChecker, ConfigInitializer, DependencyInstaller, PathVerifier, NapCatConfigurator
+from security import WebUISecurity, validate_webui_config_raw
+from webui_config import CONFIG_PATH, webui_config
 
 logger = logging.getLogger("webui")
 
@@ -50,26 +52,51 @@ plugin_mgr = PluginManager()
 db_mgr = DatabaseManager()
 knowledge_mgr = KnowledgeManager()
 tts_mgr = TTSManager()
+webui_security = WebUISecurity(webui_config)
+
+
+def _validate_webui_config_raw(raw: str) -> None:
+    """Validate the effective WebUI bind/auth pair before it reaches disk."""
+    try:
+        validate_webui_config_raw(
+            raw,
+            runtime_bind_host=webui_security.runtime_bind_host,
+        )
+    except RuntimeError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifecycle."""
+    # Validate the file itself before trusting the parsed/merged view.  This
+    # catches legacy persisted auth_token values even when the current bind is
+    # loopback, and protects startup from a raw config that hot-reload never
+    # touched.
+    if CONFIG_PATH.exists():
+        validate_webui_config_raw(
+            CONFIG_PATH.read_text(encoding="utf-8"),
+            runtime_bind_host=webui_security.runtime_bind_host,
+        )
+    webui_security.ensure_safe_bind()
     await tts_mgr.start()
     try:
         yield
     finally:
         await tts_mgr.close()
         await chat_backend.close()
-        # Shutdown: stop all running services
-        for sid in list(process_mgr.states.keys()):
-            try:
-                await process_mgr.stop_service(sid)
-            except Exception:
-                pass
+        await process_mgr.shutdown()
 
 
 app = FastAPI(title="NachoBot WebUI", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def protect_control_api(request: Request, call_next):
+    rejection = webui_security.authorize_http(request)
+    if rejection is not None:
+        return rejection
+    return await call_next(request)
 
 # Mount static and resources files
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -129,7 +156,10 @@ async def get_config(file_id: str):
         logger.warning("Failed to parse config %s: %s", _log_safe(file_id), e)
         data = None
 
-    return {"data": data, "raw": raw}
+    return {
+        "data": data,
+        "raw": raw,
+    }
 
 
 class ConfigUpdate(BaseModel):
@@ -145,11 +175,10 @@ async def update_config(file_id: str, body: ConfigUpdate):
                 tomlkit.parse(body.raw)
             except Exception as e:
                 raise HTTPException(400, f"配置存在错误，保存被拒绝 {e}")
-
-        config_mgr.write_config_raw(file_id, body.raw)
+        validator = _validate_webui_config_raw if file_id == "webui_config" else None
+        config_mgr.write_config_raw(file_id, body.raw, validator=validator)
         # Hot-reload configurations & services
         if file_id == "webui_config":
-            from webui_config import webui_config
             webui_config.reload()
 
         from process_manager import _register_services
@@ -190,9 +219,13 @@ class RestoreBackupRequest(BaseModel):
 @app.post("/api/configs/{file_id}/restore")
 async def restore_config_backup(file_id: str, body: RestoreBackupRequest):
     try:
-        bak_name = config_mgr.restore_backup(file_id, body.backup_file)
+        validator = _validate_webui_config_raw if file_id == "webui_config" else None
+        bak_name = config_mgr.restore_backup(
+            file_id,
+            body.backup_file,
+            validator=validator,
+        )
         if file_id == "webui_config":
-            from webui_config import webui_config
             webui_config.reload()
         from process_manager import _register_services
         _register_services()
@@ -221,10 +254,37 @@ async def get_services():
     return process_mgr.get_all_statuses()
 
 
+@app.get("/api/launch")
+async def get_launch_status():
+    return process_mgr.get_launch_status()
+
+
+class LaunchStartRequest(BaseModel):
+    profile: str
+
+
+@app.post("/api/launch/start")
+async def start_launch(body: LaunchStartRequest):
+    try:
+        process_mgr.request_start_launch(body.profile)
+        return {"status": "starting", "profile": body.profile.strip().lower()}
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/launch/stop")
+async def stop_launch():
+    try:
+        process_mgr.request_stop_launch()
+        return {"status": "stopping"}
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(400, str(e))
+
+
 @app.post("/api/groups/{group_id}/start")
 async def start_group(group_id: str):
     try:
-        asyncio.create_task(process_mgr.start_group(group_id))
+        process_mgr.request_start_group(group_id)
         return {"status": "starting", "group": group_id}
     except (ValueError, RuntimeError) as e:
         raise HTTPException(400, str(e))
@@ -233,7 +293,7 @@ async def start_group(group_id: str):
 @app.post("/api/groups/{group_id}/stop")
 async def stop_group(group_id: str):
     try:
-        asyncio.create_task(process_mgr.stop_group(group_id))
+        process_mgr.request_stop_group(group_id)
         return {"status": "stopping", "group": group_id}
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -242,18 +302,18 @@ async def stop_group(group_id: str):
 @app.post("/api/services/{service_id}/start")
 async def start_service(service_id: str):
     try:
-        asyncio.create_task(process_mgr.start_service(service_id))
+        process_mgr.request_start_service(service_id)
         return {"status": "starting", "service": service_id}
-    except ValueError as e:
+    except (ValueError, RuntimeError) as e:
         raise HTTPException(400, str(e))
 
 
 @app.post("/api/services/{service_id}/stop")
 async def stop_service(service_id: str):
     try:
-        asyncio.create_task(process_mgr.stop_service(service_id))
+        process_mgr.request_stop_service(service_id)
         return {"status": "stopping", "service": service_id}
-    except ValueError as e:
+    except (ValueError, RuntimeError) as e:
         raise HTTPException(400, str(e))
 
 
@@ -368,7 +428,8 @@ async def delete_chat_conversation(conversation_id: str):
 @app.websocket("/ws/chat/{conversation_id}")
 async def ws_chat(ws: WebSocket, conversation_id: str):
     """Push each streamed Core reply into the matching WebUI conversation."""
-    await ws.accept()
+    if not await webui_security.authorize_websocket(ws):
+        return
     queue = chat_backend.subscribe(conversation_id)
 
     try:
@@ -406,7 +467,8 @@ async def ws_chat(ws: WebSocket, conversation_id: str):
 
 @app.websocket("/ws/logs/{service_id}")
 async def ws_logs(ws: WebSocket, service_id: str):
-    await ws.accept()
+    if not await webui_security.authorize_websocket(ws):
+        return
 
     # Send historical logs
     history = process_mgr.get_log_history(service_id)
@@ -462,7 +524,10 @@ async def get_plugin_config(plugin_id: str):
         logger.warning("Failed to parse plugin config %s: %s", _log_safe(plugin_id), e)
         data = None
 
-    return {"data": data, "raw": raw}
+    return {
+        "data": data,
+        "raw": raw,
+    }
 
 
 class PluginConfigUpdate(BaseModel):
@@ -519,7 +584,7 @@ async def get_status():
 @app.get("/api/db/stats")
 async def db_stats():
     try:
-        return db_mgr.get_stats()
+        return await asyncio.to_thread(db_mgr.get_stats)
     except Exception:
         logger.exception("Database stats failed")
         raise HTTPException(500, "数据库统计读取失败")
@@ -528,7 +593,7 @@ async def db_stats():
 @app.get("/api/db/tables")
 async def db_list_tables():
     try:
-        return db_mgr.list_tables()
+        return await asyncio.to_thread(db_mgr.list_tables)
     except Exception:
         logger.exception("Database table list failed")
         raise HTTPException(500, "数据库表列表读取失败")
@@ -537,8 +602,8 @@ async def db_list_tables():
 @app.get("/api/db/tables/{table_name}")
 async def db_query_table(
     table_name: str,
-    page: int = 1,
-    size: int = 50,
+    page: int = Query(1, ge=1, le=1_000_000),
+    size: int = Query(50, ge=1, le=200),
     search: str = "",
     sort_by: str = "id",
     sort_order: str = "desc",
@@ -548,9 +613,22 @@ async def db_query_table(
         filter_dict = None
         if filters:
             filter_dict = json.loads(filters)
-        return db_mgr.query_table(table_name, page, size, search, sort_by, sort_order, filter_dict)
+            if not isinstance(filter_dict, dict):
+                raise ValueError("filters 必须是 JSON 对象")
+        return await asyncio.to_thread(
+            db_mgr.query_table,
+            table_name,
+            page,
+            size,
+            search,
+            sort_by,
+            sort_order,
+            filter_dict,
+        )
+    except json.JSONDecodeError as e:
+        raise HTTPException(400, f"filters 不是有效 JSON: {e.msg}")
     except ValueError as e:
-        raise HTTPException(404, str(e))
+        raise HTTPException(400, str(e))
     except Exception:
         logger.exception("Database table query failed: table=%s", _log_safe(table_name))
         raise HTTPException(500, "数据库表查询失败")
@@ -559,7 +637,7 @@ async def db_query_table(
 @app.get("/api/db/tables/{table_name}/columns/{column}/values")
 async def db_column_values(table_name: str, column: str):
     try:
-        return db_mgr.get_column_values(table_name, column)
+        return await asyncio.to_thread(db_mgr.get_column_values, table_name, column)
     except ValueError as e:
         raise HTTPException(404, str(e))
     except Exception:
@@ -574,7 +652,7 @@ async def db_column_values(table_name: str, column: str):
 @app.get("/api/db/tables/{table_name}/{row_id}")
 async def db_get_row(table_name: str, row_id: int):
     try:
-        return db_mgr.get_row(table_name, row_id)
+        return await asyncio.to_thread(db_mgr.get_row, table_name, row_id)
     except ValueError as e:
         raise HTTPException(404, str(e))
 
@@ -586,7 +664,7 @@ class RowUpdate(BaseModel):
 @app.put("/api/db/tables/{table_name}/{row_id}")
 async def db_update_row(table_name: str, row_id: int, body: RowUpdate):
     try:
-        db_mgr.update_row(table_name, row_id, body.data)
+        await asyncio.to_thread(db_mgr.update_row, table_name, row_id, body.data)
         return {"status": "ok"}
     except PermissionError as e:
         raise HTTPException(403, str(e))
@@ -597,7 +675,7 @@ async def db_update_row(table_name: str, row_id: int, body: RowUpdate):
 @app.delete("/api/db/tables/{table_name}/{row_id}")
 async def db_delete_row(table_name: str, row_id: int):
     try:
-        db_mgr.delete_row(table_name, row_id)
+        await asyncio.to_thread(db_mgr.delete_row, table_name, row_id)
         return {"status": "ok"}
     except PermissionError as e:
         raise HTTPException(403, str(e))
@@ -862,7 +940,8 @@ async def ws_setup_install(ws: WebSocket):
     Client sends: {"action": "install", "tasks": [{"id":..., "type":..., "name":..., "dir":...}, ...]}
     Server streams: {"type": "log"|"task_start"|"task_done"|"all_done", ...}
     """
-    await ws.accept()
+    if not await webui_security.authorize_websocket(ws):
+        return
 
     try:
         raw = await ws.receive_text()
@@ -911,7 +990,12 @@ async def ws_setup_install(ws: WebSocket):
 # =========================================================================
 
 if __name__ == "__main__":
-    from webui_config import webui_config
+    if CONFIG_PATH.exists():
+        validate_webui_config_raw(
+            CONFIG_PATH.read_text(encoding="utf-8"),
+            runtime_bind_host=webui_security.runtime_bind_host,
+        )
+    webui_security.ensure_safe_bind()
     uvicorn.run(
         "server:app",
         host=webui_config.host,

@@ -27,6 +27,11 @@ from src.chat.utils.prompt_injection_guard import build_guardrail_instruction, g
 from src.chat.focus.reply_context import ReplyPromptContext
 from src.chat.utils.url_fetcher import UrlContentFetcher, extract_urls
 from src.chat.utils.web_search import WebSearchManager
+from src.chat.utils.capability_router import (
+    CapabilityRouter,
+    build_search_after_decision,
+    execute_mcp_after_decision,
+)
 from src.chat.utils.chat_message_builder import (
     build_readable_messages,
     get_raw_msg_before_timestamp_with_chat,
@@ -95,6 +100,7 @@ class PrivateReplyer:
         # self.memory_activator = MemoryActivator()
 
         from src.plugin_system.core.tool_use import ToolExecutor  # 延迟导入ToolExecutor，不然会循环依赖
+        from src.plugin_system.core.mcp_tool_executor import MCPToolExecutor
 
         tool_model_set = model_config.model_task_config.tool_use
         if request_type == "file_edit":
@@ -115,10 +121,8 @@ class PrivateReplyer:
         except Exception:
             logger.warning("MCP Executor Config Read Failed")
 
-        self.mcp_executor = ToolExecutor(
+        self.mcp_executor = MCPToolExecutor(
             chat_id=self.chat_stream.stream_id,
-            enable_cache=True,
-            cache_ttl=3,
             model_set=model_config.model_task_config.mcp,
             include_prefix="mcp",
             prompt_template="mcp_tool_executor_prompt",
@@ -127,6 +131,7 @@ class PrivateReplyer:
         # 缓存权限检查结果 (私聊ID不变，只查一次)
         self.has_mcp_permission = self._check_mcp_permission()
         self.web_search_manager = WebSearchManager(chat_id=self.chat_stream.stream_id, enable_cache=True, cache_ttl=2)
+        self.capability_router = CapabilityRouter(chat_id=self.chat_stream.stream_id)
         self.url_fetcher = UrlContentFetcher()
 
     def switch_group(self, group: int) -> bool:
@@ -189,7 +194,7 @@ class PrivateReplyer:
             # 检查插件是否启用
             plugin_config = doc.get("plugin", {})
             if not plugin_config.get("enabled", True):
-                logger.debug(f"MCP Permission Check: FAILED (Plugin disabled in config)")
+                logger.debug("MCP Permission Check: FAILED (Plugin disabled in config)")
                 return False
 
             permissions = doc.get("permissions", {})
@@ -534,10 +539,29 @@ class PrivateReplyer:
             # 构建并行任务列表
             parallel_tasks = {}
 
-            # 1. 搜索任务（仅在无 URL 时触发）
-            if not urls:
+            mcp_catalog = self.mcp_executor.get_tool_catalog_summary() if self.has_mcp_permission else ""
+            allow_web_search = bool(not urls and self.web_search_manager.is_available)
+            allow_mcp = bool(self.has_mcp_permission and mcp_catalog)
+            decision_task = None
+            if allow_web_search or allow_mcp:
+                decision_task = asyncio.create_task(
+                    self.capability_router.decide(
+                        chat_history=chat_history,
+                        sender=sender,
+                        target=target,
+                        bot_name=global_config.bot.nickname,
+                        allow_web_search=allow_web_search,
+                        allow_mcp=allow_mcp,
+                        mcp_catalog=mcp_catalog,
+                    )
+                )
+
+            # 1. 搜索任务（仅在无 URL 且能力路由命中时触发）
+            if allow_web_search and decision_task:
                 logger.info("未检测到URL，尝试联网搜索判定")
-                parallel_tasks["search"] = self.web_search_manager.build_search_info(
+                parallel_tasks["search"] = build_search_after_decision(
+                    decision_task,
+                    self.web_search_manager,
                     chat_history=chat_history,
                     sender=sender,
                     target=target,
@@ -549,19 +573,26 @@ class PrivateReplyer:
                 sender=sender, target_message=target, chat_history=chat_history, return_details=False
             )
 
-            # 3. MCP工具 (High-Intelligence) - 仅在权限校验通过时执行
-            if self.has_mcp_permission:
-                parallel_tasks["mcp_tool"] = self.mcp_executor.execute_from_chat_message(
-                    sender=sender, target_message=target, chat_history=chat_history, return_details=False
+            # 3. MCP 独立工具链 - 权限和能力路由均通过后才执行
+            if allow_mcp and decision_task:
+                parallel_tasks["mcp_tool"] = execute_mcp_after_decision(
+                    decision_task,
+                    self.mcp_executor,
+                    sender=sender,
+                    target=target,
+                    chat_history=chat_history,
+                    return_details=False,
                 )
+            elif self.has_mcp_permission and not mcp_catalog:
+                logger.info("当前没有可用 MCP 工具，跳过 MCP 能力检查")
             else:
-                logger.info("用户无 MCP 权限，跳过 MCP 执行器 (Cached)")
+                logger.info("用户无 MCP 权限，跳过 MCP 能力检查 (Cached)")
 
             # 并行执行所有任务
             task_keys = list(parallel_tasks.keys())
             task_coros = list(parallel_tasks.values())
             raw_results = await asyncio.gather(*task_coros, return_exceptions=True)
-            results_map = dict(zip(task_keys, raw_results))
+            results_map = dict(zip(task_keys, raw_results, strict=True))
 
             # 处理搜索结果
             if "search" in results_map:

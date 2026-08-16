@@ -706,8 +706,9 @@ const SetupModule = (() => {
         try {
             const configResult = await apiPost('/api/setup/configs/generate', wizardData);
             if (configResult.errors && configResult.errors.length) {
-                updateProgressItem('config-gen', 'warning',
-                    `⚠️ 配置生成完成 (${configResult.generated.length} 成功, ${configResult.errors.length} 失败)`);
+                const detail = configResult.errors.join('；');
+                updateProgressItem('config-gen', 'error',
+                    `❌ 配置生成存在错误: ${detail}`);
                 configResult.errors.forEach(err => addLogLine(logDiv, `[Setup] ERROR: ${err}\n`));
             } else {
                 updateProgressItem('config-gen', 'done',
@@ -742,9 +743,10 @@ const SetupModule = (() => {
                 });
 
                 if (ncResult.errors && ncResult.errors.length) {
-                    updateProgressItem('napcat-config', 'warning',
-                        `⚠️ NapCat 配置完成 (${ncResult.configured.length} 成功, ${ncResult.errors.length} 失败)`);
-                    ncResult.errors.forEach(err => addLogLine(logDiv, `[Setup] ERROR: ${err}\n`));
+                    const detail = ncResult.errors.join('；');
+                    updateProgressItem('napcat-config', 'error',
+                        `❌ NapCat 配置失败: ${detail}`);
+                    ncResult.errors.forEach(err => addLogLine(logDiv, `[Setup] ERROR: NapCat: ${err}\n`));
                 } else if (ncResult.configured.length > 0) {
                     updateProgressItem('napcat-config', 'done',
                         `✅ NapCat 配置完成 (${ncResult.configured.join(', ')})`);
@@ -756,8 +758,10 @@ const SetupModule = (() => {
                 ncResult.configured.forEach(f => addLogLine(logDiv, `[Setup] 已配置: ${f} (WS客户端 + 日记HTTP + B站视频HTTP)\n`));
                 ncResult.skipped.forEach(f => addLogLine(logDiv, `[Setup] 跳过 (已有配置): ${f}\n`));
             } catch (e) {
-                updateProgressItem('napcat-config', 'warning', `⚠️ NapCat 配置失败: ${e.message}`);
-                addLogLine(logDiv, `[Setup] WARNING: NapCat 自动配置失败，请手动前往 NapCat WebUI 配置\n`);
+                const detail = e?.message || String(e);
+                updateProgressItem('napcat-config', 'error', `❌ NapCat 配置请求失败: ${detail}`);
+                addLogLine(logDiv, `[Setup] ERROR: NapCat 自动配置请求失败: ${detail}\n`);
+                addLogLine(logDiv, '[Setup] NapCat 自动配置未完成；其余部署继续执行，可根据上方具体错误修正后重试\n');
                 // Don't block deployment — NapCat config is best-effort
             }
         }
@@ -799,7 +803,7 @@ const SetupModule = (() => {
     function installDepsViaWebSocket(tasks, progressDiv, logDiv) {
         return new Promise((resolve, reject) => {
             const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const ws = new WebSocket(`${proto}//${location.host}/ws/setup/install`);
+            const ws = createAuthenticatedWebSocket(`${proto}//${location.host}/ws/setup/install`);
 
             ws.onopen = () => {
                 ws.send(JSON.stringify({ action: 'install', tasks }));

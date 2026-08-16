@@ -95,7 +95,7 @@ const TerminalModule = (() => {
         const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
         const url = `${proto}//${location.host}/ws/logs/${serviceId}`;
 
-        ws = new WebSocket(url);
+        ws = createAuthenticatedWebSocket(url);
 
         ws.onopen = () => {
             appendSystemLine(`已连接到 ${serviceId} 的日志流`);

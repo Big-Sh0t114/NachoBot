@@ -444,6 +444,21 @@ class ToolConfig(ConfigBase):
     web_search_timeout_seconds: int = 20
     """单个搜索引擎页面的加载超时时间（秒）"""
 
+    mcp_auto_detect: bool = True
+    """是否通过能力路由器自动触发 MCP 独立工具链"""
+
+    mcp_max_rounds: int = 3
+    """单次 MCP 独立工具链的最大决策轮数"""
+
+    mcp_max_calls: int = 5
+    """单次 MCP 独立工具链允许的最大工具调用数"""
+
+    mcp_max_candidate_tools: int = 32
+    """单次 MCP 决策最多暴露给模型的候选工具数"""
+
+    mcp_observation_max_chars: int = 12000
+    """回注 MCP 工具观察结果的最大字符数"""
+
 
 @dataclass
 class VoiceConfig(ConfigBase):

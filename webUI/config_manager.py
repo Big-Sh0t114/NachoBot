@@ -4,16 +4,17 @@ Handles TOML config file reading, writing, and backup with comment preservation.
 """
 
 import shutil
+from collections.abc import Mapping, MutableSequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import tomlkit
 
 try:
-    from .secure_paths import ensure_within, resolve_relative_to_root
+    from .secure_paths import ensure_within, resolve_named_file, resolve_relative_to_root
 except ImportError:
-    from secure_paths import ensure_within, resolve_relative_to_root
+    from secure_paths import ensure_within, resolve_named_file, resolve_relative_to_root
 
 # Root of the Nacho-with-u project (parent of webui/)
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -27,6 +28,7 @@ CONFIG_REGISTRY: list[dict[str, str]] = [
     {"id": "bot_config",    "group": "NachoBot 核心",  "path": "NachoBot/config/bot_config.toml",           "label": "机器人主配置"},
     {"id": "model_config",  "group": "NachoBot 核心",  "path": "NachoBot/config/model_config.toml",         "label": "模型与 API 配置"},
     {"id": "topics_config", "group": "NachoBot 核心",  "path": "NachoBot/config/topics_config.toml",        "label": "话题系统配置"},
+    {"id": "mcp_config",    "group": "NachoBot 核心",  "path": "NachoBot/config/mcp_config.toml",           "label": "MCP 配置"},
     {"id": "env",           "group": "NachoBot 核心",  "path": "NachoBot/.env",                             "label": "环境变量"},
     # 多模态适配器
     {"id": "tts_base",      "group": "多模态适配器", "path": "NachoBot-Multimodal-Adapter/configs/base.toml",       "label": "TTS 基础配置"},
@@ -39,6 +41,8 @@ CONFIG_REGISTRY: list[dict[str, str]] = [
     {"id": "discord_config",      "group": "Discord 适配器",   "path": "NachoBot-DiscordVC-Adapter/config.toml",    "label": "Discord VC 适配器配置"},
     {"id": "koishi_config",       "group": "Discord 适配器",   "path": "NachoBot-Koishi-Adapter/config.toml",       "label": "Koishi 适配器配置"},
     {"id": "universalvc_config",  "group": "全局语音适配器",    "path": "NachoBot-UniversalVC-Adapter/config.toml",  "label": "UniversalVC 配置"},
+    # Temporarily hidden from WebUI; restore when VRChat config exposure is wanted.
+    # {"id": "vrchat_config",       "group": "VRChat 适配器",     "path": "NachoBot-VRChat-Adapter/config.toml",       "label": "VRChat 适配器配置"},
     # WebUI 配置
     {"id": "webui_config",        "group": "WebUI 配置",       "path": "webUI/webui_config.toml",                   "label": "WebUI 系统配置"},
 ]
@@ -46,22 +50,32 @@ CONFIG_REGISTRY: list[dict[str, str]] = [
 # Field names that should be masked in the UI
 SENSITIVE_FIELDS = {
     "api_key", "token", "sessdata", "bili_jct", "buvid3", "buvid4",
-    "auth_token", "cert_file", "key_file",
+    "auth_token", "access_token", "refresh_token", "client_secret",
+    "password", "passwd", "cookie", "cookies", "authorization",
+    "credential", "credentials", "cert_file", "key_file",
 }
-
-
 def _is_sensitive(key: str) -> bool:
     """Check whether a key name is considered sensitive."""
     k = key.lower()
-    return k in SENSITIVE_FIELDS or "key" in k or "secret" in k
+    return (
+        k in SENSITIVE_FIELDS
+        or k.endswith("_token")
+        or "key" in k
+        or "secret" in k
+        or "password" in k
+        or "credential" in k
+    )
 
 
-def _mask_value(value: str) -> str:
-    """Mask a sensitive string, showing only the first 4 and last 4 chars."""
-    s = str(value)
-    if len(s) <= 12:
-        return s[:3] + "****"
-    return s[:4] + "****" + s[-4:]
+def _mask_secret_value(value: Any) -> Any:
+    """Preserve a secret value's container shape while hiding scalar values."""
+    if isinstance(value, Mapping):
+        return {key: _mask_secret_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, MutableSequence)):
+        return [_mask_secret_value(item) for item in value]
+    if value in (None, ""):
+        return value
+    return "****"
 
 
 class ConfigManager:
@@ -99,7 +113,10 @@ class ConfigManager:
             raise FileNotFoundError(f"Config file not found: {full}")
 
         if full.name == ".env":
-            return self._read_env(full)
+            data = self._read_env(full)
+            if mask_sensitive:
+                self._mask_dict(data)
+            return data
 
         raw = full.read_text(encoding="utf-8")
         doc = tomlkit.parse(raw)
@@ -111,7 +128,7 @@ class ConfigManager:
         return data
 
     def read_config_raw(self, file_id: str) -> str:
-        """Read raw text of a config file."""
+        """Read raw config text for the local WebUI editor."""
         entry = self._find(file_id)
         full = self._entry_path(entry)
         return full.read_text(encoding="utf-8")
@@ -143,10 +160,18 @@ class ConfigManager:
         self._update_tomlkit_doc(doc, data)
         full.write_text(tomlkit.dumps(doc), encoding="utf-8")
 
-    def write_config_raw(self, file_id: str, raw: str) -> None:
-        """Write raw config text to a registry-owned file."""
+    def write_config_raw(
+        self,
+        file_id: str,
+        raw: str,
+        *,
+        validator: Callable[[str], None] | None = None,
+    ) -> None:
+        """Write raw config text from the local WebUI editor."""
         entry = self._find(file_id)
         full = self._entry_path(entry)
+        if validator is not None:
+            validator(raw)
         self._backup(full, backup_type="auto")
         full.write_text(raw, encoding="utf-8")
 
@@ -158,20 +183,39 @@ class ConfigManager:
         full = self._entry_path(entry)
         return self._backup(full, backup_type="manual")
 
-    def restore_backup(self, file_id: str, backup_filename: str) -> str:
+    def restore_backup(
+        self,
+        file_id: str,
+        backup_filename: str,
+        *,
+        validator: Callable[[str], None] | None = None,
+    ) -> str:
         """Restore a specific backup file."""
         entry = self._find(file_id)
         full = self._entry_path(entry)
         
-        directory = full.parent
-        target_backup = directory / backup_filename
-        
-        if not target_backup.exists() or not target_backup.name.endswith(".bak"):
-            raise FileNotFoundError(f"Backup file not found: {backup_filename}")
+        directory = ensure_within(self.root, full.parent, must_exist=True)
+        target_backup = resolve_named_file(
+            directory,
+            backup_filename,
+            suffix=".bak",
+            must_exist=True,
+        )
+        expected_prefix = f"{full.stem}."
+        if not target_backup.name.startswith(expected_prefix) or not target_backup.is_file():
+            raise ValueError("备份文件不属于当前配置")
+
+        backup_raw = target_backup.read_text(encoding="utf-8")
+        if full.name != ".env":
+            try:
+                tomlkit.parse(backup_raw)
+            except Exception as exc:
+                raise ValueError("备份配置包含无效 TOML，恢复已拒绝") from exc
+        if validator is not None:
+            validator(backup_raw)
             
         self._backup(full, backup_type="auto")
         
-        import shutil
         shutil.copy2(target_backup, full)
         return target_backup.name
 
@@ -205,7 +249,6 @@ class ConfigManager:
             from secure_paths import ensure_within
             
         bak = ensure_within(self.root, path.with_suffix(f".{backup_type}.{ts}.bak"))
-        import shutil
         shutil.copy2(path, bak)
         
         if backup_type == "auto":
@@ -233,6 +276,12 @@ class ConfigManager:
         
         result = []
         for b in backups:
+            try:
+                b = ensure_within(directory, b, must_exist=True)
+            except (ValueError, FileNotFoundError):
+                continue
+            if not b.is_file():
+                continue
             name_parts = b.name.split('.')
             if len(name_parts) >= 4 and name_parts[-2].isdigit() and name_parts[-3] in ("auto", "manual"):
                 btype = "手动备份" if name_parts[-3] == "manual" else "自动备份"
@@ -299,13 +348,11 @@ class ConfigManager:
     def _mask_dict(cls, d: dict[str, Any], _parent_key: str = "") -> None:
         """In-place mask sensitive values."""
         for k, v in d.items():
-            if isinstance(v, dict):
+            if _is_sensitive(k):
+                d[k] = _mask_secret_value(v)
+            elif isinstance(v, dict):
                 cls._mask_dict(v, k)
-            elif isinstance(v, str) and _is_sensitive(k):
-                d[k] = _mask_value(v)
             elif isinstance(v, list):
-                for i, item in enumerate(v):
+                for item in v:
                     if isinstance(item, dict):
                         cls._mask_dict(item, k)
-                    elif isinstance(item, str) and _is_sensitive(k):
-                        v[i] = _mask_value(item)

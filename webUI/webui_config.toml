@@ -1,11 +1,19 @@
 [webui]
 # WebUI semantic version displayed in the sidebar
-version = "1.0.3"
+version = "1.0.4"
 
 [server]
 # FastAPI/Uvicorn server hosting configuration
 host = "127.0.0.1"
 port = 8088
+
+[security]
+# Required when WebUI listens on a non-loopback address. The
+# Access tokens are environment-only because this file is tracked by Git.
+# Set NACHOBOT_WEBUI_TOKEN before starting WebUI; keep this legacy field empty.
+auth_token = ""
+# Exact additional origins allowed to call /api and /ws.
+allowed_origins = []
 
 [proxy]
 # Proxy configuration for adapters like Koishi/Discord

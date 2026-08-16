@@ -27,6 +27,7 @@ from ncnk_message import (  # noqa: E402
     TargetConfig,
     TemplateInfo,
     UserInfo,
+    get_core_token_from_env,
 )
 
 from bili_src.core.config import (  # noqa: E402
@@ -85,12 +86,12 @@ class BilibiliAdapter:
             route_config={
                 self.config.platform: TargetConfig(
                     url=f"ws://{self.config.nachobot_host}:{self.config.nachobot_port}/ws",
-                    token=None,
+                    token=get_core_token_from_env(),
                 ),
                 # Live messages use the standard HeartFlow pipeline.
                 "bilibili.live": TargetConfig(
                     url=f"ws://{self.config.nachobot_host}:{self.config.nachobot_port}/ws",
-                    token=None,
+                    token=get_core_token_from_env(),
                 ),
             }
         )

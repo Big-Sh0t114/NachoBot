@@ -9,6 +9,7 @@ services:
         multimodal: ../NachoBot-Multimodal-Adapter
     environment:
       - TZ=Asia/Shanghai
+      - NACHOBOT_CORE_TOKEN=${NACHOBOT_CORE_TOKEN:-}
     volumes:
       - type: bind
         source: ./config.toml

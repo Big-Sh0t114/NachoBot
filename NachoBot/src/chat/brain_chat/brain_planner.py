@@ -28,6 +28,7 @@ from src.chat.utils.chat_message_builder import (
 from src.chat.utils.prompt_injection_guard import guard_user_content
 from src.chat.utils.display_name import resolve_sender_name
 from src.chat.utils.context_builder import build_tool_info, build_relation_info, build_lpmm_knowledge_info
+from src.chat.utils.capability_router import CapabilityRouter
 from src.memory_system.memory_retrieval import build_memory_retrieval_prompt
 from src.chat.utils.utils import get_chat_type_and_target_info
 from src.chat.planner_actions.action_manager import ActionManager
@@ -40,8 +41,8 @@ from src.plugin_system.base.component_types import ActionInfo, ComponentType, Ac
 from src.plugin_system.core.component_registry import component_registry
 import os
 import tomlkit
-import asyncio
 from src.plugin_system.core.tool_use import ToolExecutor
+from src.plugin_system.core.mcp_tool_executor import MCPToolExecutor
 from src.chat.utils.web_search import WebSearchManager
 from src.chat.utils.url_fetcher import UrlContentFetcher
 
@@ -212,15 +213,14 @@ class BrainPlanner:
             exclude_prefix="mcp",
             model_set=model_config.model_task_config.tool_use,
         )
-        self.mcp_executor = ToolExecutor(
+        self.mcp_executor = MCPToolExecutor(
             chat_id=self.chat_id,
-            enable_cache=True,
-            cache_ttl=3,
             model_set=model_config.model_task_config.mcp,
             include_prefix="mcp",
             prompt_template="mcp_tool_executor_prompt",
         )
         self.web_search_manager = WebSearchManager(chat_id=chat_id, enable_cache=True, cache_ttl=2)
+        self.capability_router = CapabilityRouter(chat_id=chat_id)
         self.url_fetcher = UrlContentFetcher()
 
     @property
@@ -685,6 +685,7 @@ class BrainPlanner:
                     target=target,
                     url_fetcher=self.url_fetcher,
                     web_search_manager=self.web_search_manager,
+                    capability_router=self.capability_router,
                     tool_executor=self.tool_executor,
                     mcp_executor=self.mcp_executor,
                     has_mcp_permission=self._check_mcp_permission(

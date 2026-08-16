@@ -14,6 +14,26 @@ const ChatModule = (() => {
     const DEFAULT_USER_NAME = 'WebUI';
     const API_ENDPOINT = '/api/chat/message';
     const DELETE_CONVERSATION_ENDPOINT = '/api/chat/conversations';
+    const CHAT_LAUNCH_PROFILES = Object.freeze({
+        full: {
+            name: '完整模式',
+            code: 'FULL',
+            summary: 'TTS · VLM · ASR',
+            detail: '完整本地多模态能力，资源占用最高',
+        },
+        lite: {
+            name: '轻量模式',
+            code: 'LITE',
+            summary: 'TTS',
+            detail: '保留语音合成，关闭 VLM / ASR',
+        },
+        potato: {
+            name: '无模型模式',
+            code: 'POTATO',
+            summary: 'Relay only',
+            detail: '仅消息中继，不加载本地模型',
+        },
+    });
     const WELCOME_SUBTITLES = [
         '我的存在，由你定义',
         '宝宝你是一个一个一个Tips啊啊啊啊',
@@ -525,7 +545,7 @@ const ChatModule = (() => {
 
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
         liveConversationId = conversationId;
-        liveSocket = new WebSocket(
+        liveSocket = createAuthenticatedWebSocket(
             `${protocol}//${location.host}/ws/chat/${encodeURIComponent(conversationId)}`
         );
 
@@ -773,70 +793,163 @@ const ChatModule = (() => {
         document.body.classList.remove('sidebar-mobile-open');
     }
 
+    function chooseLaunchProfile() {
+        if (modalOpen) {
+            toast('请先关闭当前弹窗', 'error');
+            return Promise.resolve(null);
+        }
+
+        const overlay = document.getElementById('modal-overlay');
+        const card = document.getElementById('modal-card');
+        const title = document.getElementById('modal-title');
+        const body = document.getElementById('modal-body');
+        const footer = document.getElementById('modal-footer');
+        const closeButton = document.getElementById('modal-close');
+
+        if (!overlay || !card || !title || !body || !footer || !closeButton) {
+            const raw = window.prompt('选择启动模式：FULL / LITE / POTATO', 'LITE');
+            const profileId = String(raw || '').trim().toLowerCase();
+            return Promise.resolve(CHAT_LAUNCH_PROFILES[profileId] ? profileId : null);
+        }
+
+        return new Promise(resolve => {
+            modalOpen = true;
+            card.classList.add('chat-launch-modal');
+            title.textContent = '选择 NachoBot 运行模式';
+            body.innerHTML = `
+                <div class="chat-launch-profile-intro">Core 将与以下一种运行模式绑定启动，三种模式互斥。</div>
+                <div class="chat-launch-profile-grid">
+                    ${Object.entries(CHAT_LAUNCH_PROFILES).map(([id, item]) => `
+                        <button type="button" class="chat-launch-profile" data-chat-launch-profile="${id}">
+                            <span class="chat-launch-profile-main">
+                                <strong>${item.name}</strong>
+                                <span class="chat-launch-profile-code">${item.code}</span>
+                            </span>
+                            <span class="chat-launch-profile-summary">${item.summary}</span>
+                            <span class="chat-launch-profile-detail">${item.detail}</span>
+                        </button>
+                    `).join('')}
+                </div>
+            `;
+            footer.innerHTML = '';
+
+            let settled = false;
+            const finish = result => {
+                if (settled) return;
+                settled = true;
+                overlay.classList.add('hidden');
+                card.classList.remove('chat-launch-modal');
+                closeButton.style.removeProperty('display');
+                closeButton.onclick = null;
+                overlay.onclick = null;
+                modalOpen = false;
+                resolve(result);
+            };
+
+            const cancelButton = document.createElement('button');
+            cancelButton.type = 'button';
+            cancelButton.className = 'btn btn-ghost';
+            cancelButton.textContent = '取消';
+            cancelButton.addEventListener('click', () => finish(null));
+            footer.appendChild(cancelButton);
+
+            body.querySelectorAll('[data-chat-launch-profile]').forEach(button => {
+                button.addEventListener('click', () => finish(button.dataset.chatLaunchProfile));
+            });
+
+            closeButton.style.removeProperty('display');
+            closeButton.onclick = () => finish(null);
+            overlay.onclick = event => {
+                if (event.target === overlay) finish(null);
+            };
+            overlay.classList.remove('hidden');
+        });
+    }
+
     async function toggleCoreService() {
         if (!els.status || coreToggleBusy) return;
 
-        const shouldStart = !coreRunning;
+        let currentLaunchStatus = 'stopped';
+        try {
+            const current = await apiGet('/api/launch');
+            currentLaunchStatus = String(current.status || 'stopped');
+        } catch (error) {
+            console.warn('Failed to read NachoBot launch state before toggle:', error);
+        }
+
+        if (currentLaunchStatus === 'stopping') {
+            toast('NachoBot 正在停止，请稍候', 'info');
+            return;
+        }
+
+        const shouldStart = currentLaunchStatus === 'stopped' || currentLaunchStatus === 'error';
+        let selectedProfile = null;
+        if (shouldStart) {
+            selectedProfile = await chooseLaunchProfile();
+            if (!selectedProfile) return;
+        }
+
         coreToggleBusy = true;
         coreStatusRequestSerial += 1;
         els.status.disabled = true;
         els.status.className = 'chat-status-chip is-checking';
-        els.status.textContent = shouldStart ? '核心启动中' : '核心关闭中';
-        els.status.title = shouldStart ? '正在启动 NachoBot Core' : '正在关闭 NachoBot Core';
+        els.status.textContent = shouldStart
+            ? `${CHAT_LAUNCH_PROFILES[selectedProfile].code} 启动中`
+            : 'NachoBot 关闭中';
+        els.status.title = shouldStart
+            ? `正在以 ${CHAT_LAUNCH_PROFILES[selectedProfile].code} 模式启动 NachoBot`
+            : '正在关闭 NachoBot Core 与当前运行模式';
 
         try {
-            await apiPost(`/api/services/nachobot/${shouldStart ? 'start' : 'stop'}`);
+            if (shouldStart) {
+                await apiPost('/api/launch/start', { profile: selectedProfile });
+            } else {
+                await apiPost('/api/launch/stop');
+            }
 
             let reachedTarget = false;
             for (let attempt = 0; attempt < 360; attempt += 1) {
                 await new Promise(resolve => window.setTimeout(resolve, 500));
-                try {
-                    const data = await apiGet('/api/chat/status');
-                    const coreStatus = String(data.core_status || '');
-                    coreRunning = coreStatus
-                        ? coreStatus === 'running'
-                        : Boolean(data.core_running);
+                const data = await apiGet('/api/launch');
+                const launchStatus = String(data.status || '');
+                const activeProfile = String(data.active_profile || selectedProfile || '');
+                coreRunning = data.core?.status === 'running';
 
-                    if (shouldStart && coreStatus === 'error') {
-                        throw new Error('NachoBot Core 启动失败，请查看终端日志');
-                    }
+                if (shouldStart && launchStatus === 'error') {
+                    throw new Error('NachoBot 启动失败，请查看终端日志');
+                }
 
-                    if (shouldStart && !coreRunning) {
-                        els.status.className = 'chat-status-chip is-checking';
-                        els.status.textContent = '核心启动中';
-                        els.status.title = 'NachoBot Core 正在启动并等待端口就绪';
-                    } else if (!shouldStart && coreStatus !== 'stopped') {
-                        els.status.className = 'chat-status-chip is-checking';
-                        els.status.textContent = '核心关闭中';
-                        els.status.title = 'NachoBot Core 正在关闭';
-                    }
+                if (shouldStart && launchStatus !== 'running') {
+                    const code = CHAT_LAUNCH_PROFILES[activeProfile]?.code || CHAT_LAUNCH_PROFILES[selectedProfile].code;
+                    els.status.className = 'chat-status-chip is-checking';
+                    els.status.textContent = `${code} 启动中`;
+                } else if (!shouldStart && launchStatus !== 'stopped') {
+                    els.status.className = 'chat-status-chip is-checking';
+                    els.status.textContent = 'NachoBot 关闭中';
+                }
 
-                    const startCompleted = shouldStart && coreRunning;
-                    const stopCompleted = !shouldStart
-                        && (coreStatus === 'stopped' || coreStatus === 'error' || (!coreStatus && !coreRunning));
-                    if (startCompleted || stopCompleted) {
-                        reachedTarget = true;
-                        break;
-                    }
-                } catch (error) {
-                    if (error.message?.includes('启动失败')) throw error;
-                    if (!shouldStart) {
-                        coreRunning = false;
-                        reachedTarget = true;
-                        break;
-                    }
+                const startCompleted = shouldStart && launchStatus === 'running';
+                const stopCompleted = !shouldStart && launchStatus === 'stopped';
+                if (startCompleted || stopCompleted) {
+                    reachedTarget = true;
+                    break;
                 }
             }
 
             if (!reachedTarget) {
-                throw new Error(shouldStart ? '核心服务启动超时，请查看终端日志' : '核心服务关闭超时，请查看终端日志');
+                throw new Error(shouldStart ? 'NachoBot 启动超时，请查看终端日志' : 'NachoBot 关闭超时，请查看终端日志');
             }
 
-            toast(shouldStart ? 'NachoBot Core 已启动' : 'NachoBot Core 已关闭', 'success');
+            toast(
+                shouldStart
+                    ? `NachoBot 已以 ${CHAT_LAUNCH_PROFILES[selectedProfile].code} 模式启动`
+                    : 'NachoBot 已关闭',
+                'success',
+            );
             App.pollStatus();
         } catch (error) {
-            console.warn('Failed to toggle NachoBot Core:', error);
-            toast(`核心服务操作失败：${error.message}`, 'error');
+            console.warn('Failed to toggle NachoBot launch:', error);
+            toast(`NachoBot 操作失败：${error.message}`, 'error');
         } finally {
             coreToggleBusy = false;
             els.status.disabled = false;
@@ -849,28 +962,40 @@ const ChatModule = (() => {
         const requestSerial = ++coreStatusRequestSerial;
 
         try {
-            const data = await apiGet('/api/chat/status');
+            const data = await apiGet('/api/launch');
             if (coreToggleBusy || requestSerial !== coreStatusRequestSerial) return;
-            const coreStatus = String(data.core_status || '');
-            coreRunning = coreStatus
-                ? coreStatus === 'running'
-                : Boolean(data.core_running);
-            els.status.setAttribute('aria-pressed', String(coreRunning));
 
-            if (coreStatus === 'starting') {
+            const launchStatus = String(data.status || 'stopped');
+            const activeProfile = String(data.active_profile || '');
+            const profileCode = CHAT_LAUNCH_PROFILES[activeProfile]?.code || '';
+            coreRunning = data.core?.status === 'running';
+            els.status.setAttribute('aria-pressed', String(launchStatus === 'running'));
+
+            if (launchStatus === 'starting') {
                 els.status.className = 'chat-status-chip is-checking';
-                els.status.textContent = '核心启动中';
-                els.status.disabled = true;
-            } else if (coreStatus === 'stopping') {
+                els.status.textContent = `${profileCode || 'NachoBot'} 启动中`;
+                els.status.title = '点击可取消当前启动';
+            } else if (launchStatus === 'stopping') {
                 els.status.className = 'chat-status-chip is-checking';
-                els.status.textContent = '核心关闭中';
-                els.status.disabled = true;
-            } else if (coreRunning) {
+                els.status.textContent = 'NachoBot 关闭中';
+                els.status.title = '正在关闭 Core 与当前运行模式';
+            } else if (launchStatus === 'running') {
                 els.status.className = 'chat-status-chip is-online';
-                els.status.textContent = '核心服务运行中';
-            } else {
+                els.status.textContent = profileCode ? `NachoBot · ${profileCode}` : 'NachoBot 运行中';
+                els.status.title = '点击停止 NachoBot Core 与当前运行模式';
+            } else if (launchStatus === 'error') {
                 els.status.className = 'chat-status-chip is-offline';
-                els.status.textContent = coreStatus === 'error' ? '核心启动失败' : '核心服务未运行';
+                els.status.textContent = profileCode ? `${profileCode} 启动失败` : 'NachoBot 启动失败';
+                els.status.title = '点击重新选择运行模式并启动';
+            } else if (launchStatus === 'partial') {
+                els.status.className = 'chat-status-chip is-checking';
+                els.status.textContent = profileCode ? `NachoBot · ${profileCode} 部分运行` : 'NachoBot 部分运行';
+                els.status.title = '点击停止当前启动单元';
+            } else {
+                coreRunning = false;
+                els.status.className = 'chat-status-chip is-offline';
+                els.status.textContent = 'NachoBot 未运行';
+                els.status.title = '点击选择 FULL / LITE / POTATO 并启动';
             }
         } catch (error) {
             if (coreToggleBusy || requestSerial !== coreStatusRequestSerial) return;
@@ -878,13 +1003,9 @@ const ChatModule = (() => {
             els.status.setAttribute('aria-pressed', 'false');
             els.status.className = 'chat-status-chip is-offline';
             els.status.textContent = '无法读取服务状态';
-            els.status.title = '点击尝试启动 NachoBot Core';
+            els.status.title = '点击尝试启动 NachoBot';
         } finally {
-            if (
-                !coreToggleBusy
-                && requestSerial === coreStatusRequestSerial
-                && !['核心启动中', '核心关闭中'].includes(els.status.textContent)
-            ) {
+            if (!coreToggleBusy && requestSerial === coreStatusRequestSerial) {
                 els.status.disabled = false;
             }
         }

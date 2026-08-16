@@ -67,7 +67,7 @@ if errorlevel 1 (
 REM ===== start Koishi =====
 echo.
 echo [START] Koishi ...
-start "Koishi" cmd /k "cd /d ""%KOISHI_DIR%"" && set HTTPS_PROXY=http://127.0.0.1:7897 && set HTTP_PROXY=http://127.0.0.1:7897 && npm start"
+start "Koishi" cmd /k "cd /d ""%KOISHI_DIR%"" && set HTTPS_PROXY=http://127.0.0.1:7897 && set HTTP_PROXY=http://127.0.0.1:7897 && corepack yarn start"
 
 REM ===== wait for Koishi =====
 timeout /t 5 /nobreak >nul

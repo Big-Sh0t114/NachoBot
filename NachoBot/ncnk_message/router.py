@@ -6,6 +6,7 @@ from typing import Optional, Dict, Callable, List, Any
 from dataclasses import dataclass, asdict
 import asyncio
 import logging
+import os
 from .message_base import MessageBase
 from .api import MessageClient
 from .log_utils import get_logger, setup_logger
@@ -13,21 +14,42 @@ from .log_utils import get_logger, setup_logger
 logger = get_logger()
 
 
+def get_core_token_from_env() -> Optional[str]:
+    """Return the shared Core credential without persisting it in adapter config."""
+    token = os.getenv("NACHOBOT_CORE_TOKEN", "").strip()
+    return token or None
+
+
 @dataclass
 class TargetConfig:
     url: str = None
     token: Optional[str] = None
-    ssl_verify: Optional[str] = None  # SSL证书路径，用于验证服务器证书
+    # ssl_verify 是兼容旧配置的参数：字符串表示 CA 路径，False 表示显式跳过校验。
+    # 新配置应使用 ca_file / insecure_skip_verify；默认验证系统 CA 和主机名。
+    ssl_verify: Optional[str | bool] = None
+    ca_file: Optional[str] = None
+    insecure_skip_verify: bool = False
 
     def to_dict(self) -> Dict:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: Dict) -> "TargetConfig":
+        legacy_ssl_verify = data.get("ssl_verify")
+        ca_file = data.get("ca_file")
+        if not ca_file and isinstance(legacy_ssl_verify, str):
+            ca_file = legacy_ssl_verify or None
+        insecure_skip_verify = data.get(
+            "insecure_skip_verify", legacy_ssl_verify is False
+        )
+        if not isinstance(insecure_skip_verify, bool):
+            raise ValueError("insecure_skip_verify 必须是布尔值")
         return cls(
             url=data.get("url"),
             token=data.get("token"),
-            ssl_verify=data.get("ssl_verify"),
+            ssl_verify=legacy_ssl_verify,
+            ca_file=ca_file,
+            insecure_skip_verify=insecure_skip_verify,
         )
 
 
@@ -60,6 +82,9 @@ class Router:
         logger = get_logger()
 
         self.config = config
+        for target in (config.route_config or {}).values():
+            if not isinstance(target.insecure_skip_verify, bool):
+                raise ValueError("insecure_skip_verify 必须是布尔值")
         self.clients: Dict[str, MessageClient] = {}
         self.handlers: List[Callable] = []
         self._running = False
@@ -148,8 +173,10 @@ class Router:
         await client.connect(
             url=config.url,
             platform=platform,
-            token=config.token,
+            token=config.token or get_core_token_from_env(),
             ssl_verify=config.ssl_verify,
+            ca_file=config.ca_file,
+            insecure_skip_verify=config.insecure_skip_verify,
         )
 
         # 注册常规消息处理器
@@ -310,10 +337,7 @@ class Router:
             if platform in self.config.route_config:
                 old_target = self.config.route_config[platform]
                 # 如果配置发生变化，需要重新连接
-                if (
-                    new_target.url != old_target.url
-                    or new_target.token != old_target.token
-                ):
+                if new_target != old_target:
                     await self.remove_platform(platform)
                     await self.add_platform(platform, new_target)
             else:

@@ -1,8 +1,8 @@
 # NachoBot Live2D Adapter
 
-独立的 Live2D 渲染进程。它通过版本化 WebSocket JSON 协议接收平台无关的虚拟形象命令，并将点击、侧键戳一戳等交互事件回传给调用方。
+独立的 Live2D 渲染进程。它通过版本化 WebSocket JSON 协议接收平台无关的虚拟形象命令，并将点击、戳一戳等交互事件回传给调用方。
 
-本仓库不依赖 Bilibili 消息对象、NachoBot 聊天模型、数据库或 LLM 客户端。
+本适配器不依赖 Bilibili 消息对象、NachoBot 聊天模型、数据库或 LLM 客户端，因此也可被其他平台复用。
 
 ## 架构
 
@@ -33,7 +33,7 @@ Bilibili 侧通过 `bili_src/live2d/remote_controller.py` 连接本服务。旧�
 安装 [uv](https://docs.astral.sh/uv/) 并同步项目声明的 Python 依赖：
 
 ```bat
-cd /d C:\Users\BigSh0t\Nacho-with-u\NachoBot-Live2D-Adapter
+cd NachoBot-Live2D-Adapter
 uv sync
 ```
 
@@ -62,6 +62,41 @@ poke_cooldown_seconds = 10.0
 
 `model_path` 相对于 `config.toml` 所在目录解析。
 
+### 自动模型适配
+
+默认启用非破坏性的模型适配层：模型启动时读取 `.model3.json`、可选的
+`.cdi3.json`，并在加载完成后结合 `live2d-py` 实际枚举出的参数、表情和
+Motion Group 建立运行时映射。适配过程不会改写用户的 `.model3.json`、
+`.moc3` 或其他模型资源。
+
+```toml
+[adaptation]
+enabled = true
+```
+
+自动适配包括：
+
+- 从 `FileReferences.Moc` 读取真实 `.moc3` 路径，不要求它与 `.model3.json` 同名。
+- 优先使用模型声明的 `LipSync` 参数；声明明显误指向眼睛等冲突参数时，自动寻找高置信嘴型参数。
+- 按实际名称和常见中、英、日文语义匹配表情与 canonical action。
+- `param_tween` 既接受模型原始参数 ID，也接受 `MOUTH_OPEN`、`MOUTH_FORM`、
+  `ANGLE_X/Y/Z`、`BODY_ANGLE_X/Y/Z`、`EYE_OPEN`、`EYE_L_OPEN`、`EYE_R_OPEN`、
+  `EYE_BALL_X/Y`、`BROW_L_Y`、`BROW_R_Y` 和 `BREATH` 等稳定字段。
+
+只有唯一或有明确模型元数据支持的映射才会自动采用。无法确定时会记录告警，
+可在配置中覆盖；数组表示一次控制多个联动参数：
+
+```toml
+[adaptation.parameters]
+MOUTH_OPEN = ["ParamMouthOpenY"]
+
+[adaptation.expressions]
+normal = "normal"
+shy = "shy"
+disgust = "disgust"
+angry = "angry"
+```
+
 ### 动作映射
 
 协议只传递稳定的 canonical action ID，具体 Motion Group 由本适配器配置：
@@ -78,7 +113,9 @@ TILT_HEAD = "TiltHead"
 LOOK_AWAY = "LookAway"
 ```
 
-更换模型时只修改该映射，不应在 NachoBot 或平台适配器中写死模型 Motion Group。
+配置的 Motion Group 存在时始终优先使用；不存在时，自动适配层会尝试匹配模型中
+语义明确的动作名称。仍无法识别时只需修改该映射，不应在 NachoBot 或平台适配器中
+写死模型 Motion Group。
 
 ## 启动
 
@@ -175,14 +212,11 @@ live2d_reconnect_seconds = 3.0
 - `track_mouse = true` 时持续跟踪鼠标视线。
 - `speaking` 命令控制嘴部参数动画。
 
-## 迁移边界
-
-当前迁移状态：
+## 组件边界
 
 - 渲染实现和模型资源均已移动到本项目。
 - Bilibili Adapter 仅使用远程 WebSocket 控制器。
 - Bilibili Adapter 不再为了 Live2D 构造 NachoBot `MessageRecv` 或模拟消息流。
-- 旧本地 `live2d_render` 代码已移出 Bilibili Adapter 主项目，归档在工作区的 `NachoBot-Bilibili-Adapter-live2d_render-legacy` 目录中，便于必要时回滚。
 - 主运行路径不再导入旧本地控制器、动作管理器、情绪管理器或渲染器桥接模块。
 
 ## 故障排查
@@ -211,6 +245,12 @@ live2d_reconnect_seconds = 3.0
 ### 动作命令返回 `unmapped canonical action`
 
 在 `[actions]` 中为该 canonical action ID 配置模型实际存在的 Motion Group。
+
+### 日志提示无法自动识别参数或表情
+
+先检查模型是否带有正确的 `Groups`/`DisplayInfo` 元数据；若模型使用自定义或无语义
+ID，在 `[adaptation.parameters]` 或 `[adaptation.expressions]` 中添加显式映射。
+适配器不会为了猜测语义而修改原始模型文件。
 
 ## Docker 部署
 

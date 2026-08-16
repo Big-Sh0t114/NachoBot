@@ -4,12 +4,13 @@
 """
 
 import asyncio
+import hashlib
 import json
 import time
 import re
 import difflib
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass, field
 from json_repair import repair_json
 
@@ -111,6 +112,8 @@ class MessageBatch:
     messages: List[DatabaseMessages]
     start_time: float
     end_time: float
+    start_cursor_time: float = 0.0
+    start_cursor_message_id: str = ""
 
 
 @dataclass
@@ -129,12 +132,19 @@ class TopicCacheItem:
     messages: List[str] = field(default_factory=list)
     participants: Set[str] = field(default_factory=set)
     no_update_checks: int = 0
+    # Immutable source coordinates for every message selected for this topic.
+    # These are persisted separately from the rendered message text so a
+    # retry/restart can derive the same id without depending on an LLM summary.
+    source_message_keys: List[Tuple[float, str]] = field(default_factory=list)
+    source_start_time: Optional[float] = None
+    source_end_time: Optional[float] = None
+    source_identity: str = ""
 
 
 class ChatHistorySummarizer:
     """聊天内容概括器"""
 
-    def __init__(self, chat_id: str, check_interval: int = 60):
+    def __init__(self, chat_id: str, check_interval: int = 60, writeback_drain_timeout: float = 10.0):
         """
         初始化聊天内容概括器
 
@@ -148,6 +158,7 @@ class ChatHistorySummarizer:
 
         # 记录时间点，用于计算新消息
         self.last_check_time = time.time()
+        self.last_check_message_id = ""
 
         # 记录上一次话题检查的时间，用于判断是否需要触发检查
         self.last_topic_check_time = time.time()
@@ -170,7 +181,14 @@ class ChatHistorySummarizer:
         # 后台循环相关
         self.check_interval = check_interval  # 检查间隔（秒）
         self._periodic_task: Optional[asyncio.Task] = None
+        self._writeback_tasks: Set[asyncio.Task[None]] = set()
+        self._writeback_drain_timeout = max(0.0, writeback_drain_timeout)
+        self._stopping = False
         self._running = False
+        # Serialize start/stop state transitions.  The lock is acquired
+        # before any disk/network await so concurrent starts cannot both pass
+        # the producer guard and publish two periodic tasks.
+        self._lifecycle_lock = asyncio.Lock()
 
     def _get_chat_display_name(self) -> str:
         """获取聊天显示名称"""
@@ -202,14 +220,48 @@ class ChatHistorySummarizer:
                 data = json.load(f)
 
             self.last_topic_check_time = data.get("last_topic_check_time", self.last_topic_check_time)
+            cursor = data.get("last_check_cursor") or {}
+            if isinstance(cursor, dict):
+                self.last_check_time = float(cursor.get("time", data.get("last_check_time", self.last_check_time)))
+                self.last_check_message_id = str(cursor.get("message_id", "") or "")
+            else:
+                self.last_check_time = float(data.get("last_check_time", self.last_check_time))
             topics_data = data.get("topics", {})
             loaded_count = 0
             for topic, payload in topics_data.items():
+                if not isinstance(payload, dict):
+                    continue
+                source_message_keys: List[Tuple[float, str]] = []
+                raw_source_keys = payload.get("source_message_keys", [])
+                if isinstance(raw_source_keys, list):
+                    for raw_key in raw_source_keys:
+                        if not isinstance(raw_key, (list, tuple)) or len(raw_key) < 2:
+                            continue
+                        try:
+                            source_message_keys.append((float(raw_key[0]), str(raw_key[1])))
+                        except (TypeError, ValueError):
+                            continue
+                source_start_time = payload.get("source_start_time")
+                source_end_time = payload.get("source_end_time")
+                try:
+                    source_start_time = (
+                        float(source_start_time) if source_start_time is not None else None
+                    )
+                except (TypeError, ValueError):
+                    source_start_time = None
+                try:
+                    source_end_time = float(source_end_time) if source_end_time is not None else None
+                except (TypeError, ValueError):
+                    source_end_time = None
                 self.topic_cache[topic] = TopicCacheItem(
                     topic=topic,
                     messages=payload.get("messages", []),
                     participants=set(payload.get("participants", [])),
                     no_update_checks=payload.get("no_update_checks", 0),
+                    source_message_keys=source_message_keys,
+                    source_start_time=source_start_time,
+                    source_end_time=source_end_time,
+                    source_identity=str(payload.get("source_identity", "") or ""),
                 )
                 loaded_count += 1
 
@@ -236,22 +288,55 @@ class ChatHistorySummarizer:
             if not start_time or not end_time:
                 return
 
-            # 根据时间范围重新查询消息
-            messages = message_api.get_messages_by_time_in_chat(
-                chat_id=self.chat_id,
-                start_time=start_time,
-                end_time=end_time,
-                limit=0,
-                limit_mode="latest",
-                filter_mai=False,
-                filter_command=False,
-            )
+            start_cursor_time = batch_data.get("start_cursor_time")
+            start_cursor_message_id = str(batch_data.get("start_cursor_message_id", "") or "")
+            if start_cursor_time is not None:
+                try:
+                    from src.chat.utils.chat_message_builder import get_raw_msg_after_cursor_with_chat
+
+                    messages = get_raw_msg_after_cursor_with_chat(
+                        self.chat_id,
+                        float(start_cursor_time),
+                        start_cursor_message_id,
+                        end_time=time.time(),
+                        filter_bot=False,
+                        filter_command=False,
+                    )
+                    checkpoint = (self.last_check_time, self.last_check_message_id)
+                    messages = [
+                        message for message in messages
+                        if self._message_key(message) <= checkpoint
+                    ]
+                except (ImportError, AttributeError):
+                    messages = message_api.get_messages_by_time_in_chat(
+                        chat_id=self.chat_id,
+                        start_time=start_time,
+                        end_time=end_time,
+                        limit=0,
+                        limit_mode="latest",
+                        filter_mai=False,
+                        filter_command=False,
+                    )
+            else:
+                # Backward-compatible restore for cache files written before
+                # the compound cursor was introduced.
+                messages = message_api.get_messages_by_time_in_chat(
+                    chat_id=self.chat_id,
+                    start_time=start_time,
+                    end_time=end_time,
+                    limit=0,
+                    limit_mode="latest",
+                    filter_mai=False,
+                    filter_command=False,
+                )
 
             if messages:
                 self.current_batch = MessageBatch(
                     messages=messages,
                     start_time=start_time,
                     end_time=end_time,
+                    start_cursor_time=float(start_cursor_time or start_time),
+                    start_cursor_message_id=start_cursor_message_id,
                 )
                 logger.info(f"{self.log_prefix} 已恢复聊天批次，包含 {len(messages)} 条消息")
         except Exception as e:
@@ -260,21 +345,31 @@ class ChatHistorySummarizer:
     def _persist_topic_cache(self):
         """实时持久化话题缓存和聊天批次，避免重启后丢失"""
         try:
-            # 如果既没有话题缓存也没有批次，删除缓存文件
-            if not self.topic_cache and not self.current_batch:
-                if self._topic_cache_file.exists():
-                    self._topic_cache_file.unlink()
-                return
-
-            HIPPO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            # Keep a cursor-only checkpoint even when a batch is discarded or
+            # finalized.  Removing the file here would make a restart replay
+            # the entire old window and could lose messages that arrived just
+            # before eviction.
+            self._topic_cache_file.parent.mkdir(parents=True, exist_ok=True)
             data = {
                 "chat_id": self.chat_id,
                 "last_topic_check_time": self.last_topic_check_time,
+                "last_check_time": self.last_check_time,
+                "last_check_cursor": {
+                    "time": self.last_check_time,
+                    "message_id": self.last_check_message_id,
+                },
                 "topics": {
                     topic: {
                         "messages": item.messages,
-                        "participants": list(item.participants),
+                        "participants": sorted(item.participants),
                         "no_update_checks": item.no_update_checks,
+                        "source_message_keys": [
+                            [source_time, source_key]
+                            for source_time, source_key in item.source_message_keys
+                        ],
+                        "source_start_time": item.source_start_time,
+                        "source_end_time": item.source_end_time,
+                        "source_identity": item.source_identity,
                     }
                     for topic, item in self.topic_cache.items()
                 },
@@ -285,6 +380,8 @@ class ChatHistorySummarizer:
                 data["current_batch"] = {
                     "start_time": self.current_batch.start_time,
                     "end_time": self.current_batch.end_time,
+                    "start_cursor_time": self.current_batch.start_cursor_time,
+                    "start_cursor_message_id": self.current_batch.start_cursor_message_id,
                 }
 
             with self._topic_cache_file.open("w", encoding="utf-8") as f:
@@ -303,36 +400,53 @@ class ChatHistorySummarizer:
             current_time = time.time()
 
         try:
-            # 获取从上次检查时间到当前时间的新消息
-            new_messages = message_api.get_messages_by_time_in_chat(
-                chat_id=self.chat_id,
-                start_time=self.last_check_time,
-                end_time=current_time,
-                limit=0,
-                limit_mode="latest",
-                filter_mai=False,  # 不过滤bot消息，因为需要检查bot是否发言
-                filter_command=False,
-            )
+            # Use a compound cursor so equal timestamps are deterministic and
+            # restart does not need an overlapping (duplicate-prone) window.
+            try:
+                from src.chat.utils.chat_message_builder import get_raw_msg_after_cursor_with_chat
+
+                new_messages = get_raw_msg_after_cursor_with_chat(
+                    self.chat_id,
+                    self.last_check_time,
+                    self.last_check_message_id,
+                    end_time=current_time,
+                    filter_bot=False,
+                    filter_command=False,
+                )
+            except (ImportError, AttributeError):
+                new_messages = message_api.get_messages_by_time_in_chat(
+                    chat_id=self.chat_id,
+                    start_time=self.last_check_time,
+                    end_time=current_time,
+                    limit=0,
+                    limit_mode="latest",
+                    filter_mai=False,
+                    filter_command=False,
+                )
 
             if not new_messages:
                 # 没有新消息，检查是否需要进行“话题检查”
                 if self.current_batch and self.current_batch.messages:
                     await self._check_and_run_topic_check(current_time)
-                self.last_check_time = current_time
                 return
 
             logger.debug(
                 f"{self.log_prefix} 开始处理聊天概括，时间窗口: {self.last_check_time:.2f} -> {current_time:.2f}"
             )
 
-            # 有新消息，更新最后检查时间
-            self.last_check_time = current_time
+            # Advance to the last message actually observed, not merely the
+            # wall-clock end of the query.  This avoids losing late-arriving
+            # rows and gives equal timestamps a stable message-id tie-break.
+            previous_cursor = (self.last_check_time, self.last_check_message_id)
+            new_messages.sort(key=self._message_key)
+            last_message = max(new_messages, key=self._message_key)
+            self.last_check_time, self.last_check_message_id = self._message_key(last_message)
 
             # 如果有当前批次，添加新消息
             if self.current_batch:
                 before_count = len(self.current_batch.messages)
                 self.current_batch.messages.extend(new_messages)
-                self.current_batch.end_time = current_time
+                self.current_batch.end_time = self.last_check_time
                 logger.info(
                     f"{self.log_prefix} 更新聊天检查批次: {before_count} -> {len(self.current_batch.messages)} 条消息"
                 )
@@ -343,11 +457,17 @@ class ChatHistorySummarizer:
                 self.current_batch = MessageBatch(
                     messages=new_messages,
                     start_time=new_messages[0].time if new_messages else current_time,
-                    end_time=current_time,
+                    end_time=new_messages[-1].time if new_messages else current_time,
+                    start_cursor_time=previous_cursor[0],
+                    start_cursor_message_id=previous_cursor[1],
                 )
                 logger.debug(f"{self.log_prefix} 新建聊天检查批次: {len(new_messages)} 条消息")
                 # 创建批次后持久化
                 self._persist_topic_cache()
+
+            # Persist the exact cursor before any LLM work can fail or the
+            # process can be restarted.
+            self._persist_topic_cache()
 
             # 检查是否需要触发“话题检查”
             await self._check_and_run_topic_check(current_time)
@@ -357,6 +477,82 @@ class ChatHistorySummarizer:
             import traceback
 
             traceback.print_exc()
+
+    @staticmethod
+    def _message_key(message: DatabaseMessages) -> tuple[float, str]:
+        return (float(getattr(message, "time", 0.0)), str(getattr(message, "message_id", "") or ""))
+
+    def _source_message_key(self, message: DatabaseMessages) -> Tuple[float, str]:
+        """Return an immutable coordinate for a selected source message.
+
+        Normal database rows have a stable ``message_id``.  A few adapters and
+        isolated tests provide only a timestamp, so use a deterministic hash of
+        source-row fields as a fallback; the rendered/LLM-generated summary is
+        intentionally never part of this coordinate.
+        """
+        message_time = float(getattr(message, "time", 0.0))
+        message_id = str(getattr(message, "message_id", "") or "")
+        if not message_id:
+            source_payload = {
+                "chat_id": self.chat_id,
+                "time": message_time,
+                "processed_plain_text": getattr(message, "processed_plain_text", "") or "",
+                "display_message": getattr(message, "display_message", "") or "",
+                "user_id": getattr(message, "user_id", "") or "",
+                "user_platform": getattr(message, "user_platform", "") or "",
+                "chat_info_user_id": getattr(message, "chat_info_user_id", "") or "",
+            }
+            message_id = "content:" + hashlib.sha256(
+                json.dumps(source_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+                    "utf-8"
+                )
+            ).hexdigest()
+        return message_time, message_id
+
+    def _refresh_topic_source_identity(
+        self,
+        topic: str,
+        item: TopicCacheItem,
+        fallback_start: Optional[float] = None,
+        fallback_end: Optional[float] = None,
+    ) -> None:
+        """Normalize source coordinates and derive a restart-stable identity."""
+        item.source_message_keys = sorted(set(item.source_message_keys), key=lambda key: (key[0], key[1]))
+        if item.source_message_keys:
+            item.source_start_time = min(key[0] for key in item.source_message_keys)
+            item.source_end_time = max(key[0] for key in item.source_message_keys)
+            identity_payload = {
+                "chat_id": self.chat_id,
+                "source_message_keys": [list(key) for key in item.source_message_keys],
+            }
+        else:
+            # Legacy cache entries do not have source IDs.  Their persisted
+            # rendered source chunks and range are still deterministic input;
+            # do not use the LLM-generated topic/summary as identity material.
+            if item.source_start_time is None and fallback_start is not None:
+                item.source_start_time = float(fallback_start)
+            if item.source_end_time is None and fallback_end is not None:
+                item.source_end_time = float(fallback_end)
+            identity_payload = {
+                "chat_id": self.chat_id,
+                "source_message_keys": [],
+                "source_start_time": item.source_start_time,
+                "source_end_time": item.source_end_time,
+                "source_messages": list(item.messages),
+            }
+        item.source_identity = hashlib.sha256(
+            json.dumps(identity_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+
+    @staticmethod
+    def _topic_source_range(
+        item: TopicCacheItem, fallback_start: float, fallback_end: float
+    ) -> Tuple[float, float]:
+        start_time = item.source_start_time if item.source_start_time is not None else fallback_start
+        end_time = item.source_end_time if item.source_end_time is not None else fallback_end
+        return min(start_time, end_time), max(start_time, end_time)
 
     async def _check_and_run_topic_check(self, current_time: float):
         """
@@ -399,14 +595,17 @@ class ChatHistorySummarizer:
             )
 
         if should_check:
-            await self._run_topic_check_and_update_cache(messages)
-            # 本批次已经被处理为话题信息，可以清空
-            self.current_batch = None
-            # 更新上一次检查时间，并持久化
-            self.last_topic_check_time = current_time
+            consumed = await self._run_topic_check_and_update_cache(messages)
+            if consumed:
+                # 本批次只有在分类成功（或明确判定为无 Bot 参与）后才可
+                # 清空；LLM 失败时保留批次和已持久化的游标，以便重试。
+                self.current_batch = None
+                self.last_topic_check_time = current_time
             self._persist_topic_cache()
+            return consumed
+        return False
 
-    async def _run_topic_check_and_update_cache(self, messages: List[DatabaseMessages]):
+    async def _run_topic_check_and_update_cache(self, messages: List[DatabaseMessages]) -> bool:
         """
         执行一次“话题检查”：
         1. 首先确认这段消息里是否有 Bot 发言，没有则直接丢弃本次批次；
@@ -419,7 +618,7 @@ class ChatHistorySummarizer:
         5. 更新本地话题缓存，并根据规则触发“话题打包存储”。
         """
         if not messages:
-            return
+            return True
 
         start_time = messages[0].time
         end_time = messages[-1].time
@@ -443,7 +642,7 @@ class ChatHistorySummarizer:
             logger.info(
                 f"{self.log_prefix} 当前批次内无 Bot 发言，丢弃本次检查 | 时间范围: {start_time:.2f} - {end_time:.2f}"
             )
-            return
+            return True
 
         # 2. 构造编号后的消息字符串和参与者信息
         numbered_lines, index_to_msg_str, index_to_msg_text, index_to_participants = (
@@ -478,8 +677,8 @@ class ChatHistorySummarizer:
 
         if not success or not topic_to_indices:
             logger.error(f"{self.log_prefix} 话题识别连续 {max_retries} 次失败或始终无有效话题，本次检查放弃")
-            # 即使识别失败，也认为是一次"检查"，但不更新 no_update_checks（保持原状）
-            return
+            # LLM 失败不是消费成功；保留 current_batch 和游标等待后续重试。
+            return False
 
         # 3.5. 检查新话题是否与历史话题相似（相似度>=90%则使用历史标题）
         topic_mapping = self._build_topic_mapping(topic_to_indices, similarity_threshold=0.9)
@@ -511,15 +710,19 @@ class ChatHistorySummarizer:
                 continue
 
             item = self.topic_cache.get(topic)
+            created_item = False
             if not item:
                 # 新话题
                 item = TopicCacheItem(topic=topic)
                 self.topic_cache[topic] = item
+                created_item = True
 
             # 收集属于该话题的消息文本（不带编号）
             topic_msg_texts: List[str] = []
             new_participants: Set[str] = set()
             for idx in indices:
+                if 1 <= idx <= len(messages):
+                    item.source_message_keys.append(self._source_message_key(messages[idx - 1]))
                 msg_text = index_to_msg_text.get(idx)
                 if not msg_text:
                     continue
@@ -527,12 +730,15 @@ class ChatHistorySummarizer:
                 new_participants.update(index_to_participants.get(idx, set()))
 
             if not topic_msg_texts:
+                if created_item:
+                    self.topic_cache.pop(topic, None)
                 continue
 
             # 将本次检查中属于该话题的所有消息合并为一个字符串（不带编号）
             merged_text = "\n".join(topic_msg_texts)
             item.messages.append(merged_text)
             item.participants.update(new_participants)
+            self._refresh_topic_source_identity(topic, item)
             # 本次检查中该话题有更新，重置计数
             item.no_update_checks = 0
             updated_topics.add(topic)
@@ -553,21 +759,33 @@ class ChatHistorySummarizer:
                 logger.info(f"{self.log_prefix} 话题[{topic}] 消息条数超过 4，触发打包存储")
                 topics_to_finalize.append(topic)
 
+        if not updated_topics and topic_to_indices:
+            logger.warning(f"{self.log_prefix} 话题识别未选择任何有效消息，本次检查保留批次待重试")
+            return False
+
+        # Classification mutations (including a failed finalization's source
+        # coordinates) must survive a process restart before any topic is
+        # removed.
+        self._persist_topic_cache()
         for topic in topics_to_finalize:
             item = self.topic_cache.get(topic)
             if not item:
                 continue
-            try:
-                await self._finalize_and_store_topic(
-                    topic=topic,
-                    item=item,
-                    # 这里的时间范围尽量覆盖最近一次检查的区间
-                    start_time=start_time,
-                    end_time=end_time,
-                )
-            finally:
-                # 无论成功与否，都从缓存中删除，避免重复
+            finalized = await self._finalize_and_store_topic(
+                topic=topic,
+                item=item,
+                start_time=start_time,
+                end_time=end_time,
+            )
+            if finalized:
+                # 只有主 ChatHistory 写入得到确认后才消费缓存项。
                 self.topic_cache.pop(topic, None)
+                self._persist_topic_cache()
+            else:
+                # 压缩或主库写入失败时保留完整源坐标，供下一次重试。
+                self._persist_topic_cache()
+
+        return True
 
     def _find_most_similar_topic(
         self, new_topic: str, existing_topics: List[str], similarity_threshold: float = 0.9
@@ -805,7 +1023,7 @@ class ChatHistorySummarizer:
         item: TopicCacheItem,
         start_time: float,
         end_time: float,
-    ):
+    ) -> bool:
         """
         对某个话题进行最终打包存储：
         1. 将 messages(list[str]) 拼接为 original_text；
@@ -815,36 +1033,51 @@ class ChatHistorySummarizer:
         """
         if not item.messages:
             logger.info(f"{self.log_prefix} 话题[{topic}] 无消息内容，跳过打包")
-            return
+            return False
+
+        # Use the full accumulated source range, not only the latest batch.
+        stored_start_time, stored_end_time = self._topic_source_range(item, start_time, end_time)
+        self._refresh_topic_source_identity(
+            topic,
+            item,
+            fallback_start=stored_start_time,
+            fallback_end=stored_end_time,
+        )
 
         original_text = "\n".join(item.messages)
 
         logger.info(
-            f"{self.log_prefix} 开始打包话题[{topic}] | 消息数: {len(item.messages)} | 时间范围: {start_time:.2f} - {end_time:.2f}"
+            f"{self.log_prefix} 开始打包话题[{topic}] | 消息数: {len(item.messages)} | 时间范围: {stored_start_time:.2f} - {stored_end_time:.2f}"
         )
 
         # 使用 LLM 进行总结（基于话题名）
         success, keywords, summary, key_point = await self._compress_with_llm(original_text, topic)
         if not success:
             logger.warning(f"{self.log_prefix} 话题[{topic}] LLM 概括失败，不写入数据库")
-            return
+            return False
 
         participants = list(item.participants)
 
-        await self._store_to_database(
-            start_time=start_time,
-            end_time=end_time,
+        stored = await self._store_to_database(
+            start_time=stored_start_time,
+            end_time=stored_end_time,
             original_text=original_text,
             participants=participants,
             theme=topic,  # 主题直接使用话题名
             keywords=keywords,
             summary=summary,
             key_point=key_point,
+            source_identity=item.source_identity,
         )
+
+        if not stored:
+            logger.warning(f"{self.log_prefix} 话题[{topic}] 主数据库未确认保存，保留缓存待重试")
+            return False
 
         logger.info(
             f"{self.log_prefix} 话题[{topic}] 成功打包并存储 | 消息数: {len(item.messages)} | 参与者数: {len(participants)}"
         )
+        return True
 
     async def _compress_with_llm(self, original_text: str, topic: str) -> tuple[bool, List[str], str, List[str]]:
         """
@@ -954,7 +1187,8 @@ class ChatHistorySummarizer:
         keywords: List[str],
         summary: str,
         key_point: Optional[List[str]] = None,
-    ):
+        source_identity: Optional[str] = None,
+    ) -> bool:
         """存储到数据库"""
         try:
             from src.common.database.database_model import ChatHistory
@@ -986,24 +1220,24 @@ class ChatHistorySummarizer:
                 data=data,
             )
 
-            if saved_record:
-                logger.debug(f"{self.log_prefix} 成功存储聊天历史记录到数据库")
-            else:
+            if not saved_record:
                 logger.warning(f"{self.log_prefix} 存储聊天历史记录到数据库失败")
+                return False
+            logger.debug(f"{self.log_prefix} 成功存储聊天历史记录到数据库")
 
         except Exception as e:
             logger.error(f"{self.log_prefix} 存储到数据库时出错: {e}")
             import traceback
 
             traceback.print_exc()
-            raise
+            return False
 
         # --- A_Memorix 双写：将摘要同步写入长期记忆 ---
         try:
             from src.memory_system.memory_service import memory_service
 
-            if memory_service.is_enabled():
-                asyncio.create_task(
+            if memory_service.is_enabled() and not self._stopping:
+                task = asyncio.create_task(
                     self._writeback_to_a_memorix(
                         chat_id=self.chat_id,
                         start_time=start_time,
@@ -1013,10 +1247,15 @@ class ChatHistorySummarizer:
                         keywords=keywords,
                         participants=participants,
                         key_point=key_point,
-                    )
+                        source_identity=source_identity,
+                    ),
+                    name=f"memory-writeback-{self._safe_chat_id}",
                 )
+                self._writeback_tasks.add(task)
+                task.add_done_callback(self._writeback_tasks.discard)
         except Exception as e:
             logger.debug(f"{self.log_prefix} A_Memorix 双写启动失败（不影响主流程）: {e}")
+        return True
 
     async def _writeback_to_a_memorix(
         self,
@@ -1028,6 +1267,7 @@ class ChatHistorySummarizer:
         keywords: List[str],
         participants: List[str],
         key_point: Optional[List[str]] = None,
+        source_identity: Optional[str] = None,
     ):
         """将聊天摘要异步写回 A_Memorix 长期记忆"""
         try:
@@ -1037,8 +1277,24 @@ class ChatHistorySummarizer:
             if key_point:
                 text_parts.append("关键信息：" + "；".join(key_point))
 
-            await memory_service.ingest_summary(
-                external_id=f"chat_summary:{chat_id}:{start_time:.0f}",
+            if source_identity:
+                identity = source_identity
+            else:
+                # Direct callers without a TopicCacheItem still get a stable
+                # coordinate-based id.  Summary text is deliberately excluded.
+                identity_payload = json.dumps(
+                    {
+                        "chat_id": chat_id,
+                        "start_time": start_time,
+                        "end_time": end_time,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                identity = hashlib.sha256(identity_payload).hexdigest()
+            result = await memory_service.ingest_summary(
+                external_id=f"chat_summary:{identity}",
                 chat_id=chat_id,
                 text="\n".join(text_parts),
                 participants=participants,
@@ -1051,34 +1307,92 @@ class ChatHistorySummarizer:
                     "key_point": key_point or [],
                 },
             )
-            logger.info(f"{self.log_prefix} A_Memorix 双写成功: {theme}")
+            if result.get("stored_ids"):
+                logger.info(f"{self.log_prefix} A_Memorix 双写成功: {theme}")
+            elif result.get("reason") == "exists":
+                logger.debug(f"{self.log_prefix} A_Memorix 已存在相同摘要，跳过重复写入: {theme}")
+            else:
+                logger.warning(
+                    f"{self.log_prefix} A_Memorix 未确认摘要写入: "
+                    f"theme={theme}, reason={result.get('reason', 'unknown')}"
+                )
         except Exception as e:
             logger.warning(f"{self.log_prefix} A_Memorix 双写失败: {e}")
 
     async def start(self):
         """启动后台定期检查循环"""
-        if self._running:
-            logger.warning(f"{self.log_prefix} 后台循环已在运行，无需重复启动")
-            return
+        async with self._lifecycle_lock:
+            if self._periodic_task is not None:
+                if not self._periodic_task.done():
+                    logger.warning(f"{self.log_prefix} 后台循环仍在退出，拒绝创建第二个生产者")
+                    return
+                self._periodic_task = None
+            if self._running:
+                logger.warning(f"{self.log_prefix} 后台循环已在运行，无需重复启动")
+                return
 
-        # 加载聊天批次（如果有）
-        await self._load_batch_from_disk()
+            # 恢复检查时钟与话题缓存，再恢复尚未分类的消息批次。
+            self._load_topic_cache_from_disk()
+            await self._load_batch_from_disk()
 
-        self._running = True
-        self._periodic_task = asyncio.create_task(self._periodic_check_loop())
-        logger.info(f"{self.log_prefix} 已启动后台定期检查循环 | 检查间隔: {self.check_interval}秒")
+            self._stopping = False
+            self._running = True
+            periodic_task = asyncio.create_task(self._periodic_check_loop())
+            self._periodic_task = periodic_task
+            periodic_task.add_done_callback(self._periodic_task_done)
+            logger.info(f"{self.log_prefix} 已启动后台定期检查循环 | 检查间隔: {self.check_interval}秒")
 
     async def stop(self):
-        """停止后台定期检查循环"""
-        self._running = False
-        if self._periodic_task:
-            self._periodic_task.cancel()
-            try:
-                await self._periodic_task
-            except asyncio.CancelledError:
-                pass
+        """先停止摘要生产者，再有界等待长期记忆双写。"""
+        async with self._lifecycle_lock:
+            self._stopping = True
+            self._running = False
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + self._writeback_drain_timeout
+
+            periodic_task = self._periodic_task
+            if periodic_task and not periodic_task.done():
+                periodic_task.cancel()
+                # Never await the producer without the shared stop deadline: a
+                # cancellation-resistant loop must remain tracked after timeout.
+                await asyncio.wait(
+                    (periodic_task,),
+                    timeout=max(0.0, deadline - loop.time()),
+                )
+            elif periodic_task and periodic_task.done() and self._periodic_task is periodic_task:
+                self._periodic_task = None
+
+            current_task = asyncio.current_task()
+            writeback_tasks = tuple(
+                task for task in self._writeback_tasks if task is not current_task and not task.done()
+            )
+            if writeback_tasks:
+                _, pending = await asyncio.wait(
+                    writeback_tasks,
+                    timeout=max(0.0, deadline - loop.time()),
+                )
+                if pending:
+                    logger.warning(
+                        f"{self.log_prefix} {len(pending)} 个 A_Memorix 双写任务在 "
+                        f"{self._writeback_drain_timeout:.1f}秒内未完成，已取消"
+                    )
+                    for task in pending:
+                        task.cancel()
+                    # A cancellation-resistant writeback may suppress
+                    # CancelledError.  Never gather it without a second deadline:
+                    # stop() must remain bounded, while the task stays tracked by
+                    # its done callback until it really exits.
+                    await asyncio.wait(
+                        pending,
+                        timeout=max(0.0, deadline - loop.time()),
+                    )
+            self._writeback_tasks.difference_update(task for task in self._writeback_tasks if task.done())
+            logger.info(f"{self.log_prefix} 已停止后台定期检查循环")
+
+    def _periodic_task_done(self, completed: asyncio.Task) -> None:
+        """Clear producer tracking only if this callback belongs to the live task."""
+        if self._periodic_task is completed:
             self._periodic_task = None
-        logger.info(f"{self.log_prefix} 已停止后台定期检查循环")
 
     async def _periodic_check_loop(self):
         """后台定期检查循环"""

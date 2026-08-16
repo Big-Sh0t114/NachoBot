@@ -3,14 +3,13 @@ plugins/mus_library/cache_silk/
 plugins/mus_library/music_library.json
 plugins/mus_library/list.txt
 plugins/mus_library/dump.txt
-plugins/mus_library/audio/*
+music/*
 plugins/bot_monitor
 plugins/external_service_monitor
-!plugins/mus_library/audio/.gitkeep
+!music/.gitkeep
 plugins/messenger/config.toml
 plugins/mus_library/config.toml
 plugins/Maizone/
-plugins/MaiBot_MCPBridgePlugin
 src/plugins/built_in/artwork_plugin/config.toml
 src/plugins/built_in/emoji_plugin/config.toml
 src/plugins/built_in/help_plugin/config.toml
@@ -28,6 +27,7 @@ config/bot_config.toml
 template/compare/bot_config_template.toml
 template/compare/model_config_template.toml
 template/compare/topics_config_template.toml
+template/compare/mcp_config_template.toml
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

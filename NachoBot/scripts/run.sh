@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 # NachoCore & NapCat Adapter一键安装脚本 by Cookie_987
 # 适用于Arch/Ubuntu 24.10/Debian 12/CentOS 9
@@ -35,6 +36,28 @@ SERVICE_NAME_NBADAPTER="nachobot-napcat-adapter"
 
 IS_INSTALL_NAPCAT=false
 IS_INSTALL_DEPENDENCIES=false
+
+ensure_playwright_chromium() {
+    local project_dir="${INSTALL_DIR}/NachoBot"
+    local python_exec="${INSTALL_DIR}/venv/bin/python3"
+    local ensure_script="${project_dir}/scripts/ensure_playwright.py"
+    local ensure_args=()
+
+    if [[ ! -x "${python_exec}" || ! -f "${ensure_script}" ]]; then
+        echo -e "${RED}[Warn] Playwright Chromium 预检脚本不可用，将保留 HTTP fallback。${RESET}"
+        return 1
+    fi
+
+    if command -v apt-get &>/dev/null; then
+        ensure_args+=(--with-deps)
+    fi
+
+    if ! (cd "${project_dir}" && "${python_exec}" "${ensure_script}" "${ensure_args[@]}"); then
+        echo -e "${RED}[Warn] Playwright Chromium 准备失败，将保留 HTTP fallback。${RESET}"
+        return 1
+    fi
+    return 0
+}
 
 # 检查是否已安装
 check_installed() {
@@ -121,10 +144,13 @@ update_dependencies() {
         return 1
     fi
     source "${INSTALL_DIR}/venv/bin/activate"
-    if ! pip install -r requirements.txt; then
+    if ! uv sync --locked --no-dev --active --inexact; then
         whiptail --msgbox "🚫 依赖安装失败！" 10 60
         deactivate
         return 1
+    fi
+    if ! ensure_playwright_chromium; then
+        whiptail --msgbox "⚠️ Playwright Chromium 准备失败；联网搜索将使用 HTTP fallback。" 10 70
     fi
     deactivate
     whiptail --msgbox "✅ 已停止服务并拉取最新仓库提交" 10 60
@@ -159,7 +185,14 @@ switch_branch() {
     fi
     systemctl stop ${SERVICE_NAME}
     source "${INSTALL_DIR}/venv/bin/activate"
-    pip install -r requirements.txt
+    if ! uv sync --locked --no-dev --active --inexact; then
+        whiptail --msgbox "🚫 依赖安装失败！" 10 60
+        deactivate
+        return 1
+    fi
+    if ! ensure_playwright_chromium; then
+        whiptail --msgbox "⚠️ Playwright Chromium 准备失败；联网搜索将使用 HTTP fallback。" 10 70
+    fi
     deactivate
 
     sed -i "s/^BRANCH=.*/BRANCH=${new_branch}/" /etc/NachoCore_install.conf
@@ -333,16 +366,18 @@ run_installation() {
     # Python版本检查
     check_python() {
         PYTHON_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-        if ! python3 -c "import sys; exit(0) if sys.version_info >= (3,10) else exit(1)"; then
-            whiptail --title "⚠️ [4/6] Python 版本过低" --msgbox "检测到 Python 版本为 $PYTHON_VERSION，需要 3.10 或以上！\n请升级 Python 后重新运行本脚本。" 10 60
+        if ! python3 -c "import sys; exit(0) if (3, 11) <= sys.version_info < (3, 13) else exit(1)"; then
+            whiptail --title "⚠️ [4/6] Python 版本不兼容" --msgbox "检测到 Python 版本为 $PYTHON_VERSION，需要 Python 3.11 或 3.12。\n请切换兼容版本后重新运行本脚本。" 10 60
             exit 1
         fi
     }
 
     # 如果没安装python则不检查python版本
-    if command -v python3 &>/dev/null; then
-        check_python
+    if ! command -v python3 &>/dev/null; then
+        echo -e "${RED}[Error] 未找到 python3；需要 Python 3.11 或 3.12。${RESET}"
+        exit 1
     fi
+    check_python
     
 
     # 选择分支
@@ -434,12 +469,6 @@ run_installation() {
         exit 1
     }
 
-    echo -e "${GREEN}克隆 ncnk_message 包仓库...${RESET}"
-    git clone $GITHUB_REPO/Nacho-with-u/ncnk_message.git || {
-        echo -e "${RED}克隆 ncnk_message 包仓库失败！${RESET}"
-        exit 1
-    }
-
     echo -e "${GREEN}克隆 nonebot-plugin-nachobot-adapters 仓库...${RESET}"
     git clone $GITHUB_REPO/Nacho-with-u/NachoBot-Napcat-Adapter.git || {
         echo -e "${RED}克隆 NachoBot-Napcat-Adapter.git 仓库失败！${RESET}"
@@ -448,20 +477,24 @@ run_installation() {
 
 
     echo -e "${GREEN}安装Python依赖...${RESET}"
-    pip install -r NachoBot/requirements.txt
+    if ! python -m pip install uv; then
+        echo -e "${RED}uv 安装失败${RESET}"
+        exit 1
+    fi
     cd NachoBot
-    pip install uv
-    uv pip install -i https://mirrors.aliyun.com/pypi/simple -r requirements.txt   
-    cd ..
-
-    echo -e "${GREEN}安装ncnk_message依赖...${RESET}"
-    cd ncnk_message
-    uv pip install -i https://mirrors.aliyun.com/pypi/simple -e .
+    if ! uv sync --locked --no-dev --active --inexact; then
+        echo -e "${RED}NachoBot 锁定依赖安装失败${RESET}"
+        exit 1
+    fi
+    ensure_playwright_chromium || true
     cd ..
 
     echo -e "${GREEN}部署NachoBot Napcat Adapter...${RESET}"
     cd NachoBot-Napcat-Adapter
-    uv pip install -i https://mirrors.aliyun.com/pypi/simple -r requirements.txt
+    if ! uv sync --locked --no-dev --active --inexact; then
+        echo -e "${RED}NapCat Adapter 锁定依赖安装失败${RESET}"
+        exit 1
+    fi
     cd ..
 
     echo -e "${GREEN}同意协议...${RESET}"

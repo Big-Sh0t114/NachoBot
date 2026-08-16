@@ -53,6 +53,7 @@ try:
         TargetConfig,
         TemplateInfo,
         UserInfo,
+        get_core_token_from_env,
     )
 except ImportError as exc:
     print(
@@ -149,7 +150,7 @@ class UniversalVCAdapter:
                 route_config={
                     "universal_vc": TargetConfig(
                         url=f"ws://{self.config.nachobot.host}:{self.config.nachobot.port}/ws",
-                        token=None,
+                        token=get_core_token_from_env(),
                     )
                 }
             )
