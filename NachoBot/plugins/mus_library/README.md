@@ -1,6 +1,6 @@
 # 本地曲库插件（Mus Library）
 
-从插件目录的 `audio/` 读取标准 WAV 文件，通过 OneBot 语音或兼容平台播放。把 MP3 仅改名为 `.wav` 无效。
+从核心目录的 `music/` 读取标准 WAV 文件，通过 OneBot 语音或兼容平台播放。把 MP3 仅改名为 `.wav` 无效。
 
 ## 使用
 

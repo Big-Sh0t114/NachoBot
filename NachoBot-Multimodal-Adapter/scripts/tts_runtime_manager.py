@@ -462,8 +462,14 @@ def patch_gpt_runtime_compat(source_dir: Path, runtime_dir: Path) -> Path:
     # GPT-SoVITS 自带英文 CMU 字典。g2p_en 的 import-time nltk.download()
     # 和 cmudict.dict() 对当前 en_G2p 都是冗余依赖，因此所有平台都禁用。
     venv_dir = runtime_dir / ".venv"
-    for g2p_py in venv_dir.rglob("g2p.py") if venv_dir.is_dir() else []:
-        if g2p_py.parent.name != "g2p_en":
+    g2p_candidates = [
+        venv_dir / "Lib" / "site-packages" / "g2p_en" / "g2p.py",
+    ]
+    g2p_candidates.extend(
+        venv_dir.glob("lib/python*/site-packages/g2p_en/g2p.py")
+    )
+    for g2p_py in g2p_candidates:
+        if not g2p_py.is_file():
             continue
         content = g2p_py.read_text(encoding="utf-8")
         patched = content
