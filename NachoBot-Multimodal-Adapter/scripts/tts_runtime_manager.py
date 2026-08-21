@@ -683,7 +683,14 @@ def make_gpt_infer_config(source_dir: Path, runtime_dir: Path) -> Path:
     version = detect_sovits_version(sovits_weights)
     adapter_config = read_toml(ADAPTER_ROOT / "configs" / "gpt-sovits.toml")
     device = str(adapter_config.get("tts", {}).get("device", {}).get("tts", "cuda:0")).strip()
-    runtime_device = "cuda" if device.startswith("cuda") else device
+    if device.startswith("cuda"):
+        try:
+            import torch
+            runtime_device = "cuda" if torch.cuda.is_available() else "cpu"
+        except Exception:
+            runtime_device = "cpu"
+    else:
+        runtime_device = device
     is_half = runtime_device.startswith("cuda")
 
     config_path = runtime_dir / "tts_infer.nachobot.yaml"

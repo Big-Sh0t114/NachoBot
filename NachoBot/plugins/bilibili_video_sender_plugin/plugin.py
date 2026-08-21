@@ -8,6 +8,7 @@ import platform
 import re
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import subprocess
@@ -420,9 +421,31 @@ class BilibiliParser:
 
     @staticmethod
     def _follow_redirect(url: str) -> str:
+        """解析 b23.tv 短链，仅读取重定向目标，不继续请求 Bilibili 视频页面。"""
+
+        class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
         req = BilibiliParser._build_request(url)
-        with urllib.request.urlopen(req, timeout=15) as resp:  # nosec - trusted public short URL
-            return resp.geturl()
+        opener = urllib.request.build_opener(_NoRedirectHandler())
+
+        try:
+            with opener.open(req, timeout=15) as resp:  # nosec - trusted public short URL
+                return resp.geturl()
+        except urllib.error.HTTPError as exc:
+            if exc.code in (301, 302, 303, 307, 308):
+                location = exc.headers.get("Location")
+                if location:
+                    resolved_url = urllib.parse.urljoin(url, location)
+                    BilibiliParser._logger.debug(
+                        "B23 short URL resolved",
+                        original_url=url,
+                        resolved_url=resolved_url,
+                        status=exc.code,
+                    )
+                    return resolved_url
+            raise
 
     @staticmethod
     def _extract_bvid(url: str) -> Optional[str]:
@@ -440,11 +463,17 @@ class BilibiliParser:
         # 先匹配 b23.tv 短链
         short = BilibiliParser.B23_SHORT_PATTERN.search(text)
         if short:
+            short_url = short.group(0)
             try:
-                return BilibiliParser._follow_redirect(short.group(0))
-            except Exception:
-                # 回退为原短链
-                return short.group(0)
+                return BilibiliParser._follow_redirect(short_url)
+            except Exception as exc:
+                BilibiliParser._logger.error(
+                    "B23 short URL resolution failed",
+                    url=short_url,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                # 保持现有兼容行为：解析失败时仍回退为原短链
+                return short_url
 
         # 再匹配标准视频链接
         match = BilibiliParser.VIDEO_URL_PATTERN.search(text)
