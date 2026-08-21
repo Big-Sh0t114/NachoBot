@@ -2,6 +2,7 @@
 .tmp.drivedownload/
 .claude/
 .agents/
+.serena/
 # Local Models
 iic/
 microsoft/

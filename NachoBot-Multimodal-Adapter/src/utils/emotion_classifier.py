@@ -96,24 +96,43 @@ class EmotionClassifier:
                 )
                 logger.info("情感分类模型已从本地缓存加载")
             except Exception as cache_exc:
-                logger.warning("本地情感分类模型缓存不可用: %s", cache_exc)
+                logger.warning("本地情感分类模型缓存不可用: {}", cache_exc)
 
                 from huggingface_hub import snapshot_download
+
+                # 只下载 Transformers 推理实际需要的文件。该仓库还包含
+                # ONNX 导出和重复的 pytorch_model.bin，完整 snapshot 会额外
+                # 下载大量无用数据，在中国大陆网络下尤其容易表现为长时间卡住。
+                allow_patterns = [
+                    "config.json",
+                    "model.safetensors",
+                    "*.json",
+                    "*.model",
+                    "*.txt",
+                ]
+                ignore_patterns = [
+                    "onnx/**",
+                    "*.onnx",
+                    "pytorch_model.bin",
+                ]
 
                 failures: list[str] = []
                 snapshot_dir = None
                 for endpoint in _hf_endpoints():
                     try:
-                        logger.info("尝试通过 %s 下载情感分类模型", endpoint)
+                        logger.info("尝试通过 {} 下载情感分类模型", endpoint)
                         snapshot_dir = snapshot_download(
                             repo_id=self._model_name,
                             endpoint=endpoint,
+                            allow_patterns=allow_patterns,
+                            ignore_patterns=ignore_patterns,
+                            max_workers=4,
                         )
-                        logger.info("情感分类模型已通过 %s 下载完成", endpoint)
+                        logger.info("情感分类模型已通过 {} 下载完成", endpoint)
                         break
                     except Exception as exc:
                         failures.append(f"{endpoint}: {exc}")
-                        logger.warning("通过 %s 下载情感分类模型失败: %s", endpoint, exc)
+                        logger.warning("通过 {} 下载情感分类模型失败: {}", endpoint, exc)
 
                 if snapshot_dir is None:
                     raise RuntimeError(
