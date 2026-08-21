@@ -1,10 +1,12 @@
 import asyncio
 from typing import List, Dict, Any, Optional
+
 from src.common.logger import get_logger
 from src.config.config import global_config
 from src.chat.utils.url_fetcher import extract_urls
 from src.chat.utils.capability_router import build_search_after_decision, execute_mcp_after_decision
 from src.person_info.person_info import Person
+from src.mcp.types import MCPAccessContext
 
 logger = get_logger("context_builder")
 
@@ -17,7 +19,7 @@ async def build_tool_info(
     capability_router: Any,
     tool_executor: Any,
     mcp_executor: Any,
-    has_mcp_permission: bool,
+    mcp_access_context: Optional[MCPAccessContext] = None,
     enable_tool: bool = True,
     chat_id: Optional[str] = None,
 ) -> str:
@@ -32,7 +34,7 @@ async def build_tool_info(
         capability_router: 共享的联网/MCP 能力路由器
         tool_executor: ToolExecutor 实例
         mcp_executor: MCPExecutor 实例
-        has_mcp_permission: 此用户是否有 MCP 权限
+        mcp_access_context: 核心 MCP 服务用于目录过滤和执行鉴权的上下文
         enable_tool: 是否启用工具调用
 
     Returns:
@@ -63,9 +65,9 @@ async def build_tool_info(
         # 构建并行任务列表
         parallel_tasks = {}
 
-        mcp_catalog = mcp_executor.get_tool_catalog_summary() if has_mcp_permission else ""
+        mcp_catalog = mcp_executor.get_tool_catalog_summary(access_context=mcp_access_context)
         allow_web_search = bool(not urls and web_search_manager.is_available)
-        allow_mcp = bool(has_mcp_permission and mcp_catalog)
+        allow_mcp = bool(mcp_catalog)
         decision_task = None
         if allow_web_search or allow_mcp:
             decision_task = asyncio.create_task(
@@ -106,11 +108,12 @@ async def build_tool_info(
                 target=target,
                 chat_history=chat_history,
                 return_details=False,
+                access_context=mcp_access_context,
             )
-        elif has_mcp_permission and not mcp_catalog:
-            logger.info("当前没有可用 MCP 工具，跳过 MCP 能力检查")
+        elif not mcp_catalog:
+            logger.info("当前用户没有获准使用的 MCP 工具，跳过 MCP 能力检查")
         else:
-            logger.info("用户无 MCP 权限，跳过 MCP 能力检查")
+            logger.info("跳过 MCP 能力检查")
 
         # 并行执行所有任务
         task_keys = list(parallel_tasks.keys())

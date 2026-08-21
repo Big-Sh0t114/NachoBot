@@ -486,6 +486,9 @@ class LLMRequest:
             tool_options_builder = ToolOptionBuilder()
             tool_options_builder.set_name(tool.get("name", ""))
             tool_options_builder.set_description(tool.get("description", ""))
+            input_schema = tool.get("input_schema")
+            if isinstance(input_schema, dict):
+                tool_options_builder.set_input_schema(input_schema)
             parameters: List[Tuple[str, str, str, bool, List[str] | None]] = tool.get("parameters", [])
             for param in parameters:
                 try:

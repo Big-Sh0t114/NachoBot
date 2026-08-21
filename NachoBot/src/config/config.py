@@ -37,6 +37,7 @@ from src.config.official_configs import (
     AdvancedConfig,
     InjectionConfig,
     FocusConfig,
+    MCPConfig,
 )
 
 from .api_ada_configs import (
@@ -59,6 +60,27 @@ TEMPLATE_DIR = os.path.join(PROJECT_ROOT, "template")
 
 # 对该字段的更新，请严格参照语义化版本规范：https://semver.org/lang/zh-CN/
 MMC_VERSION = "0.10.3"
+
+
+_LEGACY_MCP_FIELD_MAP = {
+    "mcp_enabled": "enabled",
+    "mcp_auto_detect": "auto_detect",
+    "mcp_servers_json": "servers_json",
+    "mcp_tool_prefix": "tool_prefix",
+    "mcp_disabled_tools": "disabled_tools",
+    "mcp_connect_timeout_seconds": "connect_timeout_seconds",
+    "mcp_call_timeout_seconds": "call_timeout_seconds",
+    "mcp_reconnect_interval_seconds": "reconnect_interval_seconds",
+    "mcp_permissions_enabled": "permissions_enabled",
+    "mcp_permission_default_mode": "permission_default_mode",
+    "mcp_quick_allow_users": "quick_allow_users",
+    "mcp_quick_deny_groups": "quick_deny_groups",
+    "mcp_permission_rules_json": "permission_rules_json",
+    "mcp_max_rounds": "max_rounds",
+    "mcp_max_calls": "max_calls",
+    "mcp_max_candidate_tools": "max_candidate_tools",
+    "mcp_observation_max_chars": "observation_max_chars",
+}
 
 
 def get_key_comment(toml_table, key):
@@ -214,7 +236,73 @@ def _migrate_renamed_model_task_groups(
     return migrated
 
 
-def _update_config_generic(config_name: str, template_name: str):
+def _legacy_mcp_fields_present() -> bool:
+    """Return whether bot_config still contains MCP fields from the old layout."""
+    bot_config_path = os.path.join(CONFIG_DIR, "bot_config.toml")
+    if not os.path.exists(bot_config_path):
+        return False
+
+    try:
+        with open(bot_config_path, "r", encoding="utf-8") as f:
+            config = tomlkit.load(f)
+        tool_config = config.get("tool")
+        return isinstance(tool_config, (dict, Table)) and any(
+            key in tool_config for key in _LEGACY_MCP_FIELD_MAP
+        )
+    except Exception as e:
+        logger.warning(f"检查旧版 bot_config MCP 配置失败: {e}")
+        return False
+
+
+def _unwrap_toml_value(value):
+    unwrap = getattr(value, "unwrap", None)
+    return unwrap() if callable(unwrap) else value
+
+
+def _migrate_legacy_mcp_config() -> bool:
+    """Create mcp_config from legacy [tool] MCP fields before bot_config is rewritten."""
+    bot_config_path = os.path.join(CONFIG_DIR, "bot_config.toml")
+    mcp_config_path = os.path.join(CONFIG_DIR, "mcp_config.toml")
+    template_path = os.path.join(TEMPLATE_DIR, "mcp_config_template.toml")
+
+    if os.path.exists(mcp_config_path) or not os.path.exists(bot_config_path):
+        return False
+
+    try:
+        with open(bot_config_path, "r", encoding="utf-8") as f:
+            bot_config = tomlkit.load(f)
+        tool_config = bot_config.get("tool")
+        if not isinstance(tool_config, (dict, Table)):
+            return False
+
+        legacy_values = {
+            new_name: _unwrap_toml_value(tool_config[old_name])
+            for old_name, new_name in _LEGACY_MCP_FIELD_MAP.items()
+            if old_name in tool_config
+        }
+        if not legacy_values:
+            return False
+
+        with open(template_path, "r", encoding="utf-8") as f:
+            new_config = tomlkit.load(f)
+        mcp_section = new_config.get("mcp")
+        if not isinstance(mcp_section, (dict, Table)):
+            raise ValueError("mcp_config_template.toml 缺少 [mcp] 配置段")
+
+        for key, value in legacy_values.items():
+            mcp_section[key] = tomlkit.item(value)
+
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(mcp_config_path, "w", encoding="utf-8") as f:
+            f.write(tomlkit.dumps(new_config))
+        logger.info(f"已将旧 bot_config [tool] 中的 MCP 配置迁移到: {mcp_config_path}")
+        return True
+    except Exception as e:
+        logger.error(f"迁移旧版 bot_config MCP 配置失败: {e}")
+        return False
+
+
+def _update_config_generic(config_name: str, template_name: str, *, force_update: bool = False):
     """
     通用的配置文件更新函数
 
@@ -321,10 +409,13 @@ def _update_config_generic(config_name: str, template_name: str):
         old_version = old_config["inner"].get("version")  # type: ignore
         new_version = new_config["inner"].get("version")  # type: ignore
         if old_version and new_version and old_version == new_version:
-            if not renamed_model_groups_migrated:
+            if not renamed_model_groups_migrated and not force_update:
                 logger.info(f"检测到{config_name}配置文件版本号相同 (v{old_version})，跳过更新")
                 return
-            logger.info(f"检测到{config_name}存在待迁移的旧模型组，将重新生成配置")
+            if renamed_model_groups_migrated:
+                logger.info(f"检测到{config_name}存在待迁移的旧模型组，将重新生成配置")
+            else:
+                logger.info(f"检测到{config_name}存在待迁移的旧配置项，将重新生成配置")
         else:
             logger.info(
                 f"\n----------------------------------------\n检测到{config_name}版本号不同: 旧版本 v{old_version} -> 新版本 v{new_version}\n----------------------------------------"
@@ -366,7 +457,11 @@ def _update_config_generic(config_name: str, template_name: str):
 
 def update_config():
     """更新bot_config.toml配置文件"""
-    _update_config_generic("bot_config", "bot_config_template")
+    _update_config_generic(
+        "bot_config",
+        "bot_config_template",
+        force_update=_legacy_mcp_fields_present(),
+    )
 
 
 def update_topics_config():
@@ -377,6 +472,11 @@ def update_topics_config():
 def update_model_config():
     """更新model_config.toml配置文件"""
     _update_config_generic("model_config", "model_config_template")
+
+
+def update_mcp_config():
+    """更新mcp_config.toml配置文件"""
+    _update_config_generic("mcp_config", "mcp_config_template")
 
 
 @dataclass
@@ -521,11 +621,25 @@ def api_ada_load_config(config_path: str) -> APIAdapterConfig:
         raise e
 
 
+def mcp_load_config(config_path: str) -> MCPConfig:
+    """加载独立 MCP 配置文件"""
+    with open(config_path, "r", encoding="utf-8") as f:
+        config_data = tomlkit.load(f)
+
+    try:
+        return MCPConfig.from_dict(config_data)
+    except Exception as e:
+        logger.critical("MCP配置文件解析失败")
+        raise e
+
+
 # 获取配置文件路径
 logger.info(f"NachoCore当前版本: {MMC_VERSION}")
+_migrate_legacy_mcp_config()
 update_config()
 update_topics_config()
 update_model_config()
+update_mcp_config()
 
 logger.info("正在品鉴配置文件...")
 global_config = load_config(
@@ -533,4 +647,5 @@ global_config = load_config(
     topics_config_path=os.path.join(CONFIG_DIR, "topics_config.toml"),
 )
 model_config = api_ada_load_config(config_path=os.path.join(CONFIG_DIR, "model_config.toml"))
+mcp_config = mcp_load_config(config_path=os.path.join(CONFIG_DIR, "mcp_config.toml"))
 logger.info("非常的新鲜，非常的美味！")

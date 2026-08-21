@@ -1,5 +1,5 @@
 [inner]
-version = "6.20.7_bs"
+version = "6.20.10_bs"
 
 #----以下是给开发人员阅读的，如果你只是部署，不需要阅读----
 #如果你想要修改配置文件，请递增version的值
@@ -94,11 +94,6 @@ persistent_rounds = 10
 enable_tool = true # 是否启用回复工具
 web_search_engines = ["bing", "duckduckgo"] # 浏览器搜索引擎，前者失败时自动尝试后者
 web_search_timeout_seconds = 20 # 单个搜索引擎页面的加载超时时间（秒）
-mcp_auto_detect = true # 仅在能力路由器判定有 MCP 需求时启动 MCP 独立工具链
-mcp_max_rounds = 3 # 单次 MCP 工具链最大决策轮数
-mcp_max_calls = 5 # 单次 MCP 工具链最大工具调用数
-mcp_max_candidate_tools = 32 # 单次 MCP 决策最多暴露的候选工具数
-mcp_observation_max_chars = 12000 # 回注 MCP 观察结果的最大字符数
 
 [mood]
 enable_mood = true # 是否启用情绪系统

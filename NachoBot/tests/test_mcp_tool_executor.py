@@ -48,6 +48,14 @@ class _FakeLLM:
         return "", ("", "fake-model", calls)
 
 
+class _FakeService:
+    def get_tool_definitions(self, _context=None):
+        return [
+            {"name": "mcp_calendar_list", "description": "List calendar events"},
+            {"name": "mcp_calendar_detail", "description": "Read calendar event details"},
+        ]
+
+
 def _install_package(name: str) -> None:
     module = types.ModuleType(name)
     module.__path__ = []
@@ -68,6 +76,7 @@ _PACKAGE_NAMES = (
     "src.common",
     "src.config",
     "src.llm_models",
+    "src.mcp",
     "src.plugin_system",
     "src.plugin_system.core",
 )
@@ -76,6 +85,8 @@ _DEPENDENCY_MODULE_NAMES = (
     "src.common.logger",
     "src.config.config",
     "src.llm_models.payload_content",
+    "src.mcp.service",
+    "src.mcp.types",
     "src.plugin_system.core.tool_use",
 )
 _MISSING = object()
@@ -90,8 +101,18 @@ _install_module(
     "src.config.config",
     global_config=types.SimpleNamespace(bot=types.SimpleNamespace(nickname="bot")),
     model_config=types.SimpleNamespace(),
+    mcp_config=types.SimpleNamespace(
+        mcp=types.SimpleNamespace(
+            max_rounds=3,
+            max_calls=5,
+            max_candidate_tools=32,
+            observation_max_chars=12000,
+        )
+    ),
 )
 _install_module("src.llm_models.payload_content", ToolCall=_ToolCall)
+_install_module("src.mcp.service", MCPService=object, mcp_service=_FakeService())
+_install_module("src.mcp.types", MCPAccessContext=object)
 _install_module("src.plugin_system.core.tool_use", ToolExecutor=_StubToolExecutor)
 
 MODULE_PATH = pathlib.Path(__file__).resolve().parents[1] / "src" / "plugin_system" / "core" / "mcp_tool_executor.py"
@@ -111,6 +132,43 @@ finally:
 
 
 class MCPToolExecutorLoopTests(unittest.IsolatedAsyncioTestCase):
+    def test_router_catalog_keeps_large_tool_set_visible(self):
+        executor = MCP_TOOL_EXECUTOR.MCPToolExecutor.__new__(MCP_TOOL_EXECUTOR.MCPToolExecutor)
+        executor.mcp_service = types.SimpleNamespace(
+            get_tool_definitions=lambda _context=None: [
+                {
+                    "name": f"mcp_server_tool_{index:02d}",
+                    "description": "A deliberately long tool description " * 12,
+                }
+                for index in range(41)
+            ]
+        )
+
+        catalog = executor.get_tool_catalog_summary(max_chars=6000)
+
+        self.assertIn("mcp_server_tool_00", catalog)
+        self.assertIn("mcp_server_tool_40", catalog)
+        self.assertNotIn("additional MCP tools omitted", catalog)
+
+    def test_router_candidates_do_not_expose_unrelated_servers(self):
+        executor = MCP_TOOL_EXECUTOR.MCPToolExecutor.__new__(MCP_TOOL_EXECUTOR.MCPToolExecutor)
+        executor.log_prefix = "[test]"
+        executor.max_candidate_tools = 32
+        tools = [
+            {"name": "mcp_calendar_list", "mcp_server": "calendar"},
+            {"name": "mcp_calendar_detail", "mcp_server": "calendar"},
+            {"name": "mcp_filesystem_delete", "mcp_server": "filesystem"},
+        ]
+        selected = executor._select_candidate_tools(
+            tools,
+            "列出明天的日历并读取详情",
+            ("mcp_calendar_list",),
+        )
+        self.assertEqual(
+            [definition["name"] for definition in selected],
+            ["mcp_calendar_list", "mcp_calendar_detail"],
+        )
+
     async def test_observation_is_fed_back_for_follow_up_calls(self):
         executor = MCP_TOOL_EXECUTOR.MCPToolExecutor.__new__(MCP_TOOL_EXECUTOR.MCPToolExecutor)
         executor.log_prefix = "[test]"
@@ -120,12 +178,9 @@ class MCPToolExecutorLoopTests(unittest.IsolatedAsyncioTestCase):
         executor.max_candidate_tools = 32
         executor.observation_max_chars = 12000
         executor.llm_model = _FakeLLM()
-        executor._get_tool_definitions = lambda: [
-            {"name": "mcp_calendar_list", "description": "List calendar events"},
-            {"name": "mcp_calendar_detail", "description": "Read calendar event details"},
-        ]
+        executor.mcp_service = _FakeService()
 
-        async def execute_tool_calls(tool_calls):
+        async def execute_tool_calls(tool_calls, *, access_context=None):
             results = [
                 {
                     "type": "tool_result",
