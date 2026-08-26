@@ -60,6 +60,30 @@ class LLMRequest:
         }
         """模型使用量记录，用于进行负载均衡，对应为(total_tokens, penalty, usage_penalty, last_penalty_time)"""
 
+    @staticmethod
+    def _resolve_model_group_name(model_set: TaskConfig) -> str:
+        """根据 TaskConfig 对象解析实际的 model_task_config 模型组名。"""
+        task_config = model_config.model_task_config
+        for group_name, configured_model_set in vars(task_config).items():
+            if group_name == "replyer" or group_name.startswith("_"):
+                continue
+            if isinstance(configured_model_set, TaskConfig) and configured_model_set is model_set:
+                return group_name
+
+        if getattr(task_config, "replyer", None) is model_set:
+            active_group = getattr(task_config, "_active_replyer_group", None)
+            if active_group in (0, 1, 2):
+                return f"replyer{active_group}"
+            return "replyer"
+
+        return "unknown"
+
+    @property
+    def log_context(self) -> str:
+        """返回用于共享 LLMRequest 日志的任务与模型组上下文。"""
+        request_type = self.request_type or "unknown"
+        return f"[{request_type}/{self._resolve_model_group_name(self.model_for_task)}]"
+
     async def generate_response_for_image(
         self,
         prompt: str,
@@ -215,7 +239,7 @@ class LLMRequest:
             interrupt_flag=interrupt_flag,
         )
 
-        logger.debug(f"LLM请求总耗时: {time.time() - start_time}")
+        logger.debug(f"{self.log_context} LLM请求总耗时: {time.time() - start_time}")
         content = response.content
         reasoning_content = response.reasoning_content or ""
         tool_calls = response.tool_calls
@@ -289,7 +313,7 @@ class LLMRequest:
             force_new_client = True
 
         client = client_registry.get_client_class_instance(api_provider, force_new=force_new_client)
-        logger.debug(f"选择请求模型: {model_info.name}")
+        logger.debug(f"{self.log_context} 选择请求模型: {model_info.name}")
 
         total_tokens, penalty, usage_penalty, last_penalty_time = self.model_usage[model_info.name]
 
@@ -362,10 +386,12 @@ class LLMRequest:
             except (EmptyResponseException, NetworkConnectionError) as e:
                 retry_remain -= 1
                 if retry_remain <= 0:
-                    logger.error(f"模型 '{model_info.name}' 在用尽对临时错误的重试次数后仍然失败。")
+                    logger.error(f"{self.log_context} 模型 '{model_info.name}' 在用尽对临时错误的重试次数后仍然失败。")
                     raise ModelAttemptFailed(f"模型 '{model_info.name}' 重试耗尽", original_exception=e) from e
 
-                logger.warning(f"模型 '{model_info.name}' 遇到可重试错误: {str(e)}。剩余重试次数: {retry_remain}")
+                logger.warning(
+                    f"{self.log_context} 模型 '{model_info.name}' 遇到可重试错误: {str(e)}。剩余重试次数: {retry_remain}"
+                )
                 await asyncio.sleep(api_provider.retry_interval)
 
             except RespNotOkException as e:
@@ -373,30 +399,32 @@ class LLMRequest:
                 if e.status_code == 429 or e.status_code >= 500:
                     retry_remain -= 1
                     if retry_remain <= 0:
-                        logger.error(f"模型 '{model_info.name}' 在遇到 {e.status_code} 错误并用尽重试次数后仍然失败。")
+                        logger.error(
+                            f"{self.log_context} 模型 '{model_info.name}' 在遇到 {e.status_code} 错误并用尽重试次数后仍然失败。"
+                        )
                         raise ModelAttemptFailed(f"模型 '{model_info.name}' 重试耗尽", original_exception=e) from e
 
                     logger.warning(
-                        f"模型 '{model_info.name}' 遇到可重试的HTTP错误: {str(e)}。剩余重试次数: {retry_remain}"
+                        f"{self.log_context} 模型 '{model_info.name}' 遇到可重试的HTTP错误: {str(e)}。剩余重试次数: {retry_remain}"
                     )
                     await asyncio.sleep(api_provider.retry_interval)
                     continue
 
                 # 特殊处理413，尝试压缩
                 if e.status_code == 413 and message_list and not compressed_messages:
-                    logger.warning(f"模型 '{model_info.name}' 返回413请求体过大，尝试压缩后重试...")
+                    logger.warning(f"{self.log_context} 模型 '{model_info.name}' 返回413请求体过大，尝试压缩后重试...")
                     # 压缩消息本身不消耗重试次数
                     compressed_messages = compress_messages(message_list)
                     continue
 
                 # 不可重试的HTTP错误
-                logger.warning(f"模型 '{model_info.name}' 遇到不可重试的HTTP错误: {str(e)}")
+                logger.warning(f"{self.log_context} 模型 '{model_info.name}' 遇到不可重试的HTTP错误: {str(e)}")
                 raise ModelAttemptFailed(f"模型 '{model_info.name}' 遇到硬错误", original_exception=e) from e
 
             except Exception as e:
-                logger.error(traceback.format_exc())
+                logger.error(f"{self.log_context}\n{traceback.format_exc()}")
 
-                logger.warning(f"模型 '{model_info.name}' 遇到未知的不可重试错误: {str(e)}")
+                logger.warning(f"{self.log_context} 模型 '{model_info.name}' 遇到未知的不可重试错误: {str(e)}")
                 raise ModelAttemptFailed(f"模型 '{model_info.name}' 遇到硬错误", original_exception=e) from e
 
         raise ModelAttemptFailed(f"模型 '{model_info.name}' 未被尝试，因为重试次数已配置为0或更少。")
@@ -454,7 +482,7 @@ class LLMRequest:
                 raise
             except ModelAttemptFailed as e:
                 last_exception = e.original_exception or e
-                logger.warning(f"模型 '{model_info.name}' 尝试失败，切换到下一个模型。原因: {e}")
+                logger.warning(f"{self.log_context} 模型 '{model_info.name}' 尝试失败，切换到下一个模型。原因: {e}")
 
                 total_tokens, penalty, usage_penalty, _ = self.model_usage[model_info.name]
                 self.model_usage[model_info.name] = (total_tokens, penalty + 1, usage_penalty, time.time())
@@ -462,7 +490,7 @@ class LLMRequest:
                 failed_models_this_request.add(model_info.name)
 
                 if isinstance(last_exception, RespNotOkException) and last_exception.status_code == 400:
-                    logger.error("收到不可恢复的客户端错误 (400)，中止所有尝试。")
+                    logger.error(f"{self.log_context} 收到不可恢复的客户端错误 (400)，中止所有尝试。")
                     raise last_exception from e
 
             finally:
@@ -470,7 +498,7 @@ class LLMRequest:
                 if usage_penalty > 0:
                     self.model_usage[model_info.name] = (total_tokens, penalty, usage_penalty - 1, last_penalty_time)
 
-        logger.error(f"所有 {max_attempts} 个模型均尝试失败。")
+        logger.error(f"{self.log_context} 所有 {max_attempts} 个模型均尝试失败。")
         if last_exception:
             raise last_exception
         raise RuntimeError("请求失败，所有可用模型均已尝试失败。")

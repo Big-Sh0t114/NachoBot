@@ -85,6 +85,13 @@ class BaseClient(ABC):
     def __init__(self, api_provider: APIProvider):
         self.api_provider = api_provider
 
+    async def close(self) -> None:
+        """释放客户端持有的资源。
+
+        默认实现为空操作；持有网络连接、文件句柄等资源的客户端应覆写此方法。
+        """
+        return None
+
     @abstractmethod
     async def get_response(
         self,

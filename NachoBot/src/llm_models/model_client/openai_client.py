@@ -425,9 +425,7 @@ class OpenaiClient(BaseClient):
         if _is_loopback_url(api_provider.base_url):
             # Local OpenAI-compatible services must not be routed through an
             # HTTP(S)_PROXY inherited from the desktop/session environment.
-            client_options["http_client"] = DefaultAsyncHttpxClient(
-                trust_env=False
-            )
+            client_options["http_client"] = DefaultAsyncHttpxClient(trust_env=False)
         self.client: AsyncOpenAI = AsyncOpenAI(
             base_url=api_provider.base_url,
             api_key=api_provider.api_key,
@@ -435,6 +433,10 @@ class OpenaiClient(BaseClient):
             timeout=api_provider.timeout,
             **client_options,
         )
+
+    async def close(self) -> None:
+        """关闭底层 AsyncOpenAI/HTTPX 客户端资源。"""
+        await self.client.close()
 
     async def get_response(
         self,

@@ -352,6 +352,13 @@ class GeminiClient(BaseClient):
             api_key=api_provider.api_key,
         )  # 这里和openai不一样，gemini会自己决定自己是否需要retry
 
+    async def close(self) -> None:
+        """关闭 Google GenAI 客户端持有的同步与异步网络资源。"""
+        try:
+            await self.client.aio.aclose()
+        finally:
+            self.client.close()
+
     @staticmethod
     def clamp_thinking_budget(tb: int, model_id: str) -> int:
         """

@@ -1,3 +1,5 @@
+8/26
+    修复A_Memorix内存溢出问题
 8/21
     修复tts runtime中对GPT Sovits的is_half选择
     修复Bilibili视频搬运插件的短链解析问题

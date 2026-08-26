@@ -27,6 +27,10 @@ from src.chat.utils.prompt_builder import Prompt, global_prompt_manager
 logger = get_logger("chat_history_summarizer")
 
 HIPPO_CACHE_DIR = Path(__file__).resolve().parents[2] / "data" / "hippo_memorizer"
+MAX_PENDING_MESSAGES = 500
+TOPIC_CHECK_MESSAGE_LIMIT = 80
+TIME_TRIGGER_MIN_MESSAGES = 20
+TOPIC_RETRY_COOLDOWN_SECONDS = 300
 
 
 def is_bot_self(platform: str, user_id: str) -> bool:
@@ -165,6 +169,7 @@ class ChatHistorySummarizer:
 
         # 当前累积的消息批次
         self.current_batch: Optional[MessageBatch] = None
+        self._topic_retry_cooldown_until = 0.0
 
         # 话题缓存：topic_str -> TopicCacheItem
         # 在内存中维护，并通过本地文件实时持久化
@@ -332,13 +337,18 @@ class ChatHistorySummarizer:
 
             if messages:
                 self.current_batch = MessageBatch(
-                    messages=messages,
+                    messages=sorted(messages, key=self._message_key),
                     start_time=start_time,
                     end_time=end_time,
-                    start_cursor_time=float(start_cursor_time or start_time),
+                    start_cursor_time=float(start_cursor_time if start_cursor_time is not None else start_time),
                     start_cursor_message_id=start_cursor_message_id,
                 )
-                logger.info(f"{self.log_prefix} 已恢复聊天批次，包含 {len(messages)} 条消息")
+                trimmed = self._trim_pending_batch()
+                if trimmed:
+                    self._persist_topic_cache()
+                logger.info(
+                    f"{self.log_prefix} 已恢复聊天批次，包含 {len(self.current_batch.messages)} 条消息"
+                )
         except Exception as e:
             logger.error(f"{self.log_prefix} 加载聊天批次失败: {e}")
 
@@ -447,6 +457,7 @@ class ChatHistorySummarizer:
                 before_count = len(self.current_batch.messages)
                 self.current_batch.messages.extend(new_messages)
                 self.current_batch.end_time = self.last_check_time
+                self._trim_pending_batch()
                 logger.info(
                     f"{self.log_prefix} 更新聊天检查批次: {before_count} -> {len(self.current_batch.messages)} 条消息"
                 )
@@ -461,6 +472,7 @@ class ChatHistorySummarizer:
                     start_cursor_time=previous_cursor[0],
                     start_cursor_message_id=previous_cursor[1],
                 )
+                self._trim_pending_batch()
                 logger.debug(f"{self.log_prefix} 新建聊天检查批次: {len(new_messages)} 条消息")
                 # 创建批次后持久化
                 self._persist_topic_cache()
@@ -481,6 +493,49 @@ class ChatHistorySummarizer:
     @staticmethod
     def _message_key(message: DatabaseMessages) -> tuple[float, str]:
         return (float(getattr(message, "time", 0.0)), str(getattr(message, "message_id", "") or ""))
+
+    def _trim_pending_batch(self) -> bool:
+        """Keep pending messages ordered and bounded, advancing the batch cursor on eviction."""
+        if not self.current_batch or not self.current_batch.messages:
+            return False
+
+        ordered_messages = sorted(self.current_batch.messages, key=self._message_key)
+        overflow_count = max(0, len(ordered_messages) - MAX_PENDING_MESSAGES)
+        if not overflow_count:
+            self.current_batch.messages = ordered_messages
+            return False
+
+        discarded = ordered_messages[:overflow_count]
+        retained = ordered_messages[overflow_count:]
+        last_discarded = discarded[-1]
+        self.current_batch.messages = retained
+        self.current_batch.start_cursor_time, self.current_batch.start_cursor_message_id = self._message_key(
+            last_discarded
+        )
+        self.current_batch.start_time = float(getattr(retained[0], "time", self.current_batch.start_time))
+        logger.warning(
+            f"{self.log_prefix} 待处理批次超过 {MAX_PENDING_MESSAGES} 条，丢弃最旧的 {overflow_count} 条消息"
+        )
+        return True
+
+    def _consume_pending_prefix(self, messages: List[DatabaseMessages]) -> None:
+        """Consume only a successfully processed prefix of the pending batch."""
+        if not self.current_batch or not messages:
+            return
+
+        consumed_count = min(len(messages), len(self.current_batch.messages))
+        consumed = self.current_batch.messages[:consumed_count]
+        remaining = self.current_batch.messages[consumed_count:]
+        if not remaining:
+            self.current_batch = None
+            return
+
+        last_consumed = consumed[-1]
+        self.current_batch.messages = remaining
+        self.current_batch.start_cursor_time, self.current_batch.start_cursor_message_id = self._message_key(
+            last_consumed
+        )
+        self.current_batch.start_time = float(getattr(remaining[0], "time", self.current_batch.start_time))
 
     def _source_message_key(self, message: DatabaseMessages) -> Tuple[float, str]:
         """Return an immutable coordinate for a selected source message.
@@ -559,11 +614,17 @@ class ChatHistorySummarizer:
         检查是否需要进行一次“话题检查”
 
         触发条件：
-        - 当前批次消息数 >= 100，或者
-        - 距离上一次检查的时间 > 3600 秒（1小时）
+        - 当前批次消息数 >= 80，或者
+        - 距离上一次检查的时间 > 10800 秒（3小时）且消息数 >= 20
         """
         if not self.current_batch or not self.current_batch.messages:
             return
+
+        if current_time < self._topic_retry_cooldown_until:
+            logger.debug(
+                f"{self.log_prefix} 话题检查处于冷却期，剩余 {self._topic_retry_cooldown_until - current_time:.1f}秒"
+            )
+            return False
 
         messages = self.current_batch.messages
         message_count = len(messages)
@@ -582,25 +643,30 @@ class ChatHistorySummarizer:
         # 检查“话题检查”触发条件
         should_check = False
 
-        # 条件1: 消息数量 >= 100，触发一次检查
-        if message_count >= 80:
-            should_check = True
-            logger.info(f"{self.log_prefix} 触发检查条件: 消息数量达到 {message_count} 条（阈值: 100条）")
-
-        # 条件2: 距离上一次检查 > 3600 * 3 秒（3小时）且消息数量 >= 20 条，触发一次检查
-        elif time_since_last_check > 3600 * 3 and message_count >= 20:
+        # 条件1: 消息数量达到有效检查批次上限，触发一次检查
+        if message_count >= TOPIC_CHECK_MESSAGE_LIMIT:
             should_check = True
             logger.info(
-                f"{self.log_prefix} 触发检查条件: 距上次检查 {time_str}（阈值: 3小时）且消息数量达到 {message_count} 条（阈值: 20条）"
+                f"{self.log_prefix} 触发检查条件: 消息数量达到 {message_count} 条（阈值: {TOPIC_CHECK_MESSAGE_LIMIT}条）"
+            )
+
+        # 条件2: 距离上一次检查 > 3600 * 3 秒（3小时）且消息数量达到最小阈值，触发一次检查
+        elif time_since_last_check > 3600 * 3 and message_count >= TIME_TRIGGER_MIN_MESSAGES:
+            should_check = True
+            logger.info(
+                f"{self.log_prefix} 触发检查条件: 距上次检查 {time_str}（阈值: 3小时）且消息数量达到 {message_count} 条（阈值: {TIME_TRIGGER_MIN_MESSAGES}条）"
             )
 
         if should_check:
-            consumed = await self._run_topic_check_and_update_cache(messages)
+            messages_to_check = messages[:TOPIC_CHECK_MESSAGE_LIMIT]
+            consumed = await self._run_topic_check_and_update_cache(messages_to_check)
             if consumed:
-                # 本批次只有在分类成功（或明确判定为无 Bot 参与）后才可
-                # 清空；LLM 失败时保留批次和已持久化的游标，以便重试。
-                self.current_batch = None
+                # 只有成功处理的前缀可以被消费；LLM 失败时保留完整批次和游标。
+                self._consume_pending_prefix(messages_to_check)
                 self.last_topic_check_time = current_time
+                self._topic_retry_cooldown_until = 0.0
+            else:
+                self._topic_retry_cooldown_until = current_time + TOPIC_RETRY_COOLDOWN_SECONDS
             self._persist_topic_cache()
             return consumed
         return False
@@ -658,10 +724,14 @@ class ChatHistorySummarizer:
 
         while attempt < max_retries:
             attempt += 1
-            success, topic_to_indices = await self._analyze_topics_with_llm(
-                numbered_lines=numbered_lines,
-                existing_topics=existing_topics,
-            )
+            try:
+                success, topic_to_indices = await self._analyze_topics_with_llm(
+                    numbered_lines=numbered_lines,
+                    existing_topics=existing_topics,
+                )
+            except Exception as e:
+                success, topic_to_indices = False, {}
+                logger.warning(f"{self.log_prefix} 话题识别第 {attempt} 次尝试抛出异常: {e}")
 
             if success and topic_to_indices:
                 if attempt > 1:

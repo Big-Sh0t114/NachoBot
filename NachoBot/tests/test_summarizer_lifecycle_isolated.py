@@ -360,6 +360,139 @@ class SummarizerLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     ["b", "c"],
                 )
 
+    async def test_restore_trims_backlog_and_persists_eviction_cursor(self) -> None:
+        with isolated_summarizer_module() as module:
+            import json
+            import tempfile
+
+            messages = [self._message(module, f"m{i}", float(i)) for i in range(1, 601)]
+            with tempfile.TemporaryDirectory() as temp_dir:
+                cache_file = Path(temp_dir) / "cache.json"
+                cache_file.write_text(
+                    json.dumps(
+                        {
+                            "chat_id": "chat",
+                            "current_batch": {
+                                "start_time": 1.0,
+                                "end_time": 600.0,
+                                "start_cursor_time": 0.0,
+                                "start_cursor_message_id": "",
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                summarizer = module.ChatHistorySummarizer("chat")
+                summarizer._topic_cache_file = cache_file
+
+                import src.chat.utils.chat_message_builder as builder
+
+                builder.get_raw_msg_after_cursor_with_chat = lambda *_args, **_kwargs: list(messages)
+                summarizer.last_check_time = 600.0
+                summarizer.last_check_message_id = "m600"
+                await summarizer._load_batch_from_disk()
+
+                self.assertIsNotNone(summarizer.current_batch)
+                batch = summarizer.current_batch
+                self.assertEqual(len(batch.messages), 500)
+                self.assertEqual(batch.messages[0].message_id, "m101")
+                self.assertEqual(batch.messages[-1].message_id, "m600")
+                self.assertEqual((batch.start_cursor_time, batch.start_cursor_message_id), (100.0, "m100"))
+                self.assertEqual(batch.start_time, 101.0)
+
+                persisted = json.loads(cache_file.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    persisted["current_batch"],
+                    {
+                        "start_time": 101.0,
+                        "end_time": 600.0,
+                        "start_cursor_time": 100.0,
+                        "start_cursor_message_id": "m100",
+                    },
+                )
+
+    async def test_append_overflow_keeps_newest_messages_and_advances_cursor(self) -> None:
+        with isolated_summarizer_module() as module:
+            import json
+            import tempfile
+
+            existing = [self._message(module, f"m{i}", float(i)) for i in range(1, 501)]
+            appended = [self._message(module, f"m{i}", float(i)) for i in range(501, 551)]
+            summarizer = module.ChatHistorySummarizer("chat")
+            summarizer.current_batch = module.MessageBatch(existing, 1.0, 500.0)
+            summarizer.last_check_time = 500.0
+            summarizer.last_check_message_id = "m500"
+            summarizer._check_and_run_topic_check = AsyncMock(return_value=False)
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                cache_file = Path(temp_dir) / "cache.json"
+                summarizer._topic_cache_file = cache_file
+
+                import src.chat.utils.chat_message_builder as builder
+
+                builder.get_raw_msg_after_cursor_with_chat = lambda *_args, **_kwargs: list(appended)
+                await summarizer.process(current_time=550.0)
+
+                batch = summarizer.current_batch
+                self.assertIsNotNone(batch)
+                self.assertEqual(len(batch.messages), 500)
+                self.assertEqual(batch.messages[0].message_id, "m51")
+                self.assertEqual(batch.messages[-1].message_id, "m550")
+                self.assertEqual((batch.start_cursor_time, batch.start_cursor_message_id), (50.0, "m50"))
+                self.assertEqual(batch.start_time, 51.0)
+                persisted = json.loads(cache_file.read_text(encoding="utf-8"))
+                self.assertEqual(persisted["current_batch"]["start_cursor_message_id"], "m50")
+
+    async def test_success_consumes_only_bounded_prefix_and_advances_batch_cursor(self) -> None:
+        with isolated_summarizer_module() as module:
+            import json
+            import tempfile
+
+            summarizer = self._make_topic_summarizer(module)
+            messages = [self._message(module, f"m{i}", float(i)) for i in range(1, 101)]
+            summarizer.current_batch = module.MessageBatch(messages, 1.0, 100.0)
+            summarizer._topic_cache_file = Path(tempfile.mkdtemp()) / "cache.json"
+            summarizer._analyze_topics_with_llm = AsyncMock(return_value=(True, {"topic": [1]}))
+
+            consumed = await summarizer._check_and_run_topic_check(1000.0)
+
+            self.assertTrue(consumed)
+            self.assertIsNotNone(summarizer.current_batch)
+            batch = summarizer.current_batch
+            self.assertEqual(len(batch.messages), 20)
+            self.assertEqual(batch.messages[0].message_id, "m81")
+            self.assertEqual(batch.messages[-1].message_id, "m100")
+            self.assertEqual((batch.start_cursor_time, batch.start_cursor_message_id), (80.0, "m80"))
+            self.assertEqual(batch.start_time, 81.0)
+            persisted = json.loads(summarizer._topic_cache_file.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["current_batch"]["start_cursor_message_id"], "m80")
+            self.assertEqual(summarizer._analyze_topics_with_llm.await_count, 1)
+
+    async def test_analysis_failure_retains_batch_and_cooldown_suppresses_retry(self) -> None:
+        with isolated_summarizer_module() as module:
+            import tempfile
+
+            summarizer = self._make_topic_summarizer(module)
+            messages = [self._message(module, f"m{i}", float(i)) for i in range(1, 81)]
+            summarizer.current_batch = module.MessageBatch(messages, 1.0, 80.0)
+            summarizer._topic_cache_file = Path(tempfile.mkdtemp()) / "cache.json"
+            summarizer._analyze_topics_with_llm = AsyncMock(return_value=(False, {}))
+
+            first_result = await summarizer._check_and_run_topic_check(1000.0)
+            self.assertFalse(first_result)
+            self.assertIsNotNone(summarizer.current_batch)
+            self.assertEqual(summarizer.current_batch.messages, messages)
+            self.assertEqual(
+                (summarizer.current_batch.start_cursor_time, summarizer.current_batch.start_cursor_message_id),
+                (0.0, ""),
+            )
+            self.assertEqual(summarizer._topic_retry_cooldown_until, 1300.0)
+            self.assertEqual(summarizer._analyze_topics_with_llm.await_count, 3)
+
+            second_result = await summarizer._check_and_run_topic_check(1001.0)
+            self.assertFalse(second_result)
+            self.assertEqual(summarizer._analyze_topics_with_llm.await_count, 3)
+
     async def test_three_failed_analysis_attempts_retain_batch_cursor_and_disk_checkpoint(self) -> None:
         with isolated_summarizer_module() as module:
             import tempfile
