@@ -545,6 +545,23 @@ const SetupModule = (() => {
         });
         if (!allValid) return;
 
+        // Check for any empty API keys
+        let hasEmptyKey = false;
+        document.querySelectorAll('.provider-row').forEach(row => {
+            const keyInput = row.querySelector('.setup-provider-key');
+            if (keyInput && !keyInput.readOnly && !keyInput.value.trim()) {
+                hasEmptyKey = true;
+                keyInput.classList.add('input-error');
+            } else if (keyInput) {
+                keyInput.classList.remove('input-error');
+            }
+        });
+
+        if (hasEmptyKey) {
+            alert('发现未填写的 API Key。请填写所有的 API Key，或者点击右侧 "✕" 按钮删除不需要的服务商配置。');
+            return;
+        }
+
         // Check SiliconFlow API key for embedding
         let sfKeyValid = false;
         document.querySelectorAll('.provider-row').forEach(row => {
