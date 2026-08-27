@@ -1,5 +1,6 @@
 8/27
     添加部署时对git的校验
+    优化tts runtime对现有python环境的复用
 8/26
     修复A_Memorix内存溢出问题
     增强WebUI对模型配置的校验
