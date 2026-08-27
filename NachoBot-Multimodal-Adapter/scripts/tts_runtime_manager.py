@@ -83,6 +83,46 @@ def ensure_venv(runtime_dir: Path, python_requirement: str = ">=3.11,<3.13") -> 
         except Exception:
             return ""
 
+    def remove_tree(path: Path) -> None:
+        """Remove a venv robustly on Windows without hiding real failures."""
+        if not path.exists():
+            return
+
+        def onerror(func, failed_path, exc_info):
+            exc = exc_info[1]
+
+            # A child can disappear between scandir() and the recursive delete,
+            # especially in very deep package trees. That already satisfies the
+            # requested deletion and must not abort the whole venv rebuild.
+            if isinstance(exc, FileNotFoundError):
+                return
+
+            # Windows packages can contain read-only files/directories.
+            if isinstance(exc, PermissionError):
+                try:
+                    os.chmod(failed_path, 0o700)
+                    func(failed_path)
+                    return
+                except FileNotFoundError:
+                    return
+                except OSError:
+                    pass
+
+            raise exc
+
+        # A disappearing child may leave another branch behind on some Python
+        # 3.11/Windows combinations, so retry the remaining tree a few times.
+        for _ in range(3):
+            try:
+                shutil.rmtree(path, onerror=onerror)
+            except FileNotFoundError:
+                pass
+
+            if not path.exists():
+                return
+
+        raise RuntimeError(f"无法完整删除旧 TTS 虚拟环境: {path}")
+
     if python.is_file():
         actual_version = probe_version(python)
         if actual_version in supported_versions:
@@ -97,7 +137,7 @@ def ensure_venv(runtime_dir: Path, python_requirement: str = ">=3.11,<3.13") -> 
     # Any newly-created venv starts without TTS dependencies. Remove both a
     # stale/corrupt environment and its ready markers before recreating it.
     if venv_dir.exists():
-        shutil.rmtree(venv_dir)
+        remove_tree(venv_dir)
     for marker in runtime_dir.glob(".deps-*.ready"):
         try:
             marker.unlink()
