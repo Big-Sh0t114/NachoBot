@@ -33,7 +33,6 @@
 .sidebar-search-icon,
 .sidebar-collapse-button,
 .sidebar-new-chat,
-.chat-mobile-history-button,
 .chat-send-button {
     display: inline-flex;
     align-items: center;
@@ -44,7 +43,6 @@
 .sidebar-search-icon .ui-icon,
 .sidebar-collapse-button .ui-icon,
 .sidebar-new-chat .ui-icon,
-.chat-mobile-history-button .ui-icon,
 .chat-send-button .ui-icon {
     margin: 0;
 }
@@ -62,8 +60,7 @@
 }
 
 .sidebar-search-icon .ui-icon,
-.sidebar-collapse-button .ui-icon,
-.chat-mobile-history-button .ui-icon {
+.sidebar-collapse-button .ui-icon {
     width: 1rem;
     height: 1rem;
 }

@@ -37,11 +37,6 @@
         transform: translateX(0);
     }
 
-    .chat-mobile-history-button {
-        display: grid;
-        place-items: center;
-    }
-
     .chat-header {
         min-height: 62px;
         padding: 10px 14px;
