@@ -83,46 +83,7 @@ def ensure_venv(runtime_dir: Path, python_requirement: str = ">=3.11,<3.13") -> 
         except Exception:
             return ""
 
-    def remove_tree(path: Path) -> None:
-        """Remove a venv robustly on Windows without hiding real failures."""
-        if not path.exists():
-            return
-
-        def onerror(func, failed_path, exc_info):
-            exc = exc_info[1]
-
-            # A child can disappear between scandir() and the recursive delete,
-            # especially in very deep package trees. That already satisfies the
-            # requested deletion and must not abort the whole venv rebuild.
-            if isinstance(exc, FileNotFoundError):
-                return
-
-            # Windows packages can contain read-only files/directories.
-            if isinstance(exc, PermissionError):
-                try:
-                    os.chmod(failed_path, 0o700)
-                    func(failed_path)
-                    return
-                except FileNotFoundError:
-                    return
-                except OSError:
-                    pass
-
-            raise exc
-
-        # A disappearing child may leave another branch behind on some Python
-        # 3.11/Windows combinations, so retry the remaining tree a few times.
-        for _ in range(3):
-            try:
-                shutil.rmtree(path, onerror=onerror)
-            except FileNotFoundError:
-                pass
-
-            if not path.exists():
-                return
-
-        raise RuntimeError(f"无法完整删除旧 TTS 虚拟环境: {path}")
-
+    rebuild = False
     if python.is_file():
         actual_version = probe_version(python)
         if actual_version in supported_versions:
@@ -133,20 +94,22 @@ def ensure_venv(runtime_dir: Path, python_requirement: str = ">=3.11,<3.13") -> 
             "托管虚拟环境 Python 版本不兼容: "
             f"当前={actual_version or 'unknown'}, 需要=3.11/3.12，正在重建"
         )
+        rebuild = True
+    elif venv_dir.exists():
+        log(f"检测到不完整或损坏的 TTS 虚拟环境，正在重建: {venv_dir}")
+        rebuild = True
 
-    # Any newly-created venv starts without TTS dependencies. Remove both a
-    # stale/corrupt environment and its ready markers before recreating it.
-    if venv_dir.exists():
-        remove_tree(venv_dir)
-    for marker in runtime_dir.glob(".deps-*.ready"):
-        try:
-            marker.unlink()
-        except FileNotFoundError:
-            pass
+    if rebuild:
+        for marker in runtime_dir.glob(".deps-*.ready"):
+            try:
+                marker.unlink()
+            except FileNotFoundError:
+                pass
 
     runtime_dir.mkdir(parents=True, exist_ok=True)
     log("创建 TTS 托管虚拟环境：优先复用本机 Python 3.11/3.12")
-    run([
+
+    cmd = [
         require_uv(),
         "venv",
         str(venv_dir),
@@ -154,7 +117,15 @@ def ensure_venv(runtime_dir: Path, python_requirement: str = ">=3.11,<3.13") -> 
         python_requirement,
         "--python-preference",
         "system",
-    ])
+    ]
+    if rebuild:
+        # The target is always NachoBot's own managed .runtime/tts/*/.venv.
+        # --force is required when a previous interrupted cleanup left a
+        # partial directory that uv no longer recognizes as a virtualenv.
+        cmd[3:3] = ["--clear", "--force"]
+
+    run(cmd)
+
     if not python.is_file():
         raise FileNotFoundError(f"虚拟环境 Python 不存在: {python}")
 
