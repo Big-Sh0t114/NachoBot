@@ -3,6 +3,7 @@
 import os
 import socket
 import subprocess
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -50,6 +51,7 @@ class EnvironmentChecker:
         """Run all environment checks and return results."""
         return {
             "python": EnvironmentChecker.check_python(),
+            "git": EnvironmentChecker.check_git(),
             "node": EnvironmentChecker.check_node(),
             "docker": EnvironmentChecker.check_docker(),
             "gpu": EnvironmentChecker.check_gpu(),
@@ -120,6 +122,51 @@ class EnvironmentChecker:
         except Exception:
             result["status"] = "warning"
             result["message"] = f"{result['python']} (uv 检测失败)"
+
+        return result
+
+    @staticmethod
+    def check_git() -> dict[str, Any]:
+        """Check Git availability and whether Windows can bootstrap it via winget."""
+        winget_available = shutil.which("winget") is not None if os.name == "nt" else False
+        result = {
+            "status": "error",
+            "git": None,
+            "winget_available": winget_available,
+            "download_url": "",
+            "download_label": "下载 Git",
+            "message": "",
+        }
+
+        try:
+            out = subprocess.run(
+                ["git", "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if out.returncode == 0:
+                version_str = out.stdout.strip() or out.stderr.strip()
+                result["git"] = version_str
+                result["status"] = "ok"
+                result["message"] = version_str
+                return result
+            result["message"] = "Git 不可用"
+        except FileNotFoundError:
+            result["message"] = "Git 未安装或不在 PATH 中"
+        except Exception as e:
+            result["message"] = f"检测 Git 时出错: {e}"
+            return result
+
+        if os.name == "nt":
+            if winget_available:
+                result["message"] += "（检测到 winget，部署时可自动安装）"
+            else:
+                result["message"] += "（winget 不可用，请手动下载安装 Git）"
+                result["download_url"] = "https://git-scm.com/download/win"
+        else:
+            result["message"] += "（当前平台不支持自动安装，请手动安装 Git）"
+            result["download_url"] = "https://git-scm.com/downloads"
 
         return result
 

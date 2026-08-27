@@ -14,6 +14,40 @@ if not defined NACHOBOT_HF_ENDPOINT (
 )
 echo [INFO] NachoBot Hugging Face endpoint: %NACHOBOT_HF_ENDPOINT%
 
+echo ===== Check Git =====
+where git >nul 2>&1
+if errorlevel 1 (
+  echo [INFO] Git not detected. Checking winget...
+  winget --version >nul 2>&1
+  if errorlevel 1 (
+    echo [ERROR] winget is not available. Git must be installed manually.
+    echo [INFO] Git download: https://git-scm.com/download/win
+    set "FINAL_RC=1"
+    goto :EXIT
+  )
+
+  echo [INFO] Installing Git with winget...
+  winget install --id Git.Git -e --source winget --accept-package-agreements --accept-source-agreements --silent
+  if errorlevel 1 (
+    echo [ERROR] Git installation via winget failed.
+    echo [INFO] Git download: https://git-scm.com/download/win
+    set "FINAL_RC=1"
+    goto :EXIT
+  )
+
+  REM winget updates the persistent PATH, but this launcher must refresh it for the current process.
+  set "PATH=%ProgramFiles%\Git\cmd;%LOCALAPPDATA%\Programs\Git\cmd;%PATH%"
+  where git >nul 2>&1
+  if errorlevel 1 (
+    echo [ERROR] Git was installed, but git.exe is not available in the current launcher process.
+    echo [INFO] Git download: https://git-scm.com/download/win
+    echo [INFO] Restart this launcher and try again.
+    set "FINAL_RC=1"
+    goto :EXIT
+  )
+)
+for /f "delims=" %%G in ('git --version 2^>nul') do echo [INFO] %%G
+
 echo ===== Prepare Shared FFmpeg =====
 call :ENSURE_FFMPEG
 if errorlevel 1 (

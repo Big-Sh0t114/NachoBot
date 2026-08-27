@@ -21,7 +21,7 @@ retry_interval = 5
 
 [[api_providers]]   # 为本地模型接入预留的预设
 name = "LocalModelLarge"
-base_url = "http://127.0.0.1:11433/v1"
+base_url = "http://127.0.0.1:11434/v1"
 api_key = "fuck"
 client_type = "openai"
 max_retry = 2

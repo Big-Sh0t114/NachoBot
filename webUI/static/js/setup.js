@@ -129,6 +129,9 @@ const SetupModule = (() => {
         const list = document.getElementById('setup-check-list');
         list.innerHTML = '';
         list.appendChild(makeCheckItem(data.python));
+        if (data.git) {
+            list.appendChild(makeCheckItem(data.git));
+        }
         list.appendChild(makeCheckItem(data.node));
         list.appendChild(makeCheckItem(data.docker));
         if (data.gpu) {
@@ -180,6 +183,17 @@ const SetupModule = (() => {
             <span class="check-icon">${iconMap[item.status] || '❓'}</span>
             <span class="check-message">${escapeHtml(item.message)}</span>
         `;
+
+        if (item.download_url) {
+            const download = document.createElement('a');
+            download.className = 'btn-download';
+            download.href = item.download_url;
+            download.target = '_blank';
+            download.rel = 'noopener noreferrer';
+            download.textContent = item.download_label || '下载';
+            el.appendChild(download);
+        }
+
         return el;
     }
 
@@ -716,6 +730,31 @@ const SetupModule = (() => {
 
         const wizardData = collectWizardData();
 
+        // Preflight: Git is required for automated dependency deployment.
+        addProgressItem(progressDiv, 'preflight-git', '🔧 检查 Git', 'running');
+        try {
+            const gitBootstrap = await apiPost('/api/setup/bootstrap/git', {});
+            if (!gitBootstrap || gitBootstrap.status !== 'ok') {
+                const detail = gitBootstrap?.message || 'Git 自动安装或验证失败';
+                updateProgressItem('preflight-git', 'error', `❌ Git 准备失败: ${detail}`);
+                addLogLine(logDiv, `[Setup] ERROR: ${detail}\n`);
+                deploying = false;
+                document.getElementById('setup-prev-5').disabled = false;
+                document.getElementById('setup-finish').disabled = false;
+                return;
+            }
+            updateProgressItem('preflight-git', 'done', `✅ ${gitBootstrap.message || 'Git 已就绪'}`);
+            addLogLine(logDiv, `[Setup] ${gitBootstrap.message || 'Git 已就绪'}\n`);
+        } catch (e) {
+            const detail = e?.message || String(e);
+            updateProgressItem('preflight-git', 'error', `❌ Git 准备失败: ${detail}`);
+            addLogLine(logDiv, `[Setup] ERROR: Git bootstrap 请求失败: ${detail}\n`);
+            deploying = false;
+            document.getElementById('setup-prev-5').disabled = false;
+            document.getElementById('setup-finish').disabled = false;
+            return;
+        }
+
         // Phase 1: Generate configs
         addProgressItem(progressDiv, 'config-gen', '📄 生成配置文件', 'running');
         addLogLine(logDiv, '[Setup] 正在生成配置文件...\n');
@@ -801,6 +840,11 @@ const SetupModule = (() => {
         } catch (e) {
             updateProgressItem('dep-install', 'error', `❌ 依赖安装失败: ${e.message}`);
             addLogLine(logDiv, `[Setup] ERROR: ${e.message}\n`);
+            addLogLine(logDiv, '[Setup] 部署已中止，请修复上述错误后重试。\n');
+            deploying = false;
+            document.getElementById('setup-prev-5').disabled = false;
+            document.getElementById('setup-finish').disabled = false;
+            return;
         }
 
         // Done

@@ -12,6 +12,7 @@ if str(WEBUI_DIR) not in sys.path:
 
 import process_manager as process_module
 import setup_checks as setup_checks_module
+import setup_deployment as setup_deployment_module
 from process_manager import ProcessManager, ServiceDef, ServiceStatus
 
 
@@ -416,6 +417,130 @@ class ProcessManagerTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(configured, probed_ports)
         for default in (8000, 8095, 8070, 9880, 9874, 5140):
             self.assertNotIn(default, probed_ports)
+
+    async def test_setup_git_check_reports_available_git(self) -> None:
+        class GitVersionResult:
+            returncode = 0
+            stdout = "git version 2.45.2\n"
+            stderr = ""
+
+        with patch.object(
+            setup_checks_module.subprocess,
+            "run",
+            return_value=GitVersionResult(),
+        ) as run:
+            result = setup_checks_module.EnvironmentChecker.check_git()
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["git"], "git version 2.45.2")
+        self.assertEqual(result["message"], "git version 2.45.2")
+        run.assert_called_once_with(
+            ["git", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+    async def test_setup_git_check_reports_missing_git(self) -> None:
+        with (
+            patch.object(
+                setup_checks_module.subprocess,
+                "run",
+                side_effect=FileNotFoundError,
+            ),
+            patch.object(setup_checks_module.shutil, "which", return_value=None),
+        ):
+            result = setup_checks_module.EnvironmentChecker.check_git()
+
+        self.assertEqual(result["status"], "error")
+        self.assertIsNone(result["git"])
+        self.assertFalse(result["winget_available"])
+        self.assertEqual(
+            result["message"],
+            "Git 未安装或不在 PATH 中（winget 不可用，请手动下载安装 Git）",
+        )
+        self.assertEqual(result["download_url"], "https://git-scm.com/download/win")
+        self.assertEqual(result["download_label"], "下载 Git")
+
+    async def test_setup_git_bootstrap_skips_install_when_git_exists(self) -> None:
+        with (
+            patch.object(
+                setup_deployment_module.EnvironmentChecker,
+                "check_git",
+                return_value={
+                    "status": "ok",
+                    "git": "git version 2.45.2",
+                    "message": "git version 2.45.2",
+                },
+            ),
+            patch.object(setup_deployment_module.shutil, "which") as which,
+        ):
+            result = await setup_deployment_module.DependencyInstaller.ensure_git()
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["message"], "git version 2.45.2")
+        which.assert_not_called()
+
+    async def test_setup_git_bootstrap_installs_missing_git_with_winget(self) -> None:
+        class FakeStdout:
+            def __init__(self):
+                self.lines = [b"Installing Git...\n", b""]
+
+            async def readline(self):
+                return self.lines.pop(0)
+
+        class FakeInstallerProcess:
+            def __init__(self):
+                self.stdout = FakeStdout()
+                self.returncode = 0
+
+            async def wait(self):
+                return self.returncode
+
+        proc = FakeInstallerProcess()
+        callback = AsyncMock()
+        git_checks = [
+            {
+                "status": "error",
+                "git": None,
+                "message": "Git 未安装或不在 PATH 中",
+            },
+            {
+                "status": "ok",
+                "git": "git version 2.45.2.windows.1",
+                "message": "git version 2.45.2.windows.1",
+            },
+        ]
+
+        with (
+            patch.object(
+                setup_deployment_module.EnvironmentChecker,
+                "check_git",
+                side_effect=git_checks,
+            ),
+            patch.object(
+                setup_deployment_module.shutil,
+                "which",
+                return_value=r"C:\\Windows\\System32\\winget.exe",
+            ),
+            patch.object(
+                setup_deployment_module.asyncio,
+                "create_subprocess_exec",
+                new=AsyncMock(return_value=proc),
+            ) as create_proc,
+        ):
+            result = await setup_deployment_module.DependencyInstaller.ensure_git(callback)
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["message"], "git version 2.45.2.windows.1")
+        create_proc.assert_awaited_once()
+        args = create_proc.await_args.args
+        self.assertEqual(args[1:6], ("install", "--id", "Git.Git", "-e", "--source"))
+        self.assertEqual(args[6], "winget")
+        self.assertIn("--accept-package-agreements", args)
+        self.assertIn("--accept-source-agreements", args)
+        self.assertIn("--silent", args)
+        self.assertGreaterEqual(callback.await_count, 2)
 
     async def test_failed_stop_is_retryable_and_visible(self) -> None:
         state = process_module.ServiceState(
