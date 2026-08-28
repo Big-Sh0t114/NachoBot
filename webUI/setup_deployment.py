@@ -951,6 +951,107 @@ class DependencyInstaller:
     }
 
     @staticmethod
+    async def ensure_git(
+        callback: Callable[[str], Any] | None = None,
+    ) -> dict[str, Any]:
+        """Ensure Git is available, installing it automatically on Windows when needed."""
+        current = EnvironmentChecker.check_git()
+        if current.get("status") == "ok":
+            return {
+                "status": "ok",
+                "message": current.get("message") or "Git 已安装",
+            }
+
+        if os.name != "nt":
+            return {
+                "status": "error",
+                "message": "Git 未安装；当前平台暂不支持自动安装 Git，请先手动安装",
+            }
+
+        winget = shutil.which("winget")
+        if not winget:
+            return {
+                "status": "error",
+                "message": "Git 未安装，且未找到 winget，无法自动安装 Git",
+            }
+
+        if callback:
+            await callback("[Setup] Git 未找到，正在通过 winget 自动安装 Git...\n")
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                winget,
+                "install",
+                "--id",
+                "Git.Git",
+                "-e",
+                "--source",
+                "winget",
+                "--accept-package-agreements",
+                "--accept-source-agreements",
+                "--silent",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=str(ROOT_DIR),
+            )
+
+            import locale
+
+            fallback_enc = locale.getpreferredencoding(False) or "gbk"
+            if proc.stdout is not None:
+                while True:
+                    line = await proc.stdout.readline()
+                    if not line:
+                        break
+                    try:
+                        text = line.decode("utf-8")
+                    except UnicodeDecodeError:
+                        text = line.decode(fallback_enc, errors="replace")
+                    if callback:
+                        await callback(text)
+
+            await proc.wait()
+            if proc.returncode != 0:
+                return {
+                    "status": "error",
+                    "message": f"Git 自动安装失败，winget 退出码: {proc.returncode}",
+                }
+
+            # The current WebUI process does not automatically inherit PATH changes
+            # made by an installer. Add common Git command directories immediately.
+            candidate_dirs = [
+                Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "cmd",
+                Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Git" / "cmd",
+                Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Git" / "cmd",
+            ]
+            path_entries = os.environ.get("PATH", "").split(os.pathsep)
+            normalized_entries = {os.path.normcase(os.path.normpath(p)) for p in path_entries if p}
+            for git_dir in candidate_dirs:
+                if not (git_dir / "git.exe").exists():
+                    continue
+                normalized = os.path.normcase(os.path.normpath(str(git_dir)))
+                if normalized not in normalized_entries:
+                    path_entries.insert(0, str(git_dir))
+                    normalized_entries.add(normalized)
+            os.environ["PATH"] = os.pathsep.join(path_entries)
+
+            verified = EnvironmentChecker.check_git()
+            if verified.get("status") != "ok":
+                return {
+                    "status": "error",
+                    "message": "Git 安装完成，但当前 WebUI 进程仍无法执行 git，请重启 WebUI 后重试",
+                }
+
+            if callback:
+                await callback(f"[Setup] Git 已就绪: {verified.get('message', 'Git')}\n")
+            return {
+                "status": "ok",
+                "message": verified.get("message") or "Git 安装完成",
+            }
+        except Exception as e:
+            return {"status": "error", "message": f"Git 自动安装出错: {e}"}
+
+    @staticmethod
     def get_install_tasks(components: list[str]) -> list[dict[str, str]]:
         """Return the list of install tasks based on selected components."""
         tasks = []

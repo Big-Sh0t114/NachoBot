@@ -40,12 +40,14 @@ WebUI 生成配置前会备份已有文件；如果现有配置损坏、账号�
 - `bot_config_template.toml` → `bot_config.toml`
 - `model_config_template.toml` → `model_config.toml`
 - `topics_config_template.toml` → `topics_config.toml`
+- `mcp_config_template.toml` → `mcp_config.toml`
 
 至少检查：
 
 - `bot_config.toml`：账号、人设、权限、记忆与群聊/私聊策略。
 - `model_config.toml`：API provider、密钥、模型映射与任务模型组。
 - `topics_config.toml`：情景和主题注入。
+- `mcp_config.toml`：MCP 服务器、权限、连接参数与工具调用预算。
 
 启动 Core：
 

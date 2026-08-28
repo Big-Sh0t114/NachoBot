@@ -906,6 +906,17 @@ async def setup_verify_path(body: VerifyPathRequest):
     return result
 
 
+@app.post("/api/setup/bootstrap/git")
+async def setup_bootstrap_git():
+    """Ensure Git is available before automated deployment."""
+    result = await DependencyInstaller.ensure_git()
+    if result.get("status") != "ok":
+        logger.warning("[Setup] Git bootstrap failed: %s", result.get("message"))
+    else:
+        logger.info("[Setup] Git bootstrap ready: %s", result.get("message"))
+    return result
+
+
 @app.get("/api/setup/deps/tasks")
 async def setup_dep_tasks(components: str = ""):
     """Return install tasks for selected components."""
@@ -948,6 +959,14 @@ async def ws_setup_install(ws: WebSocket):
         msg = json.loads(raw)
         tasks = msg.get("tasks", [])
 
+        git_check = EnvironmentChecker.check_git()
+        if git_check.get("status") != "ok":
+            await ws.send_text(json.dumps({
+                "type": "error",
+                "message": git_check.get("message") or "Git 不可用，无法执行自动部署",
+            }))
+            return
+
         for task in tasks:
             await ws.send_text(json.dumps({
                 "type": "task_start",
@@ -973,6 +992,13 @@ async def ws_setup_install(ws: WebSocket):
                 "status": result["status"],
                 "message": result["message"],
             }))
+
+            if result.get("status") != "ok":
+                await ws.send_text(json.dumps({
+                    "type": "error",
+                    "message": result.get("message") or f"依赖安装失败: {task['name']}",
+                }))
+                return
 
         await ws.send_text(json.dumps({"type": "all_done"}))
 

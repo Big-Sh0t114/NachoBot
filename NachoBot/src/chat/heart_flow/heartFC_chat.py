@@ -568,11 +568,7 @@ class HeartFChatting:
     ) -> ActionPlannerInfo | None:
         """Turn a committed Focus switch into a direct Replyer handoff."""
 
-        if (
-            focus_turn is None
-            or not (focus_turn.wake_reason & WakeReason.SWITCH_TARGET)
-            or not recent_messages
-        ):
+        if focus_turn is None or not (focus_turn.wake_reason & WakeReason.SWITCH_TARGET) or not recent_messages:
             return None
         target_message = recent_messages[-1]
         return ActionPlannerInfo(
@@ -672,11 +668,7 @@ class HeartFChatting:
             if not decision.allowed:
                 continue
 
-            target_kind = (
-                "Planner bypass 会话"
-                if HeartFChatting._focus_member_bypasses_planner(target)
-                else "私聊"
-            )
+            target_kind = "Planner bypass 会话" if HeartFChatting._focus_member_bypasses_planner(target) else "私聊"
             handoff = {}
             if not safe_return:
                 handoff = {
@@ -691,10 +683,7 @@ class HeartFChatting:
                 }
             return ActionPlannerInfo(
                 action_type=SWITCH_CHAT_ACTION,
-                reasoning=(
-                    "Focus priority preemption: "
-                    "planner-bypass > private > normal-group"
-                ),
+                reasoning=("Focus priority preemption: planner-bypass > private > normal-group"),
                 action_data={"event_id": event.event_id, "handoff": handoff},
                 action_message=None,
                 available_actions=available_actions,
@@ -726,10 +715,7 @@ class HeartFChatting:
                 continue
 
             explicit_signal = bool(event.is_mentioned or event.is_at)
-            bypass_boundary = (
-                source_bypasses_planner
-                or HeartFChatting._focus_member_bypasses_planner(target)
-            )
+            bypass_boundary = source_bypasses_planner or HeartFChatting._focus_member_bypasses_planner(target)
             if not (explicit_signal or bypass_boundary):
                 continue
 
@@ -929,6 +915,7 @@ class HeartFChatting:
 
             cycle_timers, thinking_id = self.start_cycle()
             logger.info(f"{self.log_prefix} 开始第{self._cycle_counter}次思考")
+            pre_planner_started_at = time.perf_counter()
 
             # 仅在适配器声明支持通知动作时处理。
             capabilities = runtime_capabilities_from_stream(self.chat_stream)
@@ -980,8 +967,9 @@ class HeartFChatting:
                 # 第一步：动作检查
                 available_actions: Dict[str, ActionInfo] = {}
                 try:
-                    await self.action_modifier.modify_actions()
-                    available_actions = self.action_manager.get_using_actions()
+                    with Timer("动作检查", cycle_timers):
+                        await self.action_modifier.modify_actions()
+                        available_actions = self.action_manager.get_using_actions()
                 except Exception as e:
                     logger.error(f"{self.log_prefix} 动作修改失败: {e}")
 
@@ -1027,7 +1015,6 @@ class HeartFChatting:
                     available_actions,
                 )
 
-
                 logger.debug(
                     f"{self.log_prefix} bypass_planner={bypass_planner}, messages={len(message_list_before_now)}"
                 )
@@ -1053,9 +1040,7 @@ class HeartFChatting:
                     )
                     if switch_result.success:
                         return True
-                    logger.warning(
-                        f"{self.log_prefix} [Focus] forced priority switch failed: {switch_result.reason}"
-                    )
+                    logger.warning(f"{self.log_prefix} [Focus] forced priority switch failed: {switch_result.reason}")
                     return False
 
                 # --- 中期记忆摘要生成已移至独立后台循环，此处无需处理 ---
@@ -1065,11 +1050,12 @@ class HeartFChatting:
                     try:
                         from src.memory_system.heuristic_memory_injector import inject_memory_context
 
-                        chat_content_block = await inject_memory_context(
-                            chat_id=self.stream_id,
-                            chat_content_block=chat_content_block,
-                            messages=message_list_before_now,
-                        )
+                        with Timer("A_Memorix长期记忆注入", cycle_timers):
+                            chat_content_block = await inject_memory_context(
+                                chat_id=self.stream_id,
+                                chat_content_block=chat_content_block,
+                                messages=message_list_before_now,
+                            )
                     except Exception as e:
                         logger.debug(f"{self.log_prefix} 长期记忆注入跳过: {e}")
 
@@ -1077,12 +1063,13 @@ class HeartFChatting:
                     try:
                         from src.memory_system.person_profile_injector import inject_person_profiles
 
-                        chat_content_block = await inject_person_profiles(
-                            chat_id=self.stream_id,
-                            chat_content_block=chat_content_block,
-                            messages=message_list_before_now,
-                            is_group_chat=is_group_chat,
-                        )
+                        with Timer("人物画像注入", cycle_timers):
+                            chat_content_block = await inject_person_profiles(
+                                chat_id=self.stream_id,
+                                chat_content_block=chat_content_block,
+                                messages=message_list_before_now,
+                                is_group_chat=is_group_chat,
+                            )
                     except Exception as e:
                         logger.debug(f"{self.log_prefix} 人物画像注入跳过: {e}")
 
@@ -1118,33 +1105,35 @@ class HeartFChatting:
                         )
                         if switch_result.success:
                             return True
-                        logger.warning(
-                            f"{self.log_prefix} [Focus Gate] switch failed: {switch_result.reason}"
-                        )
+                        logger.warning(f"{self.log_prefix} [Focus Gate] switch failed: {switch_result.reason}")
                         return False
 
                 async def build_current_planner_prompt():
-                    return await self.action_planner.build_planner_prompt(
-                        is_group_chat=is_group_chat,
-                        chat_target_info=chat_target_info,
-                        current_available_actions=available_actions,
-                        chat_content_block=chat_content_block,
-                        message_id_list=message_id_list,
-                        interest=global_config.personality.interest,
-                    )
+                    with Timer("Planner Prompt构建", cycle_timers):
+                        return await self.action_planner.build_planner_prompt(
+                            is_group_chat=is_group_chat,
+                            chat_target_info=chat_target_info,
+                            current_available_actions=available_actions,
+                            chat_content_block=chat_content_block,
+                            message_id_list=message_id_list,
+                            interest=global_config.personality.interest,
+                        )
 
                 if focus_gate_stayed:
                     with suppress_focus_planner_context():
                         prompt_info = await build_current_planner_prompt()
                 else:
                     prompt_info = await build_current_planner_prompt()
-                continue_flag, modified_message = await events_manager.handle_nacho_events(
-                    EventType.ON_PLAN, None, prompt_info[0], None, self.chat_stream.stream_id
-                )
+                with Timer("ON_PLAN事件", cycle_timers):
+                    continue_flag, modified_message = await events_manager.handle_nacho_events(
+                        EventType.ON_PLAN, None, prompt_info[0], None, self.chat_stream.stream_id
+                    )
                 if not continue_flag:
                     return False
                 if modified_message and modified_message._modify_flags.modify_llm_prompt:
                     prompt_info = (modified_message.llm_prompt, prompt_info[1])
+
+                cycle_timers["Planner前准备"] = time.perf_counter() - pre_planner_started_at
 
                 if bypass_planner:
                     logger.info(f"{self.log_prefix} [HFC] Bypassing Planner for {self.chat_stream.platform}")
@@ -1685,9 +1674,7 @@ class HeartFChatting:
         aggregate_tagged_text = delivery_mode == "aggregate_tagged_text"
         has_tts_tags = False
 
-        logger.debug(
-            f"{self.log_prefix} [HFC-SmartAggregation] aggregate_tagged_text={aggregate_tagged_text}"
-        )
+        logger.debug(f"{self.log_prefix} [HFC-SmartAggregation] aggregate_tagged_text={aggregate_tagged_text}")
 
         if aggregate_tagged_text:
             for i, reply_content in enumerate(reply_set.reply_data):
@@ -1895,10 +1882,7 @@ class HeartFChatting:
                         if bypass_extra:
                             injection_text = f"{bypass_extra}\n{injection_text}" if injection_text else bypass_extra
 
-                        current_enable_tool = (
-                            global_config.tool.enable_tool
-                            and capabilities.tool_mode != "disabled"
-                        )
+                        current_enable_tool = global_config.tool.enable_tool and capabilities.tool_mode != "disabled"
                         configured_typo = (
                             global_config.chinese_typo.enable if hasattr(global_config, "chinese_typo") else True
                         )
@@ -2471,7 +2455,9 @@ class HeartFChatting:
         if target_message and self._user_info_matches_reference(target_name, target_user_info):
             target_user_id = self._as_valid_qq_id(getattr(target_user_info, "user_id", ""))
             if target_user_id:
-                logger.info(f"{self.log_prefix} ban_user 通过目标消息昵称解析用户 '{target_name}' -> QQ号 {target_user_id}")
+                logger.info(
+                    f"{self.log_prefix} ban_user 通过目标消息昵称解析用户 '{target_name}' -> QQ号 {target_user_id}"
+                )
 
         if not target_user_id:
             target_user_id = self._as_valid_qq_id(target_name)

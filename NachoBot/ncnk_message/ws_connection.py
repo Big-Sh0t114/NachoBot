@@ -6,6 +6,7 @@ import asyncio
 import os
 import secrets
 import ssl
+import time
 from typing import Any, Dict, Optional, Set
 from urllib.parse import urlsplit
 
@@ -145,6 +146,7 @@ class WebSocketServer(BaseConnection, ServerConnectionInterface):
 
         self.active_websockets: Set[WebSocket] = set()
         self.platform_websockets: Dict[str, WebSocket] = {}
+        self.platform_runtime: Dict[str, Dict[str, Any]] = {}
 
         self.server: Optional[uvicorn.Server] = None
 
@@ -189,6 +191,12 @@ class WebSocketServer(BaseConnection, ServerConnectionInterface):
                         self._remove_websocket(previous, platform, force=True)
 
                 self.platform_websockets[platform] = websocket
+                previous_runtime = self.platform_runtime.get(platform, {})
+                self.platform_runtime[platform] = {
+                    "running": True,
+                    "started_at": time.monotonic(),
+                    "last_runtime_seconds": previous_runtime.get("last_runtime_seconds", 0.0),
+                }
                 logger.info("平台 %s WebSocket 已连接", safe_platform)
             else:
                 logger.info("收到未标记平台的 WebSocket 连接")
@@ -251,15 +259,48 @@ class WebSocketServer(BaseConnection, ServerConnectionInterface):
         self.active_websockets.discard(websocket)
 
         if platform and self.platform_websockets.get(platform) is websocket:
+            runtime = self.platform_runtime.get(platform)
+            if runtime is not None:
+                started_at = runtime.get("started_at")
+                if isinstance(started_at, (int, float)):
+                    runtime["last_runtime_seconds"] = max(0.0, time.monotonic() - started_at)
+                runtime["running"] = False
+                runtime["started_at"] = None
             del self.platform_websockets[platform]
             logger.debug(f"已移除平台 {platform} 的 WebSocket 映射")
             return
 
         for key, value in list(self.platform_websockets.items()):
             if value is websocket:
+                runtime = self.platform_runtime.get(key)
+                if runtime is not None:
+                    started_at = runtime.get("started_at")
+                    if isinstance(started_at, (int, float)):
+                        runtime["last_runtime_seconds"] = max(0.0, time.monotonic() - started_at)
+                    runtime["running"] = False
+                    runtime["started_at"] = None
                 del self.platform_websockets[key]
                 logger.debug(f"移除了非直接映射的平台 {key} 的 WebSocket")
                 break
+
+    def get_platform_runtime_status(self) -> Dict[str, Dict[str, Any]]:
+        """获取各平台子节点的当前运行状态与最近一次运行时长。"""
+        now = time.monotonic()
+        result: Dict[str, Dict[str, Any]] = {}
+        for platform, runtime in self.platform_runtime.items():
+            running = bool(runtime.get("running", False))
+            started_at = runtime.get("started_at")
+            last_runtime_seconds = float(runtime.get("last_runtime_seconds", 0.0) or 0.0)
+            if running and isinstance(started_at, (int, float)):
+                current_runtime_seconds = max(0.0, now - started_at)
+            else:
+                current_runtime_seconds = 0.0
+            result[platform] = {
+                "running": running,
+                "last_runtime_seconds": last_runtime_seconds,
+                "current_runtime_seconds": current_runtime_seconds,
+            }
+        return result
 
     # ------------------------------------------------------------------
     # 安全与配置信息

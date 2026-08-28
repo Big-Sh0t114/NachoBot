@@ -54,16 +54,114 @@ def run(
     )
 
 
-def ensure_venv(runtime_dir: Path, python_version: str) -> Path:
+def ensure_venv(runtime_dir: Path, python_requirement: str = ">=3.11,<3.13") -> Path:
+    """Ensure a managed TTS venv using Python 3.11 or 3.12.
+
+    Existing compatible venvs are reused. When a rebuild is required, uv is
+    instructed to prefer Python installations already present on the user's
+    system. uv may download a managed interpreter only when no compatible
+    local Python can be found.
+    """
     venv_dir = runtime_dir / ".venv"
     python = runtime_python(venv_dir)
+    supported_versions = {"3.11", "3.12"}
+
+    def probe_version(executable: Path) -> str:
+        try:
+            probe = subprocess.run(
+                [
+                    str(executable),
+                    "-c",
+                    "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            return probe.stdout.strip() if probe.returncode == 0 else ""
+        except Exception:
+            return ""
+
+    rebuild = False
     if python.is_file():
-        return python
+        actual_version = probe_version(python)
+        if actual_version in supported_versions:
+            log(f"复用 TTS 托管虚拟环境 Python {actual_version}: {python}")
+            return python
+
+        log(
+            "托管虚拟环境 Python 版本不兼容: "
+            f"当前={actual_version or 'unknown'}, 需要=3.11/3.12，正在重建"
+        )
+        rebuild = True
+    elif venv_dir.exists():
+        log(f"检测到不完整或损坏的 TTS 虚拟环境，正在重建: {venv_dir}")
+        rebuild = True
+
+    if rebuild:
+        for marker in runtime_dir.glob(".deps-*.ready"):
+            try:
+                marker.unlink()
+            except FileNotFoundError:
+                pass
+
     runtime_dir.mkdir(parents=True, exist_ok=True)
-    run([require_uv(), "venv", str(venv_dir), "--python", python_version])
+    log("创建 TTS 托管虚拟环境：优先复用本机 Python 3.11/3.12")
+
+    cmd = [
+        require_uv(),
+        "venv",
+        str(venv_dir),
+        "--python",
+        python_requirement,
+        "--python-preference",
+        "system",
+    ]
+    if rebuild:
+        # The target is always NachoBot's own managed .runtime/tts/*/.venv.
+        # --force is required when a previous interrupted cleanup left a
+        # partial directory that uv no longer recognizes as a virtualenv.
+        cmd[3:3] = ["--clear", "--force"]
+
+    run(cmd)
+
     if not python.is_file():
         raise FileNotFoundError(f"虚拟环境 Python 不存在: {python}")
+
+    actual_version = probe_version(python)
+    if actual_version not in supported_versions:
+        raise RuntimeError(
+            "虚拟环境 Python 版本错误: "
+            f"需要 3.11 或 3.12，实际 {actual_version or 'unknown'}"
+        )
+
+    log(f"TTS 托管虚拟环境使用 Python {actual_version}: {python}")
     return python
+
+
+def select_gpt_python_version() -> str:
+    """Prefer an existing Python 3.12, then 3.11; otherwise bootstrap 3.12."""
+    uv = require_uv()
+    for version in ("3.12", "3.11"):
+        try:
+            probe = subprocess.run(
+                [uv, "python", "find", version],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+        except Exception:
+            continue
+
+        python_path = probe.stdout.strip()
+        if probe.returncode == 0 and python_path:
+            log(f"GPT-SoVITS 复用已有 Python {version}: {python_path}")
+            return version
+
+    log("未发现可复用的 Python 3.12/3.11，将由 uv 自动准备 Python 3.12")
+    return "3.12"
 
 
 def torch_index_url() -> str:
@@ -231,13 +329,22 @@ def download_hf_file_direct(repo_id: str, filename: str, destination: Path) -> N
 
 def prepare_voxcpm() -> Path:
     runtime_dir = RUNTIME_ROOT / "voxcpm"
-    python = ensure_venv(runtime_dir, "3.11")
-    marker = runtime_dir / ".deps-voxcpm-2.0.3-torch211-triton36.ready"
+    python = ensure_venv(runtime_dir)
+
+    probe = subprocess.run(
+        [str(python), "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    python_version = probe.stdout.strip() if probe.returncode == 0 else "unknown"
+    marker = runtime_dir / f".deps-voxcpm-2.0.3-py{python_version}-torch211-triton36.ready"
     if marker.is_file():
         return python
 
     index_url = torch_index_url()
-    log(f"安装 VoxCPM PyTorch 2.11: {index_url}")
+    log(f"安装 VoxCPM PyTorch 2.11: {index_url} (Python {python_version})")
     run([
         require_uv(), "pip", "install", "--python", str(python),
         "torch>=2.11,<2.12", "torchaudio>=2.11,<2.12", "--index-url", index_url,
@@ -252,8 +359,11 @@ def prepare_voxcpm() -> Path:
         require_uv(), "pip", "install", "--python", str(python),
         "voxcpm==2.0.3",
     ])
-    marker.write_text(f"torch_index={index_url}\n", encoding="utf-8")
-    log(f"VoxCPM 托管运行时就绪: {runtime_dir}")
+    marker.write_text(
+        f"python={python_version}\ntorch_index={index_url}\n",
+        encoding="utf-8",
+    )
+    log(f"VoxCPM 托管运行时就绪: {runtime_dir} (Python {python_version})")
     return python
 
 
@@ -572,8 +682,17 @@ def patch_gpt_runtime_compat(source_dir: Path, runtime_dir: Path) -> Path:
 def prepare_gpt_sovits() -> tuple[Path, Path]:
     runtime_dir = RUNTIME_ROOT / "gpt-sovits"
     source_dir = ensure_gpt_source(runtime_dir)
-    python = ensure_venv(runtime_dir, "3.10")
-    marker = runtime_dir / f".deps-{GPT_REF}-v2.ready"
+    python = ensure_venv(runtime_dir)
+
+    probe = subprocess.run(
+        [str(python), "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    python_version = probe.stdout.strip() if probe.returncode == 0 else "unknown"
+    marker = runtime_dir / f".deps-{GPT_REF}-py{python_version}-v2.ready"
     if marker.is_file():
         patch_gpt_runtime_compat(source_dir, runtime_dir)
         ensure_gpt_assets(python, source_dir, runtime_dir)
@@ -601,11 +720,11 @@ def prepare_gpt_sovits() -> tuple[Path, Path]:
     # requirements 安装后 g2p_en 才存在于托管 venv，因此再次应用源码兼容补丁。
     patch_gpt_runtime_compat(source_dir, runtime_dir)
     marker.write_text(
-        f"ref={GPT_REF}\ntorch_index={index_url}\n",
+        f"ref={GPT_REF}\npython={python_version}\ntorch_index={index_url}\n",
         encoding="utf-8",
     )
     ensure_gpt_assets(python, source_dir, runtime_dir)
-    log(f"GPT-SoVITS 托管运行时就绪: {runtime_dir}")
+    log(f"GPT-SoVITS 托管运行时就绪: {runtime_dir} (Python {python_version})")
     return python, source_dir
 
 

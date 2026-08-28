@@ -80,7 +80,7 @@
     const XLINK_NS = 'http://www.w3.org/1999/xlink';
     const ELIGIBLE_SELECTOR = [
         '.nav-icon', '.sidebar-search-icon', '.sidebar-collapse-button', '.sidebar-new-chat',
-        '.chat-mobile-history-button', '.chat-send-button', '.placeholder-icon', '.hint-icon',
+        '.chat-send-button', '.placeholder-icon', '.hint-icon',
         '.component-icon', '.path-check-icon', '.path-check-status', '.config-status-icon',
         '.check-icon', '.port-status-icon', '.deploy-item', '.deploy-item-icon', '.memory-stat-card .stat-icon',
         '.memory-empty', '.memory-loading', '.memory-error', '.memory-maintain-section',

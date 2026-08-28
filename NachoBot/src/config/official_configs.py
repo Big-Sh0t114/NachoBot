@@ -444,20 +444,69 @@ class ToolConfig(ConfigBase):
     web_search_timeout_seconds: int = 20
     """单个搜索引擎页面的加载超时时间（秒）"""
 
-    mcp_auto_detect: bool = True
+
+
+@dataclass
+class MCPSettings(ConfigBase):
+    """核心 MCP 运行时配置"""
+
+    enabled: bool = True
+    """是否启用核心 MCP 运行时"""
+
+    auto_detect: bool = True
     """是否通过能力路由器自动触发 MCP 独立工具链"""
 
-    mcp_max_rounds: int = 3
+    servers_json: str = ""
+    """Claude Desktop 风格的 mcpServers JSON"""
+
+    tool_prefix: str = "mcp"
+    """暴露给模型的 MCP 工具名前缀"""
+
+    disabled_tools: list[str] = field(default_factory=list)
+    """核心 MCP 运行时禁用的工具名"""
+
+    connect_timeout_seconds: int = 20
+    """单个 MCP 服务器连接和工具发现超时"""
+
+    call_timeout_seconds: int = 60
+    """单次 MCP 工具调用超时"""
+
+    reconnect_interval_seconds: int = 30
+    """断开服务器的后台重连间隔；设为 0 禁用"""
+
+    permissions_enabled: bool = True
+    """是否启用核心 MCP 权限策略"""
+
+    permission_default_mode: str = "deny_all"
+    """未匹配权限规则时的策略：allow_all 或 deny_all"""
+
+    quick_allow_users: list[str] = field(default_factory=list)
+    """始终允许使用 MCP 的用户 ID"""
+
+    quick_deny_groups: list[str] = field(default_factory=list)
+    """始终禁止使用 MCP 的群 ID"""
+
+    permission_rules_json: str = "[]"
+    """按工具名和会话 ID 匹配的高级权限规则 JSON"""
+
+    max_rounds: int = 3
     """单次 MCP 独立工具链的最大决策轮数"""
 
-    mcp_max_calls: int = 5
+    max_calls: int = 5
     """单次 MCP 独立工具链允许的最大工具调用数"""
 
-    mcp_max_candidate_tools: int = 32
+    max_candidate_tools: int = 32
     """单次 MCP 决策最多暴露给模型的候选工具数"""
 
-    mcp_observation_max_chars: int = 12000
+    observation_max_chars: int = 12000
     """回注 MCP 工具观察结果的最大字符数"""
+
+
+@dataclass
+class MCPConfig(ConfigBase):
+    """独立 mcp_config.toml 配置文件"""
+
+    mcp: MCPSettings = field(default_factory=MCPSettings)
 
 
 @dataclass

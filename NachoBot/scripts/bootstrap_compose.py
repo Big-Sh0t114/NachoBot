@@ -12,6 +12,7 @@ FILE_SOURCES = {
     "template/bot_config_template.toml": "docker-config/mmc/bot_config.toml",
     "template/model_config_template.toml": "docker-config/mmc/model_config.toml",
     "template/topics_config_template.toml": "docker-config/mmc/topics_config.toml",
+    "template/mcp_config_template.toml": "docker-config/mmc/mcp_config.toml",
 }
 
 GENERATED_FILES = {
