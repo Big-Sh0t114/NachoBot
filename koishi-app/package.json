@@ -41,7 +41,7 @@
     "@koishijs/scripts": "^4.6.1",
     "@types/node": "^22.7.5",
     "@types/react": "^18.2.70",
-    "cross-env": "^7.0.3",
+    "cross-env": "^10.1.0",
     "esbuild": "^0.23.1",
     "esbuild-register": "npm:@shigma/esbuild-register@^1.1.1",
     "tsx": "^4.16.2",
