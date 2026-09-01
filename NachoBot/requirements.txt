@@ -138,7 +138,7 @@ loguru==0.7.3
     # via nachobot
 markdown-it-py==4.2.0
     # via rich
-mcp==2.0.0
+mcp==2.1.1
     # via nachobot
 mcp-types==2.0.0
     # via mcp
