@@ -590,14 +590,29 @@
                                         placeholder="例如: NachoBot（留空使用默认值）">
                                 </div>
                             </div>
-                            <div class="form-section setup-conditional-section" id="setup-discord-section"
-                                style="display:none">
+                            <div class="form-section" id="setup-discord-section" style="display:none">
                                 <div class="form-section-title">Discord Bot 配置</div>
-                                <p class="form-section-hint">选择 Discord 时必须填写一个 Bot Token。输入内容仅用于本次部署，保存成功后会自动清除。</p>
+                                <p class="form-section-hint">选择 Discord 时必须填写一个 Bot Token</p>
                                 <div class="form-row">
                                     <label class="form-label">Bot Token <span class="form-required">*</span></label>
-                                    <input type="password" class="form-input" id="setup-discord-token"
-                                        autocomplete="new-password" spellcheck="false" required placeholder="粘贴 Discord Bot Token">
+                                    <div class="form-input-group setup-discord-token-group">
+                                        <input type="password" class="form-input" id="setup-discord-token"
+                                            autocomplete="new-password" spellcheck="false" required
+                                            placeholder="粘贴 Discord Bot Token">
+                                        <a class="btn btn-outline btn-sm setup-discord-portal-link"
+                                            href="https://discord.com/developers/applications" target="_blank"
+                                            rel="noopener noreferrer">前往 Discord 开发者平台</a>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="form-section" id="setup-bilibili-section" style="display:none">
+                                <div class="form-section-title">Bilibili Bot 配置</div>
+                                <p class="form-section-hint">选择 Bilibili 时必须填写 Bot UID（B站账号 UID）</p>
+                                <div class="form-row">
+                                    <label class="form-label">Bilibili Bot UID <span class="form-required">*</span></label>
+                                    <input type="text" class="form-input" id="setup-bilibili-bot-account"
+                                        inputmode="numeric" pattern="[0-9]+" required
+                                        placeholder="例如: 123456789">
                                 </div>
                             </div>
                         </div>

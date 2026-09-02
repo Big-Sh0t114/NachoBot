@@ -31,6 +31,11 @@ DEFAULT_HEADERS = {
 PRIMARY_COOKIE_NAMES = ("SESSDATA", "bili_jct", "DedeUserID")
 
 
+def _is_nonblank_string(value: object) -> bool:
+    """Return whether a credential value contains non-whitespace text."""
+    return isinstance(value, str) and bool(value.strip())
+
+
 def load_config(path: Path) -> dict[str, Any]:
     raw = path.read_bytes()
     if hasattr(toml_reader, "loads"):
@@ -193,6 +198,7 @@ def main() -> int:
         return 1
 
     buvid = fetch_buvid(session)
+    updated_fields = ["SESSDATA", "bili_jct", "DedeUserID"]
 
     bilibili_cfg = config.setdefault("bilibili", {})
     if sessdata:
@@ -201,24 +207,16 @@ def main() -> int:
         bilibili_cfg["bili_jct"] = bili_jct
     if dede_user_id:
         bilibili_cfg["dede_user_id"] = dede_user_id
-    if buvid.get("buvid3") and not bilibili_cfg.get("buvid3"):
-        bilibili_cfg["buvid3"] = buvid["buvid3"]
-    if buvid.get("buvid4") and not bilibili_cfg.get("buvid4"):
-        bilibili_cfg["buvid4"] = buvid["buvid4"]
+    for field in ("buvid3", "buvid4"):
+        fetched_value = buvid.get(field)
+        if _is_nonblank_string(fetched_value) and not _is_nonblank_string(
+            bilibili_cfg.get(field)
+        ):
+            bilibili_cfg[field] = fetched_value
+            updated_fields.append(field)
 
     save_config(config_path, config)
     print("Login success. Updated config.toml.")
-    updated_fields = [
-        name
-        for name, value in (
-            ("SESSDATA", sessdata),
-            ("bili_jct", bili_jct),
-            ("DedeUserID", dede_user_id),
-            ("buvid3", buvid.get("buvid3")),
-            ("buvid4", buvid.get("buvid4")),
-        )
-        if value
-    ]
     print(f"Stored credential fields: {', '.join(updated_fields) or 'none'} (values hidden).")
     return 0
 

@@ -3,6 +3,7 @@ import importlib.util
 import io
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -33,6 +34,40 @@ class _PartialSession:
 
 
 class QrLoginOutputTests(unittest.TestCase):
+    def _run_successful_login(
+        self, config_text: str, buvid: dict[str, str]
+    ) -> tuple[str, str]:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text(config_text, encoding="utf-8")
+            output = io.StringIO()
+            argv = [
+                "qr_login.py",
+                "--config",
+                str(config_path),
+                "--qr-output",
+                str(Path(temp_dir) / "qr.png"),
+            ]
+
+            with (
+                mock.patch.object(qr_login.requests, "Session", return_value=_FakeSession()),
+                mock.patch.object(
+                    qr_login,
+                    "generate_qr",
+                    return_value={"url": "opaque-url", "qrcode_key": "opaque-key"},
+                ),
+                mock.patch.object(qr_login, "print_qr"),
+                mock.patch.object(qr_login, "poll_login", return_value={"status": "success"}),
+                mock.patch.object(qr_login, "fetch_buvid", return_value=buvid),
+                mock.patch.object(sys, "argv", argv),
+                contextlib.redirect_stdout(output),
+            ):
+                self.assertEqual(qr_login.main(), 0)
+
+            rendered_output = output.getvalue()
+            self.assertNotIn("secret-", rendered_output)
+            return config_path.read_text(encoding="utf-8"), rendered_output
+
     def test_success_output_never_contains_credential_values(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "config.toml"
@@ -140,6 +175,79 @@ class QrLoginOutputTests(unittest.TestCase):
             ):
                 self.assertNotIn(value, rendered_output)
             self.assertIn("config unchanged", rendered_output)
+
+    def test_whitespace_qr_placeholders_are_replaced_by_current_credentials(self) -> None:
+        rendered_config, rendered_output = self._run_successful_login(
+            "[bilibili]\n"
+            "sessdata = \" \"\n"
+            "bili_jct = \"\\t\"\n"
+            "buvid3 = \"  \"\n"
+            "buvid4 = \"\\n\"\n"
+            "dede_user_id = \" \"\n",
+            {"buvid3": "current-buvid3", "buvid4": "current-buvid4"},
+        )
+
+        config = tomllib.loads(rendered_config)["bilibili"]
+        self.assertEqual(
+            {
+                field: config[field]
+                for field in (
+                    "sessdata",
+                    "bili_jct",
+                    "buvid3",
+                    "buvid4",
+                    "dede_user_id",
+                )
+            },
+            {
+                "sessdata": "secret-sessdata",
+                "bili_jct": "secret-csrf",
+                "buvid3": "current-buvid3",
+                "buvid4": "current-buvid4",
+                "dede_user_id": "secret-user-id",
+            },
+        )
+        self.assertIn(
+            "Stored credential fields: SESSDATA, bili_jct, DedeUserID, buvid3, buvid4",
+            rendered_output,
+        )
+
+    def test_nonblank_existing_buvid_values_are_preserved(self) -> None:
+        rendered_config, rendered_output = self._run_successful_login(
+            "[bilibili]\n"
+            "buvid3 = \"existing-buvid3\"\n"
+            "buvid4 = \"  existing-buvid4  \"\n",
+            {"buvid3": "current-buvid3", "buvid4": "current-buvid4"},
+        )
+
+        self.assertIn('buvid3 = "existing-buvid3"', rendered_config)
+        self.assertIn('buvid4 = "  existing-buvid4  "', rendered_config)
+        self.assertNotIn('buvid3 = "current-buvid3"', rendered_config)
+        self.assertNotIn('buvid4 = "current-buvid4"', rendered_config)
+        self.assertIn(
+            "Stored credential fields: SESSDATA, bili_jct, DedeUserID (values hidden).",
+            rendered_output,
+        )
+        self.assertNotIn("buvid3", rendered_output)
+        self.assertNotIn("buvid4", rendered_output)
+
+    def test_whitespace_fetched_buvid_values_are_not_stored(self) -> None:
+        rendered_config, rendered_output = self._run_successful_login(
+            "[bilibili]\n"
+            "buvid3 = \"\"\n"
+            "buvid4 = \" \"\n",
+            {"buvid3": "  ", "buvid4": "\t"},
+        )
+
+        config = tomllib.loads(rendered_config)["bilibili"]
+        self.assertEqual(config["buvid3"], "")
+        self.assertEqual(config["buvid4"], " ")
+        self.assertIn(
+            "Stored credential fields: SESSDATA, bili_jct, DedeUserID (values hidden).",
+            rendered_output,
+        )
+        self.assertNotIn("buvid3", rendered_output)
+        self.assertNotIn("buvid4", rendered_output)
 
 
 if __name__ == "__main__":

@@ -41,6 +41,9 @@ class SetupConfigCredentialTests(unittest.TestCase):
         setup_deployment.TEMPLATE_MAP = {
             "koishi-app/koishi_template.yml": "koishi-app/koishi.yml",
             "NachoBot-DiscordVC-Adapter/config.toml.example": "NachoBot-DiscordVC-Adapter/config.toml",
+            setup_deployment.BUILTIN_BILIBILI_TEMPLATE: (
+                setup_deployment.BILIBILI_TARGET
+            ),
         }
         setup_deployment.BACKUP_DIR = self.root / "backups"
 
@@ -123,6 +126,77 @@ class SetupConfigCredentialTests(unittest.TestCase):
         defaults = setup_deployment.ConfigInitializer.get_defaults()
         self.assertEqual(defaults["discord"], {"token": ""})
 
+    def test_selected_bilibili_missing_or_invalid_uid_fails_before_writes(self) -> None:
+        target = self.root / setup_deployment.BILIBILI_TARGET
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("sentinel", encoding="utf-8")
+
+        for bilibili in ({}, {"bot_account": "  "}, {"bot_account": "１２３"}, {"bot_account": "12x"}):
+            with self.subTest(bilibili=bilibili):
+                result = setup_deployment.ConfigInitializer.generate_configs(
+                    {"components": ["bilibili"], "bilibili": bilibili}
+                )
+                self.assertTrue(result["errors"])
+                self.assertEqual(result["generated"], [])
+                self.assertEqual(result["backups"], [])
+                self.assertEqual(target.read_text(encoding="utf-8"), "sentinel")
+        self.assertFalse(setup_deployment.BACKUP_DIR.exists())
+
+    def test_valid_bilibili_uid_is_written_as_trimmed_string(self) -> None:
+        result = setup_deployment.ConfigInitializer.generate_configs(
+            {"components": ["bilibili"], "bilibili": {"bot_account": " 0012345 "}}
+        )
+
+        self.assertEqual(result["errors"], [])
+        document = tomllib.loads(
+            (self.root / setup_deployment.BILIBILI_TARGET).read_text(encoding="utf-8")
+        )
+        self.assertEqual(document["bilibili"]["bot_account"], "0012345")
+        for field in ("sessdata", "bili_jct", "buvid3", "buvid4", "dede_user_id"):
+            self.assertEqual(document["bilibili"][field], "")
+
+    def test_bilibili_defaults_stay_blank_even_with_live_template_value(self) -> None:
+        template = self.root / "NachoBot-Bilibili-Adapter" / "config_template.toml"
+        template.parent.mkdir(parents=True, exist_ok=True)
+        template.write_text('[bilibili]\nbot_account = "99887766"\n', encoding="utf-8")
+
+        defaults = setup_deployment.ConfigInitializer.get_defaults()
+
+        self.assertEqual(defaults["bilibili"], {"bot_account": ""})
+
+    def test_malformed_bilibili_builtin_template_fails_before_writes(self) -> None:
+        target = self.root / setup_deployment.BILIBILI_TARGET
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("sentinel", encoding="utf-8")
+        with mock.patch.dict(
+            setup_deployment.BUILTIN_TEMPLATE_TEXT,
+            {setup_deployment.BUILTIN_BILIBILI_TEMPLATE: "[bilibili\n"},
+        ):
+            result = setup_deployment.ConfigInitializer.generate_configs(
+                {"components": ["bilibili"], "bilibili": {"bot_account": "12345"}}
+            )
+
+        self.assertTrue(result["errors"])
+        self.assertEqual(result["generated"], [])
+        self.assertEqual(result["backups"], [])
+        self.assertEqual(target.read_text(encoding="utf-8"), "sentinel")
+
+    def test_bilibili_builtin_mapping_must_point_to_target(self) -> None:
+        target = self.root / setup_deployment.BILIBILI_TARGET
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("sentinel", encoding="utf-8")
+        broken_map = dict(setup_deployment.TEMPLATE_MAP)
+        broken_map[setup_deployment.BUILTIN_BILIBILI_TEMPLATE] = "wrong/config.toml"
+        with mock.patch.object(setup_deployment, "TEMPLATE_MAP", broken_map):
+            result = setup_deployment.ConfigInitializer.generate_configs(
+                {"components": ["bilibili"], "bilibili": {"bot_account": "12345"}}
+            )
+
+        self.assertTrue(result["errors"])
+        self.assertEqual(result["generated"], [])
+        self.assertEqual(result["backups"], [])
+        self.assertEqual(target.read_text(encoding="utf-8"), "sentinel")
+
 
 class BuiltinTemplatePackagingTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -169,7 +243,11 @@ class BuiltinTemplatePackagingTests(unittest.TestCase):
         self.assertEqual(setup_deployment.ConfigInitializer._validate_discord_templates(), [])
 
         result = setup_deployment.ConfigInitializer.generate_configs(
-            {"components": ["discord", "bilibili"], "discord": {"token": "opaque-token"}}
+            {
+                "components": ["discord", "bilibili"],
+                "discord": {"token": "opaque-token"},
+                "bilibili": {"bot_account": "0012345"},
+            }
         )
 
         self.assertEqual(result["errors"], [])
@@ -192,8 +270,9 @@ class BuiltinTemplatePackagingTests(unittest.TestCase):
                 encoding="utf-8"
             )
         )
-        for field in ("sessdata", "bili_jct", "dede_user_id"):
-            self.assertEqual(bilibili["bilibili"][field].strip(), "")
+        for field in ("sessdata", "bili_jct", "buvid3", "buvid4", "dede_user_id"):
+            self.assertEqual(bilibili["bilibili"][field], "")
+        self.assertEqual(bilibili["bilibili"]["bot_account"], "0012345")
 
     def test_builtin_mapping_and_prevalidation_avoid_user_template_paths(self) -> None:
         self.assertNotIn("koishi-app/koishi_template.yml", setup_checks.TEMPLATE_MAP)

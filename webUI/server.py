@@ -887,6 +887,7 @@ class SetupWizardData(BaseModel):
     models: list[dict] = []
     tts: dict = {}
     discord: dict = {}
+    bilibili: dict = {}
     env: dict = {}
 
 

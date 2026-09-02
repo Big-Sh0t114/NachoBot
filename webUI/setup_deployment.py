@@ -40,6 +40,7 @@ DISCORD_KOISHI_TARGET = "koishi-app/koishi.yml"
 DISCORD_VC_TARGET = "NachoBot-DiscordVC-Adapter/config.toml"
 DISCORD_KOISHI_PLACEHOLDER = "<YOUR_DISCORD_BOT_TOKEN_HERE>"
 DISCORD_VC_PLACEHOLDER = "YOUR_DISCORD_BOT_TOKEN"
+BILIBILI_TARGET = "NachoBot-Bilibili-Adapter/config.toml"
 
 
 # Sanitized, tracked fallback templates.  The user-owned template files in
@@ -164,11 +165,11 @@ platform = "bilibili"
 
 [bilibili]
 bot_account = " "       # 填写bot b站id
-sessdata = " "          # 以下字段请运行适配器目录下的 qr_login.py 自动填写
-bili_jct = " "
-buvid3 = " "
-buvid4 = " "
-dede_user_id = " "
+sessdata = ""           # 以下字段请运行适配器目录下的 qr_login.py 自动填写
+bili_jct = ""
+buvid3 = ""
+buvid4 = ""
+dede_user_id = ""
 user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
 [live]
@@ -380,6 +381,9 @@ class ConfigInitializer:
             # Never read a current Discord config here.  The wizard collects a
             # fresh token only when the user explicitly selects Discord.
             "discord": {"token": ""},
+            # Never read a current Bilibili config here.  The wizard collects a
+            # fresh account UID only when the user explicitly selects Bilibili.
+            "bilibili": {"bot_account": ""},
             "env": {"host": "127.0.0.1", "port": "8000"},
         }
 
@@ -492,6 +496,7 @@ class ConfigInitializer:
           - napcat: dict           — Napcat adapter settings
           - tts: dict              — TTS settings (engine, etc.)
           - discord: dict          — Discord settings (token)
+          - bilibili: dict         — Bilibili settings (bot_account)
           - env: dict              — .env overrides (HOST, PORT)
 
         Returns:
@@ -521,6 +526,31 @@ class ConfigInitializer:
                     "patched": [],
                 }
             template_errors = ConfigInitializer._validate_discord_templates()
+            if template_errors:
+                return {
+                    "generated": [],
+                    "skipped": list(TEMPLATE_MAP.values()),
+                    "backups": [],
+                    "errors": template_errors,
+                    "patched": [],
+                }
+
+        # Validate the Bilibili UID and its built-in template before touching
+        # any target or creating any backup.  This keeps a malformed request
+        # or packaged template from producing a partial deployment.
+        if "bilibili" in components:
+            _, bot_account_error = ConfigInitializer._get_bilibili_bot_account(
+                wizard_data
+            )
+            if bot_account_error:
+                return {
+                    "generated": [],
+                    "skipped": list(TEMPLATE_MAP.values()),
+                    "backups": [],
+                    "errors": [bot_account_error],
+                    "patched": [],
+                }
+            template_errors = ConfigInitializer._validate_bilibili_template()
             if template_errors:
                 return {
                     "generated": [],
@@ -702,6 +732,43 @@ class ConfigInitializer:
         if not isinstance(token, str) or not token.strip():
             return "", "选择 Discord 时必须填写 Bot Token"
         return token.strip(), None
+
+    @staticmethod
+    def _get_bilibili_bot_account(
+        wizard_data: dict[str, Any],
+    ) -> tuple[str, str | None]:
+        """Read and validate the Bilibili bot account UID as an ASCII string."""
+        bilibili_data = wizard_data.get("bilibili", {})
+        if not isinstance(bilibili_data, dict):
+            return "", "Bilibili Bot UID 配置无效"
+        bot_account = bilibili_data.get("bot_account", "")
+        if not isinstance(bot_account, str):
+            return "", "Bilibili Bot UID 配置无效"
+        normalized = bot_account.strip()
+        if not normalized or re.fullmatch(r"[0-9]+", normalized) is None:
+            return "", "选择 Bilibili 时必须填写有效的 Bot UID"
+        return normalized, None
+
+    @staticmethod
+    def _validate_bilibili_template() -> list[str]:
+        """Validate the packaged Bilibili template before any target writes."""
+        if TEMPLATE_MAP.get(BUILTIN_BILIBILI_TEMPLATE) != BILIBILI_TARGET:
+            return ["Bilibili 配置模板映射无效"]
+        try:
+            raw = ConfigInitializer._read_template(BUILTIN_BILIBILI_TEMPLATE)
+            if raw is None:
+                return ["Bilibili 配置模板不存在"]
+            document = tomlkit.parse(raw)
+            bilibili_section = document.get("bilibili")
+            if (
+                bilibili_section is None
+                or not isinstance(bilibili_section, dict)
+                or "bot_account" not in bilibili_section
+            ):
+                return ["Bilibili 配置模板缺少 [bilibili].bot_account"]
+        except Exception:
+            return ["Bilibili 配置模板无法验证"]
+        return []
 
     @staticmethod
     def _validate_discord_templates() -> list[str]:
@@ -912,6 +979,14 @@ class ConfigInitializer:
                 return token_error
             return ConfigInitializer._apply_discord_token(target_path, target_rel, token)
 
+        bilibili_bot_account: str | None = None
+        if target_rel == BILIBILI_TARGET:
+            bilibili_bot_account, bot_account_error = (
+                ConfigInitializer._get_bilibili_bot_account(wizard_data)
+            )
+            if bot_account_error:
+                return bot_account_error
+
         # ── TOML files ──
         try:
             raw = target_path.read_text(encoding="utf-8")
@@ -920,6 +995,19 @@ class ConfigInitializer:
             return f"TOML解析失败: {e}"
 
         changed = False
+
+        # -- Bilibili adapter config.toml --
+        # QR login owns only cookie fields; this wizard owns bot_account.
+        if target_rel == BILIBILI_TARGET:
+            bilibili_section = doc.get("bilibili")
+            if (
+                bilibili_section is None
+                or not isinstance(bilibili_section, dict)
+                or "bot_account" not in bilibili_section
+            ):
+                return "Bilibili 配置缺少 [bilibili].bot_account"
+            bilibili_section["bot_account"] = bilibili_bot_account
+            changed = True
 
         # -- bot_config.toml --
         if "bot_config" in target_rel:

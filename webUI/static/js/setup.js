@@ -351,6 +351,7 @@ const SetupModule = (() => {
         const ttsSection = document.getElementById('setup-tts-section');
         const universalvcSection = document.getElementById('setup-universalvc-section');
         const discordSection = document.getElementById('setup-discord-section');
+        const bilibiliSection = document.getElementById('setup-bilibili-section');
         if (ttsSection) {
             ttsSection.style.display = selectedComponents.includes('tts') ? '' : 'none';
         }
@@ -359,6 +360,9 @@ const SetupModule = (() => {
         }
         if (discordSection) {
             discordSection.style.display = selectedComponents.includes('discord') ? '' : 'none';
+        }
+        if (bilibiliSection) {
+            bilibiliSection.style.display = selectedComponents.includes('bilibili') ? '' : 'none';
         }
     }
 
@@ -584,6 +588,11 @@ const SetupModule = (() => {
                 token: document.getElementById('setup-discord-token')?.value.trim() || '',
             };
         }
+        if (selectedComponents.includes('bilibili')) {
+            wizardData.bilibili = {
+                bot_account: document.getElementById('setup-bilibili-bot-account')?.value.trim() || '',
+            };
+        }
         return wizardData;
     }
 
@@ -671,6 +680,18 @@ const SetupModule = (() => {
                 return;
             }
             discordToken.classList.remove('input-error');
+        }
+
+        if (selectedComponents.includes('bilibili')) {
+            const bilibiliBotAccount = document.getElementById('setup-bilibili-bot-account');
+            const botAccount = bilibiliBotAccount?.value.trim() || '';
+            if (!bilibiliBotAccount || !/^[0-9]+$/.test(botAccount)) {
+                bilibiliBotAccount?.classList.add('input-error');
+                alert('选择 Bilibili 时必须填写有效的 Bot UID（仅限数字）');
+                bilibiliBotAccount?.focus();
+                return;
+            }
+            bilibiliBotAccount.classList.remove('input-error');
         }
 
         goToStep(4);

@@ -16,11 +16,14 @@ const tokenInput = {
         contains(value) { return this._values.has(value); },
     },
 };
+const bilibiliInput = { value: '' };
 let checkedComponents = [];
 
 const documentStub = {
     getElementById(id) {
-        return id === 'setup-discord-token' ? tokenInput : null;
+        if (id === 'setup-discord-token') return tokenInput;
+        if (id === 'setup-bilibili-bot-account') return bilibiliInput;
+        return null;
     },
     querySelectorAll(selector) {
         if (selector === '.setup-component-cb:checked') return checkedComponents;
@@ -62,6 +65,16 @@ async function main() {
     tokenInput.value = 'example-value';
     const selected = contract.collectWizardData();
     assert.strictEqual(selected.discord.token, 'example-value');
+
+    checkedComponents = [{ value: 'bilibili' }];
+    contract.onComponentToggle();
+    bilibiliInput.value = ' 0012345 ';
+    const bilibiliSelected = contract.collectWizardData();
+    assert.strictEqual(bilibiliSelected.bilibili.bot_account, '0012345');
+    checkedComponents = [];
+    contract.onComponentToggle();
+    const bilibiliDeselected = contract.collectWizardData();
+    assert(!Object.prototype.hasOwnProperty.call(bilibiliDeselected, 'bilibili'));
 
     const activeWizardData = freshWizardData();
     tokenInput.value = 'example-value';
