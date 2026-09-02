@@ -332,6 +332,13 @@
     padding-bottom: 0;
 }
 
+.setup-conditional-section {
+    background: rgba(13, 148, 136, 0.035);
+    border: 1px solid rgba(13, 148, 136, 0.14);
+    border-radius: var(--radius-md);
+    padding: 16px;
+}
+
 .form-section-title {
     font-size: 0.85rem;
     font-weight: 600;
@@ -603,6 +610,53 @@
 .deploy-log-line {
     white-space: pre-wrap;
     word-break: break-all;
+}
+
+/* Bilibili QR login */
+.setup-bilibili-login-body {
+    padding: 18px 24px 22px;
+}
+
+.setup-bilibili-login-message {
+    margin: 0 0 14px;
+    color: var(--text-secondary);
+    line-height: 1.6;
+}
+
+.bilibili-login-status {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    font-weight: 600;
+}
+
+.bilibili-login-status.waiting {
+    color: var(--accent-dark);
+}
+
+.bilibili-login-status.success {
+    color: var(--success);
+}
+
+.bilibili-login-status.error {
+    color: var(--error);
+}
+
+.setup-bilibili-qr-wrap {
+    width: min(280px, 100%);
+    padding: 12px;
+    margin: 8px 0 16px;
+    background: #fff;
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-sm);
+}
+
+.setup-bilibili-qr-wrap img {
+    display: block;
+    width: 100%;
+    height: auto;
+    aspect-ratio: 1;
+    image-rendering: pixelated;
 }
 
 /* Spinner animation */

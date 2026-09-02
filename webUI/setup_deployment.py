@@ -1,6 +1,7 @@
 """Configuration generation and dependency deployment for the WebUI wizard."""
 
 import asyncio
+import json
 import os
 import re
 import shutil
@@ -11,14 +12,299 @@ from typing import Any, Callable
 import tomlkit
 
 try:
-    from .setup_checks import EnvironmentChecker, ROOT_DIR, TEMPLATE_MAP
+    from .setup_checks import (
+        BUILTIN_BILIBILI_TEMPLATE,
+        BUILTIN_KOISHI_TEMPLATE,
+        EnvironmentChecker,
+        ROOT_DIR,
+        TEMPLATE_MAP,
+    )
     from .secure_paths import ensure_within, resolve_external_path, resolve_relative_to_root
 except ImportError:
-    from setup_checks import EnvironmentChecker, ROOT_DIR, TEMPLATE_MAP
+    from setup_checks import (
+        BUILTIN_BILIBILI_TEMPLATE,
+        BUILTIN_KOISHI_TEMPLATE,
+        EnvironmentChecker,
+        ROOT_DIR,
+        TEMPLATE_MAP,
+    )
     from secure_paths import ensure_within, resolve_external_path, resolve_relative_to_root
 
 BACKUP_DIR = ROOT_DIR / "config-save" / "setup_backups"
 MAX_BACKUPS_PER_FILE = 5
+
+# These are deliberately tied to the checked-in fresh templates.  A changed
+# template must fail closed instead of accidentally replacing an unrelated
+# value (or overwriting a live credential with a new one).
+DISCORD_KOISHI_TARGET = "koishi-app/koishi.yml"
+DISCORD_VC_TARGET = "NachoBot-DiscordVC-Adapter/config.toml"
+DISCORD_KOISHI_PLACEHOLDER = "<YOUR_DISCORD_BOT_TOKEN_HERE>"
+DISCORD_VC_PLACEHOLDER = "YOUR_DISCORD_BOT_TOKEN"
+
+
+# Sanitized, tracked fallback templates.  The user-owned template files in
+# the repository may be present for local customization, but deployment must
+# remain usable when they are absent from a clean checkout/package.
+KOISHI_TEMPLATE_TEXT = """plugins:
+  group:server:
+    server:e5r2g6:
+      port: 5140
+      maxPort: 5149
+    ~server-satori:afwp8z: {}
+    ~server-temp:zcji9z: {}
+  group:basic:
+    ~admin:9rsa7e: {}
+    ~bind:28lwd6: {}
+    commands:219zrk: {}
+    help:mw5ufg: {}
+    http:up8zo1: {}
+    ~inspect:uu4df9: {}
+    locales:e1mv6f: {}
+    proxy-agent:n3qo79:
+      proxyAgent: http://127.0.0.1:7897
+    rate-limit:241jid: {}
+    telemetry:nym5b5: {}
+    ./nachobot-slash-bridge:nbcmd:
+      host: 127.0.0.1
+      port: 8000
+      platform: discord
+      enableLocalLangSwitch: false
+      silentCommands:
+        - adv-on
+        - adv-off
+        - mute
+        - mus-rand
+        - help-all
+        - lang-switch
+      localReplies:
+        help-all: ''
+        lang-switch: ''
+  group:console:
+    actions:0w1i5w: {}
+    analytics:19gqdw: {}
+    android:7qa6m8:
+      $if: env.KOISHI_AGENT?.includes('Android')
+    ~auth:zyvwiu: {}
+    config:kjd7fa: {}
+    console:idr73d:
+      open: true
+    dataview:ly3300: {}
+    desktop:5fk3p3:
+      $if: env.KOISHI_AGENT?.includes('Desktop')
+    explorer:zp5pt4: {}
+    logger:u9fhuz: {}
+    insight:ncdyq8: {}
+    market:8zm33h:
+      search:
+        endpoint: https://registry.koishi.chat/index.json
+    notifier:56uyop: {}
+    oobe:s8acau: {}
+    sandbox:u89x0b: {}
+    status:bcr45b: {}
+    theme-vanilla:i268dq: {}
+  group:storage:
+    ~database-mongo:1hb2ow:
+      database: koishi
+    ~database-mysql:4szu05:
+      database: koishi
+    ~database-postgres:7nf60j:
+      database: koishi
+    database-sqlite:4b6xgh:
+      path: data/koishi.db
+    assets-local:79fukq: {}
+  group:adapter:
+    ~adapter-dingtalk:wp560n: {}
+    adapter-discord:97kjzj:
+      token: <YOUR_DISCORD_BOT_TOKEN_HERE>
+      intents:
+        - GUILDS
+        - GUILD_MEMBERS
+        - GUILD_MESSAGES
+        - GUILD_MESSAGE_REACTIONS
+        - GUILD_MESSAGE_TYPING
+        - DIRECT_MESSAGES
+        - DIRECT_MESSAGE_REACTIONS
+        - DIRECT_MESSAGE_TYPING
+        - MESSAGE_CONTENT
+    ~adapter-kook:dfaoua: {}
+    ~adapter-lark:439n9n: {}
+    ~adapter-line:4gklsb: {}
+    ~adapter-mail:jfaioj: {}
+    ~adapter-matrix:sq583x: {}
+    ~adapter-qq:4cl7rd: {}
+    ~adapter-satori:wvr2kj: {}
+    ~adapter-slack:32tf5t: {}
+    ~adapter-telegram:lacka0: {}
+    ~adapter-wechat-official:70m36x: {}
+    ~adapter-wecom:7be9j0: {}
+    ~adapter-whatsapp:miu2cl: {}
+    ~adapter-zulip:47r8qg: {}
+  group:develop:
+    $if: env.NODE_ENV === 'development'
+    hmr:0dnupx:
+      root: .
+  server-onebot:wdndch:
+    platform: discord
+    selfId: ' '
+    enabledWs: true
+    path: /onebot/v11/ws
+    selfname: NachoBot
+    groupname: discord-channel
+    loggerinfo: false
+"""
+
+
+BILIBILI_TEMPLATE_TEXT = r'''[inner]
+version = "0.6.0"
+
+[nachobot_server]
+host = "127.0.0.1"
+port = 8000
+platform = "bilibili"
+
+[bilibili]
+bot_account = " "       # 填写bot b站id
+sessdata = " "          # 以下字段请运行适配器目录下的 qr_login.py 自动填写
+bili_jct = " "
+buvid3 = " "
+buvid4 = " "
+dede_user_id = " "
+user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+
+[live]
+enable = true
+enable_live2D = true
+live2d_url = "ws://127.0.0.1:8766"
+live2d_token = ""
+live2d_reconnect_seconds = 3.0
+room_ids = [ ]       # 填写直播间id
+use_wss = true
+heartbeat_interval = 30
+network_search_enabled = true
+live_person_profile_enabled = true
+reconnect_seconds = 5
+max_reconnect_seconds = 60
+ws_proxy = "none"
+open_timeout = 10
+max_hosts = 3
+max_attempts = 4
+proxy_pool_path = "proxy.json"
+proxy_check_url = "https://www.baidu.com"
+proxy_check_timeout = 1
+allow_self_danmu = false
+log_danmu = true
+mention_keywords = ["NachoBot"]
+mention_prefixes = ["@", "＠"]
+mention_any_at = false
+resolve_user_nickname = true
+master_user_id = " "        # 直播戳一戳解析专用，建议填写QQ号，戳一戳操作是鼠标侧键点击Live2d
+master_user_name = " "      # 你希望自己在bot上下文中出现的名字
+
+[mic_asr]
+enable = true
+room_id = ""
+subtitle_path = ""           # 语音识别字幕路径，用于obs直播
+silence_threshold = 0.015
+silence_duration = 0.8
+sample_rate = 48000
+# Push-to-talk: 只有按住按键时才捕获麦克风音频
+push_to_talk = true
+ptt_key = "v"  # 按住此键说话 (支持: "v", "ctrl", "alt", "shift", "caps_lock", "f1"-"f12" 等)
+
+[comment]
+enable_reply_notice = true
+poll_interval_seconds = 20
+max_items_per_poll = 20
+resolve_user_nickname = true
+force_mention = true
+
+[private_message]
+enable = true
+poll_interval_seconds = 20
+sessions = []
+auto_sessions = true
+auto_session_types = [4]
+auto_session_refresh_seconds = 60
+auto_session_size = 100
+force_mention = true
+
+[response_filter]
+enable = true
+blocked_markers = []     # 违禁词配置，当bot输出内容符合违禁词时会被替换为Filtered
+
+[compat]
+disable_video_sender_plugin = true
+disable_command_trigger = true
+
+[live.screen_monitor]
+manual_enable = true
+manual_duration_minutes = 30
+manual_user_ids = []        # Bilibili侧管理员账号，填写自己的b站id
+capture_active_window = true # Windows 下仅捕获当前活动窗口
+capture_interval_seconds = 30 # 截图和视觉摘要刷新间隔（秒）
+excluded_exes = ["obs64.exe", "obs32.exe"] # 逗号列表，避免 OBS 递归捕获
+
+[live.idle_tts]
+enable = true
+min_seconds = 30
+max_seconds = 90
+
+[live.room_prompts." "]     # " "内填写自己的直播间号，除非你知道你在干什么，否则请不要修改自然语言以外的部分
+host = true
+live_category = ""
+live_title = ""
+live_content = "评论回复"
+live_detail = """"""
+gift_reaction_prompt = ""
+
+reply_prompt = """{identity}
+你有一头灰色长发，头发上有Google Gemini状发卡，头发扎成过肩低双马尾，脖子上有标识身份用的条形码，穿着蓝色水手服款卫衣，领口印有Anthropic Claude图标，胸前有格子领带，口袋里装着两只机械小猫，下身身着蓝色格子短裙，身旁悬浮着猫猫状的AI机械助手。
+以上身份描述是用于让你辨认【直播画面】中的自己的，在直播回复中不要刻意提及以上细节。
+你正在你主人甘油三酯的直播间里聊天,现在请你读读之前的聊天记录，然后给出日常且口语化的回复，稍微活泼一些但总体保持懒懒的样子，
+说话简短一些，单次回复控制在80字以内20字以上，注意颜文字和双语翻译不计入总字数，遇到有价值的信息可以多说点。请注意把握聊天内容，不要回复的太有条理，可以有个性，带动直播间的氛围。
+{reply_style}
+{gift_reaction_prompt}
+请注意只对聊天内容做回复。
+
+**重要规则**
+1.如果你不想回复，或者认为没有必要回复（例如话题已结束、没有新信息），请**只**输出一个不可见字符 "\u200b" (Zero Width Space) 或者空格。
+2.请根据聊天记录判断。如果聊天内容中没有新的有效对话，或者你觉得自己上次回复已经是话题的结尾，请务必保持沉默（输出 "\u200b"）。
+3.请务必判断情感输出。要求最终只输出一段纯净的、可被系统直接解析的JSON，不包含多余描述、前后缀、反引号(如```json)或其他格式，且包含reply、emotion和action三个字段。
+4.当你需要输出中文回复和对应的日文翻译（用于语音播放）时，这些内容**必须放在JSON的`reply`字段中**，格式如下（注意下面示例用的是全角括号，但你实际输出时必须使用半角 <> 括号！）：
+＜JP＞日本語翻訳＜/JP＞＜ZH＞中文原本意思＜/ZH＞
+示例：{{"reply": "＜JP＞こんにちは＜/JP＞＜ZH＞你好呀＜/ZH＞", "emotion": "shy", "action": "害羞/移开视线"}}
+- `reply`: 你的回复内容。如果不回复，则设为 "\u200b"
+- `emotion`: 你的情感，只能从 "normal"（平常/开心）, "shy"（害羞）, "disgust"（厌恶）, "angry"（生气） 中四选一。
+- `action`: 你的动作，只能从以下选项中选一个："待机/放松", "点头/同意", "摇头/否定", "转身向左/看左边", "转身向右/看右边", "眨眼/卖萌/Wink", "身体晃动/开心/兴奋", "歪头/疑惑/思考", "害羞/移开视线/不好意思", "一般"。根据回复内容选择最合适的动作，大多数情况用"一般"即可，只在情感或语境明确时才选其他动作。
+
+{extra_info_block}，
+{person_profile_block}
+{focus_handoff_block}，
+
+下面是直播间里正在聊的内容:
+{background_dialogue_prompt}
+{core_dialogue_prompt}
+{time_block}
+
+{reply_target_block}。{keywords_reaction_prompt}
+{knowledge_prompt}{tool_info_block}
+{expression_habits_block}
+{moderation_prompt}
+"""
+
+
+
+[live.room_prompts." ".tts]    # 引号内填入自己的直播间号
+enable = true                  # 同一时间只能开启一个直播间的TTS功能，否则适配器会报错
+subtitle_path = ""             # 字幕路径，用于obs直播
+'''
+
+
+BUILTIN_TEMPLATE_TEXT: dict[str, str] = {
+    BUILTIN_KOISHI_TEMPLATE: KOISHI_TEMPLATE_TEXT,
+    BUILTIN_BILIBILI_TEMPLATE: BILIBILI_TEMPLATE_TEXT,
+}
+
 
 class BackupManager:
     """Manages config backups with rotation (max N per file)."""
@@ -91,6 +377,9 @@ class ConfigInitializer:
                 "denoise_enabled": False,
                 "speaker_enabled": True,
             },
+            # Never read a current Discord config here.  The wizard collects a
+            # fresh token only when the user explicitly selects Discord.
+            "discord": {"token": ""},
             "env": {"host": "127.0.0.1", "port": "8000"},
         }
 
@@ -178,6 +467,20 @@ class ConfigInitializer:
         return result
 
     @staticmethod
+    def _read_template(template_rel: str) -> str | None:
+        """Read a tracked built-in template or an ordinary repository file."""
+        builtin = BUILTIN_TEMPLATE_TEXT.get(template_rel)
+        if builtin is not None:
+            return builtin
+        try:
+            template_path = resolve_relative_to_root(ROOT_DIR, template_rel)
+            if not template_path.exists():
+                return None
+            return template_path.read_text(encoding="utf-8")
+        except Exception:
+            return None
+
+    @staticmethod
     def generate_configs(wizard_data: dict[str, Any]) -> dict[str, Any]:
         """
         Generate config files from templates, applying wizard form data.
@@ -188,6 +491,7 @@ class ConfigInitializer:
           - llm: dict              — LLM provider settings (api_provider, api_key, base_url)
           - napcat: dict           — Napcat adapter settings
           - tts: dict              — TTS settings (engine, etc.)
+          - discord: dict          — Discord settings (token)
           - env: dict              — .env overrides (HOST, PORT)
 
         Returns:
@@ -203,8 +507,29 @@ class ConfigInitializer:
         # Relay host/port are independent persistent adapter settings.
         tts_enabled = "tts" in components
 
+        # Validate both fresh Discord templates before touching any target.  In
+        # particular, do not let a malformed/mutated template cause a later
+        # target to receive a secret while the other target is left unchanged.
+        if "discord" in components:
+            _, token_error = ConfigInitializer._get_discord_token(wizard_data)
+            if token_error:
+                return {
+                    "generated": [],
+                    "skipped": list(TEMPLATE_MAP.values()),
+                    "backups": [],
+                    "errors": [token_error],
+                    "patched": [],
+                }
+            template_errors = ConfigInitializer._validate_discord_templates()
+            if template_errors:
+                return {
+                    "generated": [],
+                    "skipped": list(TEMPLATE_MAP.values()),
+                    "backups": [],
+                    "errors": template_errors,
+                    "patched": [],
+                }
         for tmpl_rel, target_rel in TEMPLATE_MAP.items():
-            tmpl_path = resolve_relative_to_root(ROOT_DIR, tmpl_rel)
             target_path = resolve_relative_to_root(ROOT_DIR, target_rel)
 
             # Skip components not selected
@@ -216,7 +541,8 @@ class ConfigInitializer:
                 skipped.append(target_rel)
                 continue
 
-            if not tmpl_path.exists():
+            template_text = ConfigInitializer._read_template(tmpl_rel)
+            if template_text is None:
                 errors.append(f"模板不存在: {tmpl_rel}")
                 continue
 
@@ -260,8 +586,12 @@ class ConfigInitializer:
                 # Ensure target directory exists
                 target_path.parent.mkdir(parents=True, exist_ok=True)
 
-                # Copy template to target
-                shutil.copy2(tmpl_path, target_path)
+                # Materialize a built-in template or copy a repository file.
+                if tmpl_rel in BUILTIN_TEMPLATE_TEXT:
+                    target_path.write_text(template_text, encoding="utf-8")
+                else:
+                    tmpl_path = resolve_relative_to_root(ROOT_DIR, tmpl_rel)
+                    shutil.copy2(tmpl_path, target_path)
 
                 # Restore the existing NapCat inbound connection/authentication
                 # contract and the independently configurable upstream relay endpoint.
@@ -284,7 +614,10 @@ class ConfigInitializer:
 
                 # Apply wizard data overrides
                 override_err = ConfigInitializer._apply_overrides(
-                    target_path, target_rel, wizard_data, tts_enabled
+                    target_path,
+                    target_rel,
+                    wizard_data,
+                    tts_enabled,
                 )
                 if override_err:
                     errors.append(f"覆写失败 {target_rel}: {override_err}")
@@ -360,6 +693,168 @@ class ConfigInitializer:
         return {"patched": patched, "errors": errors}
 
     @staticmethod
+    def _get_discord_token(wizard_data: dict[str, Any]) -> tuple[str, str | None]:
+        """Read and validate the one-shot Discord token without echoing it."""
+        discord_data = wizard_data.get("discord", {})
+        if not isinstance(discord_data, dict):
+            return "", "Discord Bot Token 配置无效"
+        token = discord_data.get("token", "")
+        if not isinstance(token, str) or not token.strip():
+            return "", "选择 Discord 时必须填写 Bot Token"
+        return token.strip(), None
+
+    @staticmethod
+    def _validate_discord_templates() -> list[str]:
+        """Assert both checked-in template placeholders before any writes."""
+        required_targets = {
+            DISCORD_KOISHI_TARGET: DISCORD_KOISHI_PLACEHOLDER,
+            DISCORD_VC_TARGET: DISCORD_VC_PLACEHOLDER,
+        }
+        errors: list[str] = []
+        for target_rel, placeholder in required_targets.items():
+            template_rel = next(
+                (template for template, target in TEMPLATE_MAP.items() if target == target_rel),
+                None,
+            )
+            if not template_rel:
+                errors.append(f"Discord 配置模板映射缺失: {target_rel}")
+                continue
+            try:
+                raw = ConfigInitializer._read_template(template_rel)
+                if raw is None:
+                    errors.append(f"模板不存在: {template_rel}")
+                    continue
+                if target_rel == DISCORD_KOISHI_TARGET:
+                    valid = (
+                        ConfigInitializer._koishi_discord_placeholder_location(raw)
+                        is not None
+                    )
+                else:
+                    document = tomlkit.parse(raw)
+                    discord_section = document.get("discord")
+                    valid = (
+                        discord_section is not None
+                        and discord_section.get("token") == placeholder
+                    )
+                if not valid:
+                    errors.append(f"Discord 配置模板占位符无效: {template_rel}")
+            except Exception:
+                # Keep parse and filesystem details out of the response.  The
+                # user can repair the checked-in template and retry deployment.
+                errors.append(f"Discord 配置模板无法验证: {template_rel}")
+        return errors
+
+    @staticmethod
+    def _koishi_discord_placeholder_location(raw: str) -> int | None:
+        """Locate the fresh placeholder only under the Discord adapter plugin.
+
+        The repository template is intentionally handled with a narrow YAML
+        shape check instead of a generic YAML round-trip: this preserves its
+        comments/formatting while still rejecting a global or misplaced token
+        placeholder.  The adapter plugin key is a generated ``adapter-discord``
+        mapping and its token must be a direct child at the mapping's first
+        indentation level.
+        """
+        if raw.count(DISCORD_KOISHI_PLACEHOLDER) != 1:
+            return None
+
+        lines = raw.splitlines(keepends=True)
+        adapter_headers: list[tuple[int, int]] = []
+        for index, line in enumerate(lines):
+            content = line.rstrip("\r\n")
+            if not content.strip() or content.lstrip().startswith("#"):
+                continue
+            leading = content[: len(content) - len(content.lstrip(" "))]
+            if "\t" in leading:
+                return None
+            if re.match(r"^ *adapter-discord:[^:\r\n]*:\s*(?:#.*)?$", content):
+                adapter_headers.append((index, len(leading)))
+
+        if len(adapter_headers) != 1:
+            return None
+
+        header_index, header_indent = adapter_headers[0]
+        body: list[tuple[int, int, str]] = []
+        for index in range(header_index + 1, len(lines)):
+            content = lines[index].rstrip("\r\n")
+            if not content.strip() or content.lstrip().startswith("#"):
+                continue
+            leading = content[: len(content) - len(content.lstrip(" "))]
+            if "\t" in leading:
+                return None
+            indent = len(leading)
+            if indent <= header_indent:
+                break
+            body.append((index, indent, content))
+
+        if not body:
+            return None
+        direct_indent = min(indent for _, indent, _ in body)
+        token_lines = [
+            (index, content)
+            for index, indent, content in body
+            if indent == direct_indent
+            and re.match(r"^ *token:\s*(.*?)\s*$", content)
+        ]
+        if len(token_lines) != 1:
+            return None
+        index, content = token_lines[0]
+        token_match = re.match(r"^ *token:\s*(.*?)\s*$", content)
+        if token_match is None or token_match.group(1) != DISCORD_KOISHI_PLACEHOLDER:
+            return None
+        return index
+
+    @staticmethod
+    def _apply_discord_token(
+        target_path: Path,
+        target_rel: str,
+        token: str,
+    ) -> str | None:
+        """Replace exactly one known placeholder in a generated target."""
+        try:
+            raw = target_path.read_text(encoding="utf-8")
+        except Exception:
+            return "Discord 配置文件无法读取"
+
+        if target_rel == DISCORD_KOISHI_TARGET:
+            line_index = ConfigInitializer._koishi_discord_placeholder_location(raw)
+            if line_index is None:
+                return "Koishi Discord Token 占位符无效，已拒绝写入"
+            # JSON double-quoted strings are valid YAML scalars and escape all
+            # control characters, quotes, and newlines safely.
+            replacement = json.dumps(token, ensure_ascii=False)
+            lines = raw.splitlines(keepends=True)
+            lines[line_index] = lines[line_index].replace(
+                DISCORD_KOISHI_PLACEHOLDER, replacement, 1
+            )
+            updated = "".join(lines)
+            try:
+                target_path.write_text(updated, encoding="utf-8")
+            except Exception:
+                return "Koishi Discord 配置写入失败"
+            return None
+
+        if target_rel == DISCORD_VC_TARGET:
+            try:
+                document = tomlkit.parse(raw)
+            except Exception:
+                return "DiscordVC 配置 TOML 无法解析"
+            discord_section = document.get("discord")
+            if (
+                discord_section is None
+                or discord_section.get("token") != DISCORD_VC_PLACEHOLDER
+            ):
+                return "DiscordVC Token 占位符无效，已拒绝写入"
+            discord_section["token"] = token
+            try:
+                target_path.write_text(tomlkit.dumps(document), encoding="utf-8")
+            except Exception:
+                return "DiscordVC 配置写入失败"
+            return None
+
+        return "未知 Discord 配置目标"
+
+    @staticmethod
     def _should_generate(component_id: str, target_rel: str, components: set) -> bool:
         """Determine if a config file should be generated based on selected components."""
         # Core configs are always generated
@@ -374,6 +869,7 @@ class ConfigInitializer:
             "NachoBot-Koishi-Adapter": "discord",
             "NachoBot-DiscordVC-Adapter": "discord",
             "NachoBot-UniversalVC-Adapter": "universalvc",
+            "koishi-app": "discord",
         }
         required = mapping.get(component_id)
         if required:
@@ -401,6 +897,20 @@ class ConfigInitializer:
             port = env_data.get("port", "8000")
             target_path.write_text(f"HOST={host}\nPORT={port}\n", encoding="utf-8")
             return None
+
+        # Koishi is a YAML configuration.  Its Discord token is the only
+        # wizard override and is applied against the asserted fresh template.
+        if target_rel == "koishi-app/koishi.yml":
+            token, token_error = ConfigInitializer._get_discord_token(wizard_data)
+            if token_error:
+                return token_error
+            return ConfigInitializer._apply_discord_token(target_path, target_rel, token)
+
+        if target_rel == DISCORD_VC_TARGET:
+            token, token_error = ConfigInitializer._get_discord_token(wizard_data)
+            if token_error:
+                return token_error
+            return ConfigInitializer._apply_discord_token(target_path, target_rel, token)
 
         # ── TOML files ──
         try:

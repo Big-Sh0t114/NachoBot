@@ -4,6 +4,7 @@ Main entry point: REST API + WebSocket endpoints + static file serving.
 """
 
 import asyncio
+import inspect
 import json
 import logging
 import socket
@@ -14,7 +15,7 @@ from urllib.parse import urlparse
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 from config_manager import ConfigManager
@@ -27,7 +28,15 @@ import memory_manager
 from music_library import build_music_playlist
 from chat_backend import ChatBackendError, chat_backend
 from tts_manager import TTSGenerationError, TTSManager, TTSUnavailableError
-from setup_manager import EnvironmentChecker, ConfigInitializer, DependencyInstaller, PathVerifier, NapCatConfigurator
+from setup_manager import (
+    BilibiliLoginNotReady,
+    ConfigInitializer,
+    DependencyInstaller,
+    EnvironmentChecker,
+    NapCatConfigurator,
+    PathVerifier,
+    bilibili_login_manager,
+)
 from security import WebUISecurity, validate_webui_config_raw
 from webui_config import CONFIG_PATH, webui_config
 
@@ -69,6 +78,11 @@ def _validate_webui_config_raw(raw: str) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifecycle."""
+    startup = getattr(bilibili_login_manager, "startup", None)
+    if startup is not None:
+        startup_result = startup()
+        if inspect.isawaitable(startup_result):
+            await startup_result
     # Validate the file itself before trusting the parsed/merged view.  This
     # catches legacy persisted auth_token values even when the current bind is
     # loopback, and protects startup from a raw config that hot-reload never
@@ -83,6 +97,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        await bilibili_login_manager.shutdown()
         await tts_mgr.close()
         await chat_backend.close()
         await process_mgr.shutdown()
@@ -871,6 +886,7 @@ class SetupWizardData(BaseModel):
     providers: list[dict] = []
     models: list[dict] = []
     tts: dict = {}
+    discord: dict = {}
     env: dict = {}
 
 
@@ -883,15 +899,86 @@ async def setup_generate_configs(body: SetupWizardData):
             "[Setup] generate_configs called: components=%s, providers=%d, models=%d",
             data.get("components"), len(data.get("providers", [])), len(data.get("models", []))
         )
-        result = ConfigInitializer.generate_configs(data)
+        # Every config-generation request must first stop and invalidate any
+        # prior QR helper.  This protects non-Bilibili runs from racing an old
+        # helper and keeps unproven process/QR cleanup fail-closed before any
+        # target write begins.
+        async with bilibili_login_manager.config_generation():
+            result = ConfigInitializer.generate_configs(data)
+        if "bilibili" in set(data.get("components", [])):
+            bilibili_login_manager.mark_config_generation(result)
+        else:
+            # A non-Bilibili run must not make an earlier/incomplete Bilibili
+            # deployment look ready for QR login.
+            bilibili_login_manager.mark_config_generation(False)
         logger.info(
-            "[Setup] generate_configs result: generated=%d, errors=%s",
-            len(result.get("generated", [])), result.get("errors", [])
+            "[Setup] generate_configs result: generated=%d, error_count=%d",
+            len(result.get("generated", [])), len(result.get("errors", []))
         )
         return result
     except Exception:
         logger.exception("[Setup] generate_configs failed")
         raise HTTPException(500, "配置生成失败")
+
+
+@app.post("/api/setup/bilibili/login/start")
+async def setup_bilibili_login_start():
+    """Start a fresh authenticated Bilibili QR login generation."""
+    try:
+        return await bilibili_login_manager.start(require_ready=True)
+    except BilibiliLoginNotReady as exc:
+        # This message contains no config or credential content.
+        raise HTTPException(409, str(exc)) from exc
+    except (FileNotFoundError, RuntimeError):
+        raise HTTPException(409, "Bilibili 登录尚未准备好，请重试")
+    except Exception:
+        logger.exception("[Setup] Bilibili login start failed")
+        raise HTTPException(500, "Bilibili 登录启动失败")
+
+
+@app.get("/api/setup/bilibili/login/status/{job_id}")
+async def setup_bilibili_login_status(job_id: str):
+    """Return safe status for the current-generation login job."""
+    result = await bilibili_login_manager.status(job_id)
+    if result is None:
+        raise HTTPException(
+            404,
+            "登录任务不存在或已过期",
+            headers={"Cache-Control": "no-store"},
+        )
+    return JSONResponse(content=result, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/setup/bilibili/login/status")
+async def setup_bilibili_login_status_query(job_id: str = Query(...)):
+    """Query-form compatibility alias for status polling."""
+    return await setup_bilibili_login_status(job_id)
+
+
+@app.get("/api/setup/bilibili/login/qr/{job_id}")
+async def setup_bilibili_login_qr(job_id: str):
+    """Serve only the complete QR image for the current login job."""
+    payload = await bilibili_login_manager.read_qr(job_id)
+    if payload is None:
+        raise HTTPException(
+            404,
+            "二维码不存在或已过期",
+            headers={"Cache-Control": "no-store"},
+        )
+    return Response(
+        content=payload,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "no-store",
+            "Pragma": "no-cache",
+        },
+    )
+
+
+@app.get("/api/setup/bilibili/login/qr")
+async def setup_bilibili_login_qr_query(job_id: str = Query(...)):
+    """Query-form compatibility alias for QR retrieval."""
+    return await setup_bilibili_login_qr(job_id)
 
 
 class VerifyPathRequest(BaseModel):
@@ -985,6 +1072,10 @@ async def ws_setup_install(ws: WebSocket):
                     pass
 
             result = await DependencyInstaller.install(task, callback=on_line)
+
+            bilibili_login_manager.mark_dependency_task(
+                task.get("id", ""), result.get("status", "error")
+            )
 
             await ws.send_text(json.dumps({
                 "type": "task_done",

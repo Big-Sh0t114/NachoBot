@@ -20,6 +20,13 @@ try:
         DependencyInstaller,
         NapCatConfigurator,
     )
+    from .setup_bilibili_login import (
+        BilibiliLoginCleanupError,
+        BilibiliLoginManager,
+        BilibiliLoginNotReady,
+        BilibiliLoginProcessError,
+        bilibili_login_manager,
+    )
 except ImportError:
     from setup_checks import (
         DEFAULT_PORTS,
@@ -36,6 +43,13 @@ except ImportError:
         DependencyInstaller,
         NapCatConfigurator,
     )
+    from setup_bilibili_login import (
+        BilibiliLoginCleanupError,
+        BilibiliLoginManager,
+        BilibiliLoginNotReady,
+        BilibiliLoginProcessError,
+        bilibili_login_manager,
+    )
 
 # Backward-compatible public alias. These are defaults only; runtime checks
 # resolve configured ports through EnvironmentChecker._configured_ports().
@@ -49,9 +63,14 @@ __all__ = [
     "ROOT_DIR",
     "TEMPLATE_MAP",
     "BackupManager",
+    "BilibiliLoginCleanupError",
+    "BilibiliLoginManager",
+    "BilibiliLoginNotReady",
+    "BilibiliLoginProcessError",
     "ConfigInitializer",
     "DependencyInstaller",
     "EnvironmentChecker",
     "NapCatConfigurator",
     "PathVerifier",
+    "bilibili_login_manager",
 ]
