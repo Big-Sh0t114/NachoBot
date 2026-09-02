@@ -1,13 +1,13 @@
 # Focus 短期跨会话模式
 
-Focus 在一个显式配置的会话组内只允许一个会话处于活动状态。后台会话收到消息时只聚合为事件，当前会话的 Planner 可以用终止动作 `switch_chat` 切换活动会话；切换时生成一份有界、短期、不可直接执行的 handoff，并在目标会话下一次由 Replyer 生成回复时注入。
+Focus 在一个显式配置的会话组内只允许一个会话处于活动状态。后台会话收到消息时只聚合为事件，当前会话的 Planner 可以用终止动作 `switch_chat` 切换活动会话；群聊源切换时生成一份有界、短期、不可直接执行的 handoff，并在目标会话下一次由 Replyer 生成回复时注入。私聊源切换只传递路由元数据，不注入任何源内容。
 
 ## 当前支持范围
 
 - 同一 Focus 组内 `群聊 -> 群聊`。
 - 同一 Focus 组内 `群聊 -> 私聊`，需开启 `allow_group_to_private`。
-- 私聊内容不允许导出到群聊或其他私聊；v1 不提供 `私聊 -> 群聊` 和 `私聊 -> 私聊` handoff。
-- 私聊可以通过不携带 handoff 的元数据控制路径安全返回组内群聊。
+- 私聊内容不允许导出到群聊或其他私聊；私聊源可通过不携带 handoff 的元数据切换到事件指定的组内群聊或另一私聊。
+- `allow_group_to_private` 只控制群聊源到私聊；私聊成员即使该开关关闭仍可参与 Focus，并保持元数据切换能力。
 - `off` 完全保持原有回复路径；`active` 启用 Focus。`observe` 当前是安全占位模式，不改变消息路由。
 
 群聊和私聊必须显式列入同一个 Focus 组，成员的 `allow_export` / `allow_import` 还会在服务端再次校验。模型不能指定真实 chat id、epoch、策略版本或 handoff id。
@@ -20,8 +20,8 @@ Focus 在一个显式配置的会话组内只允许一个会话处于活动状�
 2. 当前活动会话的消息唤醒其运行时；后台会话只更新未读事件，不启动后台回复循环。
 3. Planner 看到由服务端生成的 `focus_events`，只能引用其中的 `event_id` 和 `revision`。
 4. `switch_chat` 校验当前 lease、事件 revision、组成员关系和隐私策略，并等待旧会话正在发送的副作用结束。
-5. SQLite 事务原子更新活动会话和 epoch，同时保存 handoff；旧 lease 随即失效。
-6. 目标会话由 Replyer 正常生成回复。handoff 被放在当前消息之后、长期记忆之前，内容经过转义、长度限制并标记为不可信上下文。
+5. SQLite 事务原子更新活动会话和 epoch；群聊源切换时同时保存 handoff，旧 lease 随即失效。
+6. 目标会话由 Replyer 正常生成回复。群聊 handoff 被放在当前消息之后、长期记忆之前，内容经过转义、长度限制并标记为不可信上下文；私聊源切换不读取源历史、不创建 handoff。
 7. 只有适配器确认至少一段回复实际送达后才 ACK handoff。生成失败、取消、静默抑制或 lease 过期都会释放 reservation，不会误消费上下文。
 
 消息读取使用数据库主键行号而不是时间戳。一次 Focus turn 只有在完成、无操作或被策略丢弃时提交 cursor；失败、取消、过期或切换会在当前进程内安全重试。SQLite 仍作为活动会话切换、cursor、事件和 handoff 的运行期事务边界，但这些运行状态不跨重启恢复：每次启动都会作废旧 pending event、active handoff 和 reservation，将所有当前成员 cursor 建立在启动时的最新消息，并从 `initial_member` 开始。
@@ -78,7 +78,7 @@ Focus 会话的确定性抢占优先级为 `Planner bypass 会话 > 私聊 > 普
 
 ## 重要语义
 
-- `switch_chat` 是终止动作：选中后，本轮其余回复、工具和动作全部丢弃。
+- `switch_chat` 是终止动作：选中后，本轮其余回复、工具和动作全部丢弃。私聊源只能携带事件 ID，不能携带 handoff 或源内容。
 - Focus 管理的发送必须携带当前 turn lease；切换后的旧会话发送会得到 `STALE_LEASE`，不会到达适配器。
 - 一条逻辑回复即使拆成多段也只结算一次 handoff；部分送达按成功结算，全失败才释放。
 - HeartFlow 先处理上述高优先级强制抢占；未被直接路由的 Focus 事件再由轻量 Gate 判断，输出域只有 `stay`/`switch`。Bilibili/Discord VC/Universal VC 仍跳过完整 Planner。
@@ -94,4 +94,4 @@ Focus 会话的确定性抢占优先级为 `Planner bypass 会话 > 私聊 > 普
 
 ## 运维边界
 
-v1 的私聊是内容导出的终点，因此不会把私聊 handoff 带回群聊。组内群聊出现待处理事件时，私聊 Planner 只能看到不含消息正文的安全返回事件，并可通过无 handoff 的 `switch_chat` 返回。普通插件或定时任务若直接向 Focus 管理的会话发送且没有当前 lease，会被拒绝；这类来源应接入 Focus 的系统事件桥，而不是绕过协调器。
+私聊始终是内容导出的禁区。组内任一会话出现待处理事件时，私聊 Planner 只能看到不含消息正文的元数据事件，并可通过无 handoff 的 `switch_chat` 切换到事件指定的组内群聊或另一私聊；切换后的目标只读取目标会话自己的未读行。普通插件或定时任务若直接向 Focus 管理的会话发送且没有当前 lease，会被拒绝；这类来源应接入 Focus 的系统事件桥，而不是绕过协调器。

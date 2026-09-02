@@ -58,6 +58,9 @@ from src.chat.focus.reply_delivery import settle_reply_context_delivery
 from src.chat.focus.message_repository import load_message_batch
 from src.chat.focus.switch_action import (
     SWITCH_CHAT_ACTION,
+    SwitchDisposition,
+    classify_switch_failure_reason,
+    classify_switch_result,
     execute_switch_chat,
     format_recent_source_messages,
 )
@@ -614,6 +617,25 @@ class HeartFChatting:
     ) -> List[str]:
         return list(format_recent_source_messages(recent_messages or (), limit=10))
 
+    def _record_dropped_focus_switch(
+        self,
+        focus_turn: FocusTurn,
+        action_data: Dict[str, Any] | None,
+    ) -> None:
+        """Acknowledge only the event whose permanent switch was rejected."""
+
+        observed = {
+            event.event_id: event.revision
+            for event in focus_turn.events
+        }
+        event_id = action_data.get("event_id") if isinstance(action_data, dict) else None
+        if isinstance(event_id, str) and event_id in observed:
+            delivered = dict(self._focus_delivered_event_revisions or {})
+            delivered[event_id] = observed[event_id]
+            self._focus_delivered_event_revisions = delivered
+        elif not self._focus_delivered_event_revisions:
+            self._focus_delivered_event_revisions = observed
+
     @staticmethod
     def _focus_forced_priority_action(
         coordinator: FocusCoordinator,
@@ -645,7 +667,7 @@ class HeartFChatting:
                 event.event_id,
             ),
         )
-        recent_results = HeartFChatting._focus_handoff_recent_results(recent_messages)
+        recent_results: List[str] = []
         for event in ranked_events:
             target = coordinator.policy.member(definition, event.target_chat_id)
             if target is None:
@@ -654,7 +676,7 @@ class HeartFChatting:
             if target_priority <= source_priority:
                 continue
 
-            safe_return = coordinator.policy.can_return_without_handoff(
+            metadata_only = coordinator.policy.can_switch_without_handoff(
                 definition,
                 source_chat_id,
                 event.target_chat_id,
@@ -663,14 +685,16 @@ class HeartFChatting:
                 definition,
                 source_chat_id,
                 event.target_chat_id,
-                has_handoff=not safe_return,
+                has_handoff=not metadata_only,
             )
             if not decision.allowed:
                 continue
 
             target_kind = "Planner bypass 会话" if HeartFChatting._focus_member_bypasses_planner(target) else "私聊"
-            handoff = {}
-            if not safe_return:
+            action_data = {"event_id": event.event_id}
+            if not metadata_only:
+                if not recent_results:
+                    recent_results = HeartFChatting._focus_handoff_recent_results(recent_messages)
                 handoff = {
                     "task_summary": (
                         f"按 Focus 会话优先级从「{source.display_name or source.chat_id}」切换到"
@@ -681,10 +705,11 @@ class HeartFChatting:
                     "pending_items": [f"处理目标{target_kind}中的最新未读消息"],
                     "recent_results": recent_results,
                 }
+                action_data["handoff"] = handoff
             return ActionPlannerInfo(
                 action_type=SWITCH_CHAT_ACTION,
                 reasoning=("Focus priority preemption: planner-bypass > private > normal-group"),
-                action_data={"event_id": event.event_id, "handoff": handoff},
+                action_data=action_data,
                 action_message=None,
                 available_actions=available_actions,
             )
@@ -719,28 +744,32 @@ class HeartFChatting:
             if not (explicit_signal or bypass_boundary):
                 continue
 
-            safe_return = coordinator.policy.can_return_without_handoff(
+            metadata_only = coordinator.policy.can_switch_without_handoff(
                 definition,
                 source_chat_id,
                 event.target_chat_id,
             )
-            if source.kind is ChatKind.PRIVATE and not safe_return:
+            if source.kind is ChatKind.PRIVATE and not metadata_only:
                 continue
-            if target.kind is ChatKind.PRIVATE and not global_config.focus.allow_group_to_private:
+            if (
+                source.kind is ChatKind.GROUP
+                and target.kind is ChatKind.PRIVATE
+                and not global_config.focus.allow_group_to_private
+            ):
                 continue
             policy_decision = coordinator.policy.decide_switch(
                 definition,
                 source_chat_id,
                 event.target_chat_id,
-                has_handoff=not safe_return,
+                has_handoff=not metadata_only,
             )
             if not policy_decision.allowed:
                 continue
 
             fallback_kind = "mentioned/at" if explicit_signal else "bypass-session boundary"
-            handoff = {}
-            if not safe_return:
-                handoff = {
+            action_data = {"event_id": event.event_id}
+            if not metadata_only:
+                action_data["handoff"] = {
                     "task_summary": (
                         f"Focus Gate 不可用，按 {fallback_kind} 降级规则从"
                         f"「{source.display_name or source.chat_id}」切换到"
@@ -751,7 +780,7 @@ class HeartFChatting:
             return ActionPlannerInfo(
                 action_type=SWITCH_CHAT_ACTION,
                 reasoning=f"Focus Gate unavailable; deterministic {fallback_kind} fallback",
-                action_data={"event_id": event.event_id, "handoff": handoff},
+                action_data=action_data,
                 action_message=None,
                 available_actions=available_actions,
             )
@@ -1038,10 +1067,18 @@ class HeartFChatting:
                         action_data=forced_priority_action.action_data,
                         reasoning=forced_priority_action.reasoning,
                     )
+                    disposition = classify_switch_result(switch_result)
                     if switch_result.success:
+                        logger.info(f"{self.log_prefix} [Focus] forced priority switch succeeded")
                         return True
-                    logger.warning(f"{self.log_prefix} [Focus] forced priority switch failed: {switch_result.reason}")
-                    return False
+                    logger.warning(
+                        f"{self.log_prefix} [Focus] forced priority switch failed; "
+                        f"{'retrying' if disposition is SwitchDisposition.RETRY else 'dropping event'}: "
+                        f"{switch_result.reason}"
+                    )
+                    if disposition is SwitchDisposition.DROP:
+                        self._record_dropped_focus_switch(focus_turn, forced_priority_action.action_data)
+                    return disposition is not SwitchDisposition.RETRY
 
                 # --- 中期记忆摘要生成已移至独立后台循环，此处无需处理 ---
 
@@ -1103,10 +1140,18 @@ class HeartFChatting:
                             action_data=gate_action.action_data,
                             reasoning=gate_action.reasoning,
                         )
+                        disposition = classify_switch_result(switch_result)
                         if switch_result.success:
+                            logger.info(f"{self.log_prefix} [Focus Gate] terminal switch succeeded")
                             return True
-                        logger.warning(f"{self.log_prefix} [Focus Gate] switch failed: {switch_result.reason}")
-                        return False
+                        logger.warning(
+                            f"{self.log_prefix} [Focus Gate] switch failed; "
+                            f"{'retrying' if disposition is SwitchDisposition.RETRY else 'dropping event'}: "
+                            f"{switch_result.reason}"
+                        )
+                        if disposition is SwitchDisposition.DROP:
+                            self._record_dropped_focus_switch(focus_turn, gate_action.action_data)
+                        return disposition is not SwitchDisposition.RETRY
 
                 async def build_current_planner_prompt():
                     with Timer("Planner Prompt构建", cycle_timers):
@@ -1752,13 +1797,19 @@ class HeartFChatting:
                 if action_planner_info.action_type == SWITCH_CHAT_ACTION:
                     lease = current_context_lease()
                     if lease is None or lease.chat_id != self.stream_id:
+                        reason = "switch_chat requires the current Focus turn lease"
+                        disposition = classify_switch_failure_reason(reason)
+                        logger.warning(
+                            f"{self.log_prefix} Focus switch_chat failed; "
+                            f"{'retrying' if disposition is SwitchDisposition.RETRY else 'dropping event'}: {reason}"
+                        )
                         return {
                             "action_type": SWITCH_CHAT_ACTION,
                             "success": False,
                             "reply_text": "",
                             "terminal": True,
-                            "retry": False,
-                            "reason": "switch_chat requires the current Focus turn lease",
+                            "retry": disposition is SwitchDisposition.RETRY,
+                            "reason": reason,
                         }
                     switch_result = await execute_switch_chat(
                         focus_coordinator,
@@ -1766,23 +1817,21 @@ class HeartFChatting:
                         action_data=action_planner_info.action_data or {},
                         reasoning=action_planner_info.reasoning or "",
                     )
-                    retryable = switch_result.reason.startswith(
-                        (
-                            "cannot resolve Focus events",
-                            "target runtime preparation failed",
-                            "handoff persistence failed",
-                            "switch compare-and-set failed",
-                            "Focus event revision changed",
+                    disposition = classify_switch_result(switch_result)
+                    if switch_result.success:
+                        logger.info(f"{self.log_prefix} Focus switch_chat succeeded: {switch_result.reason}")
+                    else:
+                        logger.warning(
+                            f"{self.log_prefix} Focus switch_chat failed; "
+                            f"{'retrying' if disposition is SwitchDisposition.RETRY else 'dropping event'}: "
+                            f"{switch_result.reason}"
                         )
-                    )
-                    log = logger.info if switch_result.success else logger.warning
-                    log(f"{self.log_prefix} Focus switch_chat: {switch_result.reason}")
                     return {
                         "action_type": SWITCH_CHAT_ACTION,
                         "success": switch_result.success,
                         "reply_text": "",
                         "terminal": True,
-                        "retry": retryable,
+                        "retry": disposition is SwitchDisposition.RETRY,
                         "reason": switch_result.reason,
                         "target_chat_id": switch_result.target_chat_id,
                         "handoff_id": switch_result.handoff_id,
