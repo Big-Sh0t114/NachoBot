@@ -8,11 +8,11 @@ platform = "bilibili"
 
 [bilibili]
 bot_account = " "       # 填写bot b站id
-sessdata = " "          # 以下字段请运行适配器目录下的 qr_login.py 自动填写
-bili_jct = " "
-buvid3 = " "
-buvid4 = " "
-dede_user_id = " "
+sessdata = ""           # 以下字段请运行适配器目录下的 qr_login.py 自动填写
+bili_jct = ""
+buvid3 = ""
+buvid4 = ""
+dede_user_id = ""
 user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
 [live]
@@ -46,8 +46,8 @@ master_user_name = " "      # 你希望自己在bot上下文中出现的名字
 
 [mic_asr]
 enable = true
-room_id = 
-subtitle_path = ""           # 语音识别字幕路径，用于obs直播       
+room_id = ""
+subtitle_path = ""           # 语音识别字幕路径，用于obs直播
 silence_threshold = 0.015
 silence_duration = 0.8
 sample_rate = 48000

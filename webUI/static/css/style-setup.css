@@ -393,6 +393,21 @@
     flex: 1;
 }
 
+.setup-discord-token-group {
+    min-width: 0;
+}
+
+.setup-discord-token-group .form-input {
+    min-width: 0;
+}
+
+.setup-discord-portal-link {
+    flex: 0 0 auto;
+    min-width: max-content;
+    white-space: nowrap;
+    text-decoration: none;
+}
+
 .form-select {
     flex: 1;
     padding: 8px 12px;
@@ -603,6 +618,53 @@
 .deploy-log-line {
     white-space: pre-wrap;
     word-break: break-all;
+}
+
+/* Bilibili QR login */
+.setup-bilibili-login-body {
+    padding: 18px 24px 22px;
+}
+
+.setup-bilibili-login-message {
+    margin: 0 0 14px;
+    color: var(--text-secondary);
+    line-height: 1.6;
+}
+
+.bilibili-login-status {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    font-weight: 600;
+}
+
+.bilibili-login-status.waiting {
+    color: var(--accent-dark);
+}
+
+.bilibili-login-status.success {
+    color: var(--success);
+}
+
+.bilibili-login-status.error {
+    color: var(--error);
+}
+
+.setup-bilibili-qr-wrap {
+    width: min(280px, 100%);
+    padding: 12px;
+    margin: 8px 0 16px;
+    background: #fff;
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-sm);
+}
+
+.setup-bilibili-qr-wrap img {
+    display: block;
+    width: 100%;
+    height: auto;
+    aspect-ratio: 1;
+    image-rendering: pixelated;
 }
 
 /* Spinner animation */
@@ -957,4 +1019,13 @@
     .step-label { font-size: 0.7rem; }
     .form-row { flex-direction: column; gap: 4px; }
     .form-label { min-width: auto; padding-top: 0; }
+    .setup-discord-token-group {
+        width: 100%;
+        flex-direction: column;
+        align-items: stretch;
+    }
+    .setup-discord-token-group .form-input,
+    .setup-discord-portal-link {
+        width: 100%;
+    }
 }

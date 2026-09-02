@@ -590,6 +590,31 @@
                                         placeholder="例如: NachoBot（留空使用默认值）">
                                 </div>
                             </div>
+                            <div class="form-section" id="setup-discord-section" style="display:none">
+                                <div class="form-section-title">Discord Bot 配置</div>
+                                <p class="form-section-hint">选择 Discord 时必须填写一个 Bot Token</p>
+                                <div class="form-row">
+                                    <label class="form-label">Bot Token <span class="form-required">*</span></label>
+                                    <div class="form-input-group setup-discord-token-group">
+                                        <input type="password" class="form-input" id="setup-discord-token"
+                                            autocomplete="new-password" spellcheck="false" required
+                                            placeholder="粘贴 Discord Bot Token">
+                                        <a class="btn btn-outline btn-sm setup-discord-portal-link"
+                                            href="https://discord.com/developers/applications" target="_blank"
+                                            rel="noopener noreferrer">前往 Discord 开发者平台</a>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="form-section" id="setup-bilibili-section" style="display:none">
+                                <div class="form-section-title">Bilibili Bot 配置</div>
+                                <p class="form-section-hint">选择 Bilibili 时必须填写 Bot UID（B站账号 UID）</p>
+                                <div class="form-row">
+                                    <label class="form-label">Bilibili Bot UID <span class="form-required">*</span></label>
+                                    <input type="text" class="form-input" id="setup-bilibili-bot-account"
+                                        inputmode="numeric" pattern="[0-9]+" required
+                                        placeholder="例如: 123456789">
+                                </div>
+                            </div>
                         </div>
                     </div>
 
@@ -868,6 +893,23 @@
                             <h3>📋 安装日志</h3>
                         </div>
                         <div class="deploy-log" id="deploy-log"></div>
+                    </div>
+                    <div class="setup-card setup-bilibili-login-card" id="setup-bilibili-login-card"
+                        style="display:none">
+                        <div class="setup-card-header">
+                            <h3>📺 Bilibili 登录</h3>
+                            <span class="bilibili-login-status" id="setup-bilibili-login-status">等待启动</span>
+                        </div>
+                        <div class="setup-bilibili-login-body">
+                            <p class="setup-bilibili-login-message" id="setup-bilibili-login-message">
+                                请使用 Bilibili App 扫描二维码，并在 App 中确认登录。
+                            </p>
+                            <div class="setup-bilibili-qr-wrap" id="setup-bilibili-qr-wrap" style="display:none">
+                                <img id="setup-bilibili-qr" alt="Bilibili 登录二维码">
+                            </div>
+                            <button class="btn btn-outline btn-sm" id="setup-bilibili-retry"
+                                style="display:none">重新获取二维码</button>
+                        </div>
                     </div>
                     <div class="setup-hint-banner" id="setup-launch-tip"
                         style="display:none; margin-top: 20px; background: rgba(34, 197, 94, 0.1); border-color: rgba(34, 197, 94, 0.2); color: #166534;">

@@ -1,3 +1,7 @@
+9/2
+    修复focus模式下私聊切换至私聊无限卡死的问题
+8/31
+    WebUI一键部署增加对Discord/Bilibili侧的支持
 8/27
     添加部署时对git的校验
     优化tts runtime对现有python环境的复用

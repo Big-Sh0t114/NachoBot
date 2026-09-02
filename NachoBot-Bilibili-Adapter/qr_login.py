@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -26,6 +28,12 @@ DEFAULT_HEADERS = {
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "zh-CN,zh;q=0.9",
 }
+PRIMARY_COOKIE_NAMES = ("SESSDATA", "bili_jct", "DedeUserID")
+
+
+def _is_nonblank_string(value: object) -> bool:
+    """Return whether a credential value contains non-whitespace text."""
+    return isinstance(value, str) and bool(value.strip())
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -37,7 +45,26 @@ def load_config(path: Path) -> dict[str, Any]:
 
 def save_config(path: Path, data: dict[str, Any]) -> None:
     payload = toml_writer.dumps(data)
-    path.write_text(payload, encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+            delete=False,
+        ) as temp_file:
+            temp_path = Path(temp_file.name)
+            temp_file.write(payload)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+        os.replace(temp_path, path)
+        temp_path = None
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
 
 
 def generate_qr(session: requests.Session) -> dict[str, str]:
@@ -55,12 +82,31 @@ def print_qr(url: str, output_path: Path) -> None:
     qr.add_data(url)
     qr.make(fit=True)
     img = qr.make_image(fill_color="black", back_color="white")
-    img.save(output_path)
-    print(f"QR saved to: {output_path}")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    # Publish only after the encoder has completed.  The WebUI reads this
+    # fixed path while the helper is running, so a direct write could expose a
+    # truncated PNG to a concurrent request.
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            prefix=f".{output_path.name}.",
+            suffix=".tmp",
+            dir=output_path.parent,
+            delete=False,
+        ) as temp_file:
+            temp_path = Path(temp_file.name)
+        img.save(temp_path, format="PNG")
+        os.replace(temp_path, output_path)
+        temp_path = None
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+    print("QR image ready (URL hidden).")
     try:
         qr.print_ascii(invert=True)
-    except Exception:  # noqa: BLE001 - 终端不支持时回退显示 URL
-        print(f"QR URL: {url}")
+    except Exception:  # noqa: BLE001 - terminal may not support ASCII preview
+        print("QR preview unavailable; scan the published image.")
 
 
 def poll_login(session: requests.Session, qrcode_key: str, timeout_seconds: int = 180) -> dict[str, Any]:
@@ -139,10 +185,20 @@ def main() -> int:
         print("QR login failed or expired.")
         return 1
 
-    sessdata = extract_cookie(session, "SESSDATA") or ""
-    bili_jct = extract_cookie(session, "bili_jct") or ""
-    dede_user_id = extract_cookie(session, "DedeUserID") or ""
+    primary_credentials = tuple(
+        extract_cookie(session, name) or "" for name in PRIMARY_COOKIE_NAMES
+    )
+    sessdata, bili_jct, dede_user_id = primary_credentials
+
+    # Do not merge a partial current login with credentials left by an older
+    # attempt.  The config is still untouched when any primary cookie is
+    # absent or blank.
+    if not all(isinstance(value, str) and value.strip() for value in primary_credentials):
+        print("Login succeeded, but required credentials were not returned; config unchanged.")
+        return 1
+
     buvid = fetch_buvid(session)
+    updated_fields = ["SESSDATA", "bili_jct", "DedeUserID"]
 
     bilibili_cfg = config.setdefault("bilibili", {})
     if sessdata:
@@ -151,24 +207,16 @@ def main() -> int:
         bilibili_cfg["bili_jct"] = bili_jct
     if dede_user_id:
         bilibili_cfg["dede_user_id"] = dede_user_id
-    if buvid.get("buvid3") and not bilibili_cfg.get("buvid3"):
-        bilibili_cfg["buvid3"] = buvid["buvid3"]
-    if buvid.get("buvid4") and not bilibili_cfg.get("buvid4"):
-        bilibili_cfg["buvid4"] = buvid["buvid4"]
+    for field in ("buvid3", "buvid4"):
+        fetched_value = buvid.get(field)
+        if _is_nonblank_string(fetched_value) and not _is_nonblank_string(
+            bilibili_cfg.get(field)
+        ):
+            bilibili_cfg[field] = fetched_value
+            updated_fields.append(field)
 
     save_config(config_path, config)
     print("Login success. Updated config.toml.")
-    updated_fields = [
-        name
-        for name, value in (
-            ("SESSDATA", sessdata),
-            ("bili_jct", bili_jct),
-            ("DedeUserID", dede_user_id),
-            ("buvid3", buvid.get("buvid3")),
-            ("buvid4", buvid.get("buvid4")),
-        )
-        if value
-    ]
     print(f"Stored credential fields: {', '.join(updated_fields) or 'none'} (values hidden).")
     return 0
 

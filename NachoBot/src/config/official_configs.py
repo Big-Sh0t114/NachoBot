@@ -819,7 +819,7 @@ class FocusMemberConfig(ConfigBase):
     """适配器平台名，例如 qq。"""
 
     kind: Literal["group", "private"]
-    """会话类型。v1 支持 group->group 和 group->private。"""
+    """会话类型；私聊源只允许不携带内容的元数据切换。"""
 
     external_id: str
     """平台侧群号或用户号，启动时解析成 ChatStream.stream_id。"""
@@ -831,7 +831,7 @@ class FocusMemberConfig(ConfigBase):
     """是否允许该会话接收短期交接内容。"""
 
     allow_export: bool = True
-    """是否允许该会话导出短期交接内容。私聊源在 v1 中仍会被策略拒绝。"""
+    """是否允许该会话导出短期交接内容；私聊源不会导出内容。"""
 
     planner_bypass: bool = False
     """该会话是否由适配器声明为直答会话；用于启动时尚无消息上下文的 Focus 排序。"""
@@ -869,7 +869,7 @@ class FocusConfig(ConfigBase):
     """off 保持现有逻辑；observe 当前为安全 no-op；active 允许终止式切换和交接。"""
 
     allow_group_to_private: bool = True
-    """允许显式 Focus 组内的群聊到私聊路径；私聊仅可无 handoff 安全返回群聊。"""
+    """是否允许群聊源切换到私聊；私聊源的元数据切换不受此项限制。"""
 
     unread_event_threshold: int = 5
     unviewed_event_seconds: int = 180
@@ -933,8 +933,6 @@ class FocusConfig(ConfigBase):
                 if owner is not None:
                     raise ValueError(f"Focus 成员 {identity!r} 同时出现在 {owner!r} 和 {group.id!r}")
                 identities[identity] = group.id
-                if member.kind == "private" and not self.allow_group_to_private:
-                    raise ValueError(f"Focus group {group.id!r} 包含私聊成员，但 allow_group_to_private=false")
 
 
 @dataclass

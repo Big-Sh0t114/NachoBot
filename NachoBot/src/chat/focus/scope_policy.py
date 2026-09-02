@@ -14,17 +14,17 @@ class ScopeDecision:
 
 
 class ChatScopePolicy:
-    """Default v1 Focus scope policy.
+    """Default Focus scope policy with private-source metadata-only switches.
 
-    Membership is an allow-list, not just routing metadata.  v1 permits an
+    Membership is an allow-list, not just routing metadata.  The policy permits an
     enrolled group chat to switch to either another group chat or an enrolled
-    private chat when configured. A private chat remains a content-export
-    terminal, while a metadata-only, handoff-free control return to an enrolled
-    group is permitted. Private->group and private->private content transfers
-    remain denied.
+    private chat when configured. A private chat cannot export content, while
+    a metadata-only, handoff-free switch to another enrolled member is
+    permitted. Private->group and private->private content transfers remain
+    denied.
     """
 
-    version = "focus-scope-v1-group-export"
+    version = "focus-scope-v2-private-metadata"
 
     def __init__(self, *, allow_group_to_private: bool = True) -> None:
         self._allow_group_to_private = bool(allow_group_to_private)
@@ -48,7 +48,7 @@ class ChatScopePolicy:
         if not target.allow_import:
             return ScopeDecision(False, "target chat does not allow Focus context import")
         if source.kind is ChatKind.PRIVATE:
-            return ScopeDecision(False, "private chats cannot export Focus context in policy v1")
+            return ScopeDecision(False, "private chats cannot export Focus context")
         if target.kind is ChatKind.PRIVATE and not self._allow_group_to_private:
             return ScopeDecision(False, "group-to-private Focus switching is disabled by policy")
         if source.kind is ChatKind.GROUP and target.kind in {ChatKind.GROUP, ChatKind.PRIVATE}:
@@ -65,19 +65,19 @@ class ChatScopePolicy:
     ) -> ScopeDecision:
         """Authorize a control-plane switch without weakening content policy."""
 
-        if self.can_return_without_handoff(definition, source_chat_id, target_chat_id):
+        if self.can_switch_without_handoff(definition, source_chat_id, target_chat_id):
             if has_handoff:
-                return ScopeDecision(False, "private-to-group safe return must not include a handoff")
-            return ScopeDecision(True, "allowed as a metadata-only Focus safe return")
+                return ScopeDecision(False, "private-source metadata-only switch must not include a handoff")
+            return ScopeDecision(True, "allowed as a private-source metadata-only Focus switch")
         return self.decide(definition, source_chat_id, target_chat_id)
 
-    def can_return_without_handoff(
+    def can_switch_without_handoff(
         self,
         definition: FocusGroupDefinition,
         source_chat_id: str,
         target_chat_id: str,
     ) -> bool:
-        """Whether an enrolled private active chat may return to a group."""
+        """Whether a private source may switch without exporting any content."""
 
         source = self.member(definition, source_chat_id)
         target = self.member(definition, target_chat_id)
@@ -86,7 +86,7 @@ class ChatScopePolicy:
             and target is not None
             and source_chat_id != target_chat_id
             and source.kind is ChatKind.PRIVATE
-            and target.kind is ChatKind.GROUP
+            and target.kind in {ChatKind.GROUP, ChatKind.PRIVATE}
         )
 
     def can_preview_event(
@@ -97,6 +97,8 @@ class ChatScopePolicy:
     ) -> bool:
         """Authorize preview content in its real source-to-viewer direction."""
 
+        if self.can_switch_without_handoff(definition, viewer_chat_id, event_source_chat_id):
+            return False
         return self.decide(
             definition,
             event_source_chat_id,
@@ -111,7 +113,12 @@ class ChatScopePolicy:
         return bool(source is not None and target is not None and source_chat_id != target_chat_id)
 
     def can_switch(self, definition: FocusGroupDefinition, source_chat_id: str, target_chat_id: str) -> bool:
-        return self.decide(definition, source_chat_id, target_chat_id).allowed
+        return self.decide_switch(
+            definition,
+            source_chat_id,
+            target_chat_id,
+            has_handoff=False,
+        ).allowed
 
     def can_transfer(self, definition: FocusGroupDefinition, source_chat_id: str, target_chat_id: str) -> bool:
         return self.decide(definition, source_chat_id, target_chat_id).allowed

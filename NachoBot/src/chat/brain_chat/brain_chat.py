@@ -47,7 +47,13 @@ from src.chat.focus.models import (
 from src.chat.focus.reply_context import acquire_reply_context_request, release_reply_context
 from src.chat.focus.reply_delivery import settle_reply_context_delivery
 from src.chat.focus.message_repository import load_message_batch
-from src.chat.focus.switch_action import SWITCH_CHAT_ACTION, execute_switch_chat
+from src.chat.focus.switch_action import (
+    SWITCH_CHAT_ACTION,
+    SwitchDisposition,
+    classify_switch_failure_reason,
+    classify_switch_result,
+    execute_switch_chat,
+)
 from src.chat.utils.chat_message_builder import (
     build_readable_messages_with_id,
     get_raw_msg_before_timestamp_with_chat,
@@ -345,11 +351,16 @@ class BrainChatting:
             action_data=action_data,
             reasoning=reasoning,
         )
+        disposition = classify_switch_result(switch_result)
         if switch_result.success:
             logger.info(f"{self.log_prefix} [Focus Gate] terminal switch without Brain Planner")
             return True
-        logger.warning(f"{self.log_prefix} [Focus Gate] switch failed: {switch_result.reason}")
-        return False
+        logger.warning(
+            f"{self.log_prefix} [Focus Gate] switch failed; "
+            f"{'retrying' if disposition is SwitchDisposition.RETRY else 'dropping event'}: "
+            f"{switch_result.reason}"
+        )
+        return disposition is not SwitchDisposition.RETRY
 
     async def _loopbody(self, focus_turn: FocusTurn | None = None):  # sourcery skip: hoist-if-from-if
         if focus_turn is not None:
@@ -1079,13 +1090,19 @@ class BrainChatting:
                 if action_planner_info.action_type == SWITCH_CHAT_ACTION:
                     lease = current_context_lease()
                     if lease is None or lease.chat_id != self.stream_id:
+                        reason = "switch_chat requires the current Focus turn lease"
+                        disposition = classify_switch_failure_reason(reason)
+                        logger.warning(
+                            f"{self.log_prefix} Focus switch_chat failed; "
+                            f"{'retrying' if disposition is SwitchDisposition.RETRY else 'dropping event'}: {reason}"
+                        )
                         return {
                             "action_type": SWITCH_CHAT_ACTION,
                             "success": False,
                             "reply_text": "",
                             "terminal": True,
-                            "retry": False,
-                            "reason": "switch_chat requires the current Focus turn lease",
+                            "retry": disposition is SwitchDisposition.RETRY,
+                            "reason": reason,
                         }
                     switch_result = await execute_switch_chat(
                         focus_coordinator,
@@ -1093,23 +1110,21 @@ class BrainChatting:
                         action_data=action_planner_info.action_data or {},
                         reasoning=action_planner_info.reasoning or "",
                     )
-                    retryable = switch_result.reason.startswith(
-                        (
-                            "cannot resolve Focus events",
-                            "target runtime preparation failed",
-                            "handoff persistence failed",
-                            "switch compare-and-set failed",
-                            "Focus event revision changed",
+                    disposition = classify_switch_result(switch_result)
+                    if switch_result.success:
+                        logger.info(f"{self.log_prefix} Focus switch_chat succeeded: {switch_result.reason}")
+                    else:
+                        logger.warning(
+                            f"{self.log_prefix} Focus switch_chat failed; "
+                            f"{'retrying' if disposition is SwitchDisposition.RETRY else 'dropping event'}: "
+                            f"{switch_result.reason}"
                         )
-                    )
-                    log = logger.info if switch_result.success else logger.warning
-                    log(f"{self.log_prefix} Focus switch_chat: {switch_result.reason}")
                     return {
                         "action_type": SWITCH_CHAT_ACTION,
                         "success": switch_result.success,
                         "reply_text": "",
                         "terminal": True,
-                        "retry": retryable,
+                        "retry": disposition is SwitchDisposition.RETRY,
                         "reason": switch_result.reason,
                         "target_chat_id": switch_result.target_chat_id,
                         "handoff_id": switch_result.handoff_id,

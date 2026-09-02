@@ -9,6 +9,10 @@ const SetupModule = (() => {
     let selectedComponents = ['core']; // core is always selected
     let deploying = false;
     let defaultsLoader = null;
+    let bilibiliQrObjectUrl = null;
+    let bilibiliLoginJobId = null;
+    let bilibiliLoginContext = null;
+    let activeWizardData = null;
 
     // Track path verification results
     let pathCheckResults = {};
@@ -40,6 +44,19 @@ const SetupModule = (() => {
         });
         document.getElementById('setup-finish')?.addEventListener('click', () => {
             App.switchTab('launcher');
+        });
+        document.getElementById('setup-bilibili-retry')?.addEventListener('click', async () => {
+            if (deploying || !bilibiliLoginContext) return;
+            deploying = true;
+            document.getElementById('setup-prev-5').disabled = true;
+            const loginOk = await startBilibiliLogin(bilibiliLoginContext);
+            if (loginOk) {
+                completeDeployment(bilibiliLoginContext.progressDiv);
+            } else {
+                deploying = false;
+                document.getElementById('setup-prev-5').disabled = false;
+                document.getElementById('setup-finish').disabled = true;
+            }
         });
 
         // Recheck button
@@ -204,6 +221,9 @@ const SetupModule = (() => {
         document.querySelectorAll('.setup-component-cb:checked').forEach(cb => {
             selectedComponents.push(cb.value);
         });
+        if (!selectedComponents.includes('discord')) {
+            clearDiscordTokenFromRequest(activeWizardData);
+        }
         updateComponentVisuals();
     }
 
@@ -328,10 +348,22 @@ const SetupModule = (() => {
     // ---- Step 3: Config Form (repeatable rows) ----
 
     function updateFormVisibility() {
-        document.getElementById('setup-tts-section').style.display =
-            selectedComponents.includes('tts') ? '' : 'none';
-        document.getElementById('setup-universalvc-section').style.display =
-            selectedComponents.includes('universalvc') ? '' : 'none';
+        const ttsSection = document.getElementById('setup-tts-section');
+        const universalvcSection = document.getElementById('setup-universalvc-section');
+        const discordSection = document.getElementById('setup-discord-section');
+        const bilibiliSection = document.getElementById('setup-bilibili-section');
+        if (ttsSection) {
+            ttsSection.style.display = selectedComponents.includes('tts') ? '' : 'none';
+        }
+        if (universalvcSection) {
+            universalvcSection.style.display = selectedComponents.includes('universalvc') ? '' : 'none';
+        }
+        if (discordSection) {
+            discordSection.style.display = selectedComponents.includes('discord') ? '' : 'none';
+        }
+        if (bilibiliSection) {
+            bilibiliSection.style.display = selectedComponents.includes('bilibili') ? '' : 'none';
+        }
     }
 
     // -- Provider rows --
@@ -528,7 +560,7 @@ const SetupModule = (() => {
         });
 
 
-        return {
+        const wizardData = {
             components: selectedComponents,
             core: {
                 qq_account: document.getElementById('setup-qq-account')?.value.trim() || '',
@@ -547,6 +579,21 @@ const SetupModule = (() => {
             },
             env: {},
         };
+
+        // Keep the token in memory only for this request.  It is never
+        // persisted in browser storage or included in logs.  Non-Discord
+        // deployments must not carry a secret-shaped field at all.
+        if (selectedComponents.includes('discord')) {
+            wizardData.discord = {
+                token: document.getElementById('setup-discord-token')?.value.trim() || '',
+            };
+        }
+        if (selectedComponents.includes('bilibili')) {
+            wizardData.bilibili = {
+                bot_account: document.getElementById('setup-bilibili-bot-account')?.value.trim() || '',
+            };
+        }
+        return wizardData;
     }
 
     // ---- Step 3 → Step 4 validation ----
@@ -622,6 +669,29 @@ const SetupModule = (() => {
         if (!/^\d{5,12}$/.test(qqVal)) {
             alert('请填写有效的 QQ 号（5-12位数字）');
             return;
+        }
+
+        if (selectedComponents.includes('discord')) {
+            const discordToken = document.getElementById('setup-discord-token');
+            if (!discordToken || !discordToken.value.trim()) {
+                discordToken?.classList.add('input-error');
+                alert('选择 Discord 时必须填写 Bot Token');
+                discordToken?.focus();
+                return;
+            }
+            discordToken.classList.remove('input-error');
+        }
+
+        if (selectedComponents.includes('bilibili')) {
+            const bilibiliBotAccount = document.getElementById('setup-bilibili-bot-account');
+            const botAccount = bilibiliBotAccount?.value.trim() || '';
+            if (!bilibiliBotAccount || !/^[0-9]+$/.test(botAccount)) {
+                bilibiliBotAccount?.classList.add('input-error');
+                alert('选择 Bilibili 时必须填写有效的 Bot UID（仅限数字）');
+                bilibiliBotAccount?.focus();
+                return;
+            }
+            bilibiliBotAccount.classList.remove('input-error');
         }
 
         goToStep(4);
@@ -727,20 +797,33 @@ const SetupModule = (() => {
         const logDiv = document.getElementById('deploy-log');
         progressDiv.innerHTML = '';
         logDiv.innerHTML = '';
+        const launchTip = document.getElementById('setup-launch-tip');
+        if (launchTip) launchTip.style.display = 'none';
+        const bilibiliCard = document.getElementById('setup-bilibili-login-card');
+        if (bilibiliCard) bilibiliCard.style.display = selectedComponents.includes('bilibili') ? '' : 'none';
+        if (!selectedComponents.includes('bilibili')) {
+            bilibiliLoginContext = null;
+            bilibiliLoginJobId = null;
+            releaseBilibiliQr();
+        }
 
         const wizardData = collectWizardData();
+        activeWizardData = wizardData;
 
         // Preflight: Git is required for automated dependency deployment.
         addProgressItem(progressDiv, 'preflight-git', '🔧 检查 Git', 'running');
         try {
-            const gitBootstrap = await apiPost('/api/setup/bootstrap/git', {});
+            const gitBootstrap = await runGitBootstrapAttempt(
+                wizardData,
+                () => apiPost('/api/setup/bootstrap/git', {})
+            );
             if (!gitBootstrap || gitBootstrap.status !== 'ok') {
                 const detail = gitBootstrap?.message || 'Git 自动安装或验证失败';
                 updateProgressItem('preflight-git', 'error', `❌ Git 准备失败: ${detail}`);
                 addLogLine(logDiv, `[Setup] ERROR: ${detail}\n`);
                 deploying = false;
                 document.getElementById('setup-prev-5').disabled = false;
-                document.getElementById('setup-finish').disabled = false;
+                document.getElementById('setup-finish').disabled = true;
                 return;
             }
             updateProgressItem('preflight-git', 'done', `✅ ${gitBootstrap.message || 'Git 已就绪'}`);
@@ -751,7 +834,7 @@ const SetupModule = (() => {
             addLogLine(logDiv, `[Setup] ERROR: Git bootstrap 请求失败: ${detail}\n`);
             deploying = false;
             document.getElementById('setup-prev-5').disabled = false;
-            document.getElementById('setup-finish').disabled = false;
+            document.getElementById('setup-finish').disabled = true;
             return;
         }
 
@@ -760,12 +843,20 @@ const SetupModule = (() => {
         addLogLine(logDiv, '[Setup] 正在生成配置文件...\n');
 
         try {
-            const configResult = await apiPost('/api/setup/configs/generate', wizardData);
+            const configResult = await runDiscordConfigAttempt(
+                wizardData,
+                requestData => apiPost('/api/setup/configs/generate', requestData)
+            );
             if (configResult.errors && configResult.errors.length) {
                 const detail = configResult.errors.join('；');
                 updateProgressItem('config-gen', 'error',
                     `❌ 配置生成存在错误: ${detail}`);
                 configResult.errors.forEach(err => addLogLine(logDiv, `[Setup] ERROR: ${err}\n`));
+                addLogLine(logDiv, '[Setup] 配置生成失败，已中止部署。请修复错误后重试。\n');
+                deploying = false;
+                document.getElementById('setup-prev-5').disabled = false;
+                document.getElementById('setup-finish').disabled = true;
+                return;
             } else {
                 updateProgressItem('config-gen', 'done',
                     `✅ 配置生成完成 (${configResult.generated.length} 个文件)`);
@@ -780,8 +871,10 @@ const SetupModule = (() => {
         } catch (e) {
             updateProgressItem('config-gen', 'error', `❌ 配置生成失败: ${e.message}`);
             addLogLine(logDiv, `[Setup] ERROR: ${e.message}\n`);
+            addLogLine(logDiv, '[Setup] 配置生成失败，已中止部署。请修复错误后重试。\n');
             deploying = false;
             document.getElementById('setup-prev-5').disabled = false;
+            document.getElementById('setup-finish').disabled = true;
             return;
         }
 
@@ -803,7 +896,14 @@ const SetupModule = (() => {
                     updateProgressItem('napcat-config', 'error',
                         `❌ NapCat 配置失败: ${detail}`);
                     ncResult.errors.forEach(err => addLogLine(logDiv, `[Setup] ERROR: NapCat: ${err}\n`));
-                } else if (ncResult.configured.length > 0) {
+                    addLogLine(logDiv, '[Setup] NapCat 自动配置失败，已中止部署。请修复错误后重试。\n');
+                    deploying = false;
+                    document.getElementById('setup-prev-5').disabled = false;
+                    document.getElementById('setup-finish').disabled = true;
+                    return;
+                }
+
+                if (ncResult.configured.length > 0) {
                     updateProgressItem('napcat-config', 'done',
                         `✅ NapCat 配置完成 (${ncResult.configured.join(', ')})`);
                 } else {
@@ -817,8 +917,11 @@ const SetupModule = (() => {
                 const detail = e?.message || String(e);
                 updateProgressItem('napcat-config', 'error', `❌ NapCat 配置请求失败: ${detail}`);
                 addLogLine(logDiv, `[Setup] ERROR: NapCat 自动配置请求失败: ${detail}\n`);
-                addLogLine(logDiv, '[Setup] NapCat 自动配置未完成；其余部署继续执行，可根据上方具体错误修正后重试\n');
-                // Don't block deployment — NapCat config is best-effort
+                addLogLine(logDiv, '[Setup] NapCat 自动配置失败，已中止部署。请修复错误后重试。\n');
+                deploying = false;
+                document.getElementById('setup-prev-5').disabled = false;
+                document.getElementById('setup-finish').disabled = true;
+                return;
             }
         }
 
@@ -843,28 +946,42 @@ const SetupModule = (() => {
             addLogLine(logDiv, '[Setup] 部署已中止，请修复上述错误后重试。\n');
             deploying = false;
             document.getElementById('setup-prev-5').disabled = false;
-            document.getElementById('setup-finish').disabled = false;
+            document.getElementById('setup-finish').disabled = true;
             return;
         }
 
-        // Done
-        addProgressItem(progressDiv, 'done', '🎉 部署完成', 'done');
-        deploying = false;
-        document.getElementById('setup-prev-5').disabled = false;
-        document.getElementById('setup-finish').disabled = false;
-
-        const launchTip = document.getElementById('setup-launch-tip');
-        const recommendedGroupEl = document.getElementById('setup-recommended-group');
-        if (launchTip && recommendedGroupEl) {
-            recommendedGroupEl.textContent = recommendedLaunchGroup;
-            launchTip.style.display = 'block';
+        if (selectedComponents.includes('bilibili')) {
+            const loginContext = { progressDiv, logDiv };
+            bilibiliLoginContext = loginContext;
+            addProgressItem(progressDiv, 'bilibili-login', '📺 Bilibili 登录', 'running');
+            const loginOk = await startBilibiliLogin(loginContext);
+            if (!loginOk) {
+                deploying = false;
+                document.getElementById('setup-prev-5').disabled = false;
+                document.getElementById('setup-finish').disabled = true;
+                return;
+            }
         }
+
+        completeDeployment(progressDiv);
     }
 
     function installDepsViaWebSocket(tasks, progressDiv, logDiv) {
         return new Promise((resolve, reject) => {
             const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
             const ws = createAuthenticatedWebSocket(`${proto}//${location.host}/ws/setup/install`);
+            let settled = false;
+
+            const resolveOnce = () => {
+                if (settled) return;
+                settled = true;
+                resolve();
+            };
+            const rejectOnce = (error) => {
+                if (settled) return;
+                settled = true;
+                reject(error);
+            };
 
             ws.onopen = () => {
                 ws.send(JSON.stringify({ action: 'install', tasks }));
@@ -885,17 +1002,172 @@ const SetupModule = (() => {
                         updateProgressItem(`dep-${msg.task_id}`, 'error', `  ❌ ${msg.message}`);
                     }
                 } else if (msg.type === 'all_done') {
+                    resolveOnce();
                     ws.close();
-                    resolve();
                 } else if (msg.type === 'error') {
+                    rejectOnce(new Error(msg.message || '依赖安装失败'));
                     ws.close();
-                    reject(new Error(msg.message));
                 }
             };
 
-            ws.onerror = () => reject(new Error('WebSocket 连接失败'));
-            ws.onclose = (evt) => { if (!evt.wasClean) resolve(); };
+            ws.onerror = () => rejectOnce(new Error('WebSocket 连接失败'));
+            ws.onclose = (evt) => {
+                if (!settled) {
+                    rejectOnce(new Error(
+                        evt.wasClean ? '依赖安装连接提前关闭' : '依赖安装连接异常关闭'
+                    ));
+                }
+            };
         });
+    }
+
+    async function startBilibiliLogin(context) {
+        const card = document.getElementById('setup-bilibili-login-card');
+        const retryBtn = document.getElementById('setup-bilibili-retry');
+        if (card) card.style.display = '';
+        if (retryBtn) retryBtn.style.display = 'none';
+        releaseBilibiliQr();
+        setBilibiliLoginUi('waiting', '正在启动', '请稍候，正在准备 Bilibili 登录二维码。');
+        updateProgressItem('bilibili-login', 'running', '📺 等待 Bilibili 扫码确认');
+
+        try {
+            const started = await apiPost('/api/setup/bilibili/login/start', {});
+            bilibiliLoginJobId = String(started?.job_id || '');
+            if (!bilibiliLoginJobId) throw new Error('登录任务未创建');
+
+            let qrShown = false;
+            while (true) {
+                const jobId = bilibiliLoginJobId;
+                const status = await apiGet(
+                    `/api/setup/bilibili/login/status/${encodeURIComponent(jobId)}`
+                );
+                const state = status?.status || status?.state || 'waiting';
+                if (state === 'success') {
+                    setBilibiliLoginUi('success', '登录成功', status.message || 'Bilibili 登录已验证。');
+                    releaseBilibiliQr();
+                    updateProgressItem('bilibili-login', 'done', '📺 Bilibili 登录已验证');
+                    if (retryBtn) retryBtn.style.display = 'none';
+                    return true;
+                }
+
+                if (state === 'error' || state === 'expired') {
+                    const safeMessage = status.message || '二维码登录失败或已过期，请重试。';
+                    setBilibiliLoginUi('error', '登录失败', safeMessage);
+                    if (retryBtn) retryBtn.style.display = '';
+                    updateProgressItem('bilibili-login', 'error', '❌ Bilibili 登录失败，请重试');
+                    if (context?.logDiv) addLogLine(context.logDiv, '[Setup] Bilibili 登录未完成，请扫描新二维码重试。\n');
+                    return false;
+                }
+
+                setBilibiliLoginUi(
+                    'waiting',
+                    status.qr_ready ? '等待扫码确认' : '正在准备二维码',
+                    '请使用 Bilibili App 扫描二维码，并在 App 中确认登录。'
+                );
+                if (status.qr_ready && !qrShown) {
+                    qrShown = await fetchBilibiliQr(jobId);
+                }
+                await delay(1000);
+            }
+        } catch (error) {
+            setBilibiliLoginUi('error', '登录失败', error?.message || 'Bilibili 登录请求失败，请重试。');
+            if (retryBtn) retryBtn.style.display = '';
+            updateProgressItem('bilibili-login', 'error', '❌ Bilibili 登录请求失败，请重试');
+            if (context?.logDiv) addLogLine(context.logDiv, '[Setup] Bilibili 登录请求失败，请重试。\n');
+            return false;
+        }
+    }
+
+    async function fetchBilibiliQr(jobId) {
+        // Use the global fetch wrapper so X-Nachobot-Token is attached by
+        // auth.js.  The protected endpoint is never assigned directly to img.src.
+        const response = await fetch(
+            `/api/setup/bilibili/login/qr/${encodeURIComponent(jobId)}`,
+            { cache: 'no-store' }
+        );
+        if (!response.ok) return false;
+        const blob = await response.blob();
+        const image = document.getElementById('setup-bilibili-qr');
+        const qrWrap = document.getElementById('setup-bilibili-qr-wrap');
+        if (!image || !window.URL || !URL.createObjectURL) return false;
+        releaseBilibiliQr();
+        bilibiliQrObjectUrl = URL.createObjectURL(blob);
+        image.src = bilibiliQrObjectUrl;
+        if (qrWrap) qrWrap.style.display = '';
+        return true;
+    }
+
+    function releaseBilibiliQr() {
+        if (bilibiliQrObjectUrl && window.URL?.revokeObjectURL) {
+            URL.revokeObjectURL(bilibiliQrObjectUrl);
+        }
+        bilibiliQrObjectUrl = null;
+        const image = document.getElementById('setup-bilibili-qr');
+        const qrWrap = document.getElementById('setup-bilibili-qr-wrap');
+        if (image) image.removeAttribute('src');
+        if (qrWrap) qrWrap.style.display = 'none';
+    }
+
+    function setBilibiliLoginUi(state, label, message) {
+        const statusEl = document.getElementById('setup-bilibili-login-status');
+        const messageEl = document.getElementById('setup-bilibili-login-message');
+        if (statusEl) {
+            statusEl.className = `bilibili-login-status ${state}`;
+            statusEl.textContent = label;
+        }
+        if (messageEl) messageEl.textContent = message;
+    }
+
+    function delay(milliseconds) {
+        return new Promise(resolve => setTimeout(resolve, milliseconds));
+    }
+
+    async function runGitBootstrapAttempt(wizardData, request) {
+        activeWizardData = wizardData;
+        let succeeded = false;
+        try {
+            const result = await request();
+            succeeded = Boolean(result && result.status === 'ok');
+            return result;
+        } finally {
+            if (!succeeded) clearDiscordTokenFromRequest(wizardData);
+        }
+    }
+
+    async function runDiscordConfigAttempt(wizardData, request) {
+        activeWizardData = wizardData;
+        try {
+            // apiPost serializes requestData synchronously before returning its
+            // promise; cleanup therefore runs only after serialization settles.
+            return await request(wizardData);
+        } finally {
+            clearDiscordTokenFromRequest(wizardData);
+        }
+    }
+
+    function clearDiscordTokenFromRequest(wizardData) {
+        const activeData = wizardData || activeWizardData;
+        const discordTokenInput = document.getElementById('setup-discord-token');
+        if (discordTokenInput) {
+            discordTokenInput.value = '';
+            discordTokenInput.classList?.remove('input-error');
+        }
+        if (activeData?.discord) delete activeData.discord.token;
+        if (activeData === activeWizardData) activeWizardData = null;
+    }
+
+    function completeDeployment(progressDiv) {
+        addProgressItem(progressDiv, 'done', '🎉 部署完成', 'done');
+        deploying = false;
+        document.getElementById('setup-prev-5').disabled = false;
+        document.getElementById('setup-finish').disabled = false;
+
+        const launchTip = document.getElementById('setup-launch-tip');
+        const recommendedGroupEl = document.getElementById('setup-recommended-group');
+        if (launchTip && recommendedGroupEl) {
+            recommendedGroupEl.textContent = recommendedLaunchGroup;
+            launchTip.style.display = 'block';
+        }
     }
 
     // ---- UI Helpers ----
@@ -962,5 +1234,17 @@ const SetupModule = (() => {
         }
     }
 
-    return { init, refresh };
+    return {
+        init,
+        refresh,
+        // Explicitly test-only hooks.  They keep request-secret lifecycle
+        // contracts executable without changing normal browser behavior.
+        __test: {
+            collectWizardData,
+            onComponentToggle,
+            runGitBootstrapAttempt,
+            runDiscordConfigAttempt,
+            clearDiscordTokenFromRequest,
+        },
+    };
 })();

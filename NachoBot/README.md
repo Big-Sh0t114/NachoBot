@@ -31,6 +31,7 @@ launch_webui.bat
 
 WebUI 生成配置前会备份已有文件；如果现有配置损坏、账号不匹配或目标端口冲突，会报告具体错误并保留原文件。
 
+
 ## 手动配置
 
 要求 Python 3.11 或 3.12，推荐使用 [uv](https://docs.astral.sh/uv/)。
@@ -57,6 +58,70 @@ uv run python bot.py
 ```
 
 默认服务端口为 `8000`。平台适配器需要使用与 Core 一致的主机、端口和消息协议配置。
+
+### Discord 手动部署
+
+旧的 `config-save/koishi.yml` 不再使用。首次部署时，在仓库根目录从已跟踪模板创建配置：
+
+```powershell
+Copy-Item .\koishi-app\koishi_template.yml .\koishi-app\koishi.yml
+Copy-Item .\NachoBot-DiscordVC-Adapter\config.toml.example .\NachoBot-DiscordVC-Adapter\config.toml
+```
+
+随后完成以下配置：
+
+- 在 `koishi-app/koishi.yml` 的 `adapter-discord:*` 节点填写 Discord Bot Token。
+- 在 `NachoBot-DiscordVC-Adapter/config.toml` 的 `[discord]` 中填写同一个 `token`、`app_id`，并按需设置代理；不使用语音频道时可以不启动 DiscordVC Adapter。
+- 确认 `NachoBot-Koishi-Adapter/config.toml` 的 `onebot_server.ws_url` 与 Koishi OneBot Server 一致，默认是 `ws://127.0.0.1:5140/onebot/v11/ws`。
+
+Core 启动后，分别在三个终端运行：
+
+```powershell
+Set-Location .\koishi-app
+corepack enable
+corepack yarn install --immutable
+corepack yarn start
+```
+
+```powershell
+Set-Location .\NachoBot-Koishi-Adapter
+uv sync --locked
+uv run python main.py
+```
+
+```powershell
+Set-Location .\NachoBot-DiscordVC-Adapter
+uv sync
+uv run python main.py
+```
+
+也可以在配置完成后返回仓库根目录运行 `launch_discord.bat`，一次启动完整 Discord 链路。
+
+### Bilibili 手动部署
+
+旧的 `config-save/config-biliadapter.toml` 不再使用。首次部署时，在仓库根目录复制当前模板并进入适配器目录：
+
+```powershell
+Copy-Item .\NachoBot-Bilibili-Adapter\config_template.toml .\NachoBot-Bilibili-Adapter\config.toml
+Set-Location .\NachoBot-Bilibili-Adapter
+uv sync
+```
+
+使用适配器自己的虚拟环境运行二维码登录脚本，并按终端提示扫描二维码：
+
+```powershell
+.\.venv\Scripts\python.exe .\qr_login.py
+```
+
+扫码成功后，脚本会把 `SESSDATA`、`bili_jct` 和 `DedeUserID` 写入 `config.toml`。启动前还需要检查 `[nachobot_server]` 的 Core 地址，并在 `[live].room_ids` 中填写直播间 ID；如需 Live2D，再设置对应的 `enable_live2D` 和连接参数。
+
+单独启动 Bilibili Adapter：
+
+```powershell
+uv run python main.py
+```
+
+也可以在配置和扫码完成后返回仓库根目录运行 `launch_bilibili.bat`。
 
 ## 根目录启动档位
 

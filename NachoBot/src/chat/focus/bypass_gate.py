@@ -128,7 +128,11 @@ class FocusBypassDecisionGate:
                     "target": event.display_name,
                     "unread_count": event.unread_count,
                     "signals": flags or ["unread"],
-                    "preview": event.latest_preview[:500],
+                    # A private source never receives event body content.  The
+                    # coordinator normally redacts this already; keeping the
+                    # Gate boundary defensive prevents accidental re-exposure
+                    # when a caller supplies an unsanitized snapshot.
+                    "preview": event.latest_preview[:500] if allow_handoff else "",
                 }
             )
 
@@ -143,7 +147,7 @@ class FocusBypassDecisionGate:
         handoff_rule = (
             "switch 时可附带简短 handoff，只记录安全、必要、已经确认的上下文；不要编造事实。"
             if allow_handoff
-            else "当前源会话是私聊。switch 时严禁输出 handoff 或任何私聊内容，只允许返回同组群聊。"
+            else "当前源会话是私聊。允许 switch 到事件指定的同组群聊或另一已登记私聊；严禁输出 handoff、源消息或任何源会话内容。"
         )
         switch_example = (
             '{"decision":"switch","event_id":"evt_...","reason":"简短原因",'
@@ -197,6 +201,8 @@ switch: {switch_example}
         reasoning = payload.get("reason")
         if not isinstance(reasoning, str):
             reasoning = ""
+        if not allow_handoff and "handoff" in payload:
+            raise FocusBypassGateError("Private-source Focus switch must not include a handoff")
         decision = payload.get("decision")
         if decision == FocusBypassDecisionKind.STAY.value:
             return FocusBypassDecision(
@@ -211,7 +217,10 @@ switch: {switch_example}
         valid_event_ids = {event.event_id for event in events}
         if not isinstance(event_id, str) or event_id not in valid_event_ids:
             raise FocusBypassGateError("Focus bypass gate selected an unknown event_id")
-        normalized_payload = payload if allow_handoff else {"event_id": event_id}
+        if not allow_handoff:
+            normalized_payload = {"event_id": event_id}
+        else:
+            normalized_payload = payload
         action_data = normalize_switch_action_data(normalized_payload)
         return FocusBypassDecision(
             FocusBypassDecisionKind.SWITCH,

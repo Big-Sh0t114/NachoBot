@@ -15,6 +15,15 @@ except ImportError:
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
+# These identifiers refer to sanitized templates embedded in the tracked
+# setup-deployment module.  They deliberately are not filesystem paths, so a
+# clean checkout never depends on user-owned untracked template files.
+BUILTIN_KOISHI_TEMPLATE = "__builtin__/koishi.yml"
+BUILTIN_BILIBILI_TEMPLATE = "__builtin__/bilibili.toml"
+BUILTIN_TEMPLATE_KEYS = frozenset(
+    {BUILTIN_KOISHI_TEMPLATE, BUILTIN_BILIBILI_TEMPLATE}
+)
+
 TEMPLATE_MAP: dict[str, str] = {
     "NachoBot/template/bot_config_template.toml": "NachoBot/config/bot_config.toml",
     "NachoBot/template/model_config_template.toml": "NachoBot/config/model_config.toml",
@@ -27,6 +36,9 @@ TEMPLATE_MAP: dict[str, str] = {
     "NachoBot-Multimodal-Adapter/template_configs/vox_template.toml": "NachoBot-Multimodal-Adapter/configs/vox.toml",
     "NachoBot-UniversalVC-Adapter/template/config_template.toml": "NachoBot-UniversalVC-Adapter/config.toml",
     "NachoBot-Multimodal-Adapter/template_configs/perception_template.toml": "NachoBot-Multimodal-Adapter/configs/perception.toml",
+    BUILTIN_KOISHI_TEMPLATE: "koishi-app/koishi.yml",
+    "NachoBot-DiscordVC-Adapter/config.toml.example": "NachoBot-DiscordVC-Adapter/config.toml",
+    BUILTIN_BILIBILI_TEMPLATE: "NachoBot-Bilibili-Adapter/config.toml",
 }
 
 DEFAULT_PORTS: dict[str, int] = {
@@ -413,13 +425,16 @@ class EnvironmentChecker:
         results = []
         for tmpl, target in TEMPLATE_MAP.items():
             target_path = ROOT_DIR / target
-            tmpl_path = ROOT_DIR / tmpl
+            template_exists = (
+                tmpl in BUILTIN_TEMPLATE_KEYS
+                or (ROOT_DIR / tmpl).exists()
+            )
             results.append(
                 {
                     "template": tmpl,
                     "target": target,
                     "target_exists": target_path.exists(),
-                    "template_exists": tmpl_path.exists(),
+                    "template_exists": template_exists,
                     "filename": Path(target).name,
                     "component": target.split("/")[0],
                 }
