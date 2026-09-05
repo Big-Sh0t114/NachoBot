@@ -126,7 +126,7 @@ set "BASE_TOML=%ADAPTER_DIR%\configs\base.toml"
 
 REM -- .bat-only runtime selection. WebUI does not read [bat_runtime]. --
 set "BAT_RUNTIME=gpu"
-for /f "usebackq delims=" %%R in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$p='%BASE_TOML%'; if (Test-Path $p) { $c=Get-Content -Raw $p; if ($c -match '(?ms)^\[bat_runtime\]\s*.*?^lite\s*=\s*\"([^\"]+)\"') { $Matches[1] } else { 'gpu' } } else { 'gpu' }"`) do set "BAT_RUNTIME=%%R"
+for /f "usebackq delims=" %%R in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$p='%BASE_TOML%'; if (Test-Path $p) { $c=Get-Content -Raw $p; if ($c -match '(?ms)^\[bat_runtime\]\s*.*?^lite\s*=\s*\x22([^\x22]+)\x22') { $Matches[1] } else { 'gpu' } } else { 'gpu' }"`) do set "BAT_RUNTIME=%%R"
 if /i "!BAT_RUNTIME!"=="cpu" (
   set "ADAPTER_ENV_DIR=%ADAPTER_DIR%\.venv-cpu"
   set "TTS_TORCH_INDEX=https://download.pytorch.org/whl/cpu"
@@ -301,7 +301,7 @@ goto :TTS_END
 
 REM ---- Adapter for VoxCPM (Lite: TTS only, no Perception) ----
 :START_ADAPTER_VOX
-start "Multimodal Adapter (%PORT_ADAPTER%)" cmd /k "chcp 65001>nul && cd /d %ADAPTER_DIR% && set DISABLE_VLM_ASR=1 && uv run python main.py"
+start "Multimodal Adapter (%PORT_ADAPTER%)" /D "%ADAPTER_DIR%" cmd /k ""!ADAPTER_PYTHON!" main.py"
 call :WAIT_ADAPTER_READY
 if errorlevel 1 (
   set "TTS_RC=1"
