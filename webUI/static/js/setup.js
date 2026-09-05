@@ -7,6 +7,7 @@ const SetupModule = (() => {
     let currentStep = 1;
     let envCheckData = null;
     let selectedComponents = ['core']; // core is always selected
+    let multimodalRuntimeTouched = false;
     let deploying = false;
     let defaultsLoader = null;
     let bilibiliQrObjectUrl = null;
@@ -66,6 +67,12 @@ const SetupModule = (() => {
         document.querySelectorAll('.setup-component-cb').forEach(cb => {
             cb.addEventListener('change', onComponentToggle);
         });
+        document.querySelectorAll('input[name="setup-multimodal-runtime"]').forEach(radio => {
+            radio.addEventListener('change', () => {
+                multimodalRuntimeTouched = true;
+                updateMultimodalRuntimeSelection();
+            });
+        });
 
         // "+" add-row buttons
         document.getElementById('btn-add-provider')?.addEventListener('click', addProviderRow);
@@ -122,6 +129,7 @@ const SetupModule = (() => {
             }
         }
         if (step === 4) {
+            updateMultimodalRuntimeSelection();
             updatePathCheckVisibility();
             verifyAllPaths();
         }
@@ -230,8 +238,42 @@ const SetupModule = (() => {
     function updateComponentVisuals() {
         document.querySelectorAll('.component-option').forEach(label => {
             const cb = label.querySelector('input[type="checkbox"]');
-            label.classList.toggle('checked', cb.checked);
+            if (cb) label.classList.toggle('checked', cb.checked);
         });
+        updateMultimodalRuntimeSelection();
+    }
+
+    function getRecommendedMultimodalRuntime() {
+        return envCheckData?.gpu?.has_gpu ? 'gpu' : 'cpu';
+    }
+
+    function getSelectedMultimodalRuntime() {
+        const checked = document.querySelectorAll('input[name="setup-multimodal-runtime"]:checked');
+        return checked[0]?.value || getRecommendedMultimodalRuntime();
+    }
+
+    function updateMultimodalRuntimeSelection() {
+        const card = document.getElementById('setup-multimodal-runtime-card');
+        if (card) card.style.display = selectedComponents.includes('tts') ? '' : 'none';
+
+        const recommended = getRecommendedMultimodalRuntime();
+        if (!multimodalRuntimeTouched) {
+            const radios = document.querySelectorAll(`input[name="setup-multimodal-runtime"][value="${recommended}"]`);
+            const radio = radios[0];
+            if (radio) radio.checked = true;
+        }
+
+        document.querySelectorAll('[data-runtime-option]').forEach(label => {
+            const radio = label.querySelector('input[type="radio"]');
+            label.classList.toggle('checked', Boolean(radio?.checked));
+        });
+
+        const recommendEl = document.getElementById('setup-multimodal-runtime-recommend');
+        if (recommendEl) {
+            recommendEl.textContent = recommended === 'gpu'
+                ? '硬件建议：GPU / CUDA（可手动改选）'
+                : '硬件建议：CPU（可手动改选）';
+        }
     }
 
     let recommendedLaunchGroup = '核心'; // default recommendation
@@ -570,6 +612,7 @@ const SetupModule = (() => {
             models,
             tts: {
                 engine: document.getElementById('setup-tts-engine')?.value || 'GPT_Sovits',
+                runtime: getSelectedMultimodalRuntime(),
             },
             universalvc: {
                 target_process_name: document.getElementById('setup-uvc-process')?.value.trim() || '',
@@ -657,6 +700,27 @@ const SetupModule = (() => {
         });
         if (modelIds.length === 0) {
             alert('请至少配置一个模型');
+            return;
+        }
+
+        // Every configured model must reference a provider.
+        let hasMissingModelProvider = false;
+        let firstMissingModelProvider = null;
+        document.querySelectorAll('.model-row').forEach(row => {
+            const id = row.querySelector('.setup-model-id')?.value.trim() || '';
+            const providerSelect = row.querySelector('.setup-model-provider');
+            if (id && providerSelect && !providerSelect.value.trim()) {
+                hasMissingModelProvider = true;
+                providerSelect.classList.add('input-error');
+                if (!firstMissingModelProvider) firstMissingModelProvider = providerSelect;
+            } else if (providerSelect) {
+                providerSelect.classList.remove('input-error');
+            }
+        });
+
+        if (hasMissingModelProvider) {
+            alert('发现未选择服务商的模型。请为所有模型选择所属服务商，或者删除不需要的模型。');
+            firstMissingModelProvider?.focus();
             return;
         }
 
@@ -929,7 +993,9 @@ const SetupModule = (() => {
         addProgressItem(progressDiv, 'dep-install', '📦 安装依赖', 'running');
 
         try {
-            const tasks = await apiGet(`/api/setup/deps/tasks?components=${wizardData.components.join(',')}`);
+            const componentsParam = encodeURIComponent(wizardData.components.join(','));
+            const runtimeParam = encodeURIComponent(wizardData.tts?.runtime || getRecommendedMultimodalRuntime());
+            const tasks = await apiGet(`/api/setup/deps/tasks?components=${componentsParam}&multimodal_runtime=${runtimeParam}`);
 
             if (tasks.length === 0) {
                 updateProgressItem('dep-install', 'done', '✅ 无需安装依赖');

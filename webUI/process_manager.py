@@ -24,6 +24,11 @@ from ctypes import wintypes
 
 import psutil
 
+try:
+    from .multimodal_runtime import MultimodalRuntimeManager
+except ImportError:
+    from multimodal_runtime import MultimodalRuntimeManager
+
 VRCHAT_CAPABILITY_ENV = "NACHOBOT_VRCHAT_CONTROL_TOKEN"
 logger = logging.getLogger("webui.process_manager")
 
@@ -648,6 +653,9 @@ class ProcessManager:
         self._operation_tasks: dict[str, asyncio.Task[None]] = {}
         self._operation_kinds: dict[str, str] = {}
         self._service_locks: dict[str, asyncio.Lock] = {}
+        # Runtime selected for the current/next NachoBot launch transaction.
+        # FULL/LITE use gpu|cpu; POTATO is always forced to relay.
+        self._launch_runtime: str = "gpu"
         # Lazy so importing/testing on non-Windows never loads Win32 DLLs.
         self._windows_job_facade: _WindowsJobFacade | Any | None = None
 
@@ -757,6 +765,7 @@ class ProcessManager:
         return {
             "status": status,
             "active_profile": active_profile or error_profile,
+            "runtime": self._launch_runtime,
             "operation": launch_kind,
             "core": core,
             "profiles": profiles,
@@ -907,13 +916,44 @@ class ProcessManager:
             replace=True,
         )
 
-    def request_start_launch(self, profile_id: str) -> None:
-        """Start Core and exactly one runtime profile as one managed operation."""
+    def _resolve_potato_runtime(self, preferred: str | None = None) -> str:
+        """Prefer Relay for POTATO, falling back to an installed GPU/CPU runtime."""
+        if MultimodalRuntimeManager.get_status("relay")["installed"]:
+            return "relay"
+
+        candidates: list[str] = []
+        for candidate in (preferred, self._launch_runtime, "gpu", "cpu"):
+            try:
+                normalized = MultimodalRuntimeManager.normalize_profile(candidate)
+            except ValueError:
+                continue
+            if normalized in {"gpu", "cpu"} and normalized not in candidates:
+                candidates.append(normalized)
+
+        for candidate in candidates:
+            if MultimodalRuntimeManager.get_status(candidate)["installed"]:
+                return candidate
+
+        raise RuntimeError(
+            "POTATO Relay 环境不可用，且没有已安装的 GPU/CPU Multimodal 环境"
+        )
+
+    def request_start_launch(self, profile_id: str, runtime: str | None = None) -> None:
+        """Start Core and exactly one functionality profile with an explicit runtime."""
         _register_services()
         profile_id = str(profile_id or "").strip().lower()
         group_id = LAUNCH_PROFILE_GROUPS.get(profile_id)
         if group_id is None:
             raise ValueError(f"Unknown launch profile: {profile_id}")
+
+        if profile_id == "potato":
+            resolved_runtime = self._resolve_potato_runtime(runtime)
+        else:
+            resolved_runtime = MultimodalRuntimeManager.normalize_profile(runtime or "gpu")
+            if resolved_runtime == "relay":
+                raise ValueError("FULL/LITE 模式只能使用 GPU 或 CPU 环境")
+        MultimodalRuntimeManager.require_python(resolved_runtime)
+        self._launch_runtime = resolved_runtime
 
         existing = self._operation_tasks.get("launch")
         if existing and not existing.done():
@@ -927,7 +967,7 @@ class ProcessManager:
         affected = tuple(GROUP_DEFS["core"].services + GROUP_DEFS[group_id].services)
         self._schedule_operation(
             "launch",
-            lambda: self.start_launch(profile_id),
+            lambda: self.start_launch(profile_id, resolved_runtime),
             affected,
             operation_kind="start",
         )
@@ -949,12 +989,22 @@ class ProcessManager:
             replace=True,
         )
 
-    async def start_launch(self, profile_id: str) -> None:
+    async def start_launch(self, profile_id: str, runtime: str | None = None) -> None:
         """Run Core + selected profile transactionally, rolling back this launch on failure."""
         _register_services()
         group_id = LAUNCH_PROFILE_GROUPS.get(profile_id)
         if group_id is None:
             raise ValueError(f"Unknown launch profile: {profile_id}")
+
+        resolved_runtime = (
+            self._resolve_potato_runtime(runtime)
+            if profile_id == "potato"
+            else MultimodalRuntimeManager.normalize_profile(runtime or self._launch_runtime)
+        )
+        if profile_id != "potato" and resolved_runtime == "relay":
+            raise ValueError("FULL/LITE 模式只能使用 GPU 或 CPU 环境")
+        MultimodalRuntimeManager.require_python(resolved_runtime)
+        self._launch_runtime = resolved_runtime
 
         core_state = self.states.get("nachobot")
         core_was_running = bool(core_state and core_state.status == ServiceStatus.RUNNING)
@@ -1154,7 +1204,8 @@ class ProcessManager:
         # Resolve TTS engine dynamically
         try:
             cmd, cwd, env_extra = self._resolve_cmd(sdef)
-        except FileNotFoundError as e:
+            cmd, env_extra = self._resolve_multimodal_runtime_cmd(service_id, cmd, env_extra)
+        except (FileNotFoundError, RuntimeError, ValueError) as e:
             state.status = ServiceStatus.ERROR
             await self._broadcast(service_id, f"[WebUI] ERROR: {e}\n")
             return
@@ -1948,6 +1999,29 @@ class ProcessManager:
         )
         return False
 
+    def _resolve_multimodal_runtime_cmd(
+        self,
+        service_id: str,
+        cmd: list[str],
+        env_extra: dict[str, str],
+    ) -> tuple[list[str], dict[str, str]]:
+        """Replace Multimodal `uv run` commands with the selected venv Python."""
+        adapter_services = {
+            "tts_adapter_full": ["main.py"],
+            "tts_adapter_lite": ["main.py"],
+            "perception": ["-m", "nachobot_multimodal.api_server"],
+            "potato_relay": ["main.py", "--no-local-models"],
+        }
+        args = adapter_services.get(service_id)
+        if args is None:
+            return cmd, env_extra
+
+        runtime = self._launch_runtime
+        if runtime == "relay" and service_id != "potato_relay":
+            raise ValueError("FULL/LITE Multimodal 服务不能使用 Relay 环境")
+        python = MultimodalRuntimeManager.require_python(runtime)
+        return [str(python), *args], dict(env_extra)
+
     def _resolve_cmd(self, sdef: ServiceDef) -> tuple[list[str], str, dict[str, str]]:
         """Resolve dynamic commands (e.g., TTS engine based on config)."""
         if sdef.id in ("tts_engine_full", "tts_engine_lite"):
@@ -1985,10 +2059,19 @@ class ProcessManager:
             raise FileNotFoundError(f"TTS runtime manager 不存在: {manager}")
 
         managed_engine = "voxcpm" if engine == "Vox" else "gpt-sovits"
+        runtime = MultimodalRuntimeManager.normalize_profile(self._launch_runtime)
+        if runtime == "relay":
+            raise ValueError("Relay/POTATO 模式不启动本地 TTS 推理运行时")
+        python = MultimodalRuntimeManager.require_python(runtime)
         cmd = [
-            "uv", "run", "python", str(manager),
+            str(python), str(manager),
             "serve",
             "--engine", managed_engine,
             "--port", str(tts_engine_port),
         ]
-        return cmd, str(adapter_dir), {}
+        torch_index = (
+            "https://download.pytorch.org/whl/cpu"
+            if runtime == "cpu"
+            else "https://download.pytorch.org/whl/cu128"
+        )
+        return cmd, str(adapter_dir), {"NACHOBOT_TTS_TORCH_INDEX": torch_index}

@@ -20,6 +20,7 @@ try:
         TEMPLATE_MAP,
     )
     from .secure_paths import ensure_within, resolve_external_path, resolve_relative_to_root
+    from .multimodal_runtime import MultimodalRuntimeManager
 except ImportError:
     from setup_checks import (
         BUILTIN_BILIBILI_TEMPLATE,
@@ -29,6 +30,7 @@ except ImportError:
         TEMPLATE_MAP,
     )
     from secure_paths import ensure_within, resolve_external_path, resolve_relative_to_root
+    from multimodal_runtime import MultimodalRuntimeManager
 
 BACKUP_DIR = ROOT_DIR / "config-save" / "setup_backups"
 MAX_BACKUPS_PER_FILE = 5
@@ -1532,6 +1534,7 @@ class DependencyInstaller:
         "core": "NachoBot",
         "qq": "NachoBot-Napcat-Adapter",
         "tts": "NachoBot-Multimodal-Adapter",
+        "tts_relay": "NachoBot-Multimodal-Adapter",
         "bilibili": "NachoBot-Bilibili-Adapter",
         "discord_koishi": "NachoBot-Koishi-Adapter",
         "discord_vc": "NachoBot-DiscordVC-Adapter",
@@ -1650,8 +1653,12 @@ class DependencyInstaller:
             return {"status": "error", "message": f"Git 自动安装出错: {e}"}
 
     @staticmethod
-    def get_install_tasks(components: list[str]) -> list[dict[str, str]]:
-        """Return the list of install tasks based on selected components."""
+    def get_install_tasks(
+        components: list[str],
+        multimodal_runtime: str = "gpu",
+    ) -> list[dict[str, str]]:
+        """Return install tasks for selected components and Multimodal runtime."""
+        runtime = MultimodalRuntimeManager.normalize_profile(multimodal_runtime)
         tasks = []
 
         # Always install core
@@ -1685,12 +1692,29 @@ class DependencyInstaller:
             )
 
         if "tts" in component_set:
+            runtime_label = MultimodalRuntimeManager.PROFILE_META[runtime]["label"]
             tasks.append(
                 {
                     "id": "tts",
                     "type": "uv",
-                    "name": "Multimodal Adapter",
+                    "name": f"Multimodal Adapter ({runtime_label})",
                     "dir": "NachoBot-Multimodal-Adapter",
+                    "runtime": runtime,
+                }
+            )
+
+        # The lightweight POTATO/Relay runtime is part of the baseline WebUI
+        # deployment so POTATO can be started later without downloading the
+        # local Torch/model stack. If Relay is already the selected primary
+        # Multimodal runtime, the primary tts task above already covers it.
+        if not ("tts" in component_set and runtime == "relay"):
+            tasks.append(
+                {
+                    "id": "tts_relay",
+                    "type": "uv",
+                    "name": "Multimodal Adapter (Relay / POTATO)",
+                    "dir": "NachoBot-Multimodal-Adapter",
+                    "runtime": "relay",
                 }
             )
 
@@ -1759,6 +1783,12 @@ class DependencyInstaller:
             return {"status": "error", "message": f"目录不存在: {project_dir}"}
 
         if task["type"] == "uv":
+            if str(task.get("id", "")).strip() in {"tts", "tts_relay"}:
+                try:
+                    runtime = MultimodalRuntimeManager.normalize_profile(task.get("runtime"))
+                except ValueError as e:
+                    return {"status": "error", "message": str(e)}
+                return await MultimodalRuntimeManager.install(runtime, callback)
             return await DependencyInstaller._run_uv_sync(project_dir, callback)
         elif task["type"] == "yarn":
             return await DependencyInstaller._run_yarn_install(project_dir, callback)

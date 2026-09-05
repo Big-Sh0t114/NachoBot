@@ -39,6 +39,7 @@ from setup_manager import (
 )
 from security import WebUISecurity, validate_webui_config_raw
 from webui_config import CONFIG_PATH, webui_config
+from multimodal_runtime import MultimodalRuntimeManager
 
 logger = logging.getLogger("webui")
 
@@ -276,13 +277,18 @@ async def get_launch_status():
 
 class LaunchStartRequest(BaseModel):
     profile: str
+    runtime: str | None = None
 
 
 @app.post("/api/launch/start")
 async def start_launch(body: LaunchStartRequest):
     try:
-        process_mgr.request_start_launch(body.profile)
-        return {"status": "starting", "profile": body.profile.strip().lower()}
+        process_mgr.request_start_launch(body.profile, body.runtime)
+        return {
+            "status": "starting",
+            "profile": body.profile.strip().lower(),
+            "runtime": process_mgr.get_launch_status()["runtime"],
+        }
     except (ValueError, RuntimeError) as e:
         raise HTTPException(400, str(e))
 
@@ -1006,10 +1012,25 @@ async def setup_bootstrap_git():
 
 
 @app.get("/api/setup/deps/tasks")
-async def setup_dep_tasks(components: str = ""):
-    """Return install tasks for selected components."""
+async def setup_dep_tasks(components: str = "", multimodal_runtime: str = "gpu"):
+    """Return install tasks for selected components and Multimodal runtime."""
     comp_list = [c.strip() for c in components.split(",") if c.strip()]
-    return DependencyInstaller.get_install_tasks(comp_list)
+    try:
+        return DependencyInstaller.get_install_tasks(comp_list, multimodal_runtime)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/setup/deps/multimodal/status")
+async def setup_multimodal_runtime_status():
+    """Return all three isolated Multimodal runtime installation states."""
+    gpu = EnvironmentChecker.check_gpu()
+    recommended = "gpu" if gpu.get("has_gpu") else "cpu"
+    return {
+        "recommended": recommended,
+        "gpu": gpu,
+        "runtimes": MultimodalRuntimeManager.get_all_statuses(),
+    }
 
 
 class NapCatConfigRequest(BaseModel):

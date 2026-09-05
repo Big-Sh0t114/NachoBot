@@ -39,6 +39,18 @@ def runtime_python(venv_dir: Path) -> Path:
     return venv_dir / "bin" / "python"
 
 
+def explicit_tts_runtime_profile() -> str | None:
+    """Return the .bat-selected TTS profile, if one was explicitly provided."""
+    explicit = os.environ.get("NACHOBOT_TTS_RUNTIME_PROFILE", "").strip().lower()
+    return explicit if explicit in {"gpu", "cpu"} else None
+
+
+def managed_venv_dir(runtime_dir: Path) -> Path:
+    # Only .bat launchers set NACHOBOT_TTS_RUNTIME_PROFILE. Without it (e.g.
+    # WebUI), preserve the historical shared .venv behavior exactly.
+    return runtime_dir / (".venv-cpu" if explicit_tts_runtime_profile() == "cpu" else ".venv")
+
+
 def run(
     cmd: list[str],
     *,
@@ -55,14 +67,15 @@ def run(
 
 
 def ensure_venv(runtime_dir: Path, python_requirement: str = ">=3.11,<3.13") -> Path:
-    """Ensure a managed TTS venv using Python 3.11 or 3.12.
+    """Ensure a profile-isolated managed TTS venv using Python 3.11 or 3.12.
 
-    Existing compatible venvs are reused. When a rebuild is required, uv is
+    GPU keeps the historical .venv path; CPU uses .venv-cpu. Existing
+    compatible environments are reused. When a rebuild is required, uv is
     instructed to prefer Python installations already present on the user's
     system. uv may download a managed interpreter only when no compatible
     local Python can be found.
     """
-    venv_dir = runtime_dir / ".venv"
+    venv_dir = managed_venv_dir(runtime_dir)
     python = runtime_python(venv_dir)
     supported_versions = {"3.11", "3.12"}
 
@@ -339,7 +352,9 @@ def prepare_voxcpm() -> Path:
         check=False,
     )
     python_version = probe.stdout.strip() if probe.returncode == 0 else "unknown"
-    marker = runtime_dir / f".deps-voxcpm-2.0.3-py{python_version}-torch211-triton36.ready"
+    profile = explicit_tts_runtime_profile()
+    marker_prefix = f"{profile}-" if profile else ""
+    marker = runtime_dir / f".deps-{marker_prefix}voxcpm-2.0.3-py{python_version}-torch211-triton36.ready"
     if marker.is_file():
         return python
 
@@ -571,7 +586,7 @@ def patch_gpt_runtime_compat(source_dir: Path, runtime_dir: Path) -> Path:
 
     # GPT-SoVITS 自带英文 CMU 字典。g2p_en 的 import-time nltk.download()
     # 和 cmudict.dict() 对当前 en_G2p 都是冗余依赖，因此所有平台都禁用。
-    venv_dir = runtime_dir / ".venv"
+    venv_dir = managed_venv_dir(runtime_dir)
     g2p_candidates = [
         venv_dir / "Lib" / "site-packages" / "g2p_en" / "g2p.py",
     ]
@@ -692,7 +707,9 @@ def prepare_gpt_sovits() -> tuple[Path, Path]:
         check=False,
     )
     python_version = probe.stdout.strip() if probe.returncode == 0 else "unknown"
-    marker = runtime_dir / f".deps-{GPT_REF}-py{python_version}-v2.ready"
+    profile = explicit_tts_runtime_profile()
+    marker_prefix = f"{profile}-" if profile else ""
+    marker = runtime_dir / f".deps-{marker_prefix}{GPT_REF}-py{python_version}-v2.ready"
     if marker.is_file():
         patch_gpt_runtime_compat(source_dir, runtime_dir)
         ensure_gpt_assets(python, source_dir, runtime_dir)
@@ -800,17 +817,12 @@ def make_gpt_infer_config(source_dir: Path, runtime_dir: Path) -> Path:
         return source_dir / "GPT_SoVITS" / "configs" / "tts_infer.yaml"
 
     version = detect_sovits_version(sovits_weights)
-    adapter_config = read_toml(ADAPTER_ROOT / "configs" / "gpt-sovits.toml")
-    device = str(adapter_config.get("tts", {}).get("device", {}).get("tts", "cuda:0")).strip()
-    if device.startswith("cuda"):
-        try:
-            import torch
-            runtime_device = "cuda" if torch.cuda.is_available() else "cpu"
-        except Exception:
-            runtime_device = "cpu"
-    else:
-        runtime_device = device
-    is_half = runtime_device.startswith("cuda")
+    try:
+        import torch
+        runtime_device = "cuda" if torch.cuda.is_available() else "cpu"
+    except Exception:
+        runtime_device = "cpu"
+    is_half = runtime_device == "cuda"
 
     config_path = runtime_dir / "tts_infer.nachobot.yaml"
     pretrained = source_dir / "GPT_SoVITS" / "pretrained_models"
@@ -839,13 +851,6 @@ def serve_gpt_sovits(port: int) -> int:
         str(source_dir),
         str(source_dir / "GPT_SoVITS"),
     ])
-
-    config = read_toml(ADAPTER_ROOT / "configs" / "gpt-sovits.toml")
-    device = str(config.get("tts", {}).get("device", {}).get("tts", "cuda:0")).strip()
-    if device.startswith("cuda:"):
-        env["CUDA_VISIBLE_DEVICES"] = device.split(":", 1)[1] or "0"
-    else:
-        env["CUDA_VISIBLE_DEVICES"] = ""
 
     cmd = [
         str(python), "-s", str(source_dir / "api_v2.py"),

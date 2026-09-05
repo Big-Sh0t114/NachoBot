@@ -18,5 +18,11 @@ enabled = ["GPT_Sovits"]
 stream_mode = false  # 是否启用流式输出
 post_process = false # 是否启用电话语音后处理
 
+[bat_runtime]
+# 仅根目录 launchbot.bat / launchbot_lite.bat 使用，WebUI 启动不读取此配置
+# 可选值: "gpu" / "cpu"
+full = "gpu"
+lite = "gpu"
+
 [debug]
 logging_level = "DEBUG" # 日志级别
