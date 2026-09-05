@@ -29,17 +29,6 @@ class TTSModels:
 
 
 @dataclass
-class DeviceConfig:
-    tts: str
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "DeviceConfig":
-        return cls(
-            tts=data.get("tts", "cuda:0"),
-        )
-
-
-@dataclass
 class TTSConfig:
     host: str
     port: int
@@ -53,17 +42,18 @@ class TTSConfig:
     sample_steps: int
     super_sampling: bool
     models: TTSModels
-    device: DeviceConfig
     media_type: str = field(default="wav")
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "TTSConfig":
         models_data = data.pop("models", {})
-        device_data = data.pop("device", {})
+        # Backward compatibility: old configs may still contain [tts.device].
+        # The field is intentionally ignored; runtime selection is no longer
+        # controlled by the GPT-SoVITS config.
+        data.pop("device", None)
         return cls(
-            **{k: v for k, v in data.items() if k not in ("models", "device")},
+            **{k: v for k, v in data.items() if k != "models"},
             models=TTSModels.from_dict(models_data),
-            device=DeviceConfig.from_dict(device_data),
         )
 
 

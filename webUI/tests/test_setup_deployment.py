@@ -16,6 +16,8 @@ if str(WEBUI_DIR) not in sys.path:
 
 import setup_checks
 import setup_deployment
+import process_manager
+from multimodal_runtime import MultimodalRuntimeManager
 
 
 class SetupConfigCredentialTests(unittest.TestCase):
@@ -295,6 +297,118 @@ class BuiltinTemplatePackagingTests(unittest.TestCase):
         self.assertTrue(statuses[setup_deployment.BUILTIN_KOISHI_TEMPLATE])
         self.assertTrue(statuses[setup_deployment.BUILTIN_BILIBILI_TEMPLATE])
         self.assertEqual(setup_deployment.ConfigInitializer._validate_discord_templates(), [])
+
+
+class MultimodalRuntimeTests(unittest.TestCase):
+    def test_install_tasks_preserve_selected_runtime(self) -> None:
+        for runtime in ("gpu", "cpu", "relay"):
+            with self.subTest(runtime=runtime):
+                tasks = setup_deployment.DependencyInstaller.get_install_tasks(
+                    ["tts"], runtime
+                )
+                task = next(item for item in tasks if item["id"] == "tts")
+                self.assertEqual(task["runtime"], runtime)
+                self.assertIn(
+                    MultimodalRuntimeManager.PROFILE_META[runtime]["label"],
+                    task["name"],
+                )
+
+    def test_initial_deployment_always_includes_relay_runtime(self) -> None:
+        tasks = setup_deployment.DependencyInstaller.get_install_tasks([], "gpu")
+        relay = [item for item in tasks if item["id"] == "tts_relay"]
+        self.assertEqual(len(relay), 1)
+        self.assertEqual(relay[0]["runtime"], "relay")
+
+        tasks = setup_deployment.DependencyInstaller.get_install_tasks(["tts"], "gpu")
+        self.assertEqual(
+            [(item["id"], item.get("runtime")) for item in tasks if item["id"].startswith("tts")],
+            [("tts", "gpu"), ("tts_relay", "relay")],
+        )
+
+        tasks = setup_deployment.DependencyInstaller.get_install_tasks(["tts"], "relay")
+        self.assertEqual(
+            [(item["id"], item.get("runtime")) for item in tasks if item["id"].startswith("tts")],
+            [("tts", "relay")],
+        )
+
+    def test_null_runtime_alias_maps_to_relay(self) -> None:
+        self.assertEqual(MultimodalRuntimeManager.normalize_profile("null"), "relay")
+
+    def test_relay_dependencies_exclude_local_model_stack(self) -> None:
+        relay = {dependency.lower() for dependency in MultimodalRuntimeManager.RELAY_DEPENDENCIES}
+        forbidden_prefixes = (
+            "torch",
+            "torchvision",
+            "torchaudio",
+            "transformers",
+            "timm",
+            "onnxruntime",
+            "sherpa",
+        )
+        self.assertFalse(
+            any(
+                dependency.startswith(prefix)
+                for dependency in relay
+                for prefix in forbidden_prefixes
+            )
+        )
+
+    def test_potato_runtime_prefers_relay_then_falls_back_to_gpu_cpu(self) -> None:
+        manager = object.__new__(process_manager.ProcessManager)
+        manager._launch_runtime = "gpu"
+
+        installed = {"relay": True, "gpu": True, "cpu": True}
+        with mock.patch.object(
+            process_manager.MultimodalRuntimeManager,
+            "get_status",
+            side_effect=lambda profile: {"installed": installed[profile]},
+        ):
+            self.assertEqual(manager._resolve_potato_runtime("cpu"), "relay")
+
+        installed = {"relay": False, "gpu": True, "cpu": True}
+        with mock.patch.object(
+            process_manager.MultimodalRuntimeManager,
+            "get_status",
+            side_effect=lambda profile: {"installed": installed[profile]},
+        ):
+            self.assertEqual(manager._resolve_potato_runtime("cpu"), "cpu")
+
+        installed = {"relay": False, "gpu": False, "cpu": True}
+        with mock.patch.object(
+            process_manager.MultimodalRuntimeManager,
+            "get_status",
+            side_effect=lambda profile: {"installed": installed[profile]},
+        ):
+            self.assertEqual(manager._resolve_potato_runtime("gpu"), "cpu")
+
+        installed = {"relay": False, "gpu": False, "cpu": False}
+        with mock.patch.object(
+            process_manager.MultimodalRuntimeManager,
+            "get_status",
+            side_effect=lambda profile: {"installed": installed[profile]},
+        ):
+            with self.assertRaises(RuntimeError):
+                manager._resolve_potato_runtime("gpu")
+
+    def test_potato_command_uses_resolved_runtime_python_without_uv(self) -> None:
+        manager = object.__new__(process_manager.ProcessManager)
+        manager._launch_runtime = "cpu"
+        runtime_python = Path(r"C:\runtime\cpu\Scripts\python.exe")
+        with mock.patch.object(
+            process_manager.MultimodalRuntimeManager,
+            "require_python",
+            return_value=runtime_python,
+        ) as require_python:
+            cmd, env = manager._resolve_multimodal_runtime_cmd(
+                "potato_relay",
+                ["uv", "run", "python", "main.py", "--no-local-models"],
+                {},
+            )
+
+        require_python.assert_called_once_with("cpu")
+        self.assertEqual(cmd, [str(runtime_python), "main.py", "--no-local-models"])
+        self.assertNotIn("uv", cmd)
+        self.assertEqual(env, {})
 
 
 if __name__ == "__main__":

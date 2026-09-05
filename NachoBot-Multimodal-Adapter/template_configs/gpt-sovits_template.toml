@@ -26,10 +26,6 @@ repetition_penalty = 1.35  # 重复惩罚系数
 sample_steps = 32          # VITS采样步数
 super_sampling = false     # 是否启用超采样
 
-[tts.device]
-# 硬件设备配置
-tts = "cuda:0"   # TTS使用的设备
-
 [tts.models]
 # 自定义角色预设
 [tts.models.presets]

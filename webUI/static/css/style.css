@@ -614,6 +614,123 @@ body {
     font-size: 0.8rem;
 }
 
+.launch-runtime-section {
+    margin-top: 18px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border-light);
+}
+
+.launch-runtime-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.launch-runtime-item {
+    min-width: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: rgba(255, 255, 255, 0.45);
+    overflow: hidden;
+    transition: border-color var(--transition), background var(--transition), box-shadow var(--transition);
+}
+
+.launch-runtime-item.selected {
+    border-color: var(--accent);
+    background: var(--accent-bg);
+    box-shadow: 0 0 0 2px rgba(13, 148, 136, 0.10);
+}
+
+.launch-runtime-select {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 13px 14px;
+    border: 0;
+    background: transparent;
+    color: var(--text-primary);
+    text-align: left;
+    font: inherit;
+    cursor: pointer;
+}
+
+.launch-runtime-select:not(:disabled):hover {
+    background: rgba(255, 255, 255, 0.35);
+}
+
+.launch-runtime-select:disabled {
+    cursor: default;
+}
+
+.launch-runtime-item.selected .launch-profile-radio {
+    border-color: var(--accent);
+    background: var(--accent);
+}
+
+.launch-runtime-copy {
+    min-width: 0;
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.launch-runtime-copy strong {
+    font-size: 0.83rem;
+}
+
+.launch-runtime-copy small {
+    color: var(--text-muted);
+    font-size: 0.7rem;
+    line-height: 1.35;
+}
+
+.launch-runtime-state {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    min-height: 43px;
+    padding: 9px 12px;
+    border-top: 1px solid var(--border-light);
+    font-size: 0.72rem;
+    font-weight: 700;
+}
+
+.launch-runtime-state.installed {
+    color: var(--success);
+}
+
+.launch-runtime-state.missing {
+    color: var(--warning);
+}
+
+.launch-runtime-install.btn-primary {
+    background: var(--accent);
+    color: #fff;
+    border-color: transparent;
+    box-shadow: 0 2px 8px rgba(13, 148, 136, 0.25);
+}
+
+.launch-runtime-install.btn-primary:not(:disabled):hover {
+    background: var(--accent-dark);
+    color: #fff;
+    border-color: transparent;
+    box-shadow: 0 4px 14px rgba(13, 148, 136, 0.35);
+}
+
+.launch-runtime-warning {
+    margin-top: 12px;
+    padding: 10px 12px;
+    border: 1px solid rgba(245, 158, 11, 0.28);
+    border-radius: var(--radius-sm);
+    background: rgba(245, 158, 11, 0.08);
+    color: #92400e;
+    font-size: 0.76rem;
+    line-height: 1.45;
+}
+
 .launch-progress {
     margin-top: 16px;
     padding: 14px 16px;
@@ -661,7 +778,8 @@ body {
 }
 
 @media (max-width: 900px) {
-    .launch-profile-grid {
+    .launch-profile-grid,
+    .launch-runtime-grid {
         grid-template-columns: 1fr;
     }
 

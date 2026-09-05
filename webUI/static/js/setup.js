@@ -7,6 +7,7 @@ const SetupModule = (() => {
     let currentStep = 1;
     let envCheckData = null;
     let selectedComponents = ['core']; // core is always selected
+    let multimodalRuntimeTouched = false;
     let deploying = false;
     let defaultsLoader = null;
     let bilibiliQrObjectUrl = null;
@@ -66,6 +67,12 @@ const SetupModule = (() => {
         document.querySelectorAll('.setup-component-cb').forEach(cb => {
             cb.addEventListener('change', onComponentToggle);
         });
+        document.querySelectorAll('input[name="setup-multimodal-runtime"]').forEach(radio => {
+            radio.addEventListener('change', () => {
+                multimodalRuntimeTouched = true;
+                updateMultimodalRuntimeSelection();
+            });
+        });
 
         // "+" add-row buttons
         document.getElementById('btn-add-provider')?.addEventListener('click', addProviderRow);
@@ -122,6 +129,7 @@ const SetupModule = (() => {
             }
         }
         if (step === 4) {
+            updateMultimodalRuntimeSelection();
             updatePathCheckVisibility();
             verifyAllPaths();
         }
@@ -230,8 +238,41 @@ const SetupModule = (() => {
     function updateComponentVisuals() {
         document.querySelectorAll('.component-option').forEach(label => {
             const cb = label.querySelector('input[type="checkbox"]');
-            label.classList.toggle('checked', cb.checked);
+            if (cb) label.classList.toggle('checked', cb.checked);
         });
+        updateMultimodalRuntimeSelection();
+    }
+
+    function getRecommendedMultimodalRuntime() {
+        return envCheckData?.gpu?.has_gpu ? 'gpu' : 'cpu';
+    }
+
+    function getSelectedMultimodalRuntime() {
+        return document.querySelector('input[name="setup-multimodal-runtime"]:checked')?.value
+            || getRecommendedMultimodalRuntime();
+    }
+
+    function updateMultimodalRuntimeSelection() {
+        const card = document.getElementById('setup-multimodal-runtime-card');
+        if (card) card.style.display = selectedComponents.includes('tts') ? '' : 'none';
+
+        const recommended = getRecommendedMultimodalRuntime();
+        if (!multimodalRuntimeTouched) {
+            const radio = document.querySelector(`input[name="setup-multimodal-runtime"][value="${recommended}"]`);
+            if (radio) radio.checked = true;
+        }
+
+        document.querySelectorAll('[data-runtime-option]').forEach(label => {
+            const radio = label.querySelector('input[type="radio"]');
+            label.classList.toggle('checked', Boolean(radio?.checked));
+        });
+
+        const recommendEl = document.getElementById('setup-multimodal-runtime-recommend');
+        if (recommendEl) {
+            recommendEl.textContent = recommended === 'gpu'
+                ? '硬件建议：GPU / CUDA（可手动改选）'
+                : '硬件建议：CPU（可手动改选）';
+        }
     }
 
     let recommendedLaunchGroup = '核心'; // default recommendation
@@ -570,6 +611,7 @@ const SetupModule = (() => {
             models,
             tts: {
                 engine: document.getElementById('setup-tts-engine')?.value || 'GPT_Sovits',
+                runtime: getSelectedMultimodalRuntime(),
             },
             universalvc: {
                 target_process_name: document.getElementById('setup-uvc-process')?.value.trim() || '',
@@ -929,7 +971,9 @@ const SetupModule = (() => {
         addProgressItem(progressDiv, 'dep-install', '📦 安装依赖', 'running');
 
         try {
-            const tasks = await apiGet(`/api/setup/deps/tasks?components=${wizardData.components.join(',')}`);
+            const componentsParam = encodeURIComponent(wizardData.components.join(','));
+            const runtimeParam = encodeURIComponent(wizardData.tts?.runtime || getRecommendedMultimodalRuntime());
+            const tasks = await apiGet(`/api/setup/deps/tasks?components=${componentsParam}&multimodal_runtime=${runtimeParam}`);
 
             if (tasks.length === 0) {
                 updateProgressItem('dep-install', 'done', '✅ 无需安装依赖');

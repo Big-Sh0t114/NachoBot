@@ -776,6 +776,47 @@
                         <span class="hint-icon">🔎</span>
                         <span>请确认所选组件所需的外部运行依赖。验证通过后方可进入部署。</span>
                     </div>
+                    <div class="setup-card" id="setup-multimodal-runtime-card" style="display:none">
+                        <div class="setup-card-header">
+                            <h3>🧩 Multimodal 运行环境</h3>
+                            <span id="setup-multimodal-runtime-recommend" class="form-row-tag">正在读取硬件建议...</span>
+                        </div>
+                        <div class="setup-components">
+                            <div class="component-group">
+                                <div class="component-group-title">安装依赖前请选择运行环境</div>
+                                <label class="component-option checked" data-runtime-option="gpu">
+                                    <input type="radio" name="setup-multimodal-runtime" value="gpu" checked>
+                                    <div class="component-card">
+                                        <span class="component-icon">🎮</span>
+                                        <div class="component-info">
+                                            <span class="component-name">GPU / CUDA</span>
+                                            <span class="component-desc">安装 CUDA 版 PyTorch 与本地模型依赖，适合 NVIDIA GPU</span>
+                                        </div>
+                                    </div>
+                                </label>
+                                <label class="component-option" data-runtime-option="cpu">
+                                    <input type="radio" name="setup-multimodal-runtime" value="cpu">
+                                    <div class="component-card">
+                                        <span class="component-icon">🖥️</span>
+                                        <div class="component-info">
+                                            <span class="component-name">CPU</span>
+                                            <span class="component-desc">安装 CPU 版 PyTorch 与本地模型依赖，不使用 CUDA</span>
+                                        </div>
+                                    </div>
+                                </label>
+                                <label class="component-option" data-runtime-option="relay">
+                                    <input type="radio" name="setup-multimodal-runtime" value="relay">
+                                    <div class="component-card">
+                                        <span class="component-icon">🔗</span>
+                                        <div class="component-info">
+                                            <span class="component-name">仅中继 / 不安装本地模型</span>
+                                            <span class="component-desc">仅安装消息中继所需的最小依赖，不安装 Torch、Transformers、ASR/VLM 等本地模型栈</span>
+                                        </div>
+                                    </div>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
                     <div class="setup-card">
                         <div class="setup-card-header">
                             <h3>📦 依赖完整性检查</h3>
