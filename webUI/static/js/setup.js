@@ -248,8 +248,8 @@ const SetupModule = (() => {
     }
 
     function getSelectedMultimodalRuntime() {
-        return document.querySelector('input[name="setup-multimodal-runtime"]:checked')?.value
-            || getRecommendedMultimodalRuntime();
+        const checked = document.querySelectorAll('input[name="setup-multimodal-runtime"]:checked');
+        return checked[0]?.value || getRecommendedMultimodalRuntime();
     }
 
     function updateMultimodalRuntimeSelection() {
@@ -258,7 +258,8 @@ const SetupModule = (() => {
 
         const recommended = getRecommendedMultimodalRuntime();
         if (!multimodalRuntimeTouched) {
-            const radio = document.querySelector(`input[name="setup-multimodal-runtime"][value="${recommended}"]`);
+            const radios = document.querySelectorAll(`input[name="setup-multimodal-runtime"][value="${recommended}"]`);
+            const radio = radios[0];
             if (radio) radio.checked = true;
         }
 
@@ -699,6 +700,27 @@ const SetupModule = (() => {
         });
         if (modelIds.length === 0) {
             alert('请至少配置一个模型');
+            return;
+        }
+
+        // Every configured model must reference a provider.
+        let hasMissingModelProvider = false;
+        let firstMissingModelProvider = null;
+        document.querySelectorAll('.model-row').forEach(row => {
+            const id = row.querySelector('.setup-model-id')?.value.trim() || '';
+            const providerSelect = row.querySelector('.setup-model-provider');
+            if (id && providerSelect && !providerSelect.value.trim()) {
+                hasMissingModelProvider = true;
+                providerSelect.classList.add('input-error');
+                if (!firstMissingModelProvider) firstMissingModelProvider = providerSelect;
+            } else if (providerSelect) {
+                providerSelect.classList.remove('input-error');
+            }
+        });
+
+        if (hasMissingModelProvider) {
+            alert('发现未选择服务商的模型。请为所有模型选择所属服务商，或者删除不需要的模型。');
+            firstMissingModelProvider?.focus();
             return;
         }
 
