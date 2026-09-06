@@ -141,6 +141,36 @@ class MultimodalRuntimeManager:
         return cls.python_path(profile)
 
     @classmethod
+    def _installed_local_profiles(cls) -> list[str]:
+        """Return completed GPU/CPU runtimes that can also host POTATO relay."""
+        return [
+            profile
+            for profile in ("gpu", "cpu")
+            if cls.get_status(profile)["installed"]
+        ]
+
+    @classmethod
+    def _remove_relay_venv(cls) -> bool:
+        """Delete the disposable POTATO venv when a local runtime supersedes it."""
+        relay_dir = cls.env_dir("relay")
+        if not relay_dir.exists():
+            return False
+        shutil.rmtree(relay_dir)
+        return True
+
+    @classmethod
+    def reconcile_relay_fallback(cls) -> dict[str, Any]:
+        """Remove the fallback Relay venv once any GPU/CPU runtime is available."""
+        local_profiles = cls._installed_local_profiles()
+        removed = False
+        if local_profiles:
+            removed = cls._remove_relay_venv()
+        return {
+            "local_profiles": local_profiles,
+            "relay_removed": removed,
+        }
+
+    @classmethod
     async def install(
         cls,
         profile: str,
@@ -154,6 +184,21 @@ class MultimodalRuntimeManager:
 
         if not cls.ADAPTER_DIR.exists():
             return {"status": "error", "message": f"目录不存在: {cls.ADAPTER_DIR}"}
+
+        if profile == "relay":
+            try:
+                reconciliation = cls.reconcile_relay_fallback()
+            except Exception as exc:
+                return {"status": "error", "message": f"清理旧 POTATO 环境失败: {exc}"}
+            local_profiles = reconciliation["local_profiles"]
+            if local_profiles:
+                labels = "/".join(cls.PROFILE_META[item]["label"] for item in local_profiles)
+                message = f"已存在 {labels} 环境，POTATO 将直接复用本地 runtime"
+                if reconciliation["relay_removed"]:
+                    message += "；旧 .venv-potato 已删除"
+                if callback:
+                    await callback(f"[Runtime] {message}。\n")
+                return {"status": "ok", "message": message}
 
         cls._marker_path(profile).unlink(missing_ok=True)
         if callback:
@@ -227,13 +272,32 @@ class MultimodalRuntimeManager:
             ),
             encoding="utf-8",
         )
+
+        relay_removed = False
+        if profile in {"gpu", "cpu"}:
+            try:
+                relay_removed = cls.reconcile_relay_fallback()["relay_removed"]
+            except Exception as exc:
+                return {
+                    "status": "error",
+                    "message": (
+                        f"{cls.PROFILE_META[profile]['label']} 环境已安装完成，"
+                        f"但清理旧 POTATO 环境失败: {exc}"
+                    ),
+                }
+
         if callback:
             await callback(
                 f"[Runtime] {cls.PROFILE_META[profile]['label']} 环境已就绪。\n"
             )
+            if relay_removed:
+                await callback("[Runtime] 已删除由本地 runtime 取代的旧 .venv-potato。\n")
+        message = f"{cls.PROFILE_META[profile]['label']} 环境安装完成"
+        if relay_removed:
+            message += "；旧 .venv-potato 已自动删除"
         return {
             "status": "ok",
-            "message": f"{cls.PROFILE_META[profile]['label']} 环境安装完成",
+            "message": message,
         }
 
     @classmethod

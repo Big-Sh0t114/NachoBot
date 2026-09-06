@@ -930,6 +930,12 @@ class ConfigInitializer:
         if component_id == "NachoBot":
             return True
 
+        # The Multimodal relay base config is a baseline WebUI dependency:
+        # POTATO needs server/routing settings even when the user does not
+        # select local TTS/VLM/ASR. Model-specific configs remain TTS-only.
+        if target_rel == "NachoBot-Multimodal-Adapter/configs/base.toml":
+            return True
+
         # Adapter configs only when their component is selected
         mapping = {
             "NachoBot-Napcat-Adapter": "qq",
@@ -1081,7 +1087,7 @@ class ConfigInitializer:
             tts = wizard_data.get("tts", {})
             engine = tts.get("engine", "GPT_Sovits")
             if "enabled_tts" in doc:
-                doc["enabled_tts"]["enabled"] = [engine]
+                doc["enabled_tts"]["enabled"] = [engine] if tts_enabled else []
                 changed = True
 
         # -- UniversalVC adapter config.toml --
@@ -1703,11 +1709,17 @@ class DependencyInstaller:
                 }
             )
 
-        # The lightweight POTATO/Relay runtime is part of the baseline WebUI
-        # deployment so POTATO can be started later without downloading the
-        # local Torch/model stack. If Relay is already the selected primary
-        # Multimodal runtime, the primary tts task above already covers it.
-        if not ("tts" in component_set and runtime == "relay"):
+        # POTATO/Relay is only a fallback environment. Reconcile historical
+        # installs while preparing the deployment plan: if a completed GPU/CPU
+        # runtime already exists, remove any stale .venv-potato immediately.
+        installing_local_runtime = "tts" in component_set and runtime in {"gpu", "cpu"}
+        reconciliation = MultimodalRuntimeManager.reconcile_relay_fallback()
+        has_local_runtime = bool(reconciliation["local_profiles"])
+        if (
+            not installing_local_runtime
+            and not has_local_runtime
+            and not ("tts" in component_set and runtime == "relay")
+        ):
             tasks.append(
                 {
                     "id": "tts_relay",
