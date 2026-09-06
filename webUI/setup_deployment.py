@@ -1709,11 +1709,17 @@ class DependencyInstaller:
                 }
             )
 
-        # The lightweight POTATO/Relay runtime is part of the baseline WebUI
-        # deployment so POTATO can be started later without downloading the
-        # local Torch/model stack. If Relay is already the selected primary
-        # Multimodal runtime, the primary tts task above already covers it.
-        if not ("tts" in component_set and runtime == "relay"):
+        # POTATO/Relay is only a fallback environment. Reconcile historical
+        # installs while preparing the deployment plan: if a completed GPU/CPU
+        # runtime already exists, remove any stale .venv-potato immediately.
+        installing_local_runtime = "tts" in component_set and runtime in {"gpu", "cpu"}
+        reconciliation = MultimodalRuntimeManager.reconcile_relay_fallback()
+        has_local_runtime = bool(reconciliation["local_profiles"])
+        if (
+            not installing_local_runtime
+            and not has_local_runtime
+            and not ("tts" in component_set and runtime == "relay")
+        ):
             tasks.append(
                 {
                     "id": "tts_relay",

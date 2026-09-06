@@ -917,9 +917,9 @@ class ProcessManager:
         )
 
     def _resolve_potato_runtime(self, preferred: str | None = None) -> str:
-        """Prefer Relay for POTATO, falling back to an installed GPU/CPU runtime."""
-        if MultimodalRuntimeManager.get_status("relay")["installed"]:
-            return "relay"
+        """Reuse GPU/CPU for POTATO whenever possible; Relay is fallback-only."""
+        reconciliation = MultimodalRuntimeManager.reconcile_relay_fallback()
+        installed_local = set(reconciliation["local_profiles"])
 
         candidates: list[str] = []
         for candidate in (preferred, self._launch_runtime, "gpu", "cpu"):
@@ -931,8 +931,11 @@ class ProcessManager:
                 candidates.append(normalized)
 
         for candidate in candidates:
-            if MultimodalRuntimeManager.get_status(candidate)["installed"]:
+            if candidate in installed_local:
                 return candidate
+
+        if MultimodalRuntimeManager.get_status("relay")["installed"]:
+            return "relay"
 
         raise RuntimeError(
             "POTATO Relay 环境不可用，且没有已安装的 GPU/CPU Multimodal 环境"
