@@ -661,6 +661,20 @@
     color: #e2e8f0;
 }
 
+.btn.btn-primary.btn-sm {
+    background: var(--accent);
+    color: #fff;
+    border-color: transparent;
+    box-shadow: 0 2px 8px rgba(13,148,136,0.25);
+}
+
+.btn.btn-primary.btn-sm:hover {
+    background: var(--accent-dark);
+    color: #fff;
+    border-color: transparent;
+    box-shadow: 0 4px 14px rgba(13,148,136,0.35);
+}
+
 .btn-full { width: 100%; }
 
 /* ===================================================================

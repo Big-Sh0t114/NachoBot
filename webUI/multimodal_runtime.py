@@ -19,7 +19,10 @@ except ImportError:
 class MultimodalRuntimeManager:
     """Install and resolve the GPU, CPU and relay-only Multimodal environments."""
 
-    SCHEMA_VERSION = 1
+    # Schema 1 could be written after merely finding python.exe, allowing a
+    # half-created ~100 KB venv to be reported as installed. Schema 2 is only
+    # written after _validate_runtime() succeeds.
+    SCHEMA_VERSION = 2
     ADAPTER_DIR = ROOT_DIR / "NachoBot-Multimodal-Adapter"
     RUNTIME_DIR = ADAPTER_DIR / ".runtime"
     VALID_PROFILES = ("gpu", "cpu", "relay")
@@ -107,17 +110,100 @@ class MultimodalRuntimeManager:
             return False
 
     @classmethod
+    def _local_payload_present(cls, profile: str) -> bool:
+        """Cheaply reject empty or damaged GPU/CPU venvs without importing models."""
+        profile = cls.normalize_profile(profile)
+        if profile not in {"gpu", "cpu"}:
+            return False
+
+        env_dir = cls.env_dir(profile)
+        windows_site = env_dir / "Lib" / "site-packages"
+        posix_lib = env_dir / "lib"
+
+        site_packages: list[Path] = []
+        if windows_site.is_dir():
+            site_packages.append(windows_site)
+        if posix_lib.is_dir():
+            site_packages.extend(posix_lib.glob("python*/site-packages"))
+
+        required = ("torch", "transformers", "timm", "sherpa_onnx")
+        return any(
+            all((site / package).exists() for package in required)
+            for site in site_packages
+        )
+
+    @classmethod
+    def _validate_runtime(cls, profile: str) -> tuple[bool, str]:
+        """Import critical dependencies from the selected venv and verify Torch flavor."""
+        profile = cls.normalize_profile(profile)
+        python = cls.python_path(profile)
+        if not python.exists():
+            return False, f"未找到 Python: {python}"
+
+        if profile == "relay":
+            check = (
+                "import aiohttp, fastapi, numpy, scipy; "
+                "print('runtime-ok')"
+            )
+        else:
+            expected_cuda = "True" if profile == "gpu" else "False"
+            check = (
+                "import torch, transformers, timm, sherpa_onnx; "
+                "has_cuda_build = torch.version.cuda is not None; "
+                f"assert has_cuda_build is {expected_cuda}, "
+                "f'unexpected torch build: {torch.__version__}, cuda={torch.version.cuda}'; "
+                "print(f'runtime-ok torch={torch.__version__} cuda={torch.version.cuda}')"
+            )
+
+        env = os.environ.copy()
+        env["PYTHONNOUSERSITE"] = "1"
+        try:
+            import subprocess
+
+            result = subprocess.run(
+                [str(python), "-c", check],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+                timeout=60,
+                check=False,
+            )
+        except Exception as exc:
+            return False, str(exc)
+
+        output = (result.stdout or "").strip()
+        if result.returncode != 0:
+            return False, output or f"验证进程退出码: {result.returncode}"
+        return True, output or "runtime-ok"
+
+    @classmethod
     def get_status(cls, profile: str) -> dict[str, Any]:
         profile = cls.normalize_profile(profile)
         python = cls.python_path(profile)
+        marker_path = cls._marker_path(profile)
         marker_valid = cls._marker_valid(profile)
 
-        # .venv predates runtime markers and is historically the CUDA project
-        # environment. Reuse it when present to avoid forcing a second CUDA
-        # download. New CPU/relay environments require a completed marker so a
-        # half-created venv is never reported as installed.
-        legacy_gpu = profile == "gpu" and python.exists() and not marker_valid
-        installed = python.exists() and (marker_valid or legacy_gpu)
+        # Local runtimes must contain the actual model stack even when a valid
+        # marker exists. This cheaply catches empty/damaged venvs without running
+        # imports during the launcher's frequent status polling.
+        local_payload = (
+            cls._local_payload_present(profile)
+            if profile in {"gpu", "cpu"}
+            else False
+        )
+        legacy_gpu = (
+            profile == "gpu"
+            and python.exists()
+            and not marker_path.exists()
+            and local_payload
+        )
+        if profile in {"gpu", "cpu"}:
+            installed = python.exists() and local_payload and (marker_valid or legacy_gpu)
+        else:
+            installed = python.exists() and marker_valid
         return {
             "id": profile,
             "label": cls.PROFILE_META[profile]["label"],
@@ -263,6 +349,18 @@ class MultimodalRuntimeManager:
                 "status": "error",
                 "message": f"环境安装完成但未找到 Python: {python}",
             }
+
+        valid, validation_message = await asyncio.to_thread(cls._validate_runtime, profile)
+        if not valid:
+            return {
+                "status": "error",
+                "message": (
+                    f"{cls.PROFILE_META[profile]['label']} 环境依赖验证失败，"
+                    f"未写入安装标记: {validation_message}"
+                ),
+            }
+        if callback:
+            await callback(f"[Runtime] 依赖验证通过: {validation_message}\n")
 
         cls._marker_path(profile).write_text(
             json.dumps(
