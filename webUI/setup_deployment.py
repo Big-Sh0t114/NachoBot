@@ -930,6 +930,12 @@ class ConfigInitializer:
         if component_id == "NachoBot":
             return True
 
+        # The Multimodal relay base config is a baseline WebUI dependency:
+        # POTATO needs server/routing settings even when the user does not
+        # select local TTS/VLM/ASR. Model-specific configs remain TTS-only.
+        if target_rel == "NachoBot-Multimodal-Adapter/configs/base.toml":
+            return True
+
         # Adapter configs only when their component is selected
         mapping = {
             "NachoBot-Napcat-Adapter": "qq",
@@ -1081,7 +1087,7 @@ class ConfigInitializer:
             tts = wizard_data.get("tts", {})
             engine = tts.get("engine", "GPT_Sovits")
             if "enabled_tts" in doc:
-                doc["enabled_tts"]["enabled"] = [engine]
+                doc["enabled_tts"]["enabled"] = [engine] if tts_enabled else []
                 changed = True
 
         # -- UniversalVC adapter config.toml --
