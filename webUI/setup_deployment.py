@@ -1839,6 +1839,9 @@ class DependencyInstaller:
 
         env = os.environ.copy()
         env.pop("VIRTUAL_ENV", None)
+        # Never allow the WebUI process' own uv environment override to redirect
+        # an ordinary project sync into an unrelated virtual environment.
+        env.pop("UV_PROJECT_ENVIRONMENT", None)
         env["PYTHONNOUSERSITE"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUTF8"] = "1"
@@ -1891,6 +1894,9 @@ class DependencyInstaller:
 
         env = os.environ.copy()
         env.pop("VIRTUAL_ENV", None)
+        # Playwright must use the Core project environment, not an inherited
+        # UV_PROJECT_ENVIRONMENT belonging to the WebUI or another component.
+        env.pop("UV_PROJECT_ENVIRONMENT", None)
         env["PYTHONNOUSERSITE"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUTF8"] = "1"

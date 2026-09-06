@@ -706,20 +706,6 @@ body {
     color: var(--warning);
 }
 
-.launch-runtime-install.btn-primary {
-    background: var(--accent);
-    color: #fff;
-    border-color: transparent;
-    box-shadow: 0 2px 8px rgba(13, 148, 136, 0.25);
-}
-
-.launch-runtime-install.btn-primary:not(:disabled):hover {
-    background: var(--accent-dark);
-    color: #fff;
-    border-color: transparent;
-    box-shadow: 0 4px 14px rgba(13, 148, 136, 0.35);
-}
-
 .launch-runtime-warning {
     margin-top: 12px;
     padding: 10px 12px;
