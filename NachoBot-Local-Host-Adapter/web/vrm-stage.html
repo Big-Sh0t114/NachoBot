@@ -1,0 +1,476 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>星语主播 - 全身 3D 舞台</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #080612; color: #fff; font-family: "Microsoft YaHei", system-ui, sans-serif; }
+    body { background: #080612 url('/assets/immersive-dance-stage-v1.png') center / cover no-repeat; }
+    #stage { position: fixed; inset: 0; }
+    #stage canvas { width: 100%; height: 100%; display: block; }
+    .shade { position: fixed; inset: 0; pointer-events: none; background: linear-gradient(90deg, #05040dcc 0%, #0b071080 34%, transparent 66%), radial-gradient(circle at 68% 56%, transparent 0 27%, #04030a42 76%, #030208a8 100%), linear-gradient(0deg, #05030da8, transparent 42%); }
+    .brand { position: fixed; left: 5vw; top: 6vh; letter-spacing: .24em; color: #d9d2ff; font-size: clamp(12px, 1.4vw, 22px); text-shadow: 0 2px 13px #05020c; }
+    .copy { position: fixed; left: 5vw; bottom: 8vh; width: min(48vw, 800px); text-shadow: 0 3px 13px #100504; }
+    .tag { display: inline-block; margin-bottom: 15px; padding: 8px 14px; border: 1px solid #d8c9ff75; border-radius: 999px; background: #17102cb8; color: #f2eaff; box-shadow: 0 8px 24px #05020b70; font-size: clamp(13px, 1.5vw, 22px); }
+    .name { font-size: clamp(37px, 5.8vw, 92px); font-weight: 900; letter-spacing: .08em; }
+    .subtitle { margin-top: 20px; min-height: 3em; padding: 17px 22px; display: flex; align-items: center; border: 1px solid #d6c9ff70; border-radius: 20px; background: #090716d9; backdrop-filter: blur(12px); box-shadow: 0 14px 42px #040208b8, inset 0 1px #ffffff12; color: #fff; font-size: clamp(21px, 3.1vw, 48px); font-weight: 700; line-height: 1.42; }
+    .note { margin-top: 15px; color: #d8cff3; font-size: clamp(12px, 1.25vw, 18px); }
+    #state { position: fixed; top: 6vh; right: 4vw; max-width: 38vw; padding: 9px 13px; border: 1px solid #d4c4ff3b; border-radius: 999px; background: #0b0719bd; backdrop-filter: blur(10px); color: #eadfff; box-shadow: 0 8px 25px #0301066b; font-size: clamp(11px, 1.1vw, 16px); text-align: right; }
+    #barrage { position: fixed; top: 14vh; left: 5vw; max-width: min(47vw, 680px); display: none; padding: 12px 16px; border: 1px solid #ffd8bc8c; border-radius: 14px; background: #2b130ecc; box-shadow: 0 10px 24px #10030166; color: #fff5eb; font-size: clamp(14px, 1.55vw, 24px); line-height: 1.45; }
+    #barrage strong { color: #ffd6b1; margin-right: 7px; }
+    #event-panel { position: fixed; top: 14vh; right: 4vw; display: none; width: min(35vw, 440px); padding: 15px 18px; border: 1px solid #ffd8bc8c; border-radius: 16px; background: #2b130ecc; box-shadow: 0 10px 24px #10030166; color: #fff5eb; text-align: left; }
+    #event-panel strong { display: block; margin-bottom: 5px; color: #ffd6b1; font-size: .78em; letter-spacing: .08em; }
+    #event-panel span { display: block; font-size: clamp(15px, 1.55vw, 24px); line-height: 1.45; }
+    #event-panel.like { border-color: #ffc4e6aa; background: #3a1633e8; }
+    #event-panel.gift { border-color: #ffe7a7bb; background: #3b2410e8; }
+    #event-panel.safety { border-color: #ff9c9cbb; background: #431414eb; }
+    #event-panel.pause { border-color: #b9c4ffbb; background: #1b2248eb; }
+    #event-panel.resume { border-color: #a8f0d1bb; background: #123d35eb; }
+    #rules-panel { position: fixed; right: 3vw; bottom: 3vh; width: min(23vw, 320px); padding: 12px 15px; border: 1px solid #cab8ff45; border-radius: 15px; background: #090616b8; backdrop-filter: blur(10px); color: #ddd5ef; text-align: left; font-size: clamp(11px, .95vw, 15px); line-height: 1.55; opacity: .82; }
+    #rules-panel strong { display: block; margin-bottom: 4px; color: #f0c99d; letter-spacing: .06em; }
+    #missing { position: fixed; inset: 0; display: none; place-items: center; padding: 32px; background: #100807d9; text-align: center; z-index: 4; }
+    #missing > div { max-width: 650px; padding: 31px; border: 1px solid #ffe0c07d; border-radius: 22px; background: #2a1510; box-shadow: 0 20px 55px #000b; }
+    #missing h1 { margin: 0 0 14px; font-size: clamp(25px, 4vw, 48px); }
+    #missing p { margin: 10px 0; line-height: 1.7; color: #ffe4d1; }
+    @media (max-aspect-ratio: 3/4) { .copy { width: 65vw; bottom: 6vh; } .name { font-size: clamp(32px, 8vw, 80px); } #state { max-width: 55vw; } }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "/vendor/three/build/three.module.js",
+      "three/addons/": "/vendor/three/examples/jsm/",
+      "@pixiv/three-vrm": "/vendor/@pixiv/three-vrm/lib/three-vrm.module.js",
+      "@pixiv/three-vrm-animation": "/vendor/@pixiv/three-vrm-animation/lib/three-vrm-animation.module.js"
+    }
+  }
+  </script>
+</head>
+<body>
+  <main id="stage"></main><div class="shade"></div>
+  <div class="brand">AI VIRTUAL HOST · FULL BODY 3D</div>
+  <div id="state">正在加载全身 3D 形象…</div>
+  <div id="barrage"><strong id="barrage-user">弹幕</strong><span id="barrage-text"></span></div>
+  <div id="event-panel"><strong id="event-label">互动反馈</strong><span id="event-detail"></span></div>
+  <div id="rules-panel"><strong>互动规则</strong><div>评论：问小星：内容</div><div>点赞：累计 20 次触发感谢</div><div>礼物：触发致谢与预设动作</div></div>
+  <section class="copy"><div class="tag">星语主播 · 正在直播</div><div class="name">星语主播</div><div id="subtitle" class="subtitle">准备开始直播</div><div class="note">VRM 全身骨骼 · VRMA 舞蹈动作 · 本机 AI 口播 · 本地模拟互动</div></section>
+  <section id="missing"><div><h1>等待导入 VRM 模型</h1><p>请把 VRoid Studio 导出的原创 VRM 1.0 文件命名为 <code>xingyu-host-v1.vrm</code>，放进 <code>models</code> 文件夹。</p><p>导入后在 <code>config.toml</code> 的 <code>[vrm]</code> 中将 <code>enabled</code> 改为 <code>true</code>，再重启本机主播控制台。</p></div></section>
+  <script type="module">
+    import * as THREE from 'three';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+    import { VRMAnimationLoaderPlugin, createVRMAnimationClip } from '@pixiv/three-vrm-animation';
+    import { DANCE_STYLE_IDS, DANCE_STYLE_META, describeDance, resolveDanceStyle, sampleDance } from '/stage-assets/dance-choreography.js';
+    import { MOCAP_STYLE_FILES, sampleCompactMotion, validateCompactMotion } from '/stage-assets/mocap-motion.js';
+    import { ANYADANCE_STYLE_FILES, sampleAnyaDanceMotion, validateAnyaDanceMotion } from '/stage-assets/anyadance-motion.js';
+    import { danceHandGesture, sampleHandCurls, sampleHandGesture } from '/stage-assets/hand-choreography.js';
+
+    const modelUrl = '/models/xingyu-host-v1.vrm';
+    const motionBaseUrl = '/models/motions/';
+    const mocapBaseUrl = '/models/motions/aist/';
+    const host = document.querySelector('#stage');
+    const subtitle = document.querySelector('#subtitle');
+    const state = document.querySelector('#state');
+    const barrage = document.querySelector('#barrage');
+    const barrageUser = document.querySelector('#barrage-user');
+    const barrageText = document.querySelector('#barrage-text');
+    const eventPanel = document.querySelector('#event-panel');
+    const eventLabel = document.querySelector('#event-label');
+    const eventDetail = document.querySelector('#event-detail');
+    const missing = document.querySelector('#missing');
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(29, innerWidth / innerHeight, 0.05, 100);
+    camera.position.set(0.05, 1.36, 4.25);
+    const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, powerPreference: 'high-performance' });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.05;
+    host.append(renderer.domElement);
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.set(0, 1.16, 0);
+    controls.enablePan = false; controls.enableZoom = false; controls.enableDamping = true;
+    controls.minPolarAngle = 1.08; controls.maxPolarAngle = 1.53;
+    scene.add(new THREE.HemisphereLight(0xffead9, 0x3d1d17, 2.15));
+    const key = new THREE.DirectionalLight(0xffd8be, 3.5); key.position.set(-2.5, 4.5, 3.8); key.castShadow = true; scene.add(key);
+    const rim = new THREE.DirectionalLight(0x8aa2ff, 2.2); rim.position.set(3, 2.7, -2.2); scene.add(rim);
+    const floor = new THREE.Mesh(new THREE.CircleGeometry(2.25, 64), new THREE.ShadowMaterial({ color: 0x07020e, opacity: 0.42 }));
+    function stageModelX() { return innerWidth / innerHeight > 1.2 ? 0.52 : 0.16; }
+    floor.rotation.x = -Math.PI / 2; floor.position.set(stageModelX(), 0.001, 0); floor.receiveShadow = true; scene.add(floor);
+    const clock = new THREE.Clock();
+    const loader = new GLTFLoader(); loader.register((parser) => new VRMLoaderPlugin(parser));
+    let vrm = null, mixer = null, activeAction = null, activeMocap = null, activeSolved = null, activeStyle = 'idle', wantedStyle = 'idle';
+    let motionStyle = '', randomSegment = '', danceStartedAt = 0, motionStartedAt = 0, solvedStartedAt = 0, danceRequestSerial = 0, visiblePhraseKey = '';
+    let speechVersion = -1, speaking = false, activeAudio = null;
+    const motionAvailability = new Map(); const motionClipCache = new Map(); const mocapCache = new Map(); const solvedCache = new Map(); const boneRest = new Map(); const restWorld = new Map();
+    const quat = new THREE.Quaternion(); const rotation = new THREE.Quaternion(); const euler = new THREE.Euler(); const position = new THREE.Vector3();
+    const worldTarget = new THREE.Vector3(); const sourceRestQuat = new THREE.Quaternion(); const sourceCurrentQuat = new THREE.Quaternion(); const sourceDeltaQuat = new THREE.Quaternion(); const targetWorldQuat = new THREE.Quaternion(); const parentWorldQuat = new THREE.Quaternion(); const localTargetQuat = new THREE.Quaternion();
+    const ikJoint = new THREE.Vector3(); const ikEffector = new THREE.Vector3(); const ikTarget = new THREE.Vector3(); const ikFrom = new THREE.Vector3(); const ikTo = new THREE.Vector3();
+    const ikParent = new THREE.Quaternion(); const ikDelta = new THREE.Quaternion(); const ikLocalDelta = new THREE.Quaternion(); const ikIdentity = new THREE.Quaternion();
+    const trackedBones = ['hips','spine','chest','upperChest','neck','head','leftShoulder','rightShoulder','leftUpperArm','leftLowerArm','leftHand','rightUpperArm','rightLowerArm','rightHand','leftUpperLeg','leftLowerLeg','leftFoot','leftToes','rightUpperLeg','rightLowerLeg','rightFoot','rightToes'];
+    const fingerBones = ['ThumbMetacarpal','ThumbProximal','ThumbDistal','IndexProximal','IndexIntermediate','IndexDistal','MiddleProximal','MiddleIntermediate','MiddleDistal','RingProximal','RingIntermediate','RingDistal','LittleProximal','LittleIntermediate','LittleDistal'].flatMap((suffix) => [`left${suffix}`, `right${suffix}`]);
+    const rememberedBones = [...trackedBones, ...fingerBones];
+
+    function setState(text) { state.textContent = text; }
+    function showMissing(message) { setState('3D 模型尚未就绪'); missing.querySelector('p').textContent = message; missing.style.display = 'grid'; }
+    function rememberRestPose() {
+      scene.updateMatrixWorld(true);
+      for (const name of rememberedBones) {
+        const node = vrm.humanoid?.getNormalizedBoneNode(name);
+        if (node) {
+          boneRest.set(name, { node, quaternion: node.quaternion.clone(), position: node.position.clone() });
+          node.getWorldPosition(position); node.getWorldQuaternion(rotation);
+          restWorld.set(name, { position: position.clone(), quaternion: rotation.clone() });
+        }
+      }
+    }
+    function pose(name, x = 0, y = 0, z = 0, softness = 0.33) {
+      const bone = boneRest.get(name); if (!bone) return;
+      rotation.setFromEuler(euler.set(x, y, z)); quat.copy(bone.quaternion).multiply(rotation);
+      bone.node.quaternion.slerp(quat, softness);
+    }
+    function shiftHips(x, y, z, softness) {
+      const bone = boneRest.get('hips'); if (!bone) return;
+      position.copy(bone.position); position.x += x; position.y += y; position.z += z; bone.node.position.lerp(position, softness);
+    }
+    function applyHandChoreography(style, elapsed, softness) {
+      const bpm = DANCE_STYLE_META[style]?.bpm || DANCE_STYLE_META.idle.bpm;
+      const gestures = danceHandGesture(style, elapsed, bpm);
+      for (const [name, target] of Object.entries(sampleHandGesture(gestures.left, 'left'))) pose(name, target.x, target.y, target.z, softness);
+      for (const [name, target] of Object.entries(sampleHandGesture(gestures.right, 'right'))) pose(name, target.x, target.y, target.z, softness);
+    }
+    function solveArmIK(side, target, amount) {
+      solveTwoBoneIK(side, target, amount, 'UpperArm', 'LowerArm', 'Hand');
+    }
+    function solveLegIK(side, target, amount) {
+      solveTwoBoneIK(side, target, amount, 'UpperLeg', 'LowerLeg', 'Foot');
+    }
+    function solveTwoBoneIK(side, target, amount, upperPart, lowerPart, effectorPart) {
+      const effector = boneRest.get(`${side}${effectorPart}`)?.node;
+      const upper = boneRest.get(`${side}${upperPart}`)?.node;
+      const lower = boneRest.get(`${side}${lowerPart}`)?.node;
+      if (!effector || !upper || !lower || amount <= 0.001) return;
+      for (let iteration = 0; iteration < 4; iteration++) {
+        for (const joint of [lower, upper]) {
+          scene.updateMatrixWorld(true);
+          joint.getWorldPosition(ikJoint); effector.getWorldPosition(ikEffector);
+          ikFrom.subVectors(ikEffector, ikJoint); ikTo.subVectors(target, ikJoint);
+          if (ikFrom.lengthSq() < 1e-8 || ikTo.lengthSq() < 1e-8) continue;
+          ikDelta.setFromUnitVectors(ikFrom.normalize(), ikTo.normalize());
+          ikDelta.slerp(ikIdentity, 1 - Math.min(0.72, amount * 0.72));
+          joint.parent.getWorldQuaternion(ikParent);
+          ikLocalDelta.copy(ikParent).invert().multiply(ikDelta).multiply(ikParent);
+          joint.quaternion.premultiply(ikLocalDelta).normalize();
+        }
+      }
+    }
+    function applyGestureIK(intent) {
+      if (!intent || intent.amount <= 0.001) return;
+      scene.updateMatrixWorld(true);
+      const leftTarget = new THREE.Vector3(); const rightTarget = new THREE.Vector3();
+      if (intent.type === 'prayer') {
+        const chest = boneRest.get('chest')?.node;
+        if (!chest) return;
+        chest.getWorldPosition(ikTarget);
+        leftTarget.copy(ikTarget).add(new THREE.Vector3(-0.025, 0.08, 0.11));
+        rightTarget.copy(ikTarget).add(new THREE.Vector3(0.025, 0.08, 0.11));
+      } else if (intent.type === 'thighs') {
+        const leftHip = boneRest.get('leftUpperLeg')?.node; const leftKnee = boneRest.get('leftLowerLeg')?.node;
+        const rightHip = boneRest.get('rightUpperLeg')?.node; const rightKnee = boneRest.get('rightLowerLeg')?.node;
+        if (!leftHip || !leftKnee || !rightHip || !rightKnee) return;
+        // Put each palm on the visible upper-front face of the matching thigh.
+        // The outward offset keeps wide skirts and coat tails from hiding the hands.
+        leftHip.getWorldPosition(ikJoint); leftKnee.getWorldPosition(ikEffector); leftTarget.lerpVectors(ikJoint, ikEffector, 0.34).add(new THREE.Vector3(-0.055, 0.015, 0.21));
+        rightHip.getWorldPosition(ikJoint); rightKnee.getWorldPosition(ikEffector); rightTarget.lerpVectors(ikJoint, ikEffector, 0.34).add(new THREE.Vector3(0.055, 0.015, 0.21));
+      } else if (intent.type === 'waist-fists') {
+        const hips = boneRest.get('hips')?.node;
+        if (!hips) return;
+        hips.getWorldPosition(ikTarget);
+        leftTarget.copy(ikTarget).add(new THREE.Vector3(-0.17, 0.31, 0.17));
+        rightTarget.copy(ikTarget).add(new THREE.Vector3(0.17, 0.31, 0.17));
+      } else return;
+      solveArmIK('left', leftTarget, intent.amount);
+      solveArmIK('right', rightTarget, intent.amount);
+    }
+    function applyProceduralDance(elapsed, delta) {
+      if (!vrm || activeAction || activeMocap || activeSolved) return;
+      const sampled = sampleDance(activeStyle, elapsed);
+      const softness = 1 - Math.exp(-Math.min(delta, 0.05) * 11.5);
+      shiftHips(sampled.hips.x, sampled.hips.y, sampled.hips.z, softness);
+      for (const name of trackedBones) {
+        const target = sampled.bones[name] || { x: 0, y: 0, z: 0 };
+        pose(name, target.x, target.y, target.z, softness);
+      }
+      applyHandChoreography(activeStyle, elapsed, softness);
+      applyGestureIK(sampled.ik);
+      const detail = describeDance(activeStyle, elapsed);
+      const phraseKey = `${detail.style}:${detail.phrase}`;
+      if (phraseKey !== visiblePhraseKey) {
+        visiblePhraseKey = phraseKey;
+        setState(activeStyle === 'idle' ? '3D 骨骼已就绪 · 自然待机' : `正在跳 ${detail.label} · ${detail.phrase} · 全身骨骼编舞`);
+      }
+    }
+    function resetToRest() { for (const bone of boneRest.values()) { bone.node.quaternion.copy(bone.quaternion); bone.node.position.copy(bone.position); } }
+    function stopVrma() {
+      if (activeAction) activeAction.stop();
+      if (mixer && vrm) { mixer.stopAllAction(); mixer.uncacheRoot(vrm.scene); }
+      activeAction = null; mixer = null; motionStyle = '';
+    }
+    function stopMotion() {
+      stopVrma();
+      activeMocap = null;
+      activeSolved = null;
+    }
+    async function loadAnyaDanceClip(style) {
+      const file = ANYADANCE_STYLE_FILES[style];
+      if (!file) return null;
+      if (solvedCache.has(style)) return solvedCache.get(style);
+      const pending = fetch(`/models/motions/anyadance/${file}?rev=1`, { cache: 'no-store' })
+        .then((response) => response.ok ? response.json() : null)
+        .then((clip) => validateAnyaDanceMotion(clip) ? clip : null)
+        .catch(() => null);
+      solvedCache.set(style, pending);
+      return pending;
+    }
+    function playAnyaDance(style, clip) {
+      stopVrma();
+      activeMocap = null;
+      activeSolved = clip;
+      motionStyle = style;
+      solvedStartedAt = clock.getElapsedTime();
+    }
+    function setSolvedBoneWorldRotation(targetName, sourcePose, sourceRestPose, softness) {
+      const target = boneRest.get(targetName); const targetRest = restWorld.get(targetName);
+      if (!target || !targetRest || !sourcePose || !sourceRestPose) return;
+      sourceRestQuat.set(...sourceRestPose.q).normalize();
+      sourceCurrentQuat.set(...sourcePose.q).normalize();
+      sourceDeltaQuat.copy(sourceRestQuat).invert().multiply(sourceCurrentQuat);
+      targetWorldQuat.copy(targetRest.quaternion).multiply(sourceDeltaQuat);
+      if (target.node.parent) target.node.parent.getWorldQuaternion(parentWorldQuat);
+      else parentWorldQuat.identity();
+      localTargetQuat.copy(parentWorldQuat).invert().multiply(targetWorldQuat).normalize();
+      target.node.quaternion.slerp(localTargetQuat, softness);
+    }
+    function solvedWorldPosition(sample, sourceRest, targetName, rootWorld, scale) {
+      const targetRest = restWorld.get(targetName); const targetRoot = restWorld.get('hips');
+      if (!sample || !sourceRest || !targetRest || !targetRoot) return null;
+      return new THREE.Vector3(
+        targetRest.position.x + (sample.p[0] - sourceRest.p[0]) * scale + (rootWorld.x - targetRoot.position.x),
+        targetRest.position.y + (sample.p[1] - sourceRest.p[1]) * scale + (rootWorld.y - targetRoot.position.y),
+        targetRest.position.z + (sample.p[2] - sourceRest.p[2]) * scale + (rootWorld.z - targetRoot.position.z),
+      );
+    }
+    function applySolvedFingers(sampled, softness) {
+      for (const [name, target] of Object.entries(sampleHandCurls(sampled.leftFingers, 'left'))) pose(name, target.x, target.y, target.z, softness);
+      for (const [name, target] of Object.entries(sampleHandCurls(sampled.rightFingers, 'right'))) pose(name, target.x, target.y, target.z, softness);
+    }
+    function applyAnyaDanceMotion(elapsed, delta) {
+      if (!vrm || !activeSolved || activeAction) return;
+      const sampled = sampleAnyaDanceMotion(activeSolved, elapsed);
+      const softness = 1 - Math.exp(-Math.min(delta, 0.05) * 14);
+      const sourceRest = activeSolved.rest;
+      const sourcePelvis = sourceRest.pelvis;
+      const targetHips = restWorld.get('hips');
+      const targetHead = restWorld.get('head');
+      if (!targetHips || !targetHead) return;
+      const sourceHeight = Math.max(0.3, Math.hypot(...sourceRest.head.p.map((value, axis) => value - sourcePelvis.p[axis])));
+      const targetHeight = Math.max(0.3, targetHead.position.distanceTo(targetHips.position));
+      const scale = Math.min(2, Math.max(0.35, targetHeight / sourceHeight));
+      worldTarget.set(
+        targetHips.position.x + (sampled.joints.pelvis.p[0] - sourcePelvis.p[0]) * scale,
+        targetHips.position.y + (sampled.joints.pelvis.p[1] - sourcePelvis.p[1]) * scale,
+        targetHips.position.z + (sampled.joints.pelvis.p[2] - sourcePelvis.p[2]) * scale,
+      );
+      const hips = boneRest.get('hips');
+      if (hips?.node.parent) {
+        hips.node.parent.worldToLocal(position.copy(worldTarget));
+        hips.node.position.lerp(position, softness);
+      }
+      setSolvedBoneWorldRotation('hips', sampled.joints.pelvis, sourceRest.pelvis, softness);
+      setSolvedBoneWorldRotation('head', sampled.joints.head, sourceRest.head, softness);
+      setSolvedBoneWorldRotation('leftShoulder', sampled.joints.left_shoulder, sourceRest.left_shoulder, softness);
+      setSolvedBoneWorldRotation('rightShoulder', sampled.joints.right_shoulder, sourceRest.right_shoulder, softness);
+      scene.updateMatrixWorld(true);
+      const rootWorld = worldTarget.clone();
+      const leftWrist = solvedWorldPosition(sampled.joints.left_wrist, sourceRest.left_wrist, 'leftHand', rootWorld, scale);
+      const rightWrist = solvedWorldPosition(sampled.joints.right_wrist, sourceRest.right_wrist, 'rightHand', rootWorld, scale);
+      const leftAnkle = solvedWorldPosition(sampled.joints.left_ankle, sourceRest.left_ankle, 'leftFoot', rootWorld, scale);
+      const rightAnkle = solvedWorldPosition(sampled.joints.right_ankle, sourceRest.right_ankle, 'rightFoot', rootWorld, scale);
+      if (leftWrist && rightWrist) { solveArmIK('left', leftWrist, softness); solveArmIK('right', rightWrist, softness); }
+      if (leftAnkle && rightAnkle) { solveLegIK('left', leftAnkle, softness); solveLegIK('right', rightAnkle, softness); }
+      setSolvedBoneWorldRotation('leftHand', sampled.joints.left_wrist, sourceRest.left_wrist, softness);
+      setSolvedBoneWorldRotation('rightHand', sampled.joints.right_wrist, sourceRest.right_wrist, softness);
+      setSolvedBoneWorldRotation('leftFoot', sampled.joints.left_ankle, sourceRest.left_ankle, softness);
+      setSolvedBoneWorldRotation('rightFoot', sampled.joints.right_ankle, sourceRest.right_ankle, softness);
+      applySolvedFingers(sampled, softness);
+      setState(`正在跳 ${describeDance(activeStyle, 0).label} · AnyaDance MMD FK/IK 动作 · ${Math.round(activeSolved.fps)} FPS`);
+    }
+    async function motionFileExists(style) {
+      if (motionAvailability.has(style)) return motionAvailability.get(style);
+      try {
+        const response = await fetch(`${motionBaseUrl}${style}.vrma`, { method: 'HEAD', cache: 'no-store' });
+        motionAvailability.set(style, response.ok); return response.ok;
+      } catch { motionAvailability.set(style, false); return false; }
+    }
+    async function loadVrmaClip(style) {
+      if (!vrm || style === 'idle' || !(await motionFileExists(style))) return null;
+      if (motionClipCache.has(style)) return motionClipCache.get(style);
+      const pending = (async () => {
+        try {
+          const motionLoader = new GLTFLoader(); motionLoader.register((parser) => new VRMAnimationLoaderPlugin(parser));
+          const gltf = await motionLoader.loadAsync(`${motionBaseUrl}${style}.vrma`);
+          const animation = gltf.userData.vrmAnimations?.[0];
+          return animation ? createVRMAnimationClip(animation, vrm) : null;
+        } catch { return null; }
+      })();
+      motionClipCache.set(style, pending);
+      return pending;
+    }
+    async function loadMocapClip(style) {
+      const file = MOCAP_STYLE_FILES[style];
+      if (!file) return null;
+      if (mocapCache.has(style)) return mocapCache.get(style);
+      const pending = fetch(`${mocapBaseUrl}${file}?rev=2`, { cache: 'no-store' })
+        .then((response) => response.ok ? response.json() : null)
+        .then((clip) => validateCompactMotion(clip) ? clip : null)
+        .catch(() => null);
+      mocapCache.set(style, pending);
+      return pending;
+    }
+    function playMocap(style, clip) {
+      stopVrma();
+      activeSolved = null;
+      activeMocap = clip;
+      motionStyle = style;
+      motionStartedAt = clock.getElapsedTime();
+    }
+    function applyMocapDance(elapsed, delta) {
+      if (!vrm || !activeMocap || activeAction) return;
+      const sampled = sampleCompactMotion(activeMocap, elapsed);
+      const softness = 1 - Math.exp(-Math.min(delta, 0.05) * 16);
+      const restHips = boneRest.get('hips');
+      if (restHips) {
+        const source = activeMocap.hips;
+        const dx = Math.max(-0.22, Math.min(0.22, sampled.hips[0] - source[0]));
+        const dy = Math.max(-0.28, Math.min(0.48, sampled.hips[1] - source[1]));
+        const dz = Math.max(-0.18, Math.min(0.18, sampled.hips[2] - source[2]));
+        position.copy(restHips.position); position.x += dx; position.y += dy; position.z += dz;
+        restHips.node.position.lerp(position, softness);
+      }
+      for (const name of trackedBones) {
+        const values = sampled.bones[name];
+        const target = boneRest.get(name);
+        if (!values || !target) continue;
+        quat.set(values[0], values[1], values[2], values[3]).normalize();
+        target.node.quaternion.slerp(quat, softness);
+      }
+      applyHandChoreography(activeStyle, elapsed, softness);
+    }
+    function playVrma(style, clip) {
+      activeMocap = null;
+      activeSolved = null;
+      if (!mixer) mixer = new THREE.AnimationMixer(vrm.scene);
+      const previous = activeAction;
+      const next = mixer.clipAction(clip);
+      next.enabled = true; next.setEffectiveTimeScale(1); next.setEffectiveWeight(1); next.setLoop(THREE.LoopRepeat, Infinity); next.reset().fadeIn(0.55).play();
+      if (previous && previous !== next) {
+        previous.crossFadeTo(next, 0.55, false);
+        setTimeout(() => { if (activeAction !== previous) previous.stop(); }, 700);
+      }
+      activeAction = next; motionStyle = style;
+    }
+    async function activateSegment(style, serial) {
+      const solved = await loadAnyaDanceClip(style);
+      const stillWanted = wantedStyle === style || (wantedStyle === 'random' && randomSegment === style);
+      if (serial !== danceRequestSerial || !stillWanted) return;
+      if (solved) {
+        playAnyaDance(style, solved);
+        setState(`正在跳 ${describeDance(style, 0).label} · AnyaDance MMD FK/IK 动作 · 平滑循环`);
+      } else {
+        const clip = await loadVrmaClip(style);
+        if (serial !== danceRequestSerial || !stillWanted) return;
+        if (clip) {
+          playVrma(style, clip);
+          setState(`正在跳 ${describeDance(style, 0).label} · VRMA 真人动捕动作 · 平滑循环`);
+        } else {
+          const mocap = await loadMocapClip(style);
+          if (serial !== danceRequestSerial || !stillWanted) return;
+          if (mocap) {
+            playMocap(style, mocap);
+            setState(`正在跳 ${describeDance(style, 0).label} · AIST++ 真人动捕 · 手指手势编排`);
+          } else {
+            stopMotion(); visiblePhraseKey = '';
+          }
+        }
+      }
+    }
+    function ensureRandomSegment(elapsed) {
+      const nextStyle = resolveDanceStyle('random', elapsed);
+      if (nextStyle === randomSegment) return;
+      randomSegment = nextStyle; activeStyle = nextStyle; visiblePhraseKey = '';
+      activateSegment(nextStyle, ++danceRequestSerial);
+    }
+    async function chooseDance(style) {
+      const normalized = DANCE_STYLE_IDS.includes(style) ? style : 'idle';
+      if (!vrm || normalized === wantedStyle) return;
+      wantedStyle = normalized; activeStyle = normalized; randomSegment = ''; visiblePhraseKey = ''; danceStartedAt = clock.getElapsedTime();
+      const serial = ++danceRequestSerial;
+      if (normalized === 'idle') { stopMotion(); return; }
+      if (normalized === 'random') { stopMotion(); ensureRandomSegment(0); return; }
+      await activateSegment(normalized, serial);
+    }
+    function setMouth(value) { if (vrm?.expressionManager) vrm.expressionManager.setValue('aa', value); }
+    function speak(text, version, data) {
+      if (!text || version === speechVersion) return; speechVersion = version;
+      if (activeAudio) { activeAudio.pause(); activeAudio = null; }
+      if (data.neural_audio_ready && data.neural_audio_version === version) {
+        activeAudio = new Audio(`/api/latest-speech.mp3?v=${version}`); activeAudio.onplay = () => { speaking = true; };
+        activeAudio.onended = activeAudio.onerror = () => { speaking = false; setMouth(0); };
+        activeAudio.play().catch(() => { speaking = false; setMouth(0); });
+      }
+    }
+    async function refresh() {
+      try {
+        const response = await fetch('/api/status', { cache: 'no-store' }); const data = await response.json();
+        subtitle.textContent = data.latest_reply || '准备开始直播';
+        if (data.latest_barrage) {
+          barrageUser.textContent = `${data.latest_barrage_user || '演示观众'}：`;
+          barrageText.textContent = data.latest_barrage;
+          barrage.style.display = 'block';
+        }
+        if (data.demo_event_type) {
+          eventPanel.className = data.demo_event_type;
+          eventLabel.textContent = data.demo_event_label || '互动反馈';
+          eventDetail.textContent = data.demo_event_detail || '';
+          eventPanel.style.display = 'block';
+        }
+        chooseDance(data.dance_style); speak(data.latest_reply, data.speech_version, data);
+      } catch { subtitle.textContent = '本机 AI 主播暂未连接'; }
+    }
+    loader.load(modelUrl, (gltf) => {
+      vrm = gltf.userData.vrm;
+      if (!vrm) { showMissing('此文件不是有效的 VRM。请从 VRoid Studio 导出 VRM 1.0 模型。'); return; }
+      VRMUtils.removeUnnecessaryJoints(gltf.scene); vrm.scene.traverse((object) => { if (object.isMesh) { object.castShadow = true; object.receiveShadow = true; } });
+      vrm.scene.position.x = stageModelX(); scene.add(vrm.scene); vrm.springBoneManager?.reset(); rememberRestPose(); setState('3D 骨骼已就绪 · VRMA 动作优先'); refresh();
+    }, undefined, () => showMissing('未找到 xingyu-host-v1.vrm。导入模型前，当前 PNG 直播画面不会变更。'));
+    function render() {
+      requestAnimationFrame(render); const delta = clock.getDelta(); const time = clock.getElapsedTime();
+      controls.update();
+      const danceElapsed = Math.max(0, time - danceStartedAt);
+       if (wantedStyle === 'random') ensureRandomSegment(danceElapsed);
+       if (mixer) mixer.update(delta);
+       if (activeSolved) applyAnyaDanceMotion(Math.max(0, time - solvedStartedAt), delta);
+       if (activeMocap) applyMocapDance(Math.max(0, time - motionStartedAt), delta);
+      applyProceduralDance(danceElapsed, delta);
+      if (speaking) setMouth(.42 + Math.abs(Math.sin(time * 18)) * .42); if (vrm) vrm.update(delta); renderer.render(scene, camera);
+    }
+    addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); floor.position.x = stageModelX(); if (vrm) vrm.scene.position.x = stageModelX(); });
+    addEventListener('beforeunload', () => { activeAudio?.pause(); }); setInterval(refresh, 650); refresh(); render();
+  </script>
+</body>
+</html>

@@ -80,7 +80,7 @@ set "ADAPTER_DIR=%BASE_DIR%NachoBot-Multimodal-Adapter"
 set "NAPCAT_DIR=%BASE_DIR%NachoBot-Napcat-Adapter"
 set "NAPCAT_SRC=%NAPCAT_DIR%\src"
 set "SOVITS_DIR=C:\Users\BigSh0t\GPT-SoVITS\GPT-SoVITS-v2pro-20250604"
-set "VOXCPM_DIR=C:\Users\BigSh0t\VoxCPM-2.0.2"
+set "VOXCPM_DIR=E:\App\VoxCPM"
 
 set "PORT_SOVITS=9880"
 set "PORT_VOX=9880"
@@ -148,6 +148,12 @@ echo.
 if "%TTS_ENGINE%"=="Vox" goto :START_VOX
 
 REM ---- GPT-SoVITS start logic ----
+netstat -ano | findstr /r /c:":%PORT_SOVITS% " | findstr /i LISTENING >nul
+if not errorlevel 1 (
+  echo [INFO] TTS port %PORT_SOVITS% is already in use; reusing the existing service.
+  goto :TTS_SOVITS_READY
+)
+
 set "API_FILE=%SOVITS_DIR%\api_v2.py"
 if not exist "%API_FILE%" set "API_FILE=%SOVITS_DIR%\api.py"
 
@@ -179,6 +185,12 @@ goto :START_ADAPTER_SOVITS
 
 REM ---- VoxCPM API Server start logic ----
 :START_VOX
+netstat -ano | findstr /r /c:":%PORT_VOX% " | findstr /i LISTENING >nul
+if not errorlevel 1 (
+  echo [INFO] VoxCPM port %PORT_VOX% is already in use; reusing the existing service.
+  goto :TTS_VOX_READY
+)
+
 echo [INFO] Checking VoxCPM CUDA torch...
 "%PY_VOX%" -c "import torch; exit(0 if torch.cuda.is_available() else 1)" >nul 2>&1
 if errorlevel 1 (
@@ -199,7 +211,7 @@ echo [INFO] Starting VoxCPM API Server on port %PORT_VOX%...
 
 set "VOX_API_SCRIPT=%ADAPTER_DIR%\src\tts\backends\Vox\vox_api_server.py"
 set "VOX_MODEL_DIR=%VOXCPM_DIR%\models\openbmb__VoxCPM2"
-set "VOX_LORA=%VOXCPM_DIR%\lora\ncnk"
+set "VOX_LORA="
 
 set "VOX_TOML=%ADAPTER_DIR%\configs\vox.toml"
 if exist "%VOX_TOML%" (
@@ -207,12 +219,18 @@ if exist "%VOX_TOML%" (
     if "%%A"=="VAL" set "VOX_MODEL_DIR=%%B"
   )
   for /f "usebackq tokens=1,* delims==" %%A in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "Write-Output ('VAL=' + (Get-Content '%VOX_TOML%' | Select-String 'lora_weights_path\s*=\s*\x22(.*)\x22').Matches.Groups[1].Value)"`) do (
-    if "%%A"=="VAL" set "VOX_LORA=%%B"
+    if "%%A"=="VAL" if not "%%B"=="" set "VOX_LORA=%%B"
   )
 )
 
-REM Use venv python directly to avoid uv run syncing back to CPU torch
-start "VoxCPM API (%PORT_VOX%)" cmd /k "chcp 65001>nul && cd /d %VOXCPM_DIR% && %PY_VOX% %VOX_API_SCRIPT% --host 127.0.0.1 --port %PORT_VOX% --model-dir %VOX_MODEL_DIR% --lora-weights %VOX_LORA%"
+REM Use venv python directly to avoid uv run syncing back to CPU torch.
+REM Do not append an empty --lora-weights argument: cmd.exe can leave an
+REM unmatched quote in the child command when the TOML value is blank.
+if defined VOX_LORA (
+  start "VoxCPM API (%PORT_VOX%)" cmd /k "chcp 65001>nul && cd /d %VOXCPM_DIR% && %PY_VOX% %VOX_API_SCRIPT% --host 127.0.0.1 --port %PORT_VOX% --model-dir %VOX_MODEL_DIR% --lora-weights %VOX_LORA%"
+) else (
+  start "VoxCPM API (%PORT_VOX%)" cmd /k "chcp 65001>nul && cd /d %VOXCPM_DIR% && %PY_VOX% %VOX_API_SCRIPT% --host 127.0.0.1 --port %PORT_VOX% --model-dir %VOX_MODEL_DIR%"
+)
 
 set "READY="
 for /l %%I in (1,1,150) do (
@@ -233,10 +251,16 @@ goto :START_ADAPTER_VOX
 
 REM ---- Adapter for GPT-SoVITS ----
 :START_ADAPTER_SOVITS
-start "Multimodal Adapter (%PORT_ADAPTER%)" cmd /k "chcp 65001>nul && cd /d %ADAPTER_DIR% && uv run python main.py"
+netstat -ano | findstr /r /c:":%PORT_ADAPTER% " | findstr /i LISTENING >nul
+if errorlevel 1 (
+  start "Multimodal Adapter (%PORT_ADAPTER%)" cmd /k "chcp 65001>nul && cd /d %ADAPTER_DIR% && uv run python main.py"
+) else echo [INFO] Multimodal Adapter port %PORT_ADAPTER% is already in use; reusing the existing service.
 
 echo [OK] Starting Perception API (VLM + ASR)...
-start "Perception API (%PORT_PERCEPTION%)" cmd /k "chcp 65001>nul && cd /d %ADAPTER_DIR% && uv run python -m nachobot_multimodal.api_server"
+netstat -ano | findstr /r /c:":%PORT_PERCEPTION% " | findstr /i LISTENING >nul
+if errorlevel 1 (
+  start "Perception API (%PORT_PERCEPTION%)" cmd /k "chcp 65001>nul && cd /d %ADAPTER_DIR% && uv run python -m nachobot_multimodal.api_server"
+) else echo [INFO] Perception API port %PORT_PERCEPTION% is already in use; reusing the existing service.
 
 echo.
 echo All modules started.
@@ -245,10 +269,16 @@ goto :TTS_END
 
 REM ---- Adapter for VoxCPM ----
 :START_ADAPTER_VOX
-start "Multimodal Adapter (%PORT_ADAPTER%)" cmd /k "chcp 65001>nul && cd /d %ADAPTER_DIR% && uv run python main.py"
+netstat -ano | findstr /r /c:":%PORT_ADAPTER% " | findstr /i LISTENING >nul
+if errorlevel 1 (
+  start "Multimodal Adapter (%PORT_ADAPTER%)" cmd /k "chcp 65001>nul && cd /d %ADAPTER_DIR% && uv run python main.py"
+) else echo [INFO] Multimodal Adapter port %PORT_ADAPTER% is already in use; reusing the existing service.
 
 echo [OK] Starting Perception API (VLM + ASR)...
-start "Perception API (%PORT_PERCEPTION%)" cmd /k "chcp 65001>nul && cd /d %ADAPTER_DIR% && uv run python -m nachobot_multimodal.api_server"
+netstat -ano | findstr /r /c:":%PORT_PERCEPTION% " | findstr /i LISTENING >nul
+if errorlevel 1 (
+  start "Perception API (%PORT_PERCEPTION%)" cmd /k "chcp 65001>nul && cd /d %ADAPTER_DIR% && uv run python -m nachobot_multimodal.api_server"
+) else echo [INFO] Perception API port %PORT_PERCEPTION% is already in use; reusing the existing service.
 
 echo.
 echo All modules started.
@@ -278,6 +308,9 @@ set "ADAPTER_PORT=8095"
 
 set "NAPCAT_SHELL_DIR=%ROOT%NapCat.Shell"
 set "NAPCAT_SHELL_BAT=launcher-user.bat"
+set "NAPCAT_AUTOLOGIN_CONFIG=%NAPCAT_SHELL_DIR%\config\webui.json"
+set "NAPCAT_ACCOUNT="
+if exist "%NAPCAT_AUTOLOGIN_CONFIG%" for /f "usebackq delims=" %%A in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$v=(Get-Content -Raw -LiteralPath '%NAPCAT_AUTOLOGIN_CONFIG%' | ConvertFrom-Json).autoLoginAccount; if ($v) { $v }"`) do set "NAPCAT_ACCOUNT=%%A"
 
 set "PYTHON_CMD=uv run python"
 set "MAX_WAIT=60"
@@ -291,20 +324,34 @@ cd /d "%ADAPTER_DIR%"
 uv sync --python ">=3.11,<=3.13"
 
 if exist "%NACHOBOT_DIR%\%NACHOBOT_MAIN%" (
-  echo --- Start NachoBot...
-  start "NachoBot" /D "%NACHOBOT_DIR%" cmd /k "set HOST=127.0.0.1 && set PORT=%NACHOBOT_PORT% && %PYTHON_CMD% %NACHOBOT_MAIN%"
-  timeout /t 5 /nobreak >nul
+  netstat -ano | findstr /r /c:":%NACHOBOT_PORT% " | findstr /i LISTENING >nul
+  if errorlevel 1 (
+    echo --- Start NachoBot...
+    start "NachoBot" /D "%NACHOBOT_DIR%" cmd /k "set HOST=127.0.0.1 && set PORT=%NACHOBOT_PORT% && %PYTHON_CMD% %NACHOBOT_MAIN%"
+    timeout /t 5 /nobreak >nul
+  ) else echo --- NachoBot port %NACHOBOT_PORT% is already in use; reusing the existing service.
 )
 
 if exist "%ADAPTER_DIR%\%ADAPTER_MAIN%" (
-  echo --- Start Adapter...
-  start "NachoBot-Napcat" /D "%ADAPTER_DIR%" cmd /k "set HOST=0.0.0.0 && set PORT=%ADAPTER_PORT% && %PYTHON_CMD% %ADAPTER_MAIN%"
-  timeout /t 5 /nobreak >nul
+  netstat -ano | findstr /r /c:":%ADAPTER_PORT% " | findstr /i LISTENING >nul
+  if errorlevel 1 (
+    echo --- Start Adapter...
+    start "NachoBot-Napcat" /D "%ADAPTER_DIR%" cmd /k "set HOST=0.0.0.0 && set PORT=%ADAPTER_PORT% && %PYTHON_CMD% %ADAPTER_MAIN%"
+    timeout /t 5 /nobreak >nul
+  ) else echo --- NapCat adapter port %ADAPTER_PORT% is already in use; reusing the existing service.
 )
 
 if exist "%NAPCAT_SHELL_DIR%\%NAPCAT_SHELL_BAT%" (
-  echo --- Start NapCat Shell...
-  start "NapCatShell" /D "%NAPCAT_SHELL_DIR%" cmd /k "%NAPCAT_SHELL_BAT%"
+  netstat -ano | findstr /r /c:":%ADAPTER_PORT% .*ESTABLISHED" >nul
+  if errorlevel 1 (
+    if defined NAPCAT_ACCOUNT (
+      echo --- Start NapCat Shell with configured account...
+      start "NapCatShell" /D "%NAPCAT_SHELL_DIR%" cmd /k "%NAPCAT_SHELL_BAT% %NAPCAT_ACCOUNT%"
+    ) else (
+      echo --- Start NapCat Shell...
+      start "NapCatShell" /D "%NAPCAT_SHELL_DIR%" cmd /k "%NAPCAT_SHELL_BAT%"
+    )
+  ) else echo --- NapCat WebSocket is already connected; reusing the existing session.
 )
 
 echo.

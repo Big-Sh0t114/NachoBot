@@ -110,13 +110,13 @@ async def vlm_chat_completions(request: Request):
             caption_image_b64,
             image_b64,
         )
-    except Exception:
-        logger.exception("[Florence-2] Inference error")
+    except Exception as exc:
+        logger.error("[Florence-2] Inference error: %s", exc)
         return JSONResponse(
             status_code=500,
             content={
                 "error": {
-                    "message": "Florence-2 inference failed",
+                    "message": f"Florence-2 inference failed: {exc}",
                     "type": "server_error",
                 }
             },
@@ -176,13 +176,13 @@ async def audio_transcriptions(
 
     try:
         text = await asyncio.to_thread(transcribe, audio_bytes)
-    except Exception:
-        logger.exception("[Streaming ASR] Transcription error")
+    except Exception as exc:
+        logger.error("[Streaming ASR] Transcription error: %s", exc)
         return JSONResponse(
             status_code=500,
             content={
                 "error": {
-                    "message": "Streaming ASR transcription failed",
+                    "message": f"Streaming ASR transcription failed: {exc}",
                     "type": "server_error",
                 }
             },

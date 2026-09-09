@@ -9,7 +9,6 @@ from typing import Any, Callable, Dict, Optional
 
 from .client_base import WebSocketClientBase
 from .client_ws_connection import ConnectionConfig
-from .log_utils import log_safe, redact_secret
 from .message import APIMessageBase
 from .ws_config import MultiClientConfig, ConnectionEntry
 
@@ -98,14 +97,7 @@ class WebSocketMultiClient(WebSocketClientBase):
             self.multi_config.connections[name] = conn_entry
             logger.info(f"同步更新配置对象: 添加连接 {name}")
 
-        # codeql[py/clear-text-logging-sensitive-data]
-        logger.info(
-            "注册连接: %s -> %s (api_key: %s, platform: %s)",
-            log_safe(name),
-            log_safe(url),
-            redact_secret(api_key),
-            log_safe(platform),
-        )
+        logger.info(f"注册连接: {name} -> {url} (api_key: {api_key}, platform: {platform})")
         return True
 
     def update_connection(self, name: str, **kwargs) -> bool:

@@ -2,7 +2,7 @@
     "manifest_version": 1,
     "name": "信使插件 (Messenger)",
     "version": "2.0.0",
-    "description": "转告消息插件 - 通过 planner 动作池，当用户请求转告时，自动将消息转发到目标用户的私聊",
+    "description": "主人专用主动私聊插件 - 通过 planner 动作池或 #convey_<QQ号>，向指定QQ发送消息；其他用户无权使用",
     "author": {
         "name": "Big-Sh0t114",
         "url": "https://github.com/Big-Sh0t114"
@@ -30,12 +30,12 @@
             {
                 "type": "action",
                 "name": "messenger_relay",
-                "description": "帮忙向指定用户转告/传话"
+                "description": "主人专用：向指定QQ或已认识的用户主动私聊"
             },
             {
                 "type": "command",
                 "name": "convey",
-                "description": "管理员向目标用户私聊发送消息"
+                "description": "主人向目标QQ私聊发送消息"
             }
         ]
     }

@@ -2,7 +2,6 @@
 
 import logging
 from pathlib import Path
-import shutil
 import tarfile
 from typing import Optional
 
@@ -94,18 +93,7 @@ class ASRModelManager:
             member_path = (self.models_dir / member.name).resolve()
             if member_path != target_root and target_root not in member_path.parents:
                 raise ValueError(f"Unsafe path in model archive: {member.name}")
-            if member.isdir():
-                member_path.mkdir(parents=True, exist_ok=True)
-                continue
-            if not member.isfile():
-                raise ValueError(f"Unsupported archive member: {member.name}")
-
-            member_path.parent.mkdir(parents=True, exist_ok=True)
-            source = archive.extractfile(member)
-            if source is None:
-                raise ValueError(f"Unable to read archive member: {member.name}")
-            with source, member_path.open("wb") as output:
-                shutil.copyfileobj(source, output)
+        archive.extractall(path=self.models_dir)
 
     def _download(self, url: str, target: Path) -> bool:
         try:

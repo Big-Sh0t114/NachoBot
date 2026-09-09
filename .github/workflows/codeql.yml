@@ -29,7 +29,7 @@ jobs:
       - uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
-          queries: security-extended
+          queries: security-extended,security-and-quality
           build-mode: none
 
       - uses: github/codeql-action/analyze@v4

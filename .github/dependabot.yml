@@ -13,7 +13,7 @@ updates:
       - "NachoBot-UniversalVC-Adapter"
       - "webui"
     schedule:
-      interval: "monthly"
+      interval: "daily"
     target-branch: "dev"
 
   - package-ecosystem: "uv"

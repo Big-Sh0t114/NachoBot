@@ -11,8 +11,11 @@ import asyncio
 import re
 import hashlib
 import time
+import tomllib
+from pathlib import Path
 from typing import Optional, Tuple, Dict
 
+from ncnk_message import UserInfo
 from src.common.logger import get_logger
 from src.common.database.database_model import PersonInfo as PersonInfoModel
 from src.person_info.person_info import (
@@ -21,7 +24,6 @@ from src.person_info.person_info import (
     Person,
 )
 from src.chat.message_receive.chat_stream import get_chat_manager
-from src.chat.advanced.advanced_manager import advanced_manager
 from src.plugin_system.apis import send_api, message_api
 from src.plugin_system.base.base_action import BaseAction, ActionActivationType
 from src.plugin_system.base.base_command import BaseCommand
@@ -30,6 +32,47 @@ logger = get_logger("messenger")
 
 # 管理员直达指令: #convey_<QQ号> <内容>
 CONVEY_PATTERN = re.compile(r"^#convey_(\d+)\s+(.+)", re.DOTALL)
+TARGET_QQ_PATTERN = re.compile(r"^(?:qq(?:号|号码)?\s*[:：]?\s*)?(\d{5,12})$", re.IGNORECASE)
+
+
+def _configured_owner_qq() -> Optional[str]:
+    """读取主人认证插件中的主人QQ号；读取失败时安全返回空值。"""
+    raw_owner_qq = None
+    try:
+        from src.plugin_system.core.component_registry import component_registry
+
+        plugin_config = component_registry.get_plugin_config("owner_auth_plugin") or {}
+        owner_config = plugin_config.get("owner_auth", {})
+        raw_owner_qq = owner_config.get("owner_qq") if isinstance(owner_config, dict) else None
+    except Exception as e:
+        logger.debug(f"[信使] 从插件注册表读取主人QQ失败，将读取配置文件: {e}")
+
+    # 插件注册表尚未完成初始化时，直接读取同一份主人认证配置，避免权限判断误拒绝主人。
+    if not raw_owner_qq:
+        try:
+            config_path = Path(__file__).resolve().parent.parent / "owner_auth_plugin" / "config.toml"
+            with config_path.open("rb") as config_file:
+                owner_config = tomllib.load(config_file).get("owner_auth", {})
+            raw_owner_qq = owner_config.get("owner_qq") if isinstance(owner_config, dict) else None
+        except Exception as e:
+            logger.warning(f"[信使] 读取主人QQ配置失败，拒绝主动私聊: {e}")
+
+    normalized = re.sub(r"\D", "", str(raw_owner_qq or ""))
+    return normalized or None
+
+
+def _is_owner_user(user_id: object, platform: object) -> bool:
+    """主动私聊的权限判断：只允许 QQ 平台且QQ号等于主人配置。"""
+    normalized_platform = str(platform or "").strip().lower().split("-", 1)[0]
+    normalized_user_id = str(user_id or "").strip()
+    owner_qq = _configured_owner_qq()
+    return normalized_platform == "qq" and bool(owner_qq) and normalized_user_id == owner_qq
+
+
+def _extract_target_qq(target_name: str) -> Optional[str]:
+    """支持直接填写QQ号、QQ:123456或QQ号 123456。"""
+    match = TARGET_QQ_PATTERN.fullmatch(target_name.strip())
+    return match.group(1) if match else None
 
 
 class MessengerRelayAction(BaseAction):
@@ -45,7 +88,7 @@ class MessengerRelayAction(BaseAction):
     # 动作基本信息
     action_name = "messenger_relay"
     action_description = (
-        "帮忙向指定用户转告/传话/询问，将消息传达到对方的私聊。当用户让你去问某人、告诉某人、转告某人时，必须选择此动作"
+        "仅主人可用：主动向指定QQ或已认识的用户发起私聊。当主人要求私聊、询问、告诉、转告某人时，必须选择此动作；其他用户不得使用"
     )
 
     # 动作参数 - planner LLM 在选择此动作时填写
@@ -59,11 +102,12 @@ class MessengerRelayAction(BaseAction):
 
     # 使用条件 - 指导 planner LLM 何时选择此动作
     action_require = [
-        "当用户让你帮忙联系、询问、转告、传话、带话给某个人时，必须选择此动作",
-        "触发示例：'问问XX在干嘛'、'告诉XX...'、'跟XX说...'、'帮我问XX...'、'去问问XX...'、'转告XX...'",
-        "只要用户指定了一个人名并要求你去联系/询问/传达，就应该选择此动作而不是reply",
+        "仅当发言者是已验证的主人怀望（QQ: 3143873450）时，才允许选择此动作",
+        "主人让你主动私聊、帮忙联系、询问、转告、传话、带话给某个人时，必须选择此动作",
+        "触发示例：'私聊XX说你好'、'问问XX在干嘛'、'告诉XX...'、'跟XX说...'、'帮我问XX...'、'转告XX...'",
+        "目标可以是已认识的用户名称，也可以是QQ号；只要主人明确要求，就不要先征求主人二次确认",
         "仅在QQ平台生效",
-        "注意：不要把用户自己在聊天中提到和某人说话的描述误认为转告请求",
+        "非主人提出相同请求时，不得执行此动作，只能说明主动私聊功能仅主人可用",
     ]
 
     # 记录每个 target_stream_id 最近的转告来源用户名（用于解析代词）
@@ -83,6 +127,12 @@ class MessengerRelayAction(BaseAction):
             logger.debug(f"[信使] 非 QQ 平台 ({self.platform})，跳过")
             return False, "转告功能仅在QQ平台可用"
 
+        # 在任何目标解析和发送前校验，防止非主人通过 planner 间接触发外部联系。
+        if not _is_owner_user(self.user_id, self.platform):
+            logger.warning(f"[信使] 拒绝非主人主动私聊: user_id={self.user_id}, platform={self.platform}")
+            await self.send_text("主动私聊功能仅主人可用哦~", storage_message=False)
+            return True, "主动私聊功能仅主人可用"
+
         logger.info(f"[信使] 执行转告: 目标={target_name}, 内容={content[:30]}...")
 
         # 获取发送者信息
@@ -94,59 +144,62 @@ class MessengerRelayAction(BaseAction):
             except Exception:
                 logger.debug(f"[信使] 无法获取发送者 Person 信息，使用昵称: {source_name}")
 
-        # Step 1: 双向模糊匹配目标用户
-        similarity_threshold = self.get_config("components.similarity_threshold", 0.4)
-        matched_person_id, matched_name = self._find_target_person(target_name, float(similarity_threshold))
+        # Step 1: 优先支持直接QQ号；名称模式继续匹配已认识的QQ用户。
+        target_qq = _extract_target_qq(target_name)
+        matched_person_id: Optional[str] = None
+        matched_name = target_name
+        target_record = None
 
-        if not matched_person_id:
-            logger.info(f"[信使] 未找到匹配的目标用户: {target_name}")
-            await self.send_text(f"找不到叫「{target_name}」的人呢...(´-ω-`)")
-            return True, f"未找到目标用户: {target_name}"
+        if target_qq:
+            target_record = PersonInfoModel.get_or_none(
+                (PersonInfoModel.platform == "qq") & (PersonInfoModel.user_id == target_qq)
+            )
+            if target_record:
+                matched_person_id = target_record.person_id
+                matched_name = target_record.person_name or target_record.nickname or target_record.user_nickname or target_qq
+        else:
+            similarity_threshold = self.get_config("components.similarity_threshold", 0.4)
+            matched_person_id, matched_name = self._find_target_person(target_name, float(similarity_threshold))
 
-        logger.info(f"[信使] 匹配到目标用户: {matched_name} (person_id: {matched_person_id})")
+            if matched_person_id:
+                target_record = PersonInfoModel.get_or_none(PersonInfoModel.person_id == matched_person_id)
+                if target_record and target_record.user_id:
+                    target_qq = str(target_record.user_id)
+
+        if not target_qq:
+            logger.info(f"[信使] 未找到可发送的目标QQ: {target_name}")
+            await self.send_text(
+                f"找不到叫「{target_name}」的已知用户呢；如果对方还没和我聊过，请直接提供对方QQ号~",
+                storage_message=False,
+            )
+            return True, f"未找到目标用户或QQ号: {target_name}"
+
+        logger.info(f"[信使] 匹配到目标用户: {matched_name} (QQ: {target_qq}, person_id: {matched_person_id})")
 
         # Step 1.5: 检查目标用户是否在免打扰列表中
         mute_list = self.get_config("components.mute_user_list", [])
-        if mute_list:
-            target_record_check = PersonInfoModel.get_or_none(PersonInfoModel.person_id == matched_person_id)
-            if target_record_check and target_record_check.user_id in mute_list:
-                logger.info(f"[信使] 目标用户在免打扰列表中，取消转告: {matched_name}")
-                await self.send_text("此用户关闭了转告功能哦~")
-                return True, f"目标用户已关闭转告: {matched_name}"
+        mute_qqs = {str(user_id) for user_id in mute_list} if isinstance(mute_list, (list, tuple, set)) else set()
+        if str(target_qq) in mute_qqs:
+            logger.info(f"[信使] 目标用户在免打扰列表中，取消转告: {matched_name}")
+            await self.send_text("此用户关闭了转告功能哦~", storage_message=False)
+            return True, f"目标用户已关闭转告: {matched_name}"
 
         # Step 2: 查找目标用户的私聊 stream_id
-        target_stream_id = self._find_private_stream_id(matched_person_id)
+        target_stream_id = self._find_private_stream_id(matched_person_id) if matched_person_id else None
         if not target_stream_id:
-            logger.info(f"[信使] 未找到目标用户的私聊记录: {matched_name}")
-            await self.send_text(f"找到了{matched_name}，但是没有和ta私聊过呢，没办法转告...(´；ω；`)")
-            return True, f"无私聊记录: {matched_name}"
+            # 主人可以主动联系尚未建立私聊记录的用户，先注册目标私聊流再发送。
+            target_stream_id = await self._ensure_private_stream(target_qq, matched_name)
+        if not target_stream_id:
+            logger.error(f"[信使] 无法创建目标用户的私聊流: {matched_name} (QQ: {target_qq})")
+            await self.send_text("目标私聊通道创建失败，当前无法完成主动私聊。", storage_message=False)
+            return True, f"无法创建私聊流: {matched_name}"
 
         # 获取 bot 对目标用户的称呼
-        target_person = Person(person_id=matched_person_id)
-        bot_target_name = target_person.person_name or matched_name
-
-        # Step 2.5: 获取目标QQ号并发送确认消息
-        target_record = PersonInfoModel.get_or_none(PersonInfoModel.person_id == matched_person_id)
-        target_qq = target_record.user_id if target_record else "未知"
-
-        confirm_msg = f"你要转告的对象是「{matched_name}」(QQ: {target_qq}) 吗？"
-        await self.send_text(confirm_msg)
-
-        # 等待用户确认 — 自定义轮询，以发送确认消息后的时间为基准
-        timeout = int(self.get_config("components.confirmation_timeout", 60))
-        confirm_start = time.time()
-        logger.info(f"[信使] 等待用户确认转告目标: {matched_name} (timeout={timeout}s, baseline={confirm_start})")
-
-        reply_text = await self._wait_for_confirmation_reply(confirm_start, timeout)
-        if reply_text is None:
-            await self.send_text("等待确认超时，已取消转告~")
-            return True, "转告确认超时"
-
-        intent = self._extract_confirmation_intent(reply_text)
-
-        if intent != "confirm":
-            await self.send_text("已取消转告~(´-ω-`)")
-            return True, "用户取消或无法识别确认意图"
+        if matched_person_id:
+            target_person = Person(person_id=matched_person_id)
+            bot_target_name = target_person.person_name or matched_name
+        else:
+            bot_target_name = matched_name or target_qq
 
         # Step 3: 构造通知文本并注入消息触发 LLM 思考
         await self._inject_trigger_message(
@@ -294,6 +347,28 @@ class MessengerRelayAction(BaseAction):
         # 编辑距离相似度
         return calculate_string_similarity(input_name, candidate_name)
 
+    async def _ensure_private_stream(self, target_qq: str, target_name: str) -> Optional[str]:
+        """为主人主动私聊创建目标流，允许目标用户此前从未和机器人聊过。"""
+        try:
+            chat_manager = get_chat_manager()
+            stream_id = chat_manager.get_stream_id("qq", str(target_qq), is_group=False)
+            if chat_manager.get_stream(stream_id):
+                return stream_id
+
+            target_user = UserInfo(
+                platform="qq",
+                user_id=str(target_qq),
+                user_nickname=target_name or str(target_qq),
+                user_cardname="",
+            )
+            await chat_manager.get_or_create_stream("qq", target_user, None)
+            if chat_manager.get_stream(stream_id):
+                logger.info(f"[信使] 已创建主动私聊流: {target_name} (QQ: {target_qq})")
+                return stream_id
+        except Exception as e:
+            logger.error(f"[信使] 创建主动私聊流失败: target={target_qq}, error={e}")
+        return None
+
     def _find_private_stream_id(self, person_id: str) -> Optional[str]:
         """根据 person_id 查找目标用户的私聊 stream_id
 
@@ -316,8 +391,7 @@ class MessengerRelayAction(BaseAction):
 
             # 计算私聊 stream_id: md5(platform_userId_private)
             key = f"{platform}_{user_id}_private"
-            # codeql[py/weak-sensitive-data-hashing]
-            stream_id = hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()
+            stream_id = hashlib.md5(key.encode()).hexdigest()
 
             # 验证该 stream 是否存在于 ChatManager
             chat_manager = get_chat_manager()
@@ -432,43 +506,54 @@ class ConveyCommand(BaseCommand):
         target_qq = convey_match.group(1)
         convey_content = convey_match.group(2).strip()
 
-        # 权限检查
+        # 获取来源平台与用户ID
         source_user_id = ""
+        source_platform = ""
         if self.message and self.message.message_info:
+            source_platform = getattr(self.message.message_info, "platform", "") or ""
             user_info = getattr(self.message.message_info, "user_info", None)
             if user_info:
                 source_user_id = str(getattr(user_info, "user_id", ""))
 
-        if not advanced_manager.is_allowed(source_user_id):
-            logger.debug(f"[信使] #convey 权限不足: {source_user_id}")
-            return True, None, True
+        if not _is_owner_user(source_user_id, source_platform):
+            logger.warning(f"[信使] #convey 拒绝非主人主动私聊: {source_user_id}")
+            await self.send_text("主动私聊功能仅主人可用哦~", storage_message=False)
+            return True, "主动私聊功能仅主人可用", True
 
         # 获取来源 stream_id
         stream_id = ""
         if self.message and self.message.chat_stream:
             stream_id = self.message.chat_stream.stream_id
 
-        # 获取来源平台
-        source_platform = ""
-        if self.message and self.message.message_info:
-            source_platform = getattr(self.message.message_info, "platform", "") or ""
-
         # 直接通过 QQ号 计算私聊 stream_id
         key = f"qq_{target_qq}_private"
-        # codeql[py/weak-sensitive-data-hashing]
-        target_stream_id = hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()
+        target_stream_id = hashlib.md5(key.encode()).hexdigest()
 
-        # 验证 stream 存在
+        # 获取或创建目标私聊流，允许主人主动联系此前未聊过的QQ。
         chat_manager = get_chat_manager()
         target_stream = chat_manager.get_stream(target_stream_id)
         if not target_stream:
-            logger.info(f"[信使] #convey 未找到目标私聊: QQ={target_qq}")
+            try:
+                target_user = UserInfo(
+                    platform="qq",
+                    user_id=str(target_qq),
+                    user_nickname=str(target_qq),
+                    user_cardname="",
+                )
+                await chat_manager.get_or_create_stream("qq", target_user, None)
+                target_stream = chat_manager.get_stream(target_stream_id)
+            except Exception as e:
+                logger.error(f"[信使] #convey 创建目标私聊流失败: QQ={target_qq}, error={e}")
+
+        if not target_stream:
+            logger.info(f"[信使] #convey 无法创建目标私聊: QQ={target_qq}")
             if stream_id:
                 await send_api.text_to_stream(
-                    f"没有和 QQ:{target_qq} 私聊过，无法发送...(´-ω-`)",
+                    f"目标 QQ:{target_qq} 的私聊通道创建失败，当前无法完成。",
                     stream_id,
+                    storage_message=False,
                 )
-            return True, f"未找到目标私聊: QQ={target_qq}", True
+            return True, f"无法创建目标私聊: QQ={target_qq}", True
 
         # 注入消息 —— 以 bot 自己的思考形式，不带转告标识
         thought_text = (

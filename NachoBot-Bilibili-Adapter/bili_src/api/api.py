@@ -77,7 +77,7 @@ class WbiSigner:
             f"={urllib.parse.quote(str(value), safe='')}"
             for key, value in filtered.items()
         )
-        sign = hashlib.md5((query + mixin_key).encode("utf-8"), usedforsecurity=False).hexdigest()
+        sign = hashlib.md5((query + mixin_key).encode("utf-8")).hexdigest()
         params["w_rid"] = sign
         return params
 

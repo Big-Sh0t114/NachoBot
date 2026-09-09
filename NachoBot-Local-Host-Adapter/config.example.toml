@@ -1,0 +1,72 @@
+# 纯本机 AI 主播控制台：不连接抖音、不读取直播间评论或礼物。
+
+[server]
+host = "127.0.0.1"
+port = 8789
+log_level = "INFO"
+
+[nachobot]
+host = "127.0.0.1"
+port = 8000
+platform = "local.host"
+studio_id = "local-studio"
+host_user_id = "host"
+host_nickname = "主播"
+# 留空时使用 NachoBot 的默认人格。可写成一段固定人设，例如：
+# reply_prompt = "你是温柔、活泼的 AI 虚拟主播。回答简短自然，适合口播；不超过 80 个中文字符。"
+reply_prompt = ""
+network_search_enabled = false
+person_profile_enabled = false
+
+[output]
+# OBS 添加“文本（GDI+）”来源，并勾选“从文件读取”，选择这个文件。
+subtitle_file = "runtime/current_subtitle.txt"
+# 最新神经语音文件，由直播画面浏览器播放。
+speech_file = "runtime/latest_speech.mp3"
+console = true
+
+[tts]
+# 没有启动多模态/TTS 服务时可设为 false；字幕和 Live2D 仍可工作。
+enabled = true
+url = "http://127.0.0.1:8070/api/tts"
+play_local = true
+timeout_seconds = 180
+
+[neural_tts]
+# 微软在线神经语音：播报文字会发送至微软 TTS 服务；无需 API 密钥。
+enabled = true
+voice = "zh-CN-XiaoxiaoNeural"
+rate = "+0%"
+pitch = "+2Hz"
+volume = "+0%"
+
+[browser_tts]
+# 默认关闭机械浏览器语音；本地 VoxCPM2 未就绪时保持静音。
+enabled = false
+language = "zh-CN"
+# 例如 Microsoft Yaoyao。找不到时自动使用系统默认中文女声。
+preferred_voice = "Microsoft Yaoyao"
+rate = 1.0
+pitch = 1.0
+volume = 1.0
+
+[auto_announcements]
+# 设为 true 后，控制台会按间隔自动播报 messages 中的文案。
+enabled = false
+first_delay_seconds = 120
+interval_seconds = 600
+messages = [
+  "欢迎新来的朋友，喜欢今天的内容可以点个关注。",
+  "直播间会不定时分享有趣的话题，感谢大家的陪伴。",
+]
+
+[live2d]
+# 启动 NachoBot-Live2D-Adapter 后改为 true。
+enabled = false
+url = "ws://127.0.0.1:8766"
+token = ""
+
+[vrm]
+# 将原创 VRM 1.0 放到 models/xingyu-host-v1.vrm，再启用此项。
+enabled = false
+model_file = "models/xingyu-host-v1.vrm"

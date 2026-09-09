@@ -1,5 +1,4 @@
 const { Schema } = require('koishi')
-const crypto = require('crypto')
 const fs = require('fs')
 const path = require('path')
 
@@ -60,11 +59,7 @@ function nowSeconds() {
 }
 
 function buildMessageId() {
-  return `slash-${Date.now()}-${crypto.randomBytes(6).toString('hex')}`
-}
-
-function randomIndex(length) {
-  return crypto.randomInt(length)
+  return `slash-${Date.now()}-${Math.floor(Math.random() * 1000)}`
 }
 
 function shouldBypassProxy(host) {
@@ -241,12 +236,10 @@ module.exports = {
 
     const loadMusicLibrary = () => {
       const libraryPath = resolveMusicLibraryPath()
-      let fd
       try {
-        fd = fs.openSync(libraryPath, 'r')
-        const stat = fs.fstatSync(fd)
+        const stat = fs.statSync(libraryPath)
         if (!musicLibraryCache || musicLibraryCache.path !== libraryPath || musicLibraryCache.mtimeMs !== stat.mtimeMs) {
-          const raw = fs.readFileSync(fd, 'utf8')
+          const raw = fs.readFileSync(libraryPath, 'utf8')
           const data = JSON.parse(raw)
           const items = Array.isArray(data) ? data.filter((item) => item && item.title) : []
           musicLibraryCache = {
@@ -258,21 +251,13 @@ module.exports = {
         return musicLibraryCache.items || []
       } catch (err) {
         return []
-      } finally {
-        if (fd !== undefined) {
-          try {
-            fs.closeSync(fd)
-          } catch (closeErr) {
-            // Keep music library loading best-effort.
-          }
-        }
       }
     }
 
     const pickRandomSongTitle = () => {
       const items = loadMusicLibrary()
       if (!items.length) return ''
-      const pick = items[randomIndex(items.length)]
+      const pick = items[Math.floor(Math.random() * items.length)]
       if (!pick || !pick.title) return ''
       return String(pick.title || '').trim()
     }

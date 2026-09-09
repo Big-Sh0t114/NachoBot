@@ -6,11 +6,6 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-try:
-    from .secure_paths import resolve_external_path
-except ImportError:
-    from secure_paths import resolve_external_path
-
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
 TEMPLATE_MAP: dict[str, str] = {
@@ -485,15 +480,7 @@ class PathVerifier:
                 "download_url": download_url,
             }
 
-        try:
-            p = PathVerifier._resolve_external_install_dir(path)
-        except ValueError as e:
-            return {
-                "valid": False,
-                "message": f"路径无效: {e}",
-                "download_url": download_url,
-            }
-
+        p = Path(path.strip())
         if not p.exists():
             return {
                 "valid": False,
@@ -517,10 +504,6 @@ class PathVerifier:
             return PathVerifier._check_vb_cable(p, download_url)
 
         return {"valid": False, "message": "未知检查类型", "download_url": download_url}
-
-    @staticmethod
-    def _resolve_external_install_dir(path: str) -> Path:
-        return resolve_external_path(path, base_dir=ROOT_DIR)
 
     @staticmethod
     def _check_napcat(p: Path, download_url: str) -> dict:
