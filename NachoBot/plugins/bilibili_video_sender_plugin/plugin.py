@@ -8,6 +8,7 @@ import platform
 import re
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import subprocess
@@ -420,9 +421,31 @@ class BilibiliParser:
 
     @staticmethod
     def _follow_redirect(url: str) -> str:
+        """解析 b23.tv 短链，仅读取重定向目标，不继续请求 Bilibili 视频页面。"""
+
+        class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
         req = BilibiliParser._build_request(url)
-        with urllib.request.urlopen(req, timeout=15) as resp:  # nosec - trusted public short URL
-            return resp.geturl()
+        opener = urllib.request.build_opener(_NoRedirectHandler())
+
+        try:
+            with opener.open(req, timeout=15) as resp:  # nosec - trusted public short URL
+                return resp.geturl()
+        except urllib.error.HTTPError as exc:
+            if exc.code in (301, 302, 303, 307, 308):
+                location = exc.headers.get("Location")
+                if location:
+                    resolved_url = urllib.parse.urljoin(url, location)
+                    BilibiliParser._logger.debug(
+                        "B23 short URL resolved",
+                        original_url=url,
+                        resolved_url=resolved_url,
+                        status=exc.code,
+                    )
+                    return resolved_url
+            raise
 
     @staticmethod
     def _extract_bvid(url: str) -> Optional[str]:
@@ -440,11 +463,17 @@ class BilibiliParser:
         # 先匹配 b23.tv 短链
         short = BilibiliParser.B23_SHORT_PATTERN.search(text)
         if short:
+            short_url = short.group(0)
             try:
-                return BilibiliParser._follow_redirect(short.group(0))
-            except Exception:
-                # 回退为原短链
-                return short.group(0)
+                return BilibiliParser._follow_redirect(short_url)
+            except Exception as exc:
+                BilibiliParser._logger.error(
+                    "B23 short URL resolution failed",
+                    url=short_url,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                # 保持现有兼容行为：解析失败时仍回退为原短链
+                return short_url
 
         # 再匹配标准视频链接
         match = BilibiliParser.VIDEO_URL_PATTERN.search(text)
@@ -620,7 +649,7 @@ class BilibiliParser:
         if buvid3:
             # 生成 session: md5(buvid3 + 当前毫秒)
             ms = str(int(time.time() * 1000))
-            session_hash = hashlib.md5((buvid3 + ms).encode("utf-8")).hexdigest()
+            session_hash = hashlib.md5((buvid3 + ms).encode("utf-8"), usedforsecurity=False).hexdigest()
             params["session"] = session_hash
 
         # 添加gaia_source参数（有Cookie时非必要）
@@ -832,7 +861,7 @@ class BilibiliParser:
 
         if buvid3:
             ms = str(int(time.time() * 1000))
-            session_hash = hashlib.md5((buvid3 + ms).encode("utf-8")).hexdigest()
+            session_hash = hashlib.md5((buvid3 + ms).encode("utf-8"), usedforsecurity=False).hexdigest()
             params["session"] = session_hash
 
         # 添加gaia_source参数（有Cookie时非必要）
@@ -1992,7 +2021,7 @@ class BilibiliWbiSigner:
         # 排序并 urlencode
         items = sorted(safe_params.items(), key=lambda x: x[0])
         query = urllib.parse.urlencode(items, doseq=True)
-        w_rid = hashlib.md5((query + mixin_key).encode("utf-8")).hexdigest()
+        w_rid = hashlib.md5((query + mixin_key).encode("utf-8"), usedforsecurity=False).hexdigest()
         safe_params["w_rid"] = w_rid
         return safe_params
 
@@ -2390,7 +2419,7 @@ class BilibiliAutoSendHandler(BaseEventHandler):
             self._logger.error(error_msg)
             if status == "video_duration_exceeds_configured_limit":
                 await self._send_text(
-                    f"视频超过{max_video_duration_minutes}分钟，猫猫搬不动啦        (；´-ω-`)", stream_id
+                    f"视频超过{max_video_duration_minutes}分钟，猫猫搬不动啦(；´-ω-`)", stream_id
                 )
                 return self._make_return_value(True, True, "视频过长，已丢弃")
             return self._make_return_value(True, True, "解析失败")

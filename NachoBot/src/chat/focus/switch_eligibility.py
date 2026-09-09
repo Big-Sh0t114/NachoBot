@@ -8,7 +8,7 @@ from .switch_planner import has_active_focus_lease
 
 
 def can_offer_switch_chat(coordinator: FocusCoordinator, chat_id: str) -> bool:
-    """Allow group transfers and event-backed private safe returns."""
+    """Allow group transfers and event-backed private metadata-only switches."""
 
     if not has_active_focus_lease(chat_id):
         return False
@@ -20,7 +20,7 @@ def can_offer_switch_chat(coordinator: FocusCoordinator, chat_id: str) -> bool:
         return False
     if source.kind is ChatKind.GROUP:
         return True
-    return coordinator.has_safe_return_event(chat_id)
+    return coordinator.has_private_source_metadata_only_event(chat_id)
 
 
 __all__ = ["can_offer_switch_chat"]

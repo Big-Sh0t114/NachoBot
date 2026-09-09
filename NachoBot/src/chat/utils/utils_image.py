@@ -107,7 +107,7 @@ class ImageManager:
         if isinstance(image_base64, str):
             image_base64 = image_base64.encode("ascii", errors="ignore").decode("ascii")
         image_bytes = base64.b64decode(image_base64)
-        image_hash = hashlib.md5(image_bytes).hexdigest()
+        image_hash = hashlib.md5(image_bytes, usedforsecurity=False).hexdigest()
         emoji = await emoji_manager.get_emoji_from_manager(image_hash)
         if not emoji:
             return "[表情包：未知]"
@@ -127,7 +127,7 @@ class ImageManager:
             if isinstance(image_base64, str):
                 image_base64 = image_base64.encode("ascii", errors="ignore").decode("ascii")
             image_bytes = base64.b64decode(image_base64)
-            image_hash = hashlib.md5(image_bytes).hexdigest()
+            image_hash = hashlib.md5(image_bytes, usedforsecurity=False).hexdigest()
             image_format = Image.open(io.BytesIO(image_bytes)).format.lower()  # type: ignore
             policy = resolve_visual_task_policy(
                 additional_config,
@@ -288,7 +288,7 @@ class ImageManager:
             if isinstance(image_base64, str):
                 image_base64 = image_base64.encode("ascii", errors="ignore").decode("ascii")
             image_bytes = base64.b64decode(image_base64)
-            raw_image_hash = hashlib.md5(image_bytes).hexdigest()
+            raw_image_hash = hashlib.md5(image_bytes, usedforsecurity=False).hexdigest()
             policy = resolve_visual_task_policy(
                 additional_config,
                 "image",
@@ -529,7 +529,7 @@ class ImageManager:
             if isinstance(image_base64, str):
                 image_base64 = image_base64.encode("ascii", errors="ignore").decode("ascii")
             image_bytes = base64.b64decode(image_base64)
-            raw_image_hash = hashlib.md5(image_bytes).hexdigest()
+            raw_image_hash = hashlib.md5(image_bytes, usedforsecurity=False).hexdigest()
             policy = resolve_visual_task_policy(
                 additional_config,
                 "image",
@@ -623,7 +623,7 @@ class ImageManager:
             if isinstance(image_base64, str):
                 image_base64 = image_base64.encode("ascii", errors="ignore").decode("ascii")
             image_bytes = base64.b64decode(image_base64)
-            raw_image_hash = hashlib.md5(image_bytes).hexdigest()
+            raw_image_hash = hashlib.md5(image_bytes, usedforsecurity=False).hexdigest()
             image_hash = scoped_media_hash(raw_image_hash, policy)
 
             # 获取当前图片记录

@@ -1,38 +1,36 @@
 version: 2
 
 updates:
-  - package-ecosystem: "pip"
-    directories: 
+  - package-ecosystem: "uv"
+    directories:
       - "NachoBot"
       - "NachoBot-Bilibili-Adapter"
       - "NachoBot-DiscordVC-Adapter"
       - "NachoBot-Koishi-Adapter"
-      - "NachoBot-Live2D-Adapter" 
+      - "NachoBot-Live2D-Adapter"
       - "NachoBot-Multimodal-Adapter"
       - "NachoBot-Napcat-Adapter"
       - "NachoBot-UniversalVC-Adapter"
-      - "webui"
+      - "webUI"
+
     schedule:
-      interval: "daily"
+      interval: "monthly"
+
     target-branch: "dev"
 
-  - package-ecosystem: "uv"
-    directories: 
-      - "NachoBot"
-      - "NachoBot-Bilibili-Adapter"
-      - "NachoBot-DiscordVC-Adapter"
-      - "NachoBot-Koishi-Adapter"
-      - "NachoBot-Live2D-Adapter" 
-      - "NachoBot-Multimodal-Adapter"
-      - "NachoBot-Napcat-Adapter"
-      - "NachoBot-UniversalVC-Adapter"
-      - "webui"
-    schedule:
-      interval: "daily"
-    target-branch: "dev"
+    ignore:
+      - dependency-name: "torch"
+      - dependency-name: "torchaudio"
+      - dependency-name: "torchvision"
 
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    target-branch: "dev"
+
+  - package-ecosystem: "npm"
+    directory: "/koishi-app"
+    schedule:
+      interval: "monthly"
     target-branch: "dev"

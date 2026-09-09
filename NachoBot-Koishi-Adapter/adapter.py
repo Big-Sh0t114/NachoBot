@@ -17,6 +17,7 @@ from ncnk_message import (
     Seg,
     TargetConfig,
     UserInfo,
+    get_core_token_from_env,
 )
 
 from config import AdapterConfig
@@ -60,7 +61,7 @@ class KoishiOneBotAdapter:
             route_config={
                 self.config.platform: TargetConfig(
                     url=f"ws://{self.config.nachobot_host}:{self.config.nachobot_port}/ws",
-                    token=None,
+                    token=get_core_token_from_env(),
                 )
             }
         )

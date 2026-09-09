@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import aiohttp
@@ -30,7 +31,8 @@ class EmbeddingAPIAdapter:
     """适配宿主 embedding 请求接口。"""
 
     _GLOBAL_DIMENSION_CACHE: Dict[str, int] = {}
-    _GLOBAL_TEXT_EMBEDDING_CACHE: Dict[Tuple[str, int, str], np.ndarray] = {}
+    _GLOBAL_TEXT_EMBEDDING_CACHE: OrderedDict[Tuple[str, int, str], np.ndarray] = OrderedDict()
+    _GLOBAL_TEXT_EMBEDDING_CACHE_MAX_SIZE = 2048
 
     def __init__(
         self,
@@ -224,6 +226,7 @@ class EmbeddingAPIAdapter:
 
         last_exc: Optional[BaseException] = None
         for candidate_name in candidate_names:
+            client = None
             try:
                 model_info = self._find_model_info(candidate_name)
                 api_provider = self._find_provider(model_info.api_provider)
@@ -231,9 +234,7 @@ class EmbeddingAPIAdapter:
 
                 should_include_dimension = self._should_include_dimension(dimensions, include_dimension)
                 requested_dimension = (
-                    self._resolve_canonical_dimension(dimensions)
-                    if should_include_dimension
-                    else None
+                    self._resolve_canonical_dimension(dimensions) if should_include_dimension else None
                 )
                 extra_params = self._build_request_extra_params(
                     api_provider=api_provider,
@@ -259,6 +260,12 @@ class EmbeddingAPIAdapter:
             except Exception as exc:
                 last_exc = exc
                 logger.warning(f"embedding 模型 {candidate_name} 请求失败: {exc}")
+            finally:
+                if client is not None:
+                    try:
+                        await client.close()
+                    except Exception as close_exc:
+                        logger.warning(f"关闭 embedding 模型 {candidate_name} 客户端失败: {close_exc}")
 
         if last_exc is not None:
             logger.error(f"通过直接 Client 获取 Embedding 失败: {last_exc}")
@@ -344,7 +351,9 @@ class EmbeddingAPIAdapter:
         start_time = time.time()
         if dimensions is None or self.dimension_request_mode == "never":
             target_dim = int(await self._detect_dimension())
-            requested_dimension = None if self.dimension_request_mode != "always" else self._resolve_canonical_dimension()
+            requested_dimension = (
+                None if self.dimension_request_mode != "always" else self._resolve_canonical_dimension()
+            )
         else:
             target_dim = self._resolve_canonical_dimension(dimensions)
             requested_dimension = target_dim
@@ -405,6 +414,7 @@ class EmbeddingAPIAdapter:
                     if cached_vector is None:
                         uncached_items.append((index, text))
                     else:
+                        self._GLOBAL_TEXT_EMBEDDING_CACHE.move_to_end(cache_key)
                         batch_results.append((index, cached_vector.copy()))
             else:
                 uncached_items = list(enumerate(batch))
@@ -427,10 +437,7 @@ class EmbeddingAPIAdapter:
                     )
                     return batch_index, vector
 
-            tasks = [
-                encode_with_semaphore(text, index, offset + index)
-                for index, text in uncached_items
-            ]
+            tasks = [encode_with_semaphore(text, index, offset + index) for index, text in uncached_items]
             results = await asyncio.gather(*tasks)
             normalized_results: List[Tuple[int, np.ndarray]] = []
             for batch_index, vector in results:
@@ -439,6 +446,9 @@ class EmbeddingAPIAdapter:
                     text = batch[batch_index]
                     cache_key = self._embedding_cache_key(text, dimensions)
                     self._GLOBAL_TEXT_EMBEDDING_CACHE[cache_key] = vector.copy()
+                    self._GLOBAL_TEXT_EMBEDDING_CACHE.move_to_end(cache_key)
+                    while len(self._GLOBAL_TEXT_EMBEDDING_CACHE) > self._GLOBAL_TEXT_EMBEDDING_CACHE_MAX_SIZE:
+                        self._GLOBAL_TEXT_EMBEDDING_CACHE.popitem(last=False)
 
             batch_results.extend(normalized_results)
             batch_results.sort(key=lambda item: item[0])

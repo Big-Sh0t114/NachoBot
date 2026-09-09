@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import io
 import base64
 from typing import Callable, AsyncIterator, Optional, Coroutine, Any, List
@@ -159,7 +160,9 @@ def _convert_tool_options(tool_options: list[ToolOption]) -> list[FunctionDeclar
             "name": tool_option.name,
             "description": tool_option.description,
         }
-        if tool_option.params:
+        if tool_option.input_schema is not None:
+            ret["parameters_json_schema"] = copy.deepcopy(tool_option.input_schema)
+        elif tool_option.params:
             ret["parameters"] = {
                 "type": "object",
                 "properties": {param.name: _convert_tool_param(param) for param in tool_option.params},
@@ -348,6 +351,13 @@ class GeminiClient(BaseClient):
         self.client = genai.Client(
             api_key=api_provider.api_key,
         )  # 这里和openai不一样，gemini会自己决定自己是否需要retry
+
+    async def close(self) -> None:
+        """关闭 Google GenAI 客户端持有的同步与异步网络资源。"""
+        try:
+            await self.client.aio.aclose()
+        finally:
+            self.client.close()
 
     @staticmethod
     def clamp_thinking_budget(tb: int, model_id: str) -> int:

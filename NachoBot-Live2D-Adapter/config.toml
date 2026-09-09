@@ -15,6 +15,20 @@ scale = 1.0
 track_mouse = false
 poke_cooldown_seconds = 10.0
 
+# 默认在内存中扫描模型参数、表情和动作名称，不改写用户模型文件。
+[adaptation]
+enabled = true
+
+# 自动识别不明确时可在这里覆盖；单个参数可写字符串，多个联动参数可写数组。
+# [adaptation.parameters]
+# MOUTH_OPEN = ["ParamMouthOpenY"]
+
+# [adaptation.expressions]
+# normal = "normal"
+# shy = "shy"
+# disgust = "disgust"
+# angry = "angry"
+
 # Canonical action ID -> 当前 Live2D 模型中的 Motion Group。
 # 模型的实际分组名称不一致时，只需修改此表，无需改 NachoBot 或平台适配器。
 [actions]

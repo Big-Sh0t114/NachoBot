@@ -1,3 +1,4 @@
 *.bat text eol=crlf
 *.cmd text eol=crlf
 NachoLauncher.bat text eol=crlf working-tree-encoding=GBK
+requirements.txt text diff eol=lf

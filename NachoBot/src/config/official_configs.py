@@ -164,7 +164,7 @@ class ChatConfig(ConfigBase):
 
             components = [platform, str(id_str)] if is_group else [platform, str(id_str), "private"]
             key = "_".join(components)
-            return hashlib.md5(key.encode()).hexdigest()
+            return hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()
         except (ValueError, IndexError):
             return None
 
@@ -334,7 +334,7 @@ class ExpressionConfig(ConfigBase):
             else:
                 components = [platform, str(id_str), "private"]
             key = "_".join(components)
-            return hashlib.md5(key.encode()).hexdigest()
+            return hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()
 
         except (ValueError, IndexError):
             return None
@@ -443,6 +443,70 @@ class ToolConfig(ConfigBase):
 
     web_search_timeout_seconds: int = 20
     """单个搜索引擎页面的加载超时时间（秒）"""
+
+
+
+@dataclass
+class MCPSettings(ConfigBase):
+    """核心 MCP 运行时配置"""
+
+    enabled: bool = True
+    """是否启用核心 MCP 运行时"""
+
+    auto_detect: bool = True
+    """是否通过能力路由器自动触发 MCP 独立工具链"""
+
+    servers_json: str = ""
+    """Claude Desktop 风格的 mcpServers JSON"""
+
+    tool_prefix: str = "mcp"
+    """暴露给模型的 MCP 工具名前缀"""
+
+    disabled_tools: list[str] = field(default_factory=list)
+    """核心 MCP 运行时禁用的工具名"""
+
+    connect_timeout_seconds: int = 20
+    """单个 MCP 服务器连接和工具发现超时"""
+
+    call_timeout_seconds: int = 60
+    """单次 MCP 工具调用超时"""
+
+    reconnect_interval_seconds: int = 30
+    """断开服务器的后台重连间隔；设为 0 禁用"""
+
+    permissions_enabled: bool = True
+    """是否启用核心 MCP 权限策略"""
+
+    permission_default_mode: str = "deny_all"
+    """未匹配权限规则时的策略：allow_all 或 deny_all"""
+
+    quick_allow_users: list[str] = field(default_factory=list)
+    """始终允许使用 MCP 的用户 ID"""
+
+    quick_deny_groups: list[str] = field(default_factory=list)
+    """始终禁止使用 MCP 的群 ID"""
+
+    permission_rules_json: str = "[]"
+    """按工具名和会话 ID 匹配的高级权限规则 JSON"""
+
+    max_rounds: int = 3
+    """单次 MCP 独立工具链的最大决策轮数"""
+
+    max_calls: int = 5
+    """单次 MCP 独立工具链允许的最大工具调用数"""
+
+    max_candidate_tools: int = 32
+    """单次 MCP 决策最多暴露给模型的候选工具数"""
+
+    observation_max_chars: int = 12000
+    """回注 MCP 工具观察结果的最大字符数"""
+
+
+@dataclass
+class MCPConfig(ConfigBase):
+    """独立 mcp_config.toml 配置文件"""
+
+    mcp: MCPSettings = field(default_factory=MCPSettings)
 
 
 @dataclass
@@ -755,7 +819,7 @@ class FocusMemberConfig(ConfigBase):
     """适配器平台名，例如 qq。"""
 
     kind: Literal["group", "private"]
-    """会话类型。v1 支持 group->group 和 group->private。"""
+    """会话类型；私聊源只允许不携带内容的元数据切换。"""
 
     external_id: str
     """平台侧群号或用户号，启动时解析成 ChatStream.stream_id。"""
@@ -767,7 +831,7 @@ class FocusMemberConfig(ConfigBase):
     """是否允许该会话接收短期交接内容。"""
 
     allow_export: bool = True
-    """是否允许该会话导出短期交接内容。私聊源在 v1 中仍会被策略拒绝。"""
+    """是否允许该会话导出短期交接内容；私聊源不会导出内容。"""
 
     planner_bypass: bool = False
     """该会话是否由适配器声明为直答会话；用于启动时尚无消息上下文的 Focus 排序。"""
@@ -805,7 +869,7 @@ class FocusConfig(ConfigBase):
     """off 保持现有逻辑；observe 当前为安全 no-op；active 允许终止式切换和交接。"""
 
     allow_group_to_private: bool = True
-    """允许显式 Focus 组内的群聊到私聊路径；私聊仅可无 handoff 安全返回群聊。"""
+    """是否允许群聊源切换到私聊；私聊源的元数据切换不受此项限制。"""
 
     unread_event_threshold: int = 5
     unviewed_event_seconds: int = 180
@@ -869,8 +933,6 @@ class FocusConfig(ConfigBase):
                 if owner is not None:
                     raise ValueError(f"Focus 成员 {identity!r} 同时出现在 {owner!r} 和 {group.id!r}")
                 identities[identity] = group.id
-                if member.kind == "private" and not self.allow_group_to_private:
-                    raise ValueError(f"Focus group {group.id!r} 包含私聊成员，但 allow_group_to_private=false")
 
 
 @dataclass

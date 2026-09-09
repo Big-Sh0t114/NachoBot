@@ -1,6 +1,6 @@
 import asyncio
-import html
 import re
+from html.parser import HTMLParser
 from typing import List, Optional, Tuple
 
 import aiohttp
@@ -22,6 +22,37 @@ except Exception:
 _URL_PATTERN = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
 
 
+class _HTMLTextExtractor(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.text_parts: list[str] = []
+        self.title_parts: list[str] = []
+        self._skip_depth = 0
+        self._in_title = False
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        tag = tag.lower()
+        if tag in {"script", "style", "noscript"}:
+            self._skip_depth += 1
+        elif tag == "title":
+            self._in_title = True
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag in {"script", "style", "noscript"} and self._skip_depth:
+            self._skip_depth -= 1
+        elif tag == "title":
+            self._in_title = False
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth:
+            return
+        if self._in_title:
+            self.title_parts.append(data)
+        else:
+            self.text_parts.append(data)
+
+
 def extract_urls(text: str, max_urls: int = 2) -> List[str]:
     if not text:
         return []
@@ -40,17 +71,11 @@ def extract_urls(text: str, max_urls: int = 2) -> List[str]:
 
 
 def _strip_html(html_text: str) -> Tuple[str, Optional[str]]:
-    title = None
-    title_match = re.search(r"<title[^>]*>(.*?)</title>", html_text, flags=re.IGNORECASE | re.DOTALL)
-    if title_match:
-        title = html.unescape(title_match.group(1)).strip()
-
-    cleaned = re.sub(r"<script[^>]*>.*?</script>", "", html_text, flags=re.IGNORECASE | re.DOTALL)
-    cleaned = re.sub(r"<style[^>]*>.*?</style>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
-    cleaned = re.sub(r"<!--.*?-->", "", cleaned, flags=re.DOTALL)
-    cleaned = re.sub(r"<[^>]+>", " ", cleaned)
-    cleaned = html.unescape(cleaned)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    parser = _HTMLTextExtractor()
+    parser.feed(html_text)
+    parser.close()
+    cleaned = re.sub(r"\s+", " ", " ".join(parser.text_parts)).strip()
+    title = re.sub(r"\s+", " ", " ".join(parser.title_parts)).strip() or None
     return cleaned, title
 
 

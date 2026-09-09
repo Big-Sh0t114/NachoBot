@@ -1,6 +1,5 @@
 import asyncio
-import contextlib
-from typing import List, Dict, Optional, Type, Tuple, TYPE_CHECKING
+from typing import List, Dict, Optional, Set, Type, Tuple, TYPE_CHECKING
 
 from src.chat.message_receive.message import MessageRecv, MessageSending
 from src.chat.message_receive.chat_stream import get_chat_manager
@@ -16,11 +15,16 @@ logger = get_logger("events_manager")
 
 
 class EventsManager:
-    def __init__(self):
+    def __init__(self, handler_cancel_timeout: float = 5.0):
         # 有权重的 events 订阅者注册表
         self._events_subscribers: Dict[EventType | str, List[BaseEventHandler]] = {}
         self._handler_mapping: Dict[str, Type[BaseEventHandler]] = {}  # 事件处理器映射表
-        self._handler_tasks: Dict[str, List[asyncio.Task]] = {}  # 事件处理器正在处理的任务
+        self._handler_instances: Dict[str, BaseEventHandler] = {}
+        self._handler_generations: Dict[str, int] = {}
+        self._handler_generation_counter = 0
+        self._handler_tasks: Dict[str, Set[asyncio.Task]] = {}  # 事件处理器正在处理的任务
+        self._closing_handlers: Set[str] = set()
+        self._handler_cancel_timeout = max(0.0, handler_cancel_timeout)
         self._events_result_history: Dict[EventType | str, List[CustomEventHandlerResult]] = {}  # 事件的结果历史记录
         self._history_enable_map: Dict[EventType | str, bool] = {}  # 是否启用历史记录的映射表，同时作为events注册表
 
@@ -52,6 +56,9 @@ class EventsManager:
 
         handler_name = handler_info.name
 
+        if handler_name in self._closing_handlers:
+            logger.warning(f"事件处理器 {handler_name} 仍在退出，拒绝重新注册")
+            return False
         if handler_name in self._handler_mapping:
             logger.warning(f"事件处理器 {handler_name} 已存在，跳过注册")
             return False
@@ -60,8 +67,18 @@ class EventsManager:
             logger.error(f"事件类型 {handler_info.event_type} 未注册，无法为其注册处理器 {handler_name}")
             return False
 
+        if not self._insert_event_handler(handler_class, handler_info):
+            return False
+        handler_instance = self._find_event_handler_instance(handler_class, handler_name)
+        if handler_instance is None:
+            logger.error(f"事件处理器 {handler_name} 注册后未找到实例")
+            self.rollback_event_subscriber_registration(handler_name)
+            return False
         self._handler_mapping[handler_name] = handler_class
-        return self._insert_event_handler(handler_class, handler_info)
+        self._handler_instances[handler_name] = handler_instance
+        self._handler_generation_counter += 1
+        self._handler_generations[handler_name] = self._handler_generation_counter
+        return True
 
     async def handle_nacho_events(
         self,
@@ -80,9 +97,18 @@ class EventsManager:
         continue_flag = True
 
         # 1. 没有订阅者时不要触碰聊天流。Focus 事件轮次可能尚未创建消息上下文。
-        handlers = self._events_subscribers.get(event_type, [])
+        handlers = tuple(
+            (handler, self._handler_generations.get(handler.handler_name))
+            for handler in self._events_subscribers.get(event_type, ())
+            if (
+                handler.handler_name not in self._closing_handlers
+                and self._handler_instances.get(handler.handler_name) is handler
+            )
+        )
         if not handlers:
             return True, None
+
+        await self._after_handler_snapshot()
 
         # 2. 准备消息
         transformed_message = self._prepare_message(
@@ -93,7 +119,9 @@ class EventsManager:
 
         current_stream_id = transformed_message.stream_id if transformed_message else None
         modified_message: Optional[NachoMessages] = None
-        for handler in handlers:
+        for handler, generation in handlers:
+            if not self._handler_is_current(handler, generation):
+                continue
             # 3. 前置检查和配置加载
             if (
                 current_stream_id
@@ -106,47 +134,102 @@ class EventsManager:
             plugin_config = component_registry.get_plugin_config(handler.plugin_name) or {}
             handler.set_plugin_config(plugin_config)
 
+            if not self._handler_is_current(handler, generation):
+                continue
+
             # 4. 根据类型分发任务
             if (
                 handler.intercept_message or event_type == EventType.ON_STOP
             ):  # 让ON_STOP的所有事件处理器都发挥作用，防止还没执行即被取消
                 # 阻塞执行，并更新 continue_flag
                 should_continue, modified_message = await self._dispatch_intercepting_handler_task(
-                    handler, event_type, modified_message or transformed_message
+                    handler, event_type, modified_message or transformed_message, generation
                 )
                 continue_flag = continue_flag and should_continue
             else:
                 # 异步执行，不阻塞
-                self._dispatch_handler_task(handler, event_type, transformed_message)
+                self._dispatch_handler_task(handler, event_type, transformed_message, generation)
 
         return continue_flag, modified_message
 
-    async def cancel_handler_tasks(self, handler_name: str) -> None:
-        tasks_to_be_cancelled = self._handler_tasks.get(handler_name, [])
+    async def cancel_handler_tasks(self, handler_name: str) -> bool:
+        tasks_to_be_cancelled = tuple(self._handler_tasks.get(handler_name, ()))
         if remaining_tasks := [task for task in tasks_to_be_cancelled if not task.done()]:
             for task in remaining_tasks:
                 task.cancel()
+            _, pending = await asyncio.wait(
+                remaining_tasks,
+                timeout=self._handler_cancel_timeout,
+            )
+            if pending:
+                logger.warning(
+                    f"取消事件处理器 {handler_name} 的 {len(pending)} 个任务超时；"
+                    "保留跟踪并拒绝卸载"
+                )
+                return False
             try:
-                await asyncio.wait_for(asyncio.gather(*remaining_tasks, return_exceptions=True), timeout=5)
                 logger.info(f"已取消事件处理器 {handler_name} 的所有任务")
-            except asyncio.TimeoutError:
-                logger.warning(f"取消事件处理器 {handler_name} 的任务超时，开始强制取消")
             except Exception as e:
                 logger.error(f"取消事件处理器 {handler_name} 的任务时发生异常: {e}")
-        if handler_name in self._handler_tasks:
-            del self._handler_tasks[handler_name]
+                return False
+        tasks = self._handler_tasks.get(handler_name)
+        if tasks is not None:
+            tasks.difference_update(task for task in tasks if task.done())
+            if not tasks:
+                self._handler_tasks.pop(handler_name, None)
+        return True
+
+    def has_event_subscriber(self, handler_name: str) -> bool:
+        """返回事件处理器是否已注册。"""
+        return handler_name in self._handler_mapping
+
+    def rollback_event_subscriber_registration(self, handler_name: str) -> None:
+        """回滚尚未投入运行的处理器注册。"""
+        self._closing_handlers.discard(handler_name)
+        handler_class = self._handler_mapping.pop(handler_name, None)
+        handler_instance = self._handler_instances.pop(handler_name, None)
+        self._handler_generations.pop(handler_name, None)
+        if handler_class is not None:
+            self._remove_event_handler_instance(handler_class, handler_instance)
+            return
+
+        # A type-specific registration can fail after inserting the instance
+        # but before publishing ``_handler_mapping`` (for example an
+        # arbitrary RuntimeError from a registry hook).  Find and remove that
+        # unpublished instance as well, otherwise a failed plugin load leaves
+        # an event handler that is invisible to every registry index.
+        for handlers in self._events_subscribers.values():
+            for index, handler in enumerate(handlers):
+                if getattr(handler, "handler_name", None) == handler_name:
+                    del handlers[index]
+                    return
 
     async def unregister_event_subscriber(self, handler_name: str) -> bool:
         """取消注册事件处理器"""
         if handler_name not in self._handler_mapping:
-            logger.warning(f"事件处理器 {handler_name} 不存在，无法取消注册")
-            return False
+            # 取消注册是幂等操作；同时清理可能残留的任务。
+            if not await self.cancel_handler_tasks(handler_name):
+                return False
+            self._closing_handlers.discard(handler_name)
+            logger.debug(f"事件处理器 {handler_name} 未注册，无需取消")
+            return True
 
-        await self.cancel_handler_tasks(handler_name)
-
-        handler_class = self._handler_mapping.pop(handler_name)
-        if not self._remove_event_handler_instance(handler_class):
+        self._closing_handlers.add(handler_name)
+        handler_class = self._handler_mapping[handler_name]
+        handler_instance = self._handler_instances.get(handler_name)
+        # Drain before mutating the event list or registries.  A
+        # cancellation-resistant task must not leave an otherwise healthy
+        # handler invisible after a bounded unload attempt times out.
+        if not await self.cancel_handler_tasks(handler_name):
+            self._closing_handlers.discard(handler_name)
             return False
+        removed = self._remove_event_handler_instance(handler_class, handler_instance)
+        self._handler_mapping.pop(handler_name, None)
+        self._handler_instances.pop(handler_name, None)
+        self._handler_generations.pop(handler_name, None)
+        self._closing_handlers.discard(handler_name)
+        if not removed:
+            logger.warning(f"事件处理器 {handler_name} 的实例已不存在，已清理注册映射")
 
         logger.info(f"事件处理器 {handler_name} 已成功取消注册")
         return True
@@ -187,16 +270,35 @@ class EventsManager:
 
         return True
 
-    def _remove_event_handler_instance(self, handler_class: Type[BaseEventHandler]) -> bool:
+    def _find_event_handler_instance(
+        self,
+        handler_class: Type[BaseEventHandler],
+        handler_name: str,
+    ) -> Optional[BaseEventHandler]:
+        handlers = self._events_subscribers.get(handler_class.event_type, [])
+        for handler in handlers:
+            if isinstance(handler, handler_class) and handler.handler_name == handler_name:
+                return handler
+        return None
+
+    def _remove_event_handler_instance(
+        self,
+        handler_class: Type[BaseEventHandler],
+        handler_instance: Optional[BaseEventHandler] = None,
+    ) -> bool:
         """从事件类型列表中移除事件处理器"""
         display_handler_name = handler_class.handler_name or handler_class.__name__
         if handler_class.event_type == EventType.UNKNOWN:
             logger.warning(f"事件处理器 {display_handler_name} 的事件类型未知，不存在于处理器列表中")
             return False
 
-        handlers = self._events_subscribers[handler_class.event_type]
+        handlers = self._events_subscribers.get(handler_class.event_type, [])
         for i, handler in enumerate(handlers):
-            if isinstance(handler, handler_class):
+            if handler_instance is not None and handler is handler_instance:
+                del handlers[i]
+                logger.debug(f"事件处理器 {display_handler_name} 已移除")
+                return True
+            if handler_instance is None and isinstance(handler, handler_class):
                 del handlers[i]
                 logger.debug(f"事件处理器 {display_handler_name} 已移除")
                 return True
@@ -323,34 +425,60 @@ class EventsManager:
         return None  # ON_START, ON_STOP事件没有消息体
 
     def _dispatch_handler_task(
-        self, handler: BaseEventHandler, event_type: EventType | str, message: Optional[NachoMessages] = None
+        self,
+        handler: BaseEventHandler,
+        event_type: EventType | str,
+        message: Optional[NachoMessages] = None,
+        generation: Optional[int] = None,
     ):
         """分发一个非阻塞（异步）的事件处理任务。"""
         if event_type == EventType.UNKNOWN:
             raise ValueError("未知事件类型")
+        if generation is None:
+            generation = self._handler_generations.get(handler.handler_name)
+        if not self._handler_is_current(handler, generation):
+            return
         try:
             task = asyncio.create_task(handler.execute(message))
 
             task_name = f"{handler.plugin_name}-{handler.handler_name}"
             task.set_name(task_name)
-            task.add_done_callback(lambda t: self._task_done_callback(t, event_type))
+            task.add_done_callback(
+                lambda t, handler_name=handler.handler_name: self._task_done_callback(t, event_type, handler_name)
+            )
 
-            self._handler_tasks.setdefault(handler.handler_name, []).append(task)
+            self._handler_tasks.setdefault(handler.handler_name, set()).add(task)
         except Exception as e:
             logger.error(f"创建事件处理器任务 {handler.handler_name} 时发生异常: {e}", exc_info=True)
 
     async def _dispatch_intercepting_handler_task(
-        self, handler: BaseEventHandler, event_type: EventType | str, message: Optional[NachoMessages] = None
+        self,
+        handler: BaseEventHandler,
+        event_type: EventType | str,
+        message: Optional[NachoMessages] = None,
+        generation: Optional[int] = None,
     ) -> Tuple[bool, Optional[NachoMessages]]:
         """分发并等待一个阻塞（同步）的事件处理器，返回是否应继续处理。"""
         if event_type == EventType.UNKNOWN:
             raise ValueError("未知事件类型")
         if event_type not in self._history_enable_map:
             raise ValueError(f"事件类型 {event_type} 未注册")
+        if generation is None:
+            generation = self._handler_generations.get(handler.handler_name)
+        if not self._handler_is_current(handler, generation):
+            return True, None
         try:
-            success, continue_processing, return_message, custom_result, modified_message = await handler.execute(
-                message
-            )
+            task = asyncio.create_task(handler.execute(message))
+            task.set_name(f"{handler.plugin_name}-{handler.handler_name}-intercept")
+            self._handler_tasks.setdefault(handler.handler_name, set()).add(task)
+            try:
+                success, continue_processing, return_message, custom_result, modified_message = await task
+            finally:
+                tasks = self._handler_tasks.get(handler.handler_name)
+                if tasks is not None:
+                    tasks.discard(task)
+                    if not tasks:
+                        self._handler_tasks.pop(handler.handler_name, None)
 
             if not success:
                 logger.error(f"EventHandler {handler.handler_name} 执行失败: {return_message}")
@@ -367,10 +495,25 @@ class EventsManager:
             logger.error(f"EventHandler {handler.handler_name} 发生异常: {e}", exc_info=True)
             return True, None  # 发生异常时默认不中断其他处理
 
+    def _handler_is_current(self, handler: BaseEventHandler, generation: Optional[int]) -> bool:
+        """Check identity, generation, and admission before creating work."""
+        handler_name = handler.handler_name
+        if handler_name in self._closing_handlers:
+            return False
+        current_instance = self._handler_instances.get(handler_name)
+        if current_instance is None:
+            return False
+        return current_instance is handler and self._handler_generations.get(handler_name) == generation
+
+    async def _after_handler_snapshot(self) -> None:
+        """Scheduling seam used by isolated lifecycle tests; production is a no-op."""
+        return None
+
     def _task_done_callback(
         self,
         task: asyncio.Task[Tuple[bool, bool, str | None, CustomEventHandlerResult | None, NachoMessages | None]],
         event_type: EventType | str,
+        handler_name: str,
     ):
         """任务完成回调"""
         task_name = task.get_name() or "Unknown Task"
@@ -394,8 +537,11 @@ class EventsManager:
         except Exception as e:
             logger.error(f"事件处理任务 {task_name} 发生异常: {e}")
         finally:
-            with contextlib.suppress(ValueError, KeyError):
-                self._handler_tasks[task_name].remove(task)
+            tasks = self._handler_tasks.get(handler_name)
+            if tasks is not None:
+                tasks.discard(task)
+                if not tasks:
+                    self._handler_tasks.pop(handler_name, None)
 
 
 events_manager = EventsManager()

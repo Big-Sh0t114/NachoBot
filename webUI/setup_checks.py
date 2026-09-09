@@ -3,15 +3,32 @@
 import os
 import socket
 import subprocess
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
+try:
+    from .secure_paths import resolve_external_path
+except ImportError:
+    from secure_paths import resolve_external_path
+
 ROOT_DIR = Path(__file__).resolve().parent.parent
+
+# These identifiers refer to sanitized templates embedded in the tracked
+# setup-deployment module.  They deliberately are not filesystem paths, so a
+# clean checkout never depends on user-owned untracked template files.
+BUILTIN_KOISHI_TEMPLATE = "__builtin__/koishi.yml"
+BUILTIN_BILIBILI_TEMPLATE = "__builtin__/bilibili.toml"
+BUILTIN_TEMPLATE_KEYS = frozenset(
+    {BUILTIN_KOISHI_TEMPLATE, BUILTIN_BILIBILI_TEMPLATE}
+)
 
 TEMPLATE_MAP: dict[str, str] = {
     "NachoBot/template/bot_config_template.toml": "NachoBot/config/bot_config.toml",
     "NachoBot/template/model_config_template.toml": "NachoBot/config/model_config.toml",
     "NachoBot/template/topics_config_template.toml": "NachoBot/config/topics_config.toml",
+    "NachoBot/template/mcp_config_template.toml": "NachoBot/config/mcp_config.toml",
     "NachoBot/template/template.env": "NachoBot/.env",
     "NachoBot-Napcat-Adapter/template/template_config.toml": "NachoBot-Napcat-Adapter/config.toml",
     "NachoBot-Multimodal-Adapter/template_configs/base_template.toml": "NachoBot-Multimodal-Adapter/configs/base.toml",
@@ -19,9 +36,12 @@ TEMPLATE_MAP: dict[str, str] = {
     "NachoBot-Multimodal-Adapter/template_configs/vox_template.toml": "NachoBot-Multimodal-Adapter/configs/vox.toml",
     "NachoBot-UniversalVC-Adapter/template/config_template.toml": "NachoBot-UniversalVC-Adapter/config.toml",
     "NachoBot-Multimodal-Adapter/template_configs/perception_template.toml": "NachoBot-Multimodal-Adapter/configs/perception.toml",
+    BUILTIN_KOISHI_TEMPLATE: "koishi-app/koishi.yml",
+    "NachoBot-DiscordVC-Adapter/config.toml.example": "NachoBot-DiscordVC-Adapter/config.toml",
+    BUILTIN_BILIBILI_TEMPLATE: "NachoBot-Bilibili-Adapter/config.toml",
 }
 
-KNOWN_PORTS: dict[str, int] = {
+DEFAULT_PORTS: dict[str, int] = {
     "NachoBot Core": 8000,
     "Napcat Adapter": 8095,
     "Multimodal Adapter": 8070,
@@ -43,6 +63,7 @@ class EnvironmentChecker:
         """Run all environment checks and return results."""
         return {
             "python": EnvironmentChecker.check_python(),
+            "git": EnvironmentChecker.check_git(),
             "node": EnvironmentChecker.check_node(),
             "docker": EnvironmentChecker.check_docker(),
             "gpu": EnvironmentChecker.check_gpu(),
@@ -113,6 +134,51 @@ class EnvironmentChecker:
         except Exception:
             result["status"] = "warning"
             result["message"] = f"{result['python']} (uv 检测失败)"
+
+        return result
+
+    @staticmethod
+    def check_git() -> dict[str, Any]:
+        """Check Git availability and whether Windows can bootstrap it via winget."""
+        winget_available = shutil.which("winget") is not None if os.name == "nt" else False
+        result = {
+            "status": "error",
+            "git": None,
+            "winget_available": winget_available,
+            "download_url": "",
+            "download_label": "下载 Git",
+            "message": "",
+        }
+
+        try:
+            out = subprocess.run(
+                ["git", "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if out.returncode == 0:
+                version_str = out.stdout.strip() or out.stderr.strip()
+                result["git"] = version_str
+                result["status"] = "ok"
+                result["message"] = version_str
+                return result
+            result["message"] = "Git 不可用"
+        except FileNotFoundError:
+            result["message"] = "Git 未安装或不在 PATH 中"
+        except Exception as e:
+            result["message"] = f"检测 Git 时出错: {e}"
+            return result
+
+        if os.name == "nt":
+            if winget_available:
+                result["message"] += "（检测到 winget，部署时可自动安装）"
+            else:
+                result["message"] += "（winget 不可用，请手动下载安装 Git）"
+                result["download_url"] = "https://git-scm.com/download/win"
+        else:
+            result["message"] += "（当前平台不支持自动安装，请手动安装 Git）"
+            result["download_url"] = "https://git-scm.com/downloads"
 
         return result
 
@@ -199,8 +265,87 @@ class EnvironmentChecker:
         return result
 
     @staticmethod
+    def _configured_ports() -> dict[str, int]:
+        """Resolve configured service ports, keeping defaults only as fallbacks."""
+        import re
+        import tomllib
+
+        ports = dict(DEFAULT_PORTS)
+
+        # NachoBot Core (.env)
+        env_path = ROOT_DIR / "NachoBot" / ".env"
+        if env_path.exists():
+            try:
+                for line in env_path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        key, _, value = line.partition("=")
+                        if key.strip() == "PORT":
+                            ports["NachoBot Core"] = int(value.strip())
+                            break
+            except Exception:
+                pass
+
+        # NapCat adapter inbound server
+        napcat_path = ROOT_DIR / "NachoBot-Napcat-Adapter" / "config.toml"
+        if napcat_path.exists():
+            try:
+                document = tomllib.loads(napcat_path.read_text(encoding="utf-8"))
+                ports["Napcat Adapter"] = int(
+                    document.get("napcat_server", {}).get("port", ports["Napcat Adapter"])
+                )
+            except Exception:
+                pass
+
+        # Multimodal relay and selected TTS engine
+        multimodal_dir = ROOT_DIR / "NachoBot-Multimodal-Adapter"
+        base_path = multimodal_dir / "configs" / "base.toml"
+        if base_path.exists():
+            try:
+                base = tomllib.loads(base_path.read_text(encoding="utf-8"))
+                ports["Multimodal Adapter"] = int(
+                    base.get("server", {}).get("port", ports["Multimodal Adapter"])
+                )
+                enabled = base.get("enabled_tts", {}).get("enabled", ["GPT_Sovits"])
+                engine_config = "vox.toml" if isinstance(enabled, list) and "Vox" in enabled else "gpt-sovits.toml"
+                engine_path = multimodal_dir / "configs" / engine_config
+                if engine_path.exists():
+                    engine = tomllib.loads(engine_path.read_text(encoding="utf-8"))
+                    ports["TTS Engine"] = int(
+                        engine.get("tts", {}).get("port", ports["TTS Engine"])
+                    )
+            except Exception:
+                pass
+
+        # Perception API
+        perception_path = multimodal_dir / "configs" / "perception.toml"
+        if perception_path.exists():
+            try:
+                perception = tomllib.loads(perception_path.read_text(encoding="utf-8"))
+                ports["VLM / ASR API"] = int(
+                    perception.get("perception", {}).get("port", ports["VLM / ASR API"])
+                )
+            except Exception:
+                pass
+
+        # Koishi gateway
+        koishi_path = ROOT_DIR / "koishi-app" / "koishi.yml"
+        if koishi_path.exists():
+            try:
+                content = koishi_path.read_text(encoding="utf-8")
+                server_idx = content.find("group:server:")
+                if server_idx != -1:
+                    match = re.search(r"port:\s*(\d+)", content[server_idx:server_idx + 200])
+                    if match:
+                        ports["Koishi"] = int(match.group(1))
+            except Exception:
+                pass
+
+        return ports
+
+    @staticmethod
     def check_ports() -> list[dict[str, Any]]:
-        """Check port availability for all known services."""
+        """Check port availability for all configured services."""
         # Dynamically retrieve current WebUI port
         try:
             from webui_config import webui_config
@@ -214,8 +359,10 @@ class EnvironmentChecker:
             except Exception:
                 webui_port = 8088
 
+        ports = EnvironmentChecker._configured_ports()
+
         results = []
-        for name, port in KNOWN_PORTS.items():
+        for name, port in ports.items():
             if name == "WebUI":
                 port = webui_port
             entry = {
@@ -278,13 +425,16 @@ class EnvironmentChecker:
         results = []
         for tmpl, target in TEMPLATE_MAP.items():
             target_path = ROOT_DIR / target
-            tmpl_path = ROOT_DIR / tmpl
+            template_exists = (
+                tmpl in BUILTIN_TEMPLATE_KEYS
+                or (ROOT_DIR / tmpl).exists()
+            )
             results.append(
                 {
                     "template": tmpl,
                     "target": target,
                     "target_exists": target_path.exists(),
-                    "template_exists": tmpl_path.exists(),
+                    "template_exists": template_exists,
                     "filename": Path(target).name,
                     "component": target.split("/")[0],
                 }
@@ -404,7 +554,7 @@ class EnvironmentChecker:
 
 
 class PathVerifier:
-    """Verify that external dependencies are installed at the given paths."""
+    """Verify external dependencies and project-managed runtimes."""
 
     # Each entry: (check_type, display_name, validation function, download_url)
     CHECKS = {
@@ -416,14 +566,14 @@ class PathVerifier:
         },
         "sovits": {
             "name": "GPT-SoVITS",
-            "hint": "GPT-SoVITS 安装目录（包含 runtime/python.exe）",
-            "download_url": "https://www.yuque.com/baicaigongchang1145haoyuangong/ib3g1e/dkxgpiy9zb96hob4",
+            "hint": "由 Multimodal Adapter 自动下载并管理运行时",
+            "download_url": "",
             "default_rel": None,
         },
         "voxcpm": {
             "name": "VoxCPM",
-            "hint": "VoxCPM 安装目录（包含 .venv/Scripts/python.exe）",
-            "download_url": "https://github.com/openbmb/VoxCPM/releases",
+            "hint": "由 Multimodal Adapter 自动下载并管理运行时",
+            "download_url": "",
             "default_rel": None,
         },
         "nodejs": {
@@ -472,6 +622,10 @@ class PathVerifier:
         if check_type == "bilibili_dll":
             return PathVerifier._check_bilibili_dll(download_url)
 
+        # -- Managed TTS runtimes: no user-supplied external path required --
+        if check_type in ("sovits", "voxcpm"):
+            return PathVerifier._check_managed_tts(check_type)
+
         # -- Path-based checks --
         if not path or not path.strip():
             return {
@@ -480,7 +634,15 @@ class PathVerifier:
                 "download_url": download_url,
             }
 
-        p = Path(path.strip())
+        try:
+            p = PathVerifier._resolve_external_install_dir(path)
+        except ValueError as e:
+            return {
+                "valid": False,
+                "message": f"路径无效: {e}",
+                "download_url": download_url,
+            }
+
         if not p.exists():
             return {
                 "valid": False,
@@ -496,58 +658,76 @@ class PathVerifier:
 
         if check_type == "napcat":
             return PathVerifier._check_napcat(p, download_url)
-        elif check_type == "sovits":
-            return PathVerifier._check_sovits(p, download_url)
-        elif check_type == "voxcpm":
-            return PathVerifier._check_voxcpm(p, download_url)
         elif check_type == "vb_cable":
             return PathVerifier._check_vb_cable(p, download_url)
 
         return {"valid": False, "message": "未知检查类型", "download_url": download_url}
 
     @staticmethod
+    def _resolve_external_install_dir(path: str) -> Path:
+        return resolve_external_path(path, base_dir=ROOT_DIR)
+
+    @staticmethod
     def _check_napcat(p: Path, download_url: str) -> dict:
         launcher = p / "launcher-user.bat"
-        if launcher.exists():
-            return {"valid": True, "message": f"✅ NapCat Shell 已找到: {p}"}
-        # Also try napcat.bat as fallback
         napcat_bat = p / "napcat.bat"
-        if napcat_bat.exists():
-            return {"valid": True, "message": f"✅ NapCat Shell 已找到: {p}"}
+        if not launcher.exists() and not napcat_bat.exists():
+            return {
+                "valid": False,
+                "message": f"❌ 未找到 launcher-user.bat 或 napcat.bat: {p}",
+                "download_url": download_url,
+            }
+
+        # The setup wizard edits <NapCat>/config/onebot11_*.json directly.
+        # Verify that the directory can actually be created and written now,
+        # instead of passing the path check and failing later during deployment.
+        config_dir = p / "config"
+        try:
+            config_dir.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                prefix=".nachobot-write-test-",
+                suffix=".tmp",
+                dir=config_dir,
+                delete=False,
+            ) as test_file:
+                test_file.write("ok")
+                test_path = Path(test_file.name)
+            test_path.unlink(missing_ok=True)
+        except Exception as e:
+            return {
+                "valid": False,
+                "message": f"❌ NapCat 配置目录不可写: {config_dir} ({e})",
+                "download_url": download_url,
+            }
+
         return {
-            "valid": False,
-            "message": f"❌ 未找到 launcher-user.bat: {p}",
-            "download_url": download_url,
+            "valid": True,
+            "message": f"✅ NapCat Shell 已找到且配置目录可写: {p}",
         }
 
     @staticmethod
-    def _check_sovits(p: Path, download_url: str) -> dict:
-        py_exe = p / "runtime" / "python.exe"
-        if py_exe.exists():
-            return {"valid": True, "message": f"✅ GPT-SoVITS 已找到: {p}"}
-        # Alternative: check for api_v2.py
-        api_file = p / "api_v2.py"
-        if api_file.exists():
-            return {"valid": True, "message": f"✅ GPT-SoVITS 已找到: {p}"}
-        return {
-            "valid": False,
-            "message": f"❌ 未找到 runtime/python.exe 或 api_v2.py: {p}",
-            "download_url": download_url,
-        }
+    def _check_managed_tts(check_type: str) -> dict:
+        adapter = ROOT_DIR / "NachoBot-Multimodal-Adapter"
+        manager = adapter / "scripts" / "tts_runtime_manager.py"
+        if not manager.is_file():
+            return {
+                "valid": False,
+                "message": f"❌ TTS runtime manager 不存在: {manager}",
+                "download_url": "",
+            }
 
-    @staticmethod
-    def _check_voxcpm(p: Path, download_url: str) -> dict:
-        venv_py = p / ".venv" / "Scripts" / "python.exe"
-        if venv_py.exists():
-            return {"valid": True, "message": f"✅ VoxCPM 已找到: {p}"}
-        # Also accept if models dir exists
-        models_dir = p / "models"
-        if models_dir.exists():
-            return {"valid": True, "message": f"✅ VoxCPM 已找到 (models目录): {p}"}
+        engine = "gpt-sovits" if check_type == "sovits" else "voxcpm"
+        runtime = adapter / ".runtime" / "tts" / engine
+        if runtime.is_dir():
+            return {
+                "valid": True,
+                "message": f"✅ {engine} 托管运行时已创建: {runtime}",
+            }
         return {
-            "valid": False,
-            "message": f"❌ 未找到 .venv/Scripts/python.exe: {p}",
-            "download_url": download_url,
+            "valid": True,
+            "message": f"✅ {engine} 将在首次启动时自动下载并创建",
         }
 
     @staticmethod

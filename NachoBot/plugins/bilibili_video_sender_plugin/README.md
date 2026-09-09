@@ -1,64 +1,39 @@
-# 使用说明
-发送B站视频链接或QQ中的B站小程序/分享卡片到群里，麦麦会自动解析并发送视频。
-还有问题加qq3087033824
-觉得好用的话，可以点个star
-### 请务必仔细填写config.toml！！！！！
-### 如果你不知道什么是wsl，请务必保证wsl转换为false！！！
-## 使用方法
+# Bilibili 视频发送插件
 
-1. 下载本插件。
-2. 将插件解压到麦麦的 `plugins` 目录。
-3. 在 NachoBot 项目目录执行 `uv sync`，安装项目依赖。
-4. FFmpeg 和 FFprobe 由 `static-ffmpeg` 自动获取，无需手动下载或放入插件目录。
-5. 打开 `config.toml`，填入 `sessdata` 和 `buvid3`（获取方法见下方）。
-6. 在 NapCat 上新建一个正向 HTTP，并在 `config.toml` 内填入端口。
-7. 使用愉快 😊。
+识别 Bilibili 视频链接、`b23.tv` 短链，以及 QQ 中的 Bilibili 小程序/分享卡片，下载后通过 NapCat 发送视频。群聊和私聊均可用。
 
-### 视频时长上限
+## 安装与配置
 
-在 `config.toml` 的 `[bilibili]` 配置节中，可通过 `max_video_duration_minutes` 设置视频时长上限，单位为分钟，默认值为 `10`。设为 `0` 可关闭视频时长预检。
+1. 在 `NachoBot` 目录执行 `uv sync --locked`。
+2. 编辑本目录的 `config.toml`，先保持 `plugin.enabled = false` 完成配置和测试，再按需启用。
+3. 如需登录画质，在 `[bilibili]` 中填写自己的 `sessdata` 和可选 `buvid3`；不要提交 Cookie。
+4. `[api].port` 必须与 NapCat 中为本插件配置的正向 HTTP Server 端口一致。
 
----
+```toml
+[plugin]
+enabled = true
 
-## sessdata 和 buvid3 获取方法
+[bilibili]
+max_video_duration_minutes = 10 # 0 表示关闭时长预检
+enable_video_splitting = true
+enable_video_compression = true
+compression_quality = 28
 
-1. 使用 Chrome 浏览器打开 B站主页。
-2. 按下 `F12` 打开开发者工具。
-3. 点击顶部的 `Application`（应用）选项卡。
-4. 按 `F5` 刷新页面。
-5. 在左侧栏找到 `Cookies` 并展开。
-6. 找到 `bilibili` 相关的 Cookie 并点击。
-7. 在右侧的 `Value` 列找到 `sessdata` 和 `buvid3` 的值。
-8. 将这两个值填入 `config.toml` 文件中对应的位置。
+[wsl]
+enable_path_conversion = false
 
-### 参考截图
+[api]
+port = 5700
+```
 
-- 开发者工具打开界面  
-  ![开发者工具界面](https://github.com/user-attachments/assets/d8b040de-a038-4772-b588-26df92d5ce73)
+如果不了解 WSL，请保持 `enable_path_conversion = false`。
 
-- Application 栏  
-  ![Application 栏](https://github.com/user-attachments/assets/0b8a5954-d6cd-47b6-95b9-126115203907)
+## 当前处理链路
 
-- Cookie 位置  
-  ![Cookie 位置](https://github.com/user-attachments/assets/4dc9c217-f78d-4d68-bb00-71ace2d3381f)
+- 先解析 BV/AV/短链或 NapCat 已解析的卡片信息。
+- 在下载前按 `max_video_duration_minutes` 拒绝过长视频。
+- 优先 DASH，按账号权限选择画质；文件过大时可压缩或分片。
+- FFmpeg / FFprobe 由 `static-ffmpeg` 获取，不再随插件提交整套二进制目录。
+- 可自动检测 NVENC、QSV、AMF、VideoToolbox，失败时回退 `libx264`。
 
-- bilibili Cookie  
-  ![bilibili Cookie](https://github.com/user-attachments/assets/d82e3b15-64cd-490b-8eea-c6258ca0f6e2)
-
-- sessdata 和 buvid3 示例  
-  ![sessdata 和 buvid3](https://github.com/user-attachments/assets/607aa291-c927-4d00-8975-5e85fa0d1214)
-
----
-### napcat配置和config.toml
-<img width="645" height="749" alt="image" src="https://github.com/user-attachments/assets/223c491f-8433-4c47-923a-c4c830c9e572" />
-<img width="1186" height="807" alt="image" src="https://github.com/user-attachments/assets/10c79e45-048a-46c8-8d1d-ca7a4044070c" />
-两个端口要保持一致
-
-### 务必仔细填写config.toml!!!!!!
-
-
-## FFmpeg 说明
-
-插件不再要求仓库中包含 `ffmpeg` 文件夹。首次使用视频处理功能时，`static-ffmpeg` 会自动获取当前平台对应的 FFmpeg 和 FFprobe 可执行文件。
-
-
+Cookie 属于账号凭据；日志、截图和问题反馈中都应先脱敏。

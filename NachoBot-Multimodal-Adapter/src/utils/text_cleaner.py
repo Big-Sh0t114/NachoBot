@@ -94,33 +94,37 @@ _DECORATION_PATTERN = re.compile(
 
 # ============================================================
 # 2. Unicode Emoji 范围
-#    精确划分子范围，避免覆盖 CJK 统一汉字 (U+4E00-U+9FFF)
+#    用 codepoint 判断代替超大字符类正则，避免误覆盖 CJK。
 # ============================================================
 
-_EMOJI_PATTERN = re.compile(
-    "["
-    "\U0001F600-\U0001F64F"    # Emoticons (smileys)
-    "\U0001F300-\U0001F5FF"    # Misc Symbols and Pictographs
-    "\U0001F680-\U0001F6FF"    # Transport and Map
-    "\U0001F1E0-\U0001F1FF"    # Regional Indicator Symbols
-    "\U0001F900-\U0001F9FF"    # Supplemental Symbols
-    "\U0001FA00-\U0001FA6F"    # Chess Symbols
-    "\U0001FA70-\U0001FAFF"    # Symbols Extended-A
-    "\U00002702-\U000027B0"    # Dingbats
-    "\U00002600-\U000026FF"    # Misc symbols (☀☁☂ etc.)
-    "\U0000FE00-\U0000FE0F"    # Variation Selectors
-    "\U0000200D"               # Zero Width Joiner
-    "\U00002B50"               # Star ⭐
-    "\U000023F0-\U000023FA"    # Various technical symbols
-    "\U0000203C"               # ‼
-    "\U00002049"               # ⁉
-    # Enclosed characters — 拆分为安全子范围，避开 CJK
-    "\U000024C2-\U000024FF"    # Enclosed Alphanumerics (Ⓐ-ⓩ etc.)
-    "\U00002500-\U00002BFF"    # Box drawing, block elements, misc symbols
-    "\U0001F200-\U0001F251"    # Enclosed Ideographic Supplement
-    "]+",
-    re.UNICODE,
+_EMOJI_CODEPOINT_RANGES = (
+    (0x1F600, 0x1F64F),  # Emoticons
+    (0x1F300, 0x1F5FF),  # Misc Symbols and Pictographs
+    (0x1F680, 0x1F6FF),  # Transport and Map
+    (0x1F1E0, 0x1F1FF),  # Regional Indicator Symbols
+    (0x1F900, 0x1F9FF),  # Supplemental Symbols
+    (0x1FA00, 0x1FA6F),  # Chess Symbols
+    (0x1FA70, 0x1FAFF),  # Symbols Extended-A
+    (0x2702, 0x27B0),    # Dingbats
+    (0x2600, 0x26FF),    # Misc symbols
+    (0xFE00, 0xFE0F),    # Variation Selectors
+    (0x23F0, 0x23FA),    # Technical symbols
+    (0x24C2, 0x24FF),    # Enclosed Alphanumerics
+    (0x2500, 0x2BFF),    # Box drawing, block elements, misc symbols
+    (0x1F200, 0x1F251),  # Enclosed Ideographic Supplement
 )
+_EMOJI_SINGLE_CODEPOINTS = {0x200D, 0x2B50, 0x203C, 0x2049}
+
+
+def _is_emoji_codepoint(codepoint: int) -> bool:
+    return (
+        codepoint in _EMOJI_SINGLE_CODEPOINTS
+        or any(start <= codepoint <= end for start, end in _EMOJI_CODEPOINT_RANGES)
+    )
+
+
+def _strip_unicode_emoji(text: str) -> str:
+    return "".join(ch for ch in text if not _is_emoji_codepoint(ord(ch)))
 
 # ============================================================
 # 3. 多余的标点/空白清理
@@ -160,7 +164,7 @@ def clean_text_for_tts(text: str) -> str:
         return text
 
     # 1. 移除 Unicode emoji
-    text = _EMOJI_PATTERN.sub("", text)
+    text = _strip_unicode_emoji(text)
 
     # 2. 移除精确匹配的常见颜文字（优先处理，避免子串冲突）
     text = _KAOMOJI_EXACT.sub("", text)

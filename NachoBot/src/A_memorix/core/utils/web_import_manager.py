@@ -2871,7 +2871,7 @@ class ImportTaskManager:
 
             try:
                 content = await self._read_file_content(file_record)
-                content_hash = hashlib.md5(content.encode("utf-8", errors="ignore")).hexdigest()
+                content_hash = hashlib.md5(content.encode("utf-8", errors="ignore"), usedforsecurity=False).hexdigest()
                 file_record.content_hash = content_hash
                 task = self._tasks.get(task_id)
                 if task:

@@ -1,14 +1,52 @@
-﻿@echo off
+@echo off
 setlocal EnableExtensions
 chcp 65001 >nul
 set "PYTHONPATH="
 set "PYTHONHOME="
+title Launch NachoBot Lite
+set "FINAL_RC=0"
 set "ROOT=%~dp0"
 set "NACHOBOT_FFMPEG_DIR=%ROOT%.runtime\ffmpeg"
 
-set "FINAL_RC=0"
+REM ===== Hugging Face endpoint =====
+if not defined NACHOBOT_HF_ENDPOINT (
+  set "NACHOBOT_HF_ENDPOINT=https://hf-mirror.com"
+)
+echo [INFO] NachoBot Hugging Face endpoint: %NACHOBOT_HF_ENDPOINT%
 
-title Launch NachoBot Lite
+echo ===== Check Git =====
+where git >nul 2>&1
+if errorlevel 1 (
+  echo [INFO] Git not detected. Checking winget...
+  winget --version >nul 2>&1
+  if errorlevel 1 (
+    echo [ERROR] winget is not available. Git must be installed manually.
+    echo [INFO] Git download: https://git-scm.com/download/win
+    set "FINAL_RC=1"
+    goto :EXIT
+  )
+
+  echo [INFO] Installing Git with winget...
+  winget install --id Git.Git -e --source winget --accept-package-agreements --accept-source-agreements --silent
+  if errorlevel 1 (
+    echo [ERROR] Git installation via winget failed.
+    echo [INFO] Git download: https://git-scm.com/download/win
+    set "FINAL_RC=1"
+    goto :EXIT
+  )
+
+  REM winget updates the persistent PATH, but this launcher must refresh it for the current process.
+  set "PATH=%ProgramFiles%\Git\cmd;%LOCALAPPDATA%\Programs\Git\cmd;%PATH%"
+  where git >nul 2>&1
+  if errorlevel 1 (
+    echo [ERROR] Git was installed, but git.exe is not available in the current launcher process.
+    echo [INFO] Git download: https://git-scm.com/download/win
+    echo [INFO] Restart this launcher and try again.
+    set "FINAL_RC=1"
+    goto :EXIT
+  )
+)
+for /f "delims=" %%G in ('git --version 2^>nul') do echo [INFO] %%G
 
 echo ===== Prepare Shared FFmpeg =====
 call :ENSURE_FFMPEG
@@ -23,7 +61,8 @@ echo ===== Start TTS Component =====
 call :START_TTS
 if errorlevel 1 (
   set "FINAL_RC=1"
-  echo [WARN] TTS component failed to start, continuing without TTS...
+  echo [FATAL] TTS component failed to start.
+  goto :EXIT
 )
 
 echo.
@@ -48,8 +87,8 @@ if not exist "%NACHOBOT_DIR%\pyproject.toml" (
   endlocal & exit /b 1
 )
 
-if not exist "%ROOT%scripts\ensure_ffmpeg.py" (
-  echo [FATAL] FFmpeg preparation script not found: %ROOT%scripts\ensure_ffmpeg.py
+if not exist "%ROOT%NachoBot\ensure_ffmpeg.py" (
+  echo [FATAL] FFmpeg preparation script not found: %ROOT%NachoBot\ensure_ffmpeg.py
   endlocal & exit /b 1
 )
 
@@ -62,7 +101,7 @@ if errorlevel 1 (
 )
 
 echo [INFO] Checking shared FFmpeg binaries...
-uv run python "%ROOT%scripts\ensure_ffmpeg.py"
+uv run python "%ROOT%NachoBot\ensure_ffmpeg.py"
 if errorlevel 1 (
   echo [FATAL] Shared FFmpeg download or verification failed.
   endlocal & exit /b 1
@@ -82,13 +121,34 @@ set "BASE_DIR=%ROOT%"
 set "ADAPTER_DIR=%BASE_DIR%NachoBot-Multimodal-Adapter"
 set "NAPCAT_DIR=%BASE_DIR%NachoBot-Napcat-Adapter"
 set "NAPCAT_SRC=%NAPCAT_DIR%\src"
-set "SOVITS_DIR=C:\Users\BigSh0t\GPT-SoVITS\GPT-SoVITS-v2pro-20250604"
-set "VOXCPM_DIR=E:\App\VoxCPM"
-set "FFMPEG_BIN=%ROOT%NachoBot\plugins\bilibili_video_sender_plugin\ffmpeg\bin"
+set "TTS_RUNTIME_MANAGER=%ADAPTER_DIR%\scripts\tts_runtime_manager.py"
+set "BASE_TOML=%ADAPTER_DIR%\configs\base.toml"
+
+REM -- .bat-only runtime selection. WebUI does not read [bat_runtime]. --
+set "BAT_RUNTIME=gpu"
+for /f "usebackq delims=" %%R in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$p='%BASE_TOML%'; if (Test-Path $p) { $c=Get-Content -Raw $p; if ($c -match '(?ms)^\[bat_runtime\]\s*.*?^lite\s*=\s*\x22([^\x22]+)\x22') { $Matches[1] } else { 'gpu' } } else { 'gpu' }"`) do set "BAT_RUNTIME=%%R"
+if /i "!BAT_RUNTIME!"=="cpu" (
+  set "ADAPTER_ENV_DIR=%ADAPTER_DIR%\.venv-cpu"
+  set "TTS_TORCH_INDEX=https://download.pytorch.org/whl/cpu"
+) else if /i "!BAT_RUNTIME!"=="gpu" (
+  set "ADAPTER_ENV_DIR=%ADAPTER_DIR%\.venv"
+  set "TTS_TORCH_INDEX=https://download.pytorch.org/whl/cu128"
+) else (
+  echo [FATAL] Invalid [bat_runtime].lite value: !BAT_RUNTIME! ^(expected gpu or cpu^)
+  set "TTS_RC=1"
+  goto :TTS_FAIL
+)
+set "ADAPTER_PYTHON=!ADAPTER_ENV_DIR!\Scripts\python.exe"
+set "NACHOBOT_TTS_RUNTIME_PROFILE=!BAT_RUNTIME!"
+set "NACHOBOT_TTS_TORCH_INDEX=!TTS_TORCH_INDEX!"
+echo [INFO] LITE .bat runtime: !BAT_RUNTIME! ^(!ADAPTER_ENV_DIR!^)
 
 set "PORT_SOVITS=9880"
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$p='%ADAPTER_DIR%\configs\gpt-sovits.toml'; if (Test-Path $p) { $c=Get-Content -Raw $p; if ($c -match '(?ms)^\[tts\]\s*.*?^port\s*=\s*(\d+)') { $Matches[1] } else { '9880' } } else { '9880' }"`) do set "PORT_SOVITS=%%P"
 set "PORT_VOX=9880"
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$p='%ADAPTER_DIR%\configs\vox.toml'; if (Test-Path $p) { $c=Get-Content -Raw $p; if ($c -match '(?ms)^\[tts\]\s*.*?^port\s*=\s*(\d+)') { $Matches[1] } else { '9880' } } else { '9880' }"`) do set "PORT_VOX=%%P"
 set "PORT_ADAPTER=8070"
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$c = Get-Content -Raw '%BASE_TOML%'; if ($c -match '(?ms)^\[server\]\s*.*?^port\s*=\s*(\d+)') { $Matches[1] } else { '8070' }"`) do set "PORT_ADAPTER=%%P"
 set "PORT_PERCEPTION=9874"
 
 set "PYTHONNOUSERSITE=1"
@@ -97,12 +157,6 @@ set "HTTPS_PROXY="
 set "ALL_PROXY="
 set "NO_PROXY=127.0.0.1,localhost"
 
-if not exist "%ADAPTER_DIR%" (
-  echo [ERROR] Adapter directory not found: %ADAPTER_DIR%
-  set "TTS_RC=1"
-  goto :TTS_FAIL
-)
-
 set "LOG_DIR=%ADAPTER_DIR%\logs"
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
 set "SETUP_LOG=%LOG_DIR%\boot_setup.log"
@@ -110,171 +164,154 @@ echo ==== RUN %date% %time% ==== >> "%SETUP_LOG%"
 
 where uv >nul 2>&1
 if errorlevel 1 (
-  echo [INFO] uv not detected, attempting install... >> "%SETUP_LOG%"
-  powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex"
+  echo [INFO] uv not detected, installing... >> "%SETUP_LOG%"
+  powershell -NoProfile -ExecutionPolicy ByPass -Command "irm https://astral.sh/uv/install.ps1 | iex"
   set "PATH=%USERPROFILE%\.local\bin;%USERPROFILE%\.cargo\bin;%PATH%"
 )
 
-echo [INFO] Syncing adapter dependencies... >> "%SETUP_LOG%"
+echo [INFO] Syncing !BAT_RUNTIME! dependencies (Locking Python 3.11~3.13)... >> "%SETUP_LOG%"
 cd /d "%ADAPTER_DIR%"
-uv sync --python ">=3.11,<=3.13" >> "%SETUP_LOG%" 2>&1
-if errorlevel 1 (
-  echo [FATAL] uv sync failed. Please check Python installation. >> "%SETUP_LOG%"
+set "SYNC_RC=0"
+set "UV_PROJECT_ENVIRONMENT=!ADAPTER_ENV_DIR!"
+if /i "!BAT_RUNTIME!"=="cpu" (
+  if not exist "%ADAPTER_DIR%\pyproject.toml.cpu" (
+    echo [FATAL] CPU runtime spec not found: %ADAPTER_DIR%\pyproject.toml.cpu >> "%SETUP_LOG%"
+    set "TTS_RC=1"
+    set "UV_PROJECT_ENVIRONMENT="
+    goto :TTS_FAIL
+  )
+  set "CPU_PROJECT=%ADAPTER_DIR%\.runtime\bat-cpu"
+  if not exist "!CPU_PROJECT!" mkdir "!CPU_PROJECT!"
+  copy /y "%ADAPTER_DIR%\pyproject.toml.cpu" "!CPU_PROJECT!\pyproject.toml" >nul
+  uv sync --project "!CPU_PROJECT!" --python ">=3.11,<3.13" --no-install-project >> "%SETUP_LOG%" 2>&1
+  set "SYNC_RC=!ERRORLEVEL!"
+) else (
+  uv sync --project "%ADAPTER_DIR%" --python ">=3.11,<3.13" >> "%SETUP_LOG%" 2>&1
+  set "SYNC_RC=!ERRORLEVEL!"
+)
+set "UV_PROJECT_ENVIRONMENT="
+if not "!SYNC_RC!"=="0" (
+  echo [FATAL] !BAT_RUNTIME! runtime uv sync failed. >> "%SETUP_LOG%"
+  echo [FATAL] !BAT_RUNTIME! runtime uv sync failed.
+  set "TTS_RC=1"
+  goto :TTS_FAIL
+)
+if not exist "!ADAPTER_PYTHON!" (
+  echo [FATAL] Runtime Python not found: !ADAPTER_PYTHON! >> "%SETUP_LOG%"
+  echo [FATAL] Runtime Python not found: !ADAPTER_PYTHON!
   set "TTS_RC=1"
   goto :TTS_FAIL
 )
 
-set "BASE_TOML=%ADAPTER_DIR%\configs\base.toml"
+REM -- Read base.toml enabled_tts to decide which TTS engine to start --
 set "TTS_ENGINE=GPT_Sovits"
-if exist "%BASE_TOML%" (
-  for /f "usebackq tokens=*" %%L in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "(Get-Content '%BASE_TOML%' | Select-String 'enabled\s*=').Line"`) do (
-    echo %%L | findstr /i "Vox" >nul
-    if not errorlevel 1 set "TTS_ENGINE=Vox"
-    echo %%L | findstr /i "GPT_Sovits" >nul
-    if not errorlevel 1 set "TTS_ENGINE=GPT_Sovits"
+for /f "usebackq tokens=*" %%L in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "(Get-Content '%BASE_TOML%' | Select-String 'enabled\s*=').Line"`) do (
+  echo %%L | findstr /i "Vox" >nul
+  if not errorlevel 1 (
+    echo %%L | findstr /r /c:"\"Vox\".*\"GPT_Sovits\"" >nul
+    if not errorlevel 1 (
+      set "TTS_ENGINE=Vox"
+    ) else (
+      echo %%L | findstr /r /c:"\"Vox\"" >nul
+      if not errorlevel 1 (
+        echo %%L | findstr /i "GPT_Sovits" >nul
+        if errorlevel 1 (
+          set "TTS_ENGINE=Vox"
+        )
+      )
+    )
   )
 )
-
-if /i "%TTS_ENGINE%"=="Vox" if not exist "%VOXCPM_DIR%" (
-  echo [WARN] VoxCPM path missing: %VOXCPM_DIR%. Falling back to GPT_Sovits.
-  set "TTS_ENGINE=GPT_Sovits"
-)
-if /i "%TTS_ENGINE%"=="GPT_Sovits" if not exist "%SOVITS_DIR%" (
-  if exist "%VOXCPM_DIR%" (
-    echo [WARN] GPT_Sovits path missing: %SOVITS_DIR%. Falling back to Vox.
-    set "TTS_ENGINE=Vox"
-  )
-)
-
-if /i "%TTS_ENGINE%"=="GPT_Sovits" if not exist "%SOVITS_DIR%" (
-  echo [SKIP] No supported TTS engine found. Skipping TTS component.
-  endlocal & exit /b 0
-)
-if /i "%TTS_ENGINE%"=="Vox" if not exist "%VOXCPM_DIR%" (
-  echo [SKIP] VoxCPM path missing. Skipping TTS component.
-  endlocal & exit /b 0
-)
-
 echo [INFO] Detected TTS engine: %TTS_ENGINE%
+
 echo.
 echo ========== Start TTS Backend ==========
 echo.
 
-if /i "%TTS_ENGINE%"=="Vox" goto :START_VOX
+if "%TTS_ENGINE%"=="Vox" goto :START_VOX
 
-goto :START_SOVITS
-
-:START_SOVITS
-set "API_FILE=%SOVITS_DIR%\api_v2.py"
-if not exist "%API_FILE%" set "API_FILE=%SOVITS_DIR%\api.py"
-if not exist "%API_FILE%" (
-  echo [ERROR] SoVITS API file missing in %SOVITS_DIR%
+REM ---- GPT-SoVITS managed runtime ----
+if not exist "%TTS_RUNTIME_MANAGER%" (
+  echo [ERROR] TTS runtime manager not found: %TTS_RUNTIME_MANAGER%
   set "TTS_RC=1"
   goto :TTS_FAIL
 )
-set "PY_GPT=%SOVITS_DIR%\runtime\python.exe"
-if not exist "%PY_GPT%" set "PY_GPT=python"
-set "TTS_GPU_ID=0"
-set "TTS_TOML=%ADAPTER_DIR%\configs\gpt-sovits.toml"
-powershell -NoProfile -ExecutionPolicy Bypass -File "%ADAPTER_DIR%\get_gpu_id.ps1" -TomlPath "%TTS_TOML%" > "%TEMP%\_gpu_id.txt" 2>nul
-set /p TTS_GPU_ID=<"%TEMP%\_gpu_id.txt"
-del "%TEMP%\_gpu_id.txt" 2>nul
-if not defined TTS_GPU_ID set "TTS_GPU_ID=0"
-echo [INFO] TTS (SoVITS) will use GPU: %TTS_GPU_ID%
 
-start "SoVITS API (%PORT_SOVITS%)" cmd /k "chcp 65001>nul && set CUDA_VISIBLE_DEVICES=%TTS_GPU_ID% && set PYTHONPATH=%SOVITS_DIR%;%SOVITS_DIR%\GPT_SoVITS && cd /d %SOVITS_DIR% && %PY_GPT% -s %API_FILE% --port %PORT_SOVITS%"
+echo [INFO] Starting managed GPT-SoVITS runtime...
+start "SoVITS API (%PORT_SOVITS%)" /D "%ADAPTER_DIR%" cmd /k ""!ADAPTER_PYTHON!" scripts\tts_runtime_manager.py serve --engine gpt-sovits --port %PORT_SOVITS%"
 
-goto :WAIT_SERVICE_READY
-
-:START_VOX
-netstat -ano | findstr /r /c:":%PORT_VOX% " | findstr /i LISTENING >nul
-if not errorlevel 1 (
-  echo [INFO] VoxCPM port %PORT_VOX% is already in use; reusing the existing service.
-  goto :WAIT_SERVICE_READY
-)
-
-echo [INFO] Checking VoxCPM CUDA torch...
-set "PY_VOX=%VOXCPM_DIR%\.venv\Scripts\python.exe"
-if not exist "%PY_VOX%" set "PY_VOX=python"
-"%PY_VOX%" -c "import torch; exit(0 if torch.cuda.is_available() else 1)" >nul 2>&1
-if errorlevel 1 (
-  if exist "%VOXCPM_DIR%" (
-    echo [INFO] Installing CUDA torch for VoxCPM...
-    cd /d "%VOXCPM_DIR%"
-    uv pip install torch torchaudio --reinstall --index-url https://download.pytorch.org/whl/cu128 >> "%SETUP_LOG%" 2>&1
-    if errorlevel 1 (
-      echo [ERROR] Failed to install CUDA torch for VoxCPM.
-      set "TTS_RC=1"
-      goto :TTS_FAIL
-    )
-    echo [OK] CUDA torch installed.
-  ) else (
-    echo [ERROR] VoxCPM path not found: %VOXCPM_DIR%
-    set "TTS_RC=1"
-    goto :TTS_FAIL
-  )
-) else (
-  echo [OK] CUDA torch already available.
-)
-
-echo [INFO] Starting VoxCPM API Server on port %PORT_VOX%...
-set "VOX_API_SCRIPT=%ADAPTER_DIR%\src\tts\backends\Vox\vox_api_server.py"
-set "VOX_MODEL_DIR=%VOXCPM_DIR%\models\openbmb__VoxCPM2"
-set "VOX_LORA="
-set "VOX_TOML=%ADAPTER_DIR%\configs\vox.toml"
-if exist "%VOX_TOML%" (
-  for /f "usebackq tokens=1,* delims==" %%A in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "Write-Output ('VAL=' + (Get-Content '%VOX_TOML%' | Select-String 'model_dir\s*=\s*\x22(.*)\x22').Matches.Groups[1].Value)"`) do (
-    if "%%A"=="VAL" set "VOX_MODEL_DIR=%%B"
-  )
-  for /f "usebackq tokens=1,* delims==" %%A in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "Write-Output ('VAL=' + (Get-Content '%VOX_TOML%' | Select-String 'lora_weights_path\s*=\s*\x22(.*)\x22').Matches.Groups[1].Value)"`) do (
-    if "%%A"=="VAL" if not "%%B"=="" set "VOX_LORA=%%B"
-  )
-)
-
-REM Do not append an empty --lora-weights argument: cmd.exe can leave an
-REM unmatched quote in the child command when the TOML value is blank.
-if defined VOX_LORA (
-  start "VoxCPM API (%PORT_VOX%)" cmd /k "chcp 65001>nul && set PATH=%FFMPEG_BIN%;%PATH% && cd /d %VOXCPM_DIR% && %PY_VOX% %VOX_API_SCRIPT% --host 127.0.0.1 --port %PORT_VOX% --model-dir %VOX_MODEL_DIR% --lora-weights %VOX_LORA%"
-) else (
-  start "VoxCPM API (%PORT_VOX%)" cmd /k "chcp 65001>nul && set PATH=%FFMPEG_BIN%;%PATH% && cd /d %VOXCPM_DIR% && %PY_VOX% %VOX_API_SCRIPT% --host 127.0.0.1 --port %PORT_VOX% --model-dir %VOX_MODEL_DIR%"
-)
-
-goto :WAIT_SERVICE_READY
-
-:WAIT_SERVICE_READY
 set "READY="
-for /l %%I in (1,1,120) do (
+for /l %%I in (1,1,180) do (
   netstat -ano | findstr /r /c:":%PORT_SOVITS% " | findstr /i LISTENING >nul
   if not errorlevel 1 (
     set "READY=1"
-    goto :SERVICE_READY
-  )
-  netstat -ano | findstr /r /c:":%PORT_VOX% " | findstr /i LISTENING >nul
-  if not errorlevel 1 (
-    set "READY=1"
-    goto :SERVICE_READY
+    goto :TTS_SOVITS_READY
   )
   timeout /t 1 /nobreak >nul
 )
-echo [ERROR] TTS backend did not become ready.
+echo [ERROR] SoVITS timeout. If this is your first startup, wait for the model download to finish, then restart this service.
 set "TTS_RC=1"
 goto :TTS_FAIL
 
-:SERVICE_READY
-echo [OK] TTS backend ready.
-goto :START_ADAPTER
+:TTS_SOVITS_READY
+echo [OK] SoVITS ready.
+goto :START_ADAPTER_SOVITS
 
-:START_ADAPTER
-echo [INFO] Starting adapter on port %PORT_ADAPTER%...
-netstat -ano | findstr /r /c:":%PORT_ADAPTER% " | findstr /i LISTENING >nul
+REM ---- VoxCPM managed runtime ----
+:START_VOX
+if not exist "%TTS_RUNTIME_MANAGER%" (
+  echo [ERROR] TTS runtime manager not found: %TTS_RUNTIME_MANAGER%
+  set "TTS_RC=1"
+  goto :TTS_FAIL
+)
+
+echo [INFO] Starting managed VoxCPM runtime...
+start "VoxCPM API (%PORT_VOX%)" /D "%ADAPTER_DIR%" cmd /k ""!ADAPTER_PYTHON!" scripts\tts_runtime_manager.py serve --engine voxcpm --port %PORT_VOX%"
+
+set "READY="
+for /l %%I in (1,1,180) do (
+  netstat -ano | findstr /r /c:":%PORT_VOX% " | findstr /i LISTENING >nul
+  if not errorlevel 1 (
+    set "READY=1"
+    goto :TTS_VOX_READY
+  )
+  timeout /t 1 /nobreak >nul
+)
+echo [ERROR] VoxCPM timeout. If this is your first startup, wait for the model download to finish, then restart this service.
+set "TTS_RC=1"
+goto :TTS_FAIL
+
+:TTS_VOX_READY
+echo [OK] VoxCPM API ready.
+goto :START_ADAPTER_VOX
+
+REM ---- Adapter for GPT-SoVITS (Lite: TTS only, no Perception) ----
+:START_ADAPTER_SOVITS
+start "Multimodal Adapter (%PORT_ADAPTER%)" /D "%ADAPTER_DIR%" cmd /k ""!ADAPTER_PYTHON!" main.py"
+call :WAIT_ADAPTER_READY
 if errorlevel 1 (
-  start "Multimodal Adapter (%PORT_ADAPTER%)" cmd /k "chcp 65001>nul && cd /d %ADAPTER_DIR% && set DISABLE_VLM_ASR=1 && uv run python main.py"
-) else echo [INFO] Multimodal Adapter port %PORT_ADAPTER% is already in use; reusing the existing service.
+  set "TTS_RC=1"
+  goto :TTS_FAIL
+)
 
 echo.
 echo All modules started. (Lite mode, Perception skipped)
 echo.
-endlocal & exit /b 0
+goto :TTS_END
+
+REM ---- Adapter for VoxCPM (Lite: TTS only, no Perception) ----
+:START_ADAPTER_VOX
+start "Multimodal Adapter (%PORT_ADAPTER%)" /D "%ADAPTER_DIR%" cmd /k ""!ADAPTER_PYTHON!" main.py"
+call :WAIT_ADAPTER_READY
+if errorlevel 1 (
+  set "TTS_RC=1"
+  goto :TTS_FAIL
+)
+
+echo.
+echo All modules started. (Lite mode, Perception skipped)
+echo.
+goto :TTS_END
 
 :TTS_FAIL
 echo Error during initialization.
@@ -284,6 +321,25 @@ set "TTS_RC=1"
 :TTS_END
 endlocal & exit /b %TTS_RC%
 
+:WAIT_ADAPTER_READY
+set "ADAPTER_READY="
+for /l %%I in (1,1,60) do (
+  if not defined ADAPTER_READY (
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $r = Invoke-RestMethod -UseBasicParsing -TimeoutSec 1 'http://127.0.0.1:%PORT_ADAPTER%/api/health'; if ($r.status -eq 'ok' -and $r.mode -eq 'tts') { exit 0 } else { exit 1 } } catch { exit 1 }" >nul 2>&1
+    if not errorlevel 1 (
+      set "ADAPTER_READY=1"
+      echo [OK] Multimodal relay :%PORT_ADAPTER% is ready in TTS mode.
+    ) else (
+      timeout /t 1 /nobreak >nul
+    )
+  )
+)
+if not defined ADAPTER_READY (
+  echo [ERROR] Multimodal relay :%PORT_ADAPTER% did not become ready in TTS mode within 60 seconds.
+  exit /b 1
+)
+exit /b 0
+
 :START_MAIN
 setlocal EnableExtensions
 title Launch Process
@@ -292,28 +348,29 @@ chcp 65001 >nul
 set "NACHOBOT_DIR=%ROOT%NachoBot"
 set "NACHOBOT_MAIN=bot.py"
 set "NACHOBOT_PORT=8000"
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$p='%NACHOBOT_DIR%\.env'; if (Test-Path $p) { $m=Get-Content $p | Where-Object { $_ -match '^\s*PORT\s*=\s*(\d+)\s*$' } | Select-Object -First 1; if ($m -and $m -match '^\s*PORT\s*=\s*(\d+)\s*$') { $Matches[1] } else { '8000' } } else { '8000' }"`) do set "NACHOBOT_PORT=%%P"
+
 set "ADAPTER_DIR=%ROOT%NachoBot-Napcat-Adapter"
 set "ADAPTER_MAIN=main.py"
 set "ADAPTER_PORT=8095"
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$p='%ADAPTER_DIR%\config.toml'; if (Test-Path $p) { $c=Get-Content -Raw $p; if ($c -match '(?ms)^\[napcat_server\]\s*.*?^port\s*=\s*(\d+)') { $Matches[1] } else { '8095' } } else { '8095' }"`) do set "ADAPTER_PORT=%%P"
+
 set "NAPCAT_SHELL_DIR=%ROOT%NapCat.Shell"
 set "NAPCAT_SHELL_BAT=launcher-user.bat"
 set "NAPCAT_AUTOLOGIN_CONFIG=%NAPCAT_SHELL_DIR%\config\webui.json"
 set "NAPCAT_ACCOUNT="
 if exist "%NAPCAT_AUTOLOGIN_CONFIG%" for /f "usebackq delims=" %%A in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$v=(Get-Content -Raw -LiteralPath '%NAPCAT_AUTOLOGIN_CONFIG%' | ConvertFrom-Json).autoLoginAccount; if ($v) { $v }"`) do set "NAPCAT_ACCOUNT=%%A"
-set "PYTHON_CMD=uv run python"
 
-if not exist "%NACHOBOT_DIR%" (
-  echo [ERROR] NachoBot directory not found: %NACHOBOT_DIR%
-  endlocal & exit /b 1
-)
-if not exist "%ADAPTER_DIR%" (
-  echo [ERROR] Napcat adapter directory not found: %ADAPTER_DIR%
-  endlocal & exit /b 1
-)
+set "PYTHON_CMD=uv run python"
+set "MAX_WAIT=60"
 
 echo --- Syncing NachoBot...
 cd /d "%NACHOBOT_DIR%"
 uv sync --python ">=3.11,<=3.13"
+
+echo --- Checking Playwright Chromium...
+uv run python scripts\ensure_playwright.py
+if errorlevel 1 echo [WARN] Playwright Chromium preparation failed; web search will use HTTP fallback.
 
 echo --- Syncing Adapter...
 cd /d "%ADAPTER_DIR%"

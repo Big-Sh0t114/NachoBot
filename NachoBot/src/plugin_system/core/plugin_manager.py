@@ -1,10 +1,16 @@
 import os
+import importlib
 import importlib.metadata
+import inspect
 import sys
 import traceback
+import asyncio
+import types
 
 from typing import Dict, List, Optional, Tuple, Type, Any
-from importlib.util import spec_from_file_location, module_from_spec
+from importlib.util import cache_from_source, spec_from_file_location, module_from_spec
+import hashlib
+import re
 from pathlib import Path
 from packaging.requirements import InvalidRequirement, Requirement
 
@@ -37,6 +43,7 @@ class PluginManager:
         self.loaded_plugins: Dict[str, PluginBase] = {}  # 已加载的插件类实例注册表，插件名 -> 插件类实例
         self.failed_plugins: Dict[str, str] = {}  # 记录加载失败的插件文件及其错误信息，插件名 -> 错误信息
         self.plugin_requirements: Dict[str, List[str]] = {}
+        self._plugin_locks: Dict[str, asyncio.Lock] = {}
 
         # 确保插件目录存在
         self._ensure_plugin_directories()
@@ -159,6 +166,11 @@ class PluginManager:
             return False, 1
 
     async def remove_registered_plugin(self, plugin_name: str) -> bool:
+        lock = self._plugin_locks.setdefault(plugin_name, asyncio.Lock())
+        async with lock:
+            return await self._remove_registered_plugin_locked(plugin_name)
+
+    async def _remove_registered_plugin_locked(self, plugin_name: str) -> bool:
         """
         禁用插件模块
         """
@@ -168,24 +180,233 @@ class PluginManager:
             logger.warning(f"插件 {plugin_name} 未加载")
             return False
         plugin_instance = self.loaded_plugins[plugin_name]
-        plugin_info = plugin_instance.plugin_info
-        success = True
-        for component in plugin_info.components:
-            success &= await component_registry.remove_component(component.name, component.component_type, plugin_name)
-        success &= component_registry.remove_plugin_registry(plugin_name)
-        del self.loaded_plugins[plugin_name]
-        return success
+        registry_success = await self._deactivate_plugin_registry(plugin_instance)
+        if not registry_success:
+            restored = self._restore_plugin_registry(plugin_instance)
+            logger.error(f"插件 {plugin_name} 的注册表未完全清理，拒绝执行卸载钩子")
+            if not restored:
+                logger.critical(f"插件 {plugin_name} 卸载失败后的注册表恢复不完整")
+            return False
+        unload_success = await self._call_plugin_unload(plugin_instance)
+        self.loaded_plugins.pop(plugin_name, None)
+        if not unload_success:
+            logger.warning(f"插件 {plugin_name} 已从注册表移除，但卸载钩子执行失败")
+        return True
 
     async def reload_registered_plugin(self, plugin_name: str) -> bool:
+        lock = self._plugin_locks.setdefault(plugin_name, asyncio.Lock())
+        async with lock:
+            return await self._reload_registered_plugin_locked(plugin_name)
+
+    async def _reload_registered_plugin_locked(self, plugin_name: str) -> bool:
         """
         重载插件模块
         """
-        if not await self.remove_registered_plugin(plugin_name):
+        old_instance = self.loaded_plugins.get(plugin_name)
+        old_class = self.plugin_classes.get(plugin_name)
+        old_path = self.plugin_paths.get(plugin_name)
+        if old_instance is None or old_class is None or not old_path:
+            logger.warning(f"插件 {plugin_name} 未加载，无法重载")
             return False
-        if not self.load_registered_plugin_classes(plugin_name)[0]:
+
+        # 先重新读取模块并实例化候选者；该阶段失败不触碰正在运行的旧实例。
+        old_class_present = plugin_name in self.plugin_classes
+        old_path_present = plugin_name in self.plugin_paths
+
+        def restore_module_registries() -> None:
+            # Restore only this plugin's keys.  A failed scan may legitimately
+            # discover or update another plugin concurrently; whole-dict
+            # snapshots would clobber that unrelated work.
+            self.plugin_classes.pop(plugin_name, None)
+            self.plugin_paths.pop(plugin_name, None)
+            if old_class_present:
+                self.plugin_classes[plugin_name] = old_class
+            if old_path_present:
+                self.plugin_paths[plugin_name] = old_path
+
+        plugin_file = str(Path(old_path) / "plugin.py")
+        package_name = self._package_name_for_plugin_file(plugin_file)
+        module_snapshot = self._snapshot_package_modules(package_name)
+        registry_snapshot = self._snapshot_plugin_registries()
+        self.plugin_classes.pop(plugin_name, None)
+        self.plugin_paths.pop(plugin_name, None)
+        if not self._load_plugin_module_file(plugin_file):
+            self._restore_package_modules(package_name, module_snapshot)
+            self._restore_plugin_registry_delta(
+                registry_snapshot,
+                plugin_name=plugin_name,
+                package_name=package_name,
+                plugin_dir=str(Path(plugin_file).parent.resolve()),
+            )
+            restore_module_registries()
             return False
+
+        new_class = self.plugin_classes.get(plugin_name)
+        new_path = self.plugin_paths.get(plugin_name, old_path)
+        if new_class is None:
+            self._restore_package_modules(package_name, module_snapshot)
+            self._restore_plugin_registry_delta(
+                registry_snapshot,
+                plugin_name=plugin_name,
+                package_name=package_name,
+                plugin_dir=str(Path(plugin_file).parent.resolve()),
+            )
+            restore_module_registries()
+            logger.error(f"重载插件 {plugin_name} 后未找到插件类")
+            return False
+
+        try:
+            candidate = new_class(plugin_dir=new_path)
+            if not candidate.enable_plugin:
+                raise ValueError("候选插件已禁用")
+            compatible, compatibility_error = self._check_plugin_version_compatibility(
+                plugin_name, candidate.manifest_data
+            )
+            if not compatible:
+                raise ValueError(compatibility_error)
+        except Exception as exc:
+            self._restore_package_modules(package_name, module_snapshot)
+            self._restore_plugin_registry_delta(
+                registry_snapshot,
+                plugin_name=plugin_name,
+                package_name=package_name,
+                plugin_dir=str(Path(plugin_file).parent.resolve()),
+            )
+            restore_module_registries()
+            self.failed_plugins[plugin_name] = str(exc)
+            logger.error(f"重载插件 {plugin_name} 的候选实例失败: {exc}")
+            return False
+
+        if not await self._deactivate_plugin_registry(old_instance):
+            self._restore_package_modules(package_name, module_snapshot)
+            self._restore_plugin_registry_delta(
+                registry_snapshot,
+                plugin_name=plugin_name,
+                package_name=package_name,
+                plugin_dir=str(Path(plugin_file).parent.resolve()),
+            )
+            restore_module_registries()
+            if not self._restore_plugin_registry(old_instance):
+                logger.critical(f"插件 {plugin_name} 重载失败且旧注册表恢复失败")
+            return False
+
+        try:
+            candidate_registered = candidate.register_plugin()
+        except Exception as exc:
+            candidate_registered = False
+            self.failed_plugins[plugin_name] = f"插件注册失败: {exc}"
+            logger.error(f"重载插件 {plugin_name} 的候选者注册异常: {exc}", exc_info=True)
+
+        if not candidate_registered:
+            try:
+                await self._deactivate_plugin_registry(candidate)
+            except Exception as exc:
+                logger.error(f"清理插件 {plugin_name} 的候选注册表失败: {exc}", exc_info=True)
+            self._restore_package_modules(package_name, module_snapshot)
+            self._restore_plugin_registry_delta(
+                registry_snapshot,
+                plugin_name=plugin_name,
+                package_name=package_name,
+                plugin_dir=str(Path(plugin_file).parent.resolve()),
+            )
+            restore_module_registries()
+            self.loaded_plugins[plugin_name] = old_instance
+            if not self._restore_plugin_registry(old_instance):
+                logger.critical(f"插件 {plugin_name} 候选者注册失败且旧实例恢复失败")
+            return False
+
+        self.loaded_plugins[plugin_name] = candidate
+        unload_success = await self._call_plugin_unload(old_instance)
+        if not unload_success:
+            # 新实例已经成功接管注册表，此时不能对外报告“重载失败”，
+            # 否则调用方重试会对新实例二次重载。
+            logger.warning(f"插件 {plugin_name} 已重载，但旧实例的卸载钩子执行失败")
+        self.failed_plugins.pop(plugin_name, None)
         logger.debug(f"插件 {plugin_name} 重载成功")
         return True
+
+    async def _deactivate_plugin_registry(self, plugin_instance: PluginBase) -> bool:
+        """停止插件接收新工作，清理组件任务并移除注册表。"""
+        plugin_name = plugin_instance.plugin_name
+        success = True
+        for component in tuple(plugin_instance.plugin_info.components):
+            if not await component_registry.remove_component(
+                component.name,
+                component.component_type,
+                plugin_name,
+            ):
+                success = False
+        if not component_registry.remove_plugin_registry(plugin_name):
+            success = False
+        return success
+
+    def _restore_plugin_registry(self, plugin_instance: PluginBase) -> bool:
+        """在卸载/重载中途失败后，只补回缺失的旧组件，不触碰仍存在的注册。"""
+        get_components = getattr(plugin_instance, "get_plugin_components", None)
+        if not callable(get_components):
+            return False
+        expected_names = {
+            (component.component_type, component.name) for component in plugin_instance.plugin_info.components
+        }
+        restored_components = []
+        success = True
+        try:
+            definitions = get_components()
+        except Exception as exc:
+            logger.error(f"读取插件 {plugin_instance.plugin_name} 的组件定义失败: {exc}")
+            return False
+        for component_info, component_class in definitions:
+            key = (component_info.component_type, component_info.name)
+            if key not in expected_names:
+                continue
+            existing_info = component_registry.get_component_info(
+                component_info.name,
+                component_info.component_type,
+            )
+            if existing_info is not None:
+                if existing_info.plugin_name != plugin_instance.plugin_name:
+                    success = False
+                    continue
+                restored_components.append(existing_info)
+                continue
+            component_info.plugin_name = plugin_instance.plugin_name
+            if component_registry.register_component(component_info, component_class):
+                restored_components.append(component_info)
+            else:
+                success = False
+
+        if len(restored_components) != len(expected_names):
+            success = False
+        plugin_instance.plugin_info.components = restored_components
+        existing_plugin = component_registry.get_plugin_info(plugin_instance.plugin_name)
+        if existing_plugin is None:
+            if not component_registry.register_plugin(plugin_instance.plugin_info):
+                success = False
+        elif existing_plugin is not plugin_instance.plugin_info:
+            logger.warning(f"恢复插件 {plugin_instance.plugin_name} 时发现其他插件注册对象")
+            success = False
+        return success
+
+    async def _call_plugin_unload(self, plugin_instance: PluginBase) -> bool:
+        """调用 V1/V2 插件的卸载钩子，同时兼容旧的 on_plugin_unload 命名。"""
+        v2_plugin = getattr(plugin_instance, "v2_plugin", None)
+        if v2_plugin is not None and not getattr(v2_plugin, "_on_load_called", False):
+            # SDK V2 的 on_load 是惰性调用，on_unload 只与已执行的 on_load 配对。
+            return True
+        unload_target = v2_plugin if v2_plugin is not None else plugin_instance
+        callback = getattr(unload_target, "on_unload", None)
+        if not callable(callback):
+            callback = getattr(plugin_instance, "on_plugin_unload", None)
+        if not callable(callback):
+            return True
+        try:
+            result = callback()
+            if inspect.isawaitable(result):
+                await result
+            return True
+        except Exception as exc:
+            logger.error(f"插件 {plugin_instance.plugin_name} 执行卸载钩子失败: {exc}", exc_info=True)
+            return False
 
     def rescan_plugin_directory(self) -> Tuple[int, int]:
         """
@@ -288,7 +509,144 @@ class PluginManager:
 
         return loaded_count, failed_count
 
-    def _load_plugin_module_file(self, plugin_file: str) -> bool:
+    def _package_name_for_plugin_file(self, plugin_file: str) -> str:
+        plugin_path = Path(plugin_file).resolve()
+        project_root = Path(__file__).resolve().parents[3]
+        try:
+            module_parts = plugin_path.parent.relative_to(project_root).parts
+        except ValueError:
+            # External plugins are imported under a deterministic, readable
+            # package name.  The canonical directory path is part of the
+            # identity so two directories with the same basename cannot evict
+            # one another's modules during a reload.
+            canonical_dir = os.path.normcase(str(plugin_path.parent.resolve()))
+            digest = hashlib.sha256(canonical_dir.encode("utf-8")).hexdigest()[:12]
+            readable_name = re.sub(r"[^0-9A-Za-z_]", "_", plugin_path.parent.name)
+            if not readable_name:
+                readable_name = "plugin"
+            if readable_name[0].isdigit():
+                readable_name = f"_{readable_name}"
+            module_parts = ("_nachobot_external_plugins", f"{readable_name}_{digest}")
+        return ".".join(module_parts)
+
+    def _snapshot_plugin_registries(self) -> tuple[dict[str, Type[PluginBase]], dict[str, str]]:
+        return dict(self.plugin_classes), dict(self.plugin_paths)
+
+    def _restore_plugin_registry_delta(
+        self,
+        snapshot: tuple[dict[str, Type[PluginBase]], dict[str, str]],
+        *,
+        plugin_name: str | None,
+        package_name: str,
+        plugin_dir: str,
+    ) -> None:
+        """Rollback only entries attributable to this plugin transaction."""
+        previous_classes, previous_paths = snapshot
+
+        def belongs_to_transaction(key: str, value: object, kind: str) -> bool:
+            if plugin_name and key == plugin_name:
+                return True
+            if kind == "class":
+                module_name = getattr(value, "__module__", "")
+                return module_name == package_name or module_name.startswith(f"{package_name}.")
+            try:
+                candidate = str(Path(str(value)).resolve())
+                return candidate == plugin_dir or candidate.startswith(plugin_dir + os.sep)
+            except (OSError, ValueError, TypeError):
+                return False
+
+        for key in set(previous_classes) | set(self.plugin_classes):
+            current = self.plugin_classes.get(key)
+            previous = previous_classes.get(key)
+            if current == previous:
+                continue
+            if not belongs_to_transaction(key, current if current is not None else previous, "class"):
+                continue
+            if key in previous_classes:
+                self.plugin_classes[key] = previous_classes[key]
+            else:
+                self.plugin_classes.pop(key, None)
+
+        for key in set(previous_paths) | set(self.plugin_paths):
+            current = self.plugin_paths.get(key)
+            previous = previous_paths.get(key)
+            if current == previous:
+                continue
+            if not belongs_to_transaction(key, current if current is not None else previous, "path"):
+                continue
+            if key in previous_paths:
+                self.plugin_paths[key] = previous_paths[key]
+            else:
+                self.plugin_paths.pop(key, None)
+
+    @staticmethod
+    def _snapshot_package_modules(package_name: str) -> dict[str, types.ModuleType]:
+        parts = package_name.split(".")
+        parent_names = {".".join(parts[:index]) for index in range(1, len(parts) + 1)}
+        return {
+            name: module
+            for name, module in sys.modules.items()
+            if name in parent_names or name.startswith(f"{package_name}.")
+        }
+
+    @staticmethod
+    def _restore_package_modules(
+        package_name: str,
+        snapshot: dict[str, types.ModuleType],
+    ) -> None:
+        parts = package_name.split(".")
+        parent_names = {".".join(parts[:index]) for index in range(1, len(parts) + 1)}
+        managed_names = parent_names | {
+            name for name in sys.modules if name.startswith(f"{package_name}.")
+        }
+        for name in managed_names - snapshot.keys():
+            sys.modules.pop(name, None)
+        for name, module in snapshot.items():
+            sys.modules[name] = module
+
+    @staticmethod
+    def _evict_package_modules(package_name: str) -> None:
+        """Evict only this plugin package before executing fresh source."""
+        prefix = f"{package_name}."
+        for name in tuple(sys.modules):
+            if name == package_name or name.startswith(prefix):
+                sys.modules.pop(name, None)
+        importlib.invalidate_caches()
+
+    @staticmethod
+    def _evict_plugin_source_caches(plugin_dir: Path) -> None:
+        """Remove direct-source timestamp caches for one plugin directory.
+
+        Python's timestamp-based bytecode cache can otherwise reuse a stale
+        module when a source file is edited without changing its size or
+        mtime.  Only cache entries corresponding to direct ``.py`` files in
+        this plugin directory are touched; no shared/workspace cache is
+        removed.
+        """
+        plugin_root = plugin_dir.resolve()
+        for source_path in plugin_root.rglob("*.py"):
+            if not source_path.is_file():
+                continue
+            try:
+                cache_path = Path(cache_from_source(str(source_path))).resolve()
+            except (OSError, ValueError):
+                continue
+            source_cache_dir = (source_path.parent / "__pycache__").resolve()
+            try:
+                source_path.parent.resolve().relative_to(plugin_root)
+            except ValueError:
+                continue
+            if cache_path.parent != source_cache_dir:
+                continue
+            if cache_path.exists():
+                cache_path.unlink()
+
+    def _load_plugin_module_file(
+        self,
+        plugin_file: str,
+        *,
+        transaction_plugin_name: str | None = None,
+    ) -> bool:
         # sourcery skip: extract-method
         """加载单个插件模块文件
 
@@ -297,20 +655,66 @@ class PluginManager:
             plugin_name: 插件名称
             plugin_dir: 插件目录路径
         """
-        # 生成模块名
-        plugin_path = Path(plugin_file)
-        module_name = ".".join(plugin_path.parent.parts)
+        # 生成一个相对项目根目录的包名。plugin_paths 为绝对路径，若直接把
+        # Windows drive 或 POSIX root 拼入模块名，热重载时相对导入会失效。
+        plugin_path = Path(plugin_file).resolve()
+        package_name = self._package_name_for_plugin_file(plugin_file)
+        module_name = f"{package_name}.plugin"
+        module_snapshot = self._snapshot_package_modules(package_name)
+        registry_snapshot = self._snapshot_plugin_registries()
 
         try:
             self._record_plugin_requirements(plugin_file)
+            # Relative imports must observe the candidate's current files,
+            # rather than a stale sibling left in sys.modules by an earlier
+            # load. Shared ancestors remain installed for other plugins.
+            self._evict_package_modules(package_name)
+            self._evict_plugin_source_caches(plugin_path.parent)
             # 动态导入插件模块
             spec = spec_from_file_location(module_name, plugin_file)
             if spec is None or spec.loader is None:
                 logger.error(f"无法创建模块规范: {plugin_file}")
+                self._restore_package_modules(package_name, module_snapshot)
+                self._restore_plugin_registry_delta(
+                    registry_snapshot,
+                    plugin_name=transaction_plugin_name,
+                    package_name=package_name,
+                    plugin_dir=str(plugin_path.parent),
+                )
                 return False
 
             module = module_from_spec(spec)
-            module.__package__ = module_name  # 设置模块包名
+            module.__package__ = package_name  # 保留插件包名，支持 .sibling 导入
+            module.__spec__ = spec
+
+            # Install missing package levels with the path that belongs to
+            # each level. This keeps sibling packages importable while also
+            # supporting plugins outside the project tree.
+            plugin_package_path = plugin_path.parent
+            parts = package_name.split(".")
+            for index in range(1, len(parts) + 1):
+                parent_name = ".".join(parts[:index])
+                ancestor_depth = len(parts) - index
+                parent_path = (
+                    plugin_package_path
+                    if ancestor_depth == 0
+                    else plugin_package_path.parents[ancestor_depth - 1]
+                )
+                parent_path_str = str(parent_path)
+                parent = sys.modules.get(parent_name)
+                if parent is None:
+                    parent = types.ModuleType(parent_name)
+                    parent.__path__ = [parent_path_str]
+                    parent.__package__ = parent_name
+                    sys.modules[parent_name] = parent
+                elif not hasattr(parent, "__path__"):
+                    parent.__path__ = [parent_path_str]
+                elif parent_path_str not in parent.__path__:
+                    try:
+                        parent.__path__.append(parent_path_str)
+                    except AttributeError:
+                        parent.__path__ = [*parent.__path__, parent_path_str]
+            sys.modules[module_name] = module
             spec.loader.exec_module(module)
 
             # 检测是否为 V2 插件并生成适配层
@@ -341,6 +745,15 @@ class PluginManager:
             return True
 
         except Exception as e:
+            # Restore the complete package subtree, including relative-import
+            # siblings and synthetic parents, rather than only plugin.py.
+            self._restore_package_modules(package_name, module_snapshot)
+            self._restore_plugin_registry_delta(
+                registry_snapshot,
+                plugin_name=transaction_plugin_name,
+                package_name=package_name,
+                plugin_dir=str(plugin_path.parent),
+            )
             error_msg = f"加载插件模块 {plugin_file} 失败: {e}"
             logger.error(error_msg)
             self.failed_plugins[module_name] = error_msg

@@ -11,7 +11,7 @@ dependencies = [
     "loguru>=0.7.3",
     "numpy>=2.4.2",
     "onnxruntime>=1.27.0",
-    "py-cord[voice] @ file:///C:/Users/31438/AppData/Local/Temp/pycord-clone",
+    "py-cord[voice] @ git+https://github.com/Pycord-Development/pycord@refs/pull/3159/head",
     "pynacl>=1.6.2",
     "requests>=2.31.0",
     "scipy>=1.17.1",

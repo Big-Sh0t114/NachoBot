@@ -381,7 +381,7 @@ def _parse_cli_datetime(text: str, is_end: bool = False) -> float:
 
 def _json_hash(payload: Dict[str, Any]) -> str:
     data = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-    return hashlib.sha1(data.encode("utf-8")).hexdigest()
+    return hashlib.sha1(data.encode("utf-8"), usedforsecurity=False).hexdigest()
 
 
 def _deep_merge_dict(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:

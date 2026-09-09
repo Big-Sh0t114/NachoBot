@@ -1,16 +1,19 @@
 [webui]
 # WebUI semantic version displayed in the sidebar
-version = "1.0.1"
+version = "1.0.6"
 
 [server]
 # FastAPI/Uvicorn server hosting configuration
 host = "127.0.0.1"
 port = 8088
 
-[paths]
-# Absolute paths to external model directories
-voxcpm_dir = "C:/Users/BigSh0t/VoxCPM-2.0.2"
-sovits_dir = "C:/Users/BigSh0t/GPT-SoVITS/GPT-SoVITS-v2pro-20250604"
+[security]
+# Required when WebUI listens on a non-loopback address. The
+# Access tokens are environment-only because this file is tracked by Git.
+# Set NACHOBOT_WEBUI_TOKEN before starting WebUI; keep this legacy field empty.
+auth_token = ""
+# Exact additional origins allowed to call /api and /ws.
+allowed_origins = []
 
 [proxy]
 # Proxy configuration for adapters like Koishi/Discord

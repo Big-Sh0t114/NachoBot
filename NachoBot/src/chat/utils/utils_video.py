@@ -76,7 +76,7 @@ class VideoManager:
                 return "[视频(获取原始文件失败)]"
 
             # 使用 MD5 哈希去重缓存
-            video_hash = hashlib.md5(video_bytes).hexdigest()
+            video_hash = hashlib.md5(video_bytes, usedforsecurity=False).hexdigest()
             policy = resolve_visual_task_policy(
                 additional_config,
                 "video",

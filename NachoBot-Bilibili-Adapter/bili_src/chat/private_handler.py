@@ -66,7 +66,7 @@ class PrivateHandler:
                 )
                 if isinstance(resp, dict) and resp.get("code") not in (None, 0):
                     self.logger.warning(
-                        "Session list failed: session_type=%s code=%s message=%s",
+                        "Session list failed: session_type={} code={} message={}",
                         session_type,
                         resp.get("code"),
                         resp.get("message") or resp.get("msg"),
@@ -104,7 +104,7 @@ class PrivateHandler:
         if not sessions:
             self.logger.debug("Private polling: no sessions")
             return
-        self.logger.debug("Private polling: %s sessions", len(sessions))
+        self.logger.debug("Private polling: {} sessions", len(sessions))
         for session in sessions:
             key = (session.session_type, session.talker_id)
             last_seqno = self.dm_last_seqno.get(key)
@@ -116,7 +116,7 @@ class PrivateHandler:
             )
             if isinstance(resp, dict) and resp.get("code") not in (None, 0):
                 self.logger.warning(
-                    "Private poll failed: talker_id=%s session_type=%s code=%s message=%s",
+                    "Private poll failed: talker_id={} session_type={} code={} message={}",
                     session.talker_id,
                     session.session_type,
                     resp.get("code"),
@@ -145,7 +145,7 @@ class PrivateHandler:
         messages_list = list(messages)
         if messages_list:
             self.logger.info(
-                "Private messages: talker_id=%s session_type=%s count=%s",
+                "Private messages: talker_id={} session_type={} count={}",
                 session.talker_id,
                 session.session_type,
                 len(messages_list),
@@ -317,7 +317,7 @@ class PrivateHandler:
         self, session: PrivateSessionConfig, text: str
     ) -> None:
         self.logger.info(
-            "Send private message: talker_id=%s session_type=%s text=%s",
+            "Send private message: talker_id={} session_type={} text={}",
             session.talker_id,
             session.session_type,
             text,
@@ -338,7 +338,7 @@ class PrivateHandler:
                 except Exception as exc:
                     if attempt < max_attempts:
                         self.logger.warning(
-                            "Private message send failed (attempt %s/%s): %s",
+                            "Private message send failed (attempt {}/{}): {}",
                             attempt,
                             max_attempts,
                             exc,
@@ -368,12 +368,12 @@ class PrivateHandler:
                 category="daily",
             )
         except Exception as exc:
-            self.logger.error("Private image upload error: %s", exc)
+            self.logger.error("Private image upload error: {}", exc)
             return
         data = (upload_resp or {}).get("data", {})
         image_url = str(data.get("image_url") or "")
         if not image_url:
-            self.logger.warning("Private image upload missing url: %s", upload_resp)
+            self.logger.warning("Private image upload missing url: {}", upload_resp)
             return
         content: Dict[str, Any] = {"url": image_url}
         if data.get("image_height"):
@@ -385,7 +385,7 @@ class PrivateHandler:
         if image_format:
             content["imageType"] = image_format
         self.logger.info(
-            "Send private image: talker_id=%s session_type=%s url=%s",
+            "Send private image: talker_id={} session_type={} url={}",
             session.talker_id,
             session.session_type,
             image_url,
@@ -474,7 +474,7 @@ class PrivateHandler:
             return await self.adapter.api.fetch_base64(url)
         except Exception as exc:
             self.logger.warning(
-                "Private image download failed: url=%s error=%s", url, exc
+                "Private image download failed: url={} error={}", url, exc
             )
             return None
 

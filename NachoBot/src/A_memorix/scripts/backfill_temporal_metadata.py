@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 from _bootstrap import DEFAULT_DATA_DIR, resolve_repo_path
 from A_memorix.core.storage import MetadataStore  # noqa: E402

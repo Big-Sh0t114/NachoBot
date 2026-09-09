@@ -3,8 +3,6 @@ import time
 import asyncio
 import random
 import re
-import os
-import tomlkit
 
 from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime
@@ -15,6 +13,7 @@ from src.common.data_models.llm_data_model import LLMGenerationDataModel
 from src.config.config import global_config, model_config
 from src.llm_models.utils_model import LLMRequest
 from src.llm_models.exceptions import ReqAbortException
+from src.mcp.access import access_context_from_stream
 from src.chat.message_receive.message import UserInfo, Seg, MessageRecv, MessageSending
 from src.chat.message_receive.chat_stream import ChatStream
 from src.chat.runtime_capabilities import runtime_capabilities_from_stream
@@ -27,6 +26,11 @@ from src.chat.utils.prompt_injection_guard import build_guardrail_instruction, g
 from src.chat.focus.reply_context import ReplyPromptContext
 from src.chat.utils.url_fetcher import UrlContentFetcher, extract_urls
 from src.chat.utils.web_search import WebSearchManager
+from src.chat.utils.capability_router import (
+    CapabilityRouter,
+    build_search_after_decision,
+    execute_mcp_after_decision,
+)
 from src.chat.utils.chat_message_builder import (
     build_readable_messages,
     get_raw_msg_before_timestamp_with_chat,
@@ -85,6 +89,7 @@ class DefaultReplyer:
         # self.memory_activator = MemoryActivator()
 
         from src.plugin_system.core.tool_use import ToolExecutor  # 延迟导入ToolExecutor，不然会循环依赖
+        from src.plugin_system.core.mcp_tool_executor import MCPToolExecutor
 
         tool_model_set = model_config.model_task_config.tool_use
         if request_type == "file_edit":
@@ -105,84 +110,15 @@ class DefaultReplyer:
         except Exception:
             logger.warning("MCP Executor Config Read Failed")
 
-        self.mcp_executor = ToolExecutor(
+        self.mcp_executor = MCPToolExecutor(
             chat_id=self.chat_stream.stream_id,
-            enable_cache=True,
-            cache_ttl=3,
             model_set=model_config.model_task_config.mcp,
             include_prefix="mcp",
             prompt_template="mcp_tool_executor_prompt",
         )
         self.web_search_manager = WebSearchManager(chat_id=self.chat_stream.stream_id, enable_cache=True, cache_ttl=2)
+        self.capability_router = CapabilityRouter(chat_id=self.chat_stream.stream_id)
         self.url_fetcher = UrlContentFetcher()
-
-    def _check_mcp_permission(self, user_id: str = "") -> bool:
-        """检查当前用户是否有权限使用 MCP 工具 (前置检查)"""
-        try:
-            # 如果未传入 user_id，尝试从 chat_stream 获取
-            if not user_id:
-                if self.chat_stream.user_info:
-                    user_id = str(self.chat_stream.user_info.user_id)
-
-            # DEBUG LOG
-            logger.info(f"MCP Permission Check: user_id='{user_id}'")
-
-            if not user_id:
-                logger.warning("MCP Permission Check: FAILED (No user_id)")
-                return False
-
-            # 读取插件配置
-            # 路径 hardcode 指向 plugins/MaiBot_MCPBridgePlugin/config.toml
-            # 注意：需根据实际项目结构调整路径
-            config_path = os.path.join(os.getcwd(), "plugins", "MaiBot_MCPBridgePlugin", "config.toml")
-
-            # DEBUG LOG
-            logger.info(f"MCP Permission Check: config_path='{config_path}' (Exists: {os.path.exists(config_path)})")
-
-            if not os.path.exists(config_path):
-                # 配置文件不存在，默认允许? 或者默认禁止?
-                # 假设插件未安装/未配置，则不启用
-                logger.warning(f"MCP Permission Check: FAILED (Config not found at {config_path})")
-                return False
-
-            with open(config_path, "r", encoding="utf-8") as f:
-                doc = tomlkit.load(f)
-
-            # 检查插件是否启用
-            plugin_config = doc.get("plugin", {})
-            if not plugin_config.get("enabled", True):
-                # logger.debug(f"MCP Permission Check: FAILED (Plugin disabled in config)")
-                return False
-
-            permissions = doc.get("permissions", {})
-            quick_allow_users_str = permissions.get("quick_allow_users", "")
-            default_mode = permissions.get("perm_default_mode", "deny_all")
-
-            # 解析白名单
-            allow_users = {u.strip() for u in quick_allow_users_str.strip().split("\n") if u.strip()}
-
-            # DEBUG LOG
-            is_allowed = user_id in allow_users
-            logger.info(
-                f"MCP Permission Check: allow_users={allow_users}, default_mode={default_mode}, result={is_allowed}"
-            )
-
-            if is_allowed:
-                return True
-
-            # 如果默认是 deny_all 且不在白名单，则禁止
-            if default_mode == "deny_all":
-                logger.warning(
-                    f"MCP Permission Check: FAILED (User {user_id} not in whitelist and default is deny_all)"
-                )
-                return False
-
-            return True
-
-        except Exception as e:
-            logger.error(f"MCP Permission Check: ERROR ({e})")
-            logger.error(f"MCP 权限检查失败: {e}")
-            return False
 
     async def generate_reply_with_context(
         self,
@@ -613,15 +549,42 @@ class DefaultReplyer:
             # === 并行执行：搜索 + 工具判定 ===
             parallel_tasks = {}
 
-            # 两阶段搜索由 HeartFlow 在首轮回复后处理，标准搜索在这里处理。
-            if (
+            # Web search and MCP share one capability decision. The ordinary
+            # tool executor remains unchanged and continues to run in parallel.
+            allow_web_search = (
                 not mcp_only
                 and not urls
                 and not tools_disabled
                 and capabilities.web_search_mode == "standard"
-            ):
+                and self.web_search_manager.is_available
+            )
+            mcp_access_context = access_context_from_stream(self.chat_stream, user_id)
+            mcp_catalog = (
+                self.mcp_executor.get_tool_catalog_summary(access_context=mcp_access_context)
+                if not tools_disabled
+                else ""
+            )
+            allow_mcp = bool(not tools_disabled and mcp_catalog)
+
+            decision_task = None
+            if allow_web_search or allow_mcp:
+                decision_task = asyncio.create_task(
+                    self.capability_router.decide(
+                        chat_history=chat_history,
+                        sender=sender,
+                        target=target,
+                        bot_name=global_config.bot.nickname,
+                        allow_web_search=allow_web_search,
+                        allow_mcp=allow_mcp,
+                        mcp_catalog=mcp_catalog,
+                    )
+                )
+
+            if allow_web_search and decision_task:
                 logger.info("未检测到URL，尝试联网搜索判定")
-                parallel_tasks["search"] = self.web_search_manager.build_search_info(
+                parallel_tasks["search"] = build_search_after_decision(
+                    decision_task,
+                    self.web_search_manager,
                     chat_history=chat_history,
                     sender=sender,
                     target=target,
@@ -634,21 +597,28 @@ class DefaultReplyer:
                     sender=sender, target_message=target, chat_history=chat_history, return_details=False
                 )
 
-            # MCP 工具
-            has_mcp_permission = self._check_mcp_permission(user_id=user_id)
-            if has_mcp_permission and not tools_disabled:
-                parallel_tasks["mcp_tool"] = self.mcp_executor.execute_from_chat_message(
-                    sender=sender, target_message=target, chat_history=chat_history, return_details=False
+            # MCP 独立工具链：只有能力路由判定 need_mcp=true 才真正调用模型。
+            if allow_mcp and decision_task:
+                parallel_tasks["mcp_tool"] = execute_mcp_after_decision(
+                    decision_task,
+                    self.mcp_executor,
+                    sender=sender,
+                    target=target,
+                    chat_history=chat_history,
+                    return_details=False,
+                    access_context=mcp_access_context,
                 )
+            elif not mcp_catalog and not tools_disabled:
+                logger.info("当前用户没有获准使用的 MCP 工具，跳过 MCP 能力检查")
             else:
-                logger.info(f"用户无 MCP 权限，跳过 MCP 执行器")
+                logger.info("工具已禁用，跳过 MCP 能力检查")
 
             # 并行执行所有任务
             if parallel_tasks:
                 task_keys = list(parallel_tasks.keys())
                 task_coros = list(parallel_tasks.values())
                 raw_results = await asyncio.gather(*task_coros, return_exceptions=True)
-                results_map = dict(zip(task_keys, raw_results))
+                results_map = dict(zip(task_keys, raw_results, strict=True))
             else:
                 results_map = {}
 
@@ -1179,17 +1149,6 @@ class DefaultReplyer:
             logger.debug(f"获取TTS语言提示失败: {e}")
 
         extra_info_block_parts = []
-
-        capabilities = runtime_capabilities_from_stream(chat_stream)
-        if is_group_chat and capabilities.web_search_mode == "two_phase":
-            extra_info_block_parts.append(
-                "[联网搜索能力] 如果你认为需要联网实时查询才能回答当前问题"
-                "（如实时新闻、价格、天气、特定事实查询等），"
-                '请在你的回复中设置 "web_search" 字段为 true，并在 "search_query" 字段填入搜索关键词。'
-                "同时在回复文本中写一段简短的话告诉对方你正在查询。"
-                "如果不需要搜索，不需要包含这些字段。"
-                "[联网搜索能力结束]"
-            )
 
         if extra_info:
             extra_info_block_parts.append(

@@ -186,6 +186,23 @@ def remove_duplicate_handlers():  # sourcery skip: for-append-to-extend, list-co
         _file_handler = file_handlers[0]
 
 
+def normalize_ncnk_message_logger():
+    """让 ncnk_message 使用 NachoBot 根日志处理链，避免默认 handler 直接打印 structlog event_dict。"""
+    ncnk_logger = logging.getLogger("ncnk_message")
+
+    for handler in list(ncnk_logger.handlers):
+        if getattr(handler, "name", "") == "ncnk_message_default_handler":
+            ncnk_logger.removeHandler(handler)
+            try:
+                handler.close()
+            except Exception:
+                pass
+
+    # ncnk_message 默认 logger 会设置 propagate=False。
+    # 在 Core 中统一交给 root handler / ProcessorFormatter 渲染。
+    ncnk_logger.propagate = True
+
+
 # 读取日志配置
 def load_log_config():  # sourcery skip: use-contextlib-suppress
     """从配置文件加载日志设置"""
@@ -656,6 +673,10 @@ def configure_structlog():
         processors=[
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
+            # 兼容标准 logging 风格的占位符调用：
+            # logger.info("平台 %s WebSocket 已连接", platform)
+            # 将 positional_args 应用到 event，并在进入 ProcessorFormatter 前移除它。
+            structlog.stdlib.PositionalArgumentsFormatter(),
             structlog.processors.CallsiteParameterAdder(
                 parameters=[
                     structlog.processors.CallsiteParameter.PATHNAME,
@@ -747,6 +768,9 @@ def _immediate_setup():
     # 配置第三方库日志
     configure_third_party_loggers()
 
+    # 移除 ncnk_message 自带的默认 StreamHandler，避免绕过 ProcessorFormatter。
+    normalize_ncnk_message_logger()
+
     # 重新配置所有已存在的logger
     reconfigure_existing_loggers()
 
@@ -763,6 +787,8 @@ def get_logger(name: Optional[str]) -> structlog.stdlib.BoundLogger:
     """获取logger实例，支持按名称绑定"""
     if name is None:
         return raw_logger
+    if name == "ncnk_message":
+        normalize_ncnk_message_logger()
     logger = binds.get(name)  # type: ignore
     if logger is None:
         logger: structlog.stdlib.BoundLogger = structlog.get_logger(name).bind(logger_name=name)
@@ -779,6 +805,7 @@ def initialize_logging():
     LOG_CONFIG = load_log_config()
     # print(LOG_CONFIG)
     configure_third_party_loggers()
+    normalize_ncnk_message_logger()
     reconfigure_existing_loggers()
 
     # 启动日志清理任务

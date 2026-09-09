@@ -146,7 +146,7 @@ def to_retrieval_results(paths: Sequence[Dict[str, Any]]) -> List[RetrievalResul
         if not description:
             continue
         hash_seed = description.encode("utf-8")
-        path_hash = f"path_{hashlib.sha1(hash_seed).hexdigest()}"
+        path_hash = f"path_{hashlib.sha1(hash_seed, usedforsecurity=False).hexdigest()}"
         converted.append(
             RetrievalResult(
                 hash_value=path_hash,

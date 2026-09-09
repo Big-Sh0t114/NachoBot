@@ -1,9 +1,12 @@
 """Download and locate the shared sherpa-onnx streaming ASR model."""
 
 import logging
+import os
 from pathlib import Path
+import shutil
 import tarfile
 from typing import Optional
+from urllib.parse import quote
 
 import requests
 
@@ -19,6 +22,7 @@ ASR_MODEL_URL = (
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
     f"{ASR_MODEL_NAME}.tar.bz2"
 )
+ASR_HF_REPO = f"csukuangfj/{ASR_MODEL_NAME}"
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MODELS_DIR = PROJECT_ROOT / "models"
@@ -47,11 +51,22 @@ class ASRModelManager:
             self.logger.info("✓ Shared streaming ASR model: %s", self.model_dir)
             return True
 
-        archive_path = self.models_dir / f"{ASR_MODEL_NAME}.tar.bz2"
         self.logger.info(
             "Downloading shared streaming ASR model (%s)...",
             ASR_MODEL_NAME,
         )
+
+        # Prefer the Hugging Face mirror path. The same sherpa-onnx model is
+        # published as individual files there, so mainland-China deployments
+        # do not have to reach GitHub Releases for the initial 700+ MB download.
+        if self._download_from_huggingface():
+            self.logger.info("✓ Downloaded shared ASR model to %s", self.model_dir)
+            return True
+
+        # GitHub Releases remains a compatibility fallback for deployments
+        # where Hugging Face/mirrors are unavailable.
+        self.logger.warning("Hugging Face ASR download failed; trying GitHub Releases")
+        archive_path = self.models_dir / f"{ASR_MODEL_NAME}.tar.bz2"
         if not self._download(ASR_MODEL_URL, archive_path):
             return False
 
@@ -87,13 +102,63 @@ class ASRModelManager:
             for name, filename in ASR_MODEL_FILES.items()
         }
 
+    @staticmethod
+    def _hf_endpoints() -> list[str]:
+        endpoints: list[str] = []
+        for env_name in ("NACHOBOT_HF_ENDPOINT", "HF_ENDPOINT"):
+            endpoint = os.environ.get(env_name, "").strip().rstrip("/")
+            if endpoint:
+                endpoints.append(endpoint)
+        endpoints.extend(("https://hf-mirror.com", "https://huggingface.co"))
+        return list(dict.fromkeys(endpoints))
+
+    def _download_from_huggingface(self) -> bool:
+        self.model_dir.mkdir(parents=True, exist_ok=True)
+        missing = self.missing_files()
+        if not missing:
+            return True
+
+        for endpoint in self._hf_endpoints():
+            self.logger.info("Trying ASR model download via %s", endpoint)
+            endpoint_ok = True
+            for filename in missing:
+                destination = self.model_dir / filename
+                if destination.is_file():
+                    continue
+                encoded_filename = quote(filename, safe="/")
+                url = f"{endpoint}/{ASR_HF_REPO}/resolve/main/{encoded_filename}?download=true"
+                if not self._download(url, destination):
+                    endpoint_ok = False
+                    break
+
+            if endpoint_ok and not self.missing_files():
+                return True
+
+            # Keep already completed files for resume/fallback. _download()
+            # removes only the failed target, so the next endpoint does not
+            # need to redownload successful 700+ MB files.
+            missing = self.missing_files()
+
+        return False
+
     def _safe_extract(self, archive: tarfile.TarFile) -> None:
         target_root = self.models_dir.resolve()
         for member in archive.getmembers():
             member_path = (self.models_dir / member.name).resolve()
             if member_path != target_root and target_root not in member_path.parents:
                 raise ValueError(f"Unsafe path in model archive: {member.name}")
-        archive.extractall(path=self.models_dir)
+            if member.isdir():
+                member_path.mkdir(parents=True, exist_ok=True)
+                continue
+            if not member.isfile():
+                raise ValueError(f"Unsupported archive member: {member.name}")
+
+            member_path.parent.mkdir(parents=True, exist_ok=True)
+            source = archive.extractfile(member)
+            if source is None:
+                raise ValueError(f"Unable to read archive member: {member.name}")
+            with source, member_path.open("wb") as output:
+                shutil.copyfileobj(source, output)
 
     def _download(self, url: str, target: Path) -> bool:
         try:

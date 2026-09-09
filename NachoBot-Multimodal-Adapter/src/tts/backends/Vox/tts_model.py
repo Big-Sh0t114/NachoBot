@@ -104,7 +104,6 @@ class TTSModel(BaseTTSModel):
         """
         cfg_value = preset.cfg_value or self.config.vox.cfg_value
         inference_timesteps = preset.inference_timesteps or self.config.vox.inference_timesteps
-        denoise = preset.denoise if preset.denoise is not None else self.config.vox.denoise
         normalize = preset.normalize if preset.normalize is not None else self.config.vox.normalize
 
         # 处理参考音频路径
@@ -126,7 +125,7 @@ class TTSModel(BaseTTSModel):
             "prompt_text": prompt_text,
             "cfg_value": cfg_value,
             "inference_timesteps": inference_timesteps,
-            "denoise": str(denoise).lower(),
+            "denoise": "false",
             "normalize": str(normalize).lower(),
             "media_type": "wav",
             "streaming_mode": "false",

@@ -10,7 +10,7 @@ from src.common.logger import get_logger
 from src.common.message_repository import find_messages, count_messages
 from src.common.data_models.database_data_model import DatabaseMessages, DatabaseActionRecords
 from src.common.data_models.message_data_model import MessageAndActionModel
-from src.common.database.database_model import ActionRecords
+from src.common.database.database_model import ActionRecords, Messages
 from src.common.database.database_model import Images
 from src.person_info.person_info import Person, get_person_id
 from src.chat.utils.display_name import resolve_sender_name
@@ -137,6 +137,43 @@ def get_raw_msg_by_timestamp_with_chat(
         filter_bot=filter_bot,
         filter_command=filter_command,
     )
+
+
+def get_raw_msg_after_cursor_with_chat(
+    chat_id: str,
+    cursor_time: float,
+    cursor_message_id: str = "",
+    end_time: Optional[float] = None,
+    *,
+    filter_bot: bool = False,
+    filter_command: bool = False,
+) -> List[DatabaseMessages]:
+    """Return messages after a stable ``(time, message_id)`` cursor.
+
+    A timestamp alone is not a sufficient checkpoint because several messages
+    can share the same timestamp.  Query the compound ordering directly so a
+    restart can resume without an overlapping time window (and without
+    duplicating messages).
+    """
+    if not chat_id:
+        return []
+    cursor_message_id = str(cursor_message_id or "")
+    boundary = (Messages.time > cursor_time) | (
+        (Messages.time == cursor_time) & (Messages.message_id > cursor_message_id)
+    )
+    query = Messages.select().where(
+        (Messages.chat_id == chat_id)
+        & boundary
+        & (Messages.message_id != "notice")
+    )
+    if end_time is not None:
+        query = query.where(Messages.time < end_time)
+    if filter_bot:
+        query = query.where(Messages.user_id != global_config.bot.qq_account)
+    if filter_command:
+        query = query.where(~Messages.is_command)
+    query = query.order_by(Messages.time.asc(), Messages.message_id.asc())
+    return [DatabaseMessages(**model.__data__) for model in query]
 
 
 def get_raw_msg_by_timestamp_with_chat_inclusive(

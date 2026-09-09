@@ -6,7 +6,7 @@ environment/path checks and deployment/configuration.
 
 try:
     from .setup_checks import (
-        KNOWN_PORTS,
+        DEFAULT_PORTS,
         ROOT_DIR,
         TEMPLATE_MAP,
         EnvironmentChecker,
@@ -20,9 +20,16 @@ try:
         DependencyInstaller,
         NapCatConfigurator,
     )
+    from .setup_bilibili_login import (
+        BilibiliLoginCleanupError,
+        BilibiliLoginManager,
+        BilibiliLoginNotReady,
+        BilibiliLoginProcessError,
+        bilibili_login_manager,
+    )
 except ImportError:
     from setup_checks import (
-        KNOWN_PORTS,
+        DEFAULT_PORTS,
         ROOT_DIR,
         TEMPLATE_MAP,
         EnvironmentChecker,
@@ -36,17 +43,34 @@ except ImportError:
         DependencyInstaller,
         NapCatConfigurator,
     )
+    from setup_bilibili_login import (
+        BilibiliLoginCleanupError,
+        BilibiliLoginManager,
+        BilibiliLoginNotReady,
+        BilibiliLoginProcessError,
+        bilibili_login_manager,
+    )
+
+# Backward-compatible public alias. These are defaults only; runtime checks
+# resolve configured ports through EnvironmentChecker._configured_ports().
+KNOWN_PORTS = DEFAULT_PORTS
 
 __all__ = [
     "BACKUP_DIR",
+    "DEFAULT_PORTS",
     "KNOWN_PORTS",
     "MAX_BACKUPS_PER_FILE",
     "ROOT_DIR",
     "TEMPLATE_MAP",
     "BackupManager",
+    "BilibiliLoginCleanupError",
+    "BilibiliLoginManager",
+    "BilibiliLoginNotReady",
+    "BilibiliLoginProcessError",
     "ConfigInitializer",
     "DependencyInstaller",
     "EnvironmentChecker",
     "NapCatConfigurator",
     "PathVerifier",
+    "bilibili_login_manager",
 ]

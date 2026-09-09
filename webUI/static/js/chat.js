@@ -7,13 +7,33 @@
  * Response: { conversation_id?: string, message?: { role?: string, content: string }, reply?: string }
  */
 const ChatModule = (() => {
-    const { createSession, createTTS, escapeText, formatContent, formatTime, makeTitle } = window.ChatSupport;
+    const { createId, createSession, createTTS, escapeText, formatContent, formatTime, makeTitle } = window.ChatSupport;
     const { setRandomWelcomeSubtitle } = window.EasterEggSystem;
     const STORAGE_KEY = 'nachobot_chat_sessions_v1';
     const SIDEBAR_STATE_KEY = 'nachobot_sidebar_collapsed_v1';
     const DEFAULT_USER_NAME = 'WebUI';
     const API_ENDPOINT = '/api/chat/message';
     const DELETE_CONVERSATION_ENDPOINT = '/api/chat/conversations';
+    const CHAT_LAUNCH_PROFILES = Object.freeze({
+        full: {
+            name: '完整模式',
+            code: 'FULL',
+            summary: 'TTS · VLM · ASR',
+            detail: '完整本地多模态能力，资源占用最高',
+        },
+        lite: {
+            name: '轻量模式',
+            code: 'LITE',
+            summary: 'TTS',
+            detail: '保留语音合成，关闭 VLM / ASR',
+        },
+        potato: {
+            name: '无模型模式',
+            code: 'POTATO',
+            summary: 'Relay only',
+            detail: '仅消息中继，不加载本地模型',
+        },
+    });
     const WELCOME_SUBTITLES = [
         '我的存在，由你定义',
         '宝宝你是一个一个一个Tips啊啊啊啊',
@@ -40,7 +60,7 @@ const ChatModule = (() => {
     ];
 
     let initialized = false;
-    let busy = false;
+    const pendingRequestIds = new Map();
     let sessions = [];
     let activeSessionId = null;
     let historyQuery = '';
@@ -75,14 +95,17 @@ const ChatModule = (() => {
             send: document.getElementById('chat-send-button'),
             status: document.getElementById('chat-backend-status'),
             title: document.getElementById('chat-current-title'),
-            mobileHistory: document.getElementById('chat-mobile-history-button'),
-            sidebar: document.getElementById('sidebar'),
+                sidebar: document.getElementById('sidebar'),
             sidebarCollapse: document.getElementById('sidebar-collapse-button'),
             sidebarBrand: document.getElementById('sidebar-brand-button'),
             renameButton: document.getElementById('chat-rename-button'),
         };
 
         if (!els.messages || !els.form || !els.input) return;
+
+        // 旧版发送流程会在等待 Core 回复期间直接禁用 textarea。
+        // 无论脚本是否热更新、DOM 是否被复用，初始化时都强制恢复输入能力。
+        els.input.disabled = false;
 
         profile = window.ChatProfile.create({
             getInput: () => els.input,
@@ -267,6 +290,7 @@ const ChatModule = (() => {
         if (!window.confirm('清空当前对话中的全部消息？')) return;
 
         ttsController.stop();
+        pendingRequestIds.delete(session.id);
         session.messages = [];
         session.title = '新对话';
         session.updatedAt = Date.now();
@@ -277,11 +301,6 @@ const ChatModule = (() => {
     async function deleteSession(id) {
         const session = sessions.find(item => item.id === id);
         if (!session) return;
-
-        if (busy) {
-            toast('当前消息仍在处理中，请等待回复完成后再删除会话', 'error');
-            return;
-        }
 
         const confirmed = await confirmDeleteSession(session);
         if (!confirmed) return;
@@ -311,6 +330,7 @@ const ChatModule = (() => {
                 throw error;
             }
 
+            pendingRequestIds.delete(id);
             if (sessions.length === 1) {
                 sessions[0] = createSession();
                 activeSessionId = sessions[0].id;
@@ -422,7 +442,7 @@ const ChatModule = (() => {
     async function handleSubmit(event) {
         event.preventDefault();
         const text = els.input.value.trim();
-        if (!text || busy) return;
+        if (!text) return;
 
         let session = getActiveSession();
         if (!session) {
@@ -431,8 +451,10 @@ const ChatModule = (() => {
             activeSessionId = session.id;
         }
 
+        const requestMessageId = createId();
+        addPendingRequest(session.id, requestMessageId);
         session.messages.push({
-            id: createId(),
+            id: requestMessageId,
             role: 'user',
             content: text,
             createdAt: Date.now(),
@@ -442,19 +464,23 @@ const ChatModule = (() => {
 
         els.input.value = '';
         autoResizeInput();
-        saveSessions();
-        renderAll();
-        setBusy(true);
-        renderThinking();
-        connectLiveStream(session.id);
 
+        const controller = new AbortController();
+        const requestTimeout = window.setTimeout(() => controller.abort(), 10_000);
+        let requestAccepted = false;
         try {
+            saveSessions();
+            renderAll();
+            connectLiveStream(session.id);
+
             const response = await fetch(API_ENDPOINT, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                signal: controller.signal,
                 body: JSON.stringify({
                     conversation_id: session.id,
                     message: text,
+                    request_message_id: requestMessageId,
                     user_name: profile.getUserName() || DEFAULT_USER_NAME,
                 }),
             });
@@ -467,37 +493,37 @@ const ChatModule = (() => {
             }
 
             const data = await response.json();
-            const reply = data?.message?.content ?? data?.reply ?? data?.content;
-            if (typeof reply !== 'string' || !reply.trim()) {
-                throw new Error('聊天接口未返回有效文本');
+            if (data?.status !== 'accepted') {
+                throw new Error('聊天后端未确认接收消息');
             }
+            requestAccepted = true;
 
             if (typeof data.conversation_id === 'string' && data.conversation_id !== session.id) {
                 session.remoteConversationId = data.conversation_id;
             }
 
-            appendAssistantMessage(session, {
-                message_id: data?.message_id,
-                message: {
-                    role: data?.message?.role || 'assistant',
-                    content: reply,
-                },
-            });
+            // POST 只确认用户消息已送入 Core；助手回复统一由当前会话的
+            // WebSocket 接收，避免 HTTP 与实时通道重复投递或互相等待。
         } catch (error) {
-            console.warn('Chat backend unavailable:', error);
+            console.warn('Chat submit failed:', error);
+            clearPendingRequest(session.id, requestMessageId);
             session.messages.push({
                 id: createId(),
                 role: 'notice',
-                content: error.status === 404
-                    ? '聊天界面已经就绪，但 NachoBot 聊天后端尚未接入。后端实现 POST /api/chat/message 后即可返回真实回复。'
-                    : `消息未能发送到聊天后端：${error.message}`,
+                content: error.name === 'AbortError'
+                    ? '消息发送请求超时，但聊天界面不会被锁定；请检查 WebUI 与 NachoBot Core 的连接状态。'
+                    : error.status === 404
+                        ? '聊天界面已经就绪，但 NachoBot 聊天后端尚未接入。后端实现 POST /api/chat/message 后即可返回真实回复。'
+                        : `消息提交失败：${error.message}`,
                 createdAt: Date.now(),
             });
         } finally {
+            window.clearTimeout(requestTimeout);
             session.updatedAt = Date.now();
             saveSessions();
-            setBusy(false);
-            renderAll();
+            // accepted 后保留当前 DOM 中的 thinking 动画；首条 WebSocket 回复到达时
+            // onmessage -> renderAll() 会自然移除它。发送失败时则立即重绘并清除。
+            if (!requestAccepted) renderAll();
             els.input.focus();
         }
     }
@@ -518,7 +544,7 @@ const ChatModule = (() => {
 
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
         liveConversationId = conversationId;
-        liveSocket = new WebSocket(
+        liveSocket = createAuthenticatedWebSocket(
             `${protocol}//${location.host}/ws/chat/${encodeURIComponent(conversationId)}`
         );
 
@@ -527,8 +553,17 @@ const ChatModule = (() => {
                 const data = JSON.parse(event.data);
                 if (data?.type !== 'message' || data.conversation_id !== liveConversationId) return;
                 const session = sessions.find(item => item.id === data.conversation_id);
-                if (!session || !appendAssistantMessage(session, data)) return;
-                saveSessions();
+                if (!session) return;
+
+                const replyToMessageId = typeof data.reply_to_message_id === 'string'
+                    ? data.reply_to_message_id
+                    : '';
+                if (replyToMessageId) {
+                    clearPendingRequest(session.id, replyToMessageId);
+                }
+
+                const appended = appendAssistantMessage(session, data);
+                if (appended) saveSessions();
                 if (session.id === activeSessionId) renderAll();
             } catch (error) {
                 console.warn('Invalid live chat message:', error);
@@ -553,27 +588,65 @@ const ChatModule = (() => {
             return false;
         }
 
-        session.messages.push({
+        const replyToMessageId = typeof event.reply_to_message_id === 'string'
+            ? event.reply_to_message_id
+            : '';
+        const assistantMessage = {
             id: createId(),
             backendMessageId,
+            replyToMessageId,
             role: event?.message?.role || 'assistant',
             content,
             createdAt: Date.now(),
-        });
+        };
+
+        // 多段回复可能在用户已经开始下一轮后才到达。将其插回触发它的
+        // 用户消息之后，并排在同轮已有回复之后，避免视觉上串到下一轮。
+        const anchorIndex = replyToMessageId
+            ? session.messages.findIndex(message => message.id === replyToMessageId && message.role === 'user')
+            : -1;
+        if (anchorIndex >= 0) {
+            let insertIndex = anchorIndex + 1;
+            while (
+                insertIndex < session.messages.length
+                && session.messages[insertIndex].role !== 'user'
+                && session.messages[insertIndex].replyToMessageId === replyToMessageId
+            ) {
+                insertIndex += 1;
+            }
+            session.messages.splice(insertIndex, 0, assistantMessage);
+        } else {
+            session.messages.push(assistantMessage);
+        }
+
         session.updatedAt = Date.now();
         return true;
     }
 
-    function setBusy(value) {
-        busy = value;
-        els.input.disabled = value;
-        updateSendState();
+    function addPendingRequest(conversationId, requestMessageId) {
+        if (!conversationId || !requestMessageId) return;
+        let ids = pendingRequestIds.get(conversationId);
+        if (!ids) {
+            ids = new Set();
+            pendingRequestIds.set(conversationId, ids);
+        }
+        ids.add(requestMessageId);
+    }
+
+    function clearPendingRequest(conversationId, requestMessageId) {
+        const ids = pendingRequestIds.get(conversationId);
+        if (!ids) return;
+        ids.delete(requestMessageId);
+        if (ids.size === 0) pendingRequestIds.delete(conversationId);
     }
 
     function updateSendState() {
+        // Composer 不再由模型回复状态控制。即使旧代码曾把 textarea
+        // 置为 disabled，也在这里持续纠正，避免 Enter 和输入事件失效。
+        if (els.input) els.input.disabled = false;
         if (!els.send) return;
-        els.send.disabled = busy || !els.input.value.trim();
-        els.send.classList.toggle('is-busy', busy);
+        els.send.disabled = !els.input.value.trim();
+        els.send.classList.remove('is-busy');
     }
 
     function autoResizeInput() {
@@ -636,6 +709,12 @@ const ChatModule = (() => {
 
         els.messages.querySelectorAll('.chat-message, .chat-thinking').forEach(node => node.remove());
         messages.forEach(message => els.messages.appendChild(createMessageElement(message)));
+
+        const pendingIds = session ? pendingRequestIds.get(session.id) : null;
+        if (pendingIds) {
+            pendingIds.forEach(requestMessageId => renderThinking(requestMessageId));
+        }
+
         ttsController.syncButtons();
         scrollToBottom();
     }
@@ -655,7 +734,7 @@ const ChatModule = (() => {
         const isUser = message.role === 'user';
         article.innerHTML = `
             <div class="chat-message-inner">
-                ${isUser ? '' : createBotAvatarMarkup()}
+                ${isUser ? '' : profile.createBotAvatarMarkup()}
                 ${isUser ? `
                     <div class="chat-message-content">${formatContent(message.content)}</div>
                 ` : `
@@ -670,9 +749,10 @@ const ChatModule = (() => {
         return article;
     }
 
-    function renderThinking() {
+    function renderThinking(requestMessageId = '') {
         const thinking = document.createElement('div');
         thinking.className = 'chat-thinking';
+        if (requestMessageId) thinking.dataset.requestMessageId = requestMessageId;
         thinking.innerHTML = `
             ${profile.createBotAvatarMarkup()}
             <div class="chat-thinking-dots"><span></span><span></span><span></span></div>
@@ -712,70 +792,163 @@ const ChatModule = (() => {
         document.body.classList.remove('sidebar-mobile-open');
     }
 
+    function chooseLaunchProfile() {
+        if (modalOpen) {
+            toast('请先关闭当前弹窗', 'error');
+            return Promise.resolve(null);
+        }
+
+        const overlay = document.getElementById('modal-overlay');
+        const card = document.getElementById('modal-card');
+        const title = document.getElementById('modal-title');
+        const body = document.getElementById('modal-body');
+        const footer = document.getElementById('modal-footer');
+        const closeButton = document.getElementById('modal-close');
+
+        if (!overlay || !card || !title || !body || !footer || !closeButton) {
+            const raw = window.prompt('选择启动模式：FULL / LITE / POTATO', 'LITE');
+            const profileId = String(raw || '').trim().toLowerCase();
+            return Promise.resolve(CHAT_LAUNCH_PROFILES[profileId] ? profileId : null);
+        }
+
+        return new Promise(resolve => {
+            modalOpen = true;
+            card.classList.add('chat-launch-modal');
+            title.textContent = '选择 NachoBot 运行模式';
+            body.innerHTML = `
+                <div class="chat-launch-profile-intro">Core 将与以下一种运行模式绑定启动，三种模式互斥。</div>
+                <div class="chat-launch-profile-grid">
+                    ${Object.entries(CHAT_LAUNCH_PROFILES).map(([id, item]) => `
+                        <button type="button" class="chat-launch-profile" data-chat-launch-profile="${id}">
+                            <span class="chat-launch-profile-main">
+                                <strong>${item.name}</strong>
+                                <span class="chat-launch-profile-code">${item.code}</span>
+                            </span>
+                            <span class="chat-launch-profile-summary">${item.summary}</span>
+                            <span class="chat-launch-profile-detail">${item.detail}</span>
+                        </button>
+                    `).join('')}
+                </div>
+            `;
+            footer.innerHTML = '';
+
+            let settled = false;
+            const finish = result => {
+                if (settled) return;
+                settled = true;
+                overlay.classList.add('hidden');
+                card.classList.remove('chat-launch-modal');
+                closeButton.style.removeProperty('display');
+                closeButton.onclick = null;
+                overlay.onclick = null;
+                modalOpen = false;
+                resolve(result);
+            };
+
+            const cancelButton = document.createElement('button');
+            cancelButton.type = 'button';
+            cancelButton.className = 'btn btn-ghost';
+            cancelButton.textContent = '取消';
+            cancelButton.addEventListener('click', () => finish(null));
+            footer.appendChild(cancelButton);
+
+            body.querySelectorAll('[data-chat-launch-profile]').forEach(button => {
+                button.addEventListener('click', () => finish(button.dataset.chatLaunchProfile));
+            });
+
+            closeButton.style.removeProperty('display');
+            closeButton.onclick = () => finish(null);
+            overlay.onclick = event => {
+                if (event.target === overlay) finish(null);
+            };
+            overlay.classList.remove('hidden');
+        });
+    }
+
     async function toggleCoreService() {
         if (!els.status || coreToggleBusy) return;
 
-        const shouldStart = !coreRunning;
+        let currentLaunchStatus = 'stopped';
+        try {
+            const current = await apiGet('/api/launch');
+            currentLaunchStatus = String(current.status || 'stopped');
+        } catch (error) {
+            console.warn('Failed to read NachoBot launch state before toggle:', error);
+        }
+
+        if (currentLaunchStatus === 'stopping') {
+            toast('NachoBot 正在停止，请稍候', 'info');
+            return;
+        }
+
+        const shouldStart = currentLaunchStatus === 'stopped' || currentLaunchStatus === 'error';
+        let selectedProfile = null;
+        if (shouldStart) {
+            selectedProfile = await chooseLaunchProfile();
+            if (!selectedProfile) return;
+        }
+
         coreToggleBusy = true;
         coreStatusRequestSerial += 1;
         els.status.disabled = true;
         els.status.className = 'chat-status-chip is-checking';
-        els.status.textContent = shouldStart ? '核心启动中' : '核心关闭中';
-        els.status.title = shouldStart ? '正在启动 NachoBot Core' : '正在关闭 NachoBot Core';
+        els.status.textContent = shouldStart
+            ? `${CHAT_LAUNCH_PROFILES[selectedProfile].code} 启动中`
+            : 'NachoBot 关闭中';
+        els.status.title = shouldStart
+            ? `正在以 ${CHAT_LAUNCH_PROFILES[selectedProfile].code} 模式启动 NachoBot`
+            : '正在关闭 NachoBot Core 与当前运行模式';
 
         try {
-            await apiPost(`/api/services/nachobot/${shouldStart ? 'start' : 'stop'}`);
+            if (shouldStart) {
+                await apiPost('/api/launch/start', { profile: selectedProfile });
+            } else {
+                await apiPost('/api/launch/stop');
+            }
 
             let reachedTarget = false;
             for (let attempt = 0; attempt < 360; attempt += 1) {
                 await new Promise(resolve => window.setTimeout(resolve, 500));
-                try {
-                    const data = await apiGet('/api/chat/status');
-                    const coreStatus = String(data.core_status || '');
-                    coreRunning = coreStatus
-                        ? coreStatus === 'running'
-                        : Boolean(data.core_running);
+                const data = await apiGet('/api/launch');
+                const launchStatus = String(data.status || '');
+                const activeProfile = String(data.active_profile || selectedProfile || '');
+                coreRunning = data.core?.status === 'running';
 
-                    if (shouldStart && coreStatus === 'error') {
-                        throw new Error('NachoBot Core 启动失败，请查看终端日志');
-                    }
+                if (shouldStart && launchStatus === 'error') {
+                    throw new Error('NachoBot 启动失败，请查看终端日志');
+                }
 
-                    if (shouldStart && !coreRunning) {
-                        els.status.className = 'chat-status-chip is-checking';
-                        els.status.textContent = '核心启动中';
-                        els.status.title = 'NachoBot Core 正在启动并等待端口就绪';
-                    } else if (!shouldStart && coreStatus !== 'stopped') {
-                        els.status.className = 'chat-status-chip is-checking';
-                        els.status.textContent = '核心关闭中';
-                        els.status.title = 'NachoBot Core 正在关闭';
-                    }
+                if (shouldStart && launchStatus !== 'running') {
+                    const code = CHAT_LAUNCH_PROFILES[activeProfile]?.code || CHAT_LAUNCH_PROFILES[selectedProfile].code;
+                    els.status.className = 'chat-status-chip is-checking';
+                    els.status.textContent = `${code} 启动中`;
+                } else if (!shouldStart && launchStatus !== 'stopped') {
+                    els.status.className = 'chat-status-chip is-checking';
+                    els.status.textContent = 'NachoBot 关闭中';
+                }
 
-                    const startCompleted = shouldStart && coreRunning;
-                    const stopCompleted = !shouldStart
-                        && (coreStatus === 'stopped' || coreStatus === 'error' || (!coreStatus && !coreRunning));
-                    if (startCompleted || stopCompleted) {
-                        reachedTarget = true;
-                        break;
-                    }
-                } catch (error) {
-                    if (error.message?.includes('启动失败')) throw error;
-                    if (!shouldStart) {
-                        coreRunning = false;
-                        reachedTarget = true;
-                        break;
-                    }
+                const startCompleted = shouldStart && launchStatus === 'running';
+                const stopCompleted = !shouldStart && launchStatus === 'stopped';
+                if (startCompleted || stopCompleted) {
+                    reachedTarget = true;
+                    break;
                 }
             }
 
             if (!reachedTarget) {
-                throw new Error(shouldStart ? '核心服务启动超时，请查看终端日志' : '核心服务关闭超时，请查看终端日志');
+                throw new Error(shouldStart ? 'NachoBot 启动超时，请查看终端日志' : 'NachoBot 关闭超时，请查看终端日志');
             }
 
-            toast(shouldStart ? 'NachoBot Core 已启动' : 'NachoBot Core 已关闭', 'success');
+            toast(
+                shouldStart
+                    ? `NachoBot 已以 ${CHAT_LAUNCH_PROFILES[selectedProfile].code} 模式启动`
+                    : 'NachoBot 已关闭',
+                'success',
+            );
             App.pollStatus();
         } catch (error) {
-            console.warn('Failed to toggle NachoBot Core:', error);
-            toast(`核心服务操作失败：${error.message}`, 'error');
+            console.warn('Failed to toggle NachoBot launch:', error);
+            toast(`NachoBot 操作失败：${error.message}`, 'error');
         } finally {
             coreToggleBusy = false;
             els.status.disabled = false;
@@ -788,28 +961,40 @@ const ChatModule = (() => {
         const requestSerial = ++coreStatusRequestSerial;
 
         try {
-            const data = await apiGet('/api/chat/status');
+            const data = await apiGet('/api/launch');
             if (coreToggleBusy || requestSerial !== coreStatusRequestSerial) return;
-            const coreStatus = String(data.core_status || '');
-            coreRunning = coreStatus
-                ? coreStatus === 'running'
-                : Boolean(data.core_running);
-            els.status.setAttribute('aria-pressed', String(coreRunning));
 
-            if (coreStatus === 'starting') {
+            const launchStatus = String(data.status || 'stopped');
+            const activeProfile = String(data.active_profile || '');
+            const profileCode = CHAT_LAUNCH_PROFILES[activeProfile]?.code || '';
+            coreRunning = data.core?.status === 'running';
+            els.status.setAttribute('aria-pressed', String(launchStatus === 'running'));
+
+            if (launchStatus === 'starting') {
                 els.status.className = 'chat-status-chip is-checking';
-                els.status.textContent = '核心启动中';
-                els.status.disabled = true;
-            } else if (coreStatus === 'stopping') {
+                els.status.textContent = `${profileCode || 'NachoBot'} 启动中`;
+                els.status.title = '点击可取消当前启动';
+            } else if (launchStatus === 'stopping') {
                 els.status.className = 'chat-status-chip is-checking';
-                els.status.textContent = '核心关闭中';
-                els.status.disabled = true;
-            } else if (coreRunning) {
+                els.status.textContent = 'NachoBot 关闭中';
+                els.status.title = '正在关闭 Core 与当前运行模式';
+            } else if (launchStatus === 'running') {
                 els.status.className = 'chat-status-chip is-online';
-                els.status.textContent = '核心服务运行中';
-            } else {
+                els.status.textContent = profileCode ? `NachoBot · ${profileCode}` : 'NachoBot 运行中';
+                els.status.title = '点击停止 NachoBot Core 与当前运行模式';
+            } else if (launchStatus === 'error') {
                 els.status.className = 'chat-status-chip is-offline';
-                els.status.textContent = coreStatus === 'error' ? '核心启动失败' : '核心服务未运行';
+                els.status.textContent = profileCode ? `${profileCode} 启动失败` : 'NachoBot 启动失败';
+                els.status.title = '点击重新选择运行模式并启动';
+            } else if (launchStatus === 'partial') {
+                els.status.className = 'chat-status-chip is-checking';
+                els.status.textContent = profileCode ? `NachoBot · ${profileCode} 部分运行` : 'NachoBot 部分运行';
+                els.status.title = '点击停止当前启动单元';
+            } else {
+                coreRunning = false;
+                els.status.className = 'chat-status-chip is-offline';
+                els.status.textContent = 'NachoBot 未运行';
+                els.status.title = '点击选择 FULL / LITE / POTATO 并启动';
             }
         } catch (error) {
             if (coreToggleBusy || requestSerial !== coreStatusRequestSerial) return;
@@ -817,13 +1002,9 @@ const ChatModule = (() => {
             els.status.setAttribute('aria-pressed', 'false');
             els.status.className = 'chat-status-chip is-offline';
             els.status.textContent = '无法读取服务状态';
-            els.status.title = '点击尝试启动 NachoBot Core';
+            els.status.title = '点击尝试启动 NachoBot';
         } finally {
-            if (
-                !coreToggleBusy
-                && requestSerial === coreStatusRequestSerial
-                && !['核心启动中', '核心关闭中'].includes(els.status.textContent)
-            ) {
+            if (!coreToggleBusy && requestSerial === coreStatusRequestSerial) {
                 els.status.disabled = false;
             }
         }

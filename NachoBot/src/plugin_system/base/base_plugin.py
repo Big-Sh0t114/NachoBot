@@ -62,15 +62,37 @@ class BasePlugin(PluginBase):
             if component_registry.register_component(component_info, component_class):
                 registered_components.append(component_info)
             else:
-                logger.warning(f"{self.log_prefix} 组件 {component_info.name} 注册失败")
+                logger.error(f"{self.log_prefix} 组件 {component_info.name} 注册失败，回滚本插件")
+                for registered_info in registered_components:
+                    component_registry.rollback_component_registration(
+                        registered_info.name,
+                        registered_info.component_type,
+                    )
+                self.plugin_info.components = []
+                return False
 
         # 更新插件信息中的组件列表
         self.plugin_info.components = registered_components
 
         # 注册插件
-        if component_registry.register_plugin(self.plugin_info):
+        try:
+            plugin_registered = component_registry.register_plugin(self.plugin_info)
+        except Exception as exc:
+            logger.error(f"{self.log_prefix} 插件注册时发生异常: {exc}")
+            plugin_registered = False
+
+        if plugin_registered:
             logger.debug(f"{self.log_prefix} 插件注册成功，包含 {len(registered_components)} 个组件")
             return True
         else:
+            # 插件级注册失败时，回滚已提交的组件。事件处理器没有中间 await，
+            # 因此在返回控制权前不会执行；为避免留下半注册状态，只在没有
+            # 运行中事件任务的注册阶段同步回滚通用/类型注册表。
+            for component_info in registered_components:
+                component_registry.rollback_component_registration(
+                    component_info.name,
+                    component_info.component_type,
+                )
+            self.plugin_info.components = []
             logger.error(f"{self.log_prefix} 插件注册失败")
             return False

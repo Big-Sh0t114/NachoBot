@@ -243,7 +243,7 @@ def _check_proxy_list(
         except requests.RequestException:
             continue
     if not can_use:
-        logger.warning("No proxies passed check_url=%s", url)
+        logger.warning("No proxies passed check_url={}", url)
     return can_use
 
 

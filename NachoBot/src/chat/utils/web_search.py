@@ -1,4 +1,3 @@
-import asyncio
 import json
 import re
 import time
@@ -62,7 +61,18 @@ class WebSearchManager:
         )
         self._search_enabled = search_provider is not None or self._search_provider.is_available()
 
-    async def build_search_info(self, chat_history: str, sender: str, target: str, bot_name: str) -> str:
+    @property
+    def is_available(self) -> bool:
+        return self._search_enabled
+
+    async def build_search_info(
+        self,
+        chat_history: str,
+        sender: str,
+        target: str,
+        bot_name: str,
+        decision: Optional[Dict[str, Any]] = None,
+    ) -> str:
         if not target:
             return ""
         if not self._search_enabled:
@@ -70,7 +80,8 @@ class WebSearchManager:
                 logger.warning("联网搜索未启用：Playwright 不可用")
                 self._warned_disabled = True
             return ""
-        if not self._decider_enabled and not self._warned_decider:
+        has_precomputed_decision = decision is not None
+        if not has_precomputed_decision and not self._decider_enabled and not self._warned_decider:
             logger.warning("联网搜索判定未启用：model_task_config.tool_use 为空或未配置，将仅使用关键词触发")
             self._warned_decider = True
 
@@ -78,11 +89,19 @@ class WebSearchManager:
         logger.info(f"联网搜索检查: target={target_preview}")
 
         keyword_hit = self._keyword_hit(target)
-        decision_task = asyncio.create_task(self._decide_need_search(chat_history, sender, target, bot_name))
-        decision = await decision_task
+        if decision is None:
+            decision = await self._decide_need_search(chat_history, sender, target, bot_name)
+        else:
+            decision = dict(decision)
         if decision is None:
             decision = {"need_search": False, "query": "", "reason": ""}
-        if self._decider_enabled:
+        need_search_value = decision.get("need_search")
+        if isinstance(need_search_value, str):
+            decision["need_search"] = need_search_value.lower() in ("true", "yes", "1")
+        elif not isinstance(need_search_value, bool):
+            decision["need_search"] = False
+
+        if has_precomputed_decision or self._decider_enabled:
             need_search = bool(decision.get("need_search"))
         else:
             need_search = bool(keyword_hit)
@@ -114,41 +133,6 @@ class WebSearchManager:
         formatted = self._format_results(query, results, reason)
         self._set_cache(query, formatted)
         logger.info(f"联网搜索结果: {self._truncate_for_log(formatted)}")
-        return formatted
-
-    async def execute_search_direct(self, query: str, chat_history: str = "") -> str:
-        """直接执行搜索，跳过判定步骤。用于两阶段回复架构中 Pass 2。
-
-        Args:
-            query: 搜索关键词
-            chat_history: 聊天历史（可选，用于上下文）
-
-        Returns:
-            str: 格式化的搜索结果，如果无结果则返回空字符串
-        """
-        if not query or not query.strip():
-            return ""
-        if not self._search_enabled:
-            if not self._warned_disabled:
-                logger.warning("联网搜索未启用：Playwright 不可用")
-                self._warned_disabled = True
-            return ""
-
-        query = query.strip()
-        logger.info(f"直接搜索 (Pass 2): query={query}")
-
-        if cached := self._get_cache(query):
-            logger.info("直接搜索命中缓存")
-            return cached
-
-        results = await self._search(query, chat_history)
-        if not results:
-            logger.info(f"直接搜索无结果: query={query}")
-            return ""
-
-        formatted = self._format_results(query, results, "two_phase_pass2")
-        self._set_cache(query, formatted)
-        logger.info(f"直接搜索结果: {self._truncate_for_log(formatted)}")
         return formatted
 
     async def _decide_need_search(

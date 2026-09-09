@@ -18,20 +18,17 @@ def _get_seg_class():
     return Seg
 
 
-_EMOJI_RE = re.compile(
-    "["  # noqa: W605
-    "\U0001f100-\U0001f1ff"
-    "\U0001f300-\U0001f5ff"
-    "\U0001f600-\U0001f64f"
-    "\U0001f680-\U0001f6ff"
-    "\U0001f700-\U0001f77f"
-    "\U0001f780-\U0001f7ff"
-    "\U0001f800-\U0001f8ff"
-    "\U0001f900-\U0001f9ff"
-    "\U0001fa00-\U0001faff"
-    "\U00002702-\U000027b0"
-    "]",
-    flags=re.UNICODE,
+_EMOJI_CODEPOINT_RANGES = (
+    (0x1F100, 0x1F1FF),
+    (0x1F300, 0x1F5FF),
+    (0x1F600, 0x1F64F),
+    (0x1F680, 0x1F6FF),
+    (0x1F700, 0x1F77F),
+    (0x1F780, 0x1F7FF),
+    (0x1F800, 0x1F8FF),
+    (0x1F900, 0x1F9FF),
+    (0x1FA00, 0x1FAFF),
+    (0x2702, 0x27B0),
 )
 _URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
 _IMAGE_PREFIX_RE = re.compile(r"^data:image/([a-zA-Z0-9.+-]+);base64,", re.IGNORECASE)
@@ -45,7 +42,11 @@ BILIBILI_DANMU_SEND_DELAY_SECONDS = 0.8
 def _strip_emoji(text: str) -> str:
     if not text:
         return ""
-    return _EMOJI_RE.sub("", text)
+    return "".join(
+        ch
+        for ch in text
+        if not any(start <= ord(ch) <= end for start, end in _EMOJI_CODEPOINT_RANGES)
+    )
 
 
 def _mask_urls(text: str) -> str:

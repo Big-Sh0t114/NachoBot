@@ -979,7 +979,7 @@ requires-dist = [
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "numpy", specifier = ">=2.4.2" },
     { name = "onnxruntime", specifier = ">=1.27.0" },
-    { name = "py-cord", extras = ["voice"], directory = "C:/Users/31438/AppData/Local/Temp/pycord-clone" },
+    { name = "py-cord", extras = ["voice"], git = "https://github.com/Pycord-Development/pycord?rev=refs%2Fpull%2F3159%2Fhead" },
     { name = "pynacl", specifier = ">=1.6.2" },
     { name = "requests", specifier = ">=2.31.0" },
     { name = "scipy", specifier = ">=1.17.1" },
@@ -1345,7 +1345,8 @@ wheels = [
 
 [[package]]
 name = "py-cord"
-source = { directory = "C:/Users/31438/AppData/Local/Temp/pycord-clone" }
+version = "2.8.1.dev91+g326b72acc"
+source = { git = "https://github.com/Pycord-Development/pycord?rev=refs%2Fpull%2F3159%2Fhead#326b72acc8d1d952ac002fe07ca65581cf5952bc" }
 dependencies = [
     { name = "aiohttp" },
     { name = "typing-extensions" },
@@ -1355,45 +1356,6 @@ dependencies = [
 voice = [
     { name = "davey" },
     { name = "pynacl" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "aiohttp", specifier = ">=3.13.2,<4.0" },
-    { name = "aiohttp", extras = ["speedups"], marker = "extra == 'speed'" },
-    { name = "davey", marker = "extra == 'voice'", specifier = ">=0.1.4,<1" },
-    { name = "furo", marker = "python_full_version >= '3.13' and extra == 'docs'", specifier = "==2025.12.19" },
-    { name = "levenshtein", marker = "python_full_version >= '3.13' and extra == 'docs'", specifier = "==0.27.3" },
-    { name = "msgspec", marker = "extra == 'speed'", specifier = "~=0.21.0" },
-    { name = "myst-parser", extras = ["linkify"], marker = "python_full_version >= '3.13' and extra == 'docs'", specifier = "==5.1.0" },
-    { name = "pynacl", marker = "extra == 'voice'", specifier = ">=1.6.2,<1.7" },
-    { name = "sphinx", marker = "python_full_version >= '3.13' and extra == 'docs'", specifier = "==9.1.0" },
-    { name = "sphinx-autodoc-typehints", marker = "python_full_version >= '3.13' and extra == 'docs'", specifier = "==3.12.1" },
-    { name = "sphinx-copybutton", marker = "python_full_version >= '3.13' and extra == 'docs'", specifier = "==0.5.2" },
-    { name = "sphinx-intl", marker = "python_full_version >= '3.13' and extra == 'docs'", specifier = "==2.3.2" },
-    { name = "sphinxcontrib-trio", marker = "python_full_version >= '3.13' and extra == 'docs'", specifier = "==1.2.0" },
-    { name = "sphinxcontrib-websupport", marker = "python_full_version >= '3.13' and extra == 'docs'", specifier = "==2.0.0" },
-    { name = "sphinxext-opengraph", marker = "python_full_version >= '3.13' and extra == 'docs'", specifier = "==0.13.0" },
-    { name = "typing-extensions", specifier = ">=4.12.0,<5" },
-    { name = "typing-extensions", marker = "python_full_version >= '3.13' and extra == 'docs'", specifier = "==4.16.0" },
-]
-provides-extras = ["docs", "speed", "voice"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "bandit", specifier = "==1.9.4" },
-    { name = "codespell", specifier = "==2.4.3" },
-    { name = "coverage", specifier = "~=7.10" },
-    { name = "flake8", specifier = "==7.3.0" },
-    { name = "mypy", specifier = "~=2.3.0" },
-    { name = "pre-commit", specifier = "==4.6.0" },
-    { name = "pylint", specifier = "~=4.0.5" },
-    { name = "tox", specifier = ">=4.27.0" },
-    { name = "tox-gh", specifier = ">=1.5.0" },
-]
-test = [
-    { name = "pytest", specifier = "~=9.1.1" },
-    { name = "pytest-asyncio", specifier = "~=1.4.0" },
 ]
 
 [[package]]

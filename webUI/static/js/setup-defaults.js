@@ -20,7 +20,7 @@ window.SetupDefaults = (() => {
         let loading = false;
         let loaded = false;
 
-    async function loadConfigDefaults() {
+        async function loadConfigDefaults() {
             loading = true;
 
             // Show loading overlay on Step 3 panel
@@ -133,8 +133,8 @@ window.SetupDefaults = (() => {
                                 hintBanner.innerHTML = `
                                     <span class="hint-icon" style="color: #f59e0b;">💎</span>
                                     <div>
-                                        <strong>强烈推荐：高性价比服务商</strong><br>
-                                        Deepseek 官方接口，为系统提供顶级代码与文本生成能力。强烈推荐您保留并配置此项。<br><span style="color: #f59e0b;">优势：极致性能与极低价格</span>
+                                        <strong>常用服务商</strong><br>
+                                        Deepseek 官方接口，为系统提供代码与文本生成能力。<br><span style="color: var(--error); font-weight: 600;">注意：如不使用，请务必点击右侧删除该项，API Key 留空将导致启动报错。
                                     </div>
                                     <a href="https://platform.deepseek.com/" target="_blank" class="btn btn-primary" style="margin-left: auto; text-decoration: none; font-size: 0.85rem; padding: 6px 14px; border-radius: var(--radius-sm); white-space: nowrap; box-shadow: var(--shadow-sm); background: #f59e0b; color: white; border: none;">获取 API Key 🔗</a>
                                 `;

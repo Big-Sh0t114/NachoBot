@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+import secrets
 import ssl
+import time
 from typing import Any, Dict, Optional, Set
+from urllib.parse import urlsplit
 
 import aiohttp
 from aiohttp import WSMsgType
@@ -18,7 +21,7 @@ from .connection_interface import (
     ClientConnectionInterface,
     ServerConnectionInterface,
 )
-from .log_utils import configure_uvicorn_logging, get_logger, get_uvicorn_log_config
+from .log_utils import configure_uvicorn_logging, get_logger, get_uvicorn_log_config, log_safe
 
 logger = get_logger()
 
@@ -36,6 +39,49 @@ _CONNECTION_ERROR_KEYWORDS = (
     "connection",
 )
 
+_ALLOWED_ORIGINS_ENV = "NACHOBOT_WS_ALLOWED_ORIGINS"
+
+
+def _normalize_browser_origin(origin: str) -> str | None:
+    """Normalize a browser Origin value for exact allow-list matching."""
+    try:
+        parsed = urlsplit(str(origin or "").strip())
+        port = parsed.port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        return None
+    host = parsed.hostname.lower()
+    if ":" in host:
+        host = f"[{host}]"
+    default_port = 443 if parsed.scheme == "https" else 80
+    suffix = "" if port in (None, default_port) else f":{port}"
+    return f"{parsed.scheme}://{host}{suffix}"
+
+
+def _browser_origin_allowed(origin: str | None) -> bool:
+    """Allow non-browser clients; require an exact opt-in for browser clients."""
+    if origin is None:
+        return True
+    normalized = _normalize_browser_origin(origin)
+    if normalized is None:
+        return False
+    configured = os.environ.get(_ALLOWED_ORIGINS_ENV, "")
+    allowed = {
+        item
+        for raw in configured.split(",")
+        if (item := _normalize_browser_origin(raw)) is not None
+    }
+    return any(secrets.compare_digest(normalized, expected) for expected in allowed)
+
 
 def _looks_like_connection_error(exc: BaseException) -> bool:
     """判断异常是否属于常见的连接断开场景。"""
@@ -45,6 +91,23 @@ def _looks_like_connection_error(exc: BaseException) -> bool:
     except Exception:  # pragma: no cover - 极少数情况下 str(exc) 失败
         return False
     return any(keyword in message for keyword in _CONNECTION_ERROR_KEYWORDS)
+
+
+def _create_client_ssl_context(
+    ca_file: Optional[str] = None,
+    *,
+    insecure_skip_verify: bool = False,
+) -> ssl.SSLContext:
+    """创建 WSS 客户端上下文；默认使用系统 CA 并校验主机名。"""
+    if not isinstance(insecure_skip_verify, bool):
+        raise ValueError("insecure_skip_verify 必须是布尔值")
+    ssl_context = ssl.create_default_context()
+    if ca_file:
+        ssl_context.load_verify_locations(ca_file)
+    if insecure_skip_verify:
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+    return ssl_context
 
 
 class WebSocketServer(BaseConnection, ServerConnectionInterface):
@@ -83,6 +146,7 @@ class WebSocketServer(BaseConnection, ServerConnectionInterface):
 
         self.active_websockets: Set[WebSocket] = set()
         self.platform_websockets: Dict[str, WebSocket] = {}
+        self.platform_runtime: Dict[str, Dict[str, Any]] = {}
 
         self.server: Optional[uvicorn.Server] = None
 
@@ -94,34 +158,46 @@ class WebSocketServer(BaseConnection, ServerConnectionInterface):
     def _setup_routes(self) -> None:
         @self.app.websocket(self.path)
         async def websocket_endpoint(websocket: WebSocket) -> None:
-            await websocket.accept()
-
             platform = websocket.headers.get("platform", "unknown")
+            safe_platform = log_safe(platform)
+
+            if not _browser_origin_allowed(websocket.headers.get("origin")):
+                logger.warning("拒绝平台 %s 的连接请求: 浏览器来源不受信任", safe_platform)
+                await websocket.close(code=1008, reason="不受信任的浏览器来源")
+                return
 
             if self.enable_token:
                 auth_header = websocket.headers.get("authorization")
                 if not auth_header or not await self.verify_token(auth_header):
-                    logger.warning(f"拒绝平台 {platform} 的连接请求: 令牌无效")
+                    logger.warning("拒绝平台 %s 的连接请求: 令牌无效", safe_platform)
                     await websocket.close(code=1008, reason="无效的令牌")
                     return
+
+            await websocket.accept()
 
             self.active_websockets.add(websocket)
 
             if platform != "unknown":
                 previous = self.platform_websockets.get(platform)
                 if previous and previous is not websocket:
-                    logger.warning(f"检测到平台 {platform} 已有连接，正在关闭旧连接以接受新连接")
+                    logger.warning("检测到平台 %s 已有连接，正在关闭旧连接以接受新连接", safe_platform)
                     try:
                         await previous.close(code=1000, reason="新的连接已建立")
                     except Exception:
                         logger.debug(
-                            f"关闭平台 {platform} 旧连接时出现异常", exc_info=True
+                            "关闭平台 %s 旧连接时出现异常", safe_platform, exc_info=True
                         )
                     finally:
                         self._remove_websocket(previous, platform, force=True)
 
                 self.platform_websockets[platform] = websocket
-                logger.info(f"平台 {platform} WebSocket 已连接")
+                previous_runtime = self.platform_runtime.get(platform, {})
+                self.platform_runtime[platform] = {
+                    "running": True,
+                    "started_at": time.monotonic(),
+                    "last_runtime_seconds": previous_runtime.get("last_runtime_seconds", 0.0),
+                }
+                logger.info("平台 %s WebSocket 已连接", safe_platform)
             else:
                 logger.info("收到未标记平台的 WebSocket 连接")
 
@@ -130,7 +206,7 @@ class WebSocketServer(BaseConnection, ServerConnectionInterface):
                     try:
                         message = await websocket.receive_json()
                     except ValueError as exc:
-                        logger.warning(f"平台 {platform} 收到无法解析的 JSON: {exc}")
+                        logger.warning("平台 %s 收到无法解析的 JSON: %s", safe_platform, log_safe(exc))
                         continue
 
                     if platform != "unknown":
@@ -141,19 +217,19 @@ class WebSocketServer(BaseConnection, ServerConnectionInterface):
                     task = asyncio.create_task(self.process_message(message))
                     self.add_background_task(task)
             except WebSocketDisconnect:
-                logger.info(f"平台 {platform} WebSocket 已断开")
+                logger.info("平台 %s WebSocket 已断开", safe_platform)
                 self._remove_websocket(websocket, platform, force=True)
             except ConnectionResetError:
-                logger.warning(f"平台 {platform} WebSocket 连接被重置")
+                logger.warning("平台 %s WebSocket 连接被重置", safe_platform)
                 self._remove_websocket(websocket, platform, force=True)
             except asyncio.CancelledError:
-                logger.debug(f"平台 {platform} WebSocket 任务被取消")
+                logger.debug("平台 %s WebSocket 任务被取消", safe_platform)
                 self._remove_websocket(websocket, platform, force=True)
             except Exception as exc:  # pylint: disable=broad-except
                 if _looks_like_connection_error(exc):
-                    logger.debug(f"平台 {platform} WebSocket 连接关闭: {exc}")
+                    logger.debug("平台 %s WebSocket 连接关闭: %s", safe_platform, log_safe(exc))
                 else:
-                    logger.exception(f"平台 {platform} WebSocket 处理异常")
+                    logger.exception("平台 %s WebSocket 处理异常", safe_platform)
                 self._remove_websocket(websocket, platform, force=True)
 
     def _remove_websocket(
@@ -183,15 +259,48 @@ class WebSocketServer(BaseConnection, ServerConnectionInterface):
         self.active_websockets.discard(websocket)
 
         if platform and self.platform_websockets.get(platform) is websocket:
+            runtime = self.platform_runtime.get(platform)
+            if runtime is not None:
+                started_at = runtime.get("started_at")
+                if isinstance(started_at, (int, float)):
+                    runtime["last_runtime_seconds"] = max(0.0, time.monotonic() - started_at)
+                runtime["running"] = False
+                runtime["started_at"] = None
             del self.platform_websockets[platform]
             logger.debug(f"已移除平台 {platform} 的 WebSocket 映射")
             return
 
         for key, value in list(self.platform_websockets.items()):
             if value is websocket:
+                runtime = self.platform_runtime.get(key)
+                if runtime is not None:
+                    started_at = runtime.get("started_at")
+                    if isinstance(started_at, (int, float)):
+                        runtime["last_runtime_seconds"] = max(0.0, time.monotonic() - started_at)
+                    runtime["running"] = False
+                    runtime["started_at"] = None
                 del self.platform_websockets[key]
                 logger.debug(f"移除了非直接映射的平台 {key} 的 WebSocket")
                 break
+
+    def get_platform_runtime_status(self) -> Dict[str, Dict[str, Any]]:
+        """获取各平台子节点的当前运行状态与最近一次运行时长。"""
+        now = time.monotonic()
+        result: Dict[str, Dict[str, Any]] = {}
+        for platform, runtime in self.platform_runtime.items():
+            running = bool(runtime.get("running", False))
+            started_at = runtime.get("started_at")
+            last_runtime_seconds = float(runtime.get("last_runtime_seconds", 0.0) or 0.0)
+            if running and isinstance(started_at, (int, float)):
+                current_runtime_seconds = max(0.0, now - started_at)
+            else:
+                current_runtime_seconds = 0.0
+            result[platform] = {
+                "running": running,
+                "last_runtime_seconds": last_runtime_seconds,
+                "current_runtime_seconds": current_runtime_seconds,
+            }
+        return result
 
     # ------------------------------------------------------------------
     # 安全与配置信息
@@ -199,7 +308,9 @@ class WebSocketServer(BaseConnection, ServerConnectionInterface):
     async def verify_token(self, token: str) -> bool:
         if not self.enable_token:
             return True
-        return token in self.valid_tokens
+        return any(
+            secrets.compare_digest(token, expected) for expected in self.valid_tokens
+        )
 
     def add_valid_token(self, token: str) -> None:
         self.valid_tokens.add(token)
@@ -393,7 +504,8 @@ class WebSocketClient(BaseConnection, ClientConnectionInterface):
         self.url: Optional[str] = None
         self.platform: Optional[str] = None
         self.token: Optional[str] = None
-        self.ssl_verify: Optional[str] = None
+        self.ca_file: Optional[str] = None
+        self.insecure_skip_verify: bool = False
         self.headers: Dict[str, str] = {}
         self.max_message_size: int = 104_857_600
 
@@ -417,14 +529,23 @@ class WebSocketClient(BaseConnection, ClientConnectionInterface):
         platform: str,
         *,
         token: Optional[str] = None,
-        ssl_verify: Optional[str] = None,
+        ssl_verify: Optional[str | bool] = None,
+        ca_file: Optional[str] = None,
+        insecure_skip_verify: bool = False,
         max_message_size: Optional[int] = None,
         heartbeat_interval: Optional[int] = None,
     ) -> None:
+        if not isinstance(insecure_skip_verify, bool):
+            raise ValueError("insecure_skip_verify 必须是布尔值")
         self.url = url
         self.platform = platform
         self.token = token
-        self.ssl_verify = ssl_verify
+        if isinstance(ssl_verify, str) and ssl_verify:
+            ca_file = ca_file or ssl_verify
+        elif ssl_verify is False:
+            insecure_skip_verify = True
+        self.ca_file = ca_file
+        self.insecure_skip_verify = insecure_skip_verify
 
         if max_message_size is not None:
             self.max_message_size = max_message_size
@@ -444,14 +565,14 @@ class WebSocketClient(BaseConnection, ClientConnectionInterface):
 
         ssl_context = None
         if self.url.startswith("wss://"):
-            ssl_context = ssl.create_default_context()
-            if self.ssl_verify:
-                logger.info(f"使用证书验证: {self.ssl_verify}")
-                ssl_context.load_verify_locations(self.ssl_verify)
-            else:
-                logger.warning("未提供证书验证，当前连接将跳过 SSL 校验")
-                ssl_context.check_hostname = False
-                ssl_context.verify_mode = ssl.CERT_NONE
+            if self.ca_file:
+                logger.info("使用自定义 CA 验证服务器证书")
+            if self.insecure_skip_verify:
+                logger.warning("已显式启用 insecure_skip_verify，WSS 证书和主机名将不校验")
+            ssl_context = _create_client_ssl_context(
+                self.ca_file,
+                insecure_skip_verify=self.insecure_skip_verify,
+            )
 
         try:
             timeout = aiohttp.ClientTimeout(total=30, connect=10)

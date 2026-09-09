@@ -45,9 +45,12 @@
         '💎': 'gem',
         '🔗': 'link',
         '✅': 'circle-check',
-        '?': 'circle-check',
-        '?': 'circle-check',
-        '?': 'circle-check',
+        '\u221A': 'circle-check',
+        '\u2713': 'circle-check',
+        '\u2714': 'circle-check',
+        '\u{1F3AE}': 'gamepad-2',
+        '\u{1F4CB}': 'clipboard',
+        '\u{1F4CA}': 'chart',
         '⚠': 'alert-triangle',
         '🔄': 'loader',
         '🎉': 'sparkles',
@@ -75,12 +78,12 @@
         '✕': 'x',
     };
 
-    const ICON_NAMES = new Set(Object.values(GLYPH_TO_ICON));
+    const ICON_NAMES = new Set([...Object.values(GLYPH_TO_ICON), 'play', 'square']);
     const SVG_NS = 'http://www.w3.org/2000/svg';
     const XLINK_NS = 'http://www.w3.org/1999/xlink';
     const ELIGIBLE_SELECTOR = [
         '.nav-icon', '.sidebar-search-icon', '.sidebar-collapse-button', '.sidebar-new-chat',
-        '.chat-mobile-history-button', '.chat-send-button', '.placeholder-icon', '.hint-icon',
+        '.chat-send-button', '.placeholder-icon', '.hint-icon',
         '.component-icon', '.path-check-icon', '.path-check-status', '.config-status-icon',
         '.check-icon', '.port-status-icon', '.deploy-item', '.deploy-item-icon', '.memory-stat-card .stat-icon',
         '.memory-empty', '.memory-loading', '.memory-error', '.memory-maintain-section',

@@ -1,4 +1,5 @@
 import asyncio
+from collections import deque
 import time
 import traceback
 import random
@@ -46,7 +47,13 @@ from src.chat.focus.models import (
 from src.chat.focus.reply_context import acquire_reply_context_request, release_reply_context
 from src.chat.focus.reply_delivery import settle_reply_context_delivery
 from src.chat.focus.message_repository import load_message_batch
-from src.chat.focus.switch_action import SWITCH_CHAT_ACTION, execute_switch_chat
+from src.chat.focus.switch_action import (
+    SWITCH_CHAT_ACTION,
+    SwitchDisposition,
+    classify_switch_failure_reason,
+    classify_switch_result,
+    execute_switch_chat,
+)
 from src.chat.utils.chat_message_builder import (
     build_readable_messages_with_id,
     get_raw_msg_before_timestamp_with_chat,
@@ -115,9 +122,10 @@ class BrainChatting:
         # 循环控制内部状态
         self.running: bool = False
         self._loop_task: Optional[asyncio.Task] = None  # 主循环任务
+        self._in_flight_operations: int = 0
 
         # 添加循环信息管理相关的属性
-        self.history_loop: List[CycleDetail] = []
+        self.history_loop: deque[CycleDetail] = deque(maxlen=200)
         self._cycle_counter = 0
         self._current_cycle_detail: CycleDetail = None  # type: ignore
 
@@ -159,9 +167,7 @@ class BrainChatting:
             logger.info(f"{self.log_prefix} BrainChatting 启动完成")
 
         except Exception as e:
-            # 启动失败时重置状态
-            self.running = False
-            self._loop_task = None
+            await self.stop()
             logger.error(f"{self.log_prefix} BrainChatting 启动失败: {e}")
             raise
 
@@ -345,11 +351,16 @@ class BrainChatting:
             action_data=action_data,
             reasoning=reasoning,
         )
+        disposition = classify_switch_result(switch_result)
         if switch_result.success:
             logger.info(f"{self.log_prefix} [Focus Gate] terminal switch without Brain Planner")
             return True
-        logger.warning(f"{self.log_prefix} [Focus Gate] switch failed: {switch_result.reason}")
-        return False
+        logger.warning(
+            f"{self.log_prefix} [Focus Gate] switch failed; "
+            f"{'retrying' if disposition is SwitchDisposition.RETRY else 'dropping event'}: "
+            f"{switch_result.reason}"
+        )
+        return disposition is not SwitchDisposition.RETRY
 
     async def _loopbody(self, focus_turn: FocusTurn | None = None):  # sourcery skip: hoist-if-from-if
         if focus_turn is not None:
@@ -515,8 +526,6 @@ class BrainChatting:
     ) -> bool:  # sourcery skip: merge-else-if-into-elif, remove-redundant-if
         if recent_messages_list is None:
             recent_messages_list = []
-        reply_text = ""  # 初始化reply_text变量，避免UnboundLocalError
-
         # 刷新上下文以确保获取最新的模板信息
         get_chat_manager().get_stream(self.stream_id)
         context = getattr(self.chat_stream, "context", None)
@@ -719,7 +728,6 @@ class BrainChatting:
 
             # 处理执行结果
             reply_loop_info = None
-            reply_text_from_reply = ""
             action_success = False
             action_reply_text = ""
 
@@ -734,7 +742,6 @@ class BrainChatting:
                 elif result["action_type"] in ["reply", "file_edit"]:
                     if result["success"]:
                         reply_loop_info = result["loop_info"]
-                        reply_text_from_reply = result["reply_text"]
                     else:
                         logger.debug(f"{self.log_prefix} 回复动作未执行（可能被中断或生成失败）")
 
@@ -749,7 +756,6 @@ class BrainChatting:
                         "taken_time": time.time(),
                     }
                 )
-                reply_text = reply_text_from_reply
             else:
                 # 没有回复信息，构建纯动作的loop_info
                 loop_info = {
@@ -762,7 +768,6 @@ class BrainChatting:
                         "taken_time": time.time(),
                     },
                 }
-                reply_text = action_reply_text
 
             self.end_cycle(loop_info, cycle_timers)
             self.print_cycle_info(cycle_timers)
@@ -782,7 +787,7 @@ class BrainChatting:
         self._focus_turn_interrupted = False
         try:
             with bind_lease(turn.lease):
-                success = await self._loopbody(turn)
+                success = await self._run_tracked_loopbody(turn)
             if not await focus_coordinator.is_current(turn.lease):
                 status = TurnStatus.SWITCHED
             elif self._focus_turn_interrupted or self._planner_interrupt_requested:
@@ -849,12 +854,20 @@ class BrainChatting:
             logger.info(f"{self.log_prefix} Focus chat loop stopped")
         logger.info(f"{self.log_prefix} Focus chat loop ended")
 
+    async def _run_tracked_loopbody(self, focus_turn: FocusTurn | None = None) -> bool:
+        """记录 Planner/动作执行在途状态，防止运行时被 TTL/LRU 回收。"""
+        self._in_flight_operations += 1
+        try:
+            return await self._loopbody(focus_turn)
+        finally:
+            self._in_flight_operations = max(0, self._in_flight_operations - 1)
+
     async def _normal_chat_loop(self):
         """主循环，持续进行计划并可能回复消息，直到被外部取消。"""
         try:
             while self.running:
                 # 主循环
-                success = await self._loopbody()
+                success = await self._run_tracked_loopbody()
                 await asyncio.sleep(0.1)
                 if not success:
                     break
@@ -1077,13 +1090,19 @@ class BrainChatting:
                 if action_planner_info.action_type == SWITCH_CHAT_ACTION:
                     lease = current_context_lease()
                     if lease is None or lease.chat_id != self.stream_id:
+                        reason = "switch_chat requires the current Focus turn lease"
+                        disposition = classify_switch_failure_reason(reason)
+                        logger.warning(
+                            f"{self.log_prefix} Focus switch_chat failed; "
+                            f"{'retrying' if disposition is SwitchDisposition.RETRY else 'dropping event'}: {reason}"
+                        )
                         return {
                             "action_type": SWITCH_CHAT_ACTION,
                             "success": False,
                             "reply_text": "",
                             "terminal": True,
-                            "retry": False,
-                            "reason": "switch_chat requires the current Focus turn lease",
+                            "retry": disposition is SwitchDisposition.RETRY,
+                            "reason": reason,
                         }
                     switch_result = await execute_switch_chat(
                         focus_coordinator,
@@ -1091,23 +1110,21 @@ class BrainChatting:
                         action_data=action_planner_info.action_data or {},
                         reasoning=action_planner_info.reasoning or "",
                     )
-                    retryable = switch_result.reason.startswith(
-                        (
-                            "cannot resolve Focus events",
-                            "target runtime preparation failed",
-                            "handoff persistence failed",
-                            "switch compare-and-set failed",
-                            "Focus event revision changed",
+                    disposition = classify_switch_result(switch_result)
+                    if switch_result.success:
+                        logger.info(f"{self.log_prefix} Focus switch_chat succeeded: {switch_result.reason}")
+                    else:
+                        logger.warning(
+                            f"{self.log_prefix} Focus switch_chat failed; "
+                            f"{'retrying' if disposition is SwitchDisposition.RETRY else 'dropping event'}: "
+                            f"{switch_result.reason}"
                         )
-                    )
-                    log = logger.info if switch_result.success else logger.warning
-                    log(f"{self.log_prefix} Focus switch_chat: {switch_result.reason}")
                     return {
                         "action_type": SWITCH_CHAT_ACTION,
                         "success": switch_result.success,
                         "reply_text": "",
                         "terminal": True,
-                        "retry": retryable,
+                        "retry": disposition is SwitchDisposition.RETRY,
                         "reason": switch_result.reason,
                         "target_chat_id": switch_result.target_chat_id,
                         "handoff_id": switch_result.handoff_id,

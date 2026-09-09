@@ -6,15 +6,17 @@
 - 多直播间弹幕接收 / 发送（支持弹幕回复）。
 - 评论回复发送（支持所有评论类型）。
 - 回复通知轮询与转发。
-- 私信轮询与发送（仅支持文本）。
+- 私信轮询与发送，并可通过 Core 处理私信图片。
 - 本地麦克风连续 VAD / PTT 流式语音识别。
+- 直播场景的二阶段联网查询在适配器内完成，不再向 Core 注入 Bilibili 专属搜索链路。
+- 活动窗口截图 VLM 与独立 Live2D WebSocket 联动。
 - 二维码登录辅助工具，用于更新 `config.toml` 中的 Cookies。
 
 ## 安装与运行
 1. 安装 [uv](https://docs.astral.sh/uv/) 并同步依赖：
    - `uv sync`
 2. 编辑 `config.toml`，填写 `SESSDATA`、`bili_jct`、`buvid3` 以及直播间 ID。
-3. 启动独立的 `NachoBot-Live2D-Adapter`，或在工作区根目录运行 `launch_bilibili.bat` 由脚本自动启动。
+3. 如需 Live2D，设置 `enable_live2D = true`；根目录的 `launch_bilibili.bat` 会复用或启动独立 Live2D Adapter。
 4. 单独启动本适配器：
    - `uv run python main.py`
 
@@ -111,7 +113,7 @@ Multimodal-Adapter 的共享 `StreamingASR`。连续模式由 VAD 控制流的�
 - `private_message.auto_session_refresh_seconds` 控制会话列表的刷新频率（秒）。
 
 ## 二维码登录
-- 运行：`python qr_login.py`
+- 运行：`uv run python qr_login.py`
 - 该脚本会将 `SESSDATA`、`bili_jct` 和 `DedeUserID` 写入 `config.toml`。
 
 ## 指令用法
@@ -143,4 +145,6 @@ docker compose up -d
 - **屏幕监控**：本适配器的 Docker 镜像使用 `Xvfb` 支持无显示设备环境下的 `mss` 截屏。
 - **Live2D**：渲染不再由本容器负责。请单独部署 `NachoBot-Live2D-Adapter`，并将 `live.live2d_url` 指向其可访问的 WebSocket 地址；容器内不能使用 `127.0.0.1` 访问宿主机上的独立适配器。
 - **配置文件**：容器挂载使用宿主机的 `config.toml` 和日志目录，修改配置后重启容器即可生效。
+- **构建上下文**：Compose 通过 `additional_contexts` 注入相邻的 `NachoBot/ncnk_message`、多模态源码、配置和模型目录；核心配置目录以只读卷挂载。
+- **Linux 音频**：Linux 容器不提供 Windows `winsound`，因此本地播放回退会跳过；请配置远程 Live2D 播放，或在宿主机运行本适配器以使用本地音频设备。
 - **核心连接**：确保 `NachoBot` 核心服务已启动在 `nacho_bot` 网络中，且 `config.toml` 里的 `nachobot_server.host` 设置为 `core`（或宿主机 IP）。

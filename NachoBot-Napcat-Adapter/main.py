@@ -13,6 +13,7 @@ if (_NACHOBOT_PATH / "ncnk_message").is_dir():
         sys.path.insert(1, nachobot_path)
 
 import websockets as Server
+from src import version
 from src.logger import logger
 from src.recv_handler.message_handler import message_handler
 from src.recv_handler.meta_event_handler import meta_event_handler
@@ -22,6 +23,9 @@ from src.send_handler.nc_sending import nc_message_sender
 from src.config import global_config
 from src.mmc_com_layer import mmc_start_com, mmc_stop_com, router
 from src.response_pool import put_response, check_timeout_response
+from src.listen_address import resolve_listen_address
+
+logger.info(f"版本\n\nNachobot-Napcat-Adapter 版本: {version}\n喜欢的话点个star喵~\n")
 
 message_queue = asyncio.Queue()
 
@@ -149,11 +153,16 @@ def check_napcat_server_token(conn, request):
         )
     return None
 
+
 async def napcat_server():
+    listen_host, listen_port = resolve_listen_address(
+        global_config.napcat_server.host,
+        global_config.napcat_server.port,
+    )
     logger.info("正在启动adapter...")
-    async with Server.serve(message_recv, global_config.napcat_server.host, global_config.napcat_server.port, max_size=2**26, process_request=check_napcat_server_token) as server:
+    async with Server.serve(message_recv, listen_host, listen_port, max_size=2**26, process_request=check_napcat_server_token) as server:
         logger.info(
-            f"Adapter已启动，监听地址: ws://{global_config.napcat_server.host}:{global_config.napcat_server.port}"
+            f"Adapter已启动，监听地址: ws://{listen_host}:{listen_port}"
         )
         await server.serve_forever()
 

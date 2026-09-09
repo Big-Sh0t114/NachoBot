@@ -4,6 +4,7 @@ Main entry point: REST API + WebSocket endpoints + static file serving.
 """
 
 import asyncio
+import inspect
 import json
 import logging
 import socket
@@ -12,9 +13,9 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 from config_manager import ConfigManager
@@ -27,9 +28,30 @@ import memory_manager
 from music_library import build_music_playlist
 from chat_backend import ChatBackendError, chat_backend
 from tts_manager import TTSGenerationError, TTSManager, TTSUnavailableError
-from setup_manager import EnvironmentChecker, ConfigInitializer, DependencyInstaller, PathVerifier, NapCatConfigurator
+from setup_manager import (
+    BilibiliLoginNotReady,
+    ConfigInitializer,
+    DependencyInstaller,
+    EnvironmentChecker,
+    NapCatConfigurator,
+    PathVerifier,
+    bilibili_login_manager,
+)
+from security import WebUISecurity, validate_webui_config_raw
+from webui_config import CONFIG_PATH, webui_config
+from multimodal_runtime import MultimodalRuntimeManager
 
 logger = logging.getLogger("webui")
+
+
+def _log_safe(value: object, max_len: int = 200) -> str:
+    text = str(value)
+    text = text.replace("\r", "\\r").replace("\n", "\\n")
+    text = "".join(ch if ch >= " " and ch != "\x7f" else "?" for ch in text)
+    if len(text) > max_len:
+        return text[:max_len].rstrip() + "...[truncated]"
+    return text
+
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -40,26 +62,57 @@ plugin_mgr = PluginManager()
 db_mgr = DatabaseManager()
 knowledge_mgr = KnowledgeManager()
 tts_mgr = TTSManager()
+webui_security = WebUISecurity(webui_config)
+
+
+def _validate_webui_config_raw(raw: str) -> None:
+    """Validate the effective WebUI bind/auth pair before it reaches disk."""
+    try:
+        validate_webui_config_raw(
+            raw,
+            runtime_bind_host=webui_security.runtime_bind_host,
+        )
+    except RuntimeError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifecycle."""
+    startup = getattr(bilibili_login_manager, "startup", None)
+    if startup is not None:
+        startup_result = startup()
+        if inspect.isawaitable(startup_result):
+            await startup_result
+    # Validate the file itself before trusting the parsed/merged view.  This
+    # catches legacy persisted auth_token values even when the current bind is
+    # loopback, and protects startup from a raw config that hot-reload never
+    # touched.
+    if CONFIG_PATH.exists():
+        validate_webui_config_raw(
+            CONFIG_PATH.read_text(encoding="utf-8"),
+            runtime_bind_host=webui_security.runtime_bind_host,
+        )
+    webui_security.ensure_safe_bind()
     await tts_mgr.start()
     try:
         yield
     finally:
+        await bilibili_login_manager.shutdown()
         await tts_mgr.close()
         await chat_backend.close()
-        # Shutdown: stop all running services
-        for sid in list(process_mgr.states.keys()):
-            try:
-                await process_mgr.stop_service(sid)
-            except Exception:
-                pass
+        await process_mgr.shutdown()
 
 
 app = FastAPI(title="NachoBot WebUI", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def protect_control_api(request: Request, call_next):
+    rejection = webui_security.authorize_http(request)
+    if rejection is not None:
+        return rejection
+    return await call_next(request)
 
 # Mount static and resources files
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -107,13 +160,22 @@ async def list_configs():
 @app.get("/api/configs/{file_id}")
 async def get_config(file_id: str):
     try:
-        data = config_mgr.read_config(file_id, mask_sensitive=True)
         raw = config_mgr.read_config_raw(file_id)
-        return {"data": data, "raw": raw}
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+    try:
+        data = config_mgr.read_config(file_id, mask_sensitive=True)
+    except Exception as e:
+        logger.warning("Failed to parse config %s: %s", _log_safe(file_id), e)
+        data = None
+
+    return {
+        "data": data,
+        "raw": raw,
+    }
 
 
 class ConfigUpdate(BaseModel):
@@ -123,33 +185,74 @@ class ConfigUpdate(BaseModel):
 @app.put("/api/configs/{file_id}")
 async def update_config(file_id: str, body: ConfigUpdate):
     try:
-        entry = config_mgr._find(file_id)
-        full = config_mgr.root / entry["path"]
-        # Backup first
-        config_mgr._backup(full)
-        # Write raw text directly
-        full.write_text(body.raw, encoding="utf-8")
+        if file_id != "env":
+            import tomlkit
+            try:
+                tomlkit.parse(body.raw)
+            except Exception as e:
+                raise HTTPException(400, f"配置存在错误，保存被拒绝 {e}")
+        validator = _validate_webui_config_raw if file_id == "webui_config" else None
+        config_mgr.write_config_raw(file_id, body.raw, validator=validator)
         # Hot-reload configurations & services
         if file_id == "webui_config":
-            from webui_config import webui_config
             webui_config.reload()
 
         from process_manager import _register_services
         _register_services()
         return {"status": "ok"}
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(400, str(e))
-    except Exception as e:
-        raise HTTPException(500, str(e))
+    except Exception:
+        logger.exception("Config update failed: file_id=%s", _log_safe(file_id))
+        raise HTTPException(500, "配置保存失败")
 
 
 @app.post("/api/configs/{file_id}/backup")
 async def backup_config(file_id: str):
     try:
         bak = config_mgr.backup_config(file_id)
+        if not bak:
+            raise ValueError("当前配置文件包含语法错误，为了防止污染记录，已拒绝将其备份")
         return {"status": "ok", "backup": bak}
     except (ValueError, FileNotFoundError) as e:
         raise HTTPException(400, str(e))
+
+@app.get("/api/configs/{file_id}/backups")
+async def list_config_backups(file_id: str):
+    try:
+        backups = config_mgr.list_backups(file_id)
+        return {"status": "ok", "backups": backups}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"获取备份列表失败: {e}")
+
+class RestoreBackupRequest(BaseModel):
+    backup_file: str
+
+@app.post("/api/configs/{file_id}/restore")
+async def restore_config_backup(file_id: str, body: RestoreBackupRequest):
+    try:
+        validator = _validate_webui_config_raw if file_id == "webui_config" else None
+        bak_name = config_mgr.restore_backup(
+            file_id,
+            body.backup_file,
+            validator=validator,
+        )
+        if file_id == "webui_config":
+            webui_config.reload()
+        from process_manager import _register_services
+        _register_services()
+        return {"status": "ok", "backup": bak_name}
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        logger.exception("Restore failed")
+        raise HTTPException(500, f"恢复备份失败: {e}")
 
 
 # =========================================================================
@@ -167,10 +270,42 @@ async def get_services():
     return process_mgr.get_all_statuses()
 
 
+@app.get("/api/launch")
+async def get_launch_status():
+    return process_mgr.get_launch_status()
+
+
+class LaunchStartRequest(BaseModel):
+    profile: str
+    runtime: str | None = None
+
+
+@app.post("/api/launch/start")
+async def start_launch(body: LaunchStartRequest):
+    try:
+        process_mgr.request_start_launch(body.profile, body.runtime)
+        return {
+            "status": "starting",
+            "profile": body.profile.strip().lower(),
+            "runtime": process_mgr.get_launch_status()["runtime"],
+        }
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/launch/stop")
+async def stop_launch():
+    try:
+        process_mgr.request_stop_launch()
+        return {"status": "stopping"}
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(400, str(e))
+
+
 @app.post("/api/groups/{group_id}/start")
 async def start_group(group_id: str):
     try:
-        asyncio.create_task(process_mgr.start_group(group_id))
+        process_mgr.request_start_group(group_id)
         return {"status": "starting", "group": group_id}
     except (ValueError, RuntimeError) as e:
         raise HTTPException(400, str(e))
@@ -179,7 +314,7 @@ async def start_group(group_id: str):
 @app.post("/api/groups/{group_id}/stop")
 async def stop_group(group_id: str):
     try:
-        asyncio.create_task(process_mgr.stop_group(group_id))
+        process_mgr.request_stop_group(group_id)
         return {"status": "stopping", "group": group_id}
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -188,18 +323,18 @@ async def stop_group(group_id: str):
 @app.post("/api/services/{service_id}/start")
 async def start_service(service_id: str):
     try:
-        asyncio.create_task(process_mgr.start_service(service_id))
+        process_mgr.request_start_service(service_id)
         return {"status": "starting", "service": service_id}
-    except ValueError as e:
+    except (ValueError, RuntimeError) as e:
         raise HTTPException(400, str(e))
 
 
 @app.post("/api/services/{service_id}/stop")
 async def stop_service(service_id: str):
     try:
-        asyncio.create_task(process_mgr.stop_service(service_id))
+        process_mgr.request_stop_service(service_id)
         return {"status": "stopping", "service": service_id}
-    except ValueError as e:
+    except (ValueError, RuntimeError) as e:
         raise HTTPException(400, str(e))
 
 
@@ -224,6 +359,7 @@ async def send_service_input(service_id: str, body: ServiceInput):
 class ChatMessageRequest(BaseModel):
     conversation_id: str = ""
     message: str
+    request_message_id: str = ""
     user_id: str = "webui-user"
     user_name: str = "WebUI"
 
@@ -275,6 +411,7 @@ async def chat_message(body: ChatMessageRequest):
             text=body.message,
             user_id=body.user_id,
             user_name=body.user_name,
+            request_message_id=body.request_message_id,
         )
     except ChatBackendError as e:
         raise HTTPException(e.status_code, str(e))
@@ -297,22 +434,23 @@ async def delete_chat_conversation(conversation_id: str):
         chat_backend.forget_conversation(conversation_id)
         logger.info(
             "Deleted WebUI conversation %s: backend_user_id=%s, deleted_rows=%s",
-            conversation_id,
-            backend_user_id,
+            _log_safe(conversation_id),
+            _log_safe(backend_user_id),
             result.get("deleted_rows", 0),
         )
         return result
     except ValueError as e:
         raise HTTPException(409, str(e))
-    except Exception as e:
-        logger.exception("Failed to delete WebUI conversation %s", conversation_id)
-        raise HTTPException(500, f"删除会话数据库记录失败: {e}")
+    except Exception:
+        logger.exception("Failed to delete WebUI conversation %s", _log_safe(conversation_id))
+        raise HTTPException(500, "删除会话数据库记录失败")
 
 
 @app.websocket("/ws/chat/{conversation_id}")
 async def ws_chat(ws: WebSocket, conversation_id: str):
     """Push each streamed Core reply into the matching WebUI conversation."""
-    await ws.accept()
+    if not await webui_security.authorize_websocket(ws):
+        return
     queue = chat_backend.subscribe(conversation_id)
 
     try:
@@ -331,7 +469,12 @@ async def ws_chat(ws: WebSocket, conversation_id: str):
                 if received["type"] == "websocket.disconnect":
                     break
             if event_task in done:
-                await ws.send_json(event_task.result())
+                event = event_task.result()
+                await ws.send_json(event)
+                chat_backend.acknowledge_live_delivery(
+                    conversation_id,
+                    str(event.get("message_id") or ""),
+                )
     except WebSocketDisconnect:
         pass
     finally:
@@ -345,7 +488,8 @@ async def ws_chat(ws: WebSocket, conversation_id: str):
 
 @app.websocket("/ws/logs/{service_id}")
 async def ws_logs(ws: WebSocket, service_id: str):
-    await ws.accept()
+    if not await webui_security.authorize_websocket(ws):
+        return
 
     # Send historical logs
     history = process_mgr.get_log_history(service_id)
@@ -389,11 +533,22 @@ async def list_plugins():
 @app.get("/api/plugins/{plugin_id}/config")
 async def get_plugin_config(plugin_id: str):
     try:
-        data = plugin_mgr.read_plugin_config(plugin_id)
         raw = plugin_mgr.read_plugin_config_raw(plugin_id)
-        return {"data": data, "raw": raw}
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    try:
+        data = plugin_mgr.read_plugin_config(plugin_id)
+    except Exception as e:
+        logger.warning("Failed to parse plugin config %s: %s", _log_safe(plugin_id), e)
+        data = None
+
+    return {
+        "data": data,
+        "raw": raw,
+    }
 
 
 class PluginConfigUpdate(BaseModel):
@@ -403,11 +558,21 @@ class PluginConfigUpdate(BaseModel):
 @app.put("/api/plugins/{plugin_id}/config")
 async def update_plugin_config(plugin_id: str, body: PluginConfigUpdate):
     try:
-        config_path = plugin_mgr.plugins_dir / plugin_id / "config.toml"
-        config_path.write_text(body.raw, encoding="utf-8")
+        import tomlkit
+        try:
+            tomlkit.parse(body.raw)
+        except Exception as e:
+            raise HTTPException(400, f"插件配置存在错误，保存被拒绝 {e}")
+
+        plugin_mgr.write_plugin_config_raw(plugin_id, body.raw)
         return {"status": "ok"}
-    except Exception as e:
-        raise HTTPException(500, str(e))
+    except HTTPException:
+        raise
+    except (FileNotFoundError, ValueError) as e:
+        raise HTTPException(400, str(e))
+    except Exception:
+        logger.exception("Plugin config update failed: plugin_id=%s", _log_safe(plugin_id))
+        raise HTTPException(500, "插件配置保存失败")
 
 
 # =========================================================================
@@ -440,24 +605,26 @@ async def get_status():
 @app.get("/api/db/stats")
 async def db_stats():
     try:
-        return db_mgr.get_stats()
-    except Exception as e:
-        raise HTTPException(500, str(e))
+        return await asyncio.to_thread(db_mgr.get_stats)
+    except Exception:
+        logger.exception("Database stats failed")
+        raise HTTPException(500, "数据库统计读取失败")
 
 
 @app.get("/api/db/tables")
 async def db_list_tables():
     try:
-        return db_mgr.list_tables()
-    except Exception as e:
-        raise HTTPException(500, str(e))
+        return await asyncio.to_thread(db_mgr.list_tables)
+    except Exception:
+        logger.exception("Database table list failed")
+        raise HTTPException(500, "数据库表列表读取失败")
 
 
 @app.get("/api/db/tables/{table_name}")
 async def db_query_table(
     table_name: str,
-    page: int = 1,
-    size: int = 50,
+    page: int = Query(1, ge=1, le=1_000_000),
+    size: int = Query(50, ge=1, le=200),
     search: str = "",
     sort_by: str = "id",
     sort_order: str = "desc",
@@ -467,27 +634,46 @@ async def db_query_table(
         filter_dict = None
         if filters:
             filter_dict = json.loads(filters)
-        return db_mgr.query_table(table_name, page, size, search, sort_by, sort_order, filter_dict)
+            if not isinstance(filter_dict, dict):
+                raise ValueError("filters 必须是 JSON 对象")
+        return await asyncio.to_thread(
+            db_mgr.query_table,
+            table_name,
+            page,
+            size,
+            search,
+            sort_by,
+            sort_order,
+            filter_dict,
+        )
+    except json.JSONDecodeError as e:
+        raise HTTPException(400, f"filters 不是有效 JSON: {e.msg}")
     except ValueError as e:
-        raise HTTPException(404, str(e))
-    except Exception as e:
-        raise HTTPException(500, str(e))
+        raise HTTPException(400, str(e))
+    except Exception:
+        logger.exception("Database table query failed: table=%s", _log_safe(table_name))
+        raise HTTPException(500, "数据库表查询失败")
 
 
 @app.get("/api/db/tables/{table_name}/columns/{column}/values")
 async def db_column_values(table_name: str, column: str):
     try:
-        return db_mgr.get_column_values(table_name, column)
+        return await asyncio.to_thread(db_mgr.get_column_values, table_name, column)
     except ValueError as e:
         raise HTTPException(404, str(e))
-    except Exception as e:
-        raise HTTPException(500, str(e))
+    except Exception:
+        logger.exception(
+            "Database column values query failed: table=%s column=%s",
+            _log_safe(table_name),
+            _log_safe(column),
+        )
+        raise HTTPException(500, "数据库列值读取失败")
 
 
 @app.get("/api/db/tables/{table_name}/{row_id}")
 async def db_get_row(table_name: str, row_id: int):
     try:
-        return db_mgr.get_row(table_name, row_id)
+        return await asyncio.to_thread(db_mgr.get_row, table_name, row_id)
     except ValueError as e:
         raise HTTPException(404, str(e))
 
@@ -499,7 +685,7 @@ class RowUpdate(BaseModel):
 @app.put("/api/db/tables/{table_name}/{row_id}")
 async def db_update_row(table_name: str, row_id: int, body: RowUpdate):
     try:
-        db_mgr.update_row(table_name, row_id, body.data)
+        await asyncio.to_thread(db_mgr.update_row, table_name, row_id, body.data)
         return {"status": "ok"}
     except PermissionError as e:
         raise HTTPException(403, str(e))
@@ -510,7 +696,7 @@ async def db_update_row(table_name: str, row_id: int, body: RowUpdate):
 @app.delete("/api/db/tables/{table_name}/{row_id}")
 async def db_delete_row(table_name: str, row_id: int):
     try:
-        db_mgr.delete_row(table_name, row_id)
+        await asyncio.to_thread(db_mgr.delete_row, table_name, row_id)
         return {"status": "ok"}
     except PermissionError as e:
         raise HTTPException(403, str(e))
@@ -630,8 +816,9 @@ async def memory_stats():
     """Get memory store statistics."""
     try:
         return await memory_manager.get_stats(core_running=_is_core_running())
-    except Exception as e:
-        raise HTTPException(500, str(e))
+    except Exception:
+        logger.exception("Memory stats endpoint failed")
+        raise HTTPException(500, "长期记忆统计失败")
 
 
 class MemorySearchRequest(BaseModel):
@@ -650,8 +837,9 @@ async def memory_search(body: MemorySearchRequest):
             limit=body.limit,
             core_running=_is_core_running(),
         )
-    except Exception as e:
-        raise HTTPException(500, str(e))
+    except Exception:
+        logger.exception("Memory search endpoint failed")
+        raise HTTPException(500, "长期记忆检索失败")
 
 
 class MemoryMaintainRequest(BaseModel):
@@ -670,8 +858,9 @@ async def memory_maintain(body: MemoryMaintainRequest):
             reason=body.reason,
             core_running=_is_core_running(),
         )
-    except Exception as e:
-        raise HTTPException(500, str(e))
+    except Exception:
+        logger.exception("Memory maintain endpoint failed")
+        raise HTTPException(500, "长期记忆维护失败")
 
 
 # =========================================================================
@@ -703,6 +892,8 @@ class SetupWizardData(BaseModel):
     providers: list[dict] = []
     models: list[dict] = []
     tts: dict = {}
+    discord: dict = {}
+    bilibili: dict = {}
     env: dict = {}
 
 
@@ -715,15 +906,86 @@ async def setup_generate_configs(body: SetupWizardData):
             "[Setup] generate_configs called: components=%s, providers=%d, models=%d",
             data.get("components"), len(data.get("providers", [])), len(data.get("models", []))
         )
-        result = ConfigInitializer.generate_configs(data)
+        # Every config-generation request must first stop and invalidate any
+        # prior QR helper.  This protects non-Bilibili runs from racing an old
+        # helper and keeps unproven process/QR cleanup fail-closed before any
+        # target write begins.
+        async with bilibili_login_manager.config_generation():
+            result = ConfigInitializer.generate_configs(data)
+        if "bilibili" in set(data.get("components", [])):
+            bilibili_login_manager.mark_config_generation(result)
+        else:
+            # A non-Bilibili run must not make an earlier/incomplete Bilibili
+            # deployment look ready for QR login.
+            bilibili_login_manager.mark_config_generation(False)
         logger.info(
-            "[Setup] generate_configs result: generated=%d, errors=%s",
-            len(result.get("generated", [])), result.get("errors", [])
+            "[Setup] generate_configs result: generated=%d, error_count=%d",
+            len(result.get("generated", [])), len(result.get("errors", []))
         )
         return result
-    except Exception as e:
+    except Exception:
         logger.exception("[Setup] generate_configs failed")
-        raise HTTPException(500, str(e))
+        raise HTTPException(500, "配置生成失败")
+
+
+@app.post("/api/setup/bilibili/login/start")
+async def setup_bilibili_login_start():
+    """Start a fresh authenticated Bilibili QR login generation."""
+    try:
+        return await bilibili_login_manager.start(require_ready=True)
+    except BilibiliLoginNotReady as exc:
+        # This message contains no config or credential content.
+        raise HTTPException(409, str(exc)) from exc
+    except (FileNotFoundError, RuntimeError):
+        raise HTTPException(409, "Bilibili 登录尚未准备好，请重试")
+    except Exception:
+        logger.exception("[Setup] Bilibili login start failed")
+        raise HTTPException(500, "Bilibili 登录启动失败")
+
+
+@app.get("/api/setup/bilibili/login/status/{job_id}")
+async def setup_bilibili_login_status(job_id: str):
+    """Return safe status for the current-generation login job."""
+    result = await bilibili_login_manager.status(job_id)
+    if result is None:
+        raise HTTPException(
+            404,
+            "登录任务不存在或已过期",
+            headers={"Cache-Control": "no-store"},
+        )
+    return JSONResponse(content=result, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/setup/bilibili/login/status")
+async def setup_bilibili_login_status_query(job_id: str = Query(...)):
+    """Query-form compatibility alias for status polling."""
+    return await setup_bilibili_login_status(job_id)
+
+
+@app.get("/api/setup/bilibili/login/qr/{job_id}")
+async def setup_bilibili_login_qr(job_id: str):
+    """Serve only the complete QR image for the current login job."""
+    payload = await bilibili_login_manager.read_qr(job_id)
+    if payload is None:
+        raise HTTPException(
+            404,
+            "二维码不存在或已过期",
+            headers={"Cache-Control": "no-store"},
+        )
+    return Response(
+        content=payload,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "no-store",
+            "Pragma": "no-cache",
+        },
+    )
+
+
+@app.get("/api/setup/bilibili/login/qr")
+async def setup_bilibili_login_qr_query(job_id: str = Query(...)):
+    """Query-form compatibility alias for QR retrieval."""
+    return await setup_bilibili_login_qr(job_id)
 
 
 class VerifyPathRequest(BaseModel):
@@ -733,16 +995,42 @@ class VerifyPathRequest(BaseModel):
 
 @app.post("/api/setup/verify-path")
 async def setup_verify_path(body: VerifyPathRequest):
-    """Verify an external dependency path."""
+    """Verify a setup dependency or project-managed runtime."""
     result = PathVerifier.verify_path(body.type, body.path)
     return result
 
 
+@app.post("/api/setup/bootstrap/git")
+async def setup_bootstrap_git():
+    """Ensure Git is available before automated deployment."""
+    result = await DependencyInstaller.ensure_git()
+    if result.get("status") != "ok":
+        logger.warning("[Setup] Git bootstrap failed: %s", result.get("message"))
+    else:
+        logger.info("[Setup] Git bootstrap ready: %s", result.get("message"))
+    return result
+
+
 @app.get("/api/setup/deps/tasks")
-async def setup_dep_tasks(components: str = ""):
-    """Return install tasks for selected components."""
+async def setup_dep_tasks(components: str = "", multimodal_runtime: str = "gpu"):
+    """Return install tasks for selected components and Multimodal runtime."""
     comp_list = [c.strip() for c in components.split(",") if c.strip()]
-    return DependencyInstaller.get_install_tasks(comp_list)
+    try:
+        return DependencyInstaller.get_install_tasks(comp_list, multimodal_runtime)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/setup/deps/multimodal/status")
+async def setup_multimodal_runtime_status():
+    """Return all three isolated Multimodal runtime installation states."""
+    gpu = EnvironmentChecker.check_gpu()
+    recommended = "gpu" if gpu.get("has_gpu") else "cpu"
+    return {
+        "recommended": recommended,
+        "gpu": gpu,
+        "runtimes": MultimodalRuntimeManager.get_all_statuses(),
+    }
 
 
 class NapCatConfigRequest(BaseModel):
@@ -760,9 +1048,9 @@ async def setup_configure_napcat(body: NapCatConfigRequest):
             result["configured"], result["skipped"], result["errors"]
         )
         return result
-    except Exception as e:
+    except Exception:
         logger.exception("[Setup] napcat configure failed")
-        raise HTTPException(500, str(e))
+        raise HTTPException(500, "NapCat 配置失败")
 
 
 @app.websocket("/ws/setup/install")
@@ -772,12 +1060,21 @@ async def ws_setup_install(ws: WebSocket):
     Client sends: {"action": "install", "tasks": [{"id":..., "type":..., "name":..., "dir":...}, ...]}
     Server streams: {"type": "log"|"task_start"|"task_done"|"all_done", ...}
     """
-    await ws.accept()
+    if not await webui_security.authorize_websocket(ws):
+        return
 
     try:
         raw = await ws.receive_text()
         msg = json.loads(raw)
         tasks = msg.get("tasks", [])
+
+        git_check = EnvironmentChecker.check_git()
+        if git_check.get("status") != "ok":
+            await ws.send_text(json.dumps({
+                "type": "error",
+                "message": git_check.get("message") or "Git 不可用，无法执行自动部署",
+            }))
+            return
 
         for task in tasks:
             await ws.send_text(json.dumps({
@@ -798,12 +1095,23 @@ async def ws_setup_install(ws: WebSocket):
 
             result = await DependencyInstaller.install(task, callback=on_line)
 
+            bilibili_login_manager.mark_dependency_task(
+                task.get("id", ""), result.get("status", "error")
+            )
+
             await ws.send_text(json.dumps({
                 "type": "task_done",
                 "task_id": task["id"],
                 "status": result["status"],
                 "message": result["message"],
             }))
+
+            if result.get("status") != "ok":
+                await ws.send_text(json.dumps({
+                    "type": "error",
+                    "message": result.get("message") or f"依赖安装失败: {task['name']}",
+                }))
+                return
 
         await ws.send_text(json.dumps({"type": "all_done"}))
 
@@ -821,7 +1129,12 @@ async def ws_setup_install(ws: WebSocket):
 # =========================================================================
 
 if __name__ == "__main__":
-    from webui_config import webui_config
+    if CONFIG_PATH.exists():
+        validate_webui_config_raw(
+            CONFIG_PATH.read_text(encoding="utf-8"),
+            runtime_bind_host=webui_security.runtime_bind_host,
+        )
+    webui_security.ensure_safe_bind()
     uvicorn.run(
         "server:app",
         host=webui_config.host,

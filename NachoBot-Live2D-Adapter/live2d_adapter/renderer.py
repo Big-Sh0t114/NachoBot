@@ -1,10 +1,41 @@
-import os
-import sys
 import io
-from loguru import logger
+import os
 import queue
+import sys
+import time
+from collections.abc import Callable
+from typing import Any
+
 import pygame
-from typing import Optional, Any, Callable
+
+from .model_adapter import Live2DModelAdapter
+
+
+def _damped_step(
+    position: float,
+    velocity: float,
+    target: float,
+    delta_time: float,
+    parameter_range: float,
+) -> tuple[float, float]:
+    """Track a physics target while limiting visible acceleration."""
+    delta_time = max(1.0 / 240.0, min(1.0 / 15.0, delta_time))
+    parameter_range = max(abs(parameter_range), 0.01)
+    max_acceleration = parameter_range * 0.5
+    max_velocity = parameter_range * 1.5
+    remaining = target - position
+    stopping_velocity = (2.0 * max_acceleration * abs(remaining)) ** 0.5
+    desired_velocity = min(max_velocity, stopping_velocity)
+    if remaining < 0.0:
+        desired_velocity = -desired_velocity
+    max_velocity_change = max_acceleration * delta_time
+    velocity_change = max(
+        -max_velocity_change,
+        min(max_velocity_change, desired_velocity - velocity),
+    )
+    velocity += velocity_change
+    position += velocity * delta_time
+    return position, velocity
 
 
 class Live2DRenderer:
@@ -19,7 +50,8 @@ class Live2DRenderer:
         height: int = 600,
         scale: float = 1.0,
         track_mouse: bool = False,
-        on_click: Optional[Callable[[int], None]] = None,
+        on_click: Callable[[int], None] | None = None,
+        model_adapter: Live2DModelAdapter | None = None,
     ):
         self.model_path = model_path
         self.logger = logger
@@ -31,12 +63,25 @@ class Live2DRenderer:
         self.scale = scale
         self.track_mouse = track_mouse
         self.on_click = on_click
+        self.model_adapter = model_adapter or Live2DModelAdapter.from_model_path(model_path)
         self.running = False
         self.hwnd = None
         self.model = None
         self.live2d = None
         self._audio_channel = None
         self._current_sound = None
+        self.available_param_ids: list[str] = []
+        self._parameter_indexes: dict[str, int] = {}
+        self._lip_sync_param_ids: tuple[str, ...] = ()
+        self._failed_parameter_writes: set[str] = set()
+        self._smooth_idle_enabled = False
+        self._standby_smoothing_active = False
+        self._motion_in_progress = False
+        self._motion_is_initial_idle = False
+        self._physics_output_param_ids: tuple[str, ...] = ()
+        self._physics_parameter_ranges: dict[str, float] = {}
+        self._physics_filter_states: dict[str, tuple[float, float]] = {}
+        self._physics_filter_updated_at: float | None = None
 
         # Lip sync state
         self.is_speaking = False
@@ -47,7 +92,7 @@ class Live2DRenderer:
         self.target_y = 0.0
 
         # Screen config
-        self.display: Optional[pygame.Surface] = None
+        self.display: pygame.Surface | None = None
 
         # Tweening System
         self.active_tweens = []  # List of active tweens
@@ -240,14 +285,14 @@ class Live2DRenderer:
             self.logger.info(f"Loading Live2D Model: {abs_path}")
 
             # Now we are in the model directory, we can verify files
-            moc3_file = model_filename.replace(".model3.json", ".moc3")
-            if not os.path.exists(moc3_file):
+            moc3_path = self.model_adapter.metadata.moc_path
+            if moc3_path is None or not moc3_path.is_file():
                 self.logger.error(
-                    f"[Live2D] Critical: .moc3 file not found in CWD ({os.getcwd()}): {moc3_file}"
+                    f"[Live2D] Critical: referenced .moc3 file not found: {moc3_path}"
                 )
-                raise FileNotFoundError(f"Model .moc3 file not found: {moc3_file}")
+                raise FileNotFoundError(f"Model .moc3 file not found: {moc3_path}")
             else:
-                self.logger.info(f"[Live2D] ✓ Found .moc3 file: {moc3_file}")
+                self.logger.info(f"[Live2D] ✓ Found .moc3 file: {moc3_path}")
 
             self.logger.info("[Live2D] Creating LAppModel instance...")
             self.model = self.live2d.LAppModel()
@@ -284,33 +329,54 @@ class Live2DRenderer:
                     f"[Live2D] Pixels Per Unit: {self.model.GetPixelsPerUnit()}"
                 )
 
-                # Check Drawables and Parameters
+                # Bind actual runtime identifiers to the non-destructive adapter.
                 try:
-                    # Log all parameter IDs for debugging if available
-                    self.available_param_ids = []
-                    if hasattr(self.model, "GetParamIds"):
-                        try:
-                            self.available_param_ids = self.model.GetParamIds()
-                            self.logger.info(
-                                f"[Live2D] Available Parameters ({len(self.available_param_ids)})"
-                            )
-                        except Exception:
-                            pass
-
-                    # Fallback list if empty
-                    if not self.available_param_ids:
-                        self.available_param_ids = [
-                            "ParamAngleX",
-                            "ParamAngleY",
-                            "ParamAngleZ",
-                            "ParamBodyAngleX",
-                            "ParamBodyAngleY",
-                            "ParamBodyAngleZ",
-                            "ParamEyeLOpen",
-                            "ParamEyeROpen",
-                            "ParamMouthOpenY",
-                        ]
-
+                    try:
+                        runtime_param_ids = list(self.model.GetParamIds() or ())
+                    except Exception as exc:
+                        runtime_param_ids = []
+                        self.logger.warning(
+                            f"[Live2D] Failed to enumerate parameters: {exc}"
+                        )
+                    try:
+                        runtime_expression_ids = list(
+                            self.model.GetExpressionIds() or ()
+                        )
+                    except Exception as exc:
+                        runtime_expression_ids = []
+                        self.logger.warning(
+                            f"[Live2D] Failed to enumerate expressions: {exc}"
+                        )
+                    try:
+                        runtime_motion_groups = self.model.GetMotionGroups() or ()
+                    except Exception as exc:
+                        runtime_motion_groups = []
+                        self.logger.warning(
+                            f"[Live2D] Failed to enumerate Motion Groups: {exc}"
+                        )
+                    if isinstance(runtime_motion_groups, dict):
+                        runtime_motion_groups = list(runtime_motion_groups)
+                    self.model_adapter.bind_runtime(
+                        parameter_ids=runtime_param_ids,
+                        expression_ids=runtime_expression_ids,
+                        motion_groups=runtime_motion_groups,
+                    )
+                    self.available_param_ids = list(
+                        self.model_adapter.available_parameter_ids
+                    )
+                    self._parameter_indexes = {
+                        parameter_id: index
+                        for index, parameter_id in enumerate(runtime_param_ids)
+                    }
+                    self._lip_sync_param_ids = self.model_adapter.resolve_parameter(
+                        "MOUTH_OPEN"
+                    )
+                    self.logger.info(
+                        f"[Live2D] Available Parameters ({len(self.available_param_ids)})"
+                    )
+                    self.logger.info(
+                        f"[Live2D] Automatic adaptation: {self.model_adapter.describe()}"
+                    )
                 except Exception as e:
                     self.logger.warning(f"[Live2D] Failed to get model info: {e}")
 
@@ -338,12 +404,8 @@ class Live2DRenderer:
 
             self.logger.info("[Live2D] ✓ Model loaded and resized successfully")
 
-            # Try to start Idle motion (Safely)
-            try:
-                self.logger.info("[Live2D] Starting Idle motion...")
-                self.model.StartMotion("Idle", 0, 3)
-            except Exception as e:
-                self.logger.error(f"[Live2D] Failed to start motion: {e}")
+            self._configure_smooth_idle()
+            self._start_idle_motion()
 
         except Exception:
             import traceback
@@ -708,17 +770,12 @@ class Live2DRenderer:
                         )
                         mouth_value = max(0.0, min(1.0, (mouth_value + 1.0) * 0.5))
 
-                        # Only set if parameter exists (avoid crash)
-                        # We can try/except or just assume standard params exist.
-                        # For MouthOpenY it's standard.
-                        self.model.SetParameterValue(
-                            "ParamMouthOpenY", mouth_value, 1.0
-                        )
+                        self._set_lip_sync_value(mouth_value)
                     else:
                         # Smoothly close mouth
                         if self.mouth_phase > 0:
                             self.mouth_phase = 0.0
-                            self.model.SetParameterValue("ParamMouthOpenY", 0.0, 1.0)
+                            self._set_lip_sync_value(0.0)
 
                     # Process Tweens (BEFORE Update/Physics)
                     current_time = pygame.time.get_ticks() / 1000.0
@@ -770,7 +827,9 @@ class Live2DRenderer:
 
                         self.active_tweens = active_tweens_next
 
+                    self._return_to_standby_if_finished()
                     self.model.Update()
+                    self._smooth_physics_outputs()
 
                     self.model.Draw()
                     frame_count += 1
@@ -806,6 +865,229 @@ class Live2DRenderer:
 
         return rel_x, rel_y
 
+    def _set_lip_sync_value(self, value: float) -> None:
+        if not self.model:
+            return
+        if not self._lip_sync_param_ids:
+            self._lip_sync_param_ids = self.model_adapter.resolve_parameter("MOUTH_OPEN")
+        if not self._lip_sync_param_ids:
+            warning_key = "<unresolved-lip-sync>"
+            if warning_key not in self._failed_parameter_writes:
+                self._failed_parameter_writes.add(warning_key)
+                self.logger.warning(
+                    "[Live2D] No lip-sync parameter could be resolved; "
+                    "configure [adaptation.parameters].MOUTH_OPEN"
+                )
+            return
+        for parameter_id in self._lip_sync_param_ids:
+            try:
+                self.model.SetParameterValue(parameter_id, value, 1.0)
+            except Exception as exc:
+                if parameter_id not in self._failed_parameter_writes:
+                    self._failed_parameter_writes.add(parameter_id)
+                    self.logger.warning(
+                        f"[Live2D] Failed to write parameter {parameter_id}: {exc}"
+                    )
+
+    def _configure_smooth_idle(self) -> bool:
+        if not self.model:
+            return False
+        try:
+            self.model.SetAutoBreathEnable(True)
+        except Exception as exc:
+            self.logger.warning(
+                f"[Live2D] Failed to restore SDK auto-breath: {exc}"
+            )
+
+        self._smooth_idle_enabled = True
+        self._configure_physics_smoothing()
+        self.logger.info(
+            "[Live2D] Idle[0] and SDK auto-breath restored with output smoothing"
+        )
+        return True
+
+    def _configure_physics_smoothing(self) -> None:
+        self._physics_output_param_ids = ()
+        self._physics_parameter_ranges.clear()
+        self._physics_filter_states.clear()
+        self._physics_filter_updated_at = time.perf_counter()
+
+        native_model = getattr(self.model, "_model", None)
+        if not callable(getattr(native_model, "SetParameterValueById", None)):
+            self.logger.warning(
+                "[Live2D] Physics smoothing unavailable; transient parameter writes "
+                "are not supported"
+            )
+            return
+
+        resolved_ids = tuple(
+            dict.fromkeys(
+                parameter_id
+                for canonical in (
+                    "ANGLE_X",
+                    "ANGLE_Z",
+                    "BODY_ANGLE_X",
+                    "BODY_ANGLE_Z",
+                )
+                for parameter_id in self.model_adapter.resolve_parameter(canonical)
+                if parameter_id in self._parameter_indexes
+            )
+        )
+        for parameter_id in resolved_ids:
+            index = self._parameter_indexes[parameter_id]
+            try:
+                parameter = self.model.GetParameter(index)
+                parameter_range = float(parameter.max) - float(parameter.min)
+            except Exception:
+                parameter_range = 1.0
+            self._physics_parameter_ranges[parameter_id] = max(
+                abs(parameter_range), 0.01
+            )
+
+        self._physics_output_param_ids = resolved_ids
+        if resolved_ids:
+            self.logger.info(
+                "[Live2D] Smoothing final horizontal and tilt idle outputs"
+            )
+
+    def _smooth_physics_outputs(self) -> None:
+        if (
+            not self._smooth_idle_enabled
+            or not self.model
+            or not self._physics_output_param_ids
+        ):
+            return
+
+        if not self._standby_smoothing_active:
+            self._physics_filter_states.clear()
+            self._physics_filter_updated_at = time.perf_counter()
+            return
+
+        now = time.perf_counter()
+        previous_time = self._physics_filter_updated_at
+        self._physics_filter_updated_at = now
+        delta_time = 1.0 / 60.0 if previous_time is None else now - previous_time
+        tweened_parameters = {
+            str(tween.get("param"))
+            for tween in self.active_tweens
+            if isinstance(tween, dict)
+        }
+
+        for parameter_id in self._physics_output_param_ids:
+            raw_value = self._get_parameter_value(parameter_id)
+            if parameter_id in tweened_parameters:
+                self._physics_filter_states.pop(parameter_id, None)
+                continue
+            state = self._physics_filter_states.get(parameter_id)
+            if state is None:
+                self._physics_filter_states[parameter_id] = (raw_value, 0.0)
+                continue
+            value, velocity = _damped_step(
+                state[0],
+                state[1],
+                raw_value,
+                delta_time,
+                self._physics_parameter_ranges.get(parameter_id, 1.0),
+            )
+            self._physics_filter_states[parameter_id] = (value, velocity)
+            try:
+                self.model._model.SetParameterValueById(parameter_id, value, 1.0)
+            except Exception as exc:
+                if parameter_id not in self._failed_parameter_writes:
+                    self._failed_parameter_writes.add(parameter_id)
+                    self.logger.warning(
+                        f"[Live2D] Failed to smooth physics parameter "
+                        f"{parameter_id}: {exc}"
+                    )
+
+    def _get_parameter_value(self, parameter_id: str) -> float:
+        if not self.model:
+            return 0.0
+        index = self._parameter_indexes.get(parameter_id)
+        if index is None:
+            return 0.0
+        try:
+            return float(self.model.GetParameterValue(index))
+        except Exception:
+            return 0.0
+
+    def _resolve_motion_request(self, requested: Any) -> tuple[str | None, int]:
+        requested_text = str(requested or "").strip()
+        group = self.model_adapter.resolve_motion_group(requested_text)
+        if group is not None:
+            return group, 0
+        base, separator, suffix = requested_text.rpartition("_")
+        if separator and suffix.isdigit():
+            group = self.model_adapter.resolve_motion_group(base)
+            if group is not None:
+                return group, int(suffix)
+        return None, 0
+
+    def _start_idle_motion(self) -> bool:
+        if not self.model:
+            return False
+        idle_group = self.model_adapter.resolve_motion_group("Idle")
+        if not idle_group:
+            self.logger.info("[Live2D] No Idle motion group found; skipping")
+            return False
+        try:
+            self.model.StartMotion(idle_group, 0, 3)
+        except Exception as exc:
+            self._enter_standby()
+            self.logger.error(f"[Live2D] Failed to start Idle[0]: {exc}")
+            return False
+        self._motion_in_progress = True
+        self._motion_is_initial_idle = True
+        self._standby_smoothing_active = True
+        self._physics_filter_states.clear()
+        self._physics_filter_updated_at = time.perf_counter()
+        self.logger.info(f"[Live2D] Starting one-shot Idle[0]: {idle_group}")
+        return True
+
+    def _enter_standby(self, *, preserve_filter: bool = False) -> None:
+        self._motion_in_progress = False
+        self._motion_is_initial_idle = False
+        self._standby_smoothing_active = True
+        if not preserve_filter:
+            self._physics_filter_states.clear()
+            self._physics_filter_updated_at = time.perf_counter()
+        self.logger.info("[Live2D] Entering auto-breath standby")
+
+    def _return_to_standby_if_finished(self) -> None:
+        if not self.model or not self._motion_in_progress:
+            return
+        try:
+            motion_finished = self.model.IsMotionFinished()
+        except Exception as exc:
+            self.logger.warning(f"[Live2D] Failed to inspect motion state: {exc}")
+            return
+        if motion_finished:
+            self._enter_standby(preserve_filter=self._motion_is_initial_idle)
+
+    def _start_motion(self, requested: Any, *, priority: int = 3) -> None:
+        if not self.model:
+            return
+        group, index = self._resolve_motion_request(requested)
+        if group is None:
+            self.logger.warning(f"[Live2D] Motion Group does not exist: {requested}")
+            return
+        idle_group = self.model_adapter.resolve_motion_group("Idle")
+        if group == idle_group:
+            try:
+                self.model.StopAllMotions()
+            except Exception as exc:
+                self.logger.error(f"[Live2D] Failed to stop motion for standby: {exc}")
+            self._enter_standby()
+            return
+        try:
+            self._motion_in_progress = True
+            self._motion_is_initial_idle = False
+            self._standby_smoothing_active = False
+            self.model.StartMotion(group, index, priority)
+        except Exception as exc:
+            self._enter_standby()
+            self.logger.error(f"[Live2D] Failed to start motion {group}: {exc}")
+
     def _handle_command(self, cmd_type: str, cmd_data: Any):
         if cmd_type == "play_audio":
             self._play_audio(cmd_data)
@@ -826,62 +1108,66 @@ class Live2DRenderer:
                 self.target_y = float(cmd_data[1])
 
         elif cmd_type == "param_tween":
-            # cmd_data: {"param": str, "value": float, "duration": float}
             if isinstance(cmd_data, dict):
-                param_id = cmd_data.get("param")
+                requested_param = str(cmd_data.get("param") or "").strip()
                 target_val = cmd_data.get("value")
                 duration = cmd_data.get("duration", 1.0)
-
-                # Get current value (approximate, since we don't track all params perfectly,
-                # but Live2D might reset on update. Best effort: assume 0 or track last set)
-                # Ideally we GetParameterValue but python bindings might not expose it easily/reliably.
-                # Use 0.0 as start if unknown, or maybe we should store current values.
-                # For safety, let's assume we start from 0 for now or whatever the idle motion left it at.
-                # Actually, reading back is better.
-                try:
-                    start_val = self.model.GetParameterValue(param_id)
-                except:
-                    start_val = 0.0
-
-                import pygame
-
+                parameter_ids = self.model_adapter.resolve_parameter(requested_param)
+                if not parameter_ids:
+                    self.logger.warning(
+                        f"[Live2D] Ignored unresolved tween parameter: {requested_param}"
+                    )
+                    return
                 start_time = pygame.time.get_ticks() / 1000.0
+                for parameter_id in parameter_ids:
+                    self.active_tweens.append(
+                        {
+                            "param": parameter_id,
+                            "start_val": self._get_parameter_value(parameter_id),
+                            "end_val": target_val,
+                            "start_time": start_time,
+                            "duration": duration,
+                        }
+                    )
 
-                self.active_tweens.append(
-                    {
-                        "param": param_id,
-                        "start_val": start_val,
-                        "end_val": target_val,
-                        "start_time": start_time,
-                        "duration": duration,
-                    }
-                )
-
-        if cmd_type == "body_action":
-            parts = cmd_data.split("_")
-            group = parts[0]
-            no = 0
-            if len(parts) > 1:
-                try:
-                    no = int(parts[1])
-                except ValueError:
-                    pass
-            self.model.StartMotion(group, no, 3)
+        elif cmd_type == "body_action":
+            self.logger.info(f"[Live2D] Body Action: {cmd_data}")
+            self._start_motion(cmd_data)
 
         elif cmd_type == "random_motion":
-            # Native Motion System (Safe)
-            # data = {"group": "Tap", "priority": 3}
-            group = cmd_data.get("group", "Idle")
-            priority = cmd_data.get("priority", 3)
-            self.logger.info(f"[Live2D] Starting Random Motion: {group} (P={priority})")
-            if self.model:
+            if isinstance(cmd_data, dict):
+                requested_group = cmd_data.get("group", "Idle")
+                priority = int(cmd_data.get("priority", 3))
+                group = self.model_adapter.resolve_motion_group(requested_group)
+                if group is None:
+                    self.logger.warning(
+                        f"[Live2D] Motion Group does not exist: {requested_group}"
+                    )
+                    return
+                idle_group = self.model_adapter.resolve_motion_group("Idle")
+                if group == idle_group:
+                    try:
+                        self.model.StopAllMotions()
+                    except Exception as exc:
+                        self.logger.error(
+                            f"[Live2D] Failed to stop motion for standby: {exc}"
+                        )
+                    self._enter_standby()
+                    return
+                self.logger.info(
+                    f"[Live2D] Starting Random Motion: {group} (P={priority})"
+                )
                 try:
+                    self._motion_in_progress = True
+                    self._motion_is_initial_idle = False
+                    self._standby_smoothing_active = False
                     self.model.StartRandomMotion(group, priority)
                 except Exception as e:
+                    self._enter_standby()
                     self.logger.error(f"[Live2D] Failed to start motion {group}: {e}")
 
         elif cmd_type == "motion":
-            self.model.StartMotion(cmd_data, 0, 3)
+            self._start_motion(cmd_data)
 
         elif cmd_type == "state":
             # Gaze Control based on state
@@ -915,54 +1201,33 @@ class Live2DRenderer:
             except (ValueError, TypeError):
                 pass
 
-        elif cmd_type == "body_action":
-            # Body Action Command (Motion Group)
-            # e.g., "Tap", "Flick", "Idle"
-            group = str(cmd_data)
-            self.logger.info(f"[Live2D] Body Action: {group}")
-            if self.model:
-                try:
-                    # Priority 3 (Force play)
-                    self.model.StartMotion(group, 0, 3)
-                except Exception as e:
-                    self.logger.error(
-                        f"[Live2D] Failed to start body action {group}: {e}"
-                    )
-
         elif cmd_type == "emotion":
-            expr_map = {
-                "joy": "f01",  # Standard Smile
-                "anger": "angry",  # Custom angry
-                "sorrow": "f04",  # Standard Sorrow
-                "fear": "f02",  # Standard Surprise/Fear
-                "shy": "shy",
-                "disgust": "disgust",
-                "angry": "angry",
-                "normal": "normal",
-            }
-            # Handle emotion dict: {"joy": 5, "anger": 1, ...}
+            emotion_name: str | None = None
             if isinstance(cmd_data, dict):
-                # Find strongest emotion
-                strongest = max(cmd_data, key=cmd_data.get)
-                value = cmd_data[strongest]
-
-                # Only set expression if intensity is high enough
-                if value >= 3:
-                    # Map to standard Live2D expression names (adjust as needed for specific model)
-                    if strongest in expr_map:
-                        expr_name = expr_map[strongest]
-                        self.logger.info(
-                            f"[Live2D] Setting Emotion: {strongest} -> {expr_name}"
-                        )
-                        self.model.SetExpression(expr_name)
-                    else:
-                        self.model.SetExpression("")  # Default to empty/none
+                try:
+                    strongest = max(cmd_data, key=lambda key: float(cmd_data[key]))
+                    if float(cmd_data[strongest]) >= 3:
+                        emotion_name = str(strongest)
+                except (TypeError, ValueError):
+                    self.logger.warning("[Live2D] Ignored invalid emotion weights")
             elif isinstance(cmd_data, str):
-                expr_name = expr_map.get(cmd_data, cmd_data)
-                self.logger.info(
-                    f"[Live2D] Setting Emotion (String): {cmd_data} -> {expr_name}"
-                )
-                self.model.SetExpression(expr_name)
+                emotion_name = cmd_data
+
+            if emotion_name:
+                expression_id = self.model_adapter.resolve_expression(emotion_name)
+                if expression_id:
+                    self.logger.info(
+                        f"[Live2D] Setting Emotion: {emotion_name} -> {expression_id}"
+                    )
+                    self.model.SetExpression(expression_id)
+                elif emotion_name.casefold() in {"normal", "default", "neutral"}:
+                    self.logger.info("[Live2D] Resetting expressions to the model default")
+                    if hasattr(self.model, "ResetExpressions"):
+                        self.model.ResetExpressions()
+                else:
+                    self.logger.warning(
+                        f"[Live2D] No expression mapping found for: {emotion_name}"
+                    )
 
         elif cmd_type == "speaking":
             self.is_speaking = bool(cmd_data)

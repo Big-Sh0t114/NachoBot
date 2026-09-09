@@ -4,7 +4,7 @@ __version__ = "0.6.1"
 
 # Legacy API Components (pre-API-Server Version) - 从根模块导入
 from .api import MessageClient, MessageServer
-from .router import Router, RouteConfig, TargetConfig
+from .router import Router, RouteConfig, TargetConfig, get_core_token_from_env
 from .message_base import (
     Seg,
     GroupInfo,
@@ -31,6 +31,7 @@ __all__ = [
     "Router",
     "RouteConfig",
     "TargetConfig",
+    "get_core_token_from_env",
     "MessageBase",
     "Seg",
     "GroupInfo",

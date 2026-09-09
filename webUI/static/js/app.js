@@ -8,8 +8,11 @@ const App = (() => {
     let statusInterval = null;
 
     // ---- Tab Routing ----
-    function init() {
-        loadWebUIInfo();
+    async function init() {
+        // Complete the first protected request before modules open WebSockets.
+        // When authentication is enabled this lets the shared fetch wrapper
+        // collect the session token exactly once.
+        await loadWebUIInfo();
 
         document.querySelectorAll('.nav-item').forEach(item => {
             item.addEventListener('click', (e) => {
@@ -45,10 +48,14 @@ const App = (() => {
         } catch (error) {
             // Compatibility fallback for a WebUI process that has not yet been
             // restarted after adding /api/webui/info.
-            try {
-                const config = await apiGet('/api/configs/webui_config');
-                version = parseWebUIVersion(config.raw);
-            } catch (fallbackError) {
+            if (error.status === 404) {
+                try {
+                    const config = await apiGet('/api/configs/webui_config');
+                    version = parseWebUIVersion(config.raw);
+                } catch (fallbackError) {
+                    version = '';
+                }
+            } else {
                 version = '';
             }
         }
@@ -151,7 +158,11 @@ function toast(message, type = 'info') {
 
 async function apiGet(url) {
     const res = await fetch(url);
-    if (!res.ok) throw new Error(`API Error: ${res.status}`);
+    if (!res.ok) {
+        const error = new Error(`API Error: ${res.status}`);
+        error.status = res.status;
+        throw error;
+    }
     return res.json();
 }
 

@@ -129,7 +129,7 @@ class VectorStore:
     @staticmethod
     def _generate_id(key: str) -> int:
         """生成稳定的 int64 ID (SHA1 截断)"""
-        h = hashlib.sha1(key.encode("utf-8")).digest()
+        h = hashlib.sha1(key.encode("utf-8"), usedforsecurity=False).digest()
         val = int.from_bytes(h[:8], byteorder="big", signed=False)
         return val & 0x7FFFFFFFFFFFFFFF
 

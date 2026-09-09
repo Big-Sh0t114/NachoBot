@@ -49,7 +49,7 @@ class CommentHandler:
                 self.logger.debug(f"At notice fetch error: {exc}")
             if reply_items or at_items:
                 self.logger.info(
-                    "Comment notices: reply=%s at=%s",
+                    "Comment notices: reply={} at={}",
                     len(reply_items),
                     len(at_items),
                 )
@@ -167,7 +167,7 @@ class CommentHandler:
             at_details = reply_item.get("at_details") or []
             is_at_me = self._is_at_me(at_details)
             if source == "at" and self.config.dede_user_id and not is_at_me:
-                self.logger.debug("At notice without bot mention: id=%s", notify_id)
+                self.logger.debug("At notice without bot mention: id={}", notify_id)
             group_id = f"comment:{business_id}:{subject_id}"
             self.remember_comment_context(
                 group_id=group_id,
@@ -194,7 +194,7 @@ class CommentHandler:
                         )
                     else:
                         self.logger.warning(
-                            "Comment fallback reply skipped: invalid target group_id=%s user_id=%s",
+                            "Comment fallback reply skipped: invalid target group_id={} user_id={}",
                             group_id,
                             user_id,
                         )
@@ -341,7 +341,7 @@ class CommentHandler:
         text = self.adapter._filter_outgoing_text(text)
         comment_type, oid, root_id, parent_id = target
         self.logger.info(
-            "Send comment reply: type=%s oid=%s root=%s parent=%s",
+            "Send comment reply: type={} oid={} root={} parent={}",
             comment_type,
             oid,
             root_id,

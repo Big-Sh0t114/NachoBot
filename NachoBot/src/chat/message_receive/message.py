@@ -541,6 +541,17 @@ class MessageSending(MessageProcessBase):
         ret["message_info"]["user_info"] = (
             self.chat_stream.user_info.to_dict() if self.chat_stream and self.chat_stream.user_info else None
         )
+
+        # 保留本条回复所对应的原始平台消息 ID。WebUI Chat 依靠该字段
+        # 将异步、多段回复精确关联到触发它的那一轮请求，避免迟到回复
+        # 被下一轮请求错误领取。
+        if self.reply_to_message_id:
+            additional_config = ret["message_info"].get("additional_config")
+            if not isinstance(additional_config, dict):
+                additional_config = {}
+                ret["message_info"]["additional_config"] = additional_config
+            additional_config["reply_to_message_id"] = self.reply_to_message_id
+
         return ret
 
     def is_private_message(self) -> bool:

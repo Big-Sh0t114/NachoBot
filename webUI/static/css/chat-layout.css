@@ -37,11 +37,6 @@
         transform: translateX(0);
     }
 
-    .chat-mobile-history-button {
-        display: grid;
-        place-items: center;
-    }
-
     .chat-header {
         min-height: 62px;
         padding: 10px 14px;
@@ -687,7 +682,7 @@ body.sidebar-collapsed .sidebar-webui-menu .nav-icon {
     left: calc(50% + (var(--content-sidebar-width) / 2)) !important;
 }
 
-.tab-panel.active:not(#tab-terminal)::before {
+.main-content:not(:has(#tab-terminal.active))::before {
     left: calc(50% + (var(--content-sidebar-width) / 2));
 }
 

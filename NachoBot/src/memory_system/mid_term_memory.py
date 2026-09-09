@@ -7,7 +7,7 @@ import time
 import math
 import uuid
 from collections import OrderedDict
-from typing import List, Optional, Dict, Any, Tuple, TYPE_CHECKING
+from typing import List, Optional, Tuple, TYPE_CHECKING
 from datetime import datetime
 
 from src.common.logger import get_logger
@@ -21,6 +21,7 @@ from src.memory_system.mid_term_memory_embedding import (
     get_embedding_service,
     cosine_similarity,
 )
+from src.memory_system.mid_term_memory_response import _parse_summary_response
 from src.plugin_system.apis import message_api, llm_api
 from src.config.config import model_config
 
@@ -28,7 +29,6 @@ if TYPE_CHECKING:
     from src.common.data_models.database_data_model import DatabaseMessages
 
 logger = get_logger("mid_term_memory")
-
 
 class MidTermMemoryManager:
     """中期记忆管理器（每个 chat_id 一个实例）"""
@@ -296,26 +296,8 @@ class MidTermMemoryManager:
                 logger.error(f"[{self.chat_id}] LLM 调用失败: {response}")
                 return None
 
-            # 解析 JSON 响应
-            import json
-
-            # 清理可能的 markdown 代码块标记
-            response_text = response.strip()
-            if response_text.startswith("```json"):
-                response_text = response_text[7:]
-            if response_text.startswith("```"):
-                response_text = response_text[3:]
-            if response_text.endswith("```"):
-                response_text = response_text[:-3]
-            response_text = response_text.strip()
-
-            result = json.loads(response_text)
-            summary_text = result.get("summary", "")
-            recall_cues_text = result.get("recall_cues", [])
-
-            if not summary_text:
-                logger.warning(f"[{self.chat_id}] LLM 返回的摘要为空")
-                return None
+            # 解析并校验 JSON 响应；严格解析失败时由 helper 使用 json_repair 回退。
+            summary_text, recall_cues_text = _parse_summary_response(response)
 
             # Phase 2: 为 recall_cues 生成向量
             recall_cues = await self._vectorize_recall_cues(recall_cues_text)
@@ -674,7 +656,7 @@ class MidTermMemoryManager:
             embeddings = await embedding_service.embed_texts(cues_text)
 
             recall_cues = []
-            for text, embedding in zip(cues_text, embeddings):
+            for text, embedding in zip(cues_text, embeddings, strict=False):
                 recall_cues.append(RecallCue(text=text, embedding=embedding))
 
             logger.debug(f"[{self.chat_id}] 成功向量化 {len(recall_cues)} 条召回线索")

@@ -1,18 +1,21 @@
-FROM python:3.13-slim
+FROM python:3.13-slim-bookworm
+
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-WORKDIR /koishi-adapter
+WORKDIR /workspace/NachoBot-Koishi-Adapter
 
-# 安装本地 ncnk_message 包
-COPY ncnk_message /ncnk_message
-RUN uv pip install --system -e /ncnk_message
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 
-# 复制项目文件并安装依赖
-COPY pyproject.toml ./
-RUN uv pip install --system --upgrade pip
-RUN uv pip install --system .
+COPY pyproject.toml uv.lock ./
+RUN uv sync --locked --no-dev --no-install-project
 
-# 复制项目代码
 COPY . .
+COPY --from=nachobot /ncnk_message /workspace/NachoBot/ncnk_message
+
+ENV PATH="/workspace/NachoBot-Koishi-Adapter/.venv/bin:${PATH}" \
+    PYTHONUNBUFFERED=1
 
 ENTRYPOINT ["python", "main.py"]

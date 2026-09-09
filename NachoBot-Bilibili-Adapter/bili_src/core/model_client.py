@@ -233,7 +233,10 @@ class ModelClient:
                 messages=[{"role": "user", "content": prompt}],
                 temperature=task_config.temperature,
                 max_tokens=task_config.max_tokens,
-                **model.extra_params,
+                # Provider-specific options such as `enable_thinking` are not
+                # OpenAI SDK keyword arguments.  Core sends the same model
+                # metadata as an OpenAI-compatible request body extension.
+                extra_body=model.extra_params or None,
             )
 
             if response.choices and response.choices[0].message:

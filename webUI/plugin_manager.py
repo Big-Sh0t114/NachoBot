@@ -9,6 +9,13 @@ from typing import Any
 
 import tomlkit
 
+try:
+    from .secure_paths import ensure_within, resolve_named_dir
+    from .config_manager import ConfigManager
+except ImportError:
+    from secure_paths import ensure_within, resolve_named_dir
+    from config_manager import ConfigManager
+
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
 
@@ -70,36 +77,60 @@ class PluginManager:
 
         return plugins
 
-    def read_plugin_config(self, plugin_id: str) -> dict[str, Any]:
+    def read_plugin_config(self, plugin_id: str, mask_sensitive: bool = True) -> dict[str, Any]:
         """Read a plugin's config.toml as a dict."""
-        config_path = self.plugins_dir / plugin_id / "config.toml"
+        config_path = self._resolve_config_path(plugin_id, must_exist=True)
+        # codeql[py/path-injection]
         if not config_path.exists():
             raise FileNotFoundError(f"No config.toml for plugin: {plugin_id}")
 
+        # codeql[py/path-injection]
         raw = config_path.read_text(encoding="utf-8")
         doc = tomlkit.parse(raw)
-        return self._tomlkit_to_dict(doc)
+        data = self._tomlkit_to_dict(doc)
+        if mask_sensitive:
+            ConfigManager._mask_dict(data)
+        return data
 
     def read_plugin_config_raw(self, plugin_id: str) -> str:
-        """Read raw text of a plugin's config.toml."""
-        config_path = self.plugins_dir / plugin_id / "config.toml"
+        """Read raw plugin TOML for the local WebUI editor."""
+        config_path = self._resolve_config_path(plugin_id, must_exist=True)
+        # codeql[py/path-injection]
         if not config_path.exists():
             raise FileNotFoundError(f"No config.toml for plugin: {plugin_id}")
+        # codeql[py/path-injection]
         return config_path.read_text(encoding="utf-8")
 
     def write_plugin_config(self, plugin_id: str, data: dict[str, Any]) -> None:
         """Write updated config to a plugin's config.toml."""
-        config_path = self.plugins_dir / plugin_id / "config.toml"
+        config_path = self._resolve_config_path(plugin_id)
 
         # Read existing to preserve comments
+        # codeql[py/path-injection]
         if config_path.exists():
+            # codeql[py/path-injection]
             raw = config_path.read_text(encoding="utf-8")
             doc = tomlkit.parse(raw)
         else:
             doc = tomlkit.document()
 
         self._update_tomlkit_doc(doc, data)
+        # codeql[py/path-injection]
         config_path.write_text(tomlkit.dumps(doc), encoding="utf-8")
+
+    def write_plugin_config_raw(self, plugin_id: str, raw: str) -> None:
+        """Write raw plugin TOML from the local WebUI editor."""
+        config_path = self._resolve_config_path(plugin_id)
+        # codeql[py/path-injection]
+        config_path.write_text(raw, encoding="utf-8")
+
+    def _resolve_config_path(self, plugin_id: str, *, must_exist: bool = False) -> Path:
+        plugin_dir = resolve_named_dir(self.plugins_dir, plugin_id, must_exist=True)
+        config_path = ensure_within(self.plugins_dir, plugin_dir / "config.toml", must_exist=must_exist)
+        # codeql[py/path-injection]
+        if must_exist and not config_path.is_file():
+            raise FileNotFoundError(f"No config.toml for plugin: {plugin_id}")
+        return config_path
 
     @staticmethod
     def _tomlkit_to_dict(obj: Any) -> Any:

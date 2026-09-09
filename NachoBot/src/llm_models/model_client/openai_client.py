@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import io
 import json
 import re
@@ -146,7 +147,9 @@ def _convert_tool_options(tool_options: list[ToolOption]) -> list[dict[str, Any]
             "name": tool_option.name,
             "description": tool_option.description,
         }
-        if tool_option.params:
+        if tool_option.input_schema is not None:
+            ret["parameters"] = copy.deepcopy(tool_option.input_schema)
+        elif tool_option.params:
             ret["parameters"] = {
                 "type": "object",
                 "properties": {param.name: _convert_tool_param(param) for param in tool_option.params},
@@ -422,9 +425,7 @@ class OpenaiClient(BaseClient):
         if _is_loopback_url(api_provider.base_url):
             # Local OpenAI-compatible services must not be routed through an
             # HTTP(S)_PROXY inherited from the desktop/session environment.
-            client_options["http_client"] = DefaultAsyncHttpxClient(
-                trust_env=False
-            )
+            client_options["http_client"] = DefaultAsyncHttpxClient(trust_env=False)
         self.client: AsyncOpenAI = AsyncOpenAI(
             base_url=api_provider.base_url,
             api_key=api_provider.api_key,
@@ -432,6 +433,10 @@ class OpenaiClient(BaseClient):
             timeout=api_provider.timeout,
             **client_options,
         )
+
+    async def close(self) -> None:
+        """关闭底层 AsyncOpenAI/HTTPX 客户端资源。"""
+        await self.client.close()
 
     async def get_response(
         self,

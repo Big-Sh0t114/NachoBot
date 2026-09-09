@@ -28,7 +28,6 @@ class ReplyContextMode(str, Enum):
 
 class ReplyContextPurpose(str, Enum):
     PRIMARY_REPLY = "primary_reply"
-    SEARCH_FOLLOWUP = "search_followup"
     FILE_EDIT = "file_edit"
     TOOL_FOLLOWUP = "tool_followup"
 
@@ -144,26 +143,6 @@ def acquire_reply_context_request(
         max_prompt_tokens=max_prompt_tokens,
     )
 
-
-def reuse_reply_context_request(
-    lease: FocusLease,
-    cycle_id: str,
-    refs: Iterable[ReplyContextRef],
-    *,
-    purpose: ReplyContextPurpose = ReplyContextPurpose.SEARCH_FOLLOWUP,
-    max_prompt_tokens: int = 512,
-) -> ReplyContextRequest:
-    """Build a REUSE request for another generation pass in the same cycle."""
-
-    return ReplyContextRequest(
-        mode=ReplyContextMode.REUSE,
-        purpose=purpose,
-        target_chat_id=lease.chat_id,
-        lease=lease,
-        cycle_id=cycle_id,
-        reuse_refs=tuple(refs),
-        max_prompt_tokens=max_prompt_tokens,
-    )
 
 
 def register_reply_context_provider(provider: ReplyContextProvider) -> None:

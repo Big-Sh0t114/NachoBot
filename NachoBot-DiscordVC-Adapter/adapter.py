@@ -43,6 +43,7 @@ try:
         TargetConfig,
         TemplateInfo,
         UserInfo,
+        get_core_token_from_env,
     )
 except ImportError:
     # Fallback if NachoBot not found (Logic won't work but prevents import error crash)
@@ -109,7 +110,7 @@ class DiscordAdapter:
                 route_config={
                     "discord_vc": TargetConfig(
                         url=f"ws://{self.config.nachobot.host}:{self.config.nachobot.port}/ws",
-                        token=None,
+                        token=get_core_token_from_env(),
                     )
                 }
             )

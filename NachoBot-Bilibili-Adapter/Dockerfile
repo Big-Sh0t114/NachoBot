@@ -1,25 +1,37 @@
 FROM python:3.13-slim-bookworm
+
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-WORKDIR /bilibili-adapter
+WORKDIR /workspace/NachoBot-Bilibili-Adapter
 
-# 系统依赖：build-essential（stringzilla 编译）、xvfb（屏幕监控）
+# Xvfb supplies a display for mss. PortAudio is needed by the optional
+# microphone capture path; the remote Live2D adapter remains the preferred
+# audio playback path in containers.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    ca-certificates \
+    libportaudio2 \
+    libx11-6 \
+    libxtst6 \
+    portaudio19-dev \
     xvfb \
     && rm -rf /var/lib/apt/lists/*
 
-# 复制依赖列表并安装
 COPY pyproject.toml uv.lock ./
 RUN uv sync --locked --no-dev --no-install-project
-ENV PATH="/bilibili-adapter/.venv/bin:${PATH}"
 
-# 复制项目代码
 COPY . .
 
-# Shared ASR stays owned by Multimodal-Adapter. docker-compose supplies this
-# sibling directory as the named "multimodal" build context.
-COPY --from=multimodal /src /NachoBot-Multimodal-Adapter/src
-COPY --from=multimodal /configs /NachoBot-Multimodal-Adapter/configs
+# The adapter imports the canonical message package and the shared
+# Multimodal namespace from sibling build contexts supplied by Compose.
+COPY --from=nachobot /ncnk_message /workspace/NachoBot/ncnk_message
+COPY --from=multimodal /src /workspace/NachoBot-Multimodal-Adapter/src
+COPY --from=multimodal /nachobot_multimodal /workspace/NachoBot-Multimodal-Adapter/nachobot_multimodal
+COPY --from=multimodal /configs /workspace/NachoBot-Multimodal-Adapter/configs
 
-ENTRYPOINT ["python", "main.py"]
+ENV PATH="/workspace/NachoBot-Bilibili-Adapter/.venv/bin:${PATH}" \
+    PYTHONUNBUFFERED=1
+
+# Run the screen-monitoring adapter under a virtual X server even when the
+# host has no desktop session.
+ENTRYPOINT ["xvfb-run", "--auto-servernum", "--server-args=-screen 0 1920x1080x24", "python", "main.py"]

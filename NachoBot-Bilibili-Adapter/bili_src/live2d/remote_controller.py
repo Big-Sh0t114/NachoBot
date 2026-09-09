@@ -55,7 +55,7 @@ class RemoteLive2DController:
             self._connection_loop(),
             name="bilibili-live2d-remote-controller",
         )
-        self.logger.info("Remote Live2D controller started: %s", self.url)
+        self.logger.info("Remote Live2D controller started: {}", self.url)
 
     async def stop(self) -> None:
         self.is_running = False
@@ -99,7 +99,7 @@ class RemoteLive2DController:
             return False
         if len(audio_data) > MAX_REMOTE_AUDIO_BYTES:
             self.logger.warning(
-                "TTS audio segment is too large for Live2D playback (%d bytes); using local fallback",
+                "TTS audio segment is too large for Live2D playback ({} bytes); using local fallback",
                 len(audio_data),
             )
             return False
@@ -186,7 +186,7 @@ class RemoteLive2DController:
                 raise
             except Exception as exc:
                 self.logger.warning(
-                    "Live2D adapter connection lost: %s; reconnecting in %.1fs",
+                    "Live2D adapter connection lost: {}; reconnecting in {:.1f}s",
                     exc,
                     self.reconnect_seconds,
                 )
@@ -240,13 +240,13 @@ class RemoteLive2DController:
             self.logger.info("Standalone Live2D renderer reported ready")
         elif event == "error":
             self.logger.error(
-                "Standalone Live2D adapter error: %s",
+                "Standalone Live2D adapter error: {}",
                 payload.get("message", "unknown error"),
             )
         elif event == "poke":
             await self._handle_poke()
         elif event == "click":
-            self.logger.debug("Live2D model clicked: %s", payload)
+            self.logger.debug("Live2D model clicked: {}", payload)
 
     async def _handle_poke(self) -> None:
         config = self.adapter.config

@@ -201,7 +201,7 @@ class SearchExecutionService:
             "enable_ppr": bool(request.enable_ppr),
         }
         payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-        return hashlib.sha1(payload_json.encode("utf-8")).hexdigest()
+        return hashlib.sha1(payload_json.encode("utf-8"), usedforsecurity=False).hexdigest()
 
     @staticmethod
     async def execute(

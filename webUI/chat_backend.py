@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from pathlib import Path
@@ -28,6 +29,8 @@ DEFAULT_USER_ID = "webui-user"
 DEFAULT_USER_NAME = "WebUI"
 DEFAULT_FIRST_REPLY_TIMEOUT_SECONDS = 90.0
 MAX_SUBSCRIBER_QUEUE_SIZE = 100
+MAX_PENDING_REPLY_COUNT = 100
+PENDING_REPLY_TTL_SECONDS = 180.0
 
 _NACHOBOT_ROOT = Path(__file__).resolve().parent.parent / "NachoBot"
 _BOT_CONFIG_PATH = _NACHOBOT_ROOT / "config" / "bot_config.toml"
@@ -49,8 +52,10 @@ class LocalChatBackend:
         self._reader_task: asyncio.Task[None] | None = None
         self._endpoint: str | None = None
         self._conversation_by_user: dict[str, str] = {}
-        self._first_reply_waiters: dict[str, list[asyncio.Queue[dict[str, Any]]]] = {}
         self._subscribers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = {}
+        # Keep a short replay window so multi-part replies are not lost while
+        # the browser WebSocket is still connecting or briefly reconnecting.
+        self._pending_replies: dict[str, list[tuple[float, dict[str, Any]]]] = {}
 
     async def status(self, core_running: bool) -> dict[str, Any]:
         try:
@@ -77,6 +82,7 @@ class LocalChatBackend:
             maxsize=MAX_SUBSCRIBER_QUEUE_SIZE
         )
         self._subscribers.setdefault(conversation_id, set()).add(queue)
+        self._replay_pending_replies(conversation_id, queue)
         return queue
 
     def unsubscribe(self, conversation_id: str, queue: asyncio.Queue[dict[str, Any]]) -> None:
@@ -86,6 +92,24 @@ class LocalChatBackend:
         subscribers.discard(queue)
         if not subscribers:
             self._subscribers.pop(conversation_id, None)
+
+    def acknowledge_live_delivery(self, conversation_id: str, message_id: str) -> None:
+        """Remove one reply from replay storage after WebSocket delivery succeeds."""
+        message_id = str(message_id or "")
+        if not message_id:
+            return
+        pending = self._pending_replies.get(conversation_id)
+        if not pending:
+            return
+        remaining = [
+            item
+            for item in pending
+            if str(item[1].get("message_id") or "") != message_id
+        ]
+        if remaining:
+            self._pending_replies[conversation_id] = remaining
+        else:
+            self._pending_replies.pop(conversation_id, None)
 
     def resolve_webui_user_id(self, conversation_id: str) -> str:
         """Return the stable Core-side user ID owned by a WebUI conversation."""
@@ -104,8 +128,8 @@ class LocalChatBackend:
         ]
         for user_id in backend_user_ids:
             self._conversation_by_user.pop(user_id, None)
-            self._first_reply_waiters.pop(user_id, None)
         self._subscribers.pop(conversation_id, None)
+        self._pending_replies.pop(conversation_id, None)
 
     async def close(self) -> None:
         """Close the persistent Core connection during WebUI shutdown."""
@@ -132,6 +156,7 @@ class LocalChatBackend:
         *,
         user_id: str = DEFAULT_USER_ID,
         user_name: str = DEFAULT_USER_NAME,
+        request_message_id: str = "",
     ) -> dict[str, Any]:
         text = text.strip()
         if not text:
@@ -139,13 +164,11 @@ class LocalChatBackend:
 
         conversation_id = conversation_id or "default"
         backend_user_id = self._resolve_user_id(conversation_id, user_id)
-        reply_waiter: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1)
+        message_id = str(request_message_id or "").strip() or f"webui-{uuid.uuid4().hex}"
         self._conversation_by_user[backend_user_id] = conversation_id
-        self._first_reply_waiters.setdefault(backend_user_id, []).append(reply_waiter)
 
         try:
             endpoint, token = self._get_ncnk_ws_settings()
-            message_id = f"webui-{uuid.uuid4().hex}"
             payload = self._build_incoming_message(
                 message_id=message_id,
                 conversation_id=conversation_id,
@@ -158,18 +181,14 @@ class LocalChatBackend:
                 websocket = await self._ensure_connection(endpoint, token)
                 await websocket.send(json.dumps(payload, ensure_ascii=False))
 
-            try:
-                event = await asyncio.wait_for(
-                    reply_waiter.get(), timeout=DEFAULT_FIRST_REPLY_TIMEOUT_SECONDS
-                )
-            except asyncio.TimeoutError:
-                raise ChatBackendError("NachoBot Core 回复超时", status_code=504) from None
-
+            # POST 只负责可靠地把用户消息送入 Core。助手回复统一通过
+            # /ws/chat/{conversation_id} 推送，避免 HTTP 等待期间锁死输入框，
+            # 也避免首条回复同时经 HTTP 和 WebSocket 双通道竞争。
             return {
+                "status": "accepted",
                 "conversation_id": conversation_id,
                 "platform": LOCAL_PLATFORM,
-                "message_id": event["message_id"],
-                "message": event["message"],
+                "request_message_id": message_id,
             }
         except ChatBackendError:
             raise
@@ -184,8 +203,6 @@ class LocalChatBackend:
         except Exception as exc:
             logger.exception("Chat backend request failed")
             raise ChatBackendError(f"聊天后端请求失败: {exc}") from exc
-        finally:
-            self._remove_first_reply_waiter(backend_user_id, reply_waiter)
 
     async def _ensure_connection(self, endpoint: str, token: str | None):
         async with self._connection_lock:
@@ -261,11 +278,17 @@ class LocalChatBackend:
         if not conversation_id or not text:
             return None
 
+        additional_config = message_info.get("additional_config")
+        reply_to_message_id = ""
+        if isinstance(additional_config, dict):
+            reply_to_message_id = str(additional_config.get("reply_to_message_id") or "")
+
         return {
             "type": "message",
             "conversation_id": conversation_id,
             "user_id": user_id,
             "message_id": str(message_info.get("message_id") or uuid.uuid4().hex),
+            "reply_to_message_id": reply_to_message_id,
             "message": {
                 "role": "assistant",
                 "content": text,
@@ -273,13 +296,39 @@ class LocalChatBackend:
         }
 
     def _publish_reply(self, event: dict[str, Any]) -> None:
-        user_id = event["user_id"]
-        for waiter in self._first_reply_waiters.pop(user_id, []):
-            self._put_nowait(waiter, event)
+        if not str(event.get("reply_to_message_id") or ""):
+            logger.warning(
+                "Core reply %s has no reply_to_message_id; WebUI will append it without a turn anchor",
+                event.get("message_id"),
+            )
 
         conversation_id = event["conversation_id"]
+        self._remember_pending_reply(conversation_id, event)
         for subscriber in tuple(self._subscribers.get(conversation_id, ())):
             self._put_nowait(subscriber, event)
+
+    def _remember_pending_reply(self, conversation_id: str, event: dict[str, Any]) -> None:
+        now = time.monotonic()
+        pending = self._pending_replies.setdefault(conversation_id, [])
+        pending.append((now, event))
+        cutoff = now - PENDING_REPLY_TTL_SECONDS
+        pending[:] = [item for item in pending[-MAX_PENDING_REPLY_COUNT:] if item[0] >= cutoff]
+
+    def _replay_pending_replies(
+        self,
+        conversation_id: str,
+        queue: asyncio.Queue[dict[str, Any]],
+    ) -> None:
+        now = time.monotonic()
+        cutoff = now - PENDING_REPLY_TTL_SECONDS
+        pending = self._pending_replies.get(conversation_id, [])
+        fresh = [item for item in pending if item[0] >= cutoff]
+        if fresh:
+            self._pending_replies[conversation_id] = fresh[-MAX_PENDING_REPLY_COUNT:]
+            for _, event in self._pending_replies[conversation_id]:
+                self._put_nowait(queue, event)
+        else:
+            self._pending_replies.pop(conversation_id, None)
 
     @staticmethod
     def _put_nowait(queue: asyncio.Queue[dict[str, Any]], event: dict[str, Any]) -> None:
@@ -293,22 +342,11 @@ class LocalChatBackend:
         except asyncio.QueueFull:
             pass
 
-    def _remove_first_reply_waiter(
-        self, user_id: str, waiter: asyncio.Queue[dict[str, Any]]
-    ) -> None:
-        waiters = self._first_reply_waiters.get(user_id)
-        if not waiters:
-            return
-        try:
-            waiters.remove(waiter)
-        except ValueError:
-            return
-        if not waiters:
-            self._first_reply_waiters.pop(user_id, None)
-
     def _get_ncnk_ws_settings(self) -> tuple[str, str | None]:
         ncnk_config = self._read_ncnk_config()
-        token = self._first_auth_token(ncnk_config)
+        token = os.getenv("NACHOBOT_CORE_TOKEN", "").strip() or self._first_auth_token(
+            ncnk_config
+        )
 
         if bool(ncnk_config.get("use_custom", False)):
             mode = str(ncnk_config.get("mode", "ws")).lower()

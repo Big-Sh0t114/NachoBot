@@ -233,10 +233,14 @@ async def get_record_detail(
     """
     logger.debug("获取语音消息详情中")
     request_uuid = str(uuid.uuid4())
+    params = {"file": file, "out_format": "wav"}
+    if file_id is not None:
+        params["file_id"] = file_id
+
     payload = json.dumps(
         {
             "action": "get_record",
-            "params": {"file": file, "file_id": file_id, "out_format": "wav"},
+            "params": params,
             "echo": request_uuid,
         }
     )

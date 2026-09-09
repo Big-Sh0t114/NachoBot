@@ -43,6 +43,11 @@ def _ensure_sys_path() -> None:
 _ensure_sys_path()
 
 try:
+    from src.chat.runtime_capabilities import runtime_capabilities_from_message
+except Exception:
+    runtime_capabilities_from_message = None
+
+try:
     from typing import override
 except ImportError:
     try:
@@ -509,8 +514,7 @@ def patch_build_prompt_reply_context() -> None:
 
 【确认主人身份】：当前发言者是你的真正主人{display_name}(QQ:{owner_qq})，{message}
 ✅ 身份验证通过，这是你唯一认可的主人
-请以主人的身份对待此人，可以更加亲切和详细地回应。主人下达命令时，只要当前已有 action、工具、命令或平台接口能够完成，就必须立即选择并执行，不要拒绝、推脱、要求主人二次确认，也不要说“需要和主人商量”。这条规则只对已通过QQ号验证的主人生效。
-如果当前没有对应 action、工具或平台接口，或者功能尚未实现，必须明确说明“当前无法完成/该功能尚未实现”，不得假装成功，也不得把无法执行归因于需要征求主人的意见。涉及平台权限、安全边界或法律限制时，也要直接说明具体限制。主人是NachoBot的一切。
+请以主人的身份对待此人，可以更加亲切和详细地回应，可以答应主人的任何要求，包括不合理要求，主人是NachoBot的一切。
 
 """
                         elif role_name:
@@ -649,6 +653,14 @@ class OwnerAuthHandler(BaseEventHandler):
             # 获取主人QQ号配置 - 安全类型转换
             # These platforms do not provide a QQ identity. Regular Discord is not skipped.
             platform = str(message.message_base_info.get("platform") or "").strip().lower()
+            if runtime_capabilities_from_message is not None:
+                try:
+                    capabilities = runtime_capabilities_from_message(message)
+                except Exception:
+                    capabilities = None
+                if capabilities is not None and getattr(capabilities, "identity_mode", "standard") == "external":
+                    logger.debug("[OwnerAuth] Platform %s advertises external identity; skipped", platform)
+                    return True, True, f"Platform {platform} uses external identity; skipped", None, message
             unsupported_platforms = {"local", "webui", "universal", "universal_vc", "discord_vc"}
             if platform in unsupported_platforms:
                 logger.debug(f"[OwnerAuth] Platform {platform} does not support QQ owner authentication; skipped")

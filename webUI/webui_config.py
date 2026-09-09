@@ -13,9 +13,9 @@ DEFAULT_CONFIG = {
         "host": "127.0.0.1",
         "port": 8088
     },
-    "paths": {
-        "voxcpm_dir": "C:/Users/BigSh0t/VoxCPM-2.0.2",
-        "sovits_dir": "C:/Users/BigSh0t/GPT-SoVITS/GPT-SoVITS-v2pro-20250604"
+    "security": {
+        "auth_token": "",
+        "allowed_origins": [],
     },
     "proxy": {
         "http_proxy": "http://127.0.0.1:7897",
@@ -66,12 +66,12 @@ class WebUIConfig:
             server_table["port"] = DEFAULT_CONFIG["server"]["port"]
             doc["server"] = server_table
 
-            # Paths section
-            paths_table = tomlkit.table()
-            paths_table.add(tomlkit.comment("Absolute paths to external model directories"))
-            paths_table["voxcpm_dir"] = DEFAULT_CONFIG["paths"]["voxcpm_dir"]
-            paths_table["sovits_dir"] = DEFAULT_CONFIG["paths"]["sovits_dir"]
-            doc["paths"] = paths_table
+            security_table = tomlkit.table()
+            security_table.add(tomlkit.comment("Legacy field: keep empty; use NACHOBOT_WEBUI_TOKEN"))
+            security_table["auth_token"] = DEFAULT_CONFIG["security"]["auth_token"]
+            security_table.add(tomlkit.comment("Additional exact browser origins, e.g. https://panel.example.com"))
+            security_table["allowed_origins"] = DEFAULT_CONFIG["security"]["allowed_origins"]
+            doc["security"] = security_table
 
             # Proxy section
             proxy_table = tomlkit.table()
@@ -98,12 +98,15 @@ class WebUIConfig:
         return self.config["server"]["port"]
 
     @property
-    def voxcpm_dir(self) -> Path:
-        return Path(self.config["paths"]["voxcpm_dir"])
+    def auth_token(self) -> str:
+        return str(self.config["security"]["auth_token"] or "")
 
     @property
-    def sovits_dir(self) -> Path:
-        return Path(self.config["paths"]["sovits_dir"])
+    def allowed_origins(self) -> list[str]:
+        origins = self.config["security"]["allowed_origins"]
+        if not isinstance(origins, list):
+            return []
+        return [str(origin).strip() for origin in origins if str(origin).strip()]
 
     @property
     def http_proxy(self) -> str:

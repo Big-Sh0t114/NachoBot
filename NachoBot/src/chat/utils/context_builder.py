@@ -1,9 +1,12 @@
 import asyncio
 from typing import List, Dict, Any, Optional
+
 from src.common.logger import get_logger
 from src.config.config import global_config
 from src.chat.utils.url_fetcher import extract_urls
+from src.chat.utils.capability_router import build_search_after_decision, execute_mcp_after_decision
 from src.person_info.person_info import Person
+from src.mcp.types import MCPAccessContext
 
 logger = get_logger("context_builder")
 
@@ -13,9 +16,10 @@ async def build_tool_info(
     target: str,
     url_fetcher: Any,
     web_search_manager: Any,
+    capability_router: Any,
     tool_executor: Any,
     mcp_executor: Any,
-    has_mcp_permission: bool,
+    mcp_access_context: Optional[MCPAccessContext] = None,
     enable_tool: bool = True,
     chat_id: Optional[str] = None,
 ) -> str:
@@ -27,9 +31,10 @@ async def build_tool_info(
         target: 目标消息内容
         url_fetcher: UrlContentFetcher 实例
         web_search_manager: WebSearchManager 实例
+        capability_router: 共享的联网/MCP 能力路由器
         tool_executor: ToolExecutor 实例
         mcp_executor: MCPExecutor 实例
-        has_mcp_permission: 此用户是否有 MCP 权限
+        mcp_access_context: 核心 MCP 服务用于目录过滤和执行鉴权的上下文
         enable_tool: 是否启用工具调用
 
     Returns:
@@ -60,10 +65,29 @@ async def build_tool_info(
         # 构建并行任务列表
         parallel_tasks = {}
 
-        # 1. 搜索任务（仅在无 URL 时触发）
-        if not urls:
+        mcp_catalog = mcp_executor.get_tool_catalog_summary(access_context=mcp_access_context)
+        allow_web_search = bool(not urls and web_search_manager.is_available)
+        allow_mcp = bool(mcp_catalog)
+        decision_task = None
+        if allow_web_search or allow_mcp:
+            decision_task = asyncio.create_task(
+                capability_router.decide(
+                    chat_history=chat_history,
+                    sender=sender,
+                    target=target,
+                    bot_name=global_config.bot.nickname,
+                    allow_web_search=allow_web_search,
+                    allow_mcp=allow_mcp,
+                    mcp_catalog=mcp_catalog,
+                )
+            )
+
+        # 1. 搜索任务（仅在无 URL 且能力路由命中时触发）
+        if allow_web_search and decision_task:
             logger.info("未检测到URL，尝试联网搜索判定")
-            parallel_tasks["search"] = web_search_manager.build_search_info(
+            parallel_tasks["search"] = build_search_after_decision(
+                decision_task,
+                web_search_manager,
                 chat_history=chat_history,
                 sender=sender,
                 target=target,
@@ -75,19 +99,27 @@ async def build_tool_info(
             sender=sender, target_message=target, chat_history=chat_history, return_details=False
         )
 
-        # 3. MCP工具 (High-Intelligence) - 仅在权限校验通过时执行
-        if has_mcp_permission:
-            parallel_tasks["mcp_tool"] = mcp_executor.execute_from_chat_message(
-                sender=sender, target_message=target, chat_history=chat_history, return_details=False
+        # 3. MCP 独立工具链 - 权限和能力路由均通过后才执行
+        if allow_mcp and decision_task:
+            parallel_tasks["mcp_tool"] = execute_mcp_after_decision(
+                decision_task,
+                mcp_executor,
+                sender=sender,
+                target=target,
+                chat_history=chat_history,
+                return_details=False,
+                access_context=mcp_access_context,
             )
+        elif not mcp_catalog:
+            logger.info("当前用户没有获准使用的 MCP 工具，跳过 MCP 能力检查")
         else:
-            logger.info("用户无 MCP 权限，跳过 MCP 执行器 (Cached)")
+            logger.info("跳过 MCP 能力检查")
 
         # 并行执行所有任务
         task_keys = list(parallel_tasks.keys())
         task_coros = list(parallel_tasks.values())
         raw_results = await asyncio.gather(*task_coros, return_exceptions=True)
-        results_map = dict(zip(task_keys, raw_results))
+        results_map = dict(zip(task_keys, raw_results, strict=True))
 
         # 处理搜索结果
         if "search" in results_map:

@@ -1,5 +1,5 @@
 [inner]
-version = "6.20.6_bs"
+version = "6.20.10_bs"
 
 #----以下是给开发人员阅读的，如果你只是部署，不需要阅读----
 #如果你想要修改配置文件，请递增version的值
@@ -191,7 +191,7 @@ library_log_levels = { "aiohttp" = "WARNING"} # 设置特定库的日志级别
 show_prompt = false # 是否显示prompt
 
 [ncnk_message]
-auth_token = [] # 认证令牌，用于API验证，为空则不启用验证
+auth_token = [] # Core HTTP/WS 共用令牌；也可用 NACHOBOT_CORE_TOKEN，均为空时仅允许回环/显式受信容器网络
 # 以下项目若要使用需要打开use_custom，并单独配置ncnk_message的服务器
 use_custom = false # 是否启用自定义的ncnk_message服务器，注意这需要设置新的端口，不能与.env重复
 host="127.0.0.1"
@@ -206,7 +206,7 @@ none = false # 暂无
 
 [focus] # Focus 短期跨会话编排（实验性）
 mode = "off" # off=完全保持现有逻辑，observe=当前安全no-op，active=启用切换与短期交接
-allow_group_to_private = true # 允许同一显式 Focus 组内群→私；私聊仅可无 handoff 安全返回群聊
+allow_group_to_private = true # 仅控制群聊源→私聊；私聊源可无 handoff 切换到组内群聊或另一私聊
 unread_event_threshold = 5 # 后台会话累计多少条未读后通知当前会话
 unviewed_event_seconds = 180 # 后台会话多久未查看后生成事件
 max_events_per_prompt = 5 # 每轮最多注入 Planner 的事件数

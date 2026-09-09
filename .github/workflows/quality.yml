@@ -1,0 +1,310 @@
+name: Quality
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static:
+    name: Static safety checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          version: "0.9.5"
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          package-manager-cache: false
+
+      - name: Reject Python syntax errors and undefined names
+        run: uvx --from ruff==0.12.2 ruff check . --select E9,F63,F7,F82
+
+      - name: Parse every tracked Python and TOML file
+        shell: python
+        run: |
+          import ast
+          import pathlib
+          import subprocess
+          import tomllib
+
+          tracked = subprocess.check_output(
+              ["git", "ls-files", "*.py", "*.toml"],
+              text=True,
+          ).splitlines()
+          for name in tracked:
+              path = pathlib.Path(name)
+              # config-save contains legacy, intentionally half-filled snapshots
+              # (for example a blank `room_id =`) rather than deployable TOML.
+              if path.parts and path.parts[0] == "config-save":
+                  continue
+              if path.suffix == ".py":
+                  ast.parse(path.read_text(encoding="utf-8-sig"), filename=name)
+              else:
+                  with path.open("rb") as stream:
+                      tomllib.load(stream)
+
+      - name: Parse every tracked JavaScript file
+        shell: bash
+        run: |
+          while IFS= read -r -d '' file; do
+            node --check "$file"
+          done < <(git ls-files -z '*.js')
+
+      - name: Check patch whitespace
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          base="$BASE_SHA"
+          if [[ -z "$base" || "$base" =~ ^0+$ ]] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            base="HEAD^"
+          fi
+          git diff --check "$base" "$GITHUB_SHA"
+
+  locks:
+    name: Lock file (${{ matrix.project }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project:
+          - NachoBot
+          - NachoBot-Bilibili-Adapter
+          - NachoBot-DiscordVC-Adapter
+          - NachoBot-Koishi-Adapter
+          - NachoBot-Live2D-Adapter
+          - NachoBot-Multimodal-Adapter
+          - NachoBot-Napcat-Adapter
+          - NachoBot-UniversalVC-Adapter
+          - webUI
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          version: "0.9.5"
+
+      - name: Verify lock is current
+        working-directory: ${{ matrix.project }}
+        run: uv lock --check
+
+      - name: Verify Core resolves for Linux
+        if: matrix.project == 'NachoBot'
+        working-directory: NachoBot
+        run: >-
+          uv sync --locked --no-dev --no-install-project --dry-run
+          --python-platform x86_64-unknown-linux-gnu
+
+      - name: Verify generated requirements export
+        if: matrix.project == 'NachoBot'
+        working-directory: NachoBot
+        run: |
+          uv export --locked --no-dev --no-hashes --output-file requirements.txt
+          git diff --exit-code -- requirements.txt
+
+  compose:
+    name: Compose configuration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Validate every tracked Compose file
+        shell: bash
+        run: |
+          while IFS= read -r -d '' file; do
+            docker compose --file "$file" config --quiet
+          done < <(git ls-files -z '**/docker-compose.yml' 'docker-compose.yml')
+
+  unit-tests:
+    name: Unit tests (${{ matrix.project }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - project: NachoBot
+            tests: tests
+          - project: NachoBot-Bilibili-Adapter
+            tests: tests
+          - project: NachoBot-Live2D-Adapter
+            tests: tests
+            test_pattern: test_model_adapter.py
+          - project: NachoBot-Multimodal-Adapter
+            tests: tests
+          - project: NachoBot-Napcat-Adapter
+            tests: tests
+          - project: webUI
+            tests: tests
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          version: "0.9.5"
+
+      - name: Install locked runtime dependencies
+        working-directory: ${{ matrix.project }}
+        run: uv sync --locked --no-dev --no-install-project
+
+      - name: Run isolated unit tests
+        working-directory: ${{ matrix.project }}
+        run: >-
+          uv run --no-sync python -m unittest discover
+          -s ${{ matrix.tests }} -p "${{ matrix.test_pattern || 'test_*.py' }}"
+
+  koishi:
+    name: Koishi immutable install and build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          package-manager-cache: false
+
+      - name: Enable the repository-pinned Yarn release
+        run: corepack enable
+
+      - name: Install exactly the locked dependency graph
+        working-directory: koishi-app
+        run: corepack yarn install --immutable --mode=skip-build
+
+      - name: Build Koishi
+        working-directory: koishi-app
+        run: corepack yarn build
+
+  core-image:
+    name: Core container image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Detect image-affecting changes
+        id: changes
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          base="$BASE_SHA"
+          if [[ -z "$base" || "$base" =~ ^0+$ ]] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            base="HEAD^"
+          fi
+          if git diff --quiet "$base" "$GITHUB_SHA" -- NachoBot ':!NachoBot/**/*.md' ':!NachoBot/tests/**'; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build the Core image
+        if: steps.changes.outputs.build == 'true'
+        run: docker build --tag nachobot-core-ci:latest NachoBot
+
+  multimodal-image:
+    name: Multimodal container image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Detect image-affecting changes
+        id: changes
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          base="$BASE_SHA"
+          if [[ -z "$base" || "$base" =~ ^0+$ ]] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            base="HEAD^"
+          fi
+          adapter='NachoBot-Multimodal-Adapter'
+          if git diff --quiet "$base" "$GITHUB_SHA" -- \
+              "$adapter" \
+              ":!$adapter/**/*.md" \
+              ":!$adapter/tests/**" \
+              && git diff --quiet "$base" "$GITHUB_SHA" -- \
+              NachoBot \
+              ':!NachoBot/**/*.md' \
+              ':!NachoBot/tests/**'; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build the Multimodal image
+        if: steps.changes.outputs.build == 'true'
+        run: >-
+          docker build --tag nachobot-multimodal-adapter-ci:latest
+          --file NachoBot-Multimodal-Adapter/dockerfile
+          --build-context nachobot=NachoBot
+          NachoBot-Multimodal-Adapter
+
+  napcat-image:
+    name: NapCat container image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Detect image-affecting changes
+        id: changes
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          base="$BASE_SHA"
+          if [[ -z "$base" || "$base" =~ ^0+$ ]] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            base="HEAD^"
+          fi
+          adapter='NachoBot-Napcat-Adapter'
+          if git diff --quiet "$base" "$GITHUB_SHA" -- \
+              "$adapter" \
+              ":!$adapter/**/*.md" \
+              ":!$adapter/tests/**" \
+              && git diff --quiet "$base" "$GITHUB_SHA" -- \
+              NachoBot \
+              ':!NachoBot/**/*.md' \
+              ':!NachoBot/tests/**'; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build the NapCat image
+        if: steps.changes.outputs.build == 'true'
+        run: >-
+          docker build --tag nachobot-napcat-adapter-ci:latest
+          --file NachoBot-Napcat-Adapter/Dockerfile
+          --build-context nachobot=NachoBot
+          NachoBot-Napcat-Adapter

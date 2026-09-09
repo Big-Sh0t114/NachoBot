@@ -452,8 +452,8 @@ class FocusCoordinator:
             if state.active_chat_id is not None and self._can_dispatch_or_stop(state, state.active_chat_id)
         )
 
-    def has_safe_return_event(self, chat_id: str) -> bool:
-        """Synchronous planner gate for a private chat's metadata-only return."""
+    def has_private_source_metadata_only_event(self, chat_id: str) -> bool:
+        """Whether a private active chat has an event it may switch to safely."""
 
         state = self._state_for_chat(chat_id)
         if state is None or state.phase is not FocusGroupPhase.RUNNING or state.active_chat_id != chat_id:
@@ -461,7 +461,7 @@ class FocusCoordinator:
         return any(
             attention.visible
             and attention.revision > attention.delivered_revision
-            and self._policy.can_return_without_handoff(state.definition, chat_id, attention.target_chat_id)
+            and self._policy.can_switch_without_handoff(state.definition, chat_id, attention.target_chat_id)
             for attention in state.attention.values()
         )
 
@@ -545,7 +545,7 @@ class FocusCoordinator:
             )
             source_member = self._policy.member(state.definition, state.active_chat_id)
             target_member = self._policy.member(state.definition, stored_ref.chat_id)
-            safe_return = self._policy.can_return_without_handoff(
+            metadata_only = self._policy.can_switch_without_handoff(
                 state.definition,
                 state.active_chat_id,
                 stored_ref.chat_id,
@@ -558,7 +558,7 @@ class FocusCoordinator:
                     state.definition,
                     state.active_chat_id,
                     stored_ref.chat_id,
-                    has_handoff=not safe_return,
+                    has_handoff=not metadata_only,
                 ).allowed
             )
             should_surface = may_emit and (
@@ -572,7 +572,7 @@ class FocusCoordinator:
             if self._state_store is not None:
                 await self._state_store.upsert_event(
                     group_id,
-                    attention.snapshot(),
+                    self._attention_snapshot(state, attention),
                     last_delivered_revision=attention.delivered_revision,
                     visible=attention.visible,
                 )
@@ -982,7 +982,7 @@ class FocusCoordinator:
                         try:
                             await self._state_store.upsert_event(
                                 state.definition.group_id,
-                                attention.snapshot(),
+                                self._attention_snapshot(state, attention),
                                 last_delivered_revision=attention.delivered_revision,
                                 visible=True,
                                 now=current,
@@ -1133,9 +1133,9 @@ class FocusCoordinator:
         attention: _PendingAttention,
     ) -> FocusEventSnapshot:
         active = state.active_chat_id
-        safe_return = bool(
+        metadata_only = bool(
             active
-            and self._policy.can_return_without_handoff(
+            and self._policy.can_switch_without_handoff(
                 state.definition,
                 active,
                 attention.target_chat_id,
@@ -1149,7 +1149,7 @@ class FocusCoordinator:
                 active,
             )
         )
-        return attention.snapshot(include_preview=preview_allowed and not safe_return)
+        return attention.snapshot(include_preview=preview_allowed and not metadata_only)
 
     def _undelivered_events(self, state: _FocusGroupState) -> list[FocusEventSnapshot]:
         events = [

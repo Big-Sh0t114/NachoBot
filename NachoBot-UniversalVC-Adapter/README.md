@@ -1,8 +1,6 @@
 # NachoBot Universal Voice Adapter (Real-Time Edition)
 
-基于 [ProcTap](https://github.com/m96-chan/ProcTap) 的通用语音连麦适配器。能够从任意指定进程（如 Discord、QQ、游戏等）无损捕获音频，并通过 **高性能实时语音流处理管线**（去噪、声纹识别、流式语音识别）将语音转化为带有说话人身份标识的文本，发送至 NachoBot Core。Bot 的回复也将通过虚拟声卡返回至游戏或语音软件中。
-
-本适配器经过全面升级，专为**多人连麦/游戏场景**设计。
+基于 [ProcTap](https://github.com/m96-chan/ProcTap) 的 Windows 通用语音适配器。它从指定进程捕获音频，经 VAD、可选降噪、声纹追踪和共享流式 ASR 转成文本发送至 NachoBot Core，再把回复语音送入虚拟声卡，适合多人连麦与游戏场景。
 
 ## 🌟 核心特性
 
@@ -16,9 +14,10 @@
 ## 💻 前置要求
 
 1. **Windows 10/11** (20H1+)
-2. **Python 3.11+** (推荐使用 `uv` 管理依赖)
+2. **Python 3.11+**（推荐使用 `uv` 管理依赖）
 3. **虚拟声卡驱动** — 推荐 [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) 或 [VoiceMeeter](https://vb-audio.com/Voicemeeter/)
 4. **NachoBot Core** 处于运行状态
+5. 相邻的 **NachoBot-Multimodal-Adapter** 已准备共享 ASR 配置和模型
 
 ## 🎛️ 输入/输出设备设置指南
 
@@ -43,12 +42,11 @@
 cd NachoBot-UniversalVC-Adapter
 uv sync
 
-# 2. 复制并编辑配置文件
-copy config.toml.example config.toml
-# 根据需要修改 target_process_name 和 device_name，以及各项特性的开关
+# 2. 编辑现有 config.toml
+# 修改 target_process_name、device_name 与各流水线开关
 
-# 3. 运行适配器 (初次运行会自动下载所需 AI 模型)
-# 推荐使用项目根目录的 launch_universal_vc.bat 脚本来启动
+# 3. 运行适配器（初次运行会检查并下载所需模型）
+# 也可直接运行项目根目录的 launch_universal_vc.bat
 uv run python main.py
 ```
 
@@ -136,3 +134,18 @@ NachoBot-UniversalVC-Adapter/
 ├── speaker_db.json       # 本地声纹数据库 (运行时自动生成)
 └── download_models.py    # 手动触发模型下载脚本
 ```
+
+## Docker 部署
+
+本适配器提供 Windows 容器镜像：
+
+```bat
+docker network create nacho_bot
+docker compose up -d
+```
+
+镜像使用 Windows 容器引擎，因为 `proc-tap`、WASAPI 和虚拟声卡均依赖
+Windows。容器只能访问容器内部可见的进程和音频设备，不能直接捕获宿主机上的
+Discord/QQ/游戏进程或 VB-Audio 设备；如需这些能力，建议在宿主机直接运行。
+运行容器时请将 `config.toml` 中的核心地址改为 `core`（或可达的宿主机地址），
+并保留 `models`、`speaker_db.json` 及多模态模型卷。

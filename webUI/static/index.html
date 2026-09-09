@@ -26,7 +26,7 @@
     <!-- Splash — inline HTML autoplays video before any JS loads -->
     <div id="startup-screen"
         style="position:fixed;top:0;left:0;width:100vw;height:100vh;background:var(--bg-base,#0f172a);z-index:9999;display:flex;align-items:center;justify-content:center;transition:opacity 1s ease-in-out;opacity:1;">
-        <video id="startup-video" src="/resources/NachoBotLogoAnimation.mp4" autoplay muted playsinline
+        <video id="startup-video" src="/resources/NachoBotLogoAnimation.mp4" autoplay muted playsinline preload="auto"
             style="width:75%;height:auto;max-height:75vh;object-fit:contain;pointer-events:none;transform:translateZ(0);will-change:transform;-webkit-mask-image:radial-gradient(ellipse at center,black 60%,transparent 95%);mask-image:radial-gradient(ellipse at center,black 60%,transparent 95%);"></video>
     </div>
 
@@ -151,8 +151,6 @@
                 <div class="chat-workspace">
                     <header class="chat-header">
                         <div class="chat-header-left">
-                            <button type="button" class="chat-mobile-history-button" id="chat-mobile-history-button"
-                                aria-label="打开侧栏">☰</button>
                             <div>
                                 <div class="chat-eyebrow">NachoBot Chat</div>
                                 <h2 id="chat-current-title">新对话</h2>
@@ -234,7 +232,7 @@
         <section id="tab-launcher" class="tab-panel">
             <div class="panel-header">
                 <h2>一键启动</h2>
-                <p class="panel-desc">按适配器组管理服务的启动与停止</p>
+                <p class="panel-desc">按核心、平台适配器和多模态服务组管理启动与停止；端口与连接用途会随配置显示</p>
             </div>
             <div class="launcher-grid" id="launcher-grid"></div>
         </section>
@@ -592,6 +590,31 @@
                                         placeholder="例如: NachoBot（留空使用默认值）">
                                 </div>
                             </div>
+                            <div class="form-section" id="setup-discord-section" style="display:none">
+                                <div class="form-section-title">Discord Bot 配置</div>
+                                <p class="form-section-hint">选择 Discord 时必须填写一个 Bot Token</p>
+                                <div class="form-row">
+                                    <label class="form-label">Bot Token <span class="form-required">*</span></label>
+                                    <div class="form-input-group setup-discord-token-group">
+                                        <input type="password" class="form-input" id="setup-discord-token"
+                                            autocomplete="new-password" spellcheck="false" required
+                                            placeholder="粘贴 Discord Bot Token">
+                                        <a class="btn btn-outline btn-sm setup-discord-portal-link"
+                                            href="https://discord.com/developers/applications" target="_blank"
+                                            rel="noopener noreferrer">前往 Discord 开发者平台</a>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="form-section" id="setup-bilibili-section" style="display:none">
+                                <div class="form-section-title">Bilibili Bot 配置</div>
+                                <p class="form-section-hint">选择 Bilibili 时必须填写 Bot UID（B站账号 UID）</p>
+                                <div class="form-row">
+                                    <label class="form-label">Bilibili Bot UID <span class="form-required">*</span></label>
+                                    <input type="text" class="form-input" id="setup-bilibili-bot-account"
+                                        inputmode="numeric" pattern="[0-9]+" required
+                                        placeholder="例如: 123456789">
+                                </div>
+                            </div>
                         </div>
                     </div>
 
@@ -751,7 +774,48 @@
                 <div class="setup-step-panel" id="setup-step-4">
                     <div class="setup-hint-banner">
                         <span class="hint-icon">🔎</span>
-                        <span>请确认以下外部依赖已正确安装。验证通过后方可进入部署。</span>
+                        <span>请确认所选组件所需的外部运行依赖。验证通过后方可进入部署。</span>
+                    </div>
+                    <div class="setup-card" id="setup-multimodal-runtime-card" style="display:none">
+                        <div class="setup-card-header">
+                            <h3>🧩 Multimodal 运行环境</h3>
+                            <span id="setup-multimodal-runtime-recommend" class="form-row-tag">正在读取硬件建议...</span>
+                        </div>
+                        <div class="setup-components">
+                            <div class="component-group">
+                                <div class="component-group-title">安装依赖前请选择运行环境</div>
+                                <label class="component-option checked" data-runtime-option="gpu">
+                                    <input type="radio" name="setup-multimodal-runtime" value="gpu" checked>
+                                    <div class="component-card">
+                                        <span class="component-icon">🎮</span>
+                                        <div class="component-info">
+                                            <span class="component-name">GPU / CUDA</span>
+                                            <span class="component-desc">安装 CUDA 版 PyTorch 与本地模型依赖，适合 NVIDIA GPU</span>
+                                        </div>
+                                    </div>
+                                </label>
+                                <label class="component-option" data-runtime-option="cpu">
+                                    <input type="radio" name="setup-multimodal-runtime" value="cpu">
+                                    <div class="component-card">
+                                        <span class="component-icon">🖥️</span>
+                                        <div class="component-info">
+                                            <span class="component-name">CPU</span>
+                                            <span class="component-desc">安装 CPU 版 PyTorch 与本地模型依赖，不使用 CUDA</span>
+                                        </div>
+                                    </div>
+                                </label>
+                                <label class="component-option" data-runtime-option="relay">
+                                    <input type="radio" name="setup-multimodal-runtime" value="relay">
+                                    <div class="component-card">
+                                        <span class="component-icon">🔗</span>
+                                        <div class="component-info">
+                                            <span class="component-name">仅中继 / 不安装本地模型</span>
+                                            <span class="component-desc">仅安装消息中继所需的最小依赖，不安装 Torch、Transformers、ASR/VLM 等本地模型栈</span>
+                                        </div>
+                                    </div>
+                                </label>
+                            </div>
+                        </div>
                     </div>
                     <div class="setup-card">
                         <div class="setup-card-header">
@@ -820,52 +884,6 @@
                                 </div>
                             </div>
 
-                            <!-- GPT-SoVITS (tts + engine) -->
-                            <div class="path-check-card" id="path-check-sovits" data-type="sovits" style="display:none">
-                                <div class="path-check-header">
-                                    <span class="path-check-icon">🎙️</span>
-                                    <div class="path-check-info">
-                                        <span class="path-check-name">GPT-SoVITS</span>
-                                        <span class="path-check-hint">GPT-SoVITS 安装目录（包含 runtime/python.exe）</span>
-                                    </div>
-                                    <span class="path-check-status" id="status-sovits"></span>
-                                </div>
-                                <div class="path-check-body">
-                                    <div class="form-input-group">
-                                        <input type="text" class="form-input path-check-input" id="path-sovits"
-                                            placeholder="例如: C:\GPT-SoVITS\GPT-SoVITS-v2pro">
-                                        <button class="btn btn-outline btn-sm btn-verify" data-type="sovits">验证</button>
-                                    </div>
-                                    <div class="path-check-result" id="result-sovits"></div>
-                                    <a class="btn-download" id="dl-sovits"
-                                        href="https://www.yuque.com/baicaigongchang1145haoyuangong/ib3g1e/dkxgpiy9zb96hob4"
-                                        target="_blank" style="display:none">📥 前往下载 GPT-SoVITS</a>
-                                </div>
-                            </div>
-
-                            <!-- VoxCPM (tts + engine) -->
-                            <div class="path-check-card" id="path-check-voxcpm" data-type="voxcpm" style="display:none">
-                                <div class="path-check-header">
-                                    <span class="path-check-icon">🎙️</span>
-                                    <div class="path-check-info">
-                                        <span class="path-check-name">VoxCPM</span>
-                                        <span class="path-check-hint">VoxCPM 安装目录（包含 .venv/Scripts/python.exe）</span>
-                                    </div>
-                                    <span class="path-check-status" id="status-voxcpm"></span>
-                                </div>
-                                <div class="path-check-body">
-                                    <div class="form-input-group">
-                                        <input type="text" class="form-input path-check-input" id="path-voxcpm"
-                                            placeholder="例如: C:\VoxCPM-2.0.2">
-                                        <button class="btn btn-outline btn-sm btn-verify" data-type="voxcpm">验证</button>
-                                    </div>
-                                    <div class="path-check-result" id="result-voxcpm"></div>
-                                    <a class="btn-download" id="dl-voxcpm"
-                                        href="https://github.com/openbmb/VoxCPM/releases" target="_blank"
-                                        style="display:none">📥 前往下载 VoxCPM</a>
-                                </div>
-                            </div>
-
                             <!-- VB-Audio Virtual Cable (universalvc) -->
                             <div class="path-check-card" id="path-check-vb-cable" data-type="vb_cable"
                                 style="display:none">
@@ -917,6 +935,23 @@
                         </div>
                         <div class="deploy-log" id="deploy-log"></div>
                     </div>
+                    <div class="setup-card setup-bilibili-login-card" id="setup-bilibili-login-card"
+                        style="display:none">
+                        <div class="setup-card-header">
+                            <h3>📺 Bilibili 登录</h3>
+                            <span class="bilibili-login-status" id="setup-bilibili-login-status">等待启动</span>
+                        </div>
+                        <div class="setup-bilibili-login-body">
+                            <p class="setup-bilibili-login-message" id="setup-bilibili-login-message">
+                                请使用 Bilibili App 扫描二维码，并在 App 中确认登录。
+                            </p>
+                            <div class="setup-bilibili-qr-wrap" id="setup-bilibili-qr-wrap" style="display:none">
+                                <img id="setup-bilibili-qr" alt="Bilibili 登录二维码">
+                            </div>
+                            <button class="btn btn-outline btn-sm" id="setup-bilibili-retry"
+                                style="display:none">重新获取二维码</button>
+                        </div>
+                    </div>
                     <div class="setup-hint-banner" id="setup-launch-tip"
                         style="display:none; margin-top: 20px; background: rgba(34, 197, 94, 0.1); border-color: rgba(34, 197, 94, 0.2); color: #166534;">
                         <span class="hint-icon">💡</span>
@@ -958,6 +993,7 @@
             } catch (e) { }
         })();
     </script>
+    <script src="/static/js/auth.js"></script>
     <script src="/static/js/visual-icons.js"></script>
     <script src="/static/js/chat-support.js"></script>
     <script src="/static/js/chat-profile.js"></script>
@@ -969,7 +1005,7 @@
     <script src="/static/js/ui.js"></script>
     <script src="/static/js/config.js"></script>
     <script src="/static/js/launcher.js"></script>
-    <script src="/static/js/terminal.js?v=qr-canvas-2"></script>
+    <script src="/static/js/terminal.js"></script>
     <script src="/static/js/plugins.js"></script>
     <script src="/static/js/database.js"></script>
     <script src="/static/js/knowledge.js"></script>

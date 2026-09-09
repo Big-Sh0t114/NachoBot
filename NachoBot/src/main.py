@@ -58,7 +58,7 @@ class MainSystem:
 
         # 初始化 A_Memorix 长期记忆子系统
         try:
-            import src.A_memorix  # 注册兼容垫片
+            import src.A_memorix  # noqa: F401  # 注册兼容垫片
             from src.A_memorix.host_service import a_memorix_host_service
             from src.memory_system.api import router as memory_api_router
 
@@ -94,6 +94,13 @@ class MainSystem:
 
         # 加载所有actions，包括默认的和插件的
         plugin_manager.load_all_plugins()
+
+        # MCP 协议运行时由核心统一持有。旧插件若存在，只作为配置兼容外壳，
+        # 不再建立第二套连接或向全局组件表动态注册 MCP 工具。
+        from src.mcp.service import mcp_service
+
+        self._mcp_service = mcp_service
+        await mcp_service.start(wait_for_connections=False)
 
         # 注册沙盒工具（核心功能）
         from src.chat.sandbox.sandbox_tools import register_sandbox_tools
@@ -167,6 +174,12 @@ class MainSystem:
         await heartflow.stop_all()
         await focus_bootstrap.stop()
         logger.info("Focus and Heartflow runtimes stopped")
+
+        if getattr(self, "_mcp_service", None):
+            try:
+                await self._mcp_service.shutdown()
+            except Exception as e:
+                logger.error(f"MCP 核心运行时关闭失败: {e}")
 
         # 关闭 A_Memorix
         if getattr(self, "_a_memorix_host_service", None):

@@ -11,6 +11,7 @@ from json_repair import repair_json
 
 from src.llm_models.utils_model import LLMRequest
 from src.llm_models.exceptions import ReqAbortException
+from src.mcp.access import access_context_from_stream
 from src.config.config import global_config, model_config
 from src.common.logger import get_logger
 from src.common.data_models.info_data_model import ActionPlannerInfo
@@ -28,6 +29,7 @@ from src.chat.utils.chat_message_builder import (
 from src.chat.utils.prompt_injection_guard import guard_user_content
 from src.chat.utils.display_name import resolve_sender_name
 from src.chat.utils.context_builder import build_tool_info, build_relation_info, build_lpmm_knowledge_info
+from src.chat.utils.capability_router import CapabilityRouter
 from src.memory_system.memory_retrieval import build_memory_retrieval_prompt
 from src.chat.utils.utils import get_chat_type_and_target_info
 from src.chat.planner_actions.action_manager import ActionManager
@@ -38,10 +40,8 @@ from src.chat.focus.switch_eligibility import can_offer_switch_chat
 from src.chat.focus.switch_planner import has_active_focus_lease, render_switch_planner_context
 from src.plugin_system.base.component_types import ActionInfo, ComponentType, ActionActivationType
 from src.plugin_system.core.component_registry import component_registry
-import os
-import tomlkit
-import asyncio
 from src.plugin_system.core.tool_use import ToolExecutor
+from src.plugin_system.core.mcp_tool_executor import MCPToolExecutor
 from src.chat.utils.web_search import WebSearchManager
 from src.chat.utils.url_fetcher import UrlContentFetcher
 
@@ -212,15 +212,14 @@ class BrainPlanner:
             exclude_prefix="mcp",
             model_set=model_config.model_task_config.tool_use,
         )
-        self.mcp_executor = ToolExecutor(
+        self.mcp_executor = MCPToolExecutor(
             chat_id=self.chat_id,
-            enable_cache=True,
-            cache_ttl=3,
             model_set=model_config.model_task_config.mcp,
             include_prefix="mcp",
             prompt_template="mcp_tool_executor_prompt",
         )
         self.web_search_manager = WebSearchManager(chat_id=chat_id, enable_cache=True, cache_ttl=2)
+        self.capability_router = CapabilityRouter(chat_id=chat_id)
         self.url_fetcher = UrlContentFetcher()
 
     @property
@@ -245,40 +244,6 @@ class BrainPlanner:
         is_admin = str(user_id) in global_config.advanced.admins
         is_whitelisted = str(user_id) in global_config.bot.sandbox_whitelist
         return is_admin or is_whitelisted
-
-    def _check_mcp_permission(self, user_id: str) -> bool:
-        """检查当前用户是否有权限使用 MCP 工具 (集成自 PrivateGenerator)"""
-        try:
-            if not user_id:
-                return False
-
-            config_path = os.path.join(os.getcwd(), "plugins", "MaiBot_MCPBridgePlugin", "config.toml")
-            if not os.path.exists(config_path):
-                return False
-
-            with open(config_path, "r", encoding="utf-8") as f:
-                doc = tomlkit.load(f)
-
-            plugin_config = doc.get("plugin", {})
-            if not plugin_config.get("enabled", True):
-                return False
-
-            permissions = doc.get("permissions", {})
-            quick_allow_users_str = permissions.get("quick_allow_users", "")
-            default_mode = permissions.get("perm_default_mode", "deny_all")
-
-            allow_users = {u.strip() for u in quick_allow_users_str.strip().split("\n") if u.strip()}
-
-            is_allowed = user_id in allow_users
-            if is_allowed:
-                return True
-
-            if default_mode == "deny_all":
-                return False
-            return True
-        except Exception as e:
-            logger.debug(f"{self.log_prefix}MCP Permission Check Failed: {e}")
-            return False
 
     def find_message_by_id(
         self, message_id: str, message_id_list: List[Tuple[str, "DatabaseMessages"]]
@@ -670,6 +635,11 @@ class BrainPlanner:
 
             # --- 下面使用 gathered 异步加载上下文所需信息 ---
             user_info = chat_target_info if chat_target_info else None
+            chat_stream = get_chat_manager().get_stream(self.chat_id)
+            mcp_access_context = access_context_from_stream(
+                chat_stream,
+                str(user_info.user_id) if user_info and user_info.user_id else "",
+            )
 
             task_results = await asyncio.gather(
                 build_relation_info(chat_talking_prompt_short, sender_name, user_info=user_info),
@@ -685,11 +655,10 @@ class BrainPlanner:
                     target=target,
                     url_fetcher=self.url_fetcher,
                     web_search_manager=self.web_search_manager,
+                    capability_router=self.capability_router,
                     tool_executor=self.tool_executor,
                     mcp_executor=self.mcp_executor,
-                    has_mcp_permission=self._check_mcp_permission(
-                        user_info.user_id if user_info and user_info.user_id else ""
-                    ),
+                    mcp_access_context=mcp_access_context,
                     enable_tool=global_config.tool.enable_tool,
                 ),
                 build_lpmm_knowledge_info(

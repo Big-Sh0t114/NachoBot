@@ -1,4 +1,5 @@
 import asyncio
+from collections import deque
 import json
 import time
 import traceback
@@ -13,7 +14,6 @@ from src.common.data_models.message_data_model import ReplyContentType
 from src.chat.message_receive.chat_stream import ChatStream, get_chat_manager
 from src.chat.runtime_capabilities import runtime_capabilities_from_stream
 from src.chat.utils.prompt_builder import global_prompt_manager
-from src.chat.utils.prompt_variables import render_dynamic_prompt_template
 from src.chat.utils.timer_calculator import Timer
 from src.chat.planner_actions.planner import ActionPlanner
 from src.chat.planner_actions.action_modifier import ActionModifier
@@ -58,6 +58,9 @@ from src.chat.focus.reply_delivery import settle_reply_context_delivery
 from src.chat.focus.message_repository import load_message_batch
 from src.chat.focus.switch_action import (
     SWITCH_CHAT_ACTION,
+    SwitchDisposition,
+    classify_switch_failure_reason,
+    classify_switch_result,
     execute_switch_chat,
     format_recent_source_messages,
 )
@@ -125,9 +128,10 @@ class HeartFChatting:
         # 循环控制内部状态
         self.running: bool = False
         self._loop_task: Optional[asyncio.Task] = None  # 主循环任务
+        self._in_flight_operations: int = 0
 
         # 添加循环信息管理相关的属性
-        self.history_loop: List[CycleDetail] = []
+        self.history_loop: deque[CycleDetail] = deque(maxlen=200)
         self._cycle_counter = 0
         self._current_cycle_detail: CycleDetail = None  # type: ignore
 
@@ -346,9 +350,8 @@ class HeartFChatting:
             logger.info(f"{self.log_prefix} HeartFChatting 启动完成")
 
         except Exception as e:
-            # 启动失败时重置状态
-            self.running = False
-            self._loop_task = None
+            # start() 已经可能创建多个后台任务；统一走幂等 stop 回滚。
+            await self.stop()
             logger.error(f"{self.log_prefix} HeartFChatting 启动失败: {e}")
             raise
 
@@ -568,11 +571,7 @@ class HeartFChatting:
     ) -> ActionPlannerInfo | None:
         """Turn a committed Focus switch into a direct Replyer handoff."""
 
-        if (
-            focus_turn is None
-            or not (focus_turn.wake_reason & WakeReason.SWITCH_TARGET)
-            or not recent_messages
-        ):
+        if focus_turn is None or not (focus_turn.wake_reason & WakeReason.SWITCH_TARGET) or not recent_messages:
             return None
         target_message = recent_messages[-1]
         return ActionPlannerInfo(
@@ -618,6 +617,25 @@ class HeartFChatting:
     ) -> List[str]:
         return list(format_recent_source_messages(recent_messages or (), limit=10))
 
+    def _record_dropped_focus_switch(
+        self,
+        focus_turn: FocusTurn,
+        action_data: Dict[str, Any] | None,
+    ) -> None:
+        """Acknowledge only the event whose permanent switch was rejected."""
+
+        observed = {
+            event.event_id: event.revision
+            for event in focus_turn.events
+        }
+        event_id = action_data.get("event_id") if isinstance(action_data, dict) else None
+        if isinstance(event_id, str) and event_id in observed:
+            delivered = dict(self._focus_delivered_event_revisions or {})
+            delivered[event_id] = observed[event_id]
+            self._focus_delivered_event_revisions = delivered
+        elif not self._focus_delivered_event_revisions:
+            self._focus_delivered_event_revisions = observed
+
     @staticmethod
     def _focus_forced_priority_action(
         coordinator: FocusCoordinator,
@@ -649,7 +667,7 @@ class HeartFChatting:
                 event.event_id,
             ),
         )
-        recent_results = HeartFChatting._focus_handoff_recent_results(recent_messages)
+        recent_results: List[str] = []
         for event in ranked_events:
             target = coordinator.policy.member(definition, event.target_chat_id)
             if target is None:
@@ -658,7 +676,7 @@ class HeartFChatting:
             if target_priority <= source_priority:
                 continue
 
-            safe_return = coordinator.policy.can_return_without_handoff(
+            metadata_only = coordinator.policy.can_switch_without_handoff(
                 definition,
                 source_chat_id,
                 event.target_chat_id,
@@ -667,18 +685,16 @@ class HeartFChatting:
                 definition,
                 source_chat_id,
                 event.target_chat_id,
-                has_handoff=not safe_return,
+                has_handoff=not metadata_only,
             )
             if not decision.allowed:
                 continue
 
-            target_kind = (
-                "Planner bypass 会话"
-                if HeartFChatting._focus_member_bypasses_planner(target)
-                else "私聊"
-            )
-            handoff = {}
-            if not safe_return:
+            target_kind = "Planner bypass 会话" if HeartFChatting._focus_member_bypasses_planner(target) else "私聊"
+            action_data = {"event_id": event.event_id}
+            if not metadata_only:
+                if not recent_results:
+                    recent_results = HeartFChatting._focus_handoff_recent_results(recent_messages)
                 handoff = {
                     "task_summary": (
                         f"按 Focus 会话优先级从「{source.display_name or source.chat_id}」切换到"
@@ -689,13 +705,11 @@ class HeartFChatting:
                     "pending_items": [f"处理目标{target_kind}中的最新未读消息"],
                     "recent_results": recent_results,
                 }
+                action_data["handoff"] = handoff
             return ActionPlannerInfo(
                 action_type=SWITCH_CHAT_ACTION,
-                reasoning=(
-                    "Focus priority preemption: "
-                    "planner-bypass > private > normal-group"
-                ),
-                action_data={"event_id": event.event_id, "handoff": handoff},
+                reasoning=("Focus priority preemption: planner-bypass > private > normal-group"),
+                action_data=action_data,
                 action_message=None,
                 available_actions=available_actions,
             )
@@ -726,35 +740,36 @@ class HeartFChatting:
                 continue
 
             explicit_signal = bool(event.is_mentioned or event.is_at)
-            bypass_boundary = (
-                source_bypasses_planner
-                or HeartFChatting._focus_member_bypasses_planner(target)
-            )
+            bypass_boundary = source_bypasses_planner or HeartFChatting._focus_member_bypasses_planner(target)
             if not (explicit_signal or bypass_boundary):
                 continue
 
-            safe_return = coordinator.policy.can_return_without_handoff(
+            metadata_only = coordinator.policy.can_switch_without_handoff(
                 definition,
                 source_chat_id,
                 event.target_chat_id,
             )
-            if source.kind is ChatKind.PRIVATE and not safe_return:
+            if source.kind is ChatKind.PRIVATE and not metadata_only:
                 continue
-            if target.kind is ChatKind.PRIVATE and not global_config.focus.allow_group_to_private:
+            if (
+                source.kind is ChatKind.GROUP
+                and target.kind is ChatKind.PRIVATE
+                and not global_config.focus.allow_group_to_private
+            ):
                 continue
             policy_decision = coordinator.policy.decide_switch(
                 definition,
                 source_chat_id,
                 event.target_chat_id,
-                has_handoff=not safe_return,
+                has_handoff=not metadata_only,
             )
             if not policy_decision.allowed:
                 continue
 
             fallback_kind = "mentioned/at" if explicit_signal else "bypass-session boundary"
-            handoff = {}
-            if not safe_return:
-                handoff = {
+            action_data = {"event_id": event.event_id}
+            if not metadata_only:
+                action_data["handoff"] = {
                     "task_summary": (
                         f"Focus Gate 不可用，按 {fallback_kind} 降级规则从"
                         f"「{source.display_name or source.chat_id}」切换到"
@@ -765,7 +780,7 @@ class HeartFChatting:
             return ActionPlannerInfo(
                 action_type=SWITCH_CHAT_ACTION,
                 reasoning=f"Focus Gate unavailable; deterministic {fallback_kind} fallback",
-                action_data={"event_id": event.event_id, "handoff": handoff},
+                action_data=action_data,
                 action_message=None,
                 available_actions=available_actions,
             )
@@ -929,6 +944,7 @@ class HeartFChatting:
 
             cycle_timers, thinking_id = self.start_cycle()
             logger.info(f"{self.log_prefix} 开始第{self._cycle_counter}次思考")
+            pre_planner_started_at = time.perf_counter()
 
             # 仅在适配器声明支持通知动作时处理。
             capabilities = runtime_capabilities_from_stream(self.chat_stream)
@@ -980,8 +996,9 @@ class HeartFChatting:
                 # 第一步：动作检查
                 available_actions: Dict[str, ActionInfo] = {}
                 try:
-                    await self.action_modifier.modify_actions()
-                    available_actions = self.action_manager.get_using_actions()
+                    with Timer("动作检查", cycle_timers):
+                        await self.action_modifier.modify_actions()
+                        available_actions = self.action_manager.get_using_actions()
                 except Exception as e:
                     logger.error(f"{self.log_prefix} 动作修改失败: {e}")
 
@@ -1027,7 +1044,6 @@ class HeartFChatting:
                     available_actions,
                 )
 
-
                 logger.debug(
                     f"{self.log_prefix} bypass_planner={bypass_planner}, messages={len(message_list_before_now)}"
                 )
@@ -1051,12 +1067,18 @@ class HeartFChatting:
                         action_data=forced_priority_action.action_data,
                         reasoning=forced_priority_action.reasoning,
                     )
+                    disposition = classify_switch_result(switch_result)
                     if switch_result.success:
+                        logger.info(f"{self.log_prefix} [Focus] forced priority switch succeeded")
                         return True
                     logger.warning(
-                        f"{self.log_prefix} [Focus] forced priority switch failed: {switch_result.reason}"
+                        f"{self.log_prefix} [Focus] forced priority switch failed; "
+                        f"{'retrying' if disposition is SwitchDisposition.RETRY else 'dropping event'}: "
+                        f"{switch_result.reason}"
                     )
-                    return False
+                    if disposition is SwitchDisposition.DROP:
+                        self._record_dropped_focus_switch(focus_turn, forced_priority_action.action_data)
+                    return disposition is not SwitchDisposition.RETRY
 
                 # --- 中期记忆摘要生成已移至独立后台循环，此处无需处理 ---
 
@@ -1065,11 +1087,12 @@ class HeartFChatting:
                     try:
                         from src.memory_system.heuristic_memory_injector import inject_memory_context
 
-                        chat_content_block = await inject_memory_context(
-                            chat_id=self.stream_id,
-                            chat_content_block=chat_content_block,
-                            messages=message_list_before_now,
-                        )
+                        with Timer("A_Memorix长期记忆注入", cycle_timers):
+                            chat_content_block = await inject_memory_context(
+                                chat_id=self.stream_id,
+                                chat_content_block=chat_content_block,
+                                messages=message_list_before_now,
+                            )
                     except Exception as e:
                         logger.debug(f"{self.log_prefix} 长期记忆注入跳过: {e}")
 
@@ -1077,12 +1100,13 @@ class HeartFChatting:
                     try:
                         from src.memory_system.person_profile_injector import inject_person_profiles
 
-                        chat_content_block = await inject_person_profiles(
-                            chat_id=self.stream_id,
-                            chat_content_block=chat_content_block,
-                            messages=message_list_before_now,
-                            is_group_chat=is_group_chat,
-                        )
+                        with Timer("人物画像注入", cycle_timers):
+                            chat_content_block = await inject_person_profiles(
+                                chat_id=self.stream_id,
+                                chat_content_block=chat_content_block,
+                                messages=message_list_before_now,
+                                is_group_chat=is_group_chat,
+                            )
                     except Exception as e:
                         logger.debug(f"{self.log_prefix} 人物画像注入跳过: {e}")
 
@@ -1116,35 +1140,45 @@ class HeartFChatting:
                             action_data=gate_action.action_data,
                             reasoning=gate_action.reasoning,
                         )
+                        disposition = classify_switch_result(switch_result)
                         if switch_result.success:
+                            logger.info(f"{self.log_prefix} [Focus Gate] terminal switch succeeded")
                             return True
                         logger.warning(
-                            f"{self.log_prefix} [Focus Gate] switch failed: {switch_result.reason}"
+                            f"{self.log_prefix} [Focus Gate] switch failed; "
+                            f"{'retrying' if disposition is SwitchDisposition.RETRY else 'dropping event'}: "
+                            f"{switch_result.reason}"
                         )
-                        return False
+                        if disposition is SwitchDisposition.DROP:
+                            self._record_dropped_focus_switch(focus_turn, gate_action.action_data)
+                        return disposition is not SwitchDisposition.RETRY
 
                 async def build_current_planner_prompt():
-                    return await self.action_planner.build_planner_prompt(
-                        is_group_chat=is_group_chat,
-                        chat_target_info=chat_target_info,
-                        current_available_actions=available_actions,
-                        chat_content_block=chat_content_block,
-                        message_id_list=message_id_list,
-                        interest=global_config.personality.interest,
-                    )
+                    with Timer("Planner Prompt构建", cycle_timers):
+                        return await self.action_planner.build_planner_prompt(
+                            is_group_chat=is_group_chat,
+                            chat_target_info=chat_target_info,
+                            current_available_actions=available_actions,
+                            chat_content_block=chat_content_block,
+                            message_id_list=message_id_list,
+                            interest=global_config.personality.interest,
+                        )
 
                 if focus_gate_stayed:
                     with suppress_focus_planner_context():
                         prompt_info = await build_current_planner_prompt()
                 else:
                     prompt_info = await build_current_planner_prompt()
-                continue_flag, modified_message = await events_manager.handle_nacho_events(
-                    EventType.ON_PLAN, None, prompt_info[0], None, self.chat_stream.stream_id
-                )
+                with Timer("ON_PLAN事件", cycle_timers):
+                    continue_flag, modified_message = await events_manager.handle_nacho_events(
+                        EventType.ON_PLAN, None, prompt_info[0], None, self.chat_stream.stream_id
+                    )
                 if not continue_flag:
                     return False
                 if modified_message and modified_message._modify_flags.modify_llm_prompt:
                     prompt_info = (modified_message.llm_prompt, prompt_info[1])
+
+                cycle_timers["Planner前准备"] = time.perf_counter() - pre_planner_started_at
 
                 if bypass_planner:
                     logger.info(f"{self.log_prefix} [HFC] Bypassing Planner for {self.chat_stream.platform}")
@@ -1381,7 +1415,7 @@ class HeartFChatting:
         self._focus_turn_interrupted = False
         try:
             with bind_lease(turn.lease):
-                success = await self._loopbody(turn)
+                success = await self._run_tracked_loopbody(turn)
             if not await focus_coordinator.is_current(turn.lease):
                 status = TurnStatus.SWITCHED
             elif self._focus_turn_interrupted or self._planner_interrupt_requested:
@@ -1453,12 +1487,20 @@ class HeartFChatting:
             logger.info(f"{self.log_prefix} Focus chat loop stopped")
         logger.info(f"{self.log_prefix} Focus chat loop ended")
 
+    async def _run_tracked_loopbody(self, focus_turn: FocusTurn | None = None) -> bool:
+        """记录 Planner/动作执行在途状态，防止运行时被 TTL/LRU 回收。"""
+        self._in_flight_operations += 1
+        try:
+            return await self._loopbody(focus_turn)
+        finally:
+            self._in_flight_operations = max(0, self._in_flight_operations - 1)
+
     async def _normal_chat_loop(self):
         """主循环，持续进行计划并可能回复消息，直到被外部取消。"""
         try:
             while self.running:
                 # 主循环
-                success = await self._loopbody()
+                success = await self._run_tracked_loopbody()
                 await asyncio.sleep(0.1)
                 if not success:
                     break
@@ -1636,16 +1678,48 @@ class HeartFChatting:
             receipts.append(receipt)
             return ("Filtered" if receipt.delivered else ""), receipts
 
+        delivery_mode = runtime_capabilities_from_stream(self.chat_stream).reply_delivery
+        if delivery_mode == "json_envelope":
+            # The adapter owns the envelope semantics.  Core preserves it as a
+            # single transport message and only reads the generic `reply`
+            # projection so chat history remains human-readable.
+            full_text = "".join(
+                str(reply_content.content)
+                for reply_content in reply_set.reply_data
+                if reply_content.content_type == ReplyContentType.TEXT
+            )
+            if not full_text:
+                return "", receipts
+
+            display_text = full_text
+            try:
+                candidate = full_text.strip()
+                start = candidate.find("{")
+                end = candidate.rfind("}")
+                if start >= 0 and end > start:
+                    envelope = json.loads(candidate[start : end + 1], strict=False)
+                    if isinstance(envelope, dict) and isinstance(envelope.get("reply"), str):
+                        display_text = envelope["reply"].strip() or full_text
+            except (TypeError, ValueError, json.JSONDecodeError):
+                logger.debug(f"{self.log_prefix} 适配器 JSON envelope 解析失败，按原文记录")
+
+            receipt = await send_api.text_to_stream_receipt(
+                text=full_text,
+                stream_id=self.chat_stream.stream_id,
+                reply_message=message_data,
+                set_reply=need_reply,
+                typing=False,
+                selected_expressions=selected_expressions,
+                display_message=display_text,
+            )
+            receipts.append(receipt)
+            return (display_text if receipt.delivered else ""), receipts
+
         # Some adapters require tagged text to remain in one transport message.
-        aggregate_tagged_text = (
-            runtime_capabilities_from_stream(self.chat_stream).reply_delivery
-            == "aggregate_tagged_text"
-        )
+        aggregate_tagged_text = delivery_mode == "aggregate_tagged_text"
         has_tts_tags = False
 
-        logger.debug(
-            f"{self.log_prefix} [HFC-SmartAggregation] aggregate_tagged_text={aggregate_tagged_text}"
-        )
+        logger.debug(f"{self.log_prefix} [HFC-SmartAggregation] aggregate_tagged_text={aggregate_tagged_text}")
 
         if aggregate_tagged_text:
             for i, reply_content in enumerate(reply_set.reply_data):
@@ -1723,13 +1797,19 @@ class HeartFChatting:
                 if action_planner_info.action_type == SWITCH_CHAT_ACTION:
                     lease = current_context_lease()
                     if lease is None or lease.chat_id != self.stream_id:
+                        reason = "switch_chat requires the current Focus turn lease"
+                        disposition = classify_switch_failure_reason(reason)
+                        logger.warning(
+                            f"{self.log_prefix} Focus switch_chat failed; "
+                            f"{'retrying' if disposition is SwitchDisposition.RETRY else 'dropping event'}: {reason}"
+                        )
                         return {
                             "action_type": SWITCH_CHAT_ACTION,
                             "success": False,
                             "reply_text": "",
                             "terminal": True,
-                            "retry": False,
-                            "reason": "switch_chat requires the current Focus turn lease",
+                            "retry": disposition is SwitchDisposition.RETRY,
+                            "reason": reason,
                         }
                     switch_result = await execute_switch_chat(
                         focus_coordinator,
@@ -1737,23 +1817,21 @@ class HeartFChatting:
                         action_data=action_planner_info.action_data or {},
                         reasoning=action_planner_info.reasoning or "",
                     )
-                    retryable = switch_result.reason.startswith(
-                        (
-                            "cannot resolve Focus events",
-                            "target runtime preparation failed",
-                            "handoff persistence failed",
-                            "switch compare-and-set failed",
-                            "Focus event revision changed",
+                    disposition = classify_switch_result(switch_result)
+                    if switch_result.success:
+                        logger.info(f"{self.log_prefix} Focus switch_chat succeeded: {switch_result.reason}")
+                    else:
+                        logger.warning(
+                            f"{self.log_prefix} Focus switch_chat failed; "
+                            f"{'retrying' if disposition is SwitchDisposition.RETRY else 'dropping event'}: "
+                            f"{switch_result.reason}"
                         )
-                    )
-                    log = logger.info if switch_result.success else logger.warning
-                    log(f"{self.log_prefix} Focus switch_chat: {switch_result.reason}")
                     return {
                         "action_type": SWITCH_CHAT_ACTION,
                         "success": switch_result.success,
                         "reply_text": "",
                         "terminal": True,
-                        "retry": retryable,
+                        "retry": disposition is SwitchDisposition.RETRY,
                         "reason": switch_result.reason,
                         "target_chat_id": switch_result.target_chat_id,
                         "handoff_id": switch_result.handoff_id,
@@ -1853,10 +1931,7 @@ class HeartFChatting:
                         if bypass_extra:
                             injection_text = f"{bypass_extra}\n{injection_text}" if injection_text else bypass_extra
 
-                        current_enable_tool = (
-                            global_config.tool.enable_tool
-                            and capabilities.tool_mode != "disabled"
-                        )
+                        current_enable_tool = global_config.tool.enable_tool and capabilities.tool_mode != "disabled"
                         configured_typo = (
                             global_config.chinese_typo.enable if hasattr(global_config, "chinese_typo") else True
                         )
@@ -1886,19 +1961,6 @@ class HeartFChatting:
                             else:
                                 logger.info("回复生成失败")
                             return {"action_type": "reply", "success": False, "reply_text": "", "loop_info": None}
-
-                        if capabilities.web_search_mode == "two_phase" and llm_response.content:
-                            search_result = await self._handle_two_phase_search_reply(
-                                llm_response=llm_response,
-                                action_planner_info=action_planner_info,
-                                chosen_action_plan_infos=chosen_action_plan_infos,
-                                context_refs=llm_response.context_refs,
-                                thinking_id=thinking_id,
-                                available_actions=available_actions,
-                                cycle_timers=cycle_timers,
-                            )
-                            if search_result is not None:
-                                return search_result
 
                     except asyncio.CancelledError:
                         logger.debug(f"{self.log_prefix} 并行执行：回复生成任务已被取消")
@@ -2442,7 +2504,9 @@ class HeartFChatting:
         if target_message and self._user_info_matches_reference(target_name, target_user_info):
             target_user_id = self._as_valid_qq_id(getattr(target_user_info, "user_id", ""))
             if target_user_id:
-                logger.info(f"{self.log_prefix} ban_user 通过目标消息昵称解析用户 '{target_name}' -> QQ号 {target_user_id}")
+                logger.info(
+                    f"{self.log_prefix} ban_user 通过目标消息昵称解析用户 '{target_name}' -> QQ号 {target_user_id}"
+                )
 
         if not target_user_id:
             target_user_id = self._as_valid_qq_id(target_name)
@@ -2796,399 +2860,3 @@ class HeartFChatting:
         except Exception as e:
             logger.debug(f"{self.log_prefix} Person Profile 预取跳过: {e}")
             return ""
-
-    # =========================================================================
-    # Adapter-declared two-phase web search
-    # =========================================================================
-
-    _TWO_PHASE_SEARCH_FALLBACK_REPLY = (
-        '{"reply": "<JP>ちょっと待ってにゃ、猫猫が調べるにゃ</JP><ZH>稍等喵，猫猫查查看~</ZH>", "emotion": "normal"}'
-    )
-
-    async def _handle_two_phase_search_reply(
-        self,
-        llm_response,
-        action_planner_info: ActionPlannerInfo,
-        chosen_action_plan_infos: List[ActionPlannerInfo],
-        context_refs: Optional[List["ReplyContextRef"]],
-        thinking_id: str,
-        available_actions: Dict[str, ActionInfo],
-        cycle_timers: Dict[str, float],
-    ) -> Optional[Dict[str, Any]]:
-        """处理适配器声明的两阶段联网搜索。
-        检测 Pass 1 LLM 输出中是否包含 web_search JSON 请求。
-        如果包含：发送初始回复 → 执行搜索 → 生成 Pass 2 回复。
-        如果不包含：返回 None，让调用方继续正常发送流程。
-
-        Returns:
-            Optional[Dict]: 如果触发了搜索流程，返回 action result dict；
-                            否则返回 None 表示没有触发搜索。
-        """
-        content = llm_response.content
-        if not content:
-            return None
-
-        # --- 解析 LLM JSON 输出中的 web_search 字段 ---
-        search_query = self._extract_search_query_from_response(content)
-        if not search_query:
-            return None
-
-        # From this point the two-pass path owns the reservation. When there is
-        # no search request the caller still owns it and settles it through the
-        # normal reply path.
-        refs = tuple(context_refs or ())
-        logger.info(f"{self.log_prefix} [两阶段搜索] 检测到搜索请求: {search_query}")
-
-        # --- Pass 1: 发送"正在查询"的初始回复 ---
-        try:
-            initial_reply_text = self._extract_initial_reply_from_response(llm_response)
-            if not initial_reply_text:
-                initial_reply_text = self._TWO_PHASE_SEARCH_FALLBACK_REPLY
-
-            logger.info(f"{self.log_prefix} [两阶段搜索] 发送初始回复: {initial_reply_text[:50]}...")
-            receipt = await send_api.text_to_stream_receipt(
-                text=initial_reply_text,
-                stream_id=self.chat_stream.stream_id,
-                typing=False,
-                storage_message=True,
-            )
-        except asyncio.CancelledError:
-            await self._settle_interrupted_reply_context(refs, [], "two_phase_pass1_cancelled")
-            raise
-        except Exception as e:
-            await self._settle_interrupted_reply_context(refs, [], "two_phase_pass1_send_error")
-            logger.error(f"{self.log_prefix} [两阶段搜索] Pass 1 发送失败: {e}")
-            return {
-                "action_type": "reply",
-                "success": False,
-                "reply_text": "",
-                "loop_info": None,
-            }
-
-        # Pass 1 is the reply produced from the reserved handoff context. Settle
-        # it now from the real adapter receipt; Pass 2 must never ACK it again.
-        await self._settle_interrupted_reply_context(refs, [receipt], "two_phase_pass1_not_delivered")
-        if not receipt.delivered:
-            logger.warning(
-                f"{self.log_prefix} [两阶段搜索] Pass 1 未投递，停止搜索: "
-                f"status={receipt.status}, detail={receipt.detail}"
-            )
-            return {
-                "action_type": "reply",
-                "success": False,
-                "reply_text": "",
-                "loop_info": None,
-            }
-
-        # --- 执行联网搜索 (30秒超时) ---
-        search_results = ""
-        try:
-            from src.chat.utils.web_search import WebSearchManager
-
-            search_manager = WebSearchManager(
-                chat_id=self.chat_stream.stream_id,
-                enable_cache=True,
-                cache_ttl=2,
-            )
-            search_results = await asyncio.wait_for(
-                search_manager.execute_search_direct(
-                    query=search_query,
-                    chat_history="",
-                ),
-                timeout=30.0,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(f"{self.log_prefix} [两阶段搜索] 搜索超时 (30s)，跳过 Pass 2")
-            return {
-                "action_type": "reply",
-                "success": True,
-                "reply_text": initial_reply_text,
-                "loop_info": None,
-            }
-        except Exception as e:
-            logger.error(f"{self.log_prefix} [两阶段搜索] 搜索执行失败: {e}")
-            return {
-                "action_type": "reply",
-                "success": True,
-                "reply_text": initial_reply_text,
-                "loop_info": None,
-            }
-
-        if not search_results:
-            logger.info(f"{self.log_prefix} [两阶段搜索] 搜索无结果，跳过 Pass 2")
-            return {
-                "action_type": "reply",
-                "success": True,
-                "reply_text": initial_reply_text,
-                "loop_info": None,
-            }
-
-        logger.info(f"{self.log_prefix} [两阶段搜索] 搜索完成，开始 Pass 2 回复生成")
-
-        # --- Pass 2: 带搜索结果生成最终回复 ---
-        try:
-            pass2_result = await self._generate_search_followup_reply(
-                search_results=search_results,
-                original_question=getattr(action_planner_info.action_message, "processed_plain_text", "") or "",
-                initial_reply=initial_reply_text,
-                action_planner_info=action_planner_info,
-                chosen_action_plan_infos=chosen_action_plan_infos,
-                thinking_id=thinking_id,
-                available_actions=available_actions,
-                cycle_timers=cycle_timers,
-            )
-            return pass2_result
-        except Exception as e:
-            logger.error(f"{self.log_prefix} [两阶段搜索] Pass 2 回复生成失败: {e}")
-            # Pass 1 已经发送了，返回成功
-            return {
-                "action_type": "reply",
-                "success": True,
-                "reply_text": initial_reply_text,
-                "loop_info": None,
-            }
-
-    def _extract_search_query_from_response(self, content: str) -> Optional[str]:
-        """从 LLM 回复内容中提取 web_search 请求。
-
-        支持以下 JSON 格式（隔离解析，不影响其他 JSON 字段）：
-          {"web_search": true, "search_query": "关键词", ...}
-
-        Returns:
-            Optional[str]: 搜索关键词，如果未请求搜索则返回 None
-        """
-        try:
-            # 尝试从整个回复中找到 JSON 块
-            text = content.strip()
-            # 支持 ```json ... ``` 包裹
-            import re
-
-            json_match = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL)
-            if json_match:
-                text = json_match.group(1)
-            else:
-                # 直接尝试找 JSON 对象
-                start_idx = text.find("{")
-                end_idx = text.rfind("}")
-                if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
-                    text = text[start_idx : end_idx + 1]
-                else:
-                    return None
-
-            data = json.loads(text, strict=False)
-            if not isinstance(data, dict):
-                return None
-
-            # 检查 web_search 字段
-            web_search = data.get("web_search")
-            if web_search is True or (isinstance(web_search, str) and web_search.lower() in ("true", "yes", "1")):
-                query = data.get("search_query", "")
-                if isinstance(query, str) and query.strip():
-                    return query.strip()
-
-        except (json.JSONDecodeError, Exception):
-            pass
-
-        return None
-
-    def _extract_initial_reply_from_response(self, llm_response) -> Optional[str]:
-        """从 LLM 响应中提取初始回复文本（搜索前发给观众的文字）。
-
-        复用 generator 已经健壮解析好的 reply_set，
-        从中提取所有的文本内容拼接。
-
-        Returns:
-            Optional[str]: 初始回复文本，如果无法提取则返回 None
-        """
-        if not llm_response or not getattr(llm_response, "reply_set", None):
-            return None
-
-        try:
-            from src.common.data_models.message_data_model import ReplyContentType
-
-            texts = []
-            for item in llm_response.reply_set.reply_data:
-                if item.content_type == ReplyContentType.TEXT or item.content_type == "text":
-                    text_str = str(item.content).strip()
-                    if text_str:
-                        texts.append(text_str)
-
-            if texts:
-                return "\n".join(texts)
-        except Exception as e:
-            logger.debug(f"[两阶段搜索] 从 reply_set 提取初始回复失败: {e}")
-
-        return None
-
-    async def _generate_search_followup_reply(
-        self,
-        search_results: str,
-        original_question: str,
-        initial_reply: str,
-        action_planner_info: ActionPlannerInfo,
-        chosen_action_plan_infos: List[ActionPlannerInfo],
-        thinking_id: str,
-        available_actions: Dict[str, ActionInfo],
-        cycle_timers: Dict[str, float],
-    ) -> Dict[str, Any]:
-        """生成 Pass 2 搜索结果回复。
-
-        使用 replyer_search_followup_prompt 模板，将搜索结果注入后生成最终回复。
-        """
-        from datetime import datetime
-        from src.chat.utils.chat_message_builder import (
-            build_readable_messages,
-            get_raw_msg_before_timestamp_with_chat,
-            get_stepped_limit as _get_stepped_limit,
-        )
-
-        chat_stream = self.chat_stream
-        context_size = global_config.chat.get_max_context_size(is_group_chat=True)
-
-        # 获取背景对话
-        background_dialogue_prompt = ""
-        try:
-            _bg_stepped_limit = _get_stepped_limit(chat_stream.stream_id, time.time(), context_size)
-            messages_before = get_raw_msg_before_timestamp_with_chat(
-                chat_stream.stream_id,
-                time.time(),
-                limit=_bg_stepped_limit,
-            )
-            if messages_before:
-                background_dialogue_prompt = build_readable_messages(
-                    messages_before,
-                    replace_bot_name=True,
-                )
-        except Exception as e:
-            logger.debug(f"[两阶段搜索] 获取背景对话失败: {e}")
-
-        # 构建 identity
-        identity = render_dynamic_prompt_template(global_config.personality.personality)
-
-        # 构建表达习惯块（简化版）
-        expression_habits_block = ""
-
-        # 关键词反应
-        keywords_reaction_prompt = ""
-
-        # 回复风格
-        reply_style = render_dynamic_prompt_template(global_config.personality.reply_style or "")
-
-        # moderation
-        moderation_prompt = ""
-
-        time_block = f"当前时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-
-        try:
-            prompt = await global_prompt_manager.format_prompt(
-                "replyer_search_followup_prompt",
-                identity=identity,
-                expression_habits_block=expression_habits_block,
-                time_block=time_block,
-                background_dialogue_prompt=background_dialogue_prompt,
-                original_question=original_question,
-                initial_reply=initial_reply,
-                search_results=search_results,
-                keywords_reaction_prompt=keywords_reaction_prompt,
-                reply_style=reply_style,
-                moderation_prompt=moderation_prompt,
-            )
-        except Exception as e:
-            logger.error(f"[两阶段搜索] 构建 Pass 2 prompt 失败: {e}")
-            return {
-                "action_type": "reply",
-                "success": True,
-                "reply_text": initial_reply,
-                "loop_info": None,
-            }
-
-        # 按适配器声明的 TTS 语言追加输出格式指令。
-        try:
-            if chat_stream.context and chat_stream.context.message:
-                msg = chat_stream.context.message
-                if msg.message_info:
-                    tts_language = runtime_capabilities_from_stream(chat_stream).tts_language
-                    if tts_language:
-                        if tts_language == "ja":
-                            # 双语模式：要求输出 <JP>/<ZH> 标签
-                            tts_instruction = (
-                                "\n\n非常重要：请必须同时输出中文回复和对应的日文翻译（用于语音播放），格式严格如下：\n"
-                                "<JP>日本語翻訳</JP><ZH>中文原本意思</ZH>\n"
-                                "例如：\n"
-                                "<JP>こんにちは、ご飯を食べましたか？</JP><ZH>你好呀，吃过饭了吗？</ZH>\n"
-                            )
-                            prompt += tts_instruction
-                            logger.info("[两阶段搜索] Pass 2 已追加 TTS 双语标签指令 (ja)")
-                        elif tts_language == "zh":
-                            # 纯中文模式：不需要双语标签，直接输出中文
-                            tts_instruction = (
-                                "\n\n请直接用中文回复，不需要输出日文翻译，不需要使用 <JP> <ZH> 等标签。\n"
-                            )
-                            prompt += tts_instruction
-                            logger.info("[两阶段搜索] Pass 2 已追加 TTS 纯中文指令 (zh)")
-        except Exception as e:
-            logger.debug(f"[两阶段搜索] TTS 检测失败: {e}")
-
-        # 调用 LLM 生成 Pass 2 回复
-        replyer = generator_api.get_replyer(chat_stream=chat_stream, request_type="replyer")
-        if not replyer:
-            logger.error("[两阶段搜索] 无法获取回复器")
-            return {
-                "action_type": "reply",
-                "success": True,
-                "reply_text": initial_reply,
-                "loop_info": None,
-            }
-
-        try:
-            response_content, _, _, _ = await replyer.llm_generate_content(prompt)
-        except Exception as e:
-            logger.error(f"[两阶段搜索] Pass 2 LLM 调用失败: {e}")
-            return {
-                "action_type": "reply",
-                "success": True,
-                "reply_text": initial_reply,
-                "loop_info": None,
-            }
-
-        if not response_content or not response_content.strip():
-            logger.warning("[两阶段搜索] Pass 2 LLM 返回空内容")
-            return {
-                "action_type": "reply",
-                "success": True,
-                "reply_text": initial_reply,
-                "loop_info": None,
-            }
-
-        logger.info(f"{self.log_prefix} [两阶段搜索] Pass 2 回复: {response_content[:80]}...")
-
-        # 处理 Pass 2 内容 — 不分割、不加错字（低延迟场景简洁优先）
-        from src.plugin_system.apis.generator_api import process_human_text
-
-        reply_set = process_human_text(response_content, enable_splitter=True, enable_chinese_typo=False)
-        if not reply_set:
-            logger.warning("[两阶段搜索] Pass 2 文本处理失败")
-            return {
-                "action_type": "reply",
-                "success": True,
-                "reply_text": initial_reply,
-                "loop_info": None,
-            }
-
-        # 发送 Pass 2 回复
-        loop_info, reply_text, _ = await self._send_and_store_reply(
-            response_set=reply_set,
-            action_message=action_planner_info.action_message,  # type: ignore
-            cycle_timers=cycle_timers,
-            thinking_id=thinking_id,
-            actions=chosen_action_plan_infos,
-        )
-        # context_refs intentionally stay on Pass 1: the generated follow-up is
-        # a second delivery, not a second consumption of the Focus handoff.
-
-        return {
-            "action_type": "reply",
-            "success": True,
-            "reply_text": reply_text,
-            "loop_info": loop_info,
-        }

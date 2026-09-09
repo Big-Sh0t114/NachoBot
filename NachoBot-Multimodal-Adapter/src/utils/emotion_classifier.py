@@ -6,14 +6,28 @@
 
 import logging
 import os
+import threading
 from typing import List, Tuple
 
-# Set Hugging Face mirror to resolve connection timeouts in China
-os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+# Configure Hugging Face before Transformers is imported. Prefer predictable
+# HTTP downloads on mainland-China networks and honour existing deployment
+# overrides instead of forcing the official Hub.
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "10")
+os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
+
+
+def _hf_endpoints() -> list[str]:
+    endpoints: list[str] = []
+    for env_name in ("NACHOBOT_HF_ENDPOINT", "HF_ENDPOINT"):
+        endpoint = os.environ.get(env_name, "").strip().rstrip("/")
+        if endpoint:
+            endpoints.append(endpoint)
+    endpoints.extend(("https://hf-mirror.com", "https://huggingface.co"))
+    return list(dict.fromkeys(endpoints))
 
 import torch
-from transformers import pipeline as hf_pipeline
-import logging
+from transformers import AutoModelForSequenceClassification, AutoTokenizer, pipeline as hf_pipeline
 from nachobot_multimodal.logger import logger
 
 # 抑制 transformers pipeline 默认在 CPU 时的警告 "Device set to use cpu"
@@ -42,37 +56,108 @@ class EmotionClassifier:
         self._device = device
         self._use_fp16 = use_fp16
         self._classifier = None  # 惰性加载
+        self._load_lock = threading.Lock()
 
     def _ensure_loaded(self):
-        """确保分类器已加载"""
+        """确保分类器已加载；Hub 不可达时自动回退本地缓存。"""
         if self._classifier is not None:
             return
 
-        logger.info(
-            f"正在加载情感分类模型: {self._model_name} "
-            f"(device={self._device}, fp16={self._use_fp16})"
-        )
+        with self._load_lock:
+            if self._classifier is not None:
+                return
 
-        # 确定是否启用 FP16
-        use_fp16_effective = self._use_fp16 and self._device != "cpu"
+            logger.info(
+                f"正在加载情感分类模型: {self._model_name} "
+                f"(device={self._device}, fp16={self._use_fp16})"
+            )
 
-        kwargs = {
-            "task": "zero-shot-classification",
-            "model": self._model_name,
-            "device": self._device,
-        }
+            use_fp16_effective = self._use_fp16 and self._device != "cpu"
+            model_kwargs = {}
+            if use_fp16_effective:
+                model_kwargs["dtype"] = torch.float16
+                logger.info("已启用 FP16 半精度推理")
+            elif self._use_fp16 and self._device == "cpu":
+                logger.warning("CPU 设备不支持 FP16，自动回退到 FP32")
 
-        if use_fp16_effective:
-            kwargs["torch_dtype"] = torch.float16
-            logger.info("已启用 FP16 半精度推理")
-        elif self._use_fp16 and self._device == "cpu":
-            logger.warning("CPU 设备不支持 FP16，自动回退到 FP32")
+            model_short_name = self._model_name.split("/")[-1]
+            logger.info(f"情感分类模型{model_short_name}将使用{self._device}")
 
-        model_short_name = self._model_name.split("/")[-1]
-        logger.info(f"情感分类模型{model_short_name}将使用{self._device}")
+            try:
+                logger.info("优先从本地缓存加载情感分类模型")
+                tokenizer = AutoTokenizer.from_pretrained(
+                    self._model_name,
+                    local_files_only=True,
+                )
+                model = AutoModelForSequenceClassification.from_pretrained(
+                    self._model_name,
+                    local_files_only=True,
+                    **model_kwargs,
+                )
+                logger.info("情感分类模型已从本地缓存加载")
+            except Exception as cache_exc:
+                logger.warning("本地情感分类模型缓存不可用: {}", cache_exc)
 
-        self._classifier = hf_pipeline(**kwargs)
-        logger.info("情感分类模型加载完成")
+                from huggingface_hub import snapshot_download
+
+                # 只下载 Transformers 推理实际需要的文件。该仓库还包含
+                # ONNX 导出和重复的 pytorch_model.bin，完整 snapshot 会额外
+                # 下载大量无用数据，在中国大陆网络下尤其容易表现为长时间卡住。
+                allow_patterns = [
+                    "config.json",
+                    "model.safetensors",
+                    "*.json",
+                    "*.model",
+                    "*.txt",
+                ]
+                ignore_patterns = [
+                    "onnx/**",
+                    "*.onnx",
+                    "pytorch_model.bin",
+                ]
+
+                failures: list[str] = []
+                snapshot_dir = None
+                for endpoint in _hf_endpoints():
+                    try:
+                        logger.info("尝试通过 {} 下载情感分类模型", endpoint)
+                        snapshot_dir = snapshot_download(
+                            repo_id=self._model_name,
+                            endpoint=endpoint,
+                            allow_patterns=allow_patterns,
+                            ignore_patterns=ignore_patterns,
+                            max_workers=4,
+                        )
+                        logger.info("情感分类模型已通过 {} 下载完成", endpoint)
+                        break
+                    except Exception as exc:
+                        failures.append(f"{endpoint}: {exc}")
+                        logger.warning("通过 {} 下载情感分类模型失败: {}", endpoint, exc)
+
+                if snapshot_dir is None:
+                    raise RuntimeError(
+                        "无法下载情感分类模型；已尝试自定义端点、hf-mirror.com 和 huggingface.co。"
+                        + " | ".join(failures)
+                    )
+
+                tokenizer = AutoTokenizer.from_pretrained(
+                    snapshot_dir,
+                    local_files_only=True,
+                )
+                model = AutoModelForSequenceClassification.from_pretrained(
+                    snapshot_dir,
+                    local_files_only=True,
+                    **model_kwargs,
+                )
+                logger.info("情感分类模型已从下载完成的本地快照加载")
+
+            self._classifier = hf_pipeline(
+                task="zero-shot-classification",
+                model=model,
+                tokenizer=tokenizer,
+                device=self._device,
+            )
+            logger.info("情感分类模型加载完成")
 
     def classify(
         self,

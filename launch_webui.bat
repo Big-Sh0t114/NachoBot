@@ -7,6 +7,12 @@ set "NACHOBOT_DIR=%ROOT%NachoBot"
 set "WEBUI_DIR=%ROOT%webui"
 set "NACHOBOT_FFMPEG_DIR=%ROOT%.runtime\ffmpeg"
 
+REM ===== Hugging Face endpoint =====
+if not defined NACHOBOT_HF_ENDPOINT (
+    set "NACHOBOT_HF_ENDPOINT=https://hf-mirror.com"
+)
+echo [INFO] NachoBot Hugging Face endpoint: %NACHOBOT_HF_ENDPOINT%
+
 echo ===== NachoBot WebUI =====
 echo.
 
@@ -24,8 +30,8 @@ if not exist "%NACHOBOT_DIR%\pyproject.toml" (
     pause
     exit /b 1
 )
-if not exist "%ROOT%scripts\ensure_ffmpeg.py" (
-    echo [ERROR] FFmpeg preparation script not found: %ROOT%scripts\ensure_ffmpeg.py
+if not exist "%ROOT%NachoBot\ensure_ffmpeg.py" (
+    echo [ERROR] FFmpeg preparation script not found: %ROOT%NachoBot\ensure_ffmpeg.py
     pause
     exit /b 1
 )
@@ -39,8 +45,14 @@ if errorlevel 1 (
     exit /b 1
 )
 
+echo [INFO] Checking Playwright Chromium...
+uv run python scripts\ensure_playwright.py
+if errorlevel 1 (
+    echo [WARN] Playwright Chromium preparation failed; web search will use HTTP fallback.
+)
+
 echo [INFO] Checking shared FFmpeg binaries...
-uv run python "%ROOT%scripts\ensure_ffmpeg.py"
+uv run python "%ROOT%NachoBot\ensure_ffmpeg.py"
 if errorlevel 1 (
     echo [ERROR] Shared FFmpeg download or verification failed.
     pause

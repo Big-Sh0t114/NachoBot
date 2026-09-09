@@ -58,11 +58,29 @@ const UI = (() => {
         if (interactiveCheckbox) interactiveCheckbox.checked = settings.interactive;
         if (settings.bgm) armAutoplayPlayback();
 
-        // 1. Startup Animation — video autoplays from inline HTML, just set up end handlers
+        // 1. Startup Animation — fail gracefully if loading, decoding, or autoplay fails
         if (settings.startup) {
             if (startupVideo) {
-                startupVideo.addEventListener('ended', () => hideStartupScreen(startupScreen));
-                setTimeout(() => hideStartupScreen(startupScreen), 8000);
+                let startupFinished = false;
+
+                const finishStartup = () => {
+                    if (startupFinished) return;
+                    startupFinished = true;
+                    hideStartupScreen(startupScreen);
+                };
+
+                startupVideo.addEventListener('ended', finishStartup, { once: true });
+                startupVideo.addEventListener('error', () => {
+                    console.error('Startup video failed:', startupVideo.error);
+                    finishStartup();
+                }, { once: true });
+
+                startupVideo.play().catch(error => {
+                    console.error('Startup video autoplay failed:', error);
+                    finishStartup();
+                });
+
+                setTimeout(finishStartup, 8000);
             } else {
                 setTimeout(() => hideStartupScreen(startupScreen), 2000);
             }

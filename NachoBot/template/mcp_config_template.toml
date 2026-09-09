@@ -1,0 +1,24 @@
+[inner]
+version = "1.0.0_bs"
+
+#----以下是给开发人员阅读的，如果你只是部署，不需要阅读----
+#如果你想要修改配置文件，请递增version的值
+
+[mcp]
+enabled = true # 是否启用核心 MCP 运行时
+auto_detect = true # 仅在能力路由器判定有 MCP 需求时启动 MCP 独立工具链
+servers_json = "" # Claude Desktop 风格的 mcpServers JSON；凭据只应保存在未跟踪的部署配置中
+tool_prefix = "mcp" # 暴露给模型的 MCP 工具名前缀
+disabled_tools = [] # 禁用的 MCP 暴露工具名或远端原始工具名
+connect_timeout_seconds = 20 # 单个 MCP 服务器连接和工具发现超时
+call_timeout_seconds = 60 # 单次 MCP 工具调用超时
+reconnect_interval_seconds = 30 # 断线后台重连间隔；0 表示禁用
+permissions_enabled = true # 启用核心 MCP 权限策略
+permission_default_mode = "deny_all" # 未匹配规则时 allow_all 或 deny_all
+quick_allow_users = [] # 始终允许的用户 ID
+quick_deny_groups = [] # 始终拒绝的群 ID
+permission_rules_json = "[]" # 高级权限规则 JSON；格式兼容旧插件 perm_rules
+max_rounds = 3 # 单次 MCP 工具链最大决策轮数
+max_calls = 5 # 单次 MCP 工具链最大工具调用数
+max_candidate_tools = 32 # 单次 MCP 决策最多暴露给模型的候选工具数
+observation_max_chars = 12000 # 回注 MCP 工具观察结果的最大字符数

@@ -1,4 +1,5 @@
 from enum import Enum
+from typing import Any
 
 
 class ToolParamType(Enum):
@@ -50,6 +51,7 @@ class ToolOption:
         name: str,
         description: str,
         params: list[ToolParam] | None = None,
+        input_schema: dict[str, Any] | None = None,
     ):
         """
         初始化工具调用项
@@ -61,6 +63,7 @@ class ToolOption:
         self.name: str = name
         self.description: str = description
         self.params: list[ToolParam] | None = params
+        self.input_schema: dict[str, Any] | None = input_schema
 
 
 class ToolOptionBuilder:
@@ -72,6 +75,7 @@ class ToolOptionBuilder:
         self.__name: str = ""
         self.__description: str = ""
         self.__params: list[ToolParam] = []
+        self.__input_schema: dict[str, Any] | None = None
 
     def set_name(self, name: str) -> "ToolOptionBuilder":
         """
@@ -126,6 +130,13 @@ class ToolOptionBuilder:
 
         return self
 
+    def set_input_schema(self, input_schema: dict[str, Any]) -> "ToolOptionBuilder":
+        """Attach a raw JSON Schema for MCP and other schema-native tools."""
+        if not isinstance(input_schema, dict):
+            raise TypeError("input_schema 必须是字典")
+        self.__input_schema = input_schema
+        return self
+
     def build(self):
         """
         构建工具调用项
@@ -138,6 +149,7 @@ class ToolOptionBuilder:
             name=self.__name,
             description=self.__description,
             params=None if len(self.__params) == 0 else self.__params,
+            input_schema=self.__input_schema,
         )
 
 

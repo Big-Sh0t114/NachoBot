@@ -204,7 +204,7 @@ def _calculate_file_hash(file_path: Path, file_type: str) -> str:
 
     with open(file_path, "r", encoding="utf-8") as f:
         content = f.read()
-    return hashlib.md5(content.encode("utf-8")).hexdigest()
+    return hashlib.md5(content.encode("utf-8"), usedforsecurity=False).hexdigest()
 
 
 def _check_agreement_status(file_hash: str, confirm_file: Path, env_var: str) -> tuple[bool, bool]:

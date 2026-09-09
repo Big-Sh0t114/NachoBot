@@ -181,16 +181,22 @@ async def generate_reply(
             text_for_json_check = content.strip()
             start_idx = text_for_json_check.find("{")
             end_idx = text_for_json_check.rfind("}")
+            is_json_envelope = False
             if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
                 try:
                     import json
 
                     _ = json.loads(text_for_json_check[start_idx : end_idx + 1], strict=False)
-                    # If it's valid JSON, disable the splitter so the adapter receives the full JSON intact
-                    enable_splitter = False
+                    is_json_envelope = True
                 except Exception:
                     pass
-            reply_set = process_human_text(content, enable_splitter, enable_chinese_typo)
+            if is_json_envelope:
+                # An adapter-owned JSON envelope is a wire message.  Do not run
+                # human-text cleanup that could mutate its keys or values.
+                reply_set = ReplySetModel()
+                reply_set.add_text_content(content)
+            else:
+                reply_set = process_human_text(content, enable_splitter, enable_chinese_typo)
         llm_response.reply_set = reply_set
         if not content or not content.strip() or not reply_set or len(reply_set) == 0:
             await release_reply_context(acquired_refs, "empty_generation")
@@ -279,15 +285,20 @@ async def rewrite_reply(
             text_for_json_check = content.strip()
             start_idx = text_for_json_check.find("{")
             end_idx = text_for_json_check.rfind("}")
+            is_json_envelope = False
             if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
                 try:
                     import json
 
                     _ = json.loads(text_for_json_check[start_idx : end_idx + 1], strict=False)
-                    enable_splitter = False
+                    is_json_envelope = True
                 except Exception:
                     pass
-            reply_set = process_human_text(content, enable_splitter, enable_chinese_typo)
+            if is_json_envelope:
+                reply_set = ReplySetModel()
+                reply_set.add_text_content(content)
+            else:
+                reply_set = process_human_text(content, enable_splitter, enable_chinese_typo)
         llm_response.reply_set = reply_set
         if success:
             logger.info(f"[GeneratorAPI] 重写回复成功，生成了 {len(reply_set) if reply_set else 0} 个回复项")
