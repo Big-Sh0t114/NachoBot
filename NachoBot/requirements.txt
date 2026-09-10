@@ -86,7 +86,7 @@ h11==0.16.0
     #   uvicorn
 httpcore==1.0.9
     # via httpx
-httpcore2==2.9.1
+httpcore2==2.10.0
     # via httpx2
 httpx==0.28.1
     # via
