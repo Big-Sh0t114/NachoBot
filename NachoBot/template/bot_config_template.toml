@@ -1,5 +1,5 @@
 [inner]
-version = "6.20.11_bs"
+version = "6.20.12_bs"
 
 #----以下是给开发人员阅读的，如果你只是部署，不需要阅读----
 #如果你想要修改配置文件，请递增version的值
@@ -18,7 +18,7 @@ nickname = "NachoBot" # 昵称
 owner_name = "" # 主人名，可在提示词中使用 {owner_name}
 alias_names = ['猫猫', '机器人', 'AI', 'Bot'] # 别名
 integrated_plan = false # 集成规划开关，打开可提高响应速度和智力，但会增加开销，对能力较弱的模型可能起到相反的作用，使用replyer模型组
-sandbox_whitelist = [''] # 沙盒名单；sandbox_list_type=whitelist 时为白名单，blacklist 时为黑名单
+sandbox_list = [''] # 沙盒名单；sandbox_list_type=whitelist 时为白名单，blacklist 时为黑名单
 sandbox_list_type = "whitelist" # 沙盒名单类型：whitelist=仅允许列表用户，blacklist=拒绝列表用户
 bot_ban = true # 是否启用LLM自主禁言用户功能（群聊中禁言违规用户，需要bot具有管理员权限）
 ban_whitelist = [''] # 禁言白名单，列表中的QQ号不会被bot禁言（管理员/主人等）

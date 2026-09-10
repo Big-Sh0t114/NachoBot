@@ -36,7 +36,7 @@ class BotConfig(ConfigBase):
     integrated_plan: bool = True
     """集成规划开关（设为false则回退至分离的planner/replyer模式）"""
 
-    sandbox_whitelist: list[str] = field(default_factory=lambda: [])
+    sandbox_list: list[str] = field(default_factory=lambda: [])
     """沙盒名单列表；由 sandbox_list_type 决定其语义"""
 
     sandbox_list_type: Literal["whitelist", "blacklist"] = "whitelist"

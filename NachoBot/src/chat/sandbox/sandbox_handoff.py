@@ -38,7 +38,7 @@ def sandbox_user_allowed(user_id: Any) -> bool:
         bot_config = global_config.bot
         entries = {
             str(item).strip()
-            for item in getattr(bot_config, "sandbox_whitelist", [])
+            for item in getattr(bot_config, "sandbox_list", [])
             if str(item).strip()
         }
         mode = str(getattr(bot_config, "sandbox_list_type", "whitelist") or "whitelist").strip().lower()
