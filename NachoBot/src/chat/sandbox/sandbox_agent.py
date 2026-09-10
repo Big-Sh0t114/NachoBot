@@ -21,7 +21,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-from src.chat.sandbox.sandbox_handoff import SandboxEditHandoff
+from src.chat.sandbox.sandbox_handoff import SandboxEditHandoff, sandbox_user_allowed
 from src.chat.sandbox.sandbox_manager import (
     MAX_TEXT_BYTES,
     SandboxManager,
@@ -1892,15 +1892,7 @@ class SandboxAgentCoordinator:
         if not handoff.binding_is_valid():
             return False
         if self.authorize is None:
-            try:
-                from src.config.config import global_config
-
-                actor = str(handoff.actor_id)
-                admins = {str(item) for item in getattr(global_config.advanced, "admins", [])}
-                whitelist = {str(item) for item in getattr(global_config.bot, "sandbox_whitelist", [])}
-                return actor in admins or actor in whitelist
-            except Exception:
-                return False
+            return sandbox_user_allowed(handoff.actor_id)
         result = self.authorize(handoff)
         if asyncio.iscoroutine(result):
             result = await result

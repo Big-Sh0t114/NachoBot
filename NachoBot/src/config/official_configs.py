@@ -37,7 +37,10 @@ class BotConfig(ConfigBase):
     """集成规划开关（设为false则回退至分离的planner/replyer模式）"""
 
     sandbox_whitelist: list[str] = field(default_factory=lambda: [])
-    """沙盒白名单列表"""
+    """沙盒名单列表；由 sandbox_list_type 决定其语义"""
+
+    sandbox_list_type: Literal["whitelist", "blacklist"] = "whitelist"
+    """沙盒名单类型：whitelist 仅允许列表用户，blacklist 拒绝列表用户"""
 
     llm_block: bool = True
     """是否启用LLM自主屏蔽用户功能（群聊中屏蔽垃圾/骚扰信息发送者）"""

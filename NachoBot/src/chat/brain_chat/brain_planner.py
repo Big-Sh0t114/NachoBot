@@ -237,10 +237,10 @@ class BrainPlanner:
         return self.separated_llm
 
     def _check_sandbox_permission(self, user_id: str) -> bool:
-        """Check if user has permission to use sandbox features"""
-        is_admin = str(user_id) in global_config.advanced.admins
-        is_whitelisted = str(user_id) in global_config.bot.sandbox_whitelist
-        return is_admin or is_whitelisted
+        """Check the independent Sandbox allow/deny list policy."""
+        from src.chat.sandbox.sandbox_handoff import sandbox_user_allowed
+
+        return sandbox_user_allowed(user_id)
 
     def find_message_by_id(
         self, message_id: str, message_id_list: List[Tuple[str, "DatabaseMessages"]]

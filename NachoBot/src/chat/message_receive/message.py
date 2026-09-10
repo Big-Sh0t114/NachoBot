@@ -16,6 +16,7 @@ from src.config.config import global_config
 from src.chat.utils.utils_image import get_image_manager
 from src.chat.utils.utils_voice import get_voice_text
 from src.chat.sandbox.sandbox_manager import sandbox_manager
+from src.chat.sandbox.sandbox_handoff import sandbox_user_allowed
 from .chat_stream import ChatStream
 
 install(extra_lines=3)
@@ -284,9 +285,9 @@ class MessageRecv(Message):
                     elif self.message_info.user_info:
                         user_id = str(self.message_info.user_info.user_id)
 
-                if not user_id or user_id not in global_config.bot.sandbox_whitelist:
-                    logger.warning(f"用户 {user_id} 不在沙盒白名单中，拒绝自动保存文件: {file_name}")
-                    return f"[接收到文件: {file_name}，但发送者不在沙盒白名单，已忽略自动保存]"
+                if not sandbox_user_allowed(user_id):
+                    logger.warning(f"用户 {user_id} 未通过沙盒名单策略，拒绝自动保存文件: {file_name}")
+                    return f"[接收到文件: {file_name}，但发送者未通过沙盒名单策略，已忽略自动保存]"
 
                 if file_url:
                     try:

@@ -21,6 +21,34 @@ def sanitize_file_edit_query(value: Any, *, max_chars: int = MAX_QUERY_CHARS) ->
     return " ".join(text.split())[:max_chars]
 
 
+def sandbox_user_allowed(user_id: Any) -> bool:
+    """Apply the Sandbox-only allow/deny list policy for one actor.
+
+    This deliberately does not consult the global admin list. MCP permission
+    policy is separate and must not be changed by Sandbox access settings.
+    Invalid or missing policy values fail closed to the legacy whitelist mode.
+    """
+
+    actor_id = str(user_id or "").strip()
+    if not actor_id:
+        return False
+    try:
+        from src.config.config import global_config
+
+        bot_config = global_config.bot
+        entries = {
+            str(item).strip()
+            for item in getattr(bot_config, "sandbox_whitelist", [])
+            if str(item).strip()
+        }
+        mode = str(getattr(bot_config, "sandbox_list_type", "whitelist") or "whitelist").strip().lower()
+    except Exception:
+        return False
+    if mode == "blacklist":
+        return actor_id not in entries
+    return mode == "whitelist" and actor_id in entries
+
+
 def acknowledgement_fingerprint(value: Any) -> str:
     """Fingerprint the exact server-approved user-facing acknowledgement."""
 
@@ -265,4 +293,5 @@ __all__ = [
     "SandboxEnvelopeResult",
     "parse_sandbox_confirmation",
     "sanitize_file_edit_query",
+    "sandbox_user_allowed",
 ]

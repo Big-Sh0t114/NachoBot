@@ -33,7 +33,7 @@ from src.chat.utils.capability_router import (
     execute_mcp_after_decision,
     ToolInfoResult,
 )
-from src.chat.sandbox.sandbox_handoff import parse_sandbox_confirmation
+from src.chat.sandbox.sandbox_handoff import parse_sandbox_confirmation, sandbox_user_allowed
 from src.chat.utils.chat_message_builder import (
     build_readable_messages,
     get_raw_msg_before_timestamp_with_chat,
@@ -504,10 +504,8 @@ class PrivateReplyer:
             group_info = getattr(self.chat_stream, "group_info", None)
             group_id = sandbox_group_id or (str(getattr(group_info, "group_id", "") or "") if group_info else None)
             try:
-                allowed_ids = {str(item) for item in getattr(global_config.advanced, "admins", [])}
-                allowed_ids.update(str(item) for item in getattr(global_config.bot, "sandbox_whitelist", []))
                 file_edit_set = getattr(model_config.model_task_config, "file_edit", None)
-                sandbox_edit_available = bool(actor_id in allowed_ids and getattr(file_edit_set, "model_list", None))
+                sandbox_edit_available = bool(sandbox_user_allowed(actor_id) and getattr(file_edit_set, "model_list", None))
             except Exception:
                 sandbox_edit_available = False
             decision_task = None
