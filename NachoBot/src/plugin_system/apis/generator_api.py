@@ -190,7 +190,14 @@ async def generate_reply(
                     is_json_envelope = True
                 except Exception:
                     pass
-            if is_json_envelope:
+            if llm_response.sandbox_edit_handoff is not None:
+                # The server-approved sandbox acknowledgement is already the
+                # exact text bound into the immutable handoff.  Keep it as one
+                # untouched ReplySet item so splitting/typo post-processing
+                # cannot make the delivered text diverge from that binding.
+                reply_set = ReplySetModel()
+                reply_set.add_text_content(content)
+            elif is_json_envelope:
                 # An adapter-owned JSON envelope is a wire message.  Do not run
                 # human-text cleanup that could mutate its keys or values.
                 reply_set = ReplySetModel()

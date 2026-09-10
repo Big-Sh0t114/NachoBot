@@ -9,7 +9,15 @@ import uuid
 from dataclasses import dataclass
 from typing import Iterable
 
-from .models import FocusHandoff, HandoffPayload, UntrustedExcerpt
+from .models import (
+    ChatKind,
+    FocusGroupDefinition,
+    FocusHandoff,
+    HandoffKind,
+    HandoffPayload,
+    UntrustedExcerpt,
+    trusted_transition_labels,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +72,55 @@ class HandoffBuilder:
             created_at=created_at,
             expires_at=created_at + self.limits.ttl_seconds,
             max_successful_cycles=self.limits.max_successful_cycles,
+            kind=HandoffKind.CONTENT_V1,
+        )
+
+    def build_transition_identity(
+        self,
+        *,
+        definition: FocusGroupDefinition,
+        group_id: str,
+        source_chat_id: str,
+        target_chat_id: str,
+        source_epoch: int,
+        policy_version: str,
+        now: float | None = None,
+    ) -> FocusHandoff:
+        """Build a private-source identity handoff from enrolled members only.
+
+        This intentionally does not accept a payload or parent handoff.  The
+        only model-visible values are the trusted source/target display labels;
+        private chat IDs remain routing metadata on the durable handoff.
+        """
+
+        source = next((member for member in definition.members if member.chat_id == source_chat_id), None)
+        target = next((member for member in definition.members if member.chat_id == target_chat_id), None)
+        if source is None or target is None:
+            raise ValueError("Focus transition source and target must be enrolled members")
+        if source.kind is not ChatKind.PRIVATE or target.kind not in {ChatKind.GROUP, ChatKind.PRIVATE}:
+            raise ValueError("Transition identity handoffs require a private source and group/private target")
+        if group_id != definition.group_id:
+            raise ValueError("Focus transition group_id must match the enrolled definition")
+
+        source_label, target_label = trusted_transition_labels(definition, source_chat_id, target_chat_id)
+        created_at = time.time() if now is None else now
+        return FocusHandoff(
+            handoff_id=uuid.uuid4().hex,
+            parent_id=None,
+            group_id=group_id,
+            source_chat_id=source_chat_id,
+            target_chat_id=target_chat_id,
+            source_epoch=source_epoch,
+            target_epoch=source_epoch + 1,
+            payload=HandoffPayload(
+                source_display_name=source_label,
+                target_display_name=target_label,
+            ),
+            policy_version=policy_version,
+            created_at=created_at,
+            expires_at=created_at + self.limits.ttl_seconds,
+            max_successful_cycles=self.limits.max_successful_cycles,
+            kind=HandoffKind.TRANSITION_IDENTITY_V1,
         )
 
     def _merge_payload(self, parent: HandoffPayload | None, delta: HandoffPayload) -> HandoffPayload:

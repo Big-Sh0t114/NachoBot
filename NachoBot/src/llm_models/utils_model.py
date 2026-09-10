@@ -1,7 +1,10 @@
 import re
 import asyncio
+import importlib
+import inspect
 import time
 
+from collections.abc import Mapping
 from enum import Enum
 from rich.traceback import install
 from typing import Tuple, List, Dict, Optional, Callable, Any, Set
@@ -26,6 +29,176 @@ from .exceptions import (
 install(extra_lines=3)
 
 logger = get_logger("model_utils")
+
+
+class _ObservedAsyncIterator:
+    """Forward a provider stream while observing each raw response delta."""
+
+    def __init__(self, stream: Any, on_delta: Callable[[Any], None]) -> None:
+        self._stream = stream
+        self._on_delta = on_delta
+        self._closed = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        item = await self._stream.__anext__()
+        try:
+            self._on_delta(item)
+        except Exception:
+            # Observation must never corrupt provider parsing.
+            pass
+        return item
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        close = getattr(self._stream, "aclose", None)
+        if close is None:
+            close = getattr(self._stream, "close", None)
+        if close is None:
+            return
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+
+
+_STREAM_VALUE_FIELDS = frozenset(
+    {
+        "content",
+        "reasoning_content",
+        "reasoning",
+        "text",
+        "tool_calls",
+        "function_call",
+        "function",
+        "id",
+        "name",
+        "arguments",
+        "args",
+    }
+)
+_STREAM_VALUE_MISSING = object()
+
+
+def _stream_value_is_meaningful(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (bytes, bytearray)):
+        return bool(value)
+    if isinstance(value, Mapping):
+        if not value:
+            return False
+        # Provider bookkeeping objects commonly include an empty function call
+        # alongside indexes/signatures.  Inspect known response fields only in
+        # that shape, so metadata cannot release the first-delta watchdog.
+        if _STREAM_VALUE_FIELDS.intersection(value):
+            return any(
+                _stream_value_is_meaningful(value[field])
+                for field in _STREAM_VALUE_FIELDS.intersection(value)
+            )
+        return any(_stream_value_is_meaningful(item) for item in value.values())
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return any(_stream_value_is_meaningful(item) for item in value)
+    # Provider response objects are usually dataclasses or SimpleNamespace
+    # instances.  Empty objects and empty name/args/function-call fields are
+    # bookkeeping; populated response fields remain meaningful.
+    fields = []
+    for field in _STREAM_VALUE_FIELDS:
+        marker = getattr(value, field, _STREAM_VALUE_MISSING)
+        if marker is not _STREAM_VALUE_MISSING:
+            fields.append(marker)
+    if fields:
+        return any(_stream_value_is_meaningful(item) for item in fields)
+    try:
+        attributes = vars(value)
+    except TypeError:
+        # Preserve the historical permissive behavior for scalar/provider
+        # values that have no inspectable response fields.
+        return True
+    if not attributes:
+        return False
+    return any(
+        _stream_value_is_meaningful(item)
+        for name, item in attributes.items()
+        if not name.startswith("_")
+    )
+
+
+def _stream_field(value: Any, name: str) -> Any:
+    if isinstance(value, Mapping):
+        return value.get(name)
+    return getattr(value, name, None)
+
+
+def stream_delta_is_meaningful(event: Any) -> bool:
+    """Return whether a provider event contains a real response delta.
+
+    Usage-only frames, empty choices, keepalive chunks, and empty tool-call
+    bookkeeping do not count as first output.  The shape checks cover the
+    OpenAI and Gemini response objects used by the repository plus simple
+    mapping/string fakes used by tests.
+    """
+
+    if isinstance(event, str):
+        return bool(event.strip())
+    if isinstance(event, (bytes, bytearray)):
+        return bool(event)
+
+    choices = _stream_field(event, "choices")
+    if choices:
+        for choice in choices:
+            delta = _stream_field(choice, "delta")
+            if delta is None:
+                continue
+            if any(
+                _stream_value_is_meaningful(_stream_field(delta, field))
+                for field in ("content", "reasoning_content", "reasoning")
+            ):
+                return True
+            tool_calls = _stream_field(delta, "tool_calls")
+            if tool_calls:
+                for tool_call in tool_calls:
+                    function = _stream_field(tool_call, "function")
+                    if any(
+                        _stream_value_is_meaningful(_stream_field(tool_call, field))
+                        for field in ("id", "name")
+                    ) or any(
+                        _stream_value_is_meaningful(_stream_field(function, field))
+                        for field in ("name", "arguments")
+                    ):
+                        return True
+
+    candidates = _stream_field(event, "candidates")
+    if candidates:
+        for candidate in candidates:
+            content = _stream_field(candidate, "content")
+            parts = _stream_field(content, "parts")
+            if parts:
+                for part in parts:
+                    if _stream_value_is_meaningful(_stream_field(part, "text")):
+                        return True
+                    if _stream_value_is_meaningful(_stream_field(part, "function_call")):
+                        return True
+
+    if any(
+        _stream_value_is_meaningful(_stream_field(event, field))
+        for field in ("content", "reasoning_content", "reasoning", "text", "tool_calls", "function_call")
+    ):
+        return True
+    return False
+
+
+def _provider_stream_handler(client: Any) -> Optional[Callable]:
+    try:
+        module = importlib.import_module(client.__class__.__module__)
+    except Exception:
+        return None
+    return getattr(module, "_default_stream_response_handler", None)
 
 # 常见Error Code Mapping
 error_code_mapping = {
@@ -257,6 +430,62 @@ class LLMRequest:
             )
         return content or "", (reasoning_content, model_info.name, tool_calls)
 
+    async def generate_response_stream_async(
+        self,
+        prompt: str,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        raise_when_empty: bool = True,
+        interrupt_flag: Optional[asyncio.Event] = None,
+        on_delta: Optional[Callable[[Any], None]] = None,
+    ) -> Tuple[str, Tuple[str, str, Optional[List[ToolCall]]]]:
+        """Generate a response through the provider's streaming parser.
+
+        ``on_delta`` observes raw provider chunks before the existing
+        provider-specific stream handler assembles content and tool calls.
+        This keeps tool-call parsing and repair behavior in one place while
+        allowing bounded callers to detect first meaningful output.
+        """
+
+        start_time = time.time()
+
+        def message_factory(client: BaseClient) -> List[Message]:
+            message_builder = MessageBuilder()
+            message_builder.add_text_content(prompt)
+            return [message_builder.build()]
+
+        tool_built = self._build_tool_options(tools)
+        response, model_info = await self._execute_request(
+            request_type=RequestType.RESPONSE,
+            message_factory=message_factory,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tool_options=tool_built,
+            interrupt_flag=interrupt_flag,
+            stream_delta_callback=on_delta,
+            force_stream=True,
+        )
+        logger.debug(f"{self.log_context} LLM流式请求总耗时: {time.time() - start_time}")
+        content = response.content or ""
+        reasoning_content = response.reasoning_content or ""
+        tool_calls = response.tool_calls
+        if not reasoning_content and content:
+            content, extracted_reasoning = self._extract_reasoning(content)
+            reasoning_content = extracted_reasoning
+        if not content and not reasoning_content and not tool_calls and raise_when_empty:
+            raise EmptyResponseException()
+        if usage := response.usage:
+            llm_usage_recorder.record_usage_to_database(
+                model_info=model_info,
+                model_usage=usage,
+                user_id="system",
+                request_type=self.request_type,
+                endpoint="/chat/completions",
+                time_cost=time.time() - start_time,
+            )
+        return content, (reasoning_content, model_info.name, tool_calls)
+
     async def get_embedding(self, embedding_input: str) -> Tuple[List[float], str]:
         """
         获取嵌入向量
@@ -341,6 +570,8 @@ class LLMRequest:
         audio_base64: str | None,
         extra_params: Optional[Dict[str, Any]] = None,
         interrupt_flag: Optional[asyncio.Event] = None,
+        stream_delta_callback: Optional[Callable[[Any], None]] = None,
+        force_stream: bool = False,
     ) -> APIResponse:
         """
         在单个模型上执行请求，包含针对临时错误的重试逻辑。
@@ -355,14 +586,51 @@ class LLMRequest:
         while retry_remain > 0:
             try:
                 if request_type == RequestType.RESPONSE:
+                    effective_model_info = model_info
+                    if force_stream and not model_info.force_stream_mode:
+                        import copy
+
+                        effective_model_info = copy.copy(model_info)
+                        effective_model_info.force_stream_mode = True
+                    effective_stream_handler = stream_response_handler
+                    if stream_delta_callback is not None:
+                        base_handler = effective_stream_handler or _provider_stream_handler(client)
+                        if base_handler is None:
+                            raise RuntimeError("stream handler unavailable for model client")
+
+                        async def observed_handler(
+                            resp_stream,
+                            observed_interrupt_flag,
+                            _base_handler=base_handler,
+                        ):
+                            observed_stream = _ObservedAsyncIterator(resp_stream, stream_delta_callback)
+                            try:
+                                return await _base_handler(observed_stream, observed_interrupt_flag)
+                            finally:
+                                # A provider handler normally consumes the
+                                # stream.  Closing here also releases a
+                                # partially consumed generator on cancellation.
+                                if observed_interrupt_flag and observed_interrupt_flag.is_set():
+                                    try:
+                                        await observed_stream.aclose()
+                                    except Exception as close_exc:
+                                        # Cleanup must not replace the provider
+                                        # exception that caused cancellation.
+                                        logger.warning(
+                                            "%s stream close failed: %s",
+                                            self.log_context,
+                                            type(close_exc).__name__,
+                                        )
+
+                        effective_stream_handler = observed_handler
                     return await client.get_response(
-                        model_info=model_info,
+                        model_info=effective_model_info,
                         message_list=(compressed_messages or message_list),
                         tool_options=tool_options,
                         max_tokens=self.model_for_task.max_tokens if max_tokens is None else max_tokens,
                         temperature=self.model_for_task.temperature if temperature is None else temperature,
                         response_format=response_format,
-                        stream_response_handler=stream_response_handler,
+                        stream_response_handler=effective_stream_handler,
                         async_response_parser=async_response_parser,
                         extra_params=merged_extra_params,
                         interrupt_flag=interrupt_flag,
@@ -443,6 +711,8 @@ class LLMRequest:
         embedding_input: str | None = None,
         audio_base64: str | None = None,
         interrupt_flag: Optional[asyncio.Event] = None,
+        stream_delta_callback: Optional[Callable[[Any], None]] = None,
+        force_stream: bool = False,
     ) -> Tuple[APIResponse, ModelInfo]:
         """
         调度器函数，负责模型选择、故障切换。
@@ -475,6 +745,8 @@ class LLMRequest:
                     audio_base64=audio_base64,
                     extra_params=extra_params,
                     interrupt_flag=interrupt_flag,
+                    stream_delta_callback=stream_delta_callback,
+                    force_stream=force_stream,
                 )
                 return response, model_info
 

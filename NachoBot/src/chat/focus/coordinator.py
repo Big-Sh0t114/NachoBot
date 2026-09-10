@@ -20,6 +20,7 @@ from src.common.logger import get_logger
 
 from .handoff_store import HandoffStore, InMemoryHandoffStore
 from .models import (
+    ChatKind,
     EffectKind,
     FocusDispatch,
     FocusEventSnapshot,
@@ -1026,14 +1027,11 @@ class FocusCoordinator:
             handoff.group_id != lease.group_id
             or handoff.target_chat_id != lease.chat_id
             or handoff.target_epoch != lease.epoch
+            or handoff.source_epoch != lease.epoch - 1
             or handoff.policy_version != self._policy.version
         ):
             return False
-        return self._policy.can_inject(
-            state.definition,
-            handoff.source_chat_id,
-            handoff.target_chat_id,
-        )
+        return self._policy.authorize_handoff(state.definition, handoff)
 
     def _next_background_attention(
         self,
@@ -1095,9 +1093,13 @@ class FocusCoordinator:
             request.lease.chat_id,
             attention.target_chat_id,
             has_handoff=handoff is not None,
+            handoff_kind=handoff.kind if handoff is not None else None,
         )
         if not decision.allowed:
             return decision.reason
+        source_member = self._policy.member(state.definition, request.lease.chat_id)
+        if source_member is not None and source_member.kind is ChatKind.PRIVATE and handoff is None:
+            return "private-source switch requires a transition identity handoff"
         if handoff is not None:
             if (
                 handoff.group_id != request.lease.group_id
@@ -1109,6 +1111,8 @@ class FocusCoordinator:
                 return "handoff scope or epoch does not match the switch"
             if handoff.policy_version != self._policy.version:
                 return "handoff policy version is not current"
+            if not self._policy.authorize_handoff(state.definition, handoff):
+                return "handoff kind or payload is not authorized for the switch"
         return None
 
     @staticmethod

@@ -185,7 +185,16 @@ class MessageRecv(Message):
         try:
             import httpx
 
-            sandbox = sandbox_manager.get_sandbox(self.chat_stream.stream_id)
+            actor_id = ""
+            if getattr(self.message_info, "sender_info", None) and self.message_info.sender_info.user_id:
+                actor_id = str(self.message_info.sender_info.user_id)
+            elif getattr(self.message_info, "user_info", None) and self.message_info.user_info.user_id:
+                actor_id = str(self.message_info.user_info.user_id)
+            if not actor_id:
+                actor_id = str(getattr(self.chat_stream.user_info, "user_id", ""))
+            group_info = getattr(self.chat_stream, "group_info", None)
+            group_id = getattr(group_info, "group_id", None) if group_info else None
+            platform = str(getattr(self.chat_stream, "platform", "unknown") or "unknown")
 
             # Case 1: URL
             if file_data.startswith("http"):
@@ -202,7 +211,14 @@ class MessageRecv(Message):
                         # Fallback size check just in case HEAD didn't give Content-Length
                         if len(resp.content) > 1048576:
                             raise ValueError(f"File exceeds 1MB limit ({len(resp.content)} bytes)")
-                        return sandbox.save_file(resp.content, filename)
+                        return sandbox_manager.save_upload(
+                            resp.content,
+                            filename,
+                            stream_id=self.chat_stream.stream_id,
+                            platform=platform,
+                            group_id=str(group_id) if group_id is not None else None,
+                            actor_id=actor_id,
+                        )
 
             # Case 2: Local Path (already on disk, e.g. from OneBot/NapCat)
             # If the adapter saves it somewhere, we might just copy it or leave it.
@@ -213,7 +229,14 @@ class MessageRecv(Message):
 
                 with open(file_data, "rb") as f:
                     content = f.read()
-                return sandbox.save_file(content, filename)
+                return sandbox_manager.save_upload(
+                    content,
+                    filename,
+                    stream_id=self.chat_stream.stream_id,
+                    platform=platform,
+                    group_id=str(group_id) if group_id is not None else None,
+                    actor_id=actor_id,
+                )
 
             # Case 3: Base64 (Legacy/Other) - To be implemented if needed
 

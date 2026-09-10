@@ -24,13 +24,16 @@ from src.chat.utils.prompt_builder import global_prompt_manager
 from src.chat.utils.prompt_variables import get_latest_session_name, render_dynamic_prompt_template
 from src.chat.utils.prompt_injection_guard import build_guardrail_instruction, guard_user_content
 from src.chat.focus.reply_context import ReplyPromptContext
+from src.chat.replyer.prompt_build_result import ReplyPromptBuildResult
 from src.chat.utils.url_fetcher import UrlContentFetcher, extract_urls
 from src.chat.utils.web_search import WebSearchManager
 from src.chat.utils.capability_router import (
     CapabilityRouter,
     build_search_after_decision,
     execute_mcp_after_decision,
+    ToolInfoResult,
 )
+from src.chat.sandbox.sandbox_handoff import parse_sandbox_confirmation
 from src.chat.utils.chat_message_builder import (
     build_readable_messages,
     get_raw_msg_before_timestamp_with_chat,
@@ -197,7 +200,7 @@ class PrivateReplyer:
         try:
             # 3. 构建 Prompt
             with Timer("构建Prompt", {}):  # 内部计时器，可选保留
-                prompt, selected_expressions = await self.build_prompt_reply_context(
+                prompt_result = await self.build_prompt_reply_context(
                     extra_info=extra_info,
                     person_profile_block=person_profile_block,
                     available_actions=available_actions,
@@ -207,6 +210,9 @@ class PrivateReplyer:
                     reply_reason=reply_reason,
                     prompt_context=prompt_context,
                 )
+                prompt = prompt_result.prompt
+                selected_expressions = prompt_result.selected_expressions
+                sandbox_candidate = prompt_result.sandbox_candidate
             llm_response.prompt = prompt
             llm_response.selected_expressions = selected_expressions
 
@@ -250,6 +256,9 @@ class PrivateReplyer:
                         llm_response.content = modified_message.llm_response_content
                     if modified_message._modify_flags.modify_llm_response_reasoning:
                         llm_response.reasoning = modified_message.llm_response_reasoning
+                envelope = parse_sandbox_confirmation(llm_response.content, sandbox_candidate)
+                llm_response.content = envelope.content
+                llm_response.sandbox_edit_handoff = envelope.handoff
             except UserWarning as e:
                 raise e
             except ReqAbortException:
@@ -431,7 +440,17 @@ class PrivateReplyer:
 
     #     return memory_str
 
-    async def build_tool_info(self, chat_history: str, sender: str, target: str, enable_tool: bool = True) -> str:
+    async def build_tool_info(
+        self,
+        chat_history: str,
+        sender: str,
+        target: str,
+        enable_tool: bool = True,
+        *,
+        sandbox_actor_id: str = "",
+        sandbox_source_message_id: str = "",
+        sandbox_group_id: Optional[str] = None,
+    ) -> ToolInfoResult:
         """构建工具信息块
 
         Args:
@@ -445,7 +464,7 @@ class PrivateReplyer:
 
         if not enable_tool:
             logger.info("工具信息跳过: enable_tool=False")
-            return ""
+            return ToolInfoResult()
 
         try:
             url_info = ""
@@ -472,8 +491,27 @@ class PrivateReplyer:
             mcp_catalog = self.mcp_executor.get_tool_catalog_summary(access_context=mcp_access_context)
             allow_web_search = bool(not urls and self.web_search_manager.is_available)
             allow_mcp = bool(mcp_catalog)
+            actor_id = str(sandbox_actor_id or getattr(self.chat_stream.user_info, "user_id", "") or "")
+            source_message_id = str(sandbox_source_message_id or "")
+            context = getattr(self.chat_stream, "context", None)
+            context_message = getattr(context, "message", None) if context else None
+            context_info = getattr(context_message, "message_info", None)
+            if context_info is not None:
+                source_message_id = source_message_id or str(getattr(context_info, "message_id", "") or "")
+                sender_info = getattr(context_info, "sender_info", None) or getattr(context_info, "user_info", None)
+                if not sandbox_actor_id:
+                    actor_id = str(getattr(sender_info, "user_id", "") or actor_id)
+            group_info = getattr(self.chat_stream, "group_info", None)
+            group_id = sandbox_group_id or (str(getattr(group_info, "group_id", "") or "") if group_info else None)
+            try:
+                allowed_ids = {str(item) for item in getattr(global_config.advanced, "admins", [])}
+                allowed_ids.update(str(item) for item in getattr(global_config.bot, "sandbox_whitelist", []))
+                file_edit_set = getattr(model_config.model_task_config, "file_edit", None)
+                sandbox_edit_available = bool(actor_id in allowed_ids and getattr(file_edit_set, "model_list", None))
+            except Exception:
+                sandbox_edit_available = False
             decision_task = None
-            if allow_web_search or allow_mcp:
+            if allow_web_search or allow_mcp or sandbox_edit_available:
                 decision_task = asyncio.create_task(
                     self.capability_router.decide(
                         chat_history=chat_history,
@@ -483,9 +521,14 @@ class PrivateReplyer:
                         allow_web_search=allow_web_search,
                         allow_mcp=allow_mcp,
                         mcp_catalog=mcp_catalog,
+                        allow_sandbox_edit=sandbox_edit_available,
+                        sandbox_edit_available=sandbox_edit_available,
+                        sandbox_platform=str(getattr(self.chat_stream, "platform", "unknown") or "unknown"),
+                        sandbox_group_id=group_id,
+                        sandbox_actor_id=actor_id,
+                        sandbox_source_message_id=source_message_id,
                     )
                 )
-
             # 1. 搜索任务（仅在无 URL 且能力路由命中时触发）
             if allow_web_search and decision_task:
                 logger.info("未检测到URL，尝试联网搜索判定")
@@ -524,6 +567,12 @@ class PrivateReplyer:
             task_coros = list(parallel_tasks.values())
             raw_results = await asyncio.gather(*task_coros, return_exceptions=True)
             results_map = dict(zip(task_keys, raw_results, strict=True))
+            sandbox_candidate = None
+            if decision_task is not None:
+                try:
+                    sandbox_candidate = (await decision_task).sandbox_edit_candidate
+                except Exception as exc:
+                    logger.debug(f"沙盒能力路由失败: {exc}")
 
             # 处理搜索结果
             if "search" in results_map:
@@ -597,14 +646,31 @@ class PrivateReplyer:
                 if url_info:
                     logger.info("获取到网页解析结果")
 
-                return tool_info_str
+                if sandbox_candidate is not None:
+                    tool_info_str += (
+                        "\n【SANDBOX_EDIT_CONFIRMATION_REQUIRED】\n"
+                        "仅当你确认用户明确要求文件操作时，严格只输出以下 JSON，不能输出 Markdown（decision 必须是布尔值，键不可增删）："
+                        '{"sandbox_edit_decision":true,"reply_to_user":"面向用户的确认语句",'
+                        '"file_edit_query":"简洁的文件操作任务"}\n'
+                        f"待确认任务：{sandbox_candidate.query}"
+                    )
+                return ToolInfoResult(tool_info_str, sandbox_candidate)
             else:
                 logger.debug("未获取到任何工具结果")
-                return ""
+                if sandbox_candidate is not None:
+                    return ToolInfoResult(
+                        "【SANDBOX_EDIT_CONFIRMATION_REQUIRED】\n"
+                        "若确认用户明确要求文件操作，请严格只输出以下 JSON（decision 必须是布尔值，键不可增删）："
+                        '{"sandbox_edit_decision":true,"reply_to_user":"面向用户的确认语句",'
+                        '"file_edit_query":"简洁的文件操作任务"}\n'
+                        f"待确认任务：{sandbox_candidate.query}",
+                        sandbox_candidate,
+                    )
+                return ToolInfoResult()
 
         except Exception as e:
             logger.error(f"工具信息获取失败: {e}")
-            return ""
+            return ToolInfoResult()
 
     def _parse_reply_target(self, target_message: Optional[str]) -> Tuple[str, str]:
         """解析回复目标消息
@@ -758,7 +824,7 @@ class PrivateReplyer:
         chosen_actions: Optional[List[ActionPlannerInfo]] = None,
         enable_tool: bool = True,
         prompt_context: Optional[ReplyPromptContext] = None,
-    ) -> Tuple[str, List[int]]:
+    ) -> ReplyPromptBuildResult:
         """
         构建回复器上下文
 
@@ -900,7 +966,20 @@ class PrivateReplyer:
                 "memory_block",
             ),
             self._time_and_run_task(
-                self.build_tool_info(chat_talking_prompt_short, sender, target, enable_tool=enable_tool), "tool_info"
+                self.build_tool_info(
+                    chat_talking_prompt_short,
+                    sender,
+                    target,
+                    enable_tool=enable_tool,
+                    sandbox_actor_id=user_id,
+                    sandbox_source_message_id=str(getattr(reply_message, "message_id", "") or ""),
+                    sandbox_group_id=(
+                        str(getattr(getattr(getattr(reply_message, "chat_info", None), "group_info", None), "group_id", "") or "")
+                        if getattr(getattr(reply_message, "chat_info", None), "group_info", None)
+                        else None
+                    ),
+                ),
+                "tool_info",
             ),
             self._time_and_run_task(self.get_prompt_info(chat_talking_prompt_short, sender, target), "prompt_info"),
             self._time_and_run_task(self.build_actions_prompt(available_actions, chosen_actions), "actions_info"),
@@ -942,9 +1021,16 @@ class PrivateReplyer:
         selected_expressions: List[int]
         relation_info: str = results_dict["relation_info"]
         memory_block: str = results_dict["memory_block"]
-        tool_info: str = results_dict["tool_info"]
+        tool_info_result = results_dict["tool_info"]
+        sandbox_candidate = (
+            getattr(tool_info_result, "sandbox_edit_candidate", None)
+            if isinstance(tool_info_result, ToolInfoResult)
+            else None
+        )
+        tool_info: str = str(tool_info_result or "")
         if advanced_on and global_config.advanced.block_tools_when_on:
             tool_info = ""
+            sandbox_candidate = None
         prompt_info: str = results_dict["prompt_info"]  # 直接使用格式化后的结果
         actions_info: str = results_dict["actions_info"]
         personality_prompt: str = results_dict["personality_prompt"]
@@ -990,18 +1076,6 @@ class PrivateReplyer:
             advanced_prompt_block = global_config.advanced.prompt.strip()
             extra_info_block_parts.append(f"[高级模式提示]\n{advanced_prompt_block}")
 
-        # 注入沙盒文件概述 (read_file 后 LLM 生成的概要，持续 3 轮)
-        try:
-            from src.chat.sandbox.sandbox_manager import sandbox_manager
-            sandbox = sandbox_manager.get_sandbox(chat_id)
-            file_summaries_text = sandbox.get_active_summaries()
-            if file_summaries_text:
-                extra_info_block_parts.append(file_summaries_text)
-                logger.info(f"已注入沙盒文件概述到 replyer prompt (chat_id={chat_id})")
-            sandbox.tick_summaries()
-        except Exception as e:
-            logger.debug(f"获取沙盒文件概述失败: {e}")
-
         extra_info_block = "\n".join(extra_info_block_parts)
 
         time_block = f"当前时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
@@ -1022,7 +1096,7 @@ class PrivateReplyer:
             if hasattr(self, "request_type") and self.request_type == "file_edit":
                 template_name = "file_edit_prompt"
 
-            return await global_prompt_manager.format_prompt(
+            prompt = await global_prompt_manager.format_prompt(
                 template_name,
                 expression_habits_block=expression_habits_block,
                 tool_info_block=tool_info,
@@ -1044,13 +1118,14 @@ class PrivateReplyer:
                 reply_style=global_config.personality.reply_style,
                 keywords_reaction_prompt=keywords_reaction_prompt,
                 moderation_prompt=moderation_prompt_block,
-            ), selected_expressions
+            )
+            return ReplyPromptBuildResult(prompt, selected_expressions, sandbox_candidate)
         else:
             template_name = "private_replyer_prompt"
             if hasattr(self, "request_type") and self.request_type == "file_edit":
                 template_name = "file_edit_prompt"
 
-            return await global_prompt_manager.format_prompt(
+            prompt = await global_prompt_manager.format_prompt(
                 template_name,
                 expression_habits_block=expression_habits_block,
                 tool_info_block=tool_info,
@@ -1071,7 +1146,8 @@ class PrivateReplyer:
                 keywords_reaction_prompt=keywords_reaction_prompt,
                 moderation_prompt=moderation_prompt_block,
                 sender_name=sender,
-            ), selected_expressions
+            )
+            return ReplyPromptBuildResult(prompt, selected_expressions, sandbox_candidate)
 
     async def build_prompt_rewrite_context(
         self,
