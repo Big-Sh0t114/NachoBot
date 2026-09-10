@@ -99,7 +99,7 @@ httpx2-jsfetch==1.0 ; python_full_version >= '3.12' and sys_platform == 'emscrip
     # via httpx2
 id==1.6.1
     # via twine
-idna==3.18
+idna==3.19
     # via
     #   anyio
     #   httpx
