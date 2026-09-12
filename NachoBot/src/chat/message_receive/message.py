@@ -16,6 +16,7 @@ from src.config.config import global_config
 from src.chat.utils.utils_image import get_image_manager
 from src.chat.utils.utils_voice import get_voice_text
 from src.chat.sandbox.sandbox_manager import sandbox_manager
+from src.chat.sandbox.sandbox_handoff import sandbox_user_allowed
 from .chat_stream import ChatStream
 
 install(extra_lines=3)
@@ -185,7 +186,16 @@ class MessageRecv(Message):
         try:
             import httpx
 
-            sandbox = sandbox_manager.get_sandbox(self.chat_stream.stream_id)
+            actor_id = ""
+            if getattr(self.message_info, "sender_info", None) and self.message_info.sender_info.user_id:
+                actor_id = str(self.message_info.sender_info.user_id)
+            elif getattr(self.message_info, "user_info", None) and self.message_info.user_info.user_id:
+                actor_id = str(self.message_info.user_info.user_id)
+            if not actor_id:
+                actor_id = str(getattr(self.chat_stream.user_info, "user_id", ""))
+            group_info = getattr(self.chat_stream, "group_info", None)
+            group_id = getattr(group_info, "group_id", None) if group_info else None
+            platform = str(getattr(self.chat_stream, "platform", "unknown") or "unknown")
 
             # Case 1: URL
             if file_data.startswith("http"):
@@ -202,7 +212,14 @@ class MessageRecv(Message):
                         # Fallback size check just in case HEAD didn't give Content-Length
                         if len(resp.content) > 1048576:
                             raise ValueError(f"File exceeds 1MB limit ({len(resp.content)} bytes)")
-                        return sandbox.save_file(resp.content, filename)
+                        return sandbox_manager.save_upload(
+                            resp.content,
+                            filename,
+                            stream_id=self.chat_stream.stream_id,
+                            platform=platform,
+                            group_id=str(group_id) if group_id is not None else None,
+                            actor_id=actor_id,
+                        )
 
             # Case 2: Local Path (already on disk, e.g. from OneBot/NapCat)
             # If the adapter saves it somewhere, we might just copy it or leave it.
@@ -213,7 +230,14 @@ class MessageRecv(Message):
 
                 with open(file_data, "rb") as f:
                     content = f.read()
-                return sandbox.save_file(content, filename)
+                return sandbox_manager.save_upload(
+                    content,
+                    filename,
+                    stream_id=self.chat_stream.stream_id,
+                    platform=platform,
+                    group_id=str(group_id) if group_id is not None else None,
+                    actor_id=actor_id,
+                )
 
             # Case 3: Base64 (Legacy/Other) - To be implemented if needed
 
@@ -261,9 +285,9 @@ class MessageRecv(Message):
                     elif self.message_info.user_info:
                         user_id = str(self.message_info.user_info.user_id)
 
-                if not user_id or user_id not in global_config.bot.sandbox_whitelist:
-                    logger.warning(f"用户 {user_id} 不在沙盒白名单中，拒绝自动保存文件: {file_name}")
-                    return f"[接收到文件: {file_name}，但发送者不在沙盒白名单，已忽略自动保存]"
+                if not sandbox_user_allowed(user_id):
+                    logger.warning(f"用户 {user_id} 未通过沙盒名单策略，拒绝自动保存文件: {file_name}")
+                    return f"[接收到文件: {file_name}，但发送者未通过沙盒名单策略，已忽略自动保存]"
 
                 if file_url:
                     try:

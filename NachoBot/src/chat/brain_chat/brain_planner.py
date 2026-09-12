@@ -11,7 +11,6 @@ from json_repair import repair_json
 
 from src.llm_models.utils_model import LLMRequest
 from src.llm_models.exceptions import ReqAbortException
-from src.mcp.access import access_context_from_stream
 from src.config.config import global_config, model_config
 from src.common.logger import get_logger
 from src.common.data_models.info_data_model import ActionPlannerInfo
@@ -28,7 +27,7 @@ from src.chat.utils.chat_message_builder import (
 )
 from src.chat.utils.prompt_injection_guard import guard_user_content
 from src.chat.utils.display_name import resolve_sender_name
-from src.chat.utils.context_builder import build_tool_info, build_relation_info, build_lpmm_knowledge_info
+from src.chat.utils.context_builder import build_relation_info, build_lpmm_knowledge_info
 from src.chat.utils.capability_router import CapabilityRouter
 from src.memory_system.memory_retrieval import build_memory_retrieval_prompt
 from src.chat.utils.utils import get_chat_type_and_target_info
@@ -43,7 +42,6 @@ from src.plugin_system.core.component_registry import component_registry
 from src.plugin_system.core.tool_use import ToolExecutor
 from src.plugin_system.core.mcp_tool_executor import MCPToolExecutor
 from src.chat.utils.web_search import WebSearchManager
-from src.chat.utils.url_fetcher import UrlContentFetcher
 
 if TYPE_CHECKING:
     from src.common.data_models.info_data_model import TargetPersonInfo
@@ -220,7 +218,6 @@ class BrainPlanner:
         )
         self.web_search_manager = WebSearchManager(chat_id=chat_id, enable_cache=True, cache_ttl=2)
         self.capability_router = CapabilityRouter(chat_id=chat_id)
-        self.url_fetcher = UrlContentFetcher()
 
     @property
     def planner_llm(self) -> LLMRequest:
@@ -240,10 +237,10 @@ class BrainPlanner:
         return self.separated_llm
 
     def _check_sandbox_permission(self, user_id: str) -> bool:
-        """Check if user has permission to use sandbox features"""
-        is_admin = str(user_id) in global_config.advanced.admins
-        is_whitelisted = str(user_id) in global_config.bot.sandbox_whitelist
-        return is_admin or is_whitelisted
+        """Check the independent Sandbox allow/deny list policy."""
+        from src.chat.sandbox.sandbox_handoff import sandbox_user_allowed
+
+        return sandbox_user_allowed(user_id)
 
     def find_message_by_id(
         self, message_id: str, message_id_list: List[Tuple[str, "DatabaseMessages"]]
@@ -276,6 +273,12 @@ class BrainPlanner:
         try:
             action = action_json.get("action", "no_action")
             reasoning = action_json.get("reason", "未提供原因")
+            if action == "file_edit":
+                # File editing is a replyer-confirmed capability, never a
+                # planner-owned action. Preserve the user's target message and
+                # let the ordinary replyer run the single router pass.
+                action = "reply"
+                reasoning = f"文件操作请求转交普通回复器确认。原始理由: {reasoning}"
             requested_switch = action == SWITCH_CHAT_ACTION
             reply_text = "" if requested_switch else action_json.get("text", "")
             if requested_switch and not can_offer_switch_chat(focus_coordinator, self.chat_id):
@@ -635,12 +638,6 @@ class BrainPlanner:
 
             # --- 下面使用 gathered 异步加载上下文所需信息 ---
             user_info = chat_target_info if chat_target_info else None
-            chat_stream = get_chat_manager().get_stream(self.chat_id)
-            mcp_access_context = access_context_from_stream(
-                chat_stream,
-                str(user_info.user_id) if user_info and user_info.user_id else "",
-            )
-
             task_results = await asyncio.gather(
                 build_relation_info(chat_talking_prompt_short, sender_name, user_info=user_info),
                 build_memory_retrieval_prompt(
@@ -649,18 +646,10 @@ class BrainPlanner:
                     target=target,
                     chat_stream=get_chat_manager().get_stream(self.chat_id),
                 ),
-                build_tool_info(
-                    chat_history=chat_talking_prompt_short,
-                    sender=sender_name,
-                    target=target,
-                    url_fetcher=self.url_fetcher,
-                    web_search_manager=self.web_search_manager,
-                    capability_router=self.capability_router,
-                    tool_executor=self.tool_executor,
-                    mcp_executor=self.mcp_executor,
-                    mcp_access_context=mcp_access_context,
-                    enable_tool=global_config.tool.enable_tool,
-                ),
+                # Tool routing belongs to the ordinary replyer. Running the
+                # integrated planner's build_tool_info here would duplicate
+                # web/MCP/sandbox routing and create a second handoff source.
+                asyncio.sleep(0, result=""),
                 build_lpmm_knowledge_info(
                     message=chat_talking_prompt_short,
                     sender=sender_name,
@@ -735,11 +724,6 @@ class BrainPlanner:
         is_group_chat, chat_target_info = get_chat_type_and_target_info(self.chat_id)
         logger.debug(f"{self.log_prefix}获取到聊天信息 - 群聊: {is_group_chat}, 目标信息: {chat_target_info}")
 
-        # Check permissions and filter actions before they even reach activation logic
-        has_sandbox_permission = False
-        if chat_target_info and chat_target_info.user_id:
-            has_sandbox_permission = self._check_sandbox_permission(chat_target_info.user_id)
-
         current_available_actions_dict = self.action_manager.get_using_actions()
 
         # 获取完整的动作信息
@@ -748,7 +732,8 @@ class BrainPlanner:
         )
         current_available_actions = {}
         for action_name in current_available_actions_dict:
-            if action_name == "file_edit" and not has_sandbox_permission:
+            if action_name == "file_edit":
+                # Retire the old planner action even for authorized users.
                 continue
             if action_name in all_registered_actions:
                 current_available_actions[action_name] = all_registered_actions[action_name]

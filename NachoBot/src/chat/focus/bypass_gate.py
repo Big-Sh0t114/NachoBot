@@ -202,7 +202,11 @@ switch: {switch_example}
         if not isinstance(reasoning, str):
             reasoning = ""
         if not allow_handoff and "handoff" in payload:
-            raise FocusBypassGateError("Private-source Focus switch must not include a handoff")
+            # An empty object is a tolerated planner omission.  Any other
+            # supplied value remains rejected before it reaches execution.
+            raw_handoff = payload.get("handoff")
+            if not isinstance(raw_handoff, Mapping) or raw_handoff:
+                raise FocusBypassGateError("Private-source Focus switch must not include a handoff")
         decision = payload.get("decision")
         if decision == FocusBypassDecisionKind.STAY.value:
             return FocusBypassDecision(

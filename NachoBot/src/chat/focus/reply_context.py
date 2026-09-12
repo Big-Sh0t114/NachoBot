@@ -84,6 +84,10 @@ class ReplyPromptContext:
     injection_detected: bool = False
     estimated_tokens: int = 0
     digest: str = ""
+    # Focus handoff detection is telemetry only.  Keep it separate from the
+    # generic Replyer guardrail bit so a suspicious handoff cannot cause a
+    # warning sentence to be appended to the Replyer moderation prompt.
+    focus_injection_detected: bool = False
 
     @classmethod
     def empty(cls, target_chat_id: str = "") -> "ReplyPromptContext":
@@ -193,9 +197,10 @@ async def assemble_reply_context(
             focus_epoch=request.lease.epoch,
             focus_handoff_block=rendered.block,
             context_refs=material.refs,
-            injection_detected=rendered.injection_detected,
+            injection_detected=False,
             estimated_tokens=rendered.estimated_tokens,
             digest=rendered.digest,
+            focus_injection_detected=rendered.injection_detected,
         )
     except BaseException:
         # A cancellation between reservation and generation must not hold the

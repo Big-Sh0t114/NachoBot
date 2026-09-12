@@ -15,10 +15,12 @@ from .handoff_builder import HandoffBuilder, HandoffLimits
 from .models import (
     ChatKind,
     FocusLease,
+    HandoffKind,
     HandoffPayload,
     StaleFocusLeaseError,
     SwitchChatRequest,
     SwitchResult,
+    trusted_transition_labels,
 )
 
 
@@ -276,19 +278,36 @@ async def execute_switch_chat(
         definition,
         lease.chat_id,
         event.target_chat_id,
-        has_handoff=not metadata_only,
+        has_handoff=True if source.kind is ChatKind.PRIVATE else not metadata_only,
+        handoff_kind=(HandoffKind.TRANSITION_IDENTITY_V1 if source.kind is ChatKind.PRIVATE else HandoffKind.CONTENT_V1),
     )
     if not decision.allowed:
         return SwitchResult(False, decision.reason, lease)
 
-    if metadata_only:
+    focus_config = global_config.focus
+    builder = HandoffBuilder(
+        HandoffLimits(
+            ttl_seconds=focus_config.handoff_ttl_seconds,
+            max_successful_cycles=focus_config.handoff_successful_cycles,
+            prompt_token_budget=focus_config.handoff_prompt_tokens,
+        )
+    )
+    if source.kind is ChatKind.PRIVATE:
         request = SwitchChatRequest(
             lease=lease,
             event_id=event.event_id,
             expected_event_revision=event.revision,
             reasoning=reasoning,
         )
-        return await coordinator.switch_chat(request, None)
+        handoff = builder.build_transition_identity(
+            definition=definition,
+            group_id=lease.group_id,
+            source_chat_id=lease.chat_id,
+            target_chat_id=event.target_chat_id,
+            source_epoch=lease.epoch,
+            policy_version=coordinator.policy.version,
+        )
+        return await coordinator.switch_chat(request, handoff)
 
     parent = None
     try:
@@ -303,19 +322,16 @@ async def execute_switch_chat(
         # Parent inheritance is useful but must never weaken switch validation.
         parent = None
 
+    source_display_name, target_display_name = trusted_transition_labels(
+        definition,
+        lease.chat_id,
+        event.target_chat_id,
+    )
     payload = _merge_source_history(
         _payload_from_action_data(action_data),
         _load_recent_source_results(lease.chat_id),
-        source_display_name=source.display_name or source.chat_id,
-        target_display_name=target.display_name or target.chat_id,
-    )
-    focus_config = global_config.focus
-    builder = HandoffBuilder(
-        HandoffLimits(
-            ttl_seconds=focus_config.handoff_ttl_seconds,
-            max_successful_cycles=focus_config.handoff_successful_cycles,
-            prompt_token_budget=focus_config.handoff_prompt_tokens,
-        )
+        source_display_name=source_display_name,
+        target_display_name=target_display_name,
     )
     handoff = builder.build(
         group_id=lease.group_id,

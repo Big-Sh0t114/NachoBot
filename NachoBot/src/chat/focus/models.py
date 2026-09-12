@@ -62,6 +62,18 @@ class HandoffStatus(str, Enum):
     CONSUMED = "consumed"
 
 
+class HandoffKind(str, Enum):
+    """Persisted handoff meaning.
+
+    The kind is deliberately explicit instead of being inferred from a private
+    source and an empty payload.  Legacy rows without a kind are treated as
+    ordinary content by the storage adapter.
+    """
+
+    CONTENT_V1 = "content_v1"
+    TRANSITION_IDENTITY_V1 = "transition_identity_v1"
+
+
 @dataclass(frozen=True, slots=True)
 class FocusMember:
     """A resolved chat stream explicitly enrolled in a Focus group."""
@@ -108,6 +120,43 @@ class FocusGroupDefinition:
             raise ValueError(f"Focus group {self.group_id!r} has duplicate chat members")
         if self.initial_chat_id is not None and self.initial_chat_id not in member_ids:
             raise ValueError(f"Initial chat {self.initial_chat_id!r} is not a member of {self.group_id!r}")
+
+
+def trusted_member_display_name(member: FocusMember, *, role: str) -> str:
+    """Return a server-owned label safe for a transition identity sentence.
+
+    Private IDs are routing identifiers, not display names.  If an enrolled
+    private member has no configured display name, use a generic role label so
+    the identity handoff cannot disclose the raw private chat ID.
+    """
+
+    configured = " ".join(str(member.display_name or "").split())
+    # Display names are configuration, but keeping angle brackets out of the
+    # model block ensures a malformed configured label cannot create a tag.
+    configured = configured.replace("<", "＜").replace(">", "＞")
+    configured = configured[:160].rstrip()
+    if configured:
+        return configured
+    if member.kind is ChatKind.PRIVATE:
+        return "上一私聊" if role == "source" else "当前私聊"
+    return "上一群聊" if role == "source" else "当前群聊"
+
+
+def trusted_transition_labels(
+    definition: FocusGroupDefinition,
+    source_chat_id: str,
+    target_chat_id: str,
+) -> tuple[str, str]:
+    """Resolve transition labels only from explicitly enrolled members."""
+
+    source = next((member for member in definition.members if member.chat_id == source_chat_id), None)
+    target = next((member for member in definition.members if member.chat_id == target_chat_id), None)
+    if source is None or target is None:
+        raise ValueError("Focus transition source and target must be enrolled members")
+    return (
+        trusted_member_display_name(source, role="source"),
+        trusted_member_display_name(target, role="target"),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,6 +279,17 @@ class HandoffPayload:
     recent_results: tuple[str, ...] = ()
     excerpts: tuple[UntrustedExcerpt, ...] = ()
 
+    def is_identity_only(self) -> bool:
+        """Whether only the two transition display strings are populated."""
+
+        return bool(self.source_display_name and self.target_display_name) and not (
+            self.task_summary
+            or self.known_facts
+            or self.pending_items
+            or self.recent_results
+            or self.excerpts
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class FocusHandoff:
@@ -247,6 +307,7 @@ class FocusHandoff:
     max_successful_cycles: int = 3
     revision: int = 1
     status: HandoffStatus = HandoffStatus.ACTIVE
+    kind: HandoffKind = HandoffKind.CONTENT_V1
 
     def __post_init__(self) -> None:
         if self.target_epoch != self.source_epoch + 1:

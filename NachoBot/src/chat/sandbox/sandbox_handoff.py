@@ -1,0 +1,297 @@
+"""Typed, server-owned sandbox candidate and handoff contracts."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import time
+import uuid
+from dataclasses import dataclass, field
+from typing import Any, Mapping, Optional
+
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+MAX_QUERY_CHARS = 4000
+
+
+def sanitize_file_edit_query(value: Any, *, max_chars: int = MAX_QUERY_CHARS) -> str:
+    """Bound model text before it is placed in a server-side handoff."""
+
+    text = _CONTROL_CHARS.sub(" ", str(value or "")).strip()
+    return " ".join(text.split())[:max_chars]
+
+
+def sandbox_user_allowed(user_id: Any) -> bool:
+    """Apply the Sandbox-only allow/deny list policy for one actor.
+
+    This deliberately does not consult the global admin list. MCP permission
+    policy is separate and must not be changed by Sandbox access settings.
+    Invalid or missing policy values fail closed to the legacy whitelist mode.
+    """
+
+    actor_id = str(user_id or "").strip()
+    if not actor_id:
+        return False
+    try:
+        from src.config.config import global_config
+
+        bot_config = global_config.bot
+        entries = {
+            str(item).strip()
+            for item in getattr(bot_config, "sandbox_list", [])
+            if str(item).strip()
+        }
+        mode = str(getattr(bot_config, "sandbox_list_type", "whitelist") or "whitelist").strip().lower()
+    except Exception:
+        return False
+    if mode == "blacklist":
+        return actor_id not in entries
+    return mode == "whitelist" and actor_id in entries
+
+
+def acknowledgement_fingerprint(value: Any) -> str:
+    """Fingerprint the exact server-approved user-facing acknowledgement."""
+
+    text = str(value or "")
+    return hashlib.sha256(text.encode("utf-8", "strict")).hexdigest() if text else ""
+
+
+def candidate_fingerprint(
+    *,
+    stream_id: str,
+    platform: str,
+    group_id: Optional[str],
+    actor_id: str,
+    source_message_id: str,
+    query: str,
+) -> str:
+    payload = {
+        "stream_id": str(stream_id),
+        "platform": str(platform),
+        "group_id": str(group_id or ""),
+        "actor_id": str(actor_id),
+        "source_message_id": str(source_message_id),
+        "query": sanitize_file_edit_query(query),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxEditCandidate:
+    """A call-local capability-router candidate.
+
+    Identity values are always supplied by the server. The model contributes
+    only ``query``; it can never mint an ID or alter the source binding.
+    """
+
+    stream_id: str
+    platform: str
+    group_id: Optional[str]
+    actor_id: str
+    source_message_id: str
+    query: str
+    fingerprint: str
+
+    @classmethod
+    def mint(
+        cls,
+        *,
+        stream_id: str,
+        platform: str,
+        group_id: Optional[str],
+        actor_id: str,
+        source_message_id: str,
+        query: Any,
+    ) -> "SandboxEditCandidate":
+        clean_query = sanitize_file_edit_query(query)
+        return cls(
+            stream_id=str(stream_id),
+            platform=str(platform),
+            group_id=str(group_id) if group_id is not None else None,
+            actor_id=str(actor_id),
+            source_message_id=str(source_message_id),
+            query=clean_query,
+            fingerprint=candidate_fingerprint(
+                stream_id=str(stream_id),
+                platform=str(platform),
+                group_id=group_id,
+                actor_id=str(actor_id),
+                source_message_id=str(source_message_id),
+                query=clean_query,
+            ),
+        )
+
+    def binding_is_valid(self) -> bool:
+        return bool(self.query) and self.fingerprint == candidate_fingerprint(
+            stream_id=self.stream_id,
+            platform=self.platform,
+            group_id=self.group_id,
+            actor_id=self.actor_id,
+            source_message_id=self.source_message_id,
+            query=self.query,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxEditHandoff:
+    """Immutable server-minted handoff from a delivered reply to the agent."""
+
+    handoff_id: str
+    idempotency_key: str
+    stream_id: str
+    platform: str
+    group_id: Optional[str]
+    actor_id: str
+    source_message_id: str
+    candidate_fingerprint: str
+    candidate_query: str
+    file_edit_query: str
+    created_at: float = field(default_factory=time.time)
+    acknowledgement_fingerprint: str = ""
+
+    @classmethod
+    def mint(
+        cls,
+        candidate: SandboxEditCandidate,
+        *,
+        file_edit_query: Any = None,
+        handoff_id: Optional[str] = None,
+        acknowledgement: Any = None,
+    ) -> "SandboxEditHandoff":
+        if not candidate.binding_is_valid():
+            raise ValueError("invalid sandbox candidate binding")
+        minted_id = str(handoff_id or uuid.uuid4().hex)
+        # The ID is generated by the server and is never copied from model
+        # output. Requiring a UUID-like value also protects staging paths.
+        if not re.fullmatch(r"[0-9a-fA-F-]{16,128}", minted_id):
+            raise ValueError("invalid handoff id")
+        query = sanitize_file_edit_query(file_edit_query if file_edit_query is not None else candidate.query)
+        if not query:
+            raise ValueError("empty file-edit query")
+        return cls(
+            handoff_id=minted_id,
+            idempotency_key=minted_id,
+            stream_id=candidate.stream_id,
+            platform=candidate.platform,
+            group_id=candidate.group_id,
+            actor_id=candidate.actor_id,
+            source_message_id=candidate.source_message_id,
+            candidate_fingerprint=candidate.fingerprint,
+            candidate_query=candidate.query,
+            file_edit_query=query,
+            acknowledgement_fingerprint=acknowledgement_fingerprint(acknowledgement),
+        )
+
+    def binding_is_valid(self) -> bool:
+        return self.candidate_fingerprint == candidate_fingerprint(
+            stream_id=self.stream_id,
+            platform=self.platform,
+            group_id=self.group_id,
+            actor_id=self.actor_id,
+            source_message_id=self.source_message_id,
+            query=self.candidate_query,
+        )
+
+    def matches_candidate(self, candidate: SandboxEditCandidate) -> bool:
+        return (
+            candidate.binding_is_valid()
+            and self.candidate_fingerprint == candidate.fingerprint
+            and self.stream_id == candidate.stream_id
+            and self.platform == candidate.platform
+            and self.group_id == candidate.group_id
+            and self.actor_id == candidate.actor_id
+            and self.source_message_id == candidate.source_message_id
+        )
+
+    def matches_acknowledgement(self, content: Any) -> bool:
+        """Match only the immutable acknowledgement minted for this call."""
+
+        return bool(self.acknowledgement_fingerprint) and (
+            self.acknowledgement_fingerprint == acknowledgement_fingerprint(content)
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxEnvelopeResult:
+    content: str
+    handoff: Optional[SandboxEditHandoff] = None
+    envelope_seen: bool = False
+    accepted: bool = False
+
+
+_ENVELOPE_KEYS = {"sandbox_edit_decision", "reply_to_user", "file_edit_query"}
+
+
+def parse_sandbox_confirmation(
+    content: Any,
+    candidate: Optional[SandboxEditCandidate],
+    *,
+    invalid_text: str = "唔…猫猫暂时没法确认这个文件操作，稍后再试就好(´･ω･`)",
+) -> SandboxEnvelopeResult:
+    """Fail-closed parse for the ordinary replyer's confirmation envelope."""
+
+    text = str(content or "")
+    stripped = text.strip()
+    if not stripped:
+        return SandboxEnvelopeResult(text)
+    try:
+        payload = json.loads(stripped)
+    except (TypeError, json.JSONDecodeError):
+        if any(key in stripped for key in _ENVELOPE_KEYS):
+            return SandboxEnvelopeResult(invalid_text, envelope_seen=True)
+        return SandboxEnvelopeResult(text)
+    if not isinstance(payload, dict) or not (_ENVELOPE_KEYS & set(payload)):
+        return SandboxEnvelopeResult(text)
+    if set(payload) != _ENVELOPE_KEYS:
+        return SandboxEnvelopeResult(invalid_text, envelope_seen=True)
+    reply_to_user = str(payload.get("reply_to_user") or "").strip()
+    query = sanitize_file_edit_query(payload.get("file_edit_query"))
+    if not reply_to_user or len(reply_to_user) > 2000:
+        return SandboxEnvelopeResult(invalid_text, envelope_seen=True)
+    # A strict false decision is the normal refusal branch: keep the
+    # replyer's user-facing text but never mint a handoff.
+    decision = payload.get("sandbox_edit_decision")
+    if decision is False:
+        return SandboxEnvelopeResult(reply_to_user, envelope_seen=True, accepted=False)
+    if decision is not True or candidate is None or not candidate.binding_is_valid() or not query:
+        return SandboxEnvelopeResult(invalid_text, envelope_seen=True)
+    try:
+        handoff = SandboxEditHandoff.mint(
+            candidate,
+            file_edit_query=query,
+            acknowledgement=reply_to_user,
+        )
+    except (TypeError, ValueError):
+        return SandboxEnvelopeResult(invalid_text, envelope_seen=True)
+    return SandboxEnvelopeResult(reply_to_user, handoff=handoff, envelope_seen=True, accepted=True)
+
+def candidate_from_mapping(value: Mapping[str, Any]) -> Optional[SandboxEditCandidate]:
+    """Parse only the non-authoritative candidate fields used by tests/callers."""
+
+    try:
+        candidate = SandboxEditCandidate(
+            stream_id=str(value["stream_id"]),
+            platform=str(value["platform"]),
+            group_id=str(value["group_id"]) if value.get("group_id") is not None else None,
+            actor_id=str(value["actor_id"]),
+            source_message_id=str(value["source_message_id"]),
+            query=sanitize_file_edit_query(value["query"]),
+            fingerprint=str(value["fingerprint"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+    return candidate if candidate.binding_is_valid() else None
+
+
+__all__ = [
+    "SandboxEditCandidate",
+    "SandboxEditHandoff",
+    "candidate_fingerprint",
+    "candidate_from_mapping",
+    "acknowledgement_fingerprint",
+    "SandboxEnvelopeResult",
+    "parse_sandbox_confirmation",
+    "sanitize_file_edit_query",
+    "sandbox_user_allowed",
+]

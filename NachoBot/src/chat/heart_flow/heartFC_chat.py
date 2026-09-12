@@ -65,6 +65,7 @@ from src.chat.focus.switch_action import (
     format_recent_source_messages,
 )
 from src.chat.focus.switch_planner import suppress_focus_planner_context
+from src.chat.sandbox.sandbox_delivery import schedule_sandbox_after_delivery
 
 if TYPE_CHECKING:
     from src.chat.focus.reply_context import ReplyContextRef
@@ -870,6 +871,7 @@ class HeartFChatting:
         actions,
         selected_expressions: Optional[List[int]] = None,
         context_refs: Optional[List["ReplyContextRef"]] = None,
+        sandbox_handoff: Any = None,
     ) -> Tuple[Dict[str, Any], str, Dict[str, float]]:
         with Timer("回复发送", cycle_timers):
             reply_text = await self._send_response(
@@ -877,6 +879,7 @@ class HeartFChatting:
                 message_data=action_message,
                 selected_expressions=selected_expressions,
                 context_refs=context_refs,
+                sandbox_handoff=sandbox_handoff,
             )
 
         from src.manager.local_store_manager import local_storage
@@ -1584,6 +1587,7 @@ class HeartFChatting:
         message_data: "DatabaseMessages",
         selected_expressions: Optional[List[int]] = None,
         context_refs: Optional[List["ReplyContextRef"]] = None,
+        sandbox_handoff: Any = None,
     ) -> str:
         receipts: List[send_api.SendReceipt] = []
         refs = tuple(context_refs or ())
@@ -1618,6 +1622,14 @@ class HeartFChatting:
             # Delivery already happened. Releasing here could consume the same
             # handoff twice after a later retry, so retain it for recovery.
             logger.error(f"{self.log_prefix} Focus delivery settlement failed: {exc}")
+        if sandbox_handoff is not None:
+            # Schedule only after DELIVERED; this gate is in-process
+            # idempotency and is not a crash-atomic outbox.
+            await schedule_sandbox_after_delivery(
+                sandbox_handoff,
+                receipts,
+                delivered_content=reply_text,
+            )
         return reply_text
 
     async def _settle_interrupted_reply_context(
@@ -1975,6 +1987,7 @@ class HeartFChatting:
                         actions=chosen_action_plan_infos,
                         selected_expressions=selected_expressions,
                         context_refs=llm_response.context_refs,
+                        sandbox_handoff=llm_response.sandbox_edit_handoff,
                     )
                     return {
                         "action_type": "reply",

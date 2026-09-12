@@ -102,12 +102,6 @@ class MainSystem:
         self._mcp_service = mcp_service
         await mcp_service.start(wait_for_connections=False)
 
-        # 注册沙盒工具（核心功能）
-        from src.chat.sandbox.sandbox_tools import register_sandbox_tools
-
-        register_sandbox_tools()
-        logger.info("沙盒工具注册成功")
-
         # 初始化表情管理器
         get_emoji_manager().initialize()
         logger.info("表情包管理器初始化成功")
