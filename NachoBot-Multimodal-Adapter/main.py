@@ -365,37 +365,32 @@ class TTSPipeline:
         task.cancel()
 
     def _resolve_emotion_preset(self, text: str) -> str | None:
-        """通过情感分类确定使用的预设（仅在服务端运行）
-
-        Returns:
-            preset_name: 匹配的预设名称，或 None 表示使用平台默认
-        """
+        """通过 TabularisAI 固定情绪标签确定使用的 Vox 预设。"""
         if not self._emotion_classifier or not self._emotion_config:
             return None
 
         emotion_cfg = self._emotion_config
         try:
-            tag, confidence = self._emotion_classifier.classify(
-                text, emotion_cfg.available_tags
-            )
+            tag, confidence = self._emotion_classifier.classify(text)
 
             if confidence < emotion_cfg.confidence_threshold:
-                tag = emotion_cfg.default_emotion
                 logger.info(
                     f"情感置信度不足 ({confidence:.3f} < {emotion_cfg.confidence_threshold})，"
-                    f"回退默认情感: {tag}"
+                    f"回退默认预设: {emotion_cfg.default_emotion}"
                 )
-            else:
-                logger.info(f"情感分类结果: {tag} (置信度: {confidence:.3f})")
+                return emotion_cfg.default_emotion
 
-            # 查找标签对应的预设名
-            preset_name = emotion_cfg.tag_preset_map.get(tag)
+            logger.info(f"情感分类结果: {tag} (置信度: {confidence:.3f})")
+
+            preset_name = emotion_cfg.label_preset_map.get(tag)
             if preset_name:
                 logger.info(f"情感分类选择预设: {preset_name}")
                 return preset_name
-            else:
-                logger.warning(f"情感 '{tag}' 无有效预设映射，使用平台默认预设")
-                return None
+
+            logger.warning(
+                f"固定情绪标签 '{tag}' 未配置预设映射，回退默认预设: {emotion_cfg.default_emotion}"
+            )
+            return emotion_cfg.default_emotion
         except Exception as e:
             logger.warning(f"情感分类异常，使用平台默认预设: {e}")
             return None

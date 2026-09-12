@@ -340,7 +340,36 @@ def download_hf_file_direct(repo_id: str, filename: str, destination: Path) -> N
     download_http(url, destination)
 
 
+def prepare_emotion_classifier() -> Path | None:
+    """预下载 Vox 情绪分类模型到 Adapter 共用的 Hugging Face 缓存。"""
+    config_path = ADAPTER_ROOT / "configs" / "vox.toml"
+    emotion = read_toml(config_path).get("emotion", {})
+    if not emotion.get("enabled", True):
+        log("情感分类已禁用，跳过情绪分类模型准备")
+        return None
+
+    model_name = str(
+        emotion.get(
+            "classifier_model",
+            "tabularisai/multilingual-emotion-classification",
+        )
+    ).strip()
+    if not model_name:
+        model_name = "tabularisai/multilingual-emotion-classification"
+
+    model_path = Path(model_name).expanduser()
+    if model_path.is_dir():
+        log(f"使用本地情绪分类模型: {model_path}")
+        return model_path
+
+    log(f"准备情绪分类模型: {model_name}")
+    snapshot = resolve_hf_snapshot(model_name)
+    log(f"情绪分类模型已就绪: {snapshot}")
+    return snapshot
+
+
 def prepare_voxcpm() -> Path:
+    prepare_emotion_classifier()
     runtime_dir = RUNTIME_ROOT / "voxcpm"
     python = ensure_venv(runtime_dir)
 

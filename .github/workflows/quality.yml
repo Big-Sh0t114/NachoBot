@@ -145,8 +145,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - project: NachoBot
-            tests: tests
           - project: NachoBot-Bilibili-Adapter
             tests: tests
           - project: NachoBot-Live2D-Adapter
@@ -248,14 +246,7 @@ jobs:
             base="HEAD^"
           fi
           adapter='NachoBot-Multimodal-Adapter'
-          if git diff --quiet "$base" "$GITHUB_SHA" -- \
-              "$adapter" \
-              ":!$adapter/**/*.md" \
-              ":!$adapter/tests/**" \
-              && git diff --quiet "$base" "$GITHUB_SHA" -- \
-              NachoBot \
-              ':!NachoBot/**/*.md' \
-              ':!NachoBot/tests/**'; then
+          if git diff --quiet "$base" "$GITHUB_SHA" --               "$adapter"               ":!$adapter/**/*.md"               ":!$adapter/tests/**"               && git diff --quiet "$base" "$GITHUB_SHA" --               NachoBot               ':!NachoBot/**/*.md'               ':!NachoBot/tests/**'; then
             echo "build=false" >> "$GITHUB_OUTPUT"
           else
             echo "build=true" >> "$GITHUB_OUTPUT"
@@ -288,14 +279,7 @@ jobs:
             base="HEAD^"
           fi
           adapter='NachoBot-Napcat-Adapter'
-          if git diff --quiet "$base" "$GITHUB_SHA" -- \
-              "$adapter" \
-              ":!$adapter/**/*.md" \
-              ":!$adapter/tests/**" \
-              && git diff --quiet "$base" "$GITHUB_SHA" -- \
-              NachoBot \
-              ':!NachoBot/**/*.md' \
-              ':!NachoBot/tests/**'; then
+          if git diff --quiet "$base" "$GITHUB_SHA" --               "$adapter"               ":!$adapter/**/*.md"               ":!$adapter/tests/**"               && git diff --quiet "$base" "$GITHUB_SHA" --               NachoBot               ':!NachoBot/**/*.md'               ':!NachoBot/tests/**'; then
             echo "build=false" >> "$GITHUB_OUTPUT"
           else
             echo "build=true" >> "$GITHUB_OUTPUT"

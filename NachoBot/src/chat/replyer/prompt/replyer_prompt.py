@@ -132,12 +132,7 @@ reply
     "question":"需要检索或回忆的具体问题（可选，不需要则省略）"
 }}
 
-no_reply
-动作描述：等待，保持沉默。
-{{
-    "action": "no_reply",
-    "reason": "保持沉默的原因"
-}}
+{no_reply_action_description}
 
 make_appoint
 动作描述：设定定时提醒。

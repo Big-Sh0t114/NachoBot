@@ -37,8 +37,9 @@ class SwitchDisposition(str, Enum):
 
     ``SUCCESS`` describes the switch itself; ``RETRY`` and ``DROP`` describe
     what the current Focus turn should do when the switch was rejected.  A
-    dropped turn still commits the observed event revision, but never claims
-    that the switch succeeded.
+    normally dropped turn still commits the observed event revision, but never
+    claims that the switch succeeded.  A fatal coordinator-fencing failure is
+    classified as ``DROP`` while preventing that stale turn from committing.
     """
 
     SUCCESS = "success"
@@ -51,7 +52,6 @@ _RETRYABLE_SWITCH_REASON_PREFIXES = (
     "target runtime preparation failed",
     "handoff persistence failed",
     "switch persistence failed",
-    "switch compare-and-set failed",
     "Focus event revision changed",
     "Focus switch cooldown is active",
     "Focus group is transitioning",

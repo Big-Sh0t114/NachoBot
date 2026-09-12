@@ -56,15 +56,15 @@ class PipelineConfig:
 
 @dataclass
 class EmotionConfig:
-    """情感分类系统配置"""
+    """TabularisAI 固定情绪标签到 Vox 预设的路由配置。"""
+
     enabled: bool = True
-    classifier_model: str = "MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7"
+    classifier_model: str = "tabularisai/multilingual-emotion-classification"
     classifier_device: str = "cpu"
     use_fp16: bool = True
     confidence_threshold: float = 0.4
-    default_emotion: str = "\u5e73\u5e38"
-    available_tags: List[str] = field(default_factory=lambda: ["\u5e73\u5e38"])
-    tag_preset_map: Dict[str, str] = field(default_factory=dict)
+    default_emotion: str = "default"
+    label_preset_map: Dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "EmotionConfig":
@@ -74,9 +74,8 @@ class EmotionConfig:
             classifier_device=data.get("classifier_device", "cpu"),
             use_fp16=data.get("use_fp16", True),
             confidence_threshold=data.get("confidence_threshold", 0.4),
-            default_emotion=data.get("default_emotion", "\u5e73\u5e38"),
-            available_tags=data.get("available_tags", ["\u5e73\u5e38"]),
-            tag_preset_map=data.get("tag_preset_map", {}),
+            default_emotion=data.get("default_emotion", "default"),
+            label_preset_map=data.get("label_preset_map", {}),
         )
 
 

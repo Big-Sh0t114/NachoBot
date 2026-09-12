@@ -252,6 +252,25 @@ class BrainChatting:
             and focus_turn.read_through_row_id <= focus_turn.read_after_row_id
         )
 
+    @staticmethod
+    def _is_focus_switch_target_turn(
+        focus_turn: FocusTurn | None,
+        recent_messages_list: List["DatabaseMessages"],
+    ) -> bool:
+        """Return whether this turn is a real Focus target with local work."""
+
+        return bool(
+            focus_turn is not None
+            and focus_turn.wake_reason & WakeReason.SWITCH_TARGET
+            and recent_messages_list
+        )
+
+    @staticmethod
+    def _should_use_advanced_direct_reply(advanced_on: bool) -> bool:
+        """Advanced Mode keeps its priority direct-reply route."""
+
+        return bool(advanced_on)
+
     def _get_focus_bypass_gate(self) -> FocusBypassDecisionGate:
         gate = self._focus_bypass_gate
         if gate is None:
@@ -529,6 +548,8 @@ class BrainChatting:
     ) -> bool:  # sourcery skip: merge-else-if-into-elif, remove-redundant-if
         if recent_messages_list is None:
             recent_messages_list = []
+        focus_switch_target_turn = self._is_focus_switch_target_turn(focus_turn, recent_messages_list)
+        allow_no_reply = not focus_switch_target_turn
         # 刷新上下文以确保获取最新的模板信息
         get_chat_manager().get_stream(self.stream_id)
         context = getattr(self.chat_stream, "context", None)
@@ -598,7 +619,9 @@ class BrainChatting:
                 logger.debug(f"{self.log_prefix} 人物画像注入跳过: {e}")
 
             # High-level mode check
-            if advanced_manager.is_on(self.chat_stream):
+            if self._should_use_advanced_direct_reply(
+                advanced_manager.is_on(self.chat_stream),
+            ):
                 logger.info(f"{self.log_prefix} 检测到高级模式开启，跳过Planner直接回复")
 
                 # Try to find the latest user message to reply to
@@ -631,6 +654,7 @@ class BrainChatting:
                     chat_content_block=chat_content_block,
                     message_id_list=message_id_list,
                     interest=global_config.personality.interest,
+                    allow_no_reply=allow_no_reply,
                 )
                 continue_flag, modified_message = await events_manager.handle_nacho_events(
                     EventType.ON_PLAN, None, prompt_info[0], None, self.chat_stream.stream_id
@@ -650,6 +674,7 @@ class BrainChatting:
                             loop_start_time=self.last_read_time,
                             available_actions=available_actions,
                             interrupt_flag=interrupt_flag,
+                            allow_no_reply=allow_no_reply,
                         )
                     except ReqAbortException:
                         self._planner_interrupt_flag = None

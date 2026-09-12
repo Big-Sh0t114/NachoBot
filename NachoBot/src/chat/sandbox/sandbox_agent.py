@@ -21,6 +21,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from src.chat.sandbox.sandbox_callback import sandbox_callback_registry
 from src.chat.sandbox.sandbox_handoff import SandboxEditHandoff, sandbox_user_allowed
 from src.chat.sandbox.sandbox_manager import (
     MAX_TEXT_BYTES,
@@ -45,6 +46,38 @@ class SandboxAgentOutcome(str, Enum):
     MODEL_ERROR = "MODEL_ERROR"
     CANCELLED = "CANCELLED"
     TIMEOUT = "TIMEOUT"
+
+
+_OUTCOME_LABELS = {
+    SandboxAgentOutcome.FINALIZED: "已完成",
+    SandboxAgentOutcome.PUBLICATION_FAILED: "文件已修改但投递失败",
+    SandboxAgentOutcome.NO_FINALIZE: "未完成最终确认",
+    SandboxAgentOutcome.BUDGET_EXHAUSTED: "达到处理上限",
+    SandboxAgentOutcome.DUPLICATE_STALL: "重复操作导致中止",
+    SandboxAgentOutcome.MODEL_ERROR: "模型处理失败",
+    SandboxAgentOutcome.CANCELLED: "已取消",
+    SandboxAgentOutcome.TIMEOUT: "等待模型超时",
+}
+
+
+def _outcome_label(value: Any) -> str:
+    """将代理终态转换为控制台日志中的自然中文。"""
+
+    try:
+        outcome = value if isinstance(value, SandboxAgentOutcome) else SandboxAgentOutcome(str(value))
+    except ValueError:
+        return str(getattr(value, "value", value) or "未知")
+    return _OUTCOME_LABELS[outcome]
+
+
+_TOOL_LABELS = {
+    "list_tree": "列出目录",
+    "read_text": "读取文本",
+    "search_text": "搜索文本",
+    "write_text": "写入文本",
+    "CALL_BACK": "向用户追问",
+    "finalize": "确认完成",
+}
 
 
 class SandboxErrorCode(str, Enum):
@@ -217,7 +250,7 @@ class _CompleteAttemptTimeout(Exception):
 class SandboxProvider:
     """Bounded list/read/search/write/finalize provider for one handoff."""
 
-    TOOL_NAMES = ("list_tree", "read_text", "search_text", "write_text", "finalize")
+    TOOL_NAMES = ("list_tree", "read_text", "search_text", "write_text", "CALL_BACK", "finalize")
 
     def __init__(
         self,
@@ -334,6 +367,22 @@ class SandboxProvider:
                     "type": "object",
                     "required": ["path", "content"],
                     "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+                },
+            },
+            {
+                "name": "CALL_BACK",
+                "description": (
+                    "Ask the user for missing task details when the task cannot be completed "
+                    "reliably without clarification. Provide one concise query describing exactly "
+                    "what information is needed. Execution pauses until the user's answer is "
+                    "returned, then the same sandbox task continues with that answer as an "
+                    "observation. Do not use CALL_BACK for optional preferences that can be "
+                    "safely inferred from the request."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "required": ["query"],
+                    "properties": {"query": {"type": "string"}},
                 },
             },
             {
@@ -712,6 +761,7 @@ class SandboxAgent:
         self.config = config
         self.llm = llm
         self.provider: Optional[SandboxProvider] = None
+        self.callback_handler: Optional[Callable[[str], Awaitable[str]]] = None
 
     def _load_llm(self) -> Any:
         if self.llm is not None:
@@ -1233,8 +1283,8 @@ class SandboxAgent:
         result: SandboxAgentResult,
     ) -> SandboxAgentResult:
         logger.info(
-            "sandbox agent terminal: outcome=%s rounds=%d tool_calls=%d path_count=%d",
-            result.outcome.value,
+            "沙盒文件代理已结束：%s；共执行 %d 轮、调用工具 %d 次、涉及 %d 个文件",
+            _outcome_label(result.outcome),
             max(0, int(result.rounds)),
             max(0, int(result.tool_calls)),
             len(result.changed_paths),
@@ -1273,7 +1323,7 @@ class SandboxAgent:
                     detail="file_edit model is not configured",
                 )
             logger.info(
-                "sandbox agent start: model_count=%d round_budget=%d tool_budget=%d first_output_timeout=%s complete_attempt_timeout=%s non_progress_limit=%d",
+                "沙盒文件代理开始处理：可用模型 %d 个，最多执行 %d 轮、调用工具 %d 次；首次输出等待 %s 秒，单轮最长 %s 秒，连续无进展最多 %d 次",
                 len(attempts),
                 max(0, int(self.config.max_rounds)),
                 max(0, int(self.config.max_tool_calls)),
@@ -1282,8 +1332,11 @@ class SandboxAgent:
                 self._non_progress_limit(),
             )
             prompt = (
-                "You are the server-side file_edit agent. Work only through the five "
+                "You are the server-side file_edit agent. Work only through the six "
                 "sandbox tools supplied by the caller. Never use shell/code execution. "
+                "If essential task details are missing and cannot be safely inferred, use "
+                "CALL_BACK with one concise query and wait for the user's answer before continuing. "
+                "Do not use CALL_BACK for optional preferences or details that do not block correct completion. "
                 "Every path is sandbox-relative: use an empty string only for a readable "
                 "root, never use absolute, dot, or traversal paths, use group-visible "
                 "paths for reads, actor-relative or group actor-prefixed paths for writes, "
@@ -1331,9 +1384,9 @@ class SandboxAgent:
                     # before the same-model retry loop.
                     logical_round_number = rounds_used + 1
                     logger.info(
-                        "sandbox agent round: round=%d model_index=%d model_name=%s tool_calls=%d",
+                        "沙盒文件代理开始第 %d 轮：当前使用第 %d 个模型（%s），此前累计调用工具 %d 次",
                         logical_round_number,
-                        model_index,
+                        model_index + 1,
                         attempt.name,
                         total_calls,
                     )
@@ -1388,13 +1441,15 @@ class SandboxAgent:
                         else "unknown"
                         for call in calls[:8]
                     ]
+                    tool_labels = [
+                        f"{_TOOL_LABELS.get(name, name)}（{name}）"
+                        for name in tool_names
+                    ]
                     logger.info(
-                        "sandbox agent model result: round=%d model_index=%d model_name=%s tool_names=%s tool_count=%d tool_calls=%d",
+                        "模型第 %d 轮返回了 %d 个工具调用：%s；此前累计调用工具 %d 次",
                         logical_round_number,
-                        model_index,
-                        attempt.name,
-                        ",".join(tool_names),
                         len(calls),
+                        "、".join(tool_labels) or "无",
                         total_calls,
                     )
                     if not calls:
@@ -1426,19 +1481,45 @@ class SandboxAgent:
                             )
                         total_calls += 1
                         name, args = self._call_args(call)
-                        try:
-                            result = self.provider.execute(name, args)
-                        except Exception:
-                            # Provider validation failures are non-progressing
-                            # attempts; they must not reset model failover state.
-                            logger.warning(
-                                "sandbox provider call failed: tool=%s reason=provider_rejection",
-                                name if name in SandboxProvider.TOOL_NAMES else "unknown",
-                            )
-                            result = {
-                                "ok": False,
-                                "error_code": SandboxErrorCode.PROVIDER_REJECTION.value,
-                            }
+                        if name == "CALL_BACK":
+                            query = str(args.get("query", "") if isinstance(args, Mapping) else "").strip()
+                            if not query or self.callback_handler is None:
+                                result = {
+                                    "ok": False,
+                                    "error_code": SandboxErrorCode.PROVIDER_REJECTION.value,
+                                }
+                            else:
+                                try:
+                                    answer = await self.callback_handler(query)
+                                except asyncio.CancelledError:
+                                    raise
+                                except Exception as exc:
+                                    logger.warning("sandbox CALL_BACK failed: reason=%s", type(exc).__name__)
+                                    result = {
+                                        "ok": False,
+                                        "error_code": SandboxErrorCode.PROVIDER_REJECTION.value,
+                                    }
+                                else:
+                                    result = {
+                                        "ok": True,
+                                        "sandbox_observation": "user_callback",
+                                        "query": query[:1000],
+                                        "answer": str(answer or "")[: self.config.observation_max_chars],
+                                    }
+                        else:
+                            try:
+                                result = self.provider.execute(name, args)
+                            except Exception:
+                                # Provider validation failures are non-progressing
+                                # attempts; they must not reset model failover state.
+                                logger.warning(
+                                    "sandbox provider call failed: tool=%s reason=provider_rejection",
+                                    name if name in SandboxProvider.TOOL_NAMES else "unknown",
+                                )
+                                result = {
+                                    "ok": False,
+                                    "error_code": SandboxErrorCode.PROVIDER_REJECTION.value,
+                                }
                         if result.get("duplicate"):
                             duplicate_stalls += 1
                         if duplicate_stalls >= duplicate_limit:
@@ -1464,6 +1545,11 @@ class SandboxAgent:
                         if self._result_advances(name, result):
                             round_progress = True
                             self._append_observation(observations, result)
+                            if name == "CALL_BACK":
+                                # Any remaining calls were planned before the user supplied
+                                # the missing detail. Discard them and start a fresh model
+                                # round with the callback answer in observations.
+                                break
                         else:
                             failed_observations.append(self._failed_tool_observation(name, args, result))
 
@@ -1486,9 +1572,9 @@ class SandboxAgent:
                         model_cursor = 0
                         progress_found = True
                         logger.info(
-                            "sandbox agent progress: round=%d model_index=%d next_model_index=0",
+                            "第 %d 轮已取得进展（由第 %d 个模型完成），下一轮将从第一个模型开始",
                             rounds_used,
-                            model_index,
+                            model_index + 1,
                         )
                         break
 
@@ -1901,8 +1987,8 @@ class SandboxAgentCoordinator:
     @staticmethod
     def _log_terminal(result: SandboxAgentResult) -> None:
         logger.info(
-            "sandbox handoff terminal: outcome=%s rounds=%d tool_calls=%d path_count=%d",
-            result.outcome.value,
+            "沙盒任务已结束：%s；共执行 %d 轮、调用工具 %d 次、涉及 %d 个文件",
+            _outcome_label(result.outcome),
             max(0, int(result.rounds)),
             max(0, int(result.tool_calls)),
             len(result.changed_paths),
@@ -2002,6 +2088,68 @@ class SandboxAgentCoordinator:
         # A fallback receipt is intentionally never retried or interpreted as
         # delivery proof, including an explicit FAILED status.
         return False
+
+    async def _relay_callback(self, handoff: SandboxEditHandoff, query: str) -> str:
+        """Relay one sandbox clarification through the ordinary replyer and await the user's answer."""
+
+        safe_query = _redact_sandbox_text(query, handoff)[:1000].strip()
+        if not safe_query:
+            raise ValueError("CALL_BACK query is empty after sanitization")
+
+        pending = await sandbox_callback_registry.register(handoff, safe_query)
+        source_message = await self._resolve_source_message(handoff)
+        question_text = safe_query
+        try:
+            try:
+                generated = await self._completion_generator().generate_reply(
+                    chat_id=handoff.stream_id,
+                    reply_message=source_message,
+                    extra_info=(
+                        "The sandbox agent is paused because it needs one missing task detail from the user. "
+                        "Ask the user a single concise clarification question based only on the query below. "
+                        "Do not answer the task, do not claim the task is complete, do not invoke tools, and do not "
+                        "start another sandbox handoff. Preserve the meaning of the requested detail.\n"
+                        f"CALL_BACK query: {safe_query}"
+                    ),
+                    enable_tool=False,
+                    enable_splitter=False,
+                    enable_chinese_typo=False,
+                    request_type="sandbox.callback",
+                )
+                if isinstance(generated, tuple) and len(generated) == 2:
+                    success, response = generated
+                    if success is True and response is not None:
+                        if self._response_value(response, "sandbox_edit_handoff") is None:
+                            candidate = _redact_sandbox_text(self._response_value(response, "content"), handoff).strip()
+                            if candidate:
+                                question_text = candidate[:2000]
+            except Exception as exc:
+                logger.warning("sandbox CALL_BACK replyer generation failed: %s", type(exc).__name__)
+
+            sender = self._completion_sender()
+            receipt = await sender.background_text_to_stream_receipt(
+                text=question_text,
+                stream_id=handoff.stream_id,
+                set_reply=source_message is not None,
+                reply_message=source_message if source_message is not None else None,
+            )
+
+            from src.plugin_system.apis.send_api import SendStatus
+
+            status = self._response_value(receipt, "status")
+            if status is not SendStatus.DELIVERED:
+                raise RuntimeError("sandbox CALL_BACK question was not delivered")
+
+            logger.info("sandbox CALL_BACK waiting for user reply: handoff=%s", handoff.handoff_id)
+            answer = await sandbox_callback_registry.wait(pending)
+            logger.info("sandbox CALL_BACK user reply received: handoff=%s", handoff.handoff_id)
+            return answer
+        except asyncio.CancelledError:
+            await sandbox_callback_registry.cancel(handoff.handoff_id)
+            raise
+        except Exception:
+            await sandbox_callback_registry.cancel(handoff.handoff_id)
+            raise
 
     async def _default_completion_reporter(
         self,
@@ -2118,6 +2266,7 @@ class SandboxAgentCoordinator:
                 actor_id=handoff.actor_id,
             )
             agent = self.agent_factory(handoff, scope, manager=self.manager)
+            agent.callback_handler = lambda query: self._relay_callback(handoff, query)
             result = await agent.run()
         except asyncio.CancelledError:
             raise

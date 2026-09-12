@@ -19,6 +19,24 @@ from src.plugin_system.apis.send_api import SendStatus
 logger = get_logger("sandbox_delivery")
 
 
+def _outcome_label(value: Any) -> str:
+    """将代理终态转换为控制台日志中的自然中文。"""
+
+    labels = {
+        "FINALIZED": "已完成",
+        "PUBLICATION_FAILED": "文件已修改但投递失败",
+        "NO_FINALIZE": "未完成最终确认",
+        "BUDGET_EXHAUSTED": "达到处理上限",
+        "DUPLICATE_STALL": "重复操作导致中止",
+        "MODEL_ERROR": "模型处理失败",
+        "CANCELLED": "已取消",
+        "TIMEOUT": "等待模型超时",
+    }
+    raw = getattr(value, "value", value)
+    text = str(raw or "未知")
+    return labels.get(text, text)
+
+
 class SandboxDeliveryGate:
     """Claim one delivered acknowledgement and schedule one agent task."""
 
@@ -47,7 +65,7 @@ class SandboxDeliveryGate:
         try:
             result = task.result()
         except asyncio.CancelledError:
-            logger.info("sandbox delivery task completed: outcome=CANCELLED")
+            logger.info("沙盒交付任务已取消")
         except Exception as exc:
             logger.error("sandbox delivery task failed: %s", type(exc).__name__)
         else:
@@ -58,8 +76,8 @@ class SandboxDeliveryGate:
             tool_calls = max(0, int(getattr(result, "tool_calls", 0) or 0))
             path_count = len(getattr(result, "changed_paths", ()) or ())
             logger.info(
-                "sandbox delivery task completed: outcome=%s rounds=%d tool_calls=%d path_count=%d",
-                outcome,
+                "沙盒交付任务已结束：结果为 %s，共执行 %d 轮、调用工具 %d 次、涉及 %d 个文件",
+                _outcome_label(outcome),
                 rounds,
                 tool_calls,
                 path_count,
