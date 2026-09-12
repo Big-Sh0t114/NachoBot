@@ -200,9 +200,18 @@ class ChatManager:
         return hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()
 
     async def get_or_create_stream(
-        self, platform: str, user_info: UserInfo, group_info: Optional[GroupInfo] = None
+        self,
+        platform: str,
+        user_info: UserInfo,
+        group_info: Optional[GroupInfo] = None,
+        message: Optional["MessageRecv"] = None,
     ) -> ChatStream:
-        """并发安全地获取或创建聊天流。"""
+        """并发安全地获取或创建聊天流。
+
+        同一 stream_id 的并发调用共享底层创建任务，但每个调用者都会获得
+        独立的 ChatStream 快照，避免首个调用者的 user_info/context 泄漏到
+        后续并发消息。
+        """
         stream_id = self._generate_stream_id(platform, user_info, group_info)
         async with self._stream_registry_lock:
             creation_task = self._stream_creation_tasks.get(stream_id)
@@ -211,8 +220,36 @@ class ChatManager:
                     self._get_or_create_stream_impl(platform, user_info, group_info)
                 )
                 self._stream_creation_tasks[stream_id] = creation_task
+
         try:
-            return await asyncio.shield(creation_task)
+            shared_stream = await asyncio.shield(creation_task)
+
+            # canonical stream 始终跟随该聊天流最新已注册的消息。
+            # 这样即使创建任务由较早的发送者启动，也不会长期留下
+            # user_info 与 context 指向不同消息的状态。
+            cached_stream = self.streams.get(stream_id)
+            latest_message = self.last_messages.get(stream_id)
+            if cached_stream is not None and latest_message is not None:
+                latest_user_info = getattr(latest_message.message_info, "user_info", None)
+                latest_group_info = getattr(latest_message.message_info, "group_info", None)
+
+                if latest_user_info and latest_user_info.platform and latest_user_info.user_id:
+                    cached_stream.user_info = copy.deepcopy(latest_user_info)
+                if latest_group_info:
+                    cached_stream.group_info = copy.deepcopy(latest_group_info)
+                cached_stream.set_context(latest_message)
+
+            # 每个调用者必须得到独立快照。共享 creation_task 只能共享
+            # Stream 的创建结果，不能共享当前消息发送者/上下文。
+            stream = copy.deepcopy(cached_stream or shared_stream)
+            if user_info and user_info.platform and user_info.user_id:
+                stream.user_info = copy.deepcopy(user_info)
+            if group_info:
+                stream.group_info = copy.deepcopy(group_info)
+            if message is not None:
+                stream.set_context(message)
+
+            return stream
         finally:
             if creation_task.done():
                 async with self._stream_registry_lock:
@@ -222,40 +259,46 @@ class ChatManager:
     async def _get_or_create_stream_impl(
         self, platform: str, user_info: UserInfo, group_info: Optional[GroupInfo] = None
     ) -> ChatStream:
-        """获取或创建聊天流
+        """获取或创建 canonical 聊天流。
 
-        Args:
-            platform: 平台标识
-            user_info: 用户信息
-            group_info: 群组信息（可选）
-
-        Returns:
-            ChatStream: 聊天流对象
+        canonical ChatStream 表示整个 stream_id 的最新状态，因此它的
+        user_info/group_info/context 必须来自该流最新已注册消息，而不能固定为
+        启动共享 creation_task 的首个调用者。
         """
-        # 生成stream_id
         try:
             stream_id = self._generate_stream_id(platform, user_info, group_info)
+
+            from .message import MessageRecv  # 延迟导入，避免循环引用
+
+            latest_message = self.last_messages.get(stream_id)
+            if isinstance(latest_message, MessageRecv):
+                latest_user_info = latest_message.message_info.user_info
+                latest_group_info = latest_message.message_info.group_info
+            else:
+                latest_message = None
+                latest_user_info = None
+                latest_group_info = None
+
+            effective_user_info = latest_user_info or user_info
+            effective_group_info = latest_group_info or group_info
 
             # 检查内存中是否存在
             if stream_id in self.streams:
                 cached_stream = self.streams[stream_id]
-
-                # 先刷新缓存，再返回副本。旧逻辑只修改副本，导致后续 prompt
-                # 从 ChatManager 取到的始终是首次创建聊天流时的用户名称。
                 cached_stream.update_active_time()
-                if user_info and user_info.platform and user_info.user_id:
-                    cached_stream.user_info = copy.deepcopy(user_info)
-                if group_info:
-                    cached_stream.group_info = copy.deepcopy(group_info)
 
-                stream = copy.deepcopy(cached_stream)  # 返回副本以避免外部修改影响缓存
-                from .message import MessageRecv  # 延迟导入，避免循环引用
+                if (
+                    effective_user_info
+                    and effective_user_info.platform
+                    and effective_user_info.user_id
+                ):
+                    cached_stream.user_info = copy.deepcopy(effective_user_info)
+                if effective_group_info:
+                    cached_stream.group_info = copy.deepcopy(effective_group_info)
+                if latest_message is not None:
+                    cached_stream.set_context(latest_message)
 
-                if stream_id in self.last_messages and isinstance(self.last_messages[stream_id], MessageRecv):
-                    stream.set_context(self.last_messages[stream_id])
-                else:
-                    logger.error(f"聊天流 {stream_id} 不在最后消息列表中，可能是新创建的")
-                return stream
+                return copy.deepcopy(cached_stream)
 
             # 检查数据库中是否存在
             def _db_find_stream_sync(s_id: str):
@@ -263,8 +306,20 @@ class ChatManager:
 
             model_instance = await asyncio.to_thread(_db_find_stream_sync, stream_id)
 
+            # 数据库查询期间可能又收到了同一 stream 的更新消息，
+            # 因此在真正构建 canonical stream 前重新读取一次最新消息。
+            latest_message = self.last_messages.get(stream_id)
+            if isinstance(latest_message, MessageRecv):
+                latest_user_info = latest_message.message_info.user_info
+                latest_group_info = latest_message.message_info.group_info
+                effective_user_info = latest_user_info or user_info
+                effective_group_info = latest_group_info or group_info
+            else:
+                latest_message = None
+                effective_user_info = user_info
+                effective_group_info = group_info
+
             if model_instance:
-                # 从 Peewee 模型转换回 ChatStream.from_dict 期望的格式
                 user_info_data = {
                     "platform": model_instance.user_platform,
                     "user_id": model_instance.user_id,
@@ -272,7 +327,7 @@ class ChatManager:
                     "user_cardname": model_instance.user_cardname or "",
                 }
                 group_info_data = None
-                if model_instance.group_id:  # 假设 group_id 为空字符串表示没有群组信息
+                if model_instance.group_id:
                     group_info_data = {
                         "platform": model_instance.group_platform,
                         "group_id": model_instance.group_id,
@@ -288,42 +343,50 @@ class ChatManager:
                     "last_active_time": model_instance.last_active_time,
                 }
                 stream = ChatStream.from_dict(data_for_from_dict)
-                # 更新用户信息和群组信息
-                stream.user_info = user_info
-                if group_info:
-                    stream.group_info = group_info
+                if effective_user_info:
+                    stream.user_info = copy.deepcopy(effective_user_info)
+                if effective_group_info:
+                    stream.group_info = copy.deepcopy(effective_group_info)
                 stream.update_active_time()
             else:
-                # 创建新的聊天流
                 stream = ChatStream(
                     stream_id=stream_id,
                     platform=platform,
-                    user_info=user_info,
-                    group_info=group_info,
+                    user_info=copy.deepcopy(effective_user_info),
+                    group_info=copy.deepcopy(effective_group_info),
                 )
+
+            if latest_message is not None:
+                stream.set_context(latest_message)
+            else:
+                logger.error(f"聊天流 {stream_id} 不在最后消息列表中，可能是新创建的")
+
+            # canonical stream 只保存最新状态；单次调用者自己的身份/context
+            # 由 get_or_create_stream 在返回快照时覆盖。
+            self.streams[stream_id] = stream
+            await self._save_stream(stream)
+            return stream
         except Exception as e:
             logger.error(f"获取或创建聊天流失败: {e}", exc_info=True)
             raise e
 
-        stream = copy.deepcopy(stream)
-        from .message import MessageRecv  # 延迟导入，避免循环引用
-
-        if stream_id in self.last_messages and isinstance(self.last_messages[stream_id], MessageRecv):
-            stream.set_context(self.last_messages[stream_id])
-        else:
-            logger.error(f"聊天流 {stream_id} 不在最后消息列表中，可能是新创建的")
-        # 保存到内存和数据库
-        self.streams[stream_id] = stream
-        await self._save_stream(stream)
-        return stream
-
     def get_stream(self, stream_id: str) -> Optional[ChatStream]:
-        """通过stream_id获取聊天流"""
+        """通过stream_id获取聊天流，并同步到该流最新已注册消息的上下文。"""
         stream = self.streams.get(stream_id)
         if not stream:
             return None
-        if stream_id in self.last_messages:
-            stream.set_context(self.last_messages[stream_id])
+
+        latest_message = self.last_messages.get(stream_id)
+        if latest_message is not None:
+            latest_user_info = getattr(latest_message.message_info, "user_info", None)
+            latest_group_info = getattr(latest_message.message_info, "group_info", None)
+
+            if latest_user_info and latest_user_info.platform and latest_user_info.user_id:
+                stream.user_info = copy.deepcopy(latest_user_info)
+            if latest_group_info:
+                stream.group_info = copy.deepcopy(latest_group_info)
+            stream.set_context(latest_message)
+
         return stream
 
     def get_stream_by_info(

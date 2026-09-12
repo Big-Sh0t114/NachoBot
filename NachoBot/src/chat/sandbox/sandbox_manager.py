@@ -295,7 +295,7 @@ class SandboxManager:
             with file_path.open("xb") as handle:
                 handle.write(file_data)
             absolute_path = str(file_path.absolute())
-            logger.info("Saved upload %s in scoped sandbox", candidate)
+            logger.info("已将文件“%s”保存到当前沙盒", candidate)
             return absolute_path
 
     def make_staging_dir(self, handoff_id: str) -> Path:
@@ -399,7 +399,7 @@ class SandboxManager:
     async def start_periodic_cleanup(self, interval_seconds: int = 3600, max_age_seconds: int = 86400) -> None:
         import asyncio
 
-        logger.info("sandbox cleanup task started: interval=%ss", interval_seconds)
+        logger.info("沙盒定时清理任务已启动，执行间隔 %s 秒", interval_seconds)
         while True:
             await asyncio.sleep(interval_seconds)
             try:

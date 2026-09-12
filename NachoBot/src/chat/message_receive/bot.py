@@ -13,6 +13,7 @@ from src.mood.mood_manager import mood_manager  # 导入情绪管理器
 from src.chat.message_receive.chat_stream import get_chat_manager, ChatStream
 from src.chat.message_receive.message import MessageRecv
 from src.chat.message_receive.storage import MessageStorage
+from src.chat.replyer.sandbox_callback import consume_sandbox_callback_reply
 from src.chat.heart_flow.heartflow_message_processor import HeartFCMessageReceiver
 from src.chat.utils.prompt_builder import Prompt, global_prompt_manager
 from src.chat.advanced.advanced_manager import advanced_manager
@@ -511,6 +512,7 @@ class ChatBot:
                 platform=message.message_info.platform,  # type: ignore
                 user_info=user_info,  # type: ignore
                 group_info=group_info,
+                message=message,
             )
 
             message.update_chat_stream(chat)
@@ -536,6 +538,11 @@ class ChatBot:
                 chat,
                 user_info,  # type: ignore
             ):
+                return
+
+            if await consume_sandbox_callback_reply(message, chat):
+                await MessageStorage.store_message(message, chat)
+                logger.info("replyer 已将 sandbox CALL_BACK 用户答复回传，跳过普通消息处理")
                 return
 
             # 命令处理 - 使用新插件系统检查并处理命令
