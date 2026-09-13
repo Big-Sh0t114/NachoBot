@@ -8,6 +8,7 @@
 """
 
 import logging
+import hashlib
 from pathlib import Path
 from typing import Optional
 
@@ -18,32 +19,57 @@ logger = logging.getLogger(__name__)
 
 # 缓存解析好的 URL，避免每次调用都读配置文件
 _cached_emotion_api_url: Optional[str] = None
+_cached_base_fingerprint: Optional[str] = None
+_cached_base_path: Optional[str] = None
 _cache_initialized: bool = False
 
 
-def _get_emotion_api_url() -> Optional[str]:
+def _get_emotion_api_url(base_config_path: Optional[Path] = None) -> Optional[str]:
     """读取 base.toml 中的服务器地址，拼接情感分类 API URL"""
-    global _cached_emotion_api_url, _cache_initialized
-    if _cache_initialized:
-        return _cached_emotion_api_url
-
-    _cache_initialized = True
+    global _cached_emotion_api_url, _cached_base_fingerprint, _cached_base_path, _cache_initialized
     try:
-        base_toml_path = Path(__file__).resolve().parents[2] / "configs" / "base.toml"
-        if not base_toml_path.exists():
-            logger.warning(f"base.toml 不存在: {base_toml_path}")
-            return None
-        cfg = toml.load(str(base_toml_path))
+        base_toml_path = Path(base_config_path) if base_config_path else Path(__file__).resolve().parents[2] / "configs" / "base.toml"
+        cache_path = str(base_toml_path.resolve())
+        raw = base_toml_path.read_bytes()
+        fingerprint = hashlib.sha256(raw).hexdigest()
+        if (
+            _cache_initialized
+            and _cached_base_path == cache_path
+            and _cached_base_fingerprint == fingerprint
+        ):
+            return _cached_emotion_api_url
+
+        cfg = toml.loads(raw.decode("utf-8"))
+        if not isinstance(cfg, dict) or not isinstance(cfg.get("server", {}), dict):
+            raise ValueError("base.toml [server] must be a table")
         host = cfg.get("server", {}).get("host", "127.0.0.1")
         port = cfg.get("server", {}).get("port", 8070)
-        _cached_emotion_api_url = f"http://{host}:{port}/api/emotion_preset"
-        logger.info(f"情感分类远程接口已解析: {_cached_emotion_api_url}")
+        url = f"http://{host}:{port}/api/emotion_preset"
+        # Publish only a successfully parsed URL. Invalid/missing files do not
+        # poison the cache, so the next request retries after a repair.
+        _cached_emotion_api_url = url
+        _cached_base_fingerprint = fingerprint
+        _cached_base_path = cache_path
+        _cache_initialized = True
+        logger.info(f"情感分类远程接口已解析: {url}")
+        return url
+    except FileNotFoundError:
+        logger.warning(f"base.toml 不存在: {base_config_path or Path(__file__).resolve().parents[2] / 'configs' / 'base.toml'}")
+        _cached_emotion_api_url = None
+        _cached_base_fingerprint = None
+        _cached_base_path = None
+        _cache_initialized = False
+        return None
     except Exception as e:
         logger.warning(f"无法解析情感分类接口地址: {e}")
-    return _cached_emotion_api_url
+        _cached_emotion_api_url = None
+        _cached_base_fingerprint = None
+        _cached_base_path = None
+        _cache_initialized = False
+        return None
 
 
-async def resolve_emotion_preset_remote(text: str) -> Optional[str]:
+async def resolve_emotion_preset_remote(text: str, base_config_path: Optional[Path] = None) -> Optional[str]:
     """通过 HTTP 调用 TTS Adapter 服务端的 /api/emotion_preset 接口
 
     此函数独立于具体的 TTS 模型，任何适配器均可直接调用。
@@ -55,7 +81,7 @@ async def resolve_emotion_preset_remote(text: str) -> Optional[str]:
     Returns:
         preset_name: 匹配的预设名称，或 None 表示使用平台默认
     """
-    url = _get_emotion_api_url()
+    url = _get_emotion_api_url(base_config_path)
     if not url:
         return None
     try:

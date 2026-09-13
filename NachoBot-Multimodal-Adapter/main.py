@@ -1,9 +1,10 @@
 import asyncio
-import importlib
 import logging
 import os
 import random
 import sys
+import inspect
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -49,6 +50,7 @@ from nachobot_multimodal.logger import logger  # noqa: E402
 from nachobot_multimodal.tts.base import BaseTTSModel  # noqa: E402
 from nachobot_multimodal.utils.audio_encode import encode_audio, encode_audio_stream  # noqa: E402
 from nachobot_multimodal.utils import post_process  # noqa: E402
+from nachobot_multimodal.utils.tts_runtime import TTSRuntime, TTSRuntimeError  # noqa: E402
 
 
 class WebUITTSRequest(BaseModel):
@@ -69,12 +71,18 @@ class TTSPipeline:
         self.tts_list: List[BaseTTSModel] = []
         self._emotion_classifier = None
         self._emotion_config = None
+        self._emotion_model_fingerprint: Optional[str] = None
         self.no_local_models = (
             no_local_models
             if no_local_models is not None
             else os.environ.get("NACHOBOT_NO_LOCAL_MODELS") == "1"
         )
         self.config: Config = Config(config_path)
+        self._tts_runtime = (
+            None
+            if self.no_local_models
+            else TTSRuntime(config_dir=Path(self.config.config_path))
+        )
         # 根据配置刷新日志级别
         from nachobot_multimodal.logger import set_logging_level
 
@@ -104,51 +112,66 @@ class TTSPipeline:
 
     def import_module(self):
         """动态导入TTS适配"""
-        if self.no_local_models:
+        if self.no_local_models or self._tts_runtime is None:
             logger.info("无模型模式已启用，跳过 TTS 和情感分类模型加载")
             return
+        if self._tts_runtime.ensure_tts_model():
+            self._sync_runtime_state(self._tts_runtime.model)
+            logger.info("TTS model resolved from current configuration")
+        else:
+            self._sync_runtime_state(None)
+            logger.error(f"TTS configuration unavailable: {self._tts_runtime.error}")
 
-        enabled = self.config.enabled_plugin.enabled
-        # 互斥校验：GPT_Sovits 和 Vox 不可同时启用
-        if "GPT_Sovits" in enabled and "Vox" in enabled:
-            raise ValueError(
-                "GPT_Sovits 和 Vox 不可同时启用，请在 base.toml 的 [enabled_tts] 中只选择其一"
+    def _sync_runtime_state(self, model: Optional[BaseTTSModel]) -> None:
+        """Mirror the current runtime model and refresh its optional classifier."""
+
+        self.tts_list = [model] if model is not None else []
+        fingerprint = self._tts_runtime.fingerprint if self._tts_runtime else None
+        emotion_cfg = getattr(getattr(model, "config", None), "emotion", None) if model else None
+        if (
+            model is not None
+            and emotion_cfg is not None
+            and getattr(emotion_cfg, "enabled", False)
+            and self._emotion_classifier is not None
+            and self._emotion_model_fingerprint == fingerprint
+        ):
+            self._emotion_config = emotion_cfg
+            return
+
+        self._emotion_classifier = None
+        self._emotion_config = None
+        self._emotion_model_fingerprint = None
+        if model is None or emotion_cfg is None or not getattr(emotion_cfg, "enabled", False):
+            self._emotion_model_fingerprint = fingerprint
+            return
+
+        try:
+            from nachobot_multimodal.utils.emotion_classifier import EmotionClassifier
+
+            self._emotion_config = emotion_cfg
+            self._emotion_classifier = EmotionClassifier(
+                model_name=emotion_cfg.classifier_model,
+                device=emotion_cfg.classifier_device,
+                use_fp16=emotion_cfg.use_fp16,
             )
-        for tts in enabled:
-            # 动态导入模块
-            module_name = f"nachobot_multimodal.tts.backends.{tts}"
-            try:
-                module = importlib.import_module(module_name)
-                tts_class: BaseTTSModel = module.TTSModel()
-                self.tts_list.append(tts_class)
-            except ImportError as e:
-                logger.error(f"Error importing {module_name}: {e}")
-                raise
-            except AttributeError as e:
-                logger.error(f"Error accessing TTSModel in {module_name}: {e}")
-                raise
-            except Exception as e:
-                logger.error(f"Unexpected error importing {module_name}: {e}")
-                raise
+            self._emotion_model_fingerprint = fingerprint
+            logger.info("情感分类系统已在 TTS Adapter 服务端启用（模型将在首次使用时加载）")
+        except Exception as exc:
+            logger.warning(f"情感分类器初始化失败，将使用默认预设: {exc}")
 
-        # 情感分类器：遍历已加载的 TTS 模型，找到第一个带有 emotion 配置的模型
-        # （不再依赖 enabled 列表和 tts_list 索引，避免从 GPT_Sovits 切回 Vox 时
-        #   因类变量残留导致情感系统未初始化的问题）
-        for tts_model in self.tts_list:
-            emotion_cfg = getattr(getattr(tts_model, 'config', None), 'emotion', None)
-            if emotion_cfg and getattr(emotion_cfg, 'enabled', False):
-                try:
-                    from nachobot_multimodal.utils.emotion_classifier import EmotionClassifier
-                    self._emotion_config = emotion_cfg
-                    self._emotion_classifier = EmotionClassifier(
-                        model_name=emotion_cfg.classifier_model,
-                        device=emotion_cfg.classifier_device,
-                        use_fp16=emotion_cfg.use_fp16,
-                    )
-                    logger.info("情感分类系统已在 TTS Adapter 服务端启用（模型将在首次使用时加载）")
-                except Exception as e:
-                    logger.warning(f"情感分类器初始化失败，将使用默认预设: {e}")
-                break
+    @asynccontextmanager
+    async def _model_context(self):
+        if self.no_local_models or self._tts_runtime is None:
+            raise TTSRuntimeError("TTS is disabled in relay-only mode")
+        try:
+            async with self._tts_runtime.model_context() as model:
+                self._sync_runtime_state(model)
+                yield model
+        except Exception:
+            # Resolution failures clear the runtime model; keep compatibility
+            # mirrors and classifier state from serving the old backend.
+            self._sync_runtime_state(self._tts_runtime.model)
+            raise
 
     async def start(self):
         """启动服务器和路由，并导入设定的模块"""
@@ -178,17 +201,19 @@ class TTSPipeline:
                 {"preset_name": "..."}  — 如果分类器可用且匹配到预设
                 {"preset_name": null}   — 如果分类器不可用或无匹配
             """
-            preset_name = self._resolve_emotion_preset(text)
+            if self.no_local_models or self._tts_runtime is None:
+                return {"preset_name": None}
+            try:
+                async with self._model_context():
+                    preset_name = self._resolve_emotion_preset(text)
+            except Exception as exc:
+                logger.warning(f"情感分类配置不可用: {exc}")
+                preset_name = None
             return {"preset_name": preset_name}
 
         @app.get("/api/health")
         async def health_endpoint():
-            return {
-                "status": "ok",
-                "mode": "relay_only" if self.no_local_models else "tts",
-                "emotion_classifier": self._emotion_classifier is not None,
-                "tts_backends": [type(t).__module__ for t in self.tts_list],
-            }
+            return self._health_payload()
 
         @app.post("/api/tts")
         async def webui_tts_endpoint(body: WebUITTSRequest):
@@ -196,19 +221,20 @@ class TTSPipeline:
             text = body.text.strip()
             if not text:
                 raise HTTPException(status_code=400, detail="TTS 文本不能为空")
-            if not self.tts_list:
+            if self.no_local_models or self._tts_runtime is None:
                 raise HTTPException(status_code=503, detail="没有启用任何 TTS 引擎")
 
-            tts_model = self.tts_list[0]
             try:
                 async with self._webui_tts_lock:
-                    preset_name = self._resolve_emotion_preset(text)
-                    audio_data = await tts_model.tts(
-                        text=text,
-                        platform=body.platform or "webui",
-                        text_lang=body.text_lang,
-                        preset_name=preset_name,
-                    )
+                    async with self._model_context() as tts_model:
+                        preset_name = self._resolve_emotion_preset(text)
+                        audio_data = await tts_model.tts(
+                            text=text,
+                            platform=body.platform or "webui",
+                            text_lang=body.text_lang,
+                            preset_name=preset_name,
+                            skip_remote_emotion=True,
+                        )
             except Exception as exc:
                 logger.exception("WebUI TTS 生成失败")
                 raise HTTPException(status_code=502, detail=f"TTS 生成失败：{exc}") from exc
@@ -395,18 +421,49 @@ class TTSPipeline:
             logger.warning(f"情感分类异常，使用平台默认预设: {e}")
             return None
 
+    def _health_payload(self) -> dict:
+        """Return non-blocking health metadata for the adapter and WebUI."""
+
+        runtime_status = self._tts_runtime.status() if self._tts_runtime else {
+            "ready": False,
+            "backend": None,
+            "fingerprint": None,
+            "error": None,
+        }
+        desired_status = self._tts_runtime.desired_status() if self._tts_runtime else {
+            "backend": None,
+            "fingerprint": None,
+            "error": None,
+        }
+        return {
+            "status": "ok",
+            "mode": "relay_only" if self.no_local_models else "tts",
+            "emotion_classifier": self._emotion_classifier is not None,
+            # Keep the historical module-path value, while advertising a
+            # valid configured backend before the first synthesis can install
+            # a model.  The separate readiness field remains actual state.
+            "tts_backends": [desired_status["backend"]] if desired_status["backend"] else [],
+            "tts_ready": runtime_status["ready"],
+            "tts_error": runtime_status["error"] or desired_status["error"],
+        }
+
     async def get_voice_no_stream(self, text: str, platform: str, text_lang: str | None = None) -> Seg | None:
         """获取语音消息段"""
-        if not self.tts_list:
+        if self.no_local_models or self._tts_runtime is None:
             logger.warning("没有启用任何tts，跳过处理")
             return None
-        # tts_class = random.choice(self.tts_list)
-        tts_class = self.tts_list[0]
         try:
-            # 服务端情感分类，确定预设名
-            preset_name = self._resolve_emotion_preset(text)
-            # 使用非流式TTS
-            audio_data = await tts_class.tts(text=text, platform=platform, text_lang=text_lang, preset_name=preset_name)
+            async with self._model_context() as tts_class:
+                # 服务端情感分类，确定预设名
+                preset_name = self._resolve_emotion_preset(text)
+                # 使用非流式TTS
+                audio_data = await tts_class.tts(
+                    text=text,
+                    platform=platform,
+                    text_lang=text_lang,
+                    preset_name=preset_name,
+                    skip_remote_emotion=True,
+                )
             if not audio_data:
                 logger.warning("TTS 返回空音频数据，跳过发送")
                 return None
@@ -419,6 +476,7 @@ class TTSPipeline:
             # 创建语音消息
             return Seg(type="voice", data=encoded_audio)
         except Exception as e:
+            self._sync_runtime_state(self._tts_runtime.model)
             logger.error(f"TTS处理过程中发生错误: {str(e)}")
             logger.info(f"文本为: {text}")
             return None
@@ -435,52 +493,60 @@ class TTSPipeline:
             logger.warning("处理文本为空，跳过发送")
             return
         text = message_text
-        if not self.tts_list:
+        if self.no_local_models or self._tts_runtime is None:
             logger.warning("没有启用任何tts，跳过处理")
             return None
-        # tts_class = random.choice(self.tts_list)
-        tts_class = self.tts_list[0]
         try:
-            # 服务端情感分类，确定预设名
-            preset_name = self._resolve_emotion_preset(text)
-            # 修复 await async generator 的 Bug
-            audio_stream = tts_class.tts_stream(text=text, platform=platform, text_lang=text_lang, preset_name=preset_name)
-            async def handle_chunk(chunk):
-                if chunk:  # 确保chunk不为空
-                    try:
-                        # 对音频数据进行base64编码
-                        encoded_chunk = encode_audio_stream(chunk)
-                        # 创建语音消息
-                        new_seg = Seg(type="voice_stream", data=encoded_chunk)
-                        message.message_segment = new_seg
-                        message.message_info.format_info.content_format = ["voice_stream"]
-                        if not message.message_info.additional_config:
-                            message.message_info.additional_config = {}
-                        message.message_info.additional_config["original_text"] = text
-                        if text_lang:
-                            message.message_info.additional_config["text_lang"] = text_lang
+            async with self._model_context() as tts_class:
+                # 服务端情感分类，确定预设名
+                preset_name = self._resolve_emotion_preset(text)
+                # Keep the runtime context through complete stream consumption.
+                audio_stream = tts_class.tts_stream(
+                    text=text,
+                    platform=platform,
+                    text_lang=text_lang,
+                    preset_name=preset_name,
+                    skip_remote_emotion=True,
+                )
+                if inspect.isawaitable(audio_stream):
+                    audio_stream = await audio_stream
 
-                        # 发送到下游
+                async def handle_chunk(chunk):
+                    if chunk:  # 确保chunk不为空
                         try:
-                            ok = await self.server.send_message(message)
-                            logger.debug(f"流式分片发送: platform={message.message_info.platform}, ok={ok}")
-                            if not ok:
-                                logger.warning(f"流式语音发送失败 platform={message.message_info.platform}")
-                        except Exception as exc:
-                            logger.exception(f"流式发送异常: {exc}")
-                    except Exception as e:
-                        logger.error(f"处理音频块时发生错误: {str(e)}")
+                            encoded_chunk = encode_audio_stream(chunk)
+                            new_seg = Seg(type="voice_stream", data=encoded_chunk)
+                            message.message_segment = new_seg
+                            message.message_info.format_info.content_format = ["voice_stream"]
+                            if not message.message_info.additional_config:
+                                message.message_info.additional_config = {}
+                            message.message_info.additional_config["original_text"] = text
+                            if text_lang:
+                                message.message_info.additional_config["text_lang"] = text_lang
 
-            # 从音频流中读取和处理数据 (兼容同步 and 异步迭代器)
-            if hasattr(audio_stream, "__aiter__"):
-                async for chunk in audio_stream:
-                    await handle_chunk(chunk)
-            else:
-                for chunk in audio_stream:
-                    await handle_chunk(chunk)
-            
-            logger.info("流式语音消息发送完成")
+                            try:
+                                ok = await self.server.send_message(message)
+                                logger.debug(f"流式分片发送: platform={message.message_info.platform}, ok={ok}")
+                                if not ok:
+                                    logger.warning(f"流式语音发送失败 platform={message.message_info.platform}")
+                            except Exception as exc:
+                                logger.exception(f"流式发送异常: {exc}")
+                        except Exception as exc:
+                            logger.error(f"处理音频块时发生错误: {exc}")
+
+                try:
+                    if hasattr(audio_stream, "__aiter__"):
+                        async for chunk in audio_stream:
+                            await handle_chunk(chunk)
+                    else:
+                        for chunk in audio_stream:
+                            await handle_chunk(chunk)
+                finally:
+                    await self._tts_runtime.close_stream(audio_stream)
+
+                logger.info("流式语音消息发送完成")
         except Exception as e:
+            self._sync_runtime_state(self._tts_runtime.model)
             logger.error(f"TTS处理过程中发生错误: {str(e)}")
             logger.info(f"文本为: {text}")
             return None

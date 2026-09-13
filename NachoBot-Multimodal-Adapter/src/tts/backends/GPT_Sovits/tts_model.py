@@ -14,9 +14,9 @@ response_error_status_list = [
 
 
 class TTSModel(BaseTTSModel):
-    def __init__(self):
+    def __init__(self, config_path: str | Path | None = None):
         """初始化TTS模型"""
-        self.config = self.load_config()
+        self.config = self.load_config(config_path)
         if not self.config:
             raise ValueError("配置文件不存在或加载失败")
         # 记录配置文件所在目录，便于把相对路径转换为绝对路径
@@ -33,9 +33,9 @@ class TTSModel(BaseTTSModel):
         self._loaded_sovits_weights: str = ""  # 标记当前的sovits_weights名称
         self.initialize()
 
-    def load_config(self) -> "TTSBaseConfig":
+    def load_config(self, config_path: str | Path | None = None) -> "TTSBaseConfig":
         """加载配置文件"""
-        config_path = Path(__file__).resolve().parents[4] / "configs" / "gpt-sovits.toml"
+        config_path = Path(config_path) if config_path else Path(__file__).resolve().parents[4] / "configs" / "gpt-sovits.toml"
         if not config_path.exists():
             raise FileNotFoundError(f"配置文件不存在: {config_path}")
         return TTSBaseConfig(str(config_path))
@@ -390,33 +390,28 @@ class TTSModel(BaseTTSModel):
             repetition_penalty=repetition_penalty,
             sample_steps=sample_steps,
             super_sampling=super_sampling,
+            preset_name=preset_name,
         )
 
-        # async with aiohttp.ClientSession() as session:
-        #     async with session.get(f"{self.base_url}/tts", params=params, timeout=aiohttp.ClientTimeout(connect=3.05, sock_read=None)) as response:
-        #         if response.status != 200:
-        #             raise Exception(await response.json().get("message", "未知错误"))
+        # Use an async-generator context so response and session resources are
+        # closed by ``aclose()`` on normal completion, early exit, or cancel.
+        timeout = aiohttp.ClientTimeout(total=None, connect=3.05, sock_read=None)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(
+                f"{self.base_url}/tts",
+                params=params,
+                timeout=timeout,
+            ) as response:
+                if response.status != 200:
+                    parsed_response = await response.json()
+                    message = parsed_response.get("message", "未知错误")
+                    exception_message = parsed_response.get("Exception", "")
+                    raise aiohttp.ClientError(
+                        f"请求失败: {response.status}, 错误信息: {message}"
+                        + (f"，Exception: {exception_message}" if exception_message else "")
+                    )
 
-        #         # 使用更小的块大小来提高流式传输的响应性
-        #         async for chunk in response.content.iter_any(4096):
-        #             yield chunk
-        # 使用自定义超时，并设置较小的块大小来保持流式传输的响应性
-        response = requests.get(
-            f"{self.base_url}/tts",
-            params=params,
-            stream=True,
-            timeout=(3.05, None),  # (连接超时, 读取超时)
-            headers={"Connection": "keep-alive"},
-        )
-
-        if response.status_code != 200:
-            parsed_response = response.json()
-            message = parsed_response.get("message", "未知错误")
-            exception_message = parsed_response.get("Exception", "")
-            raise aiohttp.ClientError(
-                f"请求失败: {response.status_code}, 错误信息: {message}"
-                + (f"，Exception: {exception_message}" if exception_message else "")
-            )
-
-        # 使用更小的块大小来提高流式传输的响应性
-        return response.iter_content(chunk_size=4096)
+                response.raise_for_status()
+                async for chunk in response.content.iter_chunked(4096):
+                    if chunk:
+                        yield chunk
