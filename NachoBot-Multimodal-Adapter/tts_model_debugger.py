@@ -1,54 +1,46 @@
 import asyncio
-import importlib
 from pathlib import Path
-from nachobot_multimodal.tts.base import BaseTTSModel
 from typing import List
-import soundfile as sf
+
 import numpy as np
+import soundfile as sf
+
+from nachobot_multimodal.tts.base import BaseTTSModel
+from nachobot_multimodal.utils.tts_runtime import TTSRuntime
 
 
 class TTSModelDebugger:
     def __init__(self, config_path: str):
         self.config_path = config_path
         self.tts_list: List[BaseTTSModel] = []
+        self.runtime = TTSRuntime(config_dir=Path(config_path))
 
     def import_module(self):
-        """动态导入TTS适配"""
-        from nachobot_multimodal.config import Config
+        """Resolve the latest configured model without loading a stale cache."""
 
-        config = Config(self.config_path)
-        for tts in config.enabled_plugin.enabled:
-            module_name = f"nachobot_multimodal.tts.backends.{tts}"
-            try:
-                module = importlib.import_module(module_name)
-                tts_class: BaseTTSModel = module.TTSModel()
-                self.tts_list.append(tts_class)
-            except ImportError as e:
-                print(f"Error importing {module_name}: {e}")
-            except AttributeError as e:
-                print(f"Error accessing TTSModel in {module_name}: {e}")
-            except Exception as e:
-                print(f"Unexpected error importing {module_name}: {e}")
+        if self.runtime.ensure_tts_model():
+            self.tts_list = [self.runtime.model]
+        else:
+            self.tts_list = []
+            print(f"Could not resolve TTS Model: {self.runtime.error}")
 
     async def test_tts(self, text: str, platform: str):
         """测试TTS模型"""
-        if not self.tts_list:
-            print("没有启用任何TTS模型")
-            return
 
-        for tts_class in self.tts_list:
-            print(f"测试模型: {tts_class.__class__.__name__}")
-            try:
+        try:
+            async with self.runtime.model_context() as tts_class:
+                self.tts_list = [tts_class]
+                print(f"测试模型: {tts_class.__class__.__name__}")
                 audio_data = await tts_class.tts(text=text, platform=platform)
-                audio_np = np.frombuffer(audio_data, dtype=np.int16)
+                _audio_np = np.frombuffer(audio_data, dtype=np.int16)
                 print(f"模型 {tts_class.__class__.__name__} 生成了音频数据，长度: {len(audio_data)} bytes")
 
                 # 将音频数据写入WAV文件
                 # output_file = f"{tts_class.__class__.__name__}_output.wav"
                 # sf.write(output_file, audio_np, samplerate=48000, format='WAV')
-                # print(f"音频已保存到 {output_file}")
-            except Exception as e:
-                print(f"模型 {tts_class.__class__.__name__} 处理失败: {e}")
+        except Exception as exc:
+            self.tts_list = [self.runtime.model] if self.runtime.model is not None else []
+            print(f"模型处理失败: {exc}")
 
 
 if __name__ == "__main__":

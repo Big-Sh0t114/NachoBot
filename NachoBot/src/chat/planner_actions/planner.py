@@ -44,6 +44,30 @@ logger = get_logger("planner")
 install(extra_lines=3)
 
 _URL_PATTERN = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
+_SILENT_ACTION_NAMES = frozenset(("no_reply", "no_reply_until_call"))
+
+_SILENT_ACTION_DESCRIPTION = """no_reply
+动作描述：
+保持沉默，不回复直到有新消息
+控制聊天频率，不要太过频繁的发言
+{
+    "action": "no_reply",
+}
+
+no_reply_until_call
+动作描述：
+保持沉默，直到有人直接叫你的名字
+当前话题不感兴趣时使用，或有人不喜欢你的发言时使用
+{
+    "action": "no_reply_until_call",
+}"""
+_MINIMAL_PLANNER_STYLE = "本轮必须从当前可用动作中选择一个有效动作。"
+
+
+def _get_effective_plan_style(configured_style: str, allow_no_reply: bool) -> str:
+    """Keep user style for normal turns; use neutral guidance when silence is disabled."""
+
+    return configured_style if allow_no_reply else _MINIMAL_PLANNER_STYLE
 
 
 def _has_url_message(text: Optional[str]) -> bool:
@@ -78,21 +102,7 @@ def init_prompt():
 **可用的action**
 {reply_action_description}
 
-no_reply
-动作描述：
-保持沉默，不回复直到有新消息
-控制聊天频率，不要太过频繁的发言
-{{
-    "action": "no_reply",
-}}
-
-no_reply_until_call
-动作描述：
-保持沉默，直到有人直接叫你的名字
-当前话题不感兴趣时使用，或有人不喜欢你的发言时使用
-{{
-    "action": "no_reply_until_call",
-}}
+{silent_action_description}
 
 make_appoint
 动作描述：
@@ -220,6 +230,7 @@ class ActionPlanner:
         action_json: dict,
         message_id_list: List[Tuple[str, "DatabaseMessages"]],
         current_available_actions: List[Tuple[str, ActionInfo]],
+        allow_no_reply: bool = True,
     ) -> List[ActionPlannerInfo]:
         """解析单个action JSON并返回ActionPlannerInfo列表"""
         action_planner_infos = []
@@ -227,24 +238,35 @@ class ActionPlanner:
         try:
             action = action_json.get("action", "no_action")
             reasoning = action_json.get("reason", "未提供原因")
+            forced_reply_from_disabled_silent = False
+            forced_reply_from_disabled_invalid = False
+            action_data = (
+                normalize_switch_action_data(action_json)
+                if action == SWITCH_CHAT_ACTION
+                else {key: value for key, value in action_json.items() if key not in ["action", "reason"]}
+            )
+            if not allow_no_reply and action in _SILENT_ACTION_NAMES:
+                logger.warning(f"{self.log_prefix} 当前规划回合禁用静默动作 '{action}'，回退为 reply")
+                reasoning = f"当前规划回合不允许静默动作，改为正常回复。原始理由: {reasoning}"
+                action = "reply"
+                action_data = {}
+                forced_reply_from_disabled_silent = True
             if action == SWITCH_CHAT_ACTION and not can_offer_switch_chat(focus_coordinator, self.chat_id):
                 logger.warning(f"{self.log_prefix} 当前上下文无权使用 switch_chat，回退为 reply")
                 action = "reply"
                 reasoning = f"当前上下文不允许跨会话切换，改为正常回复。原始理由: {reasoning}"
                 action_data = {}
-            else:
-                action_data = (
-                    normalize_switch_action_data(action_json)
-                    if action == SWITCH_CHAT_ACTION
-                    else {key: value for key, value in action_json.items() if key not in ["action", "reason"]}
-                )
             # 非no_action动作需要target_message_id
             latest_user_message = _pick_latest_user_message(message_id_list)
             target_message = None
             fallback_to_latest = False
             target_message_explicitly_resolved = False
 
-            if action == SWITCH_CHAT_ACTION:
+            if forced_reply_from_disabled_silent:
+                # A disabled silent action cannot nominate an older message: bind
+                # the forced reply to the latest appropriate user message.
+                target_message = latest_user_message
+            elif action == SWITCH_CHAT_ACTION:
                 target_message = None
             elif target_message_id := action_json.get("target_message_id"):
                 # 根据target_message_id查找原始消息
@@ -269,10 +291,8 @@ class ActionPlanner:
             # 验证action是否可用
             available_action_names = [action_name for action_name, _ in current_available_actions]
             internal_action_names = [
-                "no_reply",
                 "reply",
                 "wait_time",
-                "no_reply_until_call",
                 "make_appoint",
                 "cancel_appoint",
                 "block_user",
@@ -280,6 +300,8 @@ class ActionPlanner:
                 "set_group_title",
                 SWITCH_CHAT_ACTION,
             ]
+            if allow_no_reply:
+                internal_action_names.extend(("no_reply", "no_reply_until_call"))
 
             if action not in internal_action_names and action not in available_action_names:
                 invalid_action = action
@@ -291,6 +313,14 @@ class ActionPlanner:
                     f" 原始理由: {reasoning}"
                 )
                 action = "reply"
+                if not allow_no_reply:
+                    forced_reply_from_disabled_invalid = True
+
+            if forced_reply_from_disabled_invalid:
+                # An invalid model action cannot nominate an older message or
+                # carry arbitrary action fields into the forced reply.
+                action_data = {}
+                target_message = latest_user_message
 
             # ban_user 会把 target_message 作为高风险身份解析依据。只有 LLM 提供的
             # target_message_id 真正命中时才允许它作为该依据；通用的“最新消息”回退不能
@@ -313,17 +343,25 @@ class ActionPlanner:
 
         except Exception as e:
             logger.error(f"{self.log_prefix}解析单个action时出错: {e}")
-            # 将列表转换为字典格式
-            available_actions_dict = dict(current_available_actions)
-            action_planner_infos.append(
-                ActionPlannerInfo(
-                    action_type="no_reply",
-                    reasoning=f"解析单个action时出错: {e}",
-                    action_data={},
-                    action_message=None,
-                    available_actions=available_actions_dict,
+            if allow_no_reply:
+                available_actions_dict = dict(current_available_actions)
+                action_planner_infos.append(
+                    ActionPlannerInfo(
+                        action_type="no_reply",
+                        reasoning=f"解析单个action时出错: {e}",
+                        action_data={},
+                        action_message=None,
+                        available_actions=available_actions_dict,
+                    )
                 )
-            )
+            else:
+                action_planner_infos.extend(
+                    self._create_reply_fallback(
+                        f"解析单个action时出错: {e}",
+                        message_id_list,
+                        dict(current_available_actions),
+                    )
+                )
 
         return action_planner_infos
 
@@ -333,13 +371,16 @@ class ActionPlanner:
         loop_start_time: float = 0.0,
         blocked_user_ids: Optional[set] = None,
         interrupt_flag: Optional[asyncio.Event] = None,
+        allow_no_reply: bool = True,
     ) -> Tuple[List[ActionPlannerInfo], Optional["DatabaseMessages"]]:
         # sourcery skip: use-named-expression
         """
         规划器 (Planner): 使用LLM根据上下文决定做出什么动作。
         """
         target_message: Optional["DatabaseMessages"] = None
+        available_actions = self._without_silent_actions(available_actions, allow_no_reply)
         is_group_chat, chat_target_info, current_available_actions = self.get_necessary_info()
+        current_available_actions = self._without_silent_actions(current_available_actions, allow_no_reply)
         context_size = global_config.chat.get_max_context_size(is_group_chat=is_group_chat)
         # 获取聊天上下文
         _planner_size = int(context_size * 0.6)
@@ -356,7 +397,7 @@ class ActionPlanner:
                 if str(msg.user_info.user_id) not in blocked_user_ids
             ]
         focus_switch_context = can_offer_switch_chat(focus_coordinator, self.chat_id)
-        if message_list_before_now and not focus_switch_context:
+        if allow_no_reply and message_list_before_now and not focus_switch_context:
             latest_message = message_list_before_now[-1]
             if _has_url_message(getattr(latest_message, "processed_plain_text", "") or "") and not _is_bot_message(
                 latest_message
@@ -426,6 +467,7 @@ class ActionPlanner:
             chat_content_block=chat_content_block,
             message_id_list=message_id_list,
             interest=global_config.personality.interest,
+            allow_no_reply=allow_no_reply,
         )
 
         # 调用LLM获取决策
@@ -436,6 +478,7 @@ class ActionPlanner:
             available_actions=available_actions,
             loop_start_time=loop_start_time,
             interrupt_flag=interrupt_flag,
+            allow_no_reply=allow_no_reply,
         )
 
         # 获取target_message（如果有非no_action的动作）
@@ -453,9 +496,12 @@ class ActionPlanner:
         message_id_list: List[Tuple[str, "DatabaseMessages"]],
         chat_content_block: str = "",
         interest: str = "",
+        allow_no_reply: bool = True,
     ) -> tuple[str, List[Tuple[str, "DatabaseMessages"]]]:
         """构建 Planner LLM 的提示词 (获取模板并填充数据)"""
         try:
+            current_available_actions = self._without_silent_actions(current_available_actions, allow_no_reply)
+
             # 获取最近执行过的动作
             actions_before_now = get_actions_by_timestamp_with_chat(
                 chat_id=self.chat_id,
@@ -512,6 +558,8 @@ class ActionPlanner:
             if advanced_on:
                 moderation_prompt_block += (
                     "\n[高级模式] 仅允许使用 reply 动作，禁止使用 no_reply、no_reply_until_call 及任何其他动作。"
+                    if allow_no_reply
+                    else "\n[高级模式] 仅允许使用 reply 动作，禁止使用其他动作。"
                 )
             time_block = f"当前时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             bot_name = global_config.bot.nickname
@@ -519,6 +567,7 @@ class ActionPlanner:
                 f",也有人叫你{','.join(global_config.bot.alias_names)}" if global_config.bot.alias_names else ""
             )
             name_block = f"你的名字是{bot_name}{bot_nickname}，请注意哪些是你自己的发言。"
+            plan_style = _get_effective_plan_style(global_config.personality.plan_style, allow_no_reply)
 
             if advanced_on:
                 action_options_block = ""  # 高级模式不展示其他动作，避免误选
@@ -557,13 +606,14 @@ class ActionPlanner:
                 moderation_prompt=moderation_prompt_block,
                 name_block=name_block,
                 interest=interest,
-                plan_style=global_config.personality.plan_style,
+                plan_style=plan_style,
                 gift_reaction_prompt=global_config.personality.gift_reaction_prompt,
                 pending_appointments=pending_text,
                 reply_action_description=reply_action_description,
                 block_user_action_text=self._build_block_user_prompt(is_group_chat),
                 ban_user_action_text=self._build_ban_user_prompt(is_group_chat),
                 set_group_title_action_text=self._build_set_group_title_prompt(is_group_chat),
+                silent_action_description=_SILENT_ACTION_DESCRIPTION if allow_no_reply else "",
             )
             prompt += await render_switch_planner_context(focus_coordinator, self.chat_id)
             if tts_lang_note:
@@ -732,10 +782,13 @@ class ActionPlanner:
         available_actions: Dict[str, ActionInfo],
         loop_start_time: float,
         interrupt_flag: Optional[asyncio.Event] = None,
+        allow_no_reply: bool = True,
     ) -> List[ActionPlannerInfo]:
         """执行主规划器"""
         llm_content = None
         actions: List[ActionPlannerInfo] = []
+        available_actions = self._without_silent_actions(available_actions, allow_no_reply)
+        filtered_actions = self._without_silent_actions(filtered_actions, allow_no_reply)
         advanced_on = advanced_manager.is_on(get_chat_manager().get_stream(self.chat_id))
 
         try:
@@ -763,6 +816,10 @@ class ActionPlanner:
             raise
         except Exception as req_e:
             logger.error(f"{self.log_prefix}LLM 请求执行失败: {req_e}")
+            if not allow_no_reply:
+                return self._create_reply_fallback(
+                    f"LLM 请求失败，模型出现问题: {req_e}", message_id_list, available_actions
+                )
             return [
                 ActionPlannerInfo(
                     action_type="no_reply",
@@ -780,18 +837,40 @@ class ActionPlanner:
                     logger.debug(f"{self.log_prefix}从响应中提取到{len(json_objects)}个JSON对象")
                     filtered_actions_list = list(filtered_actions.items())
                     for json_obj in json_objects:
-                        actions.extend(self._parse_single_action(json_obj, message_id_list, filtered_actions_list))
+                        actions.extend(
+                            self._parse_single_action(
+                                json_obj,
+                                message_id_list,
+                                filtered_actions_list,
+                                allow_no_reply=allow_no_reply,
+                            )
+                        )
                 else:
                     # 尝试解析为直接的JSON
                     logger.warning(f"{self.log_prefix}LLM没有返回可用动作: {llm_content}")
-                    actions = self._create_no_reply("LLM没有返回可用动作", available_actions)
+                    actions = self._create_no_reply(
+                        "LLM没有返回可用动作",
+                        available_actions,
+                        message_id_list=message_id_list,
+                        allow_no_reply=allow_no_reply,
+                    )
 
             except Exception as json_e:
                 logger.warning(f"{self.log_prefix}解析LLM响应JSON失败 {json_e}. LLM原始输出: '{llm_content}'")
-                actions = self._create_no_reply(f"解析LLM响应JSON失败: {json_e}", available_actions)
+                actions = self._create_no_reply(
+                    f"解析LLM响应JSON失败: {json_e}",
+                    available_actions,
+                    message_id_list=message_id_list,
+                    allow_no_reply=allow_no_reply,
+                )
                 traceback.print_exc()
         else:
-            actions = self._create_no_reply("规划器没有获得LLM响应", available_actions)
+            actions = self._create_no_reply(
+                "规划器没有获得LLM响应",
+                available_actions,
+                message_id_list=message_id_list,
+                allow_no_reply=allow_no_reply,
+            )
 
         # 添加循环开始时间到所有非no_action动作
         for action in actions:
@@ -833,14 +912,46 @@ class ActionPlanner:
 
         return actions
 
-    def _create_no_reply(self, reasoning: str, available_actions: Dict[str, ActionInfo]) -> List[ActionPlannerInfo]:
+    def _create_no_reply(
+        self,
+        reasoning: str,
+        available_actions: Dict[str, ActionInfo],
+        message_id_list: Optional[List[Tuple[str, "DatabaseMessages"]]] = None,
+        allow_no_reply: bool = True,
+    ) -> List[ActionPlannerInfo]:
         """创建no_action"""
+        if not allow_no_reply:
+            return self._create_reply_fallback(reasoning, message_id_list or [], available_actions)
         return [
             ActionPlannerInfo(
                 action_type="no_reply",
                 reasoning=reasoning,
                 action_data={},
                 action_message=None,
+                available_actions=available_actions,
+            )
+        ]
+
+    @staticmethod
+    def _without_silent_actions(
+        actions: Dict[str, ActionInfo], allow_no_reply: bool
+    ) -> Dict[str, ActionInfo]:
+        if allow_no_reply:
+            return actions
+        return {name: info for name, info in actions.items() if name not in _SILENT_ACTION_NAMES}
+
+    @staticmethod
+    def _create_reply_fallback(
+        reasoning: str,
+        message_id_list: List[Tuple[str, "DatabaseMessages"]],
+        available_actions: Dict[str, ActionInfo],
+    ) -> List[ActionPlannerInfo]:
+        return [
+            ActionPlannerInfo(
+                action_type="reply",
+                reasoning=f"{reasoning}；禁用静默动作，自动生成回复动作",
+                action_data={},
+                action_message=_pick_latest_user_message(message_id_list),
                 available_actions=available_actions,
             )
         ]

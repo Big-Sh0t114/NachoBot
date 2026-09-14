@@ -99,8 +99,8 @@ seed = -1
 # 启用情感分类（仅 Vox 生效）
 enabled = true
 
-# 分类模型名称（HuggingFace 模型 ID 或本地路径）
-classifier_model = "MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7"
+# 固定使用 TabularisAI 多语种 11 类多标签情绪分类模型
+classifier_model = "tabularisai/multilingual-emotion-classification"
 
 # 分类器运行设备（"cpu" 或 "cuda:0" 等）
 classifier_device = "cpu"
@@ -108,19 +108,24 @@ classifier_device = "cpu"
 # 是否使用 FP16 半精度推理（仅 CUDA 设备有效，CPU 自动回退 FP32）
 use_fp16 = true
 
-# 置信度阈值：低于此值时回退到默认情感
+# 最高概率低于此值时回退到默认预设
 confidence_threshold = 0.6
 
-# 默认情感（分类置信度不足或未命中时使用）
+# 默认预设
+# 必须与 [tts.models.presets.<name>] 中的预设名一致
 default_emotion = "default"
 
-# 可用的情感标签列表（用户可自行增删）
-# 分类器会将文本判定为这些标签之一
-available_tags = ["default","disgust/unhappy","happy/excited","sad/sexual"]
-
-# 情感标签到预设名的映射
-[emotion.tag_preset_map]
-default = "default"
-"disgust/unhappy" = "disgust"
-"happy/excited" = "happy"
-"sad/sexual" = "sad"
+# TabularisAI 固定 11 类标签到 Vox 预设的映射。
+# 键名固定为模型标签；值可按需要改为任意已有 Vox 预设。
+[emotion.label_preset_map]
+anger = "disgust"
+contempt = "disgust"
+disgust = "disgust"
+fear = "sad"
+frustration = "disgust"
+gratitude = "caring"
+joy = "happy"
+love = "caring"
+neutral = "default"
+sadness = "sad"
+surprise = "happy"

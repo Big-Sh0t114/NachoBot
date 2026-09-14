@@ -11,7 +11,6 @@ from json_repair import repair_json
 
 from src.llm_models.utils_model import LLMRequest
 from src.llm_models.exceptions import ReqAbortException
-from src.mcp.access import access_context_from_stream
 from src.config.config import global_config, model_config
 from src.common.logger import get_logger
 from src.common.data_models.info_data_model import ActionPlannerInfo
@@ -28,7 +27,7 @@ from src.chat.utils.chat_message_builder import (
 )
 from src.chat.utils.prompt_injection_guard import guard_user_content
 from src.chat.utils.display_name import resolve_sender_name
-from src.chat.utils.context_builder import build_tool_info, build_relation_info, build_lpmm_knowledge_info
+from src.chat.utils.context_builder import build_relation_info, build_lpmm_knowledge_info
 from src.chat.utils.capability_router import CapabilityRouter
 from src.memory_system.memory_retrieval import build_memory_retrieval_prompt
 from src.chat.utils.utils import get_chat_type_and_target_info
@@ -43,7 +42,6 @@ from src.plugin_system.core.component_registry import component_registry
 from src.plugin_system.core.tool_use import ToolExecutor
 from src.plugin_system.core.mcp_tool_executor import MCPToolExecutor
 from src.chat.utils.web_search import WebSearchManager
-from src.chat.utils.url_fetcher import UrlContentFetcher
 
 if TYPE_CHECKING:
     from src.common.data_models.info_data_model import TargetPersonInfo
@@ -54,6 +52,22 @@ logger = get_logger("replyer")
 install(extra_lines=3)
 
 _URL_PATTERN = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
+_SILENT_ACTION_NAMES = frozenset(("no_reply",))
+
+_NO_REPLY_ACTION_DESCRIPTION = """no_reply
+动作描述：
+等待，保持沉默，等待对方发言
+在私聊中这是最低优先级的动作，只有当对方明确表示暂时不需要回复或你已连续多轮回复需要暂停时才使用
+{
+    "action": "no_reply",
+}"""
+_MINIMAL_PLANNER_STYLE = "本轮必须从当前可用动作中选择一个有效动作。"
+
+
+def _get_effective_plan_style(configured_style: str, allow_no_reply: bool) -> str:
+    """Keep user style for normal turns; use neutral guidance when silence is disabled."""
+
+    return configured_style if allow_no_reply else _MINIMAL_PLANNER_STYLE
 
 
 def _has_url_message(text: Optional[str]) -> bool:
@@ -97,13 +111,7 @@ reply
     "question":"需要检索或回忆的具体问题（可选，不需要则省略）"
 }}
 
-no_reply
-动作描述：
-等待，保持沉默，等待对方发言
-在私聊中这是最低优先级的动作，只有当对方明确表示暂时不需要回复或你已连续多轮回复需要暂停时才使用
-{{
-    "action": "no_reply",
-}}
+{no_reply_action_description}
 
 make_appoint
 动作描述：
@@ -220,7 +228,6 @@ class BrainPlanner:
         )
         self.web_search_manager = WebSearchManager(chat_id=chat_id, enable_cache=True, cache_ttl=2)
         self.capability_router = CapabilityRouter(chat_id=chat_id)
-        self.url_fetcher = UrlContentFetcher()
 
     @property
     def planner_llm(self) -> LLMRequest:
@@ -240,10 +247,10 @@ class BrainPlanner:
         return self.separated_llm
 
     def _check_sandbox_permission(self, user_id: str) -> bool:
-        """Check if user has permission to use sandbox features"""
-        is_admin = str(user_id) in global_config.advanced.admins
-        is_whitelisted = str(user_id) in global_config.bot.sandbox_whitelist
-        return is_admin or is_whitelisted
+        """Check the independent Sandbox allow/deny list policy."""
+        from src.chat.sandbox.sandbox_handoff import sandbox_user_allowed
+
+        return sandbox_user_allowed(user_id)
 
     def find_message_by_id(
         self, message_id: str, message_id_list: List[Tuple[str, "DatabaseMessages"]]
@@ -269,6 +276,7 @@ class BrainPlanner:
         action_json: dict,
         message_id_list: List[Tuple[str, "DatabaseMessages"]],
         current_available_actions: List[Tuple[str, ActionInfo]],
+        allow_no_reply: bool = True,
     ) -> List[ActionPlannerInfo]:
         """解析单个action JSON并返回ActionPlannerInfo列表"""
         action_planner_infos = []
@@ -276,25 +284,43 @@ class BrainPlanner:
         try:
             action = action_json.get("action", "no_action")
             reasoning = action_json.get("reason", "未提供原因")
+            forced_reply_from_disabled_silent = False
+            forced_reply_from_disabled_invalid = False
+            if action == "file_edit":
+                # File editing is a replyer-confirmed capability, never a
+                # planner-owned action. Preserve the user's target message and
+                # let the ordinary replyer run the single router pass.
+                action = "reply"
+                reasoning = f"文件操作请求转交普通回复器确认。原始理由: {reasoning}"
             requested_switch = action == SWITCH_CHAT_ACTION
             reply_text = "" if requested_switch else action_json.get("text", "")
+            action_data = (
+                normalize_switch_action_data(action_json)
+                if requested_switch
+                else {key: value for key, value in action_json.items() if key not in ["action", "reason", "text"]}
+            )
+            if not allow_no_reply and action in _SILENT_ACTION_NAMES:
+                logger.warning(f"{self.log_prefix} 当前规划回合禁用静默动作 '{action}'，回退为 reply")
+                action = "reply"
+                reasoning = f"当前规划回合不允许静默动作，改为正常回复。原始理由: {reasoning}"
+                action_data = {}
+                reply_text = action_json.get("text", "")
+                forced_reply_from_disabled_silent = True
             if requested_switch and not can_offer_switch_chat(focus_coordinator, self.chat_id):
                 logger.warning(f"{self.log_prefix} 当前上下文无权使用 switch_chat，回退为 reply")
                 action = "reply"
                 reasoning = f"当前上下文不允许跨会话切换，改为正常回复。原始理由: {reasoning}"
                 action_data = {}
-            else:
-                action_data = (
-                    normalize_switch_action_data(action_json)
-                    if requested_switch
-                    else {key: value for key, value in action_json.items() if key not in ["action", "reason", "text"]}
-                )
             # 非no_action动作需要target_message_id
             latest_user_message = _pick_latest_user_message(message_id_list)
             target_message = None
             fallback_to_latest = False
 
-            if action == SWITCH_CHAT_ACTION:
+            if forced_reply_from_disabled_silent:
+                # A disabled silent action cannot nominate an older message: bind
+                # the forced reply to the latest appropriate user message.
+                target_message = latest_user_message
+            elif action == SWITCH_CHAT_ACTION:
                 target_message = None
             elif target_message_id := action_json.get("target_message_id"):
                 # 根据target_message_id查找原始消息
@@ -315,7 +341,9 @@ class BrainPlanner:
 
             # 验证action是否可用
             available_action_names = [action_name for action_name, _ in current_available_actions]
-            internal_action_names = ["no_reply", "reply", "wait_time", "make_appoint", "cancel_appoint", SWITCH_CHAT_ACTION]
+            internal_action_names = ["reply", "wait_time", "make_appoint", "cancel_appoint", SWITCH_CHAT_ACTION]
+            if allow_no_reply:
+                internal_action_names.append("no_reply")
 
             if action not in internal_action_names and action not in available_action_names:
                 invalid_action = action
@@ -327,6 +355,14 @@ class BrainPlanner:
                     f" 原始理由: {reasoning}"
                 )
                 action = "reply"
+                if not allow_no_reply:
+                    forced_reply_from_disabled_invalid = True
+
+            if forced_reply_from_disabled_invalid:
+                # An invalid model action cannot nominate an older message or
+                # carry arbitrary action fields into the forced reply.
+                action_data = {}
+                target_message = latest_user_message
 
             # 创建ActionPlannerInfo对象
             # 将列表转换为字典格式
@@ -344,17 +380,25 @@ class BrainPlanner:
 
         except Exception as e:
             logger.error(f"{self.log_prefix}解析单个action时出错: {e}")
-            # 将列表转换为字典格式
-            available_actions_dict = dict(current_available_actions)
-            action_planner_infos.append(
-                ActionPlannerInfo(
-                    action_type="no_reply",
-                    reasoning=f"解析单个action时出错: {e}",
-                    action_data={},
-                    action_message=None,
-                    available_actions=available_actions_dict,
+            if allow_no_reply:
+                available_actions_dict = dict(current_available_actions)
+                action_planner_infos.append(
+                    ActionPlannerInfo(
+                        action_type="no_reply",
+                        reasoning=f"解析单个action时出错: {e}",
+                        action_data={},
+                        action_message=None,
+                        available_actions=available_actions_dict,
+                    )
                 )
-            )
+            else:
+                action_planner_infos.extend(
+                    self._create_reply_fallback(
+                        f"解析单个action时出错: {e}",
+                        message_id_list,
+                        dict(current_available_actions),
+                    )
+                )
 
         return action_planner_infos
 
@@ -363,15 +407,18 @@ class BrainPlanner:
         available_actions: Dict[str, ActionInfo],
         loop_start_time: float = 0.0,
         interrupt_flag: Optional[asyncio.Event] = None,
+        allow_no_reply: bool = True,
     ) -> Tuple[List[ActionPlannerInfo], Optional["DatabaseMessages"]]:
         # sourcery skip: use-named-expression
         """
         规划器 (Planner): 使用LLM根据上下文决定做出什么动作。
         """
         target_message: Optional["DatabaseMessages"] = None
+        available_actions = self._without_silent_actions(available_actions, allow_no_reply)
 
         # 获取必要信息
         is_group_chat, chat_target_info, current_available_actions = self.get_necessary_info()
+        current_available_actions = self._without_silent_actions(current_available_actions, allow_no_reply)
         context_size = global_config.chat.get_max_context_size(is_group_chat=is_group_chat)
 
         # 获取聊天上下文
@@ -383,7 +430,7 @@ class BrainPlanner:
             timestamp=time.time(),
             limit=_stepped_limit,
         )
-        if message_list_before_now:
+        if allow_no_reply and message_list_before_now:
             latest_message = message_list_before_now[-1]
             if _has_url_message(getattr(latest_message, "processed_plain_text", "") or "") and not _is_bot_message(
                 latest_message
@@ -458,6 +505,7 @@ class BrainPlanner:
                 chat_content_block=chat_content_block,
                 message_id_list=message_id_list,
                 interest=global_config.personality.interest,
+                allow_no_reply=allow_no_reply,
             )
         else:
             prompt, message_id_list = await self.build_planner_prompt(
@@ -467,6 +515,7 @@ class BrainPlanner:
                 message_id_list=message_id_list,
                 chat_content_block=chat_content_block,
                 interest=global_config.personality.interest,
+                allow_no_reply=allow_no_reply,
             )
 
         # 调用LLM获取决策
@@ -477,6 +526,7 @@ class BrainPlanner:
             available_actions=available_actions,
             loop_start_time=loop_start_time,
             interrupt_flag=interrupt_flag,
+            allow_no_reply=allow_no_reply,
         )
 
         # 获取target_message（如果有非no_action的动作）
@@ -494,9 +544,12 @@ class BrainPlanner:
         message_id_list: List[Tuple[str, "DatabaseMessages"]],
         chat_content_block: str = "",
         interest: str = "",
+        allow_no_reply: bool = True,
     ) -> tuple[str, List[Tuple[str, "DatabaseMessages"]]]:
         """构建 Planner LLM 的提示词 (获取模板并填充数据)"""
         try:
+            current_available_actions = self._without_silent_actions(current_available_actions, allow_no_reply)
+
             # 获取最近执行过的动作
             actions_before_now = get_actions_by_timestamp_with_chat(
                 chat_id=self.chat_id,
@@ -547,6 +600,7 @@ class BrainPlanner:
                 f",也可以叫你{','.join(global_config.bot.alias_names)}" if global_config.bot.alias_names else ""
             )
             name_block = f"你的名字是{bot_name}{bot_nickname}，请注意哪些是你自己的发言。"
+            plan_style = _get_effective_plan_style(global_config.personality.private_plan_style, allow_no_reply)
 
             # 获取主规划器模板并填充
             planner_prompt_template = await global_prompt_manager.get_prompt_async("brain_planner_prompt")
@@ -559,8 +613,9 @@ class BrainPlanner:
                 moderation_prompt=moderation_prompt_block,
                 name_block=name_block,
                 interest=interest,
-                plan_style=global_config.personality.private_plan_style,
+                plan_style=plan_style,
                 pending_appointments=pending_text,
+                no_reply_action_description=_NO_REPLY_ACTION_DESCRIPTION if allow_no_reply else "",
             )
             prompt += await render_switch_planner_context(focus_coordinator, self.chat_id)
 
@@ -578,9 +633,12 @@ class BrainPlanner:
         message_id_list: List[Tuple[str, "DatabaseMessages"]],
         chat_content_block: str = "",
         interest: str = "",
+        allow_no_reply: bool = True,
     ) -> tuple[str, List[Tuple[str, "DatabaseMessages"]]]:
         """构建整合了动作和回复的提示词"""
         try:
+            current_available_actions = self._without_silent_actions(current_available_actions, allow_no_reply)
+
             # 获取最近执行过的动作
             actions_before_now = get_actions_by_timestamp_with_chat(
                 chat_id=self.chat_id,
@@ -635,12 +693,6 @@ class BrainPlanner:
 
             # --- 下面使用 gathered 异步加载上下文所需信息 ---
             user_info = chat_target_info if chat_target_info else None
-            chat_stream = get_chat_manager().get_stream(self.chat_id)
-            mcp_access_context = access_context_from_stream(
-                chat_stream,
-                str(user_info.user_id) if user_info and user_info.user_id else "",
-            )
-
             task_results = await asyncio.gather(
                 build_relation_info(chat_talking_prompt_short, sender_name, user_info=user_info),
                 build_memory_retrieval_prompt(
@@ -649,18 +701,10 @@ class BrainPlanner:
                     target=target,
                     chat_stream=get_chat_manager().get_stream(self.chat_id),
                 ),
-                build_tool_info(
-                    chat_history=chat_talking_prompt_short,
-                    sender=sender_name,
-                    target=target,
-                    url_fetcher=self.url_fetcher,
-                    web_search_manager=self.web_search_manager,
-                    capability_router=self.capability_router,
-                    tool_executor=self.tool_executor,
-                    mcp_executor=self.mcp_executor,
-                    mcp_access_context=mcp_access_context,
-                    enable_tool=global_config.tool.enable_tool,
-                ),
+                # Tool routing belongs to the ordinary replyer. Running the
+                # integrated planner's build_tool_info here would duplicate
+                # web/MCP/sandbox routing and create a second handoff source.
+                asyncio.sleep(0, result=""),
                 build_lpmm_knowledge_info(
                     message=chat_talking_prompt_short,
                     sender=sender_name,
@@ -701,6 +745,7 @@ class BrainPlanner:
                     )
 
             # 获取整合模板并填充
+            plan_style = _get_effective_plan_style(global_config.personality.private_plan_style, allow_no_reply)
             planner_prompt_template = await global_prompt_manager.get_prompt_async("brain_integrated_prompt")
             prompt = planner_prompt_template.format(
                 knowledge_prompt=knowledge_prompt_block,
@@ -716,7 +761,8 @@ class BrainPlanner:
                 action_options_text=action_options_block,
                 reply_target_block=f"你正在和 {sender_name} 聊天",
                 identity=identity,
-                reply_style=global_config.personality.private_plan_style,
+                reply_style=plan_style,
+                no_reply_action_description=_NO_REPLY_ACTION_DESCRIPTION if allow_no_reply else "",
                 keywords_reaction_prompt="",
                 moderation_prompt=moderation_prompt_block,
             )
@@ -735,11 +781,6 @@ class BrainPlanner:
         is_group_chat, chat_target_info = get_chat_type_and_target_info(self.chat_id)
         logger.debug(f"{self.log_prefix}获取到聊天信息 - 群聊: {is_group_chat}, 目标信息: {chat_target_info}")
 
-        # Check permissions and filter actions before they even reach activation logic
-        has_sandbox_permission = False
-        if chat_target_info and chat_target_info.user_id:
-            has_sandbox_permission = self._check_sandbox_permission(chat_target_info.user_id)
-
         current_available_actions_dict = self.action_manager.get_using_actions()
 
         # 获取完整的动作信息
@@ -748,7 +789,8 @@ class BrainPlanner:
         )
         current_available_actions = {}
         for action_name in current_available_actions_dict:
-            if action_name == "file_edit" and not has_sandbox_permission:
+            if action_name == "file_edit":
+                # Retire the old planner action even for authorized users.
                 continue
             if action_name in all_registered_actions:
                 current_available_actions[action_name] = all_registered_actions[action_name]
@@ -826,10 +868,13 @@ class BrainPlanner:
         available_actions: Dict[str, ActionInfo],
         loop_start_time: float,
         interrupt_flag: Optional[asyncio.Event] = None,
+        allow_no_reply: bool = True,
     ) -> List[ActionPlannerInfo]:
         """执行主规划器"""
         llm_content = None
         actions: List[ActionPlannerInfo] = []
+        available_actions = self._without_silent_actions(available_actions, allow_no_reply)
+        filtered_actions = self._without_silent_actions(filtered_actions, allow_no_reply)
 
         try:
             # 调用LLM
@@ -853,6 +898,10 @@ class BrainPlanner:
             raise
         except Exception as req_e:
             logger.error(f"{self.log_prefix}LLM 请求执行失败: {req_e}")
+            if not allow_no_reply:
+                return self._create_reply_fallback(
+                    f"LLM 请求失败，模型出现问题: {req_e}", message_id_list, available_actions
+                )
             return [
                 ActionPlannerInfo(
                     action_type="no_reply",
@@ -870,23 +919,49 @@ class BrainPlanner:
                 json_objects = self._extract_json_from_markdown(llm_content)
                 if not json_objects:
                     raw_json_objects = self._extract_json_from_raw_content(llm_content)
-                    json_objects = self._filter_raw_json_action_objects(raw_json_objects, filtered_actions_list)
+                    json_objects = self._filter_raw_json_action_objects(
+                        raw_json_objects,
+                        filtered_actions_list,
+                        allow_no_reply=allow_no_reply,
+                    )
 
                 if json_objects:
                     logger.debug(f"{self.log_prefix}从响应中提取到{len(json_objects)}个JSON对象")
                     for json_obj in json_objects:
-                        actions.extend(self._parse_single_action(json_obj, message_id_list, filtered_actions_list))
+                        actions.extend(
+                            self._parse_single_action(
+                                json_obj,
+                                message_id_list,
+                                filtered_actions_list,
+                                allow_no_reply=allow_no_reply,
+                            )
+                        )
                 else:
                     # 尝试解析为直接的JSON
                     logger.warning(f"{self.log_prefix}LLM没有返回可用动作: {llm_content}")
-                    actions = self._create_no_reply("LLM没有返回可用动作", available_actions)
+                    actions = self._create_no_reply(
+                        "LLM没有返回可用动作",
+                        available_actions,
+                        message_id_list=message_id_list,
+                        allow_no_reply=allow_no_reply,
+                    )
 
             except Exception as json_e:
                 logger.warning(f"{self.log_prefix}解析LLM响应JSON失败 {json_e}. LLM原始输出: '{llm_content}'")
-                actions = self._create_no_reply(f"解析LLM响应JSON失败: {json_e}", available_actions)
+                actions = self._create_no_reply(
+                    f"解析LLM响应JSON失败: {json_e}",
+                    available_actions,
+                    message_id_list=message_id_list,
+                    allow_no_reply=allow_no_reply,
+                )
                 traceback.print_exc()
         else:
-            actions = self._create_no_reply("规划器没有获得LLM响应", available_actions)
+            actions = self._create_no_reply(
+                "规划器没有获得LLM响应",
+                available_actions,
+                message_id_list=message_id_list,
+                allow_no_reply=allow_no_reply,
+            )
 
         # 添加循环开始时间到所有非no_action动作
         for action in actions:
@@ -914,8 +989,16 @@ class BrainPlanner:
 
         return actions
 
-    def _create_no_reply(self, reasoning: str, available_actions: Dict[str, ActionInfo]) -> List[ActionPlannerInfo]:
+    def _create_no_reply(
+        self,
+        reasoning: str,
+        available_actions: Dict[str, ActionInfo],
+        message_id_list: Optional[List[Tuple[str, "DatabaseMessages"]]] = None,
+        allow_no_reply: bool = True,
+    ) -> List[ActionPlannerInfo]:
         """创建no_action"""
+        if not allow_no_reply:
+            return self._create_reply_fallback(reasoning, message_id_list or [], available_actions)
         return [
             ActionPlannerInfo(
                 action_type="no_reply",
@@ -923,6 +1006,31 @@ class BrainPlanner:
                 action_data={},
                 action_message=None,
                 available_actions=available_actions,
+            )
+        ]
+
+    @staticmethod
+    def _without_silent_actions(
+        actions: Dict[str, ActionInfo], allow_no_reply: bool
+    ) -> Dict[str, ActionInfo]:
+        if allow_no_reply:
+            return actions
+        return {name: info for name, info in actions.items() if name not in _SILENT_ACTION_NAMES}
+
+    @staticmethod
+    def _create_reply_fallback(
+        reasoning: str,
+        message_id_list: List[Tuple[str, "DatabaseMessages"]],
+        available_actions: Dict[str, ActionInfo],
+    ) -> List[ActionPlannerInfo]:
+        return [
+            ActionPlannerInfo(
+                action_type="reply",
+                reasoning=f"{reasoning}；禁用静默动作，自动生成回复动作",
+                action_data={},
+                action_message=_pick_latest_user_message(message_id_list),
+                available_actions=available_actions,
+                reply_text="",
             )
         ]
 
@@ -980,13 +1088,16 @@ class BrainPlanner:
         self,
         json_objects: List[dict],
         current_available_actions: List[Tuple[str, ActionInfo]],
+        allow_no_reply: bool = True,
     ) -> List[dict]:
         """Keep only supported actions from raw JSON fallback responses."""
         if not json_objects:
             return []
 
         available_action_names = [action_name for action_name, _ in current_available_actions]
-        internal_action_names = ["no_reply", "reply", "wait_time", "make_appoint", "cancel_appoint", SWITCH_CHAT_ACTION]
+        internal_action_names = ["reply", "wait_time", "make_appoint", "cancel_appoint", SWITCH_CHAT_ACTION]
+        if allow_no_reply:
+            internal_action_names.append("no_reply")
         supported_actions = set(internal_action_names + available_action_names)
         filtered_objects = []
 
@@ -996,14 +1107,33 @@ class BrainPlanner:
             if action in (None, "", "no_action"):
                 filtered_objects.append(
                     {
-                        "action": "no_reply",
+                        "action": "no_reply" if allow_no_reply else "reply",
                         "reason": json_obj.get("reason", "裸JSON响应未包含可执行动作"),
+                    }
+                )
+                continue
+
+            if not allow_no_reply and action == "no_reply":
+                filtered_objects.append(
+                    {
+                        "action": "reply",
+                        "reason": f"当前规划回合不允许静默动作，改为正常回复。原始理由: {json_obj.get('reason', '未提供原因')}",
                     }
                 )
                 continue
 
             if action not in supported_actions:
                 logger.warning(f"{self.log_prefix}裸JSON响应包含不支持的动作: '{action}'")
+                if not allow_no_reply:
+                    filtered_objects.append(
+                        {
+                            "action": "reply",
+                            "reason": (
+                                f"当前规划回合不允许动作 '{action}'，改为正常回复。"
+                                f" 原始理由: {json_obj.get('reason', '未提供原因')}"
+                            ),
+                        }
+                    )
                 continue
 
             filtered_objects.append(json_obj)

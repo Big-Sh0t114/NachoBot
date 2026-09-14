@@ -195,20 +195,6 @@ async def build_tool_info(
 
             return tool_info_str
 
-        # 即使没有其他工具结果，也检查是否有沙盒文件概述需要注入
-        if chat_id:
-            try:
-                from src.chat.sandbox.sandbox_manager import sandbox_manager
-                sandbox = sandbox_manager.get_sandbox(chat_id)
-                file_summaries_text = sandbox.get_active_summaries()
-                if file_summaries_text:
-                    logger.info(f"[context_builder] 已注入沙盒文件概述 (chat_id={chat_id})")
-                    sandbox.tick_summaries()
-                    return file_summaries_text
-                sandbox.tick_summaries()
-            except Exception as e:
-                logger.debug(f"获取沙盒文件概述失败: {e}")
-
         logger.debug("未获取到任何工具结果")
         return ""
 

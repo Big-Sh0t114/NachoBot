@@ -86,15 +86,17 @@ h11==0.16.0
     #   uvicorn
 httpcore==1.0.9
     # via httpx
-httpcore2==2.9.1
+httpcore2==2.12.0 ; sys_platform != 'emscripten'
     # via httpx2
 httpx==0.28.1
     # via
     #   google-genai
     #   nachobot
     #   openai
-httpx2==2.9.1
+httpx2==2.12.0
     # via mcp
+httpx2-jsfetch==1.0 ; python_full_version >= '3.12' and sys_platform == 'emscripten'
+    # via httpx2
 id==1.6.1
     # via twine
 idna==3.18
@@ -322,7 +324,7 @@ tqdm==4.70.0
     # via
     #   nachobot
     #   openai
-truststore==0.10.4
+truststore==0.10.4 ; sys_platform != 'emscripten'
     # via
     #   httpcore2
     #   httpx2

@@ -18,12 +18,17 @@ class TTSModel(BaseTTSModel):
     情感分类通过远程 HTTP 调用 TTS Adapter 服务端的 /api/emotion_preset 接口解析。
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        config_path: str | Path | None = None,
+        base_config_path: str | Path | None = None,
+    ):
         """初始化 VoxCPM TTS 模型"""
-        self.config = self.load_config()
+        self.config = self.load_config(config_path)
         if not self.config:
             raise ValueError("VoxCPM 配置文件不存在或加载失败")
         self._config_dir = Path(self.config.config_path).parent.resolve()
+        self._base_config_path = Path(base_config_path) if base_config_path else self._config_dir / "base.toml"
         self.host = self.config.vox.host
         self.port = self.config.vox.port
         self.base_url = f"http://{self.host}:{self.port}"
@@ -35,7 +40,7 @@ class TTSModel(BaseTTSModel):
         if self.config.emotion.enabled:
             try:
                 import toml as _toml
-                base_toml_path = Path(__file__).resolve().parents[4] / "configs" / "base.toml"
+                base_toml_path = self._base_config_path
                 if base_toml_path.exists():
                     base_cfg = _toml.load(str(base_toml_path))
                     srv_host = base_cfg.get("server", {}).get("host", "127.0.0.1")
@@ -47,11 +52,9 @@ class TTSModel(BaseTTSModel):
 
         self.initialize()
 
-    def load_config(self) -> "VoxBaseConfig":
+    def load_config(self, config_path: str | Path | None = None) -> "VoxBaseConfig":
         """加载 VoxCPM 配置文件"""
-        config_path = (
-            Path(__file__).resolve().parents[4] / "configs" / "vox.toml"
-        )
+        config_path = Path(config_path) if config_path else Path(__file__).resolve().parents[4] / "configs" / "vox.toml"
         if not config_path.exists():
             raise FileNotFoundError(f"配置文件不存在: {config_path}")
         return VoxBaseConfig(str(config_path))
@@ -194,7 +197,7 @@ class TTSModel(BaseTTSModel):
         preset_name = kwargs.get("preset_name")
 
         # 如果没有外部传入，尝试远程情感分类
-        if not preset_name:
+        if not preset_name and not kwargs.get("skip_remote_emotion", False):
             preset_name = await self._resolve_emotion_preset_remote(text)
 
         # 最终回退到平台默认预设
@@ -249,7 +252,7 @@ class TTSModel(BaseTTSModel):
         text_lang = kwargs.get("text_lang")
         preset_name = kwargs.get("preset_name")
 
-        if not preset_name:
+        if not preset_name and not kwargs.get("skip_remote_emotion", False):
             preset_name = await self._resolve_emotion_preset_remote(text)
 
         if not preset_name:

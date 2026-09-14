@@ -65,6 +65,7 @@ from src.chat.focus.switch_action import (
     format_recent_source_messages,
 )
 from src.chat.focus.switch_planner import suppress_focus_planner_context
+from src.chat.sandbox.sandbox_delivery import schedule_sandbox_after_delivery
 
 if TYPE_CHECKING:
     from src.chat.focus.reply_context import ReplyContextRef
@@ -564,23 +565,28 @@ class HeartFChatting:
         return member.planner_bypass
 
     @staticmethod
-    def _focus_switch_target_reply_action(
+    def _is_focus_switch_target_turn(
         focus_turn: FocusTurn | None,
-        recent_messages: List["DatabaseMessages"],
-        available_actions: Dict[str, ActionInfo],
-    ) -> ActionPlannerInfo | None:
-        """Turn a committed Focus switch into a direct Replyer handoff."""
+        recent_messages_list: List["DatabaseMessages"],
+        planner_bypass: bool = False,
+    ) -> bool:
+        """Return whether this turn is a real, planner-owned Focus target turn."""
 
-        if focus_turn is None or not (focus_turn.wake_reason & WakeReason.SWITCH_TARGET) or not recent_messages:
-            return None
-        target_message = recent_messages[-1]
-        return ActionPlannerInfo(
-            action_type="reply",
-            reasoning="Focus switch target: directly handle the event selected by the routing Gate",
-            action_data={"focus_switch_target": True},
-            action_message=target_message,
-            available_actions=available_actions,
+        return bool(
+            not planner_bypass
+            and focus_turn is not None
+            and focus_turn.wake_reason & WakeReason.SWITCH_TARGET
+            and recent_messages_list
         )
+
+    @staticmethod
+    def _should_use_notice_shortcut(
+        recent_messages_list: List["DatabaseMessages"],
+        notice_actions: bool,
+    ) -> bool:
+        """Return whether the adapter-priority notice/poke route is eligible."""
+
+        return bool(recent_messages_list and notice_actions)
 
     @staticmethod
     def _is_focus_event_only_turn(
@@ -870,6 +876,7 @@ class HeartFChatting:
         actions,
         selected_expressions: Optional[List[int]] = None,
         context_refs: Optional[List["ReplyContextRef"]] = None,
+        sandbox_handoff: Any = None,
     ) -> Tuple[Dict[str, Any], str, Dict[str, float]]:
         with Timer("回复发送", cycle_timers):
             reply_text = await self._send_response(
@@ -877,6 +884,7 @@ class HeartFChatting:
                 message_data=action_message,
                 selected_expressions=selected_expressions,
                 context_refs=context_refs,
+                sandbox_handoff=sandbox_handoff,
             )
 
         from src.manager.local_store_manager import local_storage
@@ -946,9 +954,21 @@ class HeartFChatting:
             logger.info(f"{self.log_prefix} 开始第{self._cycle_counter}次思考")
             pre_planner_started_at = time.perf_counter()
 
-            # 仅在适配器声明支持通知动作时处理。
+            # 仅在适配器声明支持通知动作时处理；这是通知消息的优先快捷路由。
+            # 只有未命中该快捷路由的普通 Focus target 才进入 Planner。
             capabilities = runtime_capabilities_from_stream(self.chat_stream)
-            if len(recent_messages_list) > 0 and capabilities.notice_actions:
+            bypass_session = capabilities.planner_bypass
+            bypass_planner = bool(bypass_session)
+            focus_switch_target_turn = self._is_focus_switch_target_turn(
+                focus_turn,
+                recent_messages_list,
+                planner_bypass=bypass_planner,
+            )
+            allow_no_reply = not focus_switch_target_turn
+            if self._should_use_notice_shortcut(
+                recent_messages_list,
+                capabilities.notice_actions,
+            ):
                 latest_msg = recent_messages_list[-1]
                 if getattr(latest_msg, "is_notify", False) and random.random() < 0.5:
                     logger.info(f"{self.log_prefix} 检测到戳戳动作，50%概率触发 active_poke")
@@ -1031,18 +1051,10 @@ class HeartFChatting:
                     promise_block = "\n".join(["[约定缓存]"] + promise_snippets)
                     chat_content_block = f"{promise_block}\n----\n{chat_content_block}"
 
-                capabilities = runtime_capabilities_from_stream(self.chat_stream)
-                bypass_session = capabilities.planner_bypass
                 event_only_focus_turn = bool(
                     focus_turn is not None and self._is_focus_event_only_turn(focus_turn, recent_messages_list)
                 )
                 gate_required = bool(focus_turn is not None and focus_turn.events)
-                bypass_planner = bool(bypass_session)
-                switch_target_reply_action = self._focus_switch_target_reply_action(
-                    focus_turn,
-                    recent_messages_list,
-                    available_actions,
-                )
 
                 logger.debug(
                     f"{self.log_prefix} bypass_planner={bypass_planner}, messages={len(message_list_before_now)}"
@@ -1162,6 +1174,7 @@ class HeartFChatting:
                             chat_content_block=chat_content_block,
                             message_id_list=message_id_list,
                             interest=global_config.personality.interest,
+                            allow_no_reply=allow_no_reply,
                         )
 
                 if focus_gate_stayed:
@@ -1227,9 +1240,6 @@ class HeartFChatting:
                             available_actions=available_actions,
                         )
                     ]
-                elif switch_target_reply_action is not None:
-                    logger.info(f"{self.log_prefix} [Focus] switch target goes directly to Replyer")
-                    action_to_use_info = [switch_target_reply_action]
                 else:
                     with Timer("规划器", cycle_timers):
                         # 获取当前有效的屏蔽用户ID集合传递给规划器
@@ -1248,12 +1258,14 @@ class HeartFChatting:
                                     loop_start_time=self.last_read_time,
                                     available_actions=available_actions,
                                     blocked_user_ids=_active_blocked,
+                                    allow_no_reply=allow_no_reply,
                                 )
                         else:
                             action_to_use_info, _ = await self.action_planner.plan(
                                 loop_start_time=self.last_read_time,
                                 available_actions=available_actions,
                                 blocked_user_ids=_active_blocked,
+                                allow_no_reply=allow_no_reply,
                             )
 
             fenced_actions = self._fence_focus_event_only_actions(
@@ -1584,6 +1596,7 @@ class HeartFChatting:
         message_data: "DatabaseMessages",
         selected_expressions: Optional[List[int]] = None,
         context_refs: Optional[List["ReplyContextRef"]] = None,
+        sandbox_handoff: Any = None,
     ) -> str:
         receipts: List[send_api.SendReceipt] = []
         refs = tuple(context_refs or ())
@@ -1618,6 +1631,14 @@ class HeartFChatting:
             # Delivery already happened. Releasing here could consume the same
             # handoff twice after a later retry, so retain it for recovery.
             logger.error(f"{self.log_prefix} Focus delivery settlement failed: {exc}")
+        if sandbox_handoff is not None:
+            # Schedule only after DELIVERED; this gate is in-process
+            # idempotency and is not a crash-atomic outbox.
+            await schedule_sandbox_after_delivery(
+                sandbox_handoff,
+                receipts,
+                delivered_content=reply_text,
+            )
         return reply_text
 
     async def _settle_interrupted_reply_context(
@@ -1975,6 +1996,7 @@ class HeartFChatting:
                         actions=chosen_action_plan_infos,
                         selected_expressions=selected_expressions,
                         context_refs=llm_response.context_refs,
+                        sandbox_handoff=llm_response.sandbox_edit_handoff,
                     )
                     return {
                         "action_type": "reply",

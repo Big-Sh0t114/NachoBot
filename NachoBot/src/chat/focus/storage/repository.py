@@ -14,6 +14,7 @@ from ..models import (
     FocusEventSnapshot,
     FocusEventStatus,
     FocusHandoff,
+    HandoffKind,
     HandoffPayload,
     HandoffStatus,
     UntrustedExcerpt,
@@ -657,6 +658,7 @@ class FocusSQLiteStorage:
     def _insert_handoff(connection: sqlite3.Connection, handoff: FocusHandoff) -> None:
         payload_json = json.dumps(
             {
+                "handoff_kind": handoff.kind.value if isinstance(handoff.kind, HandoffKind) else HandoffKind.CONTENT_V1.value,
                 "task_summary": handoff.payload.task_summary,
                 "source_display_name": handoff.payload.source_display_name,
                 "target_display_name": handoff.payload.target_display_name,
@@ -705,6 +707,13 @@ class FocusSQLiteStorage:
     @staticmethod
     def _handoff_from_row(row: sqlite3.Row) -> FocusHandoff:
         payload_data = json.loads(row["payload_json"])
+        raw_kind = payload_data.get("handoff_kind")
+        try:
+            kind = HandoffKind(raw_kind) if raw_kind is not None else HandoffKind.CONTENT_V1
+        except (TypeError, ValueError):
+            # Unknown persisted kinds fail closed as ordinary content.  In
+            # particular, they can never become private identity metadata.
+            kind = HandoffKind.CONTENT_V1
         payload = HandoffPayload(
             task_summary=payload_data.get("task_summary", ""),
             source_display_name=payload_data.get("source_display_name", ""),
@@ -729,6 +738,7 @@ class FocusSQLiteStorage:
             max_successful_cycles=row["max_cycles"],
             revision=row["revision"],
             status=HandoffStatus(row["status"]),
+            kind=kind,
         )
 
     @staticmethod

@@ -31,7 +31,7 @@ from src.config.config import global_config
 from src.chat.message_receive.chat_stream import get_chat_manager
 from src.chat.message_receive.uni_message_sender import UniversalMessageSender
 from src.chat.message_receive.message import MessageSending, MessageRecv
-from src.chat.focus.coordinator import current_context_lease, focus_coordinator
+from src.chat.focus.coordinator import focus_coordinator
 from src.chat.focus.models import EffectKind, StaleFocusLeaseError
 from ncnk_message import Seg, UserInfo, MessageBase, BaseMessageInfo
 
@@ -256,7 +256,7 @@ async def _send_to_target_receipt_permitted(
         show_log: 发送是否显示日志
 
     Returns:
-        bool: 是否发送成功
+        SendReceipt: 真实投递结果
     """
     try:
         if set_reply and not reply_message:
@@ -387,18 +387,14 @@ async def _send_to_target(
     show_log: bool = True,
     selected_expressions: Optional[List[int]] = None,
 ) -> bool:
-    """通用发送入口；仅围栏当前 Focus 回合产生的副作用。
+    """通用 legacy bool 发送入口，不受 Focus 租约围栏。
 
-    未绑定 Focus 租约的插件、hook 和系统通知可向任意已注册聊天流
-    发送，不受 active chat 限制。若调用发生在 Focus 回合上下文内，
-    则继续校验租约，防止聊天动作或其派生任务在切换后迟到落地。
+    插件、hook、系统通知以及已创建的后台任务使用此入口时，始终直接
+    调用允许发送的内部实现；即使任务继承了来源聊天的 Focus 上下文，
+    也不会因为租约过期而被拒绝。需要 ACK/结算安全的聊天生成回复，
+    必须显式使用 ``_send_to_target_receipt`` 或对应的 receipt API。
     """
-    receipt_sender = (
-        _send_to_target_receipt
-        if current_context_lease() is not None
-        else _send_to_target_receipt_permitted
-    )
-    receipt = await receipt_sender(
+    receipt = await _send_to_target_receipt_permitted(
         message_segment=message_segment,
         stream_id=stream_id,
         display_message=display_message,
@@ -485,6 +481,35 @@ async def text_to_stream_receipt(
         reply_message=reply_message,
         storage_message=storage_message,
         selected_expressions=selected_expressions,
+    )
+
+
+async def background_text_to_stream_receipt(
+    text: str,
+    stream_id: str,
+    typing: bool = False,
+    set_reply: bool = False,
+    reply_message: Optional["DatabaseMessages"] = None,
+    storage_message: bool = True,
+    display_message: str = "",
+) -> SendReceipt:
+    """Deliver a server-owned background/system result without Focus fencing.
+
+    This text-only API is reserved for already-authorized background result
+    delivery, such as a completed Sandbox handoff. It deliberately calls the
+    permitted sender directly so a stale inherited Focus lease cannot suppress
+    the result. Live generated replies and ACK/turn-settlement paths must use
+    :func:`text_to_stream_receipt` instead.
+    """
+
+    return await _send_to_target_receipt_permitted(
+        message_segment=Seg(type="text", data=text),
+        stream_id=stream_id,
+        display_message=display_message,
+        typing=typing,
+        set_reply=set_reply,
+        reply_message=reply_message,
+        storage_message=storage_message,
     )
 
 

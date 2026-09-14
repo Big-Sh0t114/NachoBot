@@ -1,5 +1,5 @@
 [inner]
-version = "1.11.2_bs"
+version = "1.11.3_bs"
 
 [[api_providers]] # SiliconFlow的API服务商配置
 name = "SiliconFlow"
@@ -168,10 +168,10 @@ temperature = 0.05
 max_tokens = 800
 
 [model_task_config.file_edit] # 文件编辑/代码生成专用模型，建议使用能力较强的模型
-model_list = ["deepseek-v4-pro"]
+model_list = ["deepseek-v4-flash", "deepseek-v4-pro"]
 temperature = 0.1
 max_tokens = 8192
-timeout = 50
+timeout = 120
 
 [model_task_config.mcp] # MCP插件专用模型配置
 model_list = []

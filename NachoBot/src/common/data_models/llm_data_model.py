@@ -7,6 +7,7 @@ if TYPE_CHECKING:
     from src.chat.focus.reply_context import ReplyContextRef
     from src.common.data_models.message_data_model import ReplySetModel
     from src.llm_models.payload_content.tool_option import ToolCall
+    from src.chat.sandbox.sandbox_handoff import SandboxEditHandoff
 
 
 @dataclass
@@ -21,3 +22,6 @@ class LLMGenerationDataModel(BaseDataModel):
     # Internal delivery metadata.  It is deliberately kept off ReplySetModel
     # so adapters never serialize handoff reservations as message content.
     context_refs: List["ReplyContextRef"] = field(default_factory=list)
+    # Call-local, server-minted sandbox handoff. Replyer instances are cached;
+    # this metadata must travel with the generation result instead.
+    sandbox_edit_handoff: Optional["SandboxEditHandoff"] = None

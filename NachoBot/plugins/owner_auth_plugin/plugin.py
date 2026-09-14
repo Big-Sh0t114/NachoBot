@@ -24,6 +24,7 @@ import importlib
 import re
 import os
 import sys
+from dataclasses import replace
 from functools import wraps
 from typing import TypedDict, TYPE_CHECKING, Any, Optional
 from collections.abc import Callable, Coroutine
@@ -110,14 +111,14 @@ except ImportError:
                 EventType,
                 NachoMessages,
                 ConfigField,
-                EventHandlerInfo,
+                EventHandlerInfo,  # noqa: F401
                 ActionInfo,
-                BaseAction,
-                CommandInfo,
-                BaseCommand,
-                ToolInfo,
-                BaseTool,
-                PythonDependency,
+                BaseAction,  # noqa: F401
+                CommandInfo,  # noqa: F401
+                BaseCommand,  # noqa: F401
+                ToolInfo,  # noqa: F401
+                BaseTool,  # noqa: F401
+                PythonDependency,  # noqa: F401
                 CustomEventHandlerResult,
             )
             from modules.MaiBot.src.common.logger import get_logger
@@ -132,6 +133,14 @@ if TYPE_CHECKING:
             from src.chat.replyer.group_generator import DefaultReplyer
         except Exception:
             from modules.MaiBot.src.chat.replyer.group_generator import DefaultReplyer
+
+try:
+    from src.chat.replyer.prompt_build_result import ReplyPromptBuildResult
+except ImportError:
+    try:
+        from modules.MaiBot.src.chat.replyer.prompt_build_result import ReplyPromptBuildResult
+    except ImportError:
+        ReplyPromptBuildResult = None  # type: ignore[assignment,misc]
 
 # ==================== 全局缓存模块 ====================
 
@@ -366,8 +375,42 @@ def _extract_user_id_from_reply_message(reply_message: Any) -> str:
 
 
 # 保存原始方法的引用，用于卸载补丁
-_original_build_prompt_reply_context: Callable[..., Coroutine[object, object, tuple[str, list[int]]]] | None = None
+_original_build_prompt_reply_context: Callable[..., Coroutine[object, object, Any]] | None = None
 _patch_applied = False
+
+
+def _normalize_prompt_build_result(base_result: Any) -> tuple[str, Callable[[str], Any]]:
+    """Normalize current typed and legacy prompt-builder results.
+
+    The current replyers return a frozen ``ReplyPromptBuildResult``.  Older
+    replyers return ``(prompt, selected_expressions)``.  The rebuilder keeps
+    the original typed result when its prompt is unchanged and uses
+    ``dataclasses.replace`` when owner-auth text is injected, preserving every
+    call-local metadata field and the exact sandbox candidate object.
+    """
+    if ReplyPromptBuildResult is not None and isinstance(base_result, ReplyPromptBuildResult):
+        base_prompt = base_result.prompt
+
+        def rebuild(prompt: str) -> ReplyPromptBuildResult:
+            if prompt == base_prompt:
+                return base_result
+            return replace(base_result, prompt=prompt)
+
+        return base_prompt, rebuild
+
+    if isinstance(base_result, tuple) and len(base_result) == 2:
+        base_prompt, selected_expressions = base_result
+        return base_prompt, lambda prompt: (prompt, selected_expressions)
+
+    result_type = type(base_result).__name__
+    if isinstance(base_result, tuple):
+        result_shape = f"{result_type}(length={len(base_result)})"
+    else:
+        result_shape = result_type
+    raise TypeError(
+        "[主人验证补丁] build_prompt_reply_context returned unsupported result shape "
+        f"{result_shape}; expected ReplyPromptBuildResult or a 2-tuple"
+    )
 
 
 def _import_default_replyer():
@@ -423,7 +466,7 @@ def patch_build_prompt_reply_context() -> None:
             reply_message: dict[str, object] | None = None,
             prompt_context: Any = None,
             **kwargs,
-        ) -> tuple[str, list[int]]:
+        ) -> Any:
             # 兼容旧版/新版参数名差异
             if choosen_actions is None and chosen_actions is not None:
                 choosen_actions = chosen_actions
@@ -461,12 +504,12 @@ def patch_build_prompt_reply_context() -> None:
                 else:
                     raise
 
-            base_prompt, token_list = base_result
+            base_prompt, rebuild_result = _normalize_prompt_build_result(base_result)
 
             logger.debug(f"[主人验证补丁] 补丁被调用，reply_reason: {reply_reason}")
 
             if not base_prompt:
-                return base_prompt, token_list
+                return rebuild_result(base_prompt)
 
             # 尝试从reply_message/reply_reason中提取发送者信息，然后获取对应的身份验证信息
             try:
@@ -555,7 +598,7 @@ def patch_build_prompt_reply_context() -> None:
                         else:
                             identity_tag = "非主人"
                         logger.debug(f"[主人验证补丁] 身份验证结果: {identity_tag}")
-                        return enhanced_prompt, token_list
+                        return rebuild_result(enhanced_prompt)
                     else:
                         logger.debug("[主人验证补丁] 身份验证信息已过期，跳过处理")
                 else:
@@ -565,7 +608,7 @@ def patch_build_prompt_reply_context() -> None:
                 logger.warning(f"[主人验证补丁] 处理身份验证时出错: {e}")
 
             # 如果出错或没有验证信息，返回原始prompt
-            return base_prompt, token_list
+            return rebuild_result(base_prompt)
 
         # 替换原始方法 - 使用类型忽略来避免类型检查错误
         default_replyer_cls.build_prompt_reply_context = patched_method  # type: ignore[assignment]

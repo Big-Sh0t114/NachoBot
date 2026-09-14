@@ -1,4 +1,6 @@
 *.html linguist-detectable=false
 *.h linguist-detectable=false
+*.bat text eol=crlf
+*.cmd text eol=crlf
 
 koishi-app/node_modules/** linguist-vendored

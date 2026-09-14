@@ -417,6 +417,10 @@ MODULE_COLORS = {
     # 工具模块
     "tool_use": "\033[38;5;172m",  # 橙褐色
     "tool_executor": "\033[38;5;172m",  # 橙褐色
+    # 沙盒文件工具与 tool_use 使用同一橙褐色，便于在控制台归为一类
+    "sandbox_agent": "\033[38;5;172m",
+    "sandbox_delivery": "\033[38;5;172m",
+    "sandbox_manager": "\033[38;5;172m",
     "base_tool": "\033[38;5;178m",  # 金黄色
     # 工具和实用模块
     "prompt_build": "\033[38;5;105m",  # 紫色
@@ -458,6 +462,9 @@ MODULE_ALIASES = {
     "memory_activator": "记忆",
     "tool_use": "工具",
     "expressor": "表达方式",
+    "sandbox_agent": "沙盒代理",
+    "sandbox_delivery": "沙盒交付",
+    "sandbox_manager": "沙盒管理",
     "database_model": "数据库",
     "mood": "情绪",
     "memory": "记忆",

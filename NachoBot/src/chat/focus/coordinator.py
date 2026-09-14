@@ -20,6 +20,7 @@ from src.common.logger import get_logger
 
 from .handoff_store import HandoffStore, InMemoryHandoffStore
 from .models import (
+    ChatKind,
     EffectKind,
     FocusDispatch,
     FocusEventSnapshot,
@@ -46,6 +47,10 @@ from .scope_policy import ChatScopePolicy
 EnsureRuntimeCallback = Callable[[str], Awaitable[None]]
 
 logger = get_logger("focus.coordinator")
+
+_CAS_DESYNCHRONIZATION_REASON = (
+    "switch compare-and-set failed: durable/in-memory Focus state desynchronized; group fenced"
+)
 
 
 class FocusStateStore(Protocol):
@@ -880,14 +885,14 @@ class FocusCoordinator:
                         )
                     )
                 else:
-                    await asyncio.shield(self._restore_running(state))
+                    await asyncio.shield(self._fence_desynchronized(state))
                 raise
             except Exception as exc:
                 await self._restore_running(state)
                 return SwitchResult(False, f"switch persistence failed: {exc}", request.lease)
             if not committed:
-                await self._restore_running(state)
-                return SwitchResult(False, "switch compare-and-set failed", request.lease)
+                await asyncio.shield(self._fence_desynchronized(state))
+                return SwitchResult(False, _CAS_DESYNCHRONIZATION_REASON, request.lease)
             return await self._apply_committed_switch(
                 state,
                 request,
@@ -1018,6 +1023,21 @@ class FocusCoordinator:
                 state.phase = FocusGroupPhase.RUNNING
                 state.condition.notify_all()
 
+    async def _fence_desynchronized(self, state: _FocusGroupState) -> None:
+        """Stop this coordinator after durable CAS rejected its stale state.
+
+        A false CAS is conclusive after the transition has drained effects: another
+        owner has changed or reset the durable group.  Keep the durable pending
+        event untouched, but make this in-memory group fail closed so its stale
+        turn cannot be acknowledged or dispatched again.
+        """
+
+        async with state.condition:
+            state.phase = FocusGroupPhase.STOPPED
+            state.pending_wakes.clear()
+            state.in_flight_turn = None
+            state.condition.notify_all()
+
     def _authorize_handoff(self, handoff: FocusHandoff, lease: FocusLease) -> bool:
         state = self._groups.get(lease.group_id)
         if state is None:
@@ -1026,14 +1046,11 @@ class FocusCoordinator:
             handoff.group_id != lease.group_id
             or handoff.target_chat_id != lease.chat_id
             or handoff.target_epoch != lease.epoch
+            or handoff.source_epoch != lease.epoch - 1
             or handoff.policy_version != self._policy.version
         ):
             return False
-        return self._policy.can_inject(
-            state.definition,
-            handoff.source_chat_id,
-            handoff.target_chat_id,
-        )
+        return self._policy.authorize_handoff(state.definition, handoff)
 
     def _next_background_attention(
         self,
@@ -1078,7 +1095,12 @@ class FocusCoordinator:
         expected_phase = FocusGroupPhase.TRANSITIONING if transitioning else FocusGroupPhase.RUNNING
         if state.phase is not expected_phase:
             return f"Focus group is {state.phase.value}, expected {expected_phase.value}"
-        if not self._lease_matches(state, request.lease, require_turn=True):
+        if not self._lease_matches(
+            state,
+            request.lease,
+            require_turn=True,
+            allow_transitioning=transitioning,
+        ):
             return "stale source lease"
         if not transitioning and self._switch_cooldown_seconds:
             elapsed = time.monotonic() - state.last_switched_at
@@ -1095,9 +1117,13 @@ class FocusCoordinator:
             request.lease.chat_id,
             attention.target_chat_id,
             has_handoff=handoff is not None,
+            handoff_kind=handoff.kind if handoff is not None else None,
         )
         if not decision.allowed:
             return decision.reason
+        source_member = self._policy.member(state.definition, request.lease.chat_id)
+        if source_member is not None and source_member.kind is ChatKind.PRIVATE and handoff is None:
+            return "private-source switch requires a transition identity handoff"
         if handoff is not None:
             if (
                 handoff.group_id != request.lease.group_id
@@ -1109,6 +1135,8 @@ class FocusCoordinator:
                 return "handoff scope or epoch does not match the switch"
             if handoff.policy_version != self._policy.version:
                 return "handoff policy version is not current"
+            if not self._policy.authorize_handoff(state.definition, handoff):
+                return "handoff kind or payload is not authorized for the switch"
         return None
 
     @staticmethod
@@ -1116,7 +1144,17 @@ class FocusCoordinator:
         return next((item for item in state.attention.values() if item.event_id == event_id), None)
 
     @staticmethod
-    def _lease_matches(state: _FocusGroupState, lease: FocusLease, *, require_turn: bool) -> bool:
+    def _lease_matches(
+        state: _FocusGroupState,
+        lease: FocusLease,
+        *,
+        require_turn: bool,
+        allow_transitioning: bool = False,
+    ) -> bool:
+        if state.phase is not FocusGroupPhase.RUNNING and not (
+            allow_transitioning and state.phase is FocusGroupPhase.TRANSITIONING
+        ):
+            return False
         if (
             state.active_chat_id != lease.chat_id
             or state.definition.group_id != lease.group_id

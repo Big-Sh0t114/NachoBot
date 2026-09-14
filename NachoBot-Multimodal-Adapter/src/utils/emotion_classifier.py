@@ -27,7 +27,7 @@ def _hf_endpoints() -> list[str]:
     return list(dict.fromkeys(endpoints))
 
 import torch
-from transformers import AutoModelForSequenceClassification, AutoTokenizer, pipeline as hf_pipeline
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
 from nachobot_multimodal.logger import logger
 
 # 抑制 transformers pipeline 默认在 CPU 时的警告 "Device set to use cpu"
@@ -35,36 +35,32 @@ logging.getLogger("transformers.pipelines.base").setLevel(logging.ERROR)
 
 
 class EmotionClassifier:
-    """基于 zero-shot classification 的情感分类器。
+    """基于 TabularisAI 多语种多标签模型的文本情绪分类器。
 
-    使用多语言 NLI 模型将文本分类到用户自定义的情感标签中。
-    模型在首次 classify() 调用时惰性加载。
-
-    Args:
-        model_name: HuggingFace 模型 ID 或本地路径
-        device: 推理设备 ("cpu" / "cuda:0" 等)
-        use_fp16: 是否使用 FP16 半精度推理（仅 CUDA 设备有效）
+    模型固定输出 11 个情绪标签，并为每个标签提供独立 sigmoid 概率。
+    上层通过配置将这些固定标签映射到 Vox TTS 预设。
     """
 
     def __init__(
         self,
-        model_name: str = "MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7",
+        model_name: str = "tabularisai/multilingual-emotion-classification",
         device: str = "cpu",
         use_fp16: bool = True,
     ):
         self._model_name = model_name
         self._device = device
         self._use_fp16 = use_fp16
-        self._classifier = None  # 惰性加载
+        self._tokenizer = None
+        self._model = None
         self._load_lock = threading.Lock()
 
     def _ensure_loaded(self):
-        """确保分类器已加载；Hub 不可达时自动回退本地缓存。"""
-        if self._classifier is not None:
+        """确保分类模型已加载；Hub 不可达时自动回退本地缓存。"""
+        if self._model is not None and self._tokenizer is not None:
             return
 
         with self._load_lock:
-            if self._classifier is not None:
+            if self._model is not None and self._tokenizer is not None:
                 return
 
             logger.info(
@@ -100,12 +96,13 @@ class EmotionClassifier:
 
                 from huggingface_hub import snapshot_download
 
-                # 只下载 Transformers 推理实际需要的文件。该仓库还包含
-                # ONNX 导出和重复的 pytorch_model.bin，完整 snapshot 会额外
-                # 下载大量无用数据，在中国大陆网络下尤其容易表现为长时间卡住。
                 allow_patterns = [
                     "config.json",
                     "model.safetensors",
+                    "tokenizer.json",
+                    "tokenizer_config.json",
+                    "sentencepiece.bpe.model",
+                    "special_tokens_map.json",
                     "*.json",
                     "*.model",
                     "*.txt",
@@ -151,44 +148,38 @@ class EmotionClassifier:
                 )
                 logger.info("情感分类模型已从下载完成的本地快照加载")
 
-            self._classifier = hf_pipeline(
-                task="zero-shot-classification",
-                model=model,
-                tokenizer=tokenizer,
-                device=self._device,
-            )
+            model.to(self._device)
+            model.eval()
+            self._tokenizer = tokenizer
+            self._model = model
             logger.info("情感分类模型加载完成")
 
-    def classify(
-        self,
-        text: str,
-        available_tags: List[str],
-        hypothesis_template: str = "这段文字表达的情感是{}。",
-    ) -> Tuple[str, float]:
-        """对文本进行情感分类。
-
-        Args:
-            text: 待分类的文本
-            available_tags: 可用的情感标签列表
-            hypothesis_template: NLI 假设模板（{} 会被替换为标签名）
-
-        Returns:
-            (best_tag, confidence): 最佳匹配的标签和置信度 (0.0~1.0)
-        """
+    def classify(self, text: str) -> Tuple[str, float]:
+        """返回最高概率的固定情绪标签及其独立 sigmoid 概率。"""
         self._ensure_loaded()
 
-        result = self._classifier(
+        inputs = self._tokenizer(
             text,
-            candidate_labels=available_tags,
-            hypothesis_template=hypothesis_template,
+            return_tensors="pt",
+            truncation=True,
+            max_length=192,
         )
+        inputs = {name: tensor.to(self._device) for name, tensor in inputs.items()}
 
-        best_tag = result["labels"][0]
-        confidence = result["scores"][0]
+        with torch.inference_mode():
+            logits = self._model(**inputs).logits[0]
+            probabilities = torch.sigmoid(logits).float().cpu()
+
+        id2label = self._model.config.id2label
+        scores = {
+            str(id2label[index]): float(probabilities[index])
+            for index in range(len(probabilities))
+        }
+        best_tag, confidence = max(scores.items(), key=lambda item: item[1])
+        ordered_scores = dict(sorted(scores.items(), key=lambda item: item[1], reverse=True))
 
         logger.debug(
             f"情感分类: '{text[:50]}...' → {best_tag} ({confidence:.3f}) "
-            f"| 全部: {dict(zip(result['labels'], [f'{s:.3f}' for s in result['scores']], strict=False))}"
+            f"| 全部: { {label: f'{score:.3f}' for label, score in ordered_scores.items()} }"
         )
-
         return best_tag, confidence

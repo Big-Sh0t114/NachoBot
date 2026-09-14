@@ -20,6 +20,7 @@ from .models import (
     FocusLease,
     FocusMember,
     FocusTurn,
+    HandoffKind,
     HandoffPayload,
     RestoredFocusEvent,
     StoredMessageRef,
@@ -28,6 +29,8 @@ from .models import (
     TurnOutcome,
     TurnStatus,
     WakeReason,
+    trusted_member_display_name,
+    trusted_transition_labels,
 )
 from .scope_policy import ChatScopePolicy, ScopeDecision
 
@@ -45,6 +48,7 @@ __all__ = [
     "FocusMember",
     "FocusStateStore",
     "FocusTurn",
+    "HandoffKind",
     "HandoffBuilder",
     "HandoffLimits",
     "HandoffPayload",
@@ -58,6 +62,8 @@ __all__ = [
     "TurnOutcome",
     "TurnStatus",
     "WakeReason",
+    "trusted_member_display_name",
+    "trusted_transition_labels",
     "bind_lease",
     "current_context_lease",
     "focus_coordinator",

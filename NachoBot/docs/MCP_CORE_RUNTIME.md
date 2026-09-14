@@ -26,7 +26,7 @@ servers_json = '''
 ## 当前推荐服务器组合
 
 - `filesystem-local`：受目录参数约束的本地文件读取与搜索。生产环境应只传入真正需要的根目录，并通过 `disabled_tools` 禁用写入类工具。
-- `playwright-local`：使用 Microsoft 维护的 `@playwright/mcp` 替代已归档的 Puppeteer MCP。默认采用 headless、isolated，省略图片响应，并把运行产物写到未跟踪的部署配置目录；高风险的任意代码和文件上传工具应禁用。
+- `playwright-local`：使用 Microsoft 维护的 `@playwright/mcp` 替代已归档的 Puppeteer MCP。默认采用 headed、isolated 模式（省略 `--headless`），省略图片响应，并把运行产物写到未跟踪的部署配置目录。独立的 Python 网页搜索浏览器仍显式使用 `chromium.launch(headless=True)`，后台搜索不会显示窗口；高风险的任意代码和文件上传工具应禁用。
 - `context7-docs`：按库和版本检索当前技术文档。无 API Key 时可使用基础额度；需要更高限额时再在未跟踪配置中加入凭据。
 
 普通公共网页查询继续使用现有联网搜索链，不重复注册 Fetch MCP。当前 Python Fetch 参考服务器尚未完成 SDK 2.x 迁移，强行锁定旧 SDK 还会产生协议发现警告。不要注册 `everything` 一类协议演示服务器。Git、GitHub、数据库和云平台服务器只有在明确配置最小权限凭据、确认工具写入边界后才应启用。

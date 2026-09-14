@@ -60,6 +60,7 @@ from src.chat.utils.chat_message_builder import (
 )
 from src.chat.heart_flow.relation_scanner import RelationScanner
 from src.chat.memory_system.memory_activator import MemoryActivator
+from src.chat.sandbox.sandbox_delivery import schedule_sandbox_after_delivery
 
 if TYPE_CHECKING:
     from src.chat.focus.reply_context import ReplyContextRef
@@ -250,6 +251,25 @@ class BrainChatting:
             and not focus_turn.handoff_ids
             and focus_turn.read_through_row_id <= focus_turn.read_after_row_id
         )
+
+    @staticmethod
+    def _is_focus_switch_target_turn(
+        focus_turn: FocusTurn | None,
+        recent_messages_list: List["DatabaseMessages"],
+    ) -> bool:
+        """Return whether this turn is a real Focus target with local work."""
+
+        return bool(
+            focus_turn is not None
+            and focus_turn.wake_reason & WakeReason.SWITCH_TARGET
+            and recent_messages_list
+        )
+
+    @staticmethod
+    def _should_use_advanced_direct_reply(advanced_on: bool) -> bool:
+        """Advanced Mode keeps its priority direct-reply route."""
+
+        return bool(advanced_on)
 
     def _get_focus_bypass_gate(self) -> FocusBypassDecisionGate:
         gate = self._focus_bypass_gate
@@ -457,6 +477,7 @@ class BrainChatting:
         actions,
         selected_expressions: Optional[List[int]] = None,
         context_refs: Optional[List["ReplyContextRef"]] = None,
+        sandbox_handoff: Any = None,
     ) -> Tuple[Dict[str, Any], str, Dict[str, float]]:
         with Timer("回复发送", cycle_timers):
             reply_text = await self._send_response(
@@ -464,6 +485,7 @@ class BrainChatting:
                 message_data=action_message,
                 selected_expressions=selected_expressions,
                 context_refs=context_refs,
+                sandbox_handoff=sandbox_handoff,
             )
 
         # 获取 platform，如果不存在则从 chat_stream 获取，如果还是 None 则使用默认值
@@ -526,6 +548,8 @@ class BrainChatting:
     ) -> bool:  # sourcery skip: merge-else-if-into-elif, remove-redundant-if
         if recent_messages_list is None:
             recent_messages_list = []
+        focus_switch_target_turn = self._is_focus_switch_target_turn(focus_turn, recent_messages_list)
+        allow_no_reply = not focus_switch_target_turn
         # 刷新上下文以确保获取最新的模板信息
         get_chat_manager().get_stream(self.stream_id)
         context = getattr(self.chat_stream, "context", None)
@@ -595,7 +619,9 @@ class BrainChatting:
                 logger.debug(f"{self.log_prefix} 人物画像注入跳过: {e}")
 
             # High-level mode check
-            if advanced_manager.is_on(self.chat_stream):
+            if self._should_use_advanced_direct_reply(
+                advanced_manager.is_on(self.chat_stream),
+            ):
                 logger.info(f"{self.log_prefix} 检测到高级模式开启，跳过Planner直接回复")
 
                 # Try to find the latest user message to reply to
@@ -628,6 +654,7 @@ class BrainChatting:
                     chat_content_block=chat_content_block,
                     message_id_list=message_id_list,
                     interest=global_config.personality.interest,
+                    allow_no_reply=allow_no_reply,
                 )
                 continue_flag, modified_message = await events_manager.handle_nacho_events(
                     EventType.ON_PLAN, None, prompt_info[0], None, self.chat_stream.stream_id
@@ -647,6 +674,7 @@ class BrainChatting:
                             loop_start_time=self.last_read_time,
                             available_actions=available_actions,
                             interrupt_flag=interrupt_flag,
+                            allow_no_reply=allow_no_reply,
                         )
                     except ReqAbortException:
                         self._planner_interrupt_flag = None
@@ -683,9 +711,9 @@ class BrainChatting:
                     serial_actions.append(action)
 
             if serial_actions:
-                reply_actions = [action for action in serial_actions if action.action_type in ["reply", "file_edit"]]
+                reply_actions = [action for action in serial_actions if action.action_type == "reply"]
                 other_serial_actions = [
-                    action for action in serial_actions if action.action_type not in ["reply", "file_edit"]
+                    action for action in serial_actions if action.action_type != "reply"
                 ]
                 serial_actions = reply_actions + other_serial_actions
 
@@ -701,7 +729,7 @@ class BrainChatting:
                     action, action_to_use_info, thinking_id, available_actions, cycle_timers
                 )
                 results.append(result)
-                if action.action_type in ["reply", "file_edit"] and isinstance(result, dict) and result.get("success"):
+                if action.action_type == "reply" and isinstance(result, dict) and result.get("success"):
                     reply_text_for_tts = (result.get("reply_text") or "").strip()
 
             if reply_text_for_tts:
@@ -736,10 +764,10 @@ class BrainChatting:
                     logger.error(f"{self.log_prefix} 动作执行异常: {result}")
                     continue
 
-                if result["action_type"] not in ["reply", "file_edit"]:
+                if result["action_type"] != "reply":
                     action_success = result["success"]
                     action_reply_text = result["reply_text"]
-                elif result["action_type"] in ["reply", "file_edit"]:
+                elif result["action_type"] == "reply":
                     if result["success"]:
                         reply_loop_info = result["loop_info"]
                     else:
@@ -951,6 +979,7 @@ class BrainChatting:
         message_data: "DatabaseMessages",
         selected_expressions: Optional[List[int]] = None,
         context_refs: Optional[List["ReplyContextRef"]] = None,
+        sandbox_handoff: Any = None,
     ) -> str:
         receipts: List[send_api.SendReceipt] = []
         refs = tuple(context_refs or ())
@@ -985,6 +1014,14 @@ class BrainChatting:
             # Delivery already happened. Releasing here could consume the same
             # handoff twice after a later retry, so retain it for recovery.
             logger.error(f"{self.log_prefix} Focus delivery settlement failed: {exc}")
+        if sandbox_handoff is not None:
+            # The agent is scheduled only after at least one real DELIVERED
+            # receipt. This gate is in-process idempotency, not crash-atomic.
+            await schedule_sandbox_after_delivery(
+                sandbox_handoff,
+                receipts,
+                delivered_content=reply_text,
+            )
         return reply_text
 
     async def _settle_interrupted_reply_context(
@@ -1165,8 +1202,8 @@ class BrainChatting:
                         cycle_timers,
                     )
 
-                elif action_planner_info.action_type in ["reply", "file_edit"]:
-                    request_type = "file_edit" if action_planner_info.action_type == "file_edit" else "replyer"
+                elif action_planner_info.action_type == "reply":
+                    request_type = "replyer"
                     try:
                         message_text_for_injection = ""
                         if action_planner_info.action_message:
@@ -1221,7 +1258,7 @@ class BrainChatting:
                         focus_replyer_required = getattr(
                             global_config.focus, "mode", "off"
                         ) == "active" and focus_coordinator.is_managed(self.stream_id)
-                        if action_planner_info.reply_text and not focus_replyer_required:
+                        if action_planner_info.reply_text and not focus_replyer_required and not global_config.tool.enable_tool:
                             logger.info(f"{self.log_prefix} 使用集成生成的回复内容")
                             # 将文本转换为 ReplySetModel
                             from src.plugin_system.apis.generator_api import process_human_text
@@ -1251,7 +1288,7 @@ class BrainChatting:
                             available_actions=filtered_available_actions,
                             chosen_actions=filtered_chosen_actions,
                             reply_reason=action_planner_info.reasoning or "",
-                            enable_tool=enable_tool_flag or (request_type == "file_edit"),
+                            enable_tool=enable_tool_flag,
                             request_type=request_type,
                             from_plugin=False,
                             extra_info=injection_text,
@@ -1291,6 +1328,7 @@ class BrainChatting:
                         actions=chosen_action_plan_infos,
                         selected_expressions=selected_expressions,
                         context_refs=llm_response.context_refs,
+                        sandbox_handoff=llm_response.sandbox_edit_handoff,
                     )
                     return {
                         "action_type": action_planner_info.action_type,
@@ -1315,7 +1353,7 @@ class BrainChatting:
                         not success
                         and action_planner_info.action_type == "send_artwork"
                         and "未检测到明确的看画请求" in (reply_text or "")
-                        and not any(action.action_type in ["reply", "file_edit"] for action in chosen_action_plan_infos)
+                        and not any(action.action_type == "reply" for action in chosen_action_plan_infos)
                         and action_planner_info.action_message
                     ):
                         logger.info(f"{self.log_prefix} 画作请求未明确，改为文本回复")

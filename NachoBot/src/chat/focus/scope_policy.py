@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .models import ChatKind, FocusGroupDefinition, FocusMember
+from .models import (
+    ChatKind,
+    FocusGroupDefinition,
+    FocusHandoff,
+    FocusMember,
+    HandoffKind,
+    trusted_transition_labels,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -14,17 +21,17 @@ class ScopeDecision:
 
 
 class ChatScopePolicy:
-    """Default Focus scope policy with private-source metadata-only switches.
+    """Default Focus scope policy with private-source identity switches.
 
     Membership is an allow-list, not just routing metadata.  The policy permits an
     enrolled group chat to switch to either another group chat or an enrolled
-    private chat when configured. A private chat cannot export content, while
-    a metadata-only, handoff-free switch to another enrolled member is
-    permitted. Private->group and private->private content transfers remain
-    denied.
+    private chat when configured. A private chat cannot export content, while a
+    server-built transition identity handoff may accompany a switch to another
+    enrolled member. Private->group and private->private content transfers
+    remain denied.
     """
 
-    version = "focus-scope-v2-private-metadata"
+    version = "focus-scope-v3-private-transition-identity"
 
     def __init__(self, *, allow_group_to_private: bool = True) -> None:
         self._allow_group_to_private = bool(allow_group_to_private)
@@ -62,13 +69,18 @@ class ChatScopePolicy:
         target_chat_id: str,
         *,
         has_handoff: bool,
+        handoff_kind: HandoffKind | None = None,
     ) -> ScopeDecision:
         """Authorize a control-plane switch without weakening content policy."""
 
         if self.can_switch_without_handoff(definition, source_chat_id, target_chat_id):
+            if has_handoff and handoff_kind is not HandoffKind.TRANSITION_IDENTITY_V1:
+                return ScopeDecision(False, "private-source switch requires a transition identity handoff")
             if has_handoff:
-                return ScopeDecision(False, "private-source metadata-only switch must not include a handoff")
-            return ScopeDecision(True, "allowed as a private-source metadata-only Focus switch")
+                return ScopeDecision(True, "allowed as a private-source transition identity Focus switch")
+            # This remains a routing/eligibility answer.  The commit boundary
+            # requires the explicit identity handoff before changing state.
+            return ScopeDecision(True, "allowed as a private-source Focus switch")
         return self.decide(definition, source_chat_id, target_chat_id)
 
     def can_switch_without_handoff(
@@ -127,6 +139,44 @@ class ChatScopePolicy:
         """Reauthorize a handoff at injection time."""
 
         return self.decide(definition, source_chat_id, target_chat_id).allowed
+
+    def authorize_handoff(self, definition: FocusGroupDefinition, handoff: FocusHandoff) -> bool:
+        """Validate current policy and the explicit persisted handoff kind."""
+
+        if handoff.policy_version != self.version:
+            return False
+        source = self.member(definition, handoff.source_chat_id)
+        target = self.member(definition, handoff.target_chat_id)
+        if source is None or target is None or source.chat_id == target.chat_id:
+            return False
+
+        if source.kind is ChatKind.PRIVATE:
+            if target.kind not in {ChatKind.GROUP, ChatKind.PRIVATE}:
+                return False
+            if handoff.kind is not HandoffKind.TRANSITION_IDENTITY_V1:
+                return False
+            if handoff.parent_id is not None or not handoff.payload.is_identity_only():
+                return False
+            try:
+                source_label, target_label = trusted_transition_labels(
+                    definition,
+                    handoff.source_chat_id,
+                    handoff.target_chat_id,
+                )
+            except ValueError:
+                return False
+            return (
+                handoff.payload.source_display_name == source_label
+                and handoff.payload.target_display_name == target_label
+            )
+
+        if handoff.kind is not HandoffKind.CONTENT_V1:
+            return False
+        return self.decide(
+            definition,
+            handoff.source_chat_id,
+            handoff.target_chat_id,
+        ).allowed
 
     @staticmethod
     def member(definition: FocusGroupDefinition, chat_id: str) -> FocusMember | None:
