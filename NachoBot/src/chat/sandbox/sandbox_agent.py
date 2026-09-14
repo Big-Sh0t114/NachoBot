@@ -142,9 +142,10 @@ class SandboxAgentConfig:
     non_progress_limit: int = 3
     # The first-output watchdog only covers time to the first meaningful stream
     # output.  Once a real delta arrives, the inactivity ceiling above controls
-    # the remainder of that stream; there is no whole-agent timeout.  A minute
-    # gives models room to reason privately before emitting that first delta.
-    first_output_timeout_seconds: float = 60.0
+    # the remainder of that stream; there is no whole-agent timeout.  Match the
+    # initial silent window to the rolling inactivity ceiling so buffered
+    # providers are not failed over before their first observable chunk.
+    first_output_timeout_seconds: float = 120.0
 
     # Compatibility aliases for callers that used the longer names while the
     # setting was being introduced.  ``None`` means use ``non_progress_limit``.
@@ -186,6 +187,16 @@ _MAX_COMPLETION_REPORT_CHARS = 2000
 _MAX_COMPLETION_COUNT = 1000
 _MAX_FINALIZE_RESPONSE_CHARS = 4000
 _MAX_FINALIZE_RESPONSE_BYTES = 12000
+# OpenAI and Gemini clients poll their interrupt flag every 0.1 seconds while
+# an HTTP request task is pending, then give that nested task a bounded 0.25
+# second drain.  Keep the outer cooperative budget beyond both phases, with a
+# stable scheduling margin, before forcing the outer model task down.
+_STREAM_INTERRUPT_POLL_INTERVAL_SECONDS = 0.1
+_STREAM_CLIENT_DRAIN_TIMEOUT_SECONDS = 0.25
+_STREAM_COOPERATIVE_CLEANUP_SECONDS = (
+    _STREAM_INTERRUPT_POLL_INTERVAL_SECONDS + _STREAM_CLIENT_DRAIN_TIMEOUT_SECONDS + 0.05
+)
+_STREAM_FORCED_CLEANUP_SECONDS = 0.25
 _COMPLETION_REPORT_INSTRUCTIONS = (
     "这是一个已经结束的 Sandbox 任务，请现在直接用自然语言向用户说明结果。"
     "不要继续执行任务，不要让用户等待，不要请求工具，也不要输出结构化内容。"
@@ -1571,36 +1582,65 @@ class SandboxAgent:
             if activity_waiter is not None:
                 self._consume_task_exception(activity_waiter)
             if not stream_task.done():
-                cleanup = asyncio.create_task(self._cancel_stream_attempt(stream_task, interrupt_flag))
-                try:
-                    await asyncio.wait_for(asyncio.shield(cleanup), timeout=0.25)
-                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-                    cleanup.add_done_callback(self._consume_task_exception)
+                # The cleanup routine owns its cooperative and forced budgets.
+                # Await it directly so failover cannot begin while a provider's
+                # nested request task is still observing the interrupt flag.
+                await self._cancel_stream_attempt(stream_task, interrupt_flag)
             else:
                 self._consume_task_exception(stream_task)
 
     async def _cancel_stream_attempt(self, task: asyncio.Task[Any], interrupt_flag: asyncio.Event) -> None:
-        """Request cancellation and return without awaiting a resistant task."""
+        """Cooperatively stop a stream, then force it within a bounded budget.
+
+        Production model clients create a nested request task and poll
+        ``interrupt_flag`` before iterating the provider stream.  Waiting for
+        that poll before cancelling the outer task lets the client cancel and
+        await its child.  A resistant outer task is still force-cancelled and
+        detached only after its own bounded wait; its eventual result or
+        exception is consumed by the done callback.
+        """
 
         interrupt_flag.set()
         if task.done():
             self._consume_task_exception(task)
             return
+
+        try:
+            done, _ = await asyncio.wait(
+                {task},
+                timeout=_STREAM_COOPERATIVE_CLEANUP_SECONDS,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        except asyncio.CancelledError:
+            # The caller cancelled this cleanup coroutine.  Force ownership of
+            # the model task immediately, track its eventual result, and let
+            # the caller's cancellation propagate unchanged.
+            task.cancel()
+            task.add_done_callback(self._consume_task_exception)
+            raise
+
+        if task in done:
+            self._consume_task_exception(task)
+            return
+
         task.cancel()
         try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=0.2)
-        except asyncio.TimeoutError:
-            # A provider can ignore cancellation while honoring interrupt_flag
-            # later.  Leave it tracked and consume any eventual exception.
-            task.add_done_callback(self._consume_task_exception)
-            return
+            done, _ = await asyncio.wait(
+                {task},
+                timeout=_STREAM_FORCED_CLEANUP_SECONDS,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
         except asyncio.CancelledError:
+            task.cancel()
             task.add_done_callback(self._consume_task_exception)
-            return
-        except Exception:
+            raise
+        if task in done:
             self._consume_task_exception(task)
         else:
-            self._consume_task_exception(task)
+            # The provider may catch cancellation and remain alive.  Keep the
+            # task detached but handled so a late failure is not reported as
+            # an unhandled task exception.
+            task.add_done_callback(self._consume_task_exception)
 
     @staticmethod
     def _all_models_failure_outcome(reasons: Sequence[str]) -> SandboxAgentOutcome:

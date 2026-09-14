@@ -28,7 +28,7 @@ from openai.types.chat.chat_completion_chunk import ChoiceDelta
 
 from src.config.api_ada_configs import ModelInfo, APIProvider
 from src.common.logger import get_logger
-from .base_client import APIResponse, UsageRecord, BaseClient, client_registry
+from .base_client import APIResponse, UsageRecord, BaseClient, _cancel_and_drain_request_task, client_registry
 from ..exceptions import (
     RespParseException,
     NetworkConnectionError,
@@ -484,6 +484,7 @@ class OpenaiClient(BaseClient):
         # 将tool_options转换为OpenAI API所需的格式
         tools: Iterable[ChatCompletionToolParam] = _convert_tool_options(tool_options) if tool_options else NOT_GIVEN  # type: ignore
 
+        req_task: asyncio.Task[Any] | None = None
         try:
             if model_info.force_stream_mode:
                 req_task = asyncio.create_task(
@@ -500,8 +501,9 @@ class OpenaiClient(BaseClient):
                 )
                 while not req_task.done():
                     if interrupt_flag and interrupt_flag.is_set():
-                        # 如果中断量存在且被设置，则取消任务并抛出异常
-                        req_task.cancel()
+                        # The client owns the nested SDK request and must drain
+                        # it before exposing the abort to its caller.
+                        await _cancel_and_drain_request_task(req_task)
                         raise ReqAbortException("请求被外部信号中断")
                     await asyncio.sleep(0.1)  # 等待0.1秒后再次检查任务&中断信号量状态
 
@@ -523,14 +525,17 @@ class OpenaiClient(BaseClient):
                 )
                 while not req_task.done():
                     if interrupt_flag and interrupt_flag.is_set():
-                        # 如果中断量存在且被设置，则取消任务并抛出异常
-                        req_task.cancel()
+                        await _cancel_and_drain_request_task(req_task)
                         raise ReqAbortException("请求被外部信号中断")
                     await asyncio.sleep(0.1)  # 等待0.5秒后再次检查任务&中断信号量状态
 
                 # logger.info(f"OpenAI请求时间: {model_info.model_identifier}  {time.time() - start_time} \n{messages}")
 
                 resp, usage_record = async_response_parser(req_task.result())
+        except asyncio.CancelledError:
+            if req_task is not None:
+                await _cancel_and_drain_request_task(req_task)
+            raise
         except APIConnectionError as e:
             # 重封装APIConnectionError为NetworkConnectionError
             raise NetworkConnectionError() from e
