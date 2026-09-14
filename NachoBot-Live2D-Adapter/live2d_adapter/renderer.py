@@ -1,14 +1,26 @@
+import gc
 import io
 import os
 import queue
+import random
 import sys
 import time
+from collections import deque
 from collections.abc import Callable
 from typing import Any
 
 import pygame
 
+from .chat import DOCK_RESERVED_HEIGHT, DesktopPetChat
+from .config import DesktopPetConfig
+from .desktop_pet import (
+    DesktopPetState,
+    DesktopPetStateStore,
+    clamp_window_position,
+    initial_window_position,
+)
 from .model_adapter import Live2DModelAdapter
+from .tray import DesktopPetTray
 
 
 def _damped_step(
@@ -51,7 +63,10 @@ class Live2DRenderer:
         scale: float = 1.0,
         track_mouse: bool = False,
         on_click: Callable[[int], None] | None = None,
+        on_ready: Callable[[], None] | None = None,
+        on_exit: Callable[[], None] | None = None,
         model_adapter: Live2DModelAdapter | None = None,
+        desktop_pet_config: DesktopPetConfig | None = None,
     ):
         self.model_path = model_path
         self.logger = logger
@@ -63,13 +78,57 @@ class Live2DRenderer:
         self.scale = scale
         self.track_mouse = track_mouse
         self.on_click = on_click
+        self.on_ready = on_ready
+        self.on_exit = on_exit
         self.model_adapter = model_adapter or Live2DModelAdapter.from_model_path(model_path)
+        self.desktop_pet = desktop_pet_config or DesktopPetConfig()
+        self._state_store = DesktopPetStateStore(
+            self.desktop_pet.state_path if self.desktop_pet.remember_position else None,
+            logger,
+        )
+        self._desktop_state = (
+            self._state_store.load() if self.desktop_pet.enabled else DesktopPetState()
+        )
+        if self._desktop_state.scale is not None:
+            self.scale = max(
+                self.desktop_pet.min_scale,
+                min(self.desktop_pet.max_scale, self._desktop_state.scale),
+            )
+        self.offset_x = self._desktop_state.offset_x
+        self.offset_y = self._desktop_state.offset_y
+        self.always_on_top = (
+            self._desktop_state.always_on_top
+            if self._desktop_state.always_on_top is not None
+            else self.desktop_pet.always_on_top
+        )
+        self.click_through = (
+            self._desktop_state.click_through
+            if self._desktop_state.click_through is not None
+            else self.desktop_pet.click_through
+        )
+        self.window_visible = True
+        self._tray: DesktopPetTray | None = None
+        self._chat: DesktopPetChat | None = None
+        if self.desktop_pet.enabled and self.desktop_pet.chat.enabled:
+            self._chat = DesktopPetChat(
+                self.desktop_pet.chat,
+                self.desktop_pet.title,
+                self._enqueue_desktop_command,
+                self.logger,
+            )
+        self._left_drag_distance = 0
+        self._last_pet_click_at = 0.0
+        self._last_desktop_interaction_at = time.monotonic()
+        self._next_idle_motion_at = 0.0
+        self._last_chat_sync_at = 0.0
         self.running = False
         self.hwnd = None
         self.model = None
         self.live2d = None
         self._audio_channel = None
         self._current_sound = None
+        self._queued_sounds = deque()
+        self._audio_auto_speaking = False
         self.available_param_ids: list[str] = []
         self._parameter_indexes: dict[str, int] = {}
         self._lip_sync_param_ids: tuple[str, ...] = ()
@@ -190,7 +249,10 @@ class Live2DRenderer:
                 )  # Add RESIZABLE to try to fix clamping
 
             pygame.display.set_mode((self.width, self.height), flags)
-            pygame.display.set_caption("NachoBot Live2D Renderer")
+            pygame.display.set_caption(
+                self.desktop_pet.title if self.desktop_pet.enabled else "NachoBot Live2D Renderer"
+            )
+            self.hwnd = pygame.display.get_wm_info().get("window")
 
             if self.transparent:
                 try:
@@ -198,7 +260,6 @@ class Live2DRenderer:
                     import win32con
                     import win32api
 
-                    self.hwnd = pygame.display.get_wm_info()["window"]
                     self.logger.info(
                         f"[Live2D] Setting Layered Window for HWND: {self.hwnd}"
                     )
@@ -217,10 +278,14 @@ class Live2DRenderer:
                         self.hwnd, key_color, 0, win32con.LWA_COLORKEY
                     )
 
-                    # Set TopMost AND Force Size
+                    insert_after = (
+                        win32con.HWND_TOPMOST
+                        if not self.desktop_pet.enabled or self.always_on_top
+                        else win32con.HWND_NOTOPMOST
+                    )
                     win32gui.SetWindowPos(
                         self.hwnd,
-                        win32con.HWND_TOPMOST,
+                        insert_after,
                         0,
                         0,
                         self.width,
@@ -234,6 +299,9 @@ class Live2DRenderer:
                     self.logger.error(
                         f"[Live2D] Failed to set transparent window: {win_err}"
                     )
+
+            if self.desktop_pet.enabled and self.hwnd:
+                self._configure_desktop_window()
 
             self.logger.info("[Live2D] PyGame initialized successfully")
         except Exception as e:
@@ -400,7 +468,7 @@ class Live2DRenderer:
             scale_factor = self.scale
             self.logger.info(f"[Live2D] Scaling Model: {scale_factor}, Offset=(0, 0)")
             self.model.SetScale(scale_factor)
-            self.model.SetOffset(0, 0)
+            self.model.SetOffset(self.offset_x, self.offset_y)
 
             self.logger.info("[Live2D] ✓ Model loaded and resized successfully")
 
@@ -419,12 +487,12 @@ class Live2DRenderer:
 
         self.running = True
         self.logger.info("Live2D Renderer Started")
+        if self.on_ready is not None:
+            self.on_ready()
 
         clock = pygame.time.Clock()
         frame_count = 0
 
-        self.offset_x = 0.0
-        self.offset_y = 0.0
         self.dragging_model = False
         self.last_mouse_pos = (0, 0)
 
@@ -436,6 +504,20 @@ class Live2DRenderer:
         self.last_global_mouse_pos = (0, 0)
         self.btn_6_down = False
         self.btn_7_down = False
+
+        if self.desktop_pet.enabled:
+            self._schedule_next_idle_motion()
+            if self._chat is not None:
+                self._chat.start()
+                self._chat.show()
+            if self.desktop_pet.tray_icon:
+                self._tray = DesktopPetTray(
+                    self.desktop_pet.title,
+                    self._enqueue_desktop_command,
+                    self._desktop_flag,
+                    self.logger,
+                )
+                self._tray.start()
 
         while self.running:
             # Handle Window Dragging (Manual)
@@ -463,6 +545,7 @@ class Live2DRenderer:
                             win32con.SWP_NOSIZE | win32con.SWP_NOZORDER,
                         )
                         self.last_global_mouse_pos = (cur_x, cur_y)
+                        self._left_drag_distance += abs(dx) + abs(dy)
                 except Exception as e:
                     self.logger.error(f"Window Drag Error: {e}")
 
@@ -474,7 +557,11 @@ class Live2DRenderer:
 
                     win32gui.SetWindowPos(
                         self.hwnd,
-                        win32con.HWND_TOPMOST,
+                        (
+                            win32con.HWND_TOPMOST
+                            if not self.desktop_pet.enabled or self.always_on_top
+                            else win32con.HWND_NOTOPMOST
+                        ),
                         0,
                         0,
                         self.width,
@@ -502,26 +589,43 @@ class Live2DRenderer:
                     pygame.MOUSEWHEEL,
                 ):
                     self.last_interaction_time = pygame.time.get_ticks() / 1000.0
+                    self._last_desktop_interaction_at = time.monotonic()
+                    if self.desktop_pet.enabled:
+                        self._schedule_next_idle_motion()
 
                 if event.type == pygame.MOUSEBUTTONDOWN:
                     self.logger.info(
                         f"[Live2D] Mouse Down: Button {event.button} at {event.pos}"
                     )
-                    # Left Click to Pan Model (Button 1)
+                    # Desktop-pet mode uses left drag for the window. Hold Shift
+                    # while dragging to reposition the model inside its window.
                     if event.button == 1:
-                        self.dragging_model = True
-                        self.last_mouse_pos = pygame.mouse.get_pos()
+                        if self.desktop_pet.enabled and not (
+                            pygame.key.get_mods() & pygame.KMOD_SHIFT
+                        ):
+                            self.dragging_window = True
+                            self._left_drag_distance = 0
+                            try:
+                                import win32api
+
+                                self.last_global_mouse_pos = win32api.GetCursorPos()
+                            except Exception:
+                                self.dragging_window = False
+                        else:
+                            self.dragging_model = True
+                            self.last_mouse_pos = pygame.mouse.get_pos()
 
                     # Right Click to Move Window (Button 3)
                     elif event.button == 3:
-                        self.logger.info("[Live2D] Right Click: Start Window Drag")
-                        self.dragging_window = True
-                        try:
-                            import win32api
+                        if not self.desktop_pet.enabled:
+                            self.logger.info("[Live2D] Right Click: Start Window Drag")
+                            self.dragging_window = True
+                            try:
+                                import win32api
 
-                            self.last_global_mouse_pos = win32api.GetCursorPos()
-                        except:
-                            self.dragging_window = False
+                                self.last_global_mouse_pos = win32api.GetCursorPos()
+                            except Exception:
+                                self.dragging_window = False
 
                     elif event.button == 6:
                         # Side Button 1 (Back)
@@ -553,13 +657,23 @@ class Live2DRenderer:
 
                 if event.type == pygame.MOUSEBUTTONUP:
                     if event.button == 1:
-                        self.dragging_model = False
-                        self.logger.info(
-                            f"[Live2D] Mouse Up: Drag End. Offset: ({self.offset_x:.2f}, {self.offset_y:.2f})"
-                        )
+                        if self.desktop_pet.enabled and self.dragging_window:
+                            self.dragging_window = False
+                            if self._left_drag_distance <= 6:
+                                self._handle_pet_click(1)
+                            self._save_desktop_state()
+                        else:
+                            self.dragging_model = False
+                            self.logger.info(
+                                f"[Live2D] Mouse Up: Drag End. Offset: ({self.offset_x:.2f}, {self.offset_y:.2f})"
+                            )
+                            self._save_desktop_state()
                     elif event.button == 3:
-                        self.dragging_window = False
-                        self.logger.info("[Live2D] Right Click: End Window Drag")
+                        if self.desktop_pet.enabled:
+                            self._handle_pet_click(3)
+                        else:
+                            self.dragging_window = False
+                            self.logger.info("[Live2D] Right Click: End Window Drag")
                     elif event.button == 6:
                         self.btn_6_down = False
                         self.logger.info("[Live2D] Button 6 Up: Disable Gaze Tracking")
@@ -570,9 +684,11 @@ class Live2DRenderer:
                 if event.type == pygame.MOUSEWHEEL:
                     zoom_speed = 0.1
                     self.scale += event.y * zoom_speed
-                    if self.scale < 0.1:
-                        self.scale = 0.1
+                    minimum = self.desktop_pet.min_scale if self.desktop_pet.enabled else 0.1
+                    maximum = self.desktop_pet.max_scale if self.desktop_pet.enabled else 10.0
+                    self.scale = max(minimum, min(maximum, self.scale))
                     self.logger.info(f"[Live2D] Zoom: {self.scale:.2f}")
+                    self._save_desktop_state()
 
                 if event.type == pygame.MOUSEMOTION:
                     if self.dragging_model:
@@ -639,6 +755,11 @@ class Live2DRenderer:
                     break
                 except Exception as e:
                     self.logger.error(f"Command error: {e}")
+
+            self._maybe_play_desktop_idle()
+            self._sync_chat_window()
+
+            self._advance_audio_queue()
 
             if (
                 self.model
@@ -841,9 +962,337 @@ class Live2DRenderer:
             pygame.display.flip()
 
         # Cleanup
+        self._save_desktop_state()
+        if self._tray is not None:
+            self._tray.stop()
+            self._tray = None
+        if self._chat is not None:
+            self._chat.stop()
+        # live2d-py 0.7 owns native renderer and Cubism framework resources.
+        # Release them while the OpenGL context is still alive, and destroy the
+        # model before disposing the framework to avoid a Windows access
+        # violation during interpreter shutdown.
+        model = self.model
+        self.model = None
+        if model is not None:
+            model.DestroyRenderer()
+        del model
+        gc.collect()
+        self.live2d.glRelease()
         self.live2d.dispose()
         pygame.quit()
         self.logger.info("Live2D Renderer Stopped")
+        if self.on_exit is not None:
+            self.on_exit()
+
+    def _enqueue_desktop_command(self, command: str, value: Any = None) -> None:
+        self.command_queue.put((command, value))
+
+    def _desktop_flag(self, name: str) -> bool:
+        if name == "click_through":
+            return self.click_through
+        if name == "always_on_top":
+            return self.always_on_top
+        if name == "visible":
+            return self.window_visible
+        return False
+
+    def _get_work_area(self) -> tuple[int, int, int, int]:
+        import win32api
+        import win32con
+
+        monitor = win32api.MonitorFromWindow(
+            self.hwnd,
+            win32con.MONITOR_DEFAULTTONEAREST,
+        )
+        info = win32api.GetMonitorInfo(monitor)
+        return tuple(int(value) for value in info["Work"])
+
+    def _configure_desktop_window(self) -> None:
+        import win32con
+        import win32gui
+
+        win32gui.SetWindowText(self.hwnd, self.desktop_pet.title)
+        ex_style = win32gui.GetWindowLong(self.hwnd, win32con.GWL_EXSTYLE)
+        ex_style |= win32con.WS_EX_LAYERED
+        if self.desktop_pet.hide_from_taskbar:
+            ex_style |= win32con.WS_EX_TOOLWINDOW
+            ex_style &= ~win32con.WS_EX_APPWINDOW
+        if self.click_through:
+            ex_style |= win32con.WS_EX_TRANSPARENT
+        else:
+            ex_style &= ~win32con.WS_EX_TRANSPARENT
+        win32gui.SetWindowLong(self.hwnd, win32con.GWL_EXSTYLE, ex_style)
+
+        work_area = self._get_work_area()
+        if self._desktop_state.x is not None and self._desktop_state.y is not None:
+            x, y = self._desktop_state.x, self._desktop_state.y
+        else:
+            x, y = initial_window_position(
+                self.desktop_pet.start_position,
+                self.width,
+                self.height,
+                work_area,
+                self.desktop_pet.margin,
+            )
+        x, y = clamp_window_position(
+            x,
+            y,
+            self.width,
+            self.height,
+            work_area,
+            self.desktop_pet.margin,
+        )
+        if self._chat is not None:
+            x = max(
+                work_area[0] + self.desktop_pet.margin,
+                min(
+                    x,
+                    work_area[2] - self.width - self.desktop_pet.margin,
+                ),
+            )
+            maximum_y = (
+                work_area[3]
+                - self.height
+                - self.desktop_pet.margin
+                - DOCK_RESERVED_HEIGHT
+            )
+            y = max(work_area[1], min(y, maximum_y))
+        insert_after = (
+            win32con.HWND_TOPMOST if self.always_on_top else win32con.HWND_NOTOPMOST
+        )
+        flags = win32con.SWP_FRAMECHANGED | win32con.SWP_NOACTIVATE
+        win32gui.SetWindowPos(
+            self.hwnd,
+            insert_after,
+            x,
+            y,
+            self.width,
+            self.height,
+            flags,
+        )
+        self.logger.info(
+            f"[DesktopPet] window ready at ({x}, {y}), "
+            f"topmost={self.always_on_top}, click_through={self.click_through}"
+        )
+
+    def _set_click_through(self, enabled: bool) -> None:
+        if not self.hwnd:
+            return
+        import win32con
+        import win32gui
+
+        self.click_through = bool(enabled)
+        ex_style = win32gui.GetWindowLong(self.hwnd, win32con.GWL_EXSTYLE)
+        if self.click_through:
+            ex_style |= win32con.WS_EX_TRANSPARENT
+        else:
+            ex_style &= ~win32con.WS_EX_TRANSPARENT
+        win32gui.SetWindowLong(self.hwnd, win32con.GWL_EXSTYLE, ex_style)
+        win32gui.SetWindowPos(
+            self.hwnd,
+            0,
+            0,
+            0,
+            0,
+            0,
+            win32con.SWP_FRAMECHANGED
+            | win32con.SWP_NOMOVE
+            | win32con.SWP_NOSIZE
+            | win32con.SWP_NOZORDER
+            | win32con.SWP_NOACTIVATE,
+        )
+        self._save_desktop_state()
+        self._sync_chat_window(force=True)
+        if self._tray is not None:
+            self._tray.refresh()
+
+    def _set_topmost(self, enabled: bool) -> None:
+        if not self.hwnd:
+            return
+        import win32con
+        import win32gui
+
+        self.always_on_top = bool(enabled)
+        win32gui.SetWindowPos(
+            self.hwnd,
+            win32con.HWND_TOPMOST if enabled else win32con.HWND_NOTOPMOST,
+            0,
+            0,
+            0,
+            0,
+            win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE,
+        )
+        self._save_desktop_state()
+        self._sync_chat_window(force=True)
+        if self._tray is not None:
+            self._tray.refresh()
+
+    def _toggle_visibility(self) -> None:
+        if not self.hwnd:
+            return
+        import win32con
+        import win32gui
+
+        self.window_visible = not self.window_visible
+        win32gui.ShowWindow(
+            self.hwnd,
+            win32con.SW_SHOWNA if self.window_visible else win32con.SW_HIDE,
+        )
+        if self.window_visible:
+            self._set_topmost(self.always_on_top)
+        self._sync_chat_window(force=True)
+        if self._tray is not None:
+            self._tray.refresh()
+
+    def _reset_desktop_position(self) -> None:
+        if not self.hwnd:
+            return
+        import win32con
+        import win32gui
+
+        x, y = initial_window_position(
+            self.desktop_pet.start_position,
+            self.width,
+            self.height,
+            self._get_work_area(),
+            self.desktop_pet.margin,
+        )
+        if self._chat is not None:
+            y = max(
+                self._get_work_area()[1],
+                y - DOCK_RESERVED_HEIGHT,
+            )
+        win32gui.SetWindowPos(
+            self.hwnd,
+            win32con.HWND_TOPMOST if self.always_on_top else win32con.HWND_NOTOPMOST,
+            x,
+            y,
+            self.width,
+            self.height,
+            win32con.SWP_NOACTIVATE,
+        )
+        self.scale = max(
+            self.desktop_pet.min_scale,
+            min(self.desktop_pet.max_scale, self.desktop_pet.min_scale + 0.55),
+        )
+        self.offset_x = 0.0
+        self.offset_y = 0.0
+        self._save_desktop_state()
+        self._sync_chat_window(force=True)
+
+    def _sync_chat_window(self, *, force: bool = False) -> None:
+        if self._chat is None or not self.hwnd:
+            return
+        now = time.monotonic()
+        if not force and now - self._last_chat_sync_at < 0.08:
+            return
+        self._last_chat_sync_at = now
+        try:
+            import win32gui
+
+            pet_rect = tuple(int(value) for value in win32gui.GetWindowRect(self.hwnd))
+            self._chat.sync_anchor(
+                pet_rect,
+                self._get_work_area(),
+                visible=self.window_visible,
+                topmost=self.always_on_top,
+                click_through=self.click_through,
+            )
+        except Exception as exc:
+            self.logger.debug(f"Desktop chat position unavailable: {exc}")
+
+    def _save_desktop_state(self) -> None:
+        if not self.desktop_pet.enabled or not self.desktop_pet.remember_position:
+            return
+        x: int | None = None
+        y: int | None = None
+        if self.hwnd:
+            try:
+                import win32gui
+
+                left, top, _right, _bottom = win32gui.GetWindowRect(self.hwnd)
+                x, y = int(left), int(top)
+            except Exception as exc:
+                self.logger.debug(f"Desktop pet window position unavailable: {exc}")
+        self._state_store.save(
+            DesktopPetState(
+                x=x,
+                y=y,
+                scale=self.scale,
+                offset_x=self.offset_x,
+                offset_y=self.offset_y,
+                always_on_top=self.always_on_top,
+                click_through=self.click_through,
+                visible=True,
+            )
+        )
+
+    def _schedule_next_idle_motion(self) -> None:
+        minimum = self.desktop_pet.idle_motion_min_seconds
+        maximum = self.desktop_pet.idle_motion_max_seconds
+        self._next_idle_motion_at = time.monotonic() + random.uniform(minimum, maximum)
+
+    def _start_random_motion(self, requested_group: str, priority: int = 3) -> bool:
+        if not self.model:
+            return False
+        group = self.model_adapter.resolve_motion_group(requested_group)
+        if group is None:
+            self.logger.warning(f"[Live2D] Motion Group does not exist: {requested_group}")
+            return False
+        try:
+            self._motion_in_progress = True
+            self._motion_is_initial_idle = False
+            self._standby_smoothing_active = False
+            self.model.StartRandomMotion(group, priority)
+            self._schedule_next_idle_motion()
+            return True
+        except Exception as exc:
+            self._enter_standby()
+            self.logger.error(f"[Live2D] Failed to start motion {group}: {exc}")
+            return False
+
+    def _maybe_play_desktop_idle(self) -> None:
+        if (
+            not self.desktop_pet.enabled
+            or not self.window_visible
+            or not self.desktop_pet.idle_motion_groups
+            or self._motion_in_progress
+            or self.dragging_model
+            or self.dragging_window
+        ):
+            return
+        now = time.monotonic()
+        if now < self._next_idle_motion_at:
+            return
+        if now - self._last_desktop_interaction_at < self.desktop_pet.idle_motion_min_seconds:
+            self._schedule_next_idle_motion()
+            return
+        group = random.choice(self.desktop_pet.idle_motion_groups)
+        self.logger.info(f"[DesktopPet] idle interaction: {group}")
+        if not self._start_random_motion(group, priority=1):
+            self._schedule_next_idle_motion()
+
+    def _handle_pet_click(self, button: int) -> None:
+        now = time.monotonic()
+        self._last_desktop_interaction_at = now
+        if self.on_click is not None:
+            self.on_click(button)
+        if button == 1:
+            is_double_click = now - self._last_pet_click_at <= 0.4
+            motion = (
+                self.desktop_pet.double_click_motion
+                if is_double_click
+                else self.desktop_pet.left_click_motion
+            )
+            self._last_pet_click_at = now
+            if is_double_click and self._chat is not None:
+                self._chat.open()
+        else:
+            motion = self.desktop_pet.right_click_motion
+        if motion:
+            self._start_random_motion(motion)
+        self._schedule_next_idle_motion()
 
     def _get_model_relative_coords(self, x, y):
         """Helper to get coordinates relative to the model center (considering offset and scale)"""
@@ -1089,14 +1538,53 @@ class Live2DRenderer:
             self.logger.error(f"[Live2D] Failed to start motion {group}: {exc}")
 
     def _handle_command(self, cmd_type: str, cmd_data: Any):
+        if cmd_type == "desktop_open_chat":
+            if self._chat is not None:
+                self._chat.open()
+            return
+        if cmd_type == "desktop_toggle_visibility":
+            self._toggle_visibility()
+            return
+        if cmd_type == "desktop_toggle_click_through":
+            self._set_click_through(not self.click_through)
+            return
+        if cmd_type == "desktop_toggle_topmost":
+            self._set_topmost(not self.always_on_top)
+            return
+        if cmd_type == "desktop_reset_position":
+            self._reset_desktop_position()
+            return
+        if cmd_type == "desktop_quit":
+            self.running = False
+            return
         if cmd_type == "play_audio":
             self._play_audio(cmd_data)
+            return
+        if cmd_type == "queue_audio":
+            self._queue_audio(cmd_data)
+            return
+        if cmd_type == "play_chat_audio":
+            if self._play_audio(cmd_data):
+                self.is_speaking = True
+                self._audio_auto_speaking = True
             return
         if cmd_type == "stop_audio":
             self._stop_audio()
             return
 
         if not self.model:
+            return
+
+        if cmd_type == "desktop_motion":
+            self._start_random_motion(str(cmd_data or "Tap"))
+            return
+        if cmd_type == "canonical_action":
+            action_id = str(cmd_data or "").strip().upper()
+            motion_group = self.model_adapter.resolve_action(action_id)
+            if motion_group:
+                self._start_motion(motion_group)
+            else:
+                self.logger.warning(f"[Live2D] Canonical action is unavailable: {action_id}")
             return
 
         # self.logger.debug(f"Live2D Command: {cmd_type} -> {cmd_data}")
@@ -1112,23 +1600,10 @@ class Live2DRenderer:
                 requested_param = str(cmd_data.get("param") or "").strip()
                 target_val = cmd_data.get("value")
                 duration = cmd_data.get("duration", 1.0)
-                parameter_ids = self.model_adapter.resolve_parameter(requested_param)
-                if not parameter_ids:
-                    self.logger.warning(
-                        f"[Live2D] Ignored unresolved tween parameter: {requested_param}"
-                    )
-                    return
-                start_time = pygame.time.get_ticks() / 1000.0
-                for parameter_id in parameter_ids:
-                    self.active_tweens.append(
-                        {
-                            "param": parameter_id,
-                            "start_val": self._get_parameter_value(parameter_id),
-                            "end_val": target_val,
-                            "start_time": start_time,
-                            "duration": duration,
-                        }
-                    )
+                self._queue_parameter_tweens(
+                    {requested_param: target_val},
+                    duration=float(duration),
+                )
 
         elif cmd_type == "body_action":
             self.logger.info(f"[Live2D] Body Action: {cmd_data}")
@@ -1224,20 +1699,143 @@ class Live2DRenderer:
                     self.logger.info("[Live2D] Resetting expressions to the model default")
                     if hasattr(self.model, "ResetExpressions"):
                         self.model.ResetExpressions()
+                    self._apply_emotion_parameter_pose(emotion_name)
                 else:
-                    self.logger.warning(
-                        f"[Live2D] No expression mapping found for: {emotion_name}"
-                    )
+                    if self._apply_emotion_parameter_pose(emotion_name):
+                        self.logger.info(
+                            f"[Live2D] Emotion parameter pose: {emotion_name}"
+                        )
+                    else:
+                        self.logger.warning(
+                            f"[Live2D] No expression mapping found for: {emotion_name}"
+                        )
 
         elif cmd_type == "speaking":
             self.is_speaking = bool(cmd_data)
             self.logger.info(f"[Live2D] Speaking state: {self.is_speaking}")
 
-    def _play_audio(self, audio_data: Any) -> None:
+    def _queue_parameter_tweens(
+        self,
+        values: dict[str, Any],
+        *,
+        duration: float = 0.35,
+    ) -> bool:
+        start_time = pygame.time.get_ticks() / 1000.0
+        queued = False
+        for requested_param, target_value in values.items():
+            parameter_ids = self.model_adapter.resolve_parameter(requested_param)
+            if not parameter_ids:
+                self.logger.debug(
+                    f"[Live2D] Emotion parameter unavailable: {requested_param}"
+                )
+                continue
+            for parameter_id in parameter_ids:
+                self.active_tweens = [
+                    tween
+                    for tween in self.active_tweens
+                    if tween.get("param") != parameter_id
+                ]
+                self.active_tweens.append(
+                    {
+                        "param": parameter_id,
+                        "start_val": self._get_parameter_value(parameter_id),
+                        "end_val": float(target_value),
+                        "start_time": start_time,
+                        "duration": max(0.05, float(duration)),
+                    }
+                )
+                queued = True
+        return queued
+
+    def _apply_emotion_parameter_pose(self, emotion_name: str) -> bool:
+        """Provide useful emotion feedback for models without expression files."""
+
+        normalized = emotion_name.strip().casefold()
+        aliases = {
+            "default": "normal",
+            "neutral": "normal",
+            "普通": "normal",
+            "默认": "normal",
+            "happy": "joy",
+            "smile": "joy",
+            "开心": "joy",
+            "高兴": "joy",
+            "sad": "sorrow",
+            "悲伤": "sorrow",
+            "难过": "sorrow",
+            "anger": "angry",
+            "mad": "angry",
+            "生气": "angry",
+            "愤怒": "angry",
+            "surprise": "fear",
+            "surprised": "fear",
+            "惊讶": "fear",
+            "害羞": "shy",
+            "脸红": "shy",
+        }
+        normalized = aliases.get(normalized, normalized)
+        neutral = {
+            "ParamCheek": 0.0,
+            "MOUTH_OPEN": 0.0,
+            "MOUTH_FORM": 0.0,
+            "ParamEyeLSmile": 0.0,
+            "ParamEyeRSmile": 0.0,
+            "BROW_L_Y": 0.0,
+            "BROW_R_Y": 0.0,
+            "ANGLE_Y": 0.0,
+            "ANGLE_Z": 0.0,
+        }
+        poses: dict[str, dict[str, float]] = {
+            "normal": neutral,
+            "joy": {
+                **neutral,
+                "ParamCheek": 0.75,
+                "MOUTH_FORM": 0.85,
+                "ParamEyeLSmile": 0.8,
+                "ParamEyeRSmile": 0.8,
+            },
+            "shy": {
+                **neutral,
+                "ParamCheek": 1.0,
+                "MOUTH_FORM": 0.25,
+                "ANGLE_Z": 6.0,
+            },
+            "angry": {
+                **neutral,
+                "MOUTH_FORM": -0.75,
+                "BROW_L_Y": -0.65,
+                "BROW_R_Y": -0.65,
+            },
+            "disgust": {
+                **neutral,
+                "MOUTH_FORM": -0.9,
+                "BROW_L_Y": -0.25,
+                "BROW_R_Y": 0.2,
+            },
+            "fear": {
+                **neutral,
+                "MOUTH_OPEN": 0.55,
+                "BROW_L_Y": 0.65,
+                "BROW_R_Y": 0.65,
+            },
+            "sorrow": {
+                **neutral,
+                "MOUTH_FORM": -0.55,
+                "BROW_L_Y": 0.35,
+                "BROW_R_Y": 0.35,
+                "ANGLE_Y": -5.0,
+            },
+        }
+        pose = poses.get(normalized)
+        if pose is None:
+            return False
+        return self._queue_parameter_tweens(pose)
+
+    def _play_audio(self, audio_data: Any) -> bool:
         """Play WAV data inside the renderer process via PyGame's audio device."""
         if not isinstance(audio_data, bytes) or not audio_data:
             self.logger.warning("[Live2D] Ignored empty or invalid audio command")
-            return
+            return False
 
         try:
             if not pygame.mixer.get_init():
@@ -1247,11 +1845,64 @@ class Live2DRenderer:
             channel = sound.play()
             if channel is None:
                 self.logger.warning("[Live2D] No PyGame mixer channel is available for TTS")
-                return
+                return False
             self._current_sound = sound
             self._audio_channel = channel
+            return True
         except pygame.error as exc:
             self.logger.error(f"[Live2D] Failed to play TTS audio: {exc}")
+            return False
+
+    def _queue_audio(self, item: Any) -> bool:
+        """Append one short WAV block without interrupting the current block."""
+        if not isinstance(item, dict):
+            self.logger.warning("[Live2D] Ignored invalid queued audio command")
+            return False
+        audio_data = item.get("audio")
+        if not isinstance(audio_data, bytes) or not audio_data:
+            self.logger.warning("[Live2D] Ignored empty queued audio block")
+            return False
+
+        try:
+            if not pygame.mixer.get_init():
+                pygame.mixer.init()
+            if item.get("reset"):
+                self._stop_audio()
+                self.logger.info("[Live2D] Starting streamed TTS playback")
+            sound = pygame.mixer.Sound(file=io.BytesIO(audio_data))
+            if self._audio_channel is not None and self._audio_channel.get_busy():
+                self._queued_sounds.append(sound)
+            else:
+                channel = sound.play()
+                if channel is None:
+                    self.logger.warning("[Live2D] No PyGame mixer channel is available for streamed TTS")
+                    return False
+                self._current_sound = sound
+                self._audio_channel = channel
+            self.is_speaking = True
+            self._audio_auto_speaking = True
+            return True
+        except pygame.error as exc:
+            self.logger.error(f"[Live2D] Failed to queue streamed TTS audio: {exc}")
+            return False
+
+    def _advance_audio_queue(self) -> None:
+        if not self._audio_auto_speaking:
+            return
+        if self._audio_channel is not None and self._audio_channel.get_busy():
+            return
+        if self._queued_sounds:
+            sound = self._queued_sounds.popleft()
+            channel = sound.play()
+            if channel is not None:
+                self._current_sound = sound
+                self._audio_channel = channel
+                return
+            self.logger.warning("[Live2D] Could not continue streamed TTS playback")
+        self._stop_audio()
+        self.logger.info("[Live2D] Streamed TTS playback finished")
+        self.target_x = 0.0
+        self.target_y = 0.0
 
     def _stop_audio(self) -> None:
         channel = self._audio_channel
@@ -1262,3 +1913,7 @@ class Live2DRenderer:
                 pass
         self._audio_channel = None
         self._current_sound = None
+        self._queued_sounds.clear()
+        if self._audio_auto_speaking:
+            self.is_speaking = False
+        self._audio_auto_speaking = False

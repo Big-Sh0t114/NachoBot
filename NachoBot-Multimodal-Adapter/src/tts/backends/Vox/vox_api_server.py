@@ -10,6 +10,7 @@ import os
 import sys
 import io
 import re
+import random
 
 import logging
 import argparse
@@ -69,6 +70,18 @@ def _resolve_optional_audio_path(raw_path: str, label: str) -> Optional[str]:
         logger.warning("%s不存在: %s", label, _log_safe(path))
         return None
     return str(path)
+
+
+def _apply_inference_seed(seed: int) -> None:
+    """Make a configured voice preset reproducible across requests."""
+    if seed < 0:
+        return
+    normalized = int(seed) % (2**32)
+    random.seed(normalized)
+    np.random.seed(normalized)
+    torch.manual_seed(normalized)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(normalized)
 
 
 # ======== 文本切句逻辑（仿 GPT-SoVITS） ========
@@ -173,6 +186,7 @@ app = FastAPI(title="VoxCPM TTS API", version="1.0")
 # ======== 全局模型实例 ========
 voxcpm_model = None
 model_sample_rate = 24000  # VoxCPM 默认采样率
+loaded_lora_weights_path = ""
 
 
 def numpy_to_wav_bytes(sample_rate: int, audio_data: np.ndarray) -> bytes:
@@ -226,7 +240,7 @@ def load_model(
     enable_denoiser: bool = True,
 ):
     """加载 VoxCPM 模型"""
-    global voxcpm_model, model_sample_rate
+    global voxcpm_model, model_sample_rate, loaded_lora_weights_path
 
     import json
     from voxcpm import VoxCPM
@@ -248,9 +262,11 @@ def load_model(
     )
 
     lora_dir = _resolve_existing_dir(lora_weights_path, "LoRA权重目录")
+    loaded_lora_weights_path = ""
     if lora_dir:
         logger.info("Loading LoRA weights from: %s", lora_dir)
         kwargs["lora_weights_path"] = str(lora_dir)
+        loaded_lora_weights_path = str(lora_dir)
 
         from voxcpm.model.voxcpm import LoRAConfig
 
@@ -291,6 +307,7 @@ async def tts(
     prompt_wav_path: str = Query("", description="提示音频路径（极致克隆，默认同reference_wav_path）"),
     cfg_value: float = Query(2.0, description="CFG引导强度"),
     inference_timesteps: int = Query(10, description="LocDiT迭代步数"),
+    seed: int = Query(-1, description="固定随机种子；负数表示随机"),
     denoise: str = Query("false", description="兼容参数，降噪功能已禁用"),
     normalize: str = Query("false", description="是否文本规范化"),
     media_type: str = Query("wav", description="音频格式（仅支持wav）"),
@@ -357,6 +374,7 @@ async def tts(
         logger.info("  切句结果: %s", [_log_safe(s[:30] + "..." if len(s) > 30 else s) for s in segments])
 
     try:
+        _apply_inference_seed(seed)
         # 构建公共生成参数
         base_kwargs = dict(
             cfg_value=float(cfg_value),
@@ -427,6 +445,7 @@ async def tts_stream(
     prompt_wav_path: str = Query("", description="提示音频路径（极致克隆，默认同reference_wav_path）"),
     cfg_value: float = Query(2.0, description="CFG引导强度"),
     inference_timesteps: int = Query(10, description="LocDiT迭代步数"),
+    seed: int = Query(-1, description="固定随机种子；负数表示随机"),
     denoise: str = Query("true", description="是否降噪"),
     normalize: str = Query("false", description="是否文本规范化"),
     media_type: str = Query("wav", description="音频格式（仅支持wav）"),
@@ -478,6 +497,7 @@ async def tts_stream(
 
     def generate_pcm_stream():
         try:
+            _apply_inference_seed(seed)
             base_kwargs = dict(
                 cfg_value=float(cfg_value),
                 inference_timesteps=int(inference_timesteps),
@@ -531,6 +551,8 @@ async def health():
         "status": "ok",
         "model_loaded": voxcpm_model is not None,
         "sample_rate": model_sample_rate,
+        "lora_loaded": bool(loaded_lora_weights_path),
+        "lora_weights_path": loaded_lora_weights_path,
     }
 
 

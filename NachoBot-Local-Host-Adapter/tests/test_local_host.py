@@ -4,7 +4,9 @@ import asyncio
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 ADAPTER_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ADAPTER_DIR))
@@ -70,8 +72,20 @@ class LocalHostTests(unittest.TestCase):
         self.assertEqual(message.message_info.platform, "local.host")
         self.assertEqual(message.message_info.group_info.group_id, "studio")
         self.assertEqual(message.message_info.user_info.user_id, "host")
-        self.assertEqual(message.message_segment.data, "介绍一下今天的主题")
-        self.assertEqual(message.message_info.template_info.template_name, "local_host_reply")
+        self.assertIn("介绍一下今天的主题", message.message_segment.data)
+        self.assertIn("回答风格要求", message.message_segment.data)
+        self.assertIsNone(message.message_info.template_info)
+        self.assertEqual(
+            message.message_info.additional_config["runtime_capabilities"]["reply_delivery"],
+            "json_envelope",
+        )
+        self.assertFalse(
+            message.message_info.additional_config["runtime_capabilities"]["mid_term_memory"]
+        )
+        self.assertEqual(
+            message.message_info.additional_config["runtime_capabilities"]["reply_model_group"],
+            "realtime_replyer",
+        )
 
     def test_direct_announcement_writes_obs_subtitle(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -81,6 +95,219 @@ class LocalHostTests(unittest.TestCase):
             result = asyncio.run(output.deliver("<ZH>晚上好</ZH>"))
             self.assertEqual(result, "晚上好")
             self.assertEqual(subtitle.read_text(encoding="utf-8"), "晚上好")
+
+    def test_closed_mouth_delivery_writes_text_without_synthesizing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            subtitle = Path(directory) / "subtitle.txt"
+            config = make_config(subtitle)
+            output = ReplyOutput(
+                config.output,
+                replace(config.tts, enabled=True),
+                config.neural_tts,
+                config.live2d,
+            )
+
+            async def fail_if_called(*_args, **_kwargs):
+                raise AssertionError("closed-mouth delivery must not synthesize audio")
+
+            output._synthesize = fail_if_called
+            result = asyncio.run(
+                output.deliver("只显示文字", synthesize_audio=False)
+            )
+
+            self.assertEqual(result, "只显示文字")
+            self.assertEqual(subtitle.read_text(encoding="utf-8"), "只显示文字")
+            self.assertFalse(output.audio_ready)
+
+    def test_voxcpm_is_preferred_and_uses_configured_timeout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            subtitle = Path(directory) / "subtitle.txt"
+            config = make_config(subtitle)
+            output = ReplyOutput(
+                config.output,
+                replace(config.tts, enabled=True, timeout_seconds=180),
+                config.neural_tts,
+                config.live2d,
+            )
+            observed_timeout = []
+            original_wait_for = asyncio.wait_for
+
+            async def synthesize_voxcpm(*_args, **_kwargs):
+                return b"RIFF0000WAVEvoxcpm"
+
+            async def capture_wait_for(awaitable, *, timeout):
+                observed_timeout.append(timeout)
+                return await original_wait_for(awaitable, timeout=timeout)
+
+            def fail_sapi(_text):
+                raise AssertionError("SAPI must not run when VoxCPM succeeds")
+
+            output._synthesize = synthesize_voxcpm
+            output._synthesize_sapi = fail_sapi
+            with patch("outputs.asyncio.wait_for", capture_wait_for):
+                asyncio.run(output.deliver("优先使用本地神经语音"))
+
+            self.assertEqual(observed_timeout, [180.0])
+            self.assertEqual(output.audio_source, "local_voxcpm")
+            self.assertTrue(output.audio_ready)
+
+    def test_sapi_is_used_only_after_voxcpm_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            subtitle = Path(directory) / "subtitle.txt"
+            config = make_config(subtitle)
+            output = ReplyOutput(
+                config.output,
+                replace(config.tts, enabled=True),
+                config.neural_tts,
+                config.live2d,
+            )
+
+            async def unavailable_voxcpm(*_args, **_kwargs):
+                return b""
+
+            output._synthesize = unavailable_voxcpm
+            output._synthesize_sapi = lambda _text: b"RIFF0000WAVEsapi"
+            asyncio.run(output.deliver("神经语音失败后回退"))
+
+            self.assertEqual(output.audio_source, "local_sapi")
+            self.assertTrue(output.audio_ready)
+
+    def test_live2d_prefers_streaming_voxcpm_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            subtitle = Path(directory) / "subtitle.txt"
+            config = make_config(subtitle)
+            output = ReplyOutput(
+                config.output,
+                replace(config.tts, enabled=True),
+                config.neural_tts,
+                replace(config.live2d, enabled=True),
+            )
+
+            async def stream_voxcpm(*_args, **_kwargs):
+                return b"RIFF0000WAVEstream", True
+
+            async def fail_complete_wav(*_args, **_kwargs):
+                raise AssertionError("complete WAV path must not run after streaming succeeds")
+
+            output._synthesize_streaming = stream_voxcpm
+            output._synthesize = fail_complete_wav
+            audio, streamed = asyncio.run(output._synthesize_preferred("流式语音"))
+
+            self.assertEqual(audio, b"RIFF0000WAVEstream")
+            self.assertTrue(streamed)
+
+    def test_speech_is_split_at_commas_without_tiny_fragments(self):
+        segments = ReplyOutput._split_speech_segments(
+            "好的，我们先读第一段，嗯，再继续读后面的内容。",
+            min_chars=4,
+        )
+
+        self.assertEqual(
+            segments,
+            ["好的，我们先读第一段，", "嗯，再继续读后面的内容。"],
+        )
+
+    def test_later_comma_clauses_are_grouped_to_reduce_model_calls(self):
+        segments = ReplyOutput._split_speech_segments(
+            "我们先说第一段，后面这句话正在准备，如果还没准备好，"
+            "我会稍微想一下，然后再自然地接着告诉你。",
+            min_chars=4,
+            target_chars=16,
+        )
+
+        self.assertEqual(len(segments), 3)
+        self.assertEqual(segments[0], "我们先说第一段，")
+        self.assertTrue(segments[-1].endswith("告诉你。"))
+
+    def test_model_dead_air_is_trimmed_without_resampling_speech(self):
+        sample_rate = 1000
+        silence = b"\x00\x00"
+        voiced = int(1200).to_bytes(2, "little", signed=True)
+        pcm = silence * 300 + voiced * 200 + silence * 400
+
+        trimmed = ReplyOutput._trim_pcm_silence(pcm, sample_rate)
+
+        self.assertLess(len(trimmed), len(pcm))
+        self.assertGreaterEqual(len(trimmed), 400)
+        self.assertIn(voiced * 20, trimmed)
+
+    def test_segmented_playback_prefetches_next_phrase_without_filler(self):
+        with tempfile.TemporaryDirectory() as directory:
+            subtitle = Path(directory) / "subtitle.txt"
+            config = make_config(subtitle)
+            output = ReplyOutput(
+                config.output,
+                replace(
+                    config.tts,
+                    enabled=True,
+                    segmented_playback=True,
+                    segment_wait_seconds=0.03,
+                    segment_min_chars=2,
+                ),
+                config.neural_tts,
+                replace(config.live2d, enabled=True),
+            )
+            sent: list[tuple[int, bool]] = []
+            sample_rate = 1000
+
+            async def request(text, **_kwargs):
+                if text.startswith("第二"):
+                    await asyncio.sleep(0.01)
+                return b"\x01\x00" * 250, sample_rate
+
+            async def send(pcm, *, sample_rate, reset):
+                sent.append((len(pcm), reset))
+                return True
+
+            output._request_stream_pcm = request
+            output._send_stream_block = send
+            result = asyncio.run(output._synthesize_streaming("第一句话，第二句话。"))
+
+            self.assertIsNotNone(result)
+            self.assertEqual(output.last_stream_segment_count, 2)
+            self.assertEqual(output.last_stream_filler_count, 0)
+            self.assertEqual(sent, [(500, True), (500, False)])
+
+    def test_segmented_playback_adds_one_pause_and_same_voice_filler_when_late(self):
+        with tempfile.TemporaryDirectory() as directory:
+            subtitle = Path(directory) / "subtitle.txt"
+            config = make_config(subtitle)
+            output = ReplyOutput(
+                config.output,
+                replace(
+                    config.tts,
+                    enabled=True,
+                    segmented_playback=True,
+                    segment_wait_seconds=0.03,
+                    segment_filler_enabled=True,
+                    segment_min_chars=2,
+                ),
+                config.neural_tts,
+                replace(config.live2d, enabled=True),
+            )
+            sample_rate = 1000
+            output._filler_audio = (b"\x02\x00" * 50, sample_rate)
+            sent: list[tuple[bytes, bool]] = []
+
+            async def request(text, **_kwargs):
+                if text.startswith("第二"):
+                    await asyncio.sleep(0.16)
+                return b"\x01\x00" * 80, sample_rate
+
+            async def send(pcm, *, sample_rate, reset):
+                sent.append((pcm, reset))
+                return True
+
+            output._request_stream_pcm = request
+            output._send_stream_block = send
+            result = asyncio.run(output._synthesize_streaming("第一句话，第二句话。"))
+
+            self.assertIsNotNone(result)
+            self.assertEqual(output.last_stream_segment_count, 2)
+            self.assertEqual(output.last_stream_filler_count, 1)
+            self.assertTrue(sent[0][1])
+            self.assertTrue(all(not reset for _, reset in sent[1:]))
+            self.assertIn(output._filler_audio[0], [pcm for pcm, _ in sent])
 
     def test_reply_metadata_is_parsed(self):
         text, emotion, action = LocalHostAdapter._parse_reply_metadata(

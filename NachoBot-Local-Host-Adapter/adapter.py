@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +40,11 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 NACHOBOT_DIR = ROOT_DIR / "NachoBot"
 if str(NACHOBOT_DIR) not in sys.path:
     sys.path.insert(0, str(NACHOBOT_DIR))
+ACTION_ADAPTER_DIR = ROOT_DIR / "NachoBot-Live2D-Adapter" / "live2d_adapter"
+if str(ACTION_ADAPTER_DIR) not in sys.path:
+    sys.path.insert(0, str(ACTION_ADAPTER_DIR))
+
+from action_adapter import ActionAdapter  # noqa: E402
 
 from ncnk_message import (  # noqa: E402
     BaseMessageInfo,
@@ -48,7 +55,6 @@ from ncnk_message import (  # noqa: E402
     Router,
     Seg,
     TargetConfig,
-    TemplateInfo,
     UserInfo,
 )
 
@@ -62,6 +68,7 @@ class LocalHostAdapter:
         self.router = Router(RouteConfig(route_config={config.nachobot.platform: target}))
         self.router.register_class_handler(self.handle_from_nachobot)
         self.output = ReplyOutput(config.output, config.tts, config.neural_tts, config.live2d)
+        self.action_adapter = ActionAdapter(logger)
         self._router_task: asyncio.Task | None = None
         self._request_count = 0
         self._reply_count = 0
@@ -78,13 +85,31 @@ class LocalHostAdapter:
         self._core_reachable = False
         self._last_core_probe = 0.0
         self._speech_version = 0
+        self._tts_language = "auto"
+        self._pending_tts_languages: deque[str] = deque()
+        self._pending_speech_enabled: deque[bool] = deque()
+        self._pending_prompts: deque[str] = deque()
+        self._latest_emotion = "normal"
+        self._latest_action = ""
         self._dance_style = "idle"
         self._auto_announcement_index = 0
         self._auto_announcement_task: asyncio.Task | None = None
+        self._tts_filler_warmup_task: asyncio.Task | None = None
+        self._desktop_pet_mode = os.getenv(
+            "NACHOBOT_LOCAL_HOST_DESKTOP_MODE", ""
+        ).strip().casefold() in {"1", "true", "yes", "on"}
 
     async def start(self) -> None:
         self._router_task = asyncio.create_task(self._router_loop(), name="local-host-core-router")
-        if self.config.auto_announcements.enabled and self.config.auto_announcements.messages:
+        self._tts_filler_warmup_task = asyncio.create_task(
+            self._warm_tts_filler_after_startup(),
+            name="local-host-tts-filler-warmup",
+        )
+        if (
+            not self._desktop_pet_mode
+            and self.config.auto_announcements.enabled
+            and self.config.auto_announcements.messages
+        ):
             self._auto_announcement_task = asyncio.create_task(
                 self._auto_announcement_loop(), name="local-host-auto-announcements"
             )
@@ -96,7 +121,16 @@ class LocalHostAdapter:
         if self._auto_announcement_task:
             self._auto_announcement_task.cancel()
             await asyncio.gather(self._auto_announcement_task, return_exceptions=True)
+        if self._tts_filler_warmup_task:
+            self._tts_filler_warmup_task.cancel()
+            await asyncio.gather(self._tts_filler_warmup_task, return_exceptions=True)
         await self.router.stop()
+
+    async def _warm_tts_filler_after_startup(self) -> None:
+        # Let the HTTP server become responsive before the one-time local cache
+        # generation occupies VoxCPM.  Subsequent starts load the cached WAV.
+        await asyncio.sleep(3)
+        await self.output.warm_segment_filler()
 
     async def _auto_announcement_loop(self) -> None:
         config = self.config.auto_announcements
@@ -105,7 +139,7 @@ class LocalHostAdapter:
             message = config.messages[self._auto_announcement_index % len(config.messages)]
             self._auto_announcement_index += 1
             try:
-                await self.announce(message)
+                await self._deliver_reply(message)
             except Exception as exc:
                 self._last_error = str(exc)
                 logger.warning("Automatic live announcement failed: {}", exc)
@@ -122,14 +156,33 @@ class LocalHostAdapter:
                 logger.warning("NachoBot core connection failed: {}; retrying in 3s", exc)
                 await asyncio.sleep(3)
 
-    async def request_ai_reply(self, prompt: str) -> str:
+    async def request_ai_reply(
+        self,
+        prompt: str,
+        tts_language: str = "auto",
+        *,
+        speak: bool = True,
+    ) -> str:
         prompt = prompt.strip()
         if not prompt:
             raise ValueError("请输入要让 AI 主播回应的话题或台词")
         if not await self._core_available():
             raise RuntimeError("尚未连接 NachoBot Core；请先启动 launchbot.bat")
+        self._tts_language = tts_language
         message = self._build_message(prompt)
-        await self.router.send_message(message)
+        self._pending_prompts.append(prompt)
+        self._pending_tts_languages.append(tts_language)
+        self._pending_speech_enabled.append(bool(speak))
+        try:
+            await self.router.send_message(message)
+        except Exception:
+            if self._pending_prompts and self._pending_prompts[-1] == prompt:
+                self._pending_prompts.pop()
+            if self._pending_tts_languages and self._pending_tts_languages[-1] == tts_language:
+                self._pending_tts_languages.pop()
+            if self._pending_speech_enabled and self._pending_speech_enabled[-1] == bool(speak):
+                self._pending_speech_enabled.pop()
+            raise
         self._request_count += 1
         return message.message_info.message_id
 
@@ -163,11 +216,23 @@ class LocalHostAdapter:
         """Refresh the cached connectivity flag used by the control-panel status."""
         return await self._core_available()
 
-    async def announce(self, text: str) -> str:
+    async def announce(
+        self,
+        text: str,
+        tts_language: str = "auto",
+        *,
+        speak: bool = True,
+    ) -> str:
         text = text.strip()
         if not text:
             raise ValueError("请输入要直接播报的文字")
-        return await self._deliver_reply(text)
+        self._tts_language = tts_language
+        return await self._deliver_reply(
+            text,
+            question=text,
+            tts_language=tts_language,
+            synthesize_audio=speak,
+        )
 
     async def ingest_demo_barrage(self, nickname: str, content: str) -> dict[str, str]:
         """Inject one clearly-labelled local replay of a Douyin comment event.
@@ -191,7 +256,7 @@ class LocalHostAdapter:
             return {"mode": "ai", "request_id": request_id}
         except RuntimeError:
             # Keep the demo useful when NachoBot Core is temporarily offline.
-            await self._deliver_reply(f"{nickname}：{content}")
+            await self._deliver_reply(f"{nickname}：{content}", question=content)
             return {"mode": "local_fallback", "request_id": ""}
 
     async def ingest_demo_event(
@@ -226,7 +291,10 @@ class LocalHostAdapter:
             count = max(1, amount)
             self._set_demo_event("like", f"累计收到 {count} 次点赞")
             if speak:
-                await self._deliver_reply(f"谢谢大家的点赞，爱心已累计 {count} 次！")
+                await self._deliver_reply(
+                    f"谢谢大家的点赞，爱心已累计 {count} 次！",
+                    question="收到点赞",
+                )
             else:
                 self._record_demo_reply(f"谢谢大家的点赞，爱心已累计 {count} 次！")
         elif event_type == "gift":
@@ -234,28 +302,36 @@ class LocalHostAdapter:
             gift_name = detail or "小星星"
             self._set_demo_event("gift", f"{nickname} 送出 {gift_name} × {count}")
             if speak:
-                await self._deliver_reply(f"谢谢 {nickname} 的 {gift_name}，送你一段软萌舞蹈！")
+                await self._deliver_reply(
+                    f"谢谢 {nickname} 的 {gift_name}，送你一段软萌舞蹈！",
+                    question=f"收到礼物 {gift_name}",
+                )
             else:
                 self._record_demo_reply(f"谢谢 {nickname} 的 {gift_name}，送你一段软萌舞蹈！")
             self._dance_style = "cute"
         elif event_type == "safety":
             self._set_demo_event("safety", "内容未通过安全检查，已静默拦截")
             if speak:
-                await self._deliver_reply("这条内容暂时无法回应，我们换个轻松的话题吧。")
+                await self._deliver_reply(
+                    "这条内容暂时无法回应，我们换个轻松的话题吧。",
+                    question="安全拦截",
+                    emotion="disgust",
+                    action="摇头/否定",
+                )
             else:
                 self._record_demo_reply("这条内容暂时无法回应，我们换个轻松的话题吧。")
         elif event_type == "pause":
             self._demo_ai_paused = True
             self._set_demo_event("pause", "主播已暂停 AI，当前由人工接管")
             if speak:
-                await self._deliver_reply("AI 已暂停，主播接管中。")
+                await self._deliver_reply("AI 已暂停，主播接管中。", question="主播接管")
             else:
                 self._record_demo_reply("AI 已暂停，主播接管中。")
         elif event_type == "resume":
             self._demo_ai_paused = False
             self._set_demo_event("resume", "AI 互动已恢复")
             if speak:
-                await self._deliver_reply("AI 互动已恢复，欢迎继续聊天。")
+                await self._deliver_reply("AI 互动已恢复，欢迎继续聊天。", question="恢复互动")
             else:
                 self._record_demo_reply("AI 互动已恢复，欢迎继续聊天。")
         return {"mode": "local_demo", "request_id": "", "event_type": event_type}
@@ -279,12 +355,41 @@ class LocalHostAdapter:
 
     async def set_voice_profile(self, profile: str) -> str:
         profile = self.output.set_voice_profile(profile)
+        if self._tts_filler_warmup_task:
+            self._tts_filler_warmup_task.cancel()
+        self._tts_filler_warmup_task = asyncio.create_task(
+            self.output.warm_segment_filler(),
+            name=f"local-host-tts-filler-{profile}",
+        )
         return {"cute": "软萌女声", "mature": "御姐女声"}[profile]
 
     async def _deliver_reply(
-        self, text: str, *, emotion: str | None = None, action: str | None = None
+        self,
+        text: str,
+        *,
+        question: str = "",
+        emotion: str | None = None,
+        action: str | None = None,
+        tts_language: str = "auto",
+        synthesize_audio: bool = True,
     ) -> str:
-        delivered = await self.output.deliver(text, emotion=emotion, action=action)
+        decision = self.action_adapter.decide(
+            question=question,
+            reply=text,
+            emotion=emotion,
+            requested_action=action,
+        )
+        emotion = decision.emotion
+        action = decision.action_id
+        self._latest_emotion = emotion or "normal"
+        self._latest_action = action or ""
+        delivered = await self.output.deliver(
+            text,
+            emotion=emotion,
+            action=action,
+            tts_language=tts_language,
+            synthesize_audio=synthesize_audio,
+        )
         self._latest_reply = delivered
         self._reply_count += 1
         self._speech_version += 1
@@ -302,14 +407,17 @@ class LocalHostAdapter:
                 "relation_inference": False,
                 "expression_selection": False,
                 "memory_retrieval": False,
-                "mid_term_memory": True,
+                # Desktop chat already carries recent conversation context.
+                # Skipping the extra memory query removes several seconds of
+                # latency without changing the stored NachoBot memories.
+                "mid_term_memory": False,
                 "knowledge_retrieval": False,
                 "reply_model_group": "realtime_replyer",
                 "tool_mode": "disabled",
                 "web_search_mode": (
                     "two_phase" if self.config.nachobot.network_search_enabled else "disabled"
                 ),
-                "reply_delivery": "aggregate_tagged_text",
+                "reply_delivery": "json_envelope",
                 "person_profile_mode": (
                     "low_latency" if self.config.nachobot.person_profile_enabled else "disabled"
                 ),
@@ -317,15 +425,11 @@ class LocalHostAdapter:
             },
             "platform_event": {"type": "manual_host_prompt", "source": "local_control_panel"},
         }
-        template = None
+        message_text = prompt
         if self.config.nachobot.reply_prompt:
-            template = TemplateInfo(
-                template_items={
-                    "replyer_prompt": self.config.nachobot.reply_prompt,
-                    "reply_prompt": self.config.nachobot.reply_prompt,
-                },
-                template_name="local_host_reply",
-                template_default=False,
+            message_text = (
+                f"{prompt}\n\n"
+                f"回答风格要求：{self.config.nachobot.reply_prompt}"
             )
         info = BaseMessageInfo(
             platform=self.config.nachobot.platform,
@@ -342,10 +446,13 @@ class LocalHostAdapter:
                 group_name="本机 AI 主播工作室",
             ),
             format_info=FormatInfo(content_format=["text"], accept_format=["text", "reply"]),
-            template_info=template,
+            template_info=None,
             additional_config=additional,
         )
-        return MessageBase(message_info=info, message_segment=Seg(type="text", data=prompt))
+        return MessageBase(
+            message_info=info,
+            message_segment=Seg(type="text", data=message_text),
+        )
 
     async def handle_from_nachobot(self, raw_message: dict[str, Any]) -> None:
         try:
@@ -356,7 +463,25 @@ class LocalHostAdapter:
             if not text:
                 return
             text, emotion, action = self._parse_reply_metadata(text)
-            await self._deliver_reply(text, emotion=emotion, action=action)
+            question = self._pending_prompts.popleft() if self._pending_prompts else ""
+            tts_language = (
+                self._pending_tts_languages.popleft()
+                if self._pending_tts_languages
+                else self._tts_language
+            )
+            synthesize_audio = (
+                self._pending_speech_enabled.popleft()
+                if self._pending_speech_enabled
+                else True
+            )
+            await self._deliver_reply(
+                text,
+                question=question,
+                emotion=emotion,
+                action=action,
+                tts_language=tts_language,
+                synthesize_audio=synthesize_audio,
+            )
         except Exception as exc:
             self._last_error = str(exc)
             logger.exception("Failed to deliver local AI host reply: {}", exc)
@@ -394,6 +519,8 @@ class LocalHostAdapter:
             "requests": self._request_count,
             "replies": self._reply_count,
             "latest_reply": self._latest_reply,
+            "latest_emotion": self._latest_emotion,
+            "latest_action": self._latest_action,
             "latest_barrage": self._latest_barrage,
             "latest_barrage_user": self._latest_barrage_user,
             "barrage_version": self._barrage_version,
@@ -410,8 +537,19 @@ class LocalHostAdapter:
             # Kept for the browser page's backward-compatible audio-player flag.
             "neural_tts_enabled": self.config.neural_tts.enabled or self.config.tts.enabled,
             "neural_tts_voice": self.output.neural_voice,
+            "tts_language": self._tts_language,
             "neural_audio_ready": self.output.audio_ready,
             "neural_audio_version": self.output.audio_version,
+            "live2d_streamed_audio_version": self.output.streamed_audio_version,
+            "tts_stream_first_block_seconds": self.output.last_stream_first_block_seconds,
+            "tts_stream_total_seconds": self.output.last_stream_total_seconds,
+            "tts_stream_segment_count": self.output.last_stream_segment_count,
+            "tts_stream_filler_count": self.output.last_stream_filler_count,
+            "tts_segmented_playback": self.config.tts.segmented_playback,
+            "tts_segment_wait_seconds": self.config.tts.segment_wait_seconds,
+            "tts_segment_pause_step_seconds": self.config.tts.segment_pause_step_seconds,
+            "tts_segment_target_chars": self.config.tts.segment_target_chars,
+            "tts_segment_filler_ready": self.output.segment_filler_ready,
             "speech_audio_source": self.output.audio_source,
             "speech_audio_media_type": self.output.audio_media_type,
             "voice_profile": self.output.voice_profile,
@@ -435,7 +573,9 @@ class LocalHostAdapter:
             "dance_style": self._dance_style,
             "dance_label": DANCE_STYLES[self._dance_style],
             "dance_styles": DANCE_STYLES,
-            "auto_announcements_enabled": self.config.auto_announcements.enabled,
+            "auto_announcements_enabled": (
+                self.config.auto_announcements.enabled and not self._desktop_pet_mode
+            ),
             "auto_announcement_interval_seconds": self.config.auto_announcements.interval_seconds,
             "live2d_enabled": self.config.live2d.enabled,
         }

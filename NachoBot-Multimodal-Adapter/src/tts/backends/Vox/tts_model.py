@@ -105,6 +105,7 @@ class TTSModel(BaseTTSModel):
         cfg_value = preset.cfg_value or self.config.vox.cfg_value
         inference_timesteps = preset.inference_timesteps or self.config.vox.inference_timesteps
         normalize = preset.normalize if preset.normalize is not None else self.config.vox.normalize
+        seed = preset.seed if preset.seed >= 0 else self.config.vox.seed
 
         # 处理参考音频路径
         ref_wav_path = ""
@@ -125,6 +126,7 @@ class TTSModel(BaseTTSModel):
             "prompt_text": prompt_text,
             "cfg_value": cfg_value,
             "inference_timesteps": inference_timesteps,
+            "seed": seed,
             "denoise": "false",
             "normalize": str(normalize).lower(),
             "media_type": "wav",
@@ -269,7 +271,12 @@ class TTSModel(BaseTTSModel):
             return
 
         self._current_preset = preset_name
-        params = self.build_parameters(cleaned_text, preset, text_lang=text_lang)
+        params = self.build_parameters(
+            cleaned_text,
+            preset,
+            text_lang=text_lang,
+            split_method=kwargs.get("split_method"),
+        )
 
         timeout = aiohttp.ClientTimeout(total=120, connect=10)
         async with aiohttp.ClientSession(timeout=timeout) as session:

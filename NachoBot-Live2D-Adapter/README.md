@@ -13,8 +13,9 @@ NachoBot / 平台适配器
         ▼
 NachoBot-Live2D-Adapter
         │
-        ├─ protocol.py   版本化协议
-        ├─ server.py     WebSocket 服务
+         ├─ protocol.py   版本化协议
+         ├─ action_adapter.py 情绪/问题到 canonical action 的平台无关决策
+         ├─ server.py     WebSocket 服务
         ├─ runtime.py    协议到渲染命令的转换
         └─ renderer.py   PyGame/OpenGL/Live2D 渲染
         │
@@ -119,7 +120,47 @@ LOOK_AWAY = "LookAway"
 
 ## 启动
 
-双击：
+### Hiyori 桌面宠物
+
+模型位于本适配器的 `resources\hiyori_test` 时，双击统一入口 `launch_live2d.bat`。启动器会同步依赖、
+在后台启动透明窗口并确认 WebSocket 端口实际监听。配置使用相对路径，因此移动整个仓库后
+无需改盘符；使用模型时仍须遵守模型目录中的 Live2D 示例模型许可。
+
+桌宠操作：
+
+- 人物脚下会常驻米白、藏蓝、樱粉配色的无边框聊天窗；双方消息按 QQ 式左右气泡排列，输入后按 Enter 发送。
+- 输入条内可直接切换“声音：开 / 闭嘴中”和 TTS 语言（自动、中文、日语、英语）；“说明”会展开命令帮助。
+- 输入条会跟随人物窗口移动；点右上角 `—` 可暂时收起，双击人物会重新显示并聚焦。
+- 左键拖动桌宠窗口；双击会聚焦输入条，右键触发动作。
+- `Shift + 左键` 拖动可调整人物在窗口内的位置，滚轮缩放人物。
+- 系统托盘菜单可以显示/隐藏、切换鼠标穿透、切换置顶、复位位置或退出。
+- 窗口位置、缩放和开关状态会写入本地 `desktop_pet_state.json`，不会改动模型资源。
+- 最近 100 条双方消息保存在本地 `desktop_pet_chat_history.json`，重启桌宠后仍可向上翻看；Core 使用固定本机会话身份维持连续问答上下文。
+- Local Host 和 Bilibili 只提供问题/回复元数据，`action_adapter.py` 统一选择 canonical 动作：疑问歪头、否定摇头、夸奖/开心身体晃动、害羞移开视线；模型实际动作组仍由本适配器的 `[actions]` 映射解析。
+- NachoBot 后端可继续通过 `ws://127.0.0.1:8766` 发送动作、情绪、视线、说话和音频命令。
+
+运行方式由 `config.toml` 的 `[runtime].mode` 决定：`desktop_pet` 启动桌宠和聊天依赖，
+`live` 只启动直播窗口与 WebSocket 适配器。如果模型移动了，只需修改 `model_path`。
+
+脚边输入框支持：
+
+- 普通文字：经 `NachoBot-Local-Host-Adapter` 发送给 NachoBot Core，回答后自动播放本地语音。
+- `/说 内容`：不经过 AI，直接生成并朗读指定内容。
+- `/闭嘴`：继续显示 Core 的文字回答，但立即停止且不再生成 TTS 或口型；`/开口` 恢复。
+- `/语言 自动|中文|日语|英语`：设置后续 TTS 的语言提示；默认“自动”会让 VoxCPM2 自行识别。
+- `/动作 开心|点头|摇头|挥手|害羞` 和 `/表情 开心|害羞|生气|惊讶|悲伤|正常`。
+- `/置顶`、`/穿透`、`/隐藏`、`/复位`。
+- `/打开 记事本|计算器|文件管理器`；只执行这三个白名单程序，不接受任意 Shell 命令。
+- `/帮助`：在输入框内显示完整命令说明。
+
+输入框中按 `Ctrl + Enter` 会把当前文字直接朗读，不经过 AI；闭嘴模式下会提示先恢复声音。
+
+桌宠模式下，`launch_live2d.bat` 会一并检查并启动 NachoBot Core、本机问答桥和 VoxCPM2 TTS；地址由
+`[desktop_pet.chat].backend_url` 配置。服务不可用时输入框会显示明确错误，不会静默执行。
+
+### 通用适配器
+
+将 `config.toml` 中的 `mode` 改为 `live` 后，仍双击同一个入口：
 
 ```text
 launch_live2d.bat

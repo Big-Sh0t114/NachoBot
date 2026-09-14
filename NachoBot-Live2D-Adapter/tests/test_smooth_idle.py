@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import queue
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -56,10 +58,29 @@ class StubModel:
 class SmoothIdleTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        adapter_root = Path(__file__).resolve().parents[1]
-        cls.model_path = (
-            adapter_root / "resources" / "NachoBot" / "Nachobot.model3.json"
+        cls._temporary_directory = tempfile.TemporaryDirectory()
+        root = Path(cls._temporary_directory.name)
+        (root / "avatar.moc3").write_bytes(b"test-moc")
+        cls.model_path = root / "avatar.model3.json"
+        cls.model_path.write_text(
+            json.dumps(
+                {
+                    "Version": 3,
+                    "FileReferences": {
+                        "Moc": "avatar.moc3",
+                        "Motions": {
+                            "Idle": [{"File": "idle.motion3.json"}],
+                            "Nod": [{"File": "nod.motion3.json"}],
+                        },
+                    },
+                }
+            ),
+            encoding="utf-8",
         )
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._temporary_directory.cleanup()
 
     def make_renderer(self) -> tuple[Live2DRenderer, StubModel]:
         adapter = Live2DModelAdapter.from_model_path(self.model_path)

@@ -43,8 +43,8 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [NachoBot Live2D Adapter] Starting...
-uv run python -m live2d_adapter --config "config.toml"
+echo [NachoBot Live2D Adapter] Reading runtime mode from config.toml...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%LIVE2D_DIR%launch_live2d.ps1" -ConfigPath "%LIVE2D_DIR%config.toml"
 set "EXIT_CODE=%ERRORLEVEL%"
 
 if not "%EXIT_CODE%"=="0" (

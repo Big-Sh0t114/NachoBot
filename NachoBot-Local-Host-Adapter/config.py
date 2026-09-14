@@ -39,6 +39,13 @@ class TTSConfig:
     url: str
     play_local: bool
     timeout_seconds: int
+    segmented_playback: bool = True
+    segment_wait_seconds: float = 0.6
+    segment_pause_step_seconds: float = 0.2
+    segment_filler_enabled: bool = True
+    segment_filler_text: str = "嗯。"
+    segment_min_chars: int = 4
+    segment_target_chars: int = 16
 
 
 @dataclass(frozen=True)
@@ -150,6 +157,28 @@ def load_config(path: Path) -> AppConfig:
             url=str(tts.get("url", "http://127.0.0.1:8070/api/tts")).strip(),
             play_local=bool(tts.get("play_local", True)),
             timeout_seconds=max(5, int(tts.get("timeout_seconds", 180))),
+            segmented_playback=bool(tts.get("segmented_playback", True)),
+            segment_wait_seconds=min(
+                2.0,
+                max(0.2, float(tts.get("segment_wait_seconds", 0.6))),
+            ),
+            segment_pause_step_seconds=min(
+                0.5,
+                max(0.1, float(tts.get("segment_pause_step_seconds", 0.2))),
+            ),
+            segment_filler_enabled=bool(tts.get("segment_filler_enabled", True)),
+            segment_filler_text=(
+                str(tts.get("segment_filler_text", "嗯。")).strip()
+                or "嗯。"
+            ),
+            segment_min_chars=min(
+                12,
+                max(2, int(tts.get("segment_min_chars", 4))),
+            ),
+            segment_target_chars=min(
+                40,
+                max(8, int(tts.get("segment_target_chars", 16))),
+            ),
         ),
         neural_tts=NeuralTTSConfig(
             enabled=bool(neural_tts.get("enabled", True)),

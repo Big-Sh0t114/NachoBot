@@ -4,25 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import json
-from loguru import logger
+import sys
+from pathlib import Path
 from typing import Any, Optional, Tuple
+
+
+_ACTION_ADAPTER_DIR = Path(__file__).resolve().parents[3] / "NachoBot-Live2D-Adapter" / "live2d_adapter"
+if str(_ACTION_ADAPTER_DIR) not in sys.path:
+    sys.path.insert(0, str(_ACTION_ADAPTER_DIR))
+
+from action_adapter import ActionAdapter  # noqa: E402
 
 
 class Live2DManager:
     """Translate Bilibili reply metadata into platform-neutral avatar commands."""
-
-    _ACTION_TO_CANONICAL_ID = {
-        "待机/放松": "IDLE",
-        "点头/同意": "NOD",
-        "摇头/否定": "SHAKE_HEAD",
-        "转身向左/看左边": "TURN_LEFT",
-        "转身向右/看右边": "TURN_RIGHT",
-        "眨眼/卖萌/Wink": "WINK",
-        "身体晃动/开心/兴奋": "HAPPY",
-        "歪头/疑惑/思考": "TILT_HEAD",
-        "害羞/移开视线/不好意思": "LOOK_AWAY",
-        "一般": "GENERAL",
-    }
 
     def __init__(
         self,
@@ -34,6 +29,7 @@ class Live2DManager:
         self.logger = logger
         self.adapter = adapter_ref
         self.controller = None
+        self.action_adapter = ActionAdapter(logger)
 
         if self.config.live_live2d_enable:
             try:
@@ -94,22 +90,25 @@ class Live2DManager:
         if not controller:
             return
 
-        if emotion in {"normal", "shy", "disgust", "angry"}:
+        decision = self.action_adapter.decide(
+            emotion=emotion,
+            requested_action=action,
+        )
+        if decision.emotion and (emotion is not None or action is not None):
             self._schedule(
-                controller.send_live2d_event("emotion", emotion),
-                f"emotion:{emotion}",
+                controller.send_live2d_event("emotion", decision.emotion),
+                f"emotion:{decision.emotion}",
             )
 
-        if not action:
+        if not decision.action_id:
             return
 
-        action_id = self._ACTION_TO_CANONICAL_ID.get(action)
-        if not action_id or action_id in {"IDLE", "GENERAL"}:
+        if decision.action_id in {"IDLE", "GENERAL"}:
             return
 
         self._schedule(
-            controller.send_canonical_action(action_id),
-            f"action:{action}->{action_id}",
+            controller.send_canonical_action(decision.action_id),
+            f"action:{action}->{decision.action_id}",
         )
 
     def _schedule(self, coroutine: Any, description: str) -> None:

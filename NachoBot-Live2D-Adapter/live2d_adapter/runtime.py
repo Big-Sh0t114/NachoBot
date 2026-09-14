@@ -27,6 +27,7 @@ from .protocol import (
 from .renderer import Live2DRenderer
 
 InteractionSink = Callable[[InteractionEvent], Awaitable[None]]
+ShutdownSink = Callable[[], Awaitable[None]]
 
 
 MAX_REMOTE_AUDIO_BYTES = 4 * 1024 * 1024
@@ -43,20 +44,27 @@ class AvatarRuntime:
         self.model_adapter: Live2DModelAdapter | None = None
         self._event_loop: asyncio.AbstractEventLoop | None = None
         self._interaction_sink: InteractionSink | None = None
+        self._shutdown_sink: ShutdownSink | None = None
         self._last_poke_time = 0.0
         self._started = False
+        self._renderer_ready = threading.Event()
+        self._renderer_start_error: Exception | None = None
 
     @property
     def is_running(self) -> bool:
         return bool(
             self._started
             and self.renderer is not None
+            and self.renderer.running
             and self.render_thread is not None
             and self.render_thread.is_alive()
         )
 
     def set_interaction_sink(self, sink: InteractionSink | None) -> None:
         self._interaction_sink = sink
+
+    def set_shutdown_sink(self, sink: ShutdownSink | None) -> None:
+        self._shutdown_sink = sink
 
     async def start(self) -> None:
         if self._started:
@@ -87,6 +95,8 @@ class AvatarRuntime:
         self.logger.info("Live2D automatic adaptation: {}", adaptation_report)
 
         self._event_loop = asyncio.get_running_loop()
+        self._renderer_ready.clear()
+        self._renderer_start_error = None
         self.renderer = Live2DRenderer(
             model_path=str(renderer_config.model_path),
             logger=self.logger,
@@ -98,7 +108,10 @@ class AvatarRuntime:
             scale=renderer_config.scale,
             track_mouse=renderer_config.track_mouse,
             on_click=self._on_renderer_click,
+            on_ready=self._on_renderer_ready,
+            on_exit=self._on_renderer_exit,
             model_adapter=self.model_adapter,
+            desktop_pet_config=self.config.desktop_pet,
         )
         self.render_thread = threading.Thread(
             target=self._run_renderer,
@@ -107,8 +120,20 @@ class AvatarRuntime:
         )
         self._started = True
         self.render_thread.start()
+        renderer_ready = await asyncio.to_thread(self._renderer_ready.wait, 30.0)
+        if not renderer_ready:
+            self._started = False
+            self.renderer.running = False
+            raise RuntimeError("Live2D renderer did not become ready within 30 seconds")
+        if self._renderer_start_error is not None:
+            self._started = False
+            error = self._renderer_start_error
+            self.renderer = None
+            self.render_thread = None
+            raise RuntimeError(f"Live2D renderer failed during startup: {error}") from error
         self.logger.info(
-            "Live2D runtime started: model=%s window=%sx%s",
+            "Live2D runtime started: mode={} model={} window={}x{}",
+            self.config.runtime.mode,
             renderer_config.model_path,
             renderer_config.width,
             renderer_config.height,
@@ -121,6 +146,7 @@ class AvatarRuntime:
                     "model_path": str(renderer_config.model_path),
                     "width": renderer_config.width,
                     "height": renderer_config.height,
+                    "mode": self.config.runtime.mode,
                     "adaptation": adaptation_report,
                 },
             )
@@ -229,6 +255,15 @@ class AvatarRuntime:
         elif event is AvatarEvent.PLAY_AUDIO:
             self._enqueue("play_audio", self._decode_wav_payload(payload))
 
+        elif event is AvatarEvent.QUEUE_AUDIO:
+            self._enqueue(
+                "queue_audio",
+                {
+                    "audio": self._decode_wav_payload(payload),
+                    "reset": bool(payload.get("reset", False)),
+                },
+            )
+
         elif event is AvatarEvent.STOP_AUDIO:
             self._enqueue("stop_audio", None)
 
@@ -241,7 +276,9 @@ class AvatarRuntime:
         assert self.renderer is not None
         try:
             self.renderer.run()
-        except Exception:
+        except Exception as exc:
+            self._renderer_start_error = exc
+            self._renderer_ready.set()
             self.logger.exception("Live2D renderer thread crashed")
             self._emit_from_renderer_thread(
                 InteractionEvent(
@@ -249,6 +286,16 @@ class AvatarRuntime:
                     payload={"message": "Live2D renderer thread crashed"},
                 )
             )
+            self._on_renderer_exit()
+        finally:
+            if not self._renderer_ready.is_set():
+                self._renderer_start_error = RuntimeError(
+                    "Live2D renderer exited before reporting ready"
+                )
+                self._renderer_ready.set()
+
+    def _on_renderer_ready(self) -> None:
+        self._renderer_ready.set()
 
     def _enqueue(self, command_type: str, content: Any) -> None:
         try:
@@ -284,7 +331,8 @@ class AvatarRuntime:
             )
         )
 
-        if button not in (6, 7):
+        poke_buttons = (1, 6, 7) if self.config.desktop_pet.enabled else (6, 7)
+        if button not in poke_buttons:
             return
 
         cooldown = self.config.renderer.poke_cooldown_seconds
@@ -304,6 +352,13 @@ class AvatarRuntime:
             )
         )
 
+    def _on_renderer_exit(self) -> None:
+        sink = self._shutdown_sink
+        loop = self._event_loop
+        if not self._started or sink is None or loop is None or loop.is_closed():
+            return
+        asyncio.run_coroutine_threadsafe(sink(), loop)
+
     def _emit_from_renderer_thread(self, event: InteractionEvent) -> None:
         loop = self._event_loop
         if loop is None or loop.is_closed():
@@ -314,7 +369,7 @@ class AvatarRuntime:
         sink = self._interaction_sink
         if sink is None:
             self.logger.debug(
-                "Live2D interaction dropped because no sink is connected: %s",
+                "Live2D interaction dropped because no sink is connected: {}",
                 event.event.value,
             )
             return
@@ -322,7 +377,7 @@ class AvatarRuntime:
             await sink(event)
         except Exception:
             self.logger.exception(
-                "Failed to emit Live2D interaction: %s", event.event.value
+                "Failed to emit Live2D interaction: {}", event.event.value
             )
 
     @staticmethod

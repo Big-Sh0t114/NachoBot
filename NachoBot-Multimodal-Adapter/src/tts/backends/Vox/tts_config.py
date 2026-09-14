@@ -12,6 +12,9 @@ class VoxPreset:
     cfg_value: float = field(default=2.0)
     inference_timesteps: int = field(default=10)
     normalize: bool = field(default=False)
+    # Kept for compatibility with existing vox.toml files. The current local
+    # VoxCPM2 server accepts the flag but intentionally runs with denoising off.
+    denoise: bool = field(default=False)
     seed: int = field(default=-1)
 
 
@@ -24,6 +27,7 @@ class VoxConfig:
     cfg_value: float = field(default=2.0)
     inference_timesteps: int = field(default=10)
     normalize: bool = field(default=False)
+    denoise: bool = field(default=False)
     seed: int = field(default=-1)
     split_method: str = field(default="cut3")
     max_split_length: int = field(default=80)

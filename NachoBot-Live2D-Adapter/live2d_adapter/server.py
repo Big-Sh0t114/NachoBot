@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from loguru import logger
-from collections.abc import Iterable
 from urllib.parse import parse_qs, urlsplit
 
 from websockets.exceptions import ConnectionClosed
@@ -21,8 +19,9 @@ from .protocol import (
 )
 from .runtime import AvatarRuntime
 
-
 MAX_WEBSOCKET_MESSAGE_BYTES = 8 * 1024 * 1024
+
+
 class AvatarWebSocketServer:
     """Expose :class:`AvatarRuntime` through the versioned avatar protocol."""
 
@@ -38,14 +37,16 @@ class AvatarWebSocketServer:
         self._clients: set[WebSocketServerProtocol] = set()
         self._clients_lock = asyncio.Lock()
         self._server = None
+        self._stop_requested = False
 
     async def run(self) -> None:
         self.runtime.set_interaction_sink(self.broadcast)
+        self.runtime.set_shutdown_sink(self.stop)
         await self.runtime.start()
 
         host = self.config.server.host
         port = self.config.server.port
-        self.logger.info("Live2D WebSocket server listening on ws://%s:%s", host, port)
+        self.logger.info("Live2D WebSocket server listening on ws://{}:{}", host, port)
 
         try:
             async with serve(
@@ -57,14 +58,18 @@ class AvatarWebSocketServer:
                 max_size=MAX_WEBSOCKET_MESSAGE_BYTES,
             ) as server:
                 self._server = server
+                if self._stop_requested:
+                    server.close()
                 await server.wait_closed()
         finally:
             self._server = None
             self.runtime.set_interaction_sink(None)
+            self.runtime.set_shutdown_sink(None)
             await self._close_clients()
             await self.runtime.stop()
 
     async def stop(self) -> None:
+        self._stop_requested = True
         server = self._server
         if server is not None:
             server.close()
@@ -77,7 +82,7 @@ class AvatarWebSocketServer:
 
         if not clients:
             self.logger.debug(
-                "No Live2D clients connected; interaction dropped: %s",
+                "No Live2D clients connected; interaction dropped: {}",
                 event.event.value,
             )
             return
@@ -88,7 +93,7 @@ class AvatarWebSocketServer:
         )
         for result in results:
             if isinstance(result, Exception):
-                self.logger.debug("Live2D interaction send failed: %s", result)
+                self.logger.debug("Live2D interaction send failed: {}", result)
 
     async def _handle_client(
         self,
@@ -105,13 +110,16 @@ class AvatarWebSocketServer:
             self._clients.add(websocket)
 
         remote_address = getattr(websocket, "remote_address", None)
-        self.logger.info("Live2D client connected: %s", remote_address)
+        self.logger.info("Live2D client connected: {}", remote_address)
 
         try:
             await websocket.send(
                 InteractionEvent(
                     event=AvatarInteraction.READY,
-                    payload={"running": self.runtime.is_running},
+                    payload={
+                        "running": self.runtime.is_running,
+                        "mode": self.config.runtime.mode,
+                    },
                 ).to_json()
             )
 
@@ -142,7 +150,7 @@ class AvatarWebSocketServer:
         finally:
             async with self._clients_lock:
                 self._clients.discard(websocket)
-            self.logger.info("Live2D client disconnected: %s", remote_address)
+            self.logger.info("Live2D client disconnected: {}", remote_address)
 
     def _is_authorized(self, request_path: str) -> bool:
         expected_token = self.config.server.token

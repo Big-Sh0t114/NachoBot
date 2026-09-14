@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -26,6 +27,16 @@ def _build_parser() -> argparse.ArgumentParser:
         default=Path("config.toml"),
         help="TOML configuration path (default: ./config.toml)",
     )
+    parser.add_argument(
+        "--print-mode",
+        action="store_true",
+        help="Print the resolved runtime mode and exit.",
+    )
+    parser.add_argument(
+        "--print-launch-config",
+        action="store_true",
+        help="Print the resolved launcher settings as JSON and exit.",
+    )
     return parser
 
 
@@ -46,6 +57,22 @@ async def _run(config_path: Path) -> None:
 def main() -> int:
     args = _build_parser().parse_args()
     try:
+        if args.print_mode or args.print_launch_config:
+            config = load_config(args.config)
+            if args.print_mode:
+                print(config.runtime.mode)
+            else:
+                print(
+                    json.dumps(
+                        {
+                            "mode": config.runtime.mode,
+                            "chat_enabled": config.desktop_pet.chat.enabled,
+                            "chat_backend_url": config.desktop_pet.chat.backend_url,
+                            "chat_play_audio": config.desktop_pet.chat.play_audio,
+                        }
+                    )
+                )
+            return 0
         asyncio.run(_run(args.config))
     except (ConfigError, ModelAdaptationError) as exc:
         print(f"Live2D adapter configuration error: {exc}", file=sys.stderr)

@@ -18,6 +18,8 @@ from config import AppConfig, load_config
 
 class TextRequest(BaseModel):
     text: str = Field(min_length=1, max_length=1000)
+    tts_language: str = Field(default="auto", pattern=r"^(auto|zh|ja|en)$")
+    speak: bool = True
 
 
 class DemoBarrageRequest(BaseModel):
@@ -185,7 +187,11 @@ def create_app(config: AppConfig) -> FastAPI:
     @app.post("/api/respond")
     async def respond(payload: TextRequest) -> dict:
         try:
-            request_id = await adapter.request_ai_reply(payload.text)
+            request_id = await adapter.request_ai_reply(
+                payload.text,
+                payload.tts_language,
+                speak=payload.speak,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except RuntimeError as exc:
@@ -195,7 +201,11 @@ def create_app(config: AppConfig) -> FastAPI:
     @app.post("/api/announce")
     async def announce(payload: TextRequest) -> dict:
         try:
-            text = await adapter.announce(payload.text)
+            text = await adapter.announce(
+                payload.text,
+                payload.tts_language,
+                speak=payload.speak,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"ok": True, "text": text}

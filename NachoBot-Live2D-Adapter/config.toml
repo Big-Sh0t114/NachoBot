@@ -4,16 +4,52 @@ port = 8766
 # 留空表示仅依赖本机监听地址；需要鉴权时同时配置 Bilibili 侧令牌。
 token = ""
 
+[runtime]
+# desktop_pet：脚边聊天桌宠；live：仅启动直播/推流用 Live2D 窗口与 WebSocket。
+mode = "desktop_pet"
+
 [renderer]
 # 相对于本配置文件所在目录解析。
-model_path = "resources/NachoBot/Nachobot.model3.json"
+model_path = "resources/hiyori_test/runtime/hiyori_pro_t11.model3.json"
 transparent = true
 antialiasing = true
-width = 1400
-height = 1200
-scale = 1.0
-track_mouse = false
-poke_cooldown_seconds = 10.0
+width = 520
+height = 760
+scale = 0.9
+track_mouse = true
+poke_cooldown_seconds = 4.0
+
+# mode = "desktop_pet" 时启用以下设置；mode = "live" 时自动忽略桌宠窗口行为。
+[desktop_pet]
+title = "桃濑日和 · NachoBot 桌宠"
+always_on_top = true
+hide_from_taskbar = true
+click_through = false
+remember_position = true
+state_path = "desktop_pet_state.json"
+start_position = "bottom_right"
+margin = 24
+min_scale = 0.45
+max_scale = 1.8
+tray_icon = true
+left_click_motion = "Tap"
+double_click_motion = "FlickUp"
+right_click_motion = "Flick"
+idle_motion_groups = ["Flick", "FlickDown", "FlickUp", "Tap", "Tap@Body", "Flick@Body"]
+idle_motion_min_seconds = 18.0
+idle_motion_max_seconds = 40.0
+
+[desktop_pet.chat]
+enabled = true
+backend_url = "http://127.0.0.1:8789"
+request_timeout_seconds = 8.0
+reply_timeout_seconds = 180.0
+poll_interval_seconds = 0.5
+play_audio = true
+tts_language = "auto"
+max_input_chars = 500
+history_path = "desktop_pet_chat_history.json"
+max_history_messages = 100
 
 # 默认在内存中扫描模型参数、表情和动作名称，不改写用户模型文件。
 [adaptation]
@@ -32,14 +68,14 @@ enabled = true
 # Canonical action ID -> 当前 Live2D 模型中的 Motion Group。
 # 模型的实际分组名称不一致时，只需修改此表，无需改 NachoBot 或平台适配器。
 [actions]
-NOD = "Nod"
-SHAKE_HEAD = "Shake"
-TURN_LEFT = "TurnLeft"
-TURN_RIGHT = "TurnRight"
-WINK = "Wink"
-HAPPY = "Sway"
-TILT_HEAD = "TiltHead"
-LOOK_AWAY = "LookAway"
+NOD = "FlickDown"
+SHAKE_HEAD = "Flick"
+TURN_LEFT = "Tap@Body"
+TURN_RIGHT = "Flick@Body"
+WINK = "Tap"
+HAPPY = "FlickUp"
+TILT_HEAD = "Tap"
+LOOK_AWAY = "Tap@Body"
 
 [logging]
 level = "INFO"

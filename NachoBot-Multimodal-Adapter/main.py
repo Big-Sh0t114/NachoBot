@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Tuple
 
 import toml
 from fastapi import HTTPException, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 _NACHOBOT_PATH = Path(__file__).resolve().parents[1] / "NachoBot"
@@ -57,6 +58,7 @@ class WebUITTSRequest(BaseModel):
     text: str = Field(min_length=1, max_length=10_000)
     platform: str = Field(default="webui", max_length=64)
     text_lang: str | None = Field(default=None, max_length=32)
+    split_method: str | None = Field(default=None, pattern=r"^cut[0-5]$")
 
 
 class TTSPipeline:
@@ -221,13 +223,57 @@ class TTSPipeline:
                 headers={"Cache-Control": "no-store"},
             )
 
+        @app.post("/api/tts-stream")
+        async def webui_tts_stream_endpoint(body: WebUITTSRequest):
+            """Stream raw 48 kHz mono PCM so the desktop pet can speak early."""
+            text = body.text.strip()
+            if not text:
+                raise HTTPException(status_code=400, detail="TTS 文本不能为空")
+            if not self.tts_list:
+                raise HTTPException(status_code=503, detail="没有启用任何 TTS 引擎")
+
+            tts_model = self.tts_list[0]
+            stream_tts = getattr(tts_model, "tts_stream", None)
+            if not callable(stream_tts):
+                raise HTTPException(status_code=501, detail="当前 TTS 引擎不支持流式输出")
+
+            async def audio_stream():
+                try:
+                    async with self._webui_tts_lock:
+                        preset_name = self._resolve_emotion_preset(text)
+                        async for chunk in stream_tts(
+                            text=text,
+                            platform=body.platform or "webui",
+                            text_lang=body.text_lang,
+                            preset_name=preset_name,
+                            split_method=body.split_method,
+                        ):
+                            if chunk:
+                                yield chunk
+                except Exception:
+                    logger.exception("WebUI 流式 TTS 生成失败")
+
+            return StreamingResponse(
+                audio_stream(),
+                media_type="application/octet-stream",
+                headers={
+                    "Cache-Control": "no-store",
+                    "X-Sample-Rate": "48000",
+                    "X-Sample-Width": "2",
+                    "X-Channels": "1",
+                },
+            )
+
         if self.no_local_models:
             logger.info(
                 "已注册 HTTP 兼容接口（无模型模式：TTS 和情感分类均禁用）: "
-                "/api/emotion_preset, /api/health, /api/tts"
+                "/api/emotion_preset, /api/health, /api/tts, /api/tts-stream"
             )
         else:
-            logger.info("已注册 HTTP 接口: /api/emotion_preset, /api/health, /api/tts")
+            logger.info(
+                "已注册 HTTP 接口: /api/emotion_preset, /api/health, "
+                "/api/tts, /api/tts-stream"
+            )
 
     async def server_handle(self, message_data: dict):
         """处理服务器收到的消息"""

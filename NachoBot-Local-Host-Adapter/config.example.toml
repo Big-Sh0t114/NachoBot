@@ -31,6 +31,14 @@ enabled = true
 url = "http://127.0.0.1:8070/api/tts"
 play_local = true
 timeout_seconds = 180
+# 长回复按标点分段；播放当前短句时在后台合成下一句。
+segmented_playback = true
+segment_wait_seconds = 0.6
+segment_pause_step_seconds = 0.2
+segment_filler_enabled = true
+segment_filler_text = "嗯。"
+segment_min_chars = 4
+segment_target_chars = 16
 
 [neural_tts]
 # 微软在线神经语音：播报文字会发送至微软 TTS 服务；无需 API 密钥。
