@@ -16,6 +16,11 @@ try:
 except ImportError:
     resolve_emotion_preset_remote = None
 
+try:
+    from nachobot_multimodal.utils.tts_runtime import TTSRuntime
+except ImportError:
+    TTSRuntime = None
+
 def _clean_text_for_tts(text: str) -> str:
     """Helper to clean text for TTS, similar to how utils did it. 
        We will keep this here if it's specific to TTS formatting."""
@@ -38,6 +43,7 @@ class TTSManager:
         extract_json_emotion_callback: Optional[Callable] = None,
         tts_model_class: Any = None,
         tts_import_error: Optional[str] = None,
+        tts_config_dir: Optional[Path] = None,
     ):
         self.config = config
         self.logger = logger
@@ -52,7 +58,16 @@ class TTSManager:
         
         self.tts_model_class = tts_model_class
         self.tts_import_error = tts_import_error
-
+        self.tts_config_dir = Path(tts_config_dir) if tts_config_dir else None
+        self._tts_runtime = (
+            TTSRuntime(
+                self.tts_config_dir,
+                model_class=tts_model_class,
+                import_error=tts_import_error,
+            )
+            if TTSRuntime is not None
+            else None
+        )
         self.tts_model = None
         self.tts_enable = False
         self.subtitle_path = "subtitles.txt"
@@ -91,20 +106,44 @@ class TTSManager:
         self._next_idle_target = self._get_next_idle_interval()
 
     def ensure_tts_model(self) -> bool:
-        if self.tts_model:
-            return True
+        """Refresh the shared runtime and mirror its actual model."""
 
-        if self.tts_model_class:
-            try:
-                self.tts_model = self.tts_model_class()
-                self.logger.info("TTS Model initialized successfully")
-                return True
-            except Exception as e:
-                self.logger.error(f"Failed to initialize TTS Model: {e}")
-                return False
-        else:
+        if self._tts_runtime is None:
             self.logger.error(f"TTS enabled but TTSModel not available: {self.tts_import_error}")
+            self.tts_model = None
             return False
+        ready = self._tts_runtime.ensure_tts_model()
+        self.tts_model = self._tts_runtime.model
+        if not ready:
+            self.logger.error(f"TTS configuration unavailable: {self._tts_runtime.error}")
+        return ready
+
+    async def _synthesize_tts_segment(self, text: str, **kwargs) -> Any:
+        """Refresh and synthesize one segment under the shared async boundary."""
+
+        if self._tts_runtime is None:
+            raise RuntimeError("TTS runtime unavailable")
+        try:
+            async with self._tts_runtime.model_context() as model:
+                self.tts_model = model
+                return await model.tts(text=text, **kwargs)
+        except Exception:
+            self.tts_model = self._tts_runtime.model
+            raise
+
+    async def _resolve_remote_emotion_preset(self, text: str) -> Optional[str]:
+        """Resolve emotion through the same base config selected for TTS."""
+
+        if resolve_emotion_preset_remote is None:
+            return None
+        base_path = None
+        if self.tts_config_dir:
+            base_path = (
+                self.tts_config_dir
+                if self.tts_config_dir.suffix.lower() == ".toml"
+                else self.tts_config_dir / "base.toml"
+            )
+        return await resolve_emotion_preset_remote(text, base_config_path=base_path)
 
     def is_tts_enabled(self, room_id: int) -> bool:
         if room_id in self._tts_manual_overrides:
@@ -341,8 +380,6 @@ class TTSManager:
                 idle_item = random.choice(self.config.idle_tts_texts)
                 self.logger.info(f"Idle time ({idle_duration:.1f}s) reached target ({self._next_idle_target:.1f}s). Triggering preset TTS.")
                 self.reset_idle_timer()
-                if not self.ensure_tts_model():
-                    continue
                 try:
                     if isinstance(idle_item, dict):
                         parsed_text = idle_item.get("reply", str(idle_item))
@@ -370,14 +407,19 @@ class TTSManager:
                     preset_name = None
                     if resolve_emotion_preset_remote is not None:
                         try:
-                            preset_name = await resolve_emotion_preset_remote(cleaned_tts_text)
+                            preset_name = await self._resolve_remote_emotion_preset(cleaned_tts_text)
                         except Exception as e:
                             self.logger.error(f"Failed to resolve emotion preset: {e}")
 
                     first_segment = True
                     for idx, seg_text in enumerate(segments):
                         self.logger.info(f"Idle TTS 生成第 {idx+1}/{len(segments)} 段: {seg_text}")
-                        audio_data = await self.tts_model.tts(text=seg_text, platform=self.config.platform, preset_name=preset_name, split_method="cut0")
+                        audio_data = await self._synthesize_tts_segment(
+                            seg_text,
+                            platform=self.config.platform,
+                            preset_name=preset_name,
+                            split_method="cut0",
+                        )
 
                         if first_segment and audio_data:
                             first_segment = False
@@ -491,7 +533,10 @@ class TTSManager:
                 msg_to_send = text_zh if text_zh else full_text
                 tts_text = text_jp if text_jp else ""
 
-            if self.tts_model or (tts_config and tts_config.get("enable") and self.ensure_tts_model()):
+            # Enter the TTS path when an already-created client exists or this
+            # room is configured for TTS. Each segment below performs the live
+            # refresh; the cached object must not bypass configuration checks.
+            if self.tts_model or (tts_config and tts_config.get("enable")):
                 subtitle_path = str(tts_config.get("subtitle_path") or "subtitles.txt")
                 self.update_subtitle(display_text, subtitle_path=subtitle_path)
 
@@ -507,14 +552,19 @@ class TTSManager:
                         preset_name = None
                         if resolve_emotion_preset_remote is not None:
                             try:
-                                preset_name = await resolve_emotion_preset_remote(cleaned_tts_text)
+                                preset_name = await self._resolve_remote_emotion_preset(cleaned_tts_text)
                             except Exception as e:
                                 self.logger.error(f"Failed to resolve emotion preset: {e}")
 
                         first_segment = True
                         for idx, seg_text in enumerate(segments):
                             self.logger.info(f"TTS 生成第 {idx+1}/{len(segments)} 段: {seg_text}")
-                            audio_data = await self.tts_model.tts(text=seg_text, platform=self.config.platform, preset_name=preset_name, split_method="cut0")
+                            audio_data = await self._synthesize_tts_segment(
+                                seg_text,
+                                platform=self.config.platform,
+                                preset_name=preset_name,
+                                split_method="cut0",
+                            )
 
                             if first_segment and audio_data:
                                 first_segment = False

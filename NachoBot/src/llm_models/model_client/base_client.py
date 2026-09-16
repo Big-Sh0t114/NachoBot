@@ -9,6 +9,74 @@ from ..payload_content.resp_format import RespFormat
 from ..payload_content.tool_option import ToolOption, ToolCall
 
 
+_REQUEST_TASK_DRAIN_TIMEOUT_SECONDS = 0.25
+_DETACHED_REQUEST_TASKS: set[asyncio.Future[Any]] = set()
+
+
+def _consume_task_exception(task: asyncio.Future[Any]) -> None:
+    """Retrieve a completed task exception without letting it escape."""
+
+    if not task.done():
+        return
+    try:
+        task.exception()
+    except (asyncio.CancelledError, Exception):
+        # Retrieving ``exception`` marks it handled.  Detached callbacks must
+        # never turn a late provider failure into an event-loop error.
+        pass
+
+
+def _track_detached_request_task(task: asyncio.Future[Any]) -> None:
+    """Keep a resistant request task tracked until its result is consumed."""
+
+    if task not in _DETACHED_REQUEST_TASKS:
+        _DETACHED_REQUEST_TASKS.add(task)
+
+        def consume(done_task: asyncio.Future[Any]) -> None:
+            _DETACHED_REQUEST_TASKS.discard(done_task)
+            _consume_task_exception(done_task)
+
+        task.add_done_callback(consume)
+
+
+async def _cancel_and_drain_request_task(
+    task: asyncio.Task[Any],
+    *,
+    timeout: float = _REQUEST_TASK_DRAIN_TIMEOUT_SECONDS,
+) -> None:
+    """Cancel and boundedly drain a provider request task.
+
+    ``asyncio.wait`` observes completion without re-raising the child task's
+    ``CancelledError``.  Therefore a ``CancelledError`` caught around the wait
+    unambiguously belongs to the current cleanup coroutine.  In that case the
+    child is force-cancelled, tracked, and caller cancellation is re-raised.
+    """
+
+    if task.done():
+        _consume_task_exception(task)
+        return
+
+    task.cancel()
+    try:
+        done, _ = await asyncio.wait(
+            {task},
+            timeout=max(0.001, float(timeout)),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+    except asyncio.CancelledError:
+        # The cleanup caller was cancelled while the child was draining.  The
+        # child must remain owned by a done callback even as cancellation
+        # propagates immediately to its caller.
+        task.cancel()
+        _track_detached_request_task(task)
+        raise
+
+    if task in done:
+        _consume_task_exception(task)
+    else:
+        _track_detached_request_task(task)
+
+
 @dataclass
 class UsageRecord:
     """

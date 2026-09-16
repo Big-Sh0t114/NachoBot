@@ -16,6 +16,7 @@ import json
 import re
 import shutil
 import threading
+from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -122,28 +123,48 @@ class SandboxAgentResult:
 
 @dataclass(frozen=True, slots=True)
 class SandboxAgentConfig:
+    # Deprecated compatibility knobs.  They remain accepted for older callers,
+    # but the agent deliberately ignores them: progress and consecutive failure
+    # state, rather than whole-agent totals, determine when a task stops.
     max_rounds: int = 8
     max_tool_calls: int = 32
     max_entries: int = 256
     observation_max_chars: int = 12_000
     max_text_bytes: int = MAX_TEXT_BYTES
     duplicate_limit: int = 3
-    # A complete stream attempt has its own bounded ceiling.  This is per
-    # model attempt; it is deliberately not a whole-agent wall-clock timeout.
+    # After first output, this is an inactivity ceiling for one model stream,
+    # not a fixed whole-attempt wall-clock timeout.  Meaningful deltas restart
+    # it, so a continuously progressing stream may run longer than 120 seconds.
     complete_attempt_timeout_seconds: float = 120.0
     # A rejected tool response gets at least one same-model correction turn.
     # The effective value is clamped to two to preserve that guarantee even
     # when an old deployment supplies zero or one.
     non_progress_limit: int = 3
-    # The watchdog only covers time to first meaningful stream output.  Once a
-    # real delta arrives, the complete-attempt ceiling controls the remainder
-    # of that stream; there is no whole-agent timeout.
-    first_output_timeout_seconds: float = 15.0
+    # The first-output watchdog only covers time to the first meaningful stream
+    # output.  Once a real delta arrives, the inactivity ceiling above controls
+    # the remainder of that stream; there is no whole-agent timeout.  Match the
+    # initial silent window to the rolling inactivity ceiling so buffered
+    # providers are not failed over before their first observable chunk.
+    first_output_timeout_seconds: float = 120.0
 
     # Compatibility aliases for callers that used the longer names while the
     # setting was being introduced.  ``None`` means use ``non_progress_limit``.
     max_consecutive_non_progress: Optional[int] = None
     consecutive_non_progress_limit: Optional[int] = None
+    # Keep only a recent, bounded set of request fingerprints.  This prevents a
+    # progressing task from growing process memory without imposing a task cap.
+    duplicate_fingerprint_window: int = 256
+    # Staged files are bounded bookkeeping, not an agent lifetime budget.  The
+    # conservative defaults allow 64 distinct files and 8 MiB; a rejected write
+    # is reported to the model as an ordinary non-progress result.
+    max_staged_files: int = 64
+    max_staged_bytes: int = 8 * 1024 * 1024
+    # Keep the in-flight provider stream assembly bounded as well.  Four MiB
+    # leaves room for a 512 KiB write_text payload, JSON escaping, tool metadata,
+    # reasoning, and neighbouring deltas without turning a long-lived stream
+    # into an unbounded process-memory sink.  Exceeding this is a model-attempt
+    # failure and therefore participates in ordinary model failover.
+    stream_buffer_max_bytes: int = 4 * 1024 * 1024
 
 
 _DEFAULT_AGENT_CONFIG = SandboxAgentConfig()
@@ -166,6 +187,16 @@ _MAX_COMPLETION_REPORT_CHARS = 2000
 _MAX_COMPLETION_COUNT = 1000
 _MAX_FINALIZE_RESPONSE_CHARS = 4000
 _MAX_FINALIZE_RESPONSE_BYTES = 12000
+# OpenAI and Gemini clients poll their interrupt flag every 0.1 seconds while
+# an HTTP request task is pending, then give that nested task a bounded 0.25
+# second drain.  Keep the outer cooperative budget beyond both phases, with a
+# stable scheduling margin, before forcing the outer model task down.
+_STREAM_INTERRUPT_POLL_INTERVAL_SECONDS = 0.1
+_STREAM_CLIENT_DRAIN_TIMEOUT_SECONDS = 0.25
+_STREAM_COOPERATIVE_CLEANUP_SECONDS = (
+    _STREAM_INTERRUPT_POLL_INTERVAL_SECONDS + _STREAM_CLIENT_DRAIN_TIMEOUT_SECONDS + 0.05
+)
+_STREAM_FORCED_CLEANUP_SECONDS = 0.25
 _COMPLETION_REPORT_INSTRUCTIONS = (
     "这是一个已经结束的 Sandbox 任务，请现在直接用自然语言向用户说明结果。"
     "不要继续执行任务，不要让用户等待，不要请求工具，也不要输出结构化内容。"
@@ -247,6 +278,12 @@ class _CompleteAttemptTimeout(Exception):
     pass
 
 
+class _StreamBufferOverflow(Exception):
+    """A single model stream exceeded its bounded in-flight assembly buffer."""
+
+    pass
+
+
 class SandboxProvider:
     """Bounded list/read/search/write/finalize provider for one handoff."""
 
@@ -274,8 +311,15 @@ class SandboxProvider:
         self.staging_dir.mkdir(parents=True, exist_ok=True)
         manager._check_storage_path(self.staging_dir)
         self.source_revision = scope.revision()
+        self._fingerprint_window = max(1, int(config.duplicate_fingerprint_window))
         self._seen_fingerprints: set[str] = set()
+        self._fingerprint_order: deque[str] = deque()
         self._write_paths: set[str] = set()
+        self._staged_file_limit = max(0, int(config.max_staged_files))
+        self._staged_byte_limit = max(0, int(config.max_staged_bytes))
+        self._staged_sizes: Dict[str, int] = {}
+        self._staged_total_bytes = 0
+        self._load_staging_usage()
         self._successful_read_observation = False
         self._finalized = False
 
@@ -417,6 +461,9 @@ class SandboxProvider:
         if fingerprint in self._seen_fingerprints:
             return self._error_result(SandboxErrorCode.DUPLICATE, "duplicate request", duplicate=True)
         self._seen_fingerprints.add(fingerprint)
+        self._fingerprint_order.append(fingerprint)
+        while len(self._fingerprint_order) > self._fingerprint_window:
+            self._seen_fingerprints.discard(self._fingerprint_order.popleft())
         return None
 
     def _bounded_text(self, value: Any) -> str:
@@ -462,6 +509,53 @@ class SandboxProvider:
             item.is_file() and not _is_reparse_or_symlink(item)
             for item in self.staging_dir.rglob("*")
         )
+
+    def _load_staging_usage(self) -> None:
+        """Index existing staged files so overwrite accounting stays exact."""
+
+        for item in self.staging_dir.rglob("*"):
+            if not item.is_file() or _is_reparse_or_symlink(item):
+                continue
+            if len(self._staged_sizes) >= self._staged_file_limit:
+                break
+            try:
+                relative = item.relative_to(self.staging_dir).as_posix()
+                size = item.stat().st_size
+            except (OSError, ValueError):
+                continue
+            if self._staged_total_bytes + size > self._staged_byte_limit:
+                continue
+            self._staged_sizes[relative] = size
+            self._staged_total_bytes += size
+
+    def _sync_staged_entry(self, relative: str, staged: Path) -> int:
+        """Refresh one staged entry and return its current byte size."""
+
+        previous_size = self._staged_sizes.get(relative)
+        try:
+            current_size = staged.stat().st_size if staged.is_file() and not _is_reparse_or_symlink(staged) else None
+        except OSError:
+            current_size = None
+        if current_size is None:
+            if previous_size is not None:
+                self._staged_sizes.pop(relative, None)
+                self._staged_total_bytes -= previous_size
+            return 0
+        if previous_size is None:
+            if len(self._staged_sizes) >= self._staged_file_limit:
+                return current_size
+            if self._staged_total_bytes + current_size > self._staged_byte_limit:
+                return current_size
+            self._staged_sizes[relative] = current_size
+            self._staged_total_bytes += current_size
+        elif previous_size != current_size:
+            if self._staged_total_bytes - previous_size + current_size > self._staged_byte_limit:
+                self._staged_sizes.pop(relative, None)
+                self._staged_total_bytes -= previous_size
+                return current_size
+            self._staged_sizes[relative] = current_size
+            self._staged_total_bytes += current_size - previous_size
+        return current_size
 
     def list_tree(self, path: Any = "") -> Dict[str, Any]:
         args = {"path": str(path or "")}
@@ -592,6 +686,15 @@ class SandboxProvider:
             _ = destination  # force actor-root/reparse validation before staging
             staged = self.staging_dir / Path(relative)
             self.manager._check_storage_path(staged)
+            staged_exists = staged.is_file() and not _is_reparse_or_symlink(staged)
+            previous_size = self._sync_staged_entry(relative, staged)
+            content_bytes = len(text.encode("utf-8"))
+            if staged_exists and relative not in self._staged_sizes:
+                return self._error_result(SandboxErrorCode.SIZE_LIMIT, "staged bookkeeping limit exceeded")
+            if relative not in self._staged_sizes and len(self._staged_sizes) >= self._staged_file_limit:
+                return self._error_result(SandboxErrorCode.SIZE_LIMIT, "staged file count limit exceeded")
+            if self._staged_total_bytes - previous_size + content_bytes > self._staged_byte_limit:
+                return self._error_result(SandboxErrorCode.SIZE_LIMIT, "staged byte limit exceeded")
             staged.parent.mkdir(parents=True, exist_ok=True)
             self.manager._check_storage_path(staged)
             staged.write_text(text, encoding="utf-8", newline="")
@@ -603,6 +706,8 @@ class SandboxProvider:
             else:
                 code = SandboxErrorCode.PROVIDER_REJECTION
             return self._error_result(code, str(exc))
+        self._staged_sizes[relative] = content_bytes
+        self._staged_total_bytes = self._staged_total_bytes - previous_size + content_bytes
         self._write_paths.add(relative)
         return {"ok": True, "path": relative, "staged": True, "revision": len(self._write_paths)}
 
@@ -930,9 +1035,14 @@ class SandboxAgent:
             observation["path"] = safe_path
         return observation
 
+    def _observation_limit(self) -> int:
+        return max(1, int(self.config.observation_max_chars))
+
     def _append_observation(self, observations: List[str], value: Mapping[str, Any]) -> None:
         encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
-        observations.append(encoded[: max(1, int(self.config.observation_max_chars))])
+        observations.append(encoded[-self._observation_limit() :])
+        bounded = "\n".join(observations)[-self._observation_limit() :]
+        observations[:] = [bounded] if bounded else []
 
     def _append_no_tool_observation(self, observations: List[str]) -> None:
         self._append_observation(
@@ -963,6 +1073,177 @@ class SandboxAgent:
         if isinstance(value, Mapping):
             return value.get(name)
         return getattr(value, name, None)
+
+    @classmethod
+    def _stream_value_is_meaningful(cls, value: Any) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, (bytes, bytearray)):
+            return bool(value)
+        if isinstance(value, Mapping):
+            return any(cls._stream_value_is_meaningful(item) for item in value.values())
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return any(cls._stream_value_is_meaningful(item) for item in value)
+        try:
+            attributes = vars(value)
+        except TypeError:
+            return bool(value)
+        return any(cls._stream_value_is_meaningful(item) for item in attributes.values())
+
+    @staticmethod
+    def _stream_items(value: Any) -> Iterable[Any]:
+        if value is None:
+            return ()
+        if isinstance(value, (list, tuple)):
+            return value
+        return (value,)
+
+    @classmethod
+    def _tool_delta_is_meaningful(cls, value: Any) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, (str, bytes, bytearray)):
+            return cls._stream_value_is_meaningful(value)
+        function = cls._stream_field(value, "function")
+        for candidate in (value, function):
+            if candidate is None:
+                continue
+            if any(
+                cls._stream_value_is_meaningful(cls._stream_field(candidate, field))
+                for field in ("name", "arguments", "args")
+            ):
+                return True
+            nested = cls._stream_field(candidate, "function_call")
+            if nested is not None and nested is not candidate and cls._tool_delta_is_meaningful(nested):
+                return True
+        return False
+
+    @classmethod
+    def _watchdog_delta_is_meaningful(cls, event: Any) -> bool:
+        """Recognize actual output without treating IDs or usage as activity."""
+
+        if isinstance(event, (str, bytes, bytearray)):
+            return cls._stream_value_is_meaningful(event)
+        choices = cls._stream_field(event, "choices")
+        for choice in cls._stream_items(choices):
+            delta = cls._stream_field(choice, "delta")
+            if delta is None:
+                continue
+            if any(
+                cls._stream_value_is_meaningful(cls._stream_field(delta, field))
+                for field in ("content", "reasoning_content", "reasoning", "text")
+            ) or cls._tool_delta_is_meaningful(delta):
+                return True
+            for tool_call in cls._stream_items(cls._stream_field(delta, "tool_calls")):
+                if cls._tool_delta_is_meaningful(tool_call):
+                    return True
+
+        candidates = cls._stream_field(event, "candidates")
+        for candidate in cls._stream_items(candidates):
+            content = cls._stream_field(candidate, "content")
+            for part in cls._stream_items(cls._stream_field(content, "parts")):
+                if cls._stream_value_is_meaningful(cls._stream_field(part, "text")):
+                    return True
+                if cls._tool_delta_is_meaningful(cls._stream_field(part, "function_call")):
+                    return True
+
+        if any(
+            cls._stream_value_is_meaningful(cls._stream_field(event, field))
+            for field in ("content", "reasoning_content", "reasoning", "text")
+        ) or cls._tool_delta_is_meaningful(event):
+            return True
+        for tool_call in cls._stream_items(cls._stream_field(event, "tool_calls")):
+            if cls._tool_delta_is_meaningful(tool_call):
+                return True
+        return False
+
+    @staticmethod
+    def _stream_utf8_size(value: str, limit: int) -> int:
+        """Count UTF-8 bytes without constructing a second aggregate string."""
+
+        total = 0
+        for character in value:
+            codepoint = ord(character)
+            if codepoint <= 0x7F:
+                total += 1
+            elif codepoint <= 0x7FF:
+                total += 2
+            elif codepoint <= 0xFFFF:
+                total += 3
+            else:
+                total += 4
+            if total > limit:
+                return limit + 1
+        return total
+
+    @classmethod
+    def _stream_event_bytes(cls, event: Any, limit: int) -> int:
+        """Measure one event with a bounded recursive walk.
+
+        The stream event is already materialized by the provider.  This walk
+        counts its scalar/container payloads in place instead of serializing
+        the growing event history merely to measure it.  A small structural
+        charge makes even empty keepalive events consume bounded space in the
+        retained event list.
+        """
+
+        total = 0
+        seen: set[int] = set()
+
+        def visit(value: Any, depth: int = 0) -> None:
+            nonlocal total
+            if total > limit:
+                return
+            if value is None:
+                total += 1
+                return
+            if isinstance(value, str):
+                total += cls._stream_utf8_size(value, max(0, limit - total))
+                return
+            if isinstance(value, (bytes, bytearray, memoryview)):
+                total += min(len(value), max(0, limit - total) + 1)
+                return
+            if isinstance(value, (bool, int, float, complex)):
+                total += 8
+                return
+            if depth >= 32:
+                total += 1
+                return
+            marker = id(value)
+            if marker in seen:
+                total += 1
+                return
+            seen.add(marker)
+            if isinstance(value, Mapping):
+                total += 2
+                for key, item in value.items():
+                    visit(key, depth + 1)
+                    visit(item, depth + 1)
+                    if total > limit:
+                        return
+                return
+            if isinstance(value, (list, tuple, set, frozenset)):
+                total += 2
+                for item in value:
+                    visit(item, depth + 1)
+                    if total > limit:
+                        return
+                return
+            try:
+                attributes = vars(value)
+            except TypeError:
+                total += len(type(value).__name__) + 1
+            else:
+                total += 2
+                visit(attributes, depth + 1)
+
+        visit(event)
+        return max(1, total)
+
+    def _stream_buffer_limit(self) -> int:
+        return max(1, int(self.config.stream_buffer_max_bytes))
 
     @classmethod
     def _stream_event_parts(cls, event: Any) -> Tuple[str, str, List[Tuple[int, str, Any]]]:
@@ -1118,13 +1399,40 @@ class SandboxAgent:
         prompt: str,
         tools: List[Dict[str, Any]],
         first_output: asyncio.Event,
+        activity_event: asyncio.Event,
+        last_activity: List[float],
         interrupt_flag: asyncio.Event,
     ) -> Tuple[str, Tuple[str, str, Optional[List[Any]]]]:
-        from src.llm_models.utils_model import stream_delta_is_meaningful
+        stream_limit = self._stream_buffer_limit()
+        stream_bytes = 0
+        callback_seen = False
+        callback_meaningful_seen = False
+        stream_overflowed = False
 
-        def observe(event: Any) -> None:
-            if stream_delta_is_meaningful(event):
+        def account_stream_bytes(event: Any, *, cancel_on_overflow: bool) -> bool:
+            nonlocal stream_bytes, stream_overflowed
+            event_bytes = self._stream_event_bytes(event, stream_limit)
+            if stream_bytes + event_bytes > stream_limit:
+                stream_overflowed = True
+                interrupt_flag.set()
+                if cancel_on_overflow:
+                    current_task = asyncio.current_task()
+                    if current_task is not None:
+                        current_task.cancel()
+                return False
+            stream_bytes += event_bytes
+            return True
+
+        def observe(event: Any, *, count_buffer: bool = True) -> None:
+            nonlocal callback_seen, callback_meaningful_seen
+            if self._watchdog_delta_is_meaningful(event):
+                callback_meaningful_seen = True
                 first_output.set()
+                last_activity[0] = asyncio.get_running_loop().time()
+                activity_event.set()
+            if count_buffer:
+                callback_seen = True
+                account_stream_bytes(event, cancel_on_overflow=True)
 
         method = self._stream_method(attempt.client)
         if method is None:
@@ -1144,33 +1452,52 @@ class SandboxAgent:
             kwargs["interrupt_flag"] = interrupt_flag
         if "on_delta" in parameters or accepts_kwargs:
             kwargs["on_delta"] = observe
-        value = method(**kwargs)
-        if inspect.isawaitable(value):
-            value = await value
+        try:
+            value = method(**kwargs)
+            if inspect.isawaitable(value):
+                value = await value
+            if stream_overflowed:
+                raise _StreamBufferOverflow()
 
-        if hasattr(value, "__aiter__"):
-            events: List[Any] = []
-            try:
-                async for event in value:
-                    observe(event)
-                    events.append(event)
-            finally:
+            if hasattr(value, "__aiter__"):
+                events: List[Any] = []
                 try:
-                    await self._close_stream(value)
-                except Exception as close_exc:
-                    # Stream cleanup must not replace the provider result or
-                    # exception that caused this attempt to finish.
-                    logger.warning("sandbox stream close failed: %s", type(close_exc).__name__)
-            return self._assemble_stream_events(events)
+                    async for event in value:
+                        observe(event, count_buffer=False)
+                        if not callback_seen and not account_stream_bytes(event, cancel_on_overflow=False):
+                            raise _StreamBufferOverflow()
+                        if stream_overflowed:
+                            raise _StreamBufferOverflow()
+                        events.append(event)
+                finally:
+                    try:
+                        await self._close_stream(value)
+                    except Exception as close_exc:
+                        # Stream cleanup must not replace the provider result or
+                        # exception that caused this attempt to finish.
+                        logger.warning("sandbox stream close failed: %s", type(close_exc).__name__)
+                return self._assemble_stream_events(events)
 
-        if isinstance(value, tuple) and len(value) >= 2:
-            response, detail = value[0], value[1]
-            if response and stream_delta_is_meaningful({"content": response}):
-                observe({"content": response})
-            return response or "", detail
-        if value and stream_delta_is_meaningful(value):
-            observe(value)
-        return str(value or ""), ("", attempt.name, None)
+            if isinstance(value, tuple) and len(value) >= 2:
+                response, detail = value[0], value[1]
+                if response and self._watchdog_delta_is_meaningful({"content": response}):
+                    observe({"content": response}, count_buffer=not callback_meaningful_seen)
+                if stream_overflowed:
+                    raise _StreamBufferOverflow()
+                return response or "", detail
+            if value and self._watchdog_delta_is_meaningful(value):
+                observe(value, count_buffer=not callback_meaningful_seen)
+            if stream_overflowed:
+                raise _StreamBufferOverflow()
+            return str(value or ""), ("", attempt.name, None)
+        except asyncio.CancelledError:
+            if stream_overflowed:
+                raise _StreamBufferOverflow() from None
+            raise
+        except Exception:
+            if stream_overflowed:
+                raise _StreamBufferOverflow() from None
+            raise
 
     async def _run_stream_with_deadlines(
         self,
@@ -1178,9 +1505,11 @@ class SandboxAgent:
         prompt: str,
         tools: List[Dict[str, Any]],
     ) -> Tuple[str, Tuple[str, str, Optional[List[Any]]]]:
-        """Run one model stream under first-output and complete-attempt clocks."""
+        """Run one model stream under first-output and inactivity clocks."""
 
         first_output = asyncio.Event()
+        activity_event = asyncio.Event()
+        last_activity = [0.0]
         interrupt_flag = asyncio.Event()
         stream_task = asyncio.create_task(
             self._invoke_stream_attempt(
@@ -1188,85 +1517,130 @@ class SandboxAgent:
                 prompt,
                 tools,
                 first_output,
+                activity_event,
+                last_activity,
                 interrupt_flag,
             )
         )
         first_waiter = asyncio.create_task(first_output.wait())
+        activity_waiter: Optional[asyncio.Task[None]] = None
         loop = asyncio.get_running_loop()
         started = loop.time()
         first_deadline = started + self._first_output_timeout()
-        complete_deadline = started + self._complete_attempt_timeout()
         try:
             while True:
                 if stream_task.done():
                     return await stream_task
                 now = loop.time()
-                complete_remaining = complete_deadline - now
-                first_remaining = first_deadline - now
-                if complete_remaining <= 0:
-                    raise _CompleteAttemptTimeout()
-                if first_remaining <= 0:
-                    raise _FirstOutputTimeout()
-                done, _ = await asyncio.wait(
-                    {stream_task, first_waiter},
-                    timeout=min(complete_remaining, first_remaining),
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if stream_task in done:
-                    return await stream_task
-                if first_waiter in done:
-                    complete_remaining = complete_deadline - loop.time()
-                    if complete_remaining <= 0:
-                        raise _CompleteAttemptTimeout()
+                if not first_output.is_set():
+                    first_remaining = first_deadline - now
+                    if first_remaining <= 0:
+                        raise _FirstOutputTimeout()
                     done, _ = await asyncio.wait(
-                        {stream_task},
-                        timeout=complete_remaining,
+                        {stream_task, first_waiter},
+                        timeout=first_remaining,
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     if stream_task in done:
                         return await stream_task
+                    if first_waiter in done:
+                        # Remove the first-delta signal before waiting for
+                        # subsequent activity.  ``last_activity`` retains the
+                        # timestamp of every meaningful delta, including any
+                        # fragments emitted while this waiter was waking.
+                        activity_event.clear()
+                        continue
+                    raise _FirstOutputTimeout()
+
+                idle_remaining = last_activity[0] + self._complete_attempt_timeout() - loop.time()
+                if idle_remaining <= 0:
                     raise _CompleteAttemptTimeout()
-                # Neither task completed before the nearest deadline.  Keep
-                # first-output classification precise when both are configured
-                # to expire at nearly the same instant.
-                if complete_deadline <= first_deadline:
-                    raise _CompleteAttemptTimeout()
-                raise _FirstOutputTimeout()
+                activity_waiter = asyncio.create_task(activity_event.wait())
+                done, _ = await asyncio.wait(
+                    {stream_task, activity_waiter},
+                    timeout=idle_remaining,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if stream_task in done:
+                    activity_waiter.cancel()
+                    self._consume_task_exception(activity_waiter)
+                    activity_waiter = None
+                    return await stream_task
+                if activity_waiter in done:
+                    activity_event.clear()
+                    activity_waiter = None
+                    continue
+                # No meaningful content, reasoning, or tool-call delta arrived
+                # during the configured inactivity interval.
+                raise _CompleteAttemptTimeout()
         finally:
             if not first_waiter.done():
                 first_waiter.cancel()
             self._consume_task_exception(first_waiter)
+            if activity_waiter is not None and not activity_waiter.done():
+                activity_waiter.cancel()
+            if activity_waiter is not None:
+                self._consume_task_exception(activity_waiter)
             if not stream_task.done():
-                cleanup = asyncio.create_task(self._cancel_stream_attempt(stream_task, interrupt_flag))
-                try:
-                    await asyncio.wait_for(asyncio.shield(cleanup), timeout=0.25)
-                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-                    cleanup.add_done_callback(self._consume_task_exception)
+                # The cleanup routine owns its cooperative and forced budgets.
+                # Await it directly so failover cannot begin while a provider's
+                # nested request task is still observing the interrupt flag.
+                await self._cancel_stream_attempt(stream_task, interrupt_flag)
             else:
                 self._consume_task_exception(stream_task)
 
     async def _cancel_stream_attempt(self, task: asyncio.Task[Any], interrupt_flag: asyncio.Event) -> None:
-        """Request cancellation and return without awaiting a resistant task."""
+        """Cooperatively stop a stream, then force it within a bounded budget.
+
+        Production model clients create a nested request task and poll
+        ``interrupt_flag`` before iterating the provider stream.  Waiting for
+        that poll before cancelling the outer task lets the client cancel and
+        await its child.  A resistant outer task is still force-cancelled and
+        detached only after its own bounded wait; its eventual result or
+        exception is consumed by the done callback.
+        """
 
         interrupt_flag.set()
         if task.done():
             self._consume_task_exception(task)
             return
+
+        try:
+            done, _ = await asyncio.wait(
+                {task},
+                timeout=_STREAM_COOPERATIVE_CLEANUP_SECONDS,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        except asyncio.CancelledError:
+            # The caller cancelled this cleanup coroutine.  Force ownership of
+            # the model task immediately, track its eventual result, and let
+            # the caller's cancellation propagate unchanged.
+            task.cancel()
+            task.add_done_callback(self._consume_task_exception)
+            raise
+
+        if task in done:
+            self._consume_task_exception(task)
+            return
+
         task.cancel()
         try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=0.2)
-        except asyncio.TimeoutError:
-            # A provider can ignore cancellation while honoring interrupt_flag
-            # later.  Leave it tracked and consume any eventual exception.
-            task.add_done_callback(self._consume_task_exception)
-            return
+            done, _ = await asyncio.wait(
+                {task},
+                timeout=_STREAM_FORCED_CLEANUP_SECONDS,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
         except asyncio.CancelledError:
+            task.cancel()
             task.add_done_callback(self._consume_task_exception)
-            return
-        except Exception:
+            raise
+        if task in done:
             self._consume_task_exception(task)
         else:
-            self._consume_task_exception(task)
+            # The provider may catch cancellation and remain alive.  Keep the
+            # task detached but handled so a late failure is not reported as
+            # an unhandled task exception.
+            task.add_done_callback(self._consume_task_exception)
 
     @staticmethod
     def _all_models_failure_outcome(reasons: Sequence[str]) -> SandboxAgentOutcome:
@@ -1311,6 +1685,7 @@ class SandboxAgent:
 
     async def _run_loop(self) -> SandboxAgentResult:
         total_calls = 0
+        rounds_used = 0
         try:
             self.provider = SandboxProvider(self.scope, self.handoff, manager=self.manager, config=self.config)
             loaded = self._load_llm()
@@ -1323,10 +1698,8 @@ class SandboxAgent:
                     detail="file_edit model is not configured",
                 )
             logger.info(
-                "沙盒文件代理开始处理：可用模型 %d 个，最多执行 %d 轮、调用工具 %d 次；首次输出等待 %s 秒，单轮最长 %s 秒，连续无进展最多 %d 次",
+                "沙盒文件代理开始处理：可用模型 %d 个；取得进展后会继续处理，只有连续失败才会停止；首次输出等待 %s 秒，模型连续无进展最长 %s 秒，连续无进展最多 %d 次",
                 len(attempts),
-                max(0, int(self.config.max_rounds)),
-                max(0, int(self.config.max_tool_calls)),
                 self._first_output_timeout(),
                 self._complete_attempt_timeout(),
                 self._non_progress_limit(),
@@ -1352,25 +1725,13 @@ class SandboxAgent:
             )
             observations: List[str] = []
             duplicate_stalls = 0
-            rounds_used = 0
             model_cursor = 0
             non_progress_counts = [0 for _ in attempts]
             exhausted_models: set[int] = set()
-            max_rounds = max(0, int(self.config.max_rounds))
             non_progress_limit = self._non_progress_limit()
             duplicate_limit = max(1, int(self.config.duplicate_limit))
 
-            while rounds_used < max_rounds:
-                if total_calls >= self.config.max_tool_calls:
-                    self.provider.abort()
-                    return SandboxAgentResult(
-                        SandboxAgentOutcome.BUDGET_EXHAUSTED,
-                        self.handoff.handoff_id,
-                        detail="tool-call budget exhausted",
-                        tool_calls=total_calls,
-                        rounds=rounds_used,
-                    )
-
+            while True:
                 failure_reasons: List[str] = []
                 progress_found = False
                 while model_cursor < len(attempts):
@@ -1379,9 +1740,8 @@ class SandboxAgent:
                         model_cursor += 1
                         continue
                     attempt = attempts[model_index]
-                    # Corrective responses consume round budget, so derive
-                    # the displayed round at each attempt rather than once
-                    # before the same-model retry loop.
+                    # Derive the displayed telemetry round at each attempt so
+                    # same-model correction turns remain visible in logs.
                     logical_round_number = rounds_used + 1
                     logger.info(
                         "沙盒文件代理开始第 %d 轮：当前使用第 %d 个模型（%s），此前累计调用工具 %d 次",
@@ -1390,7 +1750,7 @@ class SandboxAgent:
                         attempt.name,
                         total_calls,
                     )
-                    observation = "\n".join(observations)[-self.config.observation_max_chars :]
+                    observation = "\n".join(observations)[-self._observation_limit() :]
                     round_prompt = f"{prompt}\n\nObserved sandbox results:\n{observation}" if observation else prompt
                     try:
                         response, detail = await self._run_stream_with_deadlines(
@@ -1416,6 +1776,16 @@ class SandboxAgent:
                         failure_reasons.append("complete_attempt_timeout")
                         logger.warning(
                             "sandbox agent model attempt failed: round=%d model_index=%d model_name=%s reason=complete_attempt_timeout",
+                            logical_round_number,
+                            model_index,
+                            attempt.name,
+                        )
+                        model_cursor += 1
+                        continue
+                    except _StreamBufferOverflow:
+                        failure_reasons.append("model")
+                        logger.warning(
+                            "sandbox agent model attempt failed: round=%d model_index=%d model_name=%s reason=stream_buffer_overflow",
                             logical_round_number,
                             model_index,
                             attempt.name,
@@ -1470,15 +1840,6 @@ class SandboxAgent:
                     round_progress = False
                     failed_observations: List[Dict[str, Any]] = []
                     for call in calls:
-                        if total_calls >= self.config.max_tool_calls:
-                            self.provider.abort()
-                            return SandboxAgentResult(
-                                SandboxAgentOutcome.BUDGET_EXHAUSTED,
-                                self.handoff.handoff_id,
-                                detail="tool-call budget exhausted",
-                                tool_calls=total_calls,
-                                rounds=rounds_used,
-                            )
                         total_calls += 1
                         name, args = self._call_args(call)
                         if name == "CALL_BACK":
@@ -1504,7 +1865,7 @@ class SandboxAgent:
                                         "ok": True,
                                         "sandbox_observation": "user_callback",
                                         "query": query[:1000],
-                                        "answer": str(answer or "")[: self.config.observation_max_chars],
+                                        "answer": str(answer or "")[: self._observation_limit()],
                                     }
                         else:
                             try:
@@ -1522,6 +1883,8 @@ class SandboxAgent:
                                 }
                         if result.get("duplicate"):
                             duplicate_stalls += 1
+                        else:
+                            duplicate_stalls = 0
                         if duplicate_stalls >= duplicate_limit:
                             self.provider.abort()
                             return SandboxAgentResult(
@@ -1563,13 +1926,14 @@ class SandboxAgent:
                         )
 
                     if round_progress:
-                        # Genuine provider progress consumes one bounded round,
-                        # resets correction state, and starts the next logical
-                        # turn from model zero.
+                        # Genuine provider progress resets every consecutive
+                        # failure tracker and starts the next logical turn from
+                        # model zero.  There is no whole-agent round budget.
                         rounds_used += 1
                         non_progress_counts = [0 for _ in attempts]
                         exhausted_models.clear()
                         model_cursor = 0
+                        duplicate_stalls = 0
                         progress_found = True
                         logger.info(
                             "第 %d 轮已取得进展（由第 %d 个模型完成），下一轮将从第一个模型开始",
@@ -1579,7 +1943,7 @@ class SandboxAgent:
                         break
 
                     # A completed response with tool calls that all failed
-                    # validation consumes exactly one bounded correction turn,
+                    # validation consumes exactly one correction turn,
                     # regardless of the number of rejected calls in it.
                     rounds_used += 1
                     failure_reasons.append("non_progress")
@@ -1591,15 +1955,6 @@ class SandboxAgent:
                         attempt.name,
                         non_progress_counts[model_index],
                     )
-                    if rounds_used >= max_rounds:
-                        self.provider.abort()
-                        return SandboxAgentResult(
-                            SandboxAgentOutcome.BUDGET_EXHAUSTED,
-                            self.handoff.handoff_id,
-                            detail="round budget exhausted",
-                            tool_calls=total_calls,
-                            rounds=rounds_used,
-                        )
                     if non_progress_counts[model_index] >= non_progress_limit:
                         exhausted_models.add(model_index)
                         model_cursor += 1
@@ -1627,14 +1982,6 @@ class SandboxAgent:
                     rounds=rounds_used,
                 )
 
-            self.provider.abort()
-            return SandboxAgentResult(
-                SandboxAgentOutcome.BUDGET_EXHAUSTED,
-                self.handoff.handoff_id,
-                detail="round budget exhausted",
-                tool_calls=total_calls,
-                rounds=max_rounds,
-            )
         except asyncio.CancelledError:
             if self.provider:
                 self.provider.abort()
@@ -1648,6 +1995,7 @@ class SandboxAgent:
                 self.handoff.handoff_id,
                 detail=type(exc).__name__,
                 tool_calls=total_calls,
+                rounds=rounds_used,
             )
 
 

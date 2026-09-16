@@ -32,7 +32,7 @@ from google.genai.errors import (
 from src.config.api_ada_configs import ModelInfo, APIProvider
 from src.common.logger import get_logger
 
-from .base_client import APIResponse, UsageRecord, BaseClient, client_registry
+from .base_client import APIResponse, UsageRecord, BaseClient, _cancel_and_drain_request_task, client_registry
 from ..exceptions import (
     RespParseException,
     NetworkConnectionError,
@@ -474,6 +474,7 @@ class GeminiClient(BaseClient):
 
         generation_config = GenerateContentConfig(**generation_config_dict)
 
+        req_task: asyncio.Task[Any] | None = None
         try:
             if model_info.force_stream_mode:
                 req_task = asyncio.create_task(
@@ -485,8 +486,9 @@ class GeminiClient(BaseClient):
                 )
                 while not req_task.done():
                     if interrupt_flag and interrupt_flag.is_set():
-                        # 如果中断量存在且被设置，则取消任务并抛出异常
-                        req_task.cancel()
+                        # The client owns the nested SDK request and must drain
+                        # it before exposing the abort to its caller.
+                        await _cancel_and_drain_request_task(req_task)
                         raise ReqAbortException("请求被外部信号中断")
                     await asyncio.sleep(0.1)  # 等待0.1秒后再次检查任务&中断信号量状态
                 resp, usage_record = await stream_response_handler(req_task.result(), interrupt_flag)
@@ -500,12 +502,19 @@ class GeminiClient(BaseClient):
                 )
                 while not req_task.done():
                     if interrupt_flag and interrupt_flag.is_set():
-                        # 如果中断量存在且被设置，则取消任务并抛出异常
-                        req_task.cancel()
+                        await _cancel_and_drain_request_task(req_task)
                         raise ReqAbortException("请求被外部信号中断")
                     await asyncio.sleep(0.5)  # 等待0.5秒后再次检查任务&中断信号量状态
 
                 resp, usage_record = async_response_parser(req_task.result())
+        except asyncio.CancelledError:
+            if req_task is not None:
+                await _cancel_and_drain_request_task(req_task)
+            raise
+        except ReqAbortException:
+            # An explicit abort is not a transient network failure and must
+            # not be translated into NetworkConnectionError/retry handling.
+            raise
         except (ClientError, ServerError) as e:
             # 重封装ClientError和ServerError为RespNotOkException
             raise RespNotOkException(e.code, e.message) from None

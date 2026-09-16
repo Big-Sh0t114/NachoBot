@@ -2,9 +2,11 @@
 from fastapi import FastAPI, Request
 import uvicorn
 import logging
+import asyncio
 from pathlib import Path
 import re
 from .tts_model import TTSModel
+from ....utils.tts_runtime import TTSRuntime
 
 app = FastAPI(title="GPT-SoVITS Adapter API", version="1.1")
 logger = logging.getLogger("api_server")
@@ -17,6 +19,10 @@ PLATFORM_FILENAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 tts_model: TTSModel | None = None
 gpt_weights: str | None = None
 sovits_weights: str | None = None
+_runtime = TTSRuntime(
+    config_dir=Path(__file__).resolve().parents[4] / "configs",
+    fixed_backend="GPT_Sovits",
+)
 
 
 def _log_safe(value: object, max_len: int = 200) -> str:
@@ -48,6 +54,24 @@ def _safe_output_path(platform: str) -> Path:
     return OUTPUT_DIR / f"output_{token[:80]}.wav"
 
 
+def _apply_weight_transaction(model: TTSModel, gpt_path: str, sovits_path: str) -> None:
+    """Apply both fixed API weight changes as one serialized mutation."""
+
+    model.set_gpt_weights(gpt_path)
+    model.set_sovits_weights(sovits_path)
+    # Keep explicit load_model overrides in memory for every preset so changing
+    # the platform does not reload stale TOML weight paths.
+    for preset in model.config.tts.models.presets.values():
+        preset.gpt_model = gpt_path
+        preset.sovits_model = sovits_path
+
+
+def _sync_weight_metadata(model: TTSModel) -> None:
+    global gpt_weights, sovits_weights
+    gpt_weights = getattr(model, "_loaded_gpt_weights", None)
+    sovits_weights = getattr(model, "_loaded_sovits_weights", None)
+
+
 @app.on_event("startup")
 async def startup_event():
     """初始化 FastAPI 服务时加载默认模型配置"""
@@ -55,7 +79,9 @@ async def startup_event():
 
     print("启动 GPT-SoVITS TTS 服务中 ...")
     try:
-        tts_model = TTSModel()
+        async with _runtime.model_context() as model:
+            tts_model = model
+            _sync_weight_metadata(model)
         print("默认配置加载完成")
     except Exception:
         logger.exception("TTS Model initialization failed")
@@ -86,11 +112,24 @@ async def load_model(request: Request):
         logger.warning("Model path validation failed: %s", _log_safe(e))
         return {"status": "error", "msg": "模型路径无效或文件不存在"}
 
-    # 动态切换权重
-    tts_model.set_gpt_weights(str(gpt_path))
-    tts_model.set_sovits_weights(str(sovits_path))
-
-    gpt_weights, sovits_weights = str(gpt_path), str(sovits_path)
+    try:
+        async with _runtime.model_context() as model:
+            tts_model = model
+            try:
+                await _runtime.call_blocking(
+                    _apply_weight_transaction,
+                    model,
+                    str(gpt_path),
+                    str(sovits_path),
+                )
+            except BaseException as exc:
+                _runtime.invalidate(f"Fixed GPT weight transaction failed: {exc}")
+                raise
+            gpt_weights, sovits_weights = str(gpt_path), str(sovits_path)
+    except Exception as exc:
+        logger.error("Model load failed: %s", _log_safe(exc))
+        tts_model = _runtime.model
+        return {"status": "error", "msg": "模型权重加载失败"}
     return {
         "status": "ok",
         "msg": "模型权重已加载成功",
@@ -110,9 +149,7 @@ async def infer(request: Request):
         "platform": "default"
     }
     """
-    if tts_model is None:
-        return {"status": "error", "msg": "TTS 模型未初始化"}
-
+    global tts_model
     data = await request.json()
     text = data.get("text", "").strip()
     platform = data.get("platform", "default")
@@ -121,8 +158,11 @@ async def infer(request: Request):
         return {"status": "error", "msg": "缺少文本输入"}
 
     try:
-        # 调用已有的 TTS 接口（返回音频二进制）
-        audio_bytes = await tts_model.tts(text=text, platform=platform)
+        async with _runtime.model_context() as model:
+            tts_model = model
+            _sync_weight_metadata(model)
+            # 调用已有的 TTS 接口（返回音频二进制）
+            audio_bytes = await model.tts(text=text, platform=platform)
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         output_path = _safe_output_path(platform)
         # codeql[py/path-injection]
