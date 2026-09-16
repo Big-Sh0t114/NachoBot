@@ -66,6 +66,7 @@ class MessageHandler:
         group_id: Optional[int] = None,
         ignore_bot: Optional[bool] = False,
         ignore_global_list: Optional[bool] = False,
+        ignore_self_muted: Optional[bool] = False,
     ) -> bool:
         # sourcery skip: hoist-statement-from-if, merge-else-if-into-elif
         """
@@ -75,13 +76,14 @@ class MessageHandler:
             group_id: int: 群ID
             ignore_bot: bool: 是否忽略机器人检查
             ignore_global_list: bool: 是否忽略全局黑名单检查
+            ignore_self_muted: bool: 是否忽略Bot在群内被禁言时的链路拦截
         Returns:
             bool: 是否允许聊天
         """
         logger.debug(f"群聊id: {group_id}, 用户id: {user_id}")
 
         # 检查Bot自身是否在该群被禁言，若是则切断链路以减少token消耗
-        if group_id:
+        if group_id and not ignore_self_muted:
             from .notice_handler import notice_handler
             import time as _time
 

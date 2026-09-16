@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import time
 from typing import Any, List, Optional, TYPE_CHECKING
+from ncnk_message import get_system_event
 
 from src.common.logger import get_logger
 
@@ -132,6 +133,8 @@ def _build_query_from_messages(
 
     recent_texts: List[str] = []
     for msg in reversed(messages):
+        if get_system_event(msg) is not None or getattr(msg, "user_info", None) is None:
+            continue
         if is_bot_self(msg.user_info.platform, msg.user_info.user_id):
             continue
         text = getattr(msg, "processed_plain_text", "") or ""

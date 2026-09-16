@@ -1,5 +1,4 @@
 import asyncio
-import asyncio
 import hashlib
 import time
 import copy
@@ -67,7 +66,7 @@ class ChatStream:
         self,
         stream_id: str,
         platform: str,
-        user_info: UserInfo,
+        user_info: Optional[UserInfo],
         group_info: Optional[GroupInfo] = None,
         data: Optional[dict] = None,
     ):
@@ -130,6 +129,9 @@ class ChatManager:
         if not self._initialized:
             self.streams: Dict[str, ChatStream] = {}  # stream_id -> ChatStream
             self.last_messages: Dict[str, "MessageRecv"] = {}  # stream_id -> last_message
+            # Private structured events select a stream with an explicit peer
+            # while keeping message_info.user_info=None (senderless).
+            self.last_routing_user_infos: Dict[str, Optional[UserInfo]] = {}
             self._stream_registry_lock = asyncio.Lock()
             self._stream_creation_tasks: Dict[str, asyncio.Task[ChatStream]] = {}
             try:
@@ -163,29 +165,44 @@ class ChatManager:
             except Exception as e:
                 logger.error(f"聊天流自动保存失败: {str(e)}")
 
-    def register_message(self, message: "MessageRecv"):
+    def register_message(
+        self,
+        message: "MessageRecv",
+        routing_user_info: Optional[UserInfo] = None,
+    ):
         """注册消息到聊天流"""
         stream_id = self._generate_stream_id(
             message.message_info.platform,  # type: ignore
             message.message_info.user_info,
             message.message_info.group_info,
+            routing_user_info=routing_user_info,
         )
         self.last_messages[stream_id] = message
+        # Ordinary messages use their sender as the conversation peer.  A
+        # structured private event supplies that peer independently; group
+        # events deliberately record None.
+        self.last_routing_user_infos[stream_id] = copy.deepcopy(
+            routing_user_info if routing_user_info is not None else message.message_info.user_info
+        )
         # logger.debug(f"注册消息到聊天流: {stream_id}")
 
     @staticmethod
     def _generate_stream_id(
-        platform: str, user_info: Optional[UserInfo], group_info: Optional[GroupInfo] = None
+        platform: str,
+        user_info: Optional[UserInfo],
+        group_info: Optional[GroupInfo] = None,
+        routing_user_info: Optional[UserInfo] = None,
     ) -> str:
         """生成聊天流唯一ID"""
-        if not user_info and not group_info:
+        stream_user_info = routing_user_info if routing_user_info is not None else user_info
+        if not stream_user_info and not group_info:
             raise ValueError("用户信息或群组信息必须提供")
 
         if group_info:
             # 组合关键信息
             components = [platform, str(group_info.group_id)]
         else:
-            components = [platform, str(user_info.user_id), "private"]  # type: ignore
+            components = [platform, str(stream_user_info.user_id), "private"]  # type: ignore
 
         # 使用MD5生成唯一ID
         key = "_".join(components)
@@ -202,48 +219,65 @@ class ChatManager:
     async def get_or_create_stream(
         self,
         platform: str,
-        user_info: UserInfo,
+        user_info: Optional[UserInfo],
         group_info: Optional[GroupInfo] = None,
         message: Optional["MessageRecv"] = None,
+        routing_user_info: Optional[UserInfo] = None,
     ) -> ChatStream:
         """并发安全地获取或创建聊天流。
 
         同一 stream_id 的并发调用共享底层创建任务，但每个调用者都会获得
         独立的 ChatStream 快照，避免首个调用者的 user_info/context 泄漏到
         后续并发消息。
+
+        对群系统事件，user_info=None 是当前消息的真实语义，不能回退或继承
+        上一位普通消息发送者；群 stream_id 仍只依赖 platform + group_id。
         """
-        stream_id = self._generate_stream_id(platform, user_info, group_info)
+        stream_id = self._generate_stream_id(
+            platform,
+            user_info,
+            group_info,
+            routing_user_info=routing_user_info,
+        )
         async with self._stream_registry_lock:
             creation_task = self._stream_creation_tasks.get(stream_id)
             if creation_task is None:
                 creation_task = asyncio.create_task(
-                    self._get_or_create_stream_impl(platform, user_info, group_info)
+                    self._get_or_create_stream_impl(
+                        platform,
+                        user_info,
+                        group_info,
+                        routing_user_info=routing_user_info,
+                    )
                 )
                 self._stream_creation_tasks[stream_id] = creation_task
 
         try:
             shared_stream = await asyncio.shield(creation_task)
 
-            # canonical stream 始终跟随该聊天流最新已注册的消息。
-            # 这样即使创建任务由较早的发送者启动，也不会长期留下
-            # user_info 与 context 指向不同消息的状态。
+            # canonical stream 始终跟随该聊天流最新已注册消息。
+            # latest_user_info 即使为 None 也必须写回，因为 None 对系统事件表示
+            # “当前消息没有 sender”，不能继续保留上一位用户。
             cached_stream = self.streams.get(stream_id)
             latest_message = self.last_messages.get(stream_id)
             if cached_stream is not None and latest_message is not None:
-                latest_user_info = getattr(latest_message.message_info, "user_info", None)
+                latest_user_info = self.last_routing_user_infos.get(
+                    stream_id,
+                    getattr(latest_message.message_info, "user_info", None),
+                )
                 latest_group_info = getattr(latest_message.message_info, "group_info", None)
 
-                if latest_user_info and latest_user_info.platform and latest_user_info.user_id:
-                    cached_stream.user_info = copy.deepcopy(latest_user_info)
+                cached_stream.user_info = copy.deepcopy(latest_user_info)
                 if latest_group_info:
                     cached_stream.group_info = copy.deepcopy(latest_group_info)
                 cached_stream.set_context(latest_message)
 
-            # 每个调用者必须得到独立快照。共享 creation_task 只能共享
-            # Stream 的创建结果，不能共享当前消息发送者/上下文。
+            # 每个调用者必须得到独立快照。当前消息的 user_info=None 也必须覆盖，
+            # 否则系统事件会错误继承共享 stream 中上一位发言人的身份。
             stream = copy.deepcopy(cached_stream or shared_stream)
-            if user_info and user_info.platform and user_info.user_id:
-                stream.user_info = copy.deepcopy(user_info)
+            stream.user_info = copy.deepcopy(
+                routing_user_info if routing_user_info is not None else user_info
+            )
             if group_info:
                 stream.group_info = copy.deepcopy(group_info)
             if message is not None:
@@ -257,42 +291,54 @@ class ChatManager:
                         self._stream_creation_tasks.pop(stream_id, None)
 
     async def _get_or_create_stream_impl(
-        self, platform: str, user_info: UserInfo, group_info: Optional[GroupInfo] = None
+        self,
+        platform: str,
+        user_info: Optional[UserInfo],
+        group_info: Optional[GroupInfo] = None,
+        routing_user_info: Optional[UserInfo] = None,
     ) -> ChatStream:
         """获取或创建 canonical 聊天流。
 
         canonical ChatStream 表示整个 stream_id 的最新状态，因此它的
         user_info/group_info/context 必须来自该流最新已注册消息，而不能固定为
         启动共享 creation_task 的首个调用者。
+
+        对群系统事件，user_info=None 是最新消息的真实 sender 语义，不能通过
+        ``latest_user_info or user_info`` 回退成上一位普通用户。
         """
         try:
-            stream_id = self._generate_stream_id(platform, user_info, group_info)
+            stream_id = self._generate_stream_id(
+                platform,
+                user_info,
+                group_info,
+                routing_user_info=routing_user_info,
+            )
 
             from .message import MessageRecv  # 延迟导入，避免循环引用
 
             latest_message = self.last_messages.get(stream_id)
             if isinstance(latest_message, MessageRecv):
-                latest_user_info = latest_message.message_info.user_info
+                latest_user_info = self.last_routing_user_infos.get(
+                    stream_id,
+                    latest_message.message_info.user_info,
+                )
                 latest_group_info = latest_message.message_info.group_info
+                effective_user_info = latest_user_info
+                effective_group_info = latest_group_info or group_info
             else:
                 latest_message = None
-                latest_user_info = None
-                latest_group_info = None
-
-            effective_user_info = latest_user_info or user_info
-            effective_group_info = latest_group_info or group_info
+                effective_user_info = (
+                    routing_user_info if routing_user_info is not None else user_info
+                )
+                effective_group_info = group_info
 
             # 检查内存中是否存在
             if stream_id in self.streams:
                 cached_stream = self.streams[stream_id]
                 cached_stream.update_active_time()
 
-                if (
-                    effective_user_info
-                    and effective_user_info.platform
-                    and effective_user_info.user_id
-                ):
-                    cached_stream.user_info = copy.deepcopy(effective_user_info)
+                # None 也必须写回：它表示最新系统事件没有 message sender。
+                cached_stream.user_info = copy.deepcopy(effective_user_info)
                 if effective_group_info:
                     cached_stream.group_info = copy.deepcopy(effective_group_info)
                 if latest_message is not None:
@@ -310,22 +356,37 @@ class ChatManager:
             # 因此在真正构建 canonical stream 前重新读取一次最新消息。
             latest_message = self.last_messages.get(stream_id)
             if isinstance(latest_message, MessageRecv):
-                latest_user_info = latest_message.message_info.user_info
+                latest_user_info = self.last_routing_user_infos.get(
+                    stream_id,
+                    latest_message.message_info.user_info,
+                )
                 latest_group_info = latest_message.message_info.group_info
-                effective_user_info = latest_user_info or user_info
+                effective_user_info = latest_user_info
                 effective_group_info = latest_group_info or group_info
             else:
                 latest_message = None
-                effective_user_info = user_info
+                effective_user_info = (
+                    routing_user_info if routing_user_info is not None else user_info
+                )
                 effective_group_info = group_info
 
             if model_instance:
-                user_info_data = {
-                    "platform": model_instance.user_platform,
-                    "user_id": model_instance.user_id,
-                    "user_nickname": model_instance.user_nickname,
-                    "user_cardname": model_instance.user_cardname or "",
-                }
+                user_info_data = None
+                if any(
+                    (
+                        model_instance.user_platform,
+                        model_instance.user_id,
+                        model_instance.user_nickname,
+                        model_instance.user_cardname,
+                    )
+                ):
+                    user_info_data = {
+                        "platform": model_instance.user_platform,
+                        "user_id": model_instance.user_id,
+                        "user_nickname": model_instance.user_nickname,
+                        "user_cardname": model_instance.user_cardname or "",
+                    }
+
                 group_info_data = None
                 if model_instance.group_id:
                     group_info_data = {
@@ -343,8 +404,8 @@ class ChatManager:
                     "last_active_time": model_instance.last_active_time,
                 }
                 stream = ChatStream.from_dict(data_for_from_dict)
-                if effective_user_info:
-                    stream.user_info = copy.deepcopy(effective_user_info)
+                # 当前调用/最新消息的 sender 语义优先，None 也必须覆盖数据库旧值。
+                stream.user_info = copy.deepcopy(effective_user_info)
                 if effective_group_info:
                     stream.group_info = copy.deepcopy(effective_group_info)
                 stream.update_active_time()
@@ -378,11 +439,15 @@ class ChatManager:
 
         latest_message = self.last_messages.get(stream_id)
         if latest_message is not None:
-            latest_user_info = getattr(latest_message.message_info, "user_info", None)
+            latest_user_info = self.last_routing_user_infos.get(
+                stream_id,
+                getattr(latest_message.message_info, "user_info", None),
+            )
             latest_group_info = getattr(latest_message.message_info, "group_info", None)
 
-            if latest_user_info and latest_user_info.platform and latest_user_info.user_id:
-                stream.user_info = copy.deepcopy(latest_user_info)
+            # None is meaningful for a senderless system event and must clear a
+            # stale ordinary sender on the canonical stream.
+            stream.user_info = copy.deepcopy(latest_user_info)
             if latest_group_info:
                 stream.group_info = copy.deepcopy(latest_group_info)
             stream.set_context(latest_message)
@@ -390,10 +455,19 @@ class ChatManager:
         return stream
 
     def get_stream_by_info(
-        self, platform: str, user_info: UserInfo, group_info: Optional[GroupInfo] = None
+        self,
+        platform: str,
+        user_info: Optional[UserInfo],
+        group_info: Optional[GroupInfo] = None,
+        routing_user_info: Optional[UserInfo] = None,
     ) -> Optional[ChatStream]:
         """通过信息获取聊天流"""
-        stream_id = self._generate_stream_id(platform, user_info, group_info)
+        stream_id = self._generate_stream_id(
+            platform,
+            user_info,
+            group_info,
+            routing_user_info=routing_user_info,
+        )
         return self.streams.get(stream_id)
 
     def get_stream_name(self, stream_id: str) -> Optional[str]:
@@ -453,12 +527,21 @@ class ChatManager:
         def _db_load_all_streams_sync():
             loaded_streams_data = []
             for model_instance in ChatStreams.select():
-                user_info_data = {
-                    "platform": model_instance.user_platform,
-                    "user_id": model_instance.user_id,
-                    "user_nickname": model_instance.user_nickname,
-                    "user_cardname": model_instance.user_cardname or "",
-                }
+                user_info_data = None
+                if any(
+                    (
+                        model_instance.user_platform,
+                        model_instance.user_id,
+                        model_instance.user_nickname,
+                        model_instance.user_cardname,
+                    )
+                ):
+                    user_info_data = {
+                        "platform": model_instance.user_platform,
+                        "user_id": model_instance.user_id,
+                        "user_nickname": model_instance.user_nickname,
+                        "user_cardname": model_instance.user_cardname or "",
+                    }
                 group_info_data = None
                 if model_instance.group_id:
                     group_info_data = {

@@ -7,6 +7,7 @@ inferring behavior from a platform name, group id, or template name.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -114,28 +115,43 @@ class PlatformEvent:
 
 
 def additional_config_from_message(message: Any) -> Mapping[str, Any]:
+    def _as_mapping(value: Any) -> Mapping[str, Any] | None:
+        if isinstance(value, Mapping):
+            return value
+        if isinstance(value, str) and value.strip():
+            try:
+                parsed = json.loads(value)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return None
+            return parsed if isinstance(parsed, Mapping) else None
+        return None
+
     if isinstance(message, Mapping):
-        direct = message.get("additional_config")
-        if isinstance(direct, Mapping) and direct:
+        direct = _as_mapping(message.get("additional_config"))
+        if direct:
             return direct
         additional_data = message.get("additional_data")
         if isinstance(additional_data, Mapping) and additional_data:
             return additional_data
         base_info = message.get("message_base_info")
-        if isinstance(base_info, Mapping) and isinstance(base_info.get("additional_config"), Mapping):
-            return base_info["additional_config"]
-    direct = getattr(message, "additional_config", None)
-    if isinstance(direct, Mapping) and direct:
+        if isinstance(base_info, Mapping):
+            nested = _as_mapping(base_info.get("additional_config"))
+            if nested is not None:
+                return nested
+    direct = _as_mapping(getattr(message, "additional_config", None))
+    if direct:
         return direct
     additional_data = getattr(message, "additional_data", None)
     if isinstance(additional_data, Mapping) and additional_data:
         return additional_data
     base_info = getattr(message, "message_base_info", None)
-    if isinstance(base_info, Mapping) and isinstance(base_info.get("additional_config"), Mapping):
-        return base_info["additional_config"]
+    if isinstance(base_info, Mapping):
+        nested = _as_mapping(base_info.get("additional_config"))
+        if nested is not None:
+            return nested
     message_info = getattr(message, "message_info", None)
-    nested = getattr(message_info, "additional_config", None)
-    return nested if isinstance(nested, Mapping) else {}
+    nested = _as_mapping(getattr(message_info, "additional_config", None))
+    return nested if nested is not None else {}
 
 
 def runtime_capabilities_from_message(message: Any) -> RuntimeCapabilities:

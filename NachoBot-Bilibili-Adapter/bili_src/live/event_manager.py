@@ -13,6 +13,7 @@ from ncnk_message import (
     MessageBase,
     Seg,
     UserInfo,
+    build_system_event,
 )
 
 ACCEPT_FORMAT = ["text", "voice", "reply", "command"]
@@ -73,28 +74,40 @@ class EventManager:
                         count = data["count"]
                         room_id, user_id, gift_name = key
                         user_name = data["user_name"]
-                        timestamp = data["timestamp"]
+                        occurrence_timestamp = data["timestamp"]
                         price = data["price"] * count
 
                         self.logger.info(f"Flushing aggregated gift: {gift_name} x{count} from {user_name}")
 
                         prompt_text = f"送出了 {gift_name} x{count}"
                         template_info = await self.adapter._get_template_info(room_id, user_id, prompt_text)
-                        
+
                         additional_config = self.adapter._build_live_additional_config(
                             room_id,
-                            {"is_mentioned": 1.0},
+                            platform_event={"kind": "support", "amount": max(0, price)},
                         )
-                        
+                        additional_config["system_event"] = build_system_event(
+                            "bilibili.gift",
+                            actor={"user_id": str(user_id), "name": user_name},
+                            target=None,
+                            data={
+                                "room_id": str(room_id),
+                                "gift_name": gift_name,
+                                "num": count,
+                                "price": price,
+                                "aggregated": True,
+                                "occurred_at": occurrence_timestamp,
+                            },
+                        )
+
                         message_info = BaseMessageInfo(
                             platform=self.config.platform,
                             message_id=str(uuid.uuid4()),
-                            time=timestamp,
-                            user_info=UserInfo(
-                                platform=self.config.platform,
-                                user_id=user_id,
-                                user_nickname=user_name,
-                            ),
+                            # HeartFlow queries by ingestion time. Using the
+                            # original occurrence time can place a debounced
+                            # gift behind its current read watermark.
+                            time=time.time(),
+                            user_info=None,
                             group_info=GroupInfo(
                                 platform=self.config.platform,
                                 group_id=str(room_id),
@@ -123,6 +136,8 @@ class EventManager:
                                     "num": count,
                                     "price": price,
                                     "room_id": room_id,
+                                    "user_id": user_id,
+                                    "user_name": user_name,
                                 },
                                 ensure_ascii=True,
                             ),

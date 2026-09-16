@@ -1,12 +1,13 @@
 import re
 import time
+import json
 import urllib3
 
 from abc import abstractmethod
 from dataclasses import dataclass
 from rich.traceback import install
 from typing import Optional, Any, List
-from ncnk_message import Seg, UserInfo, BaseMessageInfo, MessageBase
+from ncnk_message import Seg, UserInfo, BaseMessageInfo, MessageBase, get_system_event
 
 import os
 from pathlib import Path
@@ -474,7 +475,10 @@ class MessageProcessBase(Message):
                 if self.reply and hasattr(self.reply, "processed_plain_text"):
                     # print(f"self.reply.processed_plain_text: {self.reply.processed_plain_text}")
                     # print(f"reply: {self.reply}")
-                    return f"[回复<{self.reply.message_info.user_info.user_nickname}:{self.reply.message_info.user_info.user_id}> 的消息：{self.reply.processed_plain_text}]"  # type: ignore
+                    reply_user_info = getattr(self.reply.message_info, "user_info", None)
+                    if get_system_event(self.reply) is not None or reply_user_info is None:
+                        return f"[回复系统事件的消息：{self.reply.processed_plain_text}]"
+                    return f"[回复<{reply_user_info.user_nickname}:{reply_user_info.user_id}> 的消息：{self.reply.processed_plain_text}]"
                 return ""
             else:
                 return f"[{segment.type}:{str(segment.data)}]"
@@ -642,44 +646,77 @@ def message_recv_from_dict(message_dict: dict) -> MessageRecv:
 
 
 def message_from_db_dict(db_dict: dict) -> MessageRecv:
-    """从数据库字典创建MessageRecv实例"""
-    # 转换扁平的数据库字典为嵌套结构
+    """从数据库字典创建 MessageRecv 实例。"""
+    raw_additional_config = db_dict.get("additional_config")
+    additional_config = None
+    if isinstance(raw_additional_config, dict):
+        additional_config = raw_additional_config
+    elif isinstance(raw_additional_config, str) and raw_additional_config.strip():
+        try:
+            parsed_additional_config = json.loads(raw_additional_config)
+            if isinstance(parsed_additional_config, dict):
+                additional_config = parsed_additional_config
+        except (TypeError, ValueError, json.JSONDecodeError):
+            logger.warning("数据库消息 additional_config 不是有效 JSON，忽略该字段")
+
+    user_platform = db_dict.get("user_platform")
+    user_id = db_dict.get("user_id")
+    user_nickname = db_dict.get("user_nickname")
+    user_cardname = db_dict.get("user_cardname")
+
+    # 系统事件没有 message sender。数据库扁平 sender 字段为空时必须恢复为真正的 None，
+    # 不能构造 user_id/user_nickname 均为空的 UserInfo。
+    if any((user_platform, user_id, user_nickname, user_cardname)):
+        user_info = {
+            "platform": user_platform,
+            "user_id": user_id,
+            "user_nickname": user_nickname,
+            "user_cardname": user_cardname,
+        }
+    else:
+        user_info = None
+
+    group_platform = db_dict.get("chat_info_group_platform")
+    group_id = db_dict.get("chat_info_group_id")
+    group_name = db_dict.get("chat_info_group_name")
+    if any((group_platform, group_id, group_name)):
+        group_info = {
+            "platform": group_platform,
+            "group_id": group_id,
+            "group_name": group_name,
+        }
+    else:
+        group_info = None
+
     message_info_dict = {
         "platform": db_dict.get("chat_info_platform"),
         "message_id": db_dict.get("message_id"),
         "time": db_dict.get("time"),
-        "group_info": {
-            "platform": db_dict.get("chat_info_group_platform"),
-            "group_id": db_dict.get("chat_info_group_id"),
-            "group_name": db_dict.get("chat_info_group_name"),
-        },
-        "user_info": {
-            "platform": db_dict.get("user_platform"),
-            "user_id": db_dict.get("user_id"),
-            "user_nickname": db_dict.get("user_nickname"),
-            "user_cardname": db_dict.get("user_cardname"),
-        },
+        "group_info": group_info,
+        "user_info": user_info,
+        "additional_config": additional_config,
     }
 
-    processed_text = db_dict.get("processed_plain_text", "")
+    processed_text = db_dict.get("processed_plain_text", "") or ""
 
-    # 构建 MessageRecv 需要的字典
     recv_dict = {
         "message_info": message_info_dict,
-        "message_segment": {"type": "text", "data": processed_text},  # 从纯文本重建消息段
-        "raw_message": None,  # 数据库中未存储原始消息
+        "message_segment": {"type": "text", "data": processed_text},
+        "raw_message": None,
         "processed_plain_text": processed_text,
     }
 
-    # 创建 MessageRecv 实例
     msg = MessageRecv(recv_dict)
 
-    # 从数据库字典中填充其他可选字段
     msg.interest_value = db_dict.get("interest_value", 0.0)
     msg.is_mentioned = db_dict.get("is_mentioned")
+    msg.is_at = db_dict.get("is_at", False)
+    msg.reply_probability_boost = db_dict.get("reply_probability_boost", 0.0) or 0.0
     msg.priority_mode = db_dict.get("priority_mode", "interest")
     msg.priority_info = db_dict.get("priority_info")
     msg.is_emoji = db_dict.get("is_emoji", False)
     msg.is_picid = db_dict.get("is_picid", False)
+    msg.is_command = db_dict.get("is_command", False)
+    msg.is_notify = bool(db_dict.get("is_notify", False))
 
     return msg

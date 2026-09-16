@@ -17,6 +17,29 @@ from .message_base import (
     SenderInfo,
     ReceiverInfo,
 )
+from .system_event import (
+    SYSTEM_EVENT_KEY,
+    SYSTEM_EVENT_ROUTE_KEY,
+    SYSTEM_EVENT_ROUTE_KIND_PRIVATE,
+    SYSTEM_EVENT_VERSION,
+    SystemEventClassification,
+    SystemEventResult,
+    SystemEventRouteClassification,
+    SystemEventRouteResult,
+    SystemEventRouteStatus,
+    SystemEventState,
+    SystemEventStatus,
+    build_system_event,
+    build_system_event_route,
+    classify_system_event,
+    classify_system_event_route,
+    get_system_event,
+    get_system_event_route,
+    system_event_fallback_text,
+    system_event_result,
+    system_event_route_result,
+    validate_system_event_route,
+)
 
 # API-Server Version Components 不在根模块导出，需要从子模块导入
 # 消息相关组件 - 使用 from ncnk_message.message import
@@ -42,6 +65,27 @@ __all__ = [
     "InfoBase",
     "SenderInfo",
     "ReceiverInfo",
+    "SYSTEM_EVENT_KEY",
+    "SYSTEM_EVENT_ROUTE_KEY",
+    "SYSTEM_EVENT_ROUTE_KIND_PRIVATE",
+    "SYSTEM_EVENT_VERSION",
+    "SystemEventState",
+    "SystemEventStatus",
+    "SystemEventResult",
+    "SystemEventClassification",
+    "SystemEventRouteResult",
+    "SystemEventRouteStatus",
+    "SystemEventRouteClassification",
+    "build_system_event",
+    "build_system_event_route",
+    "classify_system_event",
+    "classify_system_event_route",
+    "system_event_result",
+    "system_event_route_result",
+    "get_system_event",
+    "get_system_event_route",
+    "validate_system_event_route",
+    "system_event_fallback_text",
     # 注意：API-Server Version 组件需要从子模块导入：
     # - 消息相关: from ncnk_message.message import APIMessageBase, MessageDim, etc.
     # - 服务端: from ncnk_message.server import WebSocketServer, ServerConfig, etc.

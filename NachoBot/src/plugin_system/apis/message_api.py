@@ -100,9 +100,23 @@ def get_messages_by_time_in_chat(
         raise ValueError("chat_id 必须是字符串类型")
     if filter_mai:
         return filter_mai_messages(
-            get_raw_msg_by_timestamp_with_chat(chat_id, start_time, end_time, limit, limit_mode, filter_command)
+            get_raw_msg_by_timestamp_with_chat(
+                chat_id,
+                start_time,
+                end_time,
+                limit,
+                limit_mode,
+                filter_command=filter_command,
+            )
         )
-    return get_raw_msg_by_timestamp_with_chat(chat_id, start_time, end_time, limit, limit_mode, filter_command)
+    return get_raw_msg_by_timestamp_with_chat(
+        chat_id,
+        start_time,
+        end_time,
+        limit,
+        limit_mode,
+        filter_command=filter_command,
+    )
 
 
 def get_messages_by_time_in_chat_inclusive(
@@ -142,11 +156,21 @@ def get_messages_by_time_in_chat_inclusive(
     if filter_mai:
         return filter_mai_messages(
             get_raw_msg_by_timestamp_with_chat_inclusive(
-                chat_id, start_time, end_time, limit, limit_mode, filter_command
+                chat_id,
+                start_time,
+                end_time,
+                limit,
+                limit_mode,
+                filter_command=filter_command,
             )
         )
     return get_raw_msg_by_timestamp_with_chat_inclusive(
-        chat_id, start_time, end_time, limit, limit_mode, filter_command
+        chat_id,
+        start_time,
+        end_time,
+        limit,
+        limit_mode,
+        filter_command=filter_command,
     )
 
 
@@ -479,14 +503,15 @@ async def get_person_ids_from_messages(messages: List[Dict[str, Any]]) -> List[s
 
 
 def filter_mai_messages(messages: List[DatabaseMessages]) -> List[DatabaseMessages]:
-    """
-    从消息列表中移滤的消息
-    Args:
-        messages: 消息列表，每个元素是消息字典
-    Returns:
-        过滤后的消息列表
-    """
-    return [msg for msg in messages if msg.user_info.user_id != str(global_config.bot.qq_account)]
+    """过滤 Bot 自身发送的消息；senderless 消息必须保留。"""
+    bot_id = str(global_config.bot.qq_account)
+    filtered_messages: List[DatabaseMessages] = []
+    for msg in messages:
+        user_info = getattr(msg, "user_info", None)
+        if user_info is not None and str(getattr(user_info, "user_id", "") or "") == bot_id:
+            continue
+        filtered_messages.append(msg)
+    return filtered_messages
 
 
 def translate_pid_to_description(pid: str) -> str:

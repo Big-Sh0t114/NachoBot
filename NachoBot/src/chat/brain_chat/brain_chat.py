@@ -12,6 +12,7 @@ from src.config.config import global_config
 from src.common.logger import get_logger
 from src.common.data_models.info_data_model import ActionPlannerInfo
 from src.common.data_models.message_data_model import ReplyContentType
+from ncnk_message import get_system_event
 from src.chat.message_receive.chat_stream import ChatStream, get_chat_manager
 from src.chat.utils.prompt_builder import global_prompt_manager
 from src.chat.utils.timer_calculator import Timer
@@ -488,14 +489,23 @@ class BrainChatting:
                 sandbox_handoff=sandbox_handoff,
             )
 
-        # 获取 platform，如果不存在则从 chat_stream 获取，如果还是 None 则使用默认值
-        platform = action_message.chat_info.platform
-        if platform is None:
-            platform = getattr(self.chat_stream, "platform", "unknown")
+        # Structured system events deliberately have no sender ``user_info``.
+        # They are environment input, not ordinary user messages, so keep the
+        # finalizer senderless and avoid constructing a Person from the event
+        # actor (or dereferencing a missing user_info object).
+        system_event = get_system_event(action_message)
+        user_info = getattr(action_message, "user_info", None)
+        if system_event is not None or user_info is None:
+            action_prompt_display = f"你对系统事件进行了回复：{reply_text}"
+        else:
+            # 获取 platform，如果不存在则从 chat_stream 获取，如果还是 None 则使用默认值
+            platform = action_message.chat_info.platform
+            if platform is None:
+                platform = getattr(self.chat_stream, "platform", "unknown")
 
-        person = Person(platform=platform, user_id=action_message.user_info.user_id)
-        person_name = person.person_name
-        action_prompt_display = f"你对{person_name}进行了回复：{reply_text}"
+            person = Person(platform=platform, user_id=user_info.user_id)
+            person_name = person.person_name
+            action_prompt_display = f"你对{person_name}进行了回复：{reply_text}"
 
         await database_api.store_action_info(
             chat_stream=self.chat_stream,

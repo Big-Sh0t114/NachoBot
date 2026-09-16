@@ -8,6 +8,7 @@ import numpy as np
 
 from collections import Counter
 from typing import Optional, Tuple, List, TYPE_CHECKING
+from ncnk_message import get_system_event
 
 from src.common.logger import get_logger
 from src.common.data_models.database_data_model import DatabaseMessages
@@ -45,6 +46,8 @@ def db_message_to_str(message_dict: dict) -> str:
 
 def is_mentioned_bot_in_message(message: MessageRecv) -> tuple[bool, bool, float]:
     """检查消息是否提到了机器人"""
+    if get_system_event(message) is not None:
+        return False, False, 0.0
     keywords = [k for k in [global_config.bot.nickname] + list(global_config.bot.alias_names) if k]
     reply_probability = 0.0
     is_at = False
@@ -126,6 +129,9 @@ def get_recent_group_speaker(chat_stream_id: str, sender, limit: int = 12) -> li
 
     who_chat_in_group = []
     for db_msg in recent_messages:
+        user_info = getattr(db_msg, "user_info", None)
+        if user_info is None:
+            continue
         # user_info = UserInfo.from_dict(
         #     {
         #         "platform": msg_db_data["user_platform"],
@@ -142,14 +148,14 @@ def get_recent_group_speaker(chat_stream_id: str, sender, limit: int = 12) -> li
         # ):  # 排除重复，排除消息发送者，排除bot，限制加载的关系数目
         #     who_chat_in_group.append((user_info.platform, user_info.user_id, user_info.user_nickname))
         if (
-            (db_msg.user_info.platform, db_msg.user_info.user_id) != sender
-            and db_msg.user_info.user_id != global_config.bot.qq_account
-            and (db_msg.user_info.platform, db_msg.user_info.user_id, db_msg.user_info.user_nickname)
+            (user_info.platform, user_info.user_id) != sender
+            and user_info.user_id != global_config.bot.qq_account
+            and (user_info.platform, user_info.user_id, user_info.user_nickname)
             not in who_chat_in_group
             and len(who_chat_in_group) < 5
         ):  # 排除重复，排除消息发送者，排除bot，限制加载的关系数目
             who_chat_in_group.append(
-                (db_msg.user_info.platform, db_msg.user_info.user_id, db_msg.user_info.user_nickname)
+                (user_info.platform, user_info.user_id, user_info.user_nickname)
             )
 
     return who_chat_in_group

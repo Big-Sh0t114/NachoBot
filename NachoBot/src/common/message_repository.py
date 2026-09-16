@@ -81,7 +81,11 @@ def find_messages(
             query = query.where(Messages.user_id != global_config.bot.qq_account)
 
         if filter_command:
-            query = query.where(not Messages.is_command)
+            # ``not Messages.is_command`` evaluates the Peewee field in
+            # Python and becomes a constant ``False`` before it reaches SQL.
+            # Negate the expression so command-filtered callers retain
+            # ordinary rows and senderless structured system events.
+            query = query.where(~Messages.is_command)
 
         if limit > 0:
             if limit_mode == "earliest":

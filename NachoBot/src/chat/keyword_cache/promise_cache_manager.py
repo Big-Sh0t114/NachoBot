@@ -4,6 +4,7 @@ import os
 import re
 import time
 from typing import Dict, Iterable, List, Optional, Set, Tuple, TYPE_CHECKING
+from ncnk_message import get_system_event
 
 from src.config.config import global_config, model_config
 from src.common.logger import get_logger
@@ -193,6 +194,8 @@ class PromiseCacheManager:
 
     def _message_to_record(self, message) -> Optional[dict]:
         try:
+            if get_system_event(message) is not None:
+                return None
             if hasattr(message, "message_info"):
                 info = message.message_info
                 user_info = info.user_info

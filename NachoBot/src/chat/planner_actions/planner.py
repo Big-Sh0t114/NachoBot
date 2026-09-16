@@ -394,7 +394,8 @@ class ActionPlanner:
         if blocked_user_ids:
             message_list_before_now = [
                 msg for msg in message_list_before_now
-                if str(msg.user_info.user_id) not in blocked_user_ids
+                if getattr(msg, "user_info", None) is None
+                or str(getattr(msg.user_info, "user_id", "")) not in blocked_user_ids
             ]
         focus_switch_context = can_offer_switch_chat(focus_coordinator, self.chat_id)
         if allow_no_reply and message_list_before_now and not focus_switch_context:

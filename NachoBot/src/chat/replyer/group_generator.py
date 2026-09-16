@@ -5,6 +5,7 @@ import random
 import re
 
 from typing import List, Optional, Dict, Any, Tuple
+from ncnk_message import get_system_event, system_event_fallback_text
 from datetime import datetime
 from src.common.logger import get_logger
 from src.common.data_models.database_data_model import DatabaseMessages
@@ -870,8 +871,12 @@ class DefaultReplyer:
 
         # 过滤消息：分离bot和目标用户的对话 vs 其他用户的对话
         for msg in message_list_before_now:
+            msg_user_info = getattr(msg, "user_info", None)
+            if msg_user_info is None:
+                # structured system_event 没有 sender，不参与按用户筛选的核心对话。
+                continue
             try:
-                msg_user_id = str(msg.user_info.user_id)
+                msg_user_id = str(msg_user_info.user_id)
                 reply_to = msg.reply_to
                 _platform, reply_to_user_id = self._parse_reply_target(reply_to)
                 if (msg_user_id == bot_id and reply_to_user_id == target_user_id) or msg_user_id == target_user_id:
@@ -885,7 +890,11 @@ class DefaultReplyer:
         if core_dialogue_list:
             # 检查最新五条消息中是否包含bot自己说的消息
             latest_5_messages = core_dialogue_list[-5:] if len(core_dialogue_list) >= 5 else core_dialogue_list
-            has_bot_message = any(str(msg.user_info.user_id) == bot_id for msg in latest_5_messages)
+            has_bot_message = any(
+                getattr(msg, "user_info", None) is not None
+                and str(msg.user_info.user_id) == bot_id
+                for msg in latest_5_messages
+            )
 
             # logger.info(f"最新五条消息：{latest_5_messages}")
             # logger.info(f"最新五条消息中是否包含bot自己说的消息：{has_bot_message}")
@@ -1033,17 +1042,45 @@ class DefaultReplyer:
         focus_handoff_block = prompt_context.focus_handoff_block if prompt_context is not None else ""
         injection_detected = bool(prompt_context and prompt_context.injection_detected)
 
+        reply_system_event = None
         if reply_message:
-            user_id = reply_message.user_info.user_id
-            person = Person(platform=platform, user_id=user_id)
-            person_name = resolve_sender_name(
-                user_info=reply_message.user_info,
-                person_name=person.person_name,
-                user_id=user_id,
-                fallback="用户",
+            reply_user_info = getattr(reply_message, "user_info", None)
+            reply_system_event = get_system_event(reply_message)
+            if reply_system_event is None and reply_user_info is not None:
+                user_id = reply_user_info.user_id
+                person = Person(platform=platform, user_id=user_id)
+                person_name = resolve_sender_name(
+                    user_info=reply_user_info,
+                    person_name=person.person_name,
+                    user_id=user_id,
+                    fallback="用户",
+                )
+                sender = person_name
+            else:
+                actor = reply_system_event.get("actor") if reply_system_event else None
+                actor_name = (
+                    (actor.get("name") or actor.get("user_id"))
+                    if isinstance(actor, dict)
+                    else None
+                )
+                # system_event 没有 message sender。actor 仅用于事件文本展示，
+                # 不作为 sender 参与 Person/关系/身份语义。
+                sender = "系统事件"
+                user_id = ""
+            target = reply_message.processed_plain_text or (
+                system_event_fallback_text(reply_system_event) if reply_system_event else ""
             )
-            sender = person_name
-            target = reply_message.processed_plain_text
+            if reply_system_event:
+                actor = reply_system_event.get("actor")
+                actor_name = (
+                    (actor.get("name") or actor.get("user_id"))
+                    if isinstance(actor, dict)
+                    else None
+                )
+                if actor_name:
+                    actor_name = str(actor_name).strip()
+                    if actor_name and not target.lstrip().startswith(actor_name):
+                        target = f"{actor_name}{target}"
 
         mood_prompt: str = ""
         if global_config.mood.enable_mood:
@@ -1072,19 +1109,24 @@ class DefaultReplyer:
         )
 
         person_list_short: List[Person] = []
+        reply_user_info = getattr(reply_message, "user_info", None) if reply_message else None
         for msg in message_list_before_short:
+            msg_user_info = getattr(msg, "user_info", None)
+            if msg_user_info is None:
+                # structured system_event 没有 sender，不参与 Person/关系信息构建。
+                continue
             if (
-                global_config.bot.qq_account == msg.user_info.user_id
-                and global_config.bot.platform == msg.user_info.platform
+                global_config.bot.qq_account == msg_user_info.user_id
+                and global_config.bot.platform == msg_user_info.platform
             ):
                 continue
             if (
-                reply_message
-                and reply_message.user_info.user_id == msg.user_info.user_id
-                and reply_message.user_info.platform == msg.user_info.platform
+                reply_user_info is not None
+                and reply_user_info.user_id == msg_user_info.user_id
+                and reply_user_info.platform == msg_user_info.platform
             ):
                 continue
-            person = Person(platform=msg.user_info.platform, user_id=msg.user_info.user_id)
+            person = Person(platform=msg_user_info.platform, user_id=msg_user_info.user_id)
             if person.is_known:
                 person_list_short.append(person)
 
@@ -1245,7 +1287,9 @@ class DefaultReplyer:
 
         time_block = f"当前时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 
-        if sender:
+        if reply_system_event:
+            reply_target_block = f"现在发生了系统事件：{target}。引起了你的注意"
+        elif sender:
             if is_group_chat:
                 reply_target_block = f"现在{sender}说的:{target}。引起了你的注意"
             else:  # private chat

@@ -3,6 +3,7 @@ import asyncio
 
 from abc import ABC, abstractmethod
 from typing import Tuple, Optional, TYPE_CHECKING, Dict, List
+from ncnk_message import get_system_event
 
 from src.common.logger import get_logger
 from src.common.data_models.message_data_model import ReplyContentType, ReplyContent, ReplySetModel, ForwardNode
@@ -119,6 +120,7 @@ class BaseAction(ABC):
 
         if self.action_message:
             self.has_action_message = True
+            is_system_event = get_system_event(self.action_message) is not None
 
             if self.action_name != "no_action":
                 self.group_id = (
@@ -132,14 +134,27 @@ class BaseAction(ABC):
                     else None
                 )
 
-                self.user_id = str(self.action_message.user_info.user_id)
-                self.user_nickname = self.action_message.user_info.user_nickname
+                message_user_info = getattr(self.action_message, "user_info", None)
+                if not is_system_event and message_user_info is not None:
+                    self.user_id = str(message_user_info.user_id)
+                    self.user_nickname = message_user_info.user_nickname
                 if self.group_id:
                     self.is_group = True
                     self.target_id = self.group_id
                 else:
                     self.is_group = False
-                    self.target_id = self.user_id
+                    if is_system_event:
+                        # 私聊系统事件仍需知道回复发往哪个会话，但路由对象
+                        # 不是事件发送者，更不能成为插件权限检查的用户主体。
+                        stream_user_info = getattr(self.chat_stream, "user_info", None)
+                        self.target_id = str(getattr(stream_user_info, "user_id", "") or "") or None
+                    elif self.user_id:
+                        self.target_id = self.user_id
+                    else:
+                        stream_user_info = getattr(self.chat_stream, "user_info", None)
+                        self.user_id = str(getattr(stream_user_info, "user_id", "") or "") or None
+                        self.user_nickname = getattr(stream_user_info, "user_nickname", None)
+                        self.target_id = self.user_id
             else:
                 if self.chat_stream.group_info:
                     self.group_id = self.chat_stream.group_info.group_id
@@ -147,10 +162,12 @@ class BaseAction(ABC):
                     self.is_group = True
                     self.target_id = self.group_id
                 else:
-                    self.user_id = self.chat_stream.user_info.user_id
-                    self.user_nickname = self.chat_stream.user_info.user_nickname
+                    stream_user_info = getattr(self.chat_stream, "user_info", None)
                     self.is_group = False
-                    self.target_id = self.user_id
+                    self.target_id = getattr(stream_user_info, "user_id", None)
+                    if not is_system_event:
+                        self.user_id = self.target_id
+                        self.user_nickname = getattr(stream_user_info, "user_nickname", None)
 
         logger.debug(f"{self.log_prefix} Action组件初始化完成")
         logger.debug(

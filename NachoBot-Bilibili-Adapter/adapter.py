@@ -27,6 +27,7 @@ from ncnk_message import (  # noqa: E402
     TargetConfig,
     TemplateInfo,
     UserInfo,
+    build_system_event,
     get_core_token_from_env,
 )
 
@@ -994,34 +995,38 @@ class BilibiliAdapter:
                 }
             self.event_manager.gift_buffer[key]["count"] += num
             self.event_manager.gift_buffer[key]["price"] = price
-            self.event_manager.gift_buffer[key]["timestamp"] = (
-                timestamp  # Update to latest
-            )
-            self.event_manager.last_gift_time[key] = time.time()  # Update act time
+            self.event_manager.gift_buffer[key]["timestamp"] = timestamp
+            self.event_manager.last_gift_time[key] = time.time()
             return
 
-        # Build prompt using helper
+        # system_event 没有 message sender；actor 只保留在 metadata 中。
         prompt_text = f"送出了 {gift_name} x{num}"
         template_info = await self._get_template_info(room_id, user_id, prompt_text)
 
-        # Prepare additional config for high value gifts logic if needed
-        # Ensuring mention logic is consistent
-        additional_config = self._build_live_additional_config(room_id)
-        # if template_info:
-        #    additional_config = template_info.additional_config or {}
-
-        # Force mention for gifts to ensure reaction
-        additional_config["is_mentioned"] = 1.0
+        additional_config = self._build_live_additional_config(
+            room_id,
+            platform_event={
+                "kind": "support",
+                "amount": max(0, price) * max(1, num),
+            },
+        )
+        additional_config["system_event"] = build_system_event(
+            "bilibili.gift",
+            actor={"user_id": str(user_id), "name": user_name},
+            target=None,
+            data={
+                "room_id": str(room_id),
+                "gift_name": gift_name,
+                "num": num,
+                "price": price,
+            },
+        )
 
         message_info = BaseMessageInfo(
             platform=self.config.platform,
             message_id=str(uuid.uuid4()),
             time=timestamp,
-            user_info=UserInfo(
-                platform=self.config.platform,
-                user_id=user_id,
-                user_nickname=user_name,
-            ),
+            user_info=None,
             group_info=GroupInfo(
                 platform=self.config.platform,
                 group_id=str(room_id),
@@ -1035,8 +1040,6 @@ class BilibiliAdapter:
             additional_config=additional_config,
         )
 
-        # Use seglist to include both gift info and text prompt
-        # Include gift metadata alongside readable HeartFlow text.
         gift_segment = Seg(type="gift", data=f"{gift_name}:{num}")
         text_segment = Seg(type="text", data=prompt_text)
 
@@ -1050,6 +1053,8 @@ class BilibiliAdapter:
                     "num": num,
                     "price": price,
                     "room_id": room_id,
+                    "user_id": user_id,
+                    "user_name": user_name,
                 },
                 ensure_ascii=True,
             ),
@@ -1073,34 +1078,29 @@ class BilibiliAdapter:
         user_name: str,
     ) -> None:
         self.tts_manager.reset_idle_timer()
-        """
-        Handle a poke event (simulated or real).
-        """
+        """Handle a poke event (simulated or real) as a structured system event."""
         self.logger.info(f"Poke event received from {user_name} ({user_id})")
 
         timestamp = time.time()
-
-        # Standard format for poke/notice
-        text = f"{user_name}用鼠标戳了戳你"
-
-        # Resolve template info to ensuring correct persona/TTS settings
+        text = "用鼠标戳了戳你"
         template_info = await self._get_template_info(room_id, user_id, text)
 
         additional_config = self._build_live_additional_config(
             room_id,
             {"room_id": room_id},
         )
+        additional_config["system_event"] = build_system_event(
+            "bilibili.poke",
+            actor={"user_id": str(user_id), "name": user_name},
+            target=None,
+            data={"room_id": str(room_id)},
+        )
 
         message_info = BaseMessageInfo(
             platform=self.config.platform,
-            # Special ID for notice messages as seen in bot.py logic
-            message_id="notice",
+            message_id=str(uuid.uuid4()),
             time=timestamp,
-            user_info=UserInfo(
-                platform=self.config.platform,
-                user_id=user_id,
-                user_nickname=user_name,
-            ),
+            user_info=None,
             group_info=GroupInfo(
                 platform=self.config.platform,
                 group_id=str(room_id),
@@ -1117,10 +1117,17 @@ class BilibiliAdapter:
         message = MessageBase(
             message_info=message_info,
             message_segment=Seg(type="text", data=text),
-            raw_message=None,
+            raw_message=json.dumps(
+                {
+                    "type": "poke",
+                    "room_id": room_id,
+                    "user_id": user_id,
+                    "user_name": user_name,
+                },
+                ensure_ascii=True,
+            ),
         )
 
-        # High priority to ensure immediate reaction
         self.event_manager.push_to_event_queue(20, message)
 
     async def handle_mic_message(self, room_id: int, text: str) -> None:
@@ -1190,22 +1197,6 @@ class BilibiliAdapter:
             f"SuperChat: [{room_id}] {user_name}({user_id}): {message_text} (Price: {price} CNY)"
         )
 
-        # if room_id in self._live_streamer_controllers:
-        #     controller = self._live_streamer_controllers[room_id]
-        #     await controller.inject_priority_event(
-        #         PriorityEvent(
-        #             event_type="superchat",
-        #             user_name=user_name,
-        #             user_id=user_id,
-        #             timestamp=timestamp,
-        #             sc_message=message_text,
-        #             sc_price=price,
-        #         )
-        #     )
-        #     self.logger.info("[LiveStreamer] SC injected as priority event")
-        #     return  # Don't process through normal path
-
-        # Build prompt using helper
         prompt_text = f"发送了超级弹幕(SC)：{message_text} (价值 {price} 元)"
         template_info = await self._get_template_info(room_id, user_id, prompt_text)
 
@@ -1216,21 +1207,22 @@ class BilibiliAdapter:
                 "amount": max(0, price),
             },
         )
-        # if template_info:
-        #    additional_config = template_info.additional_config or {}
-
-        # Force mention for SC to ensure reaction
-        additional_config["is_mentioned"] = 1.0
+        additional_config["system_event"] = build_system_event(
+            "bilibili.superchat",
+            actor={"user_id": str(user_id), "name": user_name},
+            target=None,
+            data={
+                "room_id": str(room_id),
+                "message": message_text,
+                "price": price,
+            },
+        )
 
         message_info = BaseMessageInfo(
             platform=self.config.platform,
             message_id=str(uuid.uuid4()),
             time=timestamp,
-            user_info=UserInfo(
-                platform=self.config.platform,
-                user_id=user_id,
-                user_nickname=user_name,
-            ),
+            user_info=None,
             group_info=GroupInfo(
                 platform=self.config.platform,
                 group_id=str(room_id),
@@ -1260,6 +1252,8 @@ class BilibiliAdapter:
                     "text": message_text,
                     "price": price,
                     "room_id": room_id,
+                    "user_id": user_id,
+                    "user_name": user_name,
                 },
                 ensure_ascii=True,
             ),
@@ -1282,23 +1276,8 @@ class BilibiliAdapter:
     ) -> None:
         self.tts_manager.reset_idle_timer()
         self.logger.info(
-            f"Guard: [{room_id}] {user_name}({user_id}) became {guard_name} (Level: {guard_level}) - PATCHED_VERIFIED"
+            f"Guard: [{room_id}] {user_name}({user_id}) became {guard_name} (Level: {guard_level})"
         )
-
-        # if room_id in self._live_streamer_controllers:
-        #     controller = self._live_streamer_controllers[room_id]
-        #     await controller.inject_priority_event(
-        #         PriorityEvent(
-        #             event_type="guard",
-        #             user_name=user_name,
-        #             user_id=user_id,
-        #             timestamp=timestamp,
-        #             guard_name=guard_name,
-        #             guard_level=guard_level,
-        #         )
-        #     )
-        #     self.logger.info("[LiveStreamer] Guard injected as priority event")
-        #     return  # Don't process through normal path
 
         prompt_text = f"开通了 {guard_name} ({num} 个月)"
         template_info = await self._get_template_info(room_id, user_id, prompt_text)
@@ -1311,21 +1290,24 @@ class BilibiliAdapter:
                 "membership_days": 30,
             },
         )
-        # if template_info:
-        #    additional_config = template_info.additional_config or {}
-
-        # Force mention for Guardian to ensure reaction
-        additional_config["is_mentioned"] = 1.0
+        additional_config["system_event"] = build_system_event(
+            "bilibili.guard_buy",
+            actor={"user_id": str(user_id), "name": user_name},
+            target=None,
+            data={
+                "room_id": str(room_id),
+                "guard_name": guard_name,
+                "guard_level": guard_level,
+                "num": num,
+                "price": price,
+            },
+        )
 
         message_info = BaseMessageInfo(
             platform=self.config.platform,
             message_id=str(uuid.uuid4()),
             time=timestamp,
-            user_info=UserInfo(
-                platform=self.config.platform,
-                user_id=user_id,
-                user_nickname=user_name,
-            ),
+            user_info=None,
             group_info=GroupInfo(
                 platform=self.config.platform,
                 group_id=str(room_id),
@@ -1339,7 +1321,6 @@ class BilibiliAdapter:
             additional_config=additional_config,
         )
 
-        # Priority Info for VIP
         priority_segment = Seg(
             type="priority_info",
             data={
@@ -1360,12 +1341,13 @@ class BilibiliAdapter:
                     "level": guard_level,
                     "room_id": room_id,
                     "price": price,
+                    "user_id": user_id,
+                    "user_name": user_name,
                 },
                 ensure_ascii=True,
             ),
         )
 
-        # Bypass queue for immediate core processing
         asyncio.create_task(self._send_to_nachobot(message))
 
     async def handle_incoming_guard_entry(
@@ -1383,26 +1365,26 @@ class BilibiliAdapter:
             f"GuardEntry: [{room_id}] {user_name}({user_id}) entered as {guard_label}"
         )
 
-        prompt_text = f"{guard_label} {user_name} 进入了直播间"
+        prompt_text = f"以{guard_label}身份进入了直播间"
         template_info = await self._get_template_info(room_id, user_id, prompt_text)
 
-        additional_config = self._build_live_additional_config(
-            room_id,
-            {
-                "room_id": room_id,
-                "is_mentioned": 1.0,
+        additional_config = self._build_live_additional_config(room_id)
+        additional_config["system_event"] = build_system_event(
+            "bilibili.guard_entry",
+            actor={"user_id": str(user_id), "name": user_name},
+            target=None,
+            data={
+                "room_id": str(room_id),
+                "guard_level": guard_level,
+                "guard_label": guard_label,
             },
         )
 
         message_info = BaseMessageInfo(
             platform=self.config.platform,
-            message_id="notice",
+            message_id=str(uuid.uuid4()),
             time=timestamp,
-            user_info=UserInfo(
-                platform=self.config.platform,
-                user_id=user_id,
-                user_nickname=user_name,
-            ),
+            user_info=None,
             group_info=GroupInfo(
                 platform=self.config.platform,
                 group_id=str(room_id),
@@ -1419,10 +1401,19 @@ class BilibiliAdapter:
         message = MessageBase(
             message_info=message_info,
             message_segment=Seg(type="text", data=prompt_text),
-            raw_message=None,
+            raw_message=json.dumps(
+                {
+                    "type": "guard_entry",
+                    "room_id": room_id,
+                    "user_id": user_id,
+                    "user_name": user_name,
+                    "guard_level": guard_level,
+                    "guard_label": guard_label,
+                },
+                ensure_ascii=True,
+            ),
         )
 
-        # Priority 20: same as VIP/Mention to ensure bot notices and greets
         self.event_manager.push_to_event_queue(20, message)
 
     # ========== Prompt Resolution ==========
@@ -1581,6 +1572,24 @@ class BilibiliAdapter:
     # ========== Command Handlers ==========
 
     async def _send_to_nachobot(self, message: MessageBase) -> None:
+        additional_config = getattr(message.message_info, "additional_config", None)
+        system_event = (
+            additional_config.get("system_event")
+            if isinstance(additional_config, dict)
+            else None
+        )
+        if isinstance(system_event, dict):
+            event_data = system_event.get("data")
+            if not isinstance(event_data, dict):
+                event_data = {}
+                system_event["data"] = event_data
+
+            # Core 的非 Focus 未读查询以严格的 time > last_read_time
+            # 判定。排队或延迟处理的事件必须以实际入站时刻排序，同时把
+            # 平台原始发生时间保留在 metadata 中。
+            event_data.setdefault("occurred_at", message.message_info.time)
+            message.message_info.time = time.time()
+
         self.logger.info(
             "Forward to NachoBot: platform={} group_id={} message_id={}",
             message.message_info.platform,

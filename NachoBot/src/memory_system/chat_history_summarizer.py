@@ -700,7 +700,8 @@ class ChatHistorySummarizer:
 
         for msg in messages:
             # 使用统一的 is_bot_self 函数判断是否是机器人自己（支持多平台，包括 WebUI）
-            if is_bot_self(msg.user_info.platform, msg.user_info.user_id):
+            user_info = getattr(msg, "user_info", None)
+            if user_info is not None and is_bot_self(user_info.platform, user_info.user_id):
                 has_bot_message = True
                 break
 

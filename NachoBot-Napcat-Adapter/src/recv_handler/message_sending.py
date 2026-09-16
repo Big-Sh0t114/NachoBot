@@ -27,6 +27,7 @@ class MessageSending:
         except Exception as e:
             logger.error(f"发送消息失败: {str(e)}")
             logger.error("请检查与Nachobot之间的连接")
+            return False
 
     async def send_custom_message(self, custom_message: Dict, platform: str, message_type: str) -> bool:
         """

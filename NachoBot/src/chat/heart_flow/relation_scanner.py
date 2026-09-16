@@ -247,8 +247,13 @@ class RelationScanner:
         user_messages: Dict[Tuple[str, str], List] = {}  # (platform, user_id) -> messages
         for msg in new_messages:
             try:
-                platform = msg.user_info.platform
-                user_id = str(msg.user_info.user_id)
+                user_info = getattr(msg, "user_info", None)
+                if user_info is None:
+                    # Structured system events are environmental context, not
+                    # person/relation observations.
+                    continue
+                platform = user_info.platform
+                user_id = str(user_info.user_id)
 
                 # 过滤 bot 自身
                 if _is_bot_self(platform, user_id):
@@ -282,7 +287,11 @@ class RelationScanner:
                         "platform": platform,
                         "user_id": user_id,
                         "person_id": person.person_id,
-                        "orig_nickname": messages[-1].user_info.user_nickname if messages else f"用户{user_id}",
+                        "orig_nickname": (
+                            getattr(messages[-1].user_info, "user_nickname", None)
+                            if messages and getattr(messages[-1], "user_info", None) is not None
+                            else f"用户{user_id}"
+                        ),
                     }
                 )
                 self._recently_scanned_users[person_key] = current_time

@@ -6,6 +6,7 @@ import traceback
 import random
 from typing import List, Optional, Dict, Any, Tuple, TYPE_CHECKING
 from rich.traceback import install
+from ncnk_message import get_system_event
 
 from src.config.config import global_config
 from src.common.logger import get_logger
@@ -177,10 +178,13 @@ class HeartFChatting:
         return True
 
     def _filter_blocked_users(self, messages: List["DatabaseMessages"], caller: str = "") -> List["DatabaseMessages"]:
-        """从消息列表中过滤掉被屏蔽用户的消息"""
+        """从消息列表中过滤掉被屏蔽用户的消息。
+
+        system_event 没有 message sender，因此不属于任何被屏蔽用户，必须保留。
+        """
         if not self.blocked_users:
             return messages
-        # 清理过期条目
+
         now = time.time()
         expired = [uid for uid, exp in self.blocked_users.items() if now > exp]
         for uid in expired:
@@ -188,17 +192,25 @@ class HeartFChatting:
             logger.info(f"{self.log_prefix} 用户 {uid} 的屏蔽已到期，已自动解除")
         if not self.blocked_users:
             return messages
+
         logger.debug(
             f"{self.log_prefix} [block_filter][{caller}] 屏蔽列表: {self.blocked_users}, 待过滤消息数: {len(messages)}"
         )
+
         original_count = len(messages)
-        filtered = [msg for msg in messages if not self._is_user_blocked(str(msg.user_info.user_id))]
+        filtered: List["DatabaseMessages"] = []
+        for msg in messages:
+            user_info = getattr(msg, "user_info", None)
+            user_id = getattr(user_info, "user_id", None) if user_info is not None else None
+            if not user_id or not self._is_user_blocked(str(user_id)):
+                filtered.append(msg)
+
         if original_count != len(filtered):
             logger.debug(f"{self.log_prefix} [block_filter][{caller}] 已过滤 {original_count - len(filtered)} 条")
         return filtered
 
     def _resolve_user_id_by_nickname(self, nickname: str) -> Optional[str]:
-        """通过昵称从最近消息中查找用户的真实QQ号"""
+        """通过昵称从最近消息中查找用户的真实QQ号。"""
         try:
             recent_messages = get_raw_msg_before_timestamp_with_chat(
                 chat_id=self.stream_id,
@@ -206,9 +218,12 @@ class HeartFChatting:
                 limit=100,
             )
             for msg in recent_messages:
-                user_nickname = msg.user_info.user_nickname or ""
-                user_cardname = msg.user_info.user_cardname or ""
-                user_id = str(msg.user_info.user_id)
+                user_info = getattr(msg, "user_info", None)
+                if user_info is None:
+                    continue
+                user_nickname = user_info.user_nickname or ""
+                user_cardname = user_info.user_cardname or ""
+                user_id = str(user_info.user_id)
                 if nickname == user_nickname or nickname == user_cardname:
                     return user_id
         except Exception as e:
@@ -469,6 +484,12 @@ class HeartFChatting:
             # 再过滤被屏蔽用户的消息
             recent_messages_list = self._filter_blocked_users(recent_messages_list, caller="loopbody")
 
+            # structured system_event 是环境事件；不能受 no_reply_until_call
+            # 或普通消息 talk_threshold 随机节流影响。普通会话交给 Planner，
+            # planner_bypass 会话则由后续 Replyer 直达分支处理。
+            has_system_event = any(self._get_system_event(msg) is not None for msg in recent_messages_list)
+            focus_requires_observe = focus_requires_observe or has_system_event
+
             # 过滤后无消息则跳过本轮思考
             if len(recent_messages_list) == 0:
                 if focus_requires_observe:
@@ -580,13 +601,51 @@ class HeartFChatting:
         )
 
     @staticmethod
+    def _get_system_event(message: "DatabaseMessages") -> dict | None:
+        """Return the validated structured event metadata, if present."""
+
+        # A structured envelope paired with a message sender violates the
+        # ingress contract.  Core drops that shape before it can reach
+        # HeartFlow; keep the downstream accessor equally conservative for
+        # recovered/hand-built rows so actor metadata can never be treated as
+        # a sender target.
+        if getattr(message, "user_info", None) is not None:
+            return None
+        message_info = getattr(message, "message_info", None)
+        if message_info is not None and getattr(message_info, "user_info", None) is not None:
+            return None
+        return get_system_event(message)
+
+    @staticmethod
+    def _has_structured_event(message: "DatabaseMessages") -> bool:
+        """Check the envelope itself, including malformed sender-bearing rows.
+
+        The normal Core ingress rejects a sender-bearing envelope before it can
+        reach HeartFlow.  This raw check is retained only for the legacy notice
+        shortcut guard, so a recovered malformed row cannot trigger an
+        adapter-priority action by accident.
+        """
+
+        return get_system_event(message) is not None
+
+    @staticmethod
     def _should_use_notice_shortcut(
         recent_messages_list: List["DatabaseMessages"],
         notice_actions: bool,
     ) -> bool:
-        """Return whether the adapter-priority notice/poke route is eligible."""
+        """Return whether the legacy adapter-priority notice/poke route is eligible.
 
-        return bool(recent_messages_list and notice_actions)
+        Structured ``system_event`` messages never use the old notice/active_poke
+        shortcut; normal sessions evaluate them in Planner and bypass sessions
+        route them directly to Replyer.
+        """
+        if not recent_messages_list or not notice_actions:
+            return False
+
+        if any(HeartFChatting._has_structured_event(message) for message in recent_messages_list):
+            return False
+
+        return True
 
     @staticmethod
     def _is_focus_event_only_turn(
@@ -893,14 +952,18 @@ class HeartFChatting:
             local_storage["deploy_success"] = True
             logger.info(f"{self.log_prefix} 核心成功完成一次完整的收发与回复，标记部署成功。")
 
-        # 获取 platform，如果不存在则从 chat_stream 获取，如果还是 None 则使用默认值
-        platform = action_message.chat_info.platform
-        if platform is None:
-            platform = getattr(self.chat_stream, "platform", "unknown")
+        system_event = get_system_event(action_message)
 
-        person = Person(platform=platform, user_id=action_message.user_info.user_id)
-        person_name = person.person_name
-        action_prompt_display = f"你对{person_name}进行了回复：{reply_text}"
+        user_info = getattr(action_message, "user_info", None)
+        if system_event is not None or user_info is None:
+            action_prompt_display = f"你对系统事件进行了回复：{reply_text}"
+        else:
+            platform = action_message.chat_info.platform
+            if platform is None:
+                platform = getattr(self.chat_stream, "platform", "unknown")
+            person = Person(platform=platform, user_id=user_info.user_id)
+            person_name = person.person_name
+            action_prompt_display = f"你对{person_name}进行了回复：{reply_text}"
 
         await database_api.store_action_info(
             chat_stream=self.chat_stream,
@@ -912,7 +975,6 @@ class HeartFChatting:
             action_name="reply",
         )
 
-        # 构建循环信息
         loop_info: Dict[str, Any] = {
             "loop_plan_info": {
                 "action_result": actions,
@@ -943,10 +1005,6 @@ class HeartFChatting:
         logger.debug(f"{self.log_prefix} [HFC] Current template name: {current_template}")
 
         async with global_prompt_manager.async_message_scope(current_template):
-            # Debug check
-            debug_prompt = await global_prompt_manager.get_prompt_async("brain_planner_prompt")
-            logger.debug(f"{self.log_prefix} [HFC] Resolved brain_planner_prompt preview: {str(debug_prompt)[:50]}...")
-
             # 使用后台任务触发学习，避免阻塞当前主流程（尤其避免LLM拥堵时阻塞发起思考）
             asyncio.create_task(self.expression_learner.trigger_learning_for_chat())
 
@@ -957,14 +1015,51 @@ class HeartFChatting:
             # 仅在适配器声明支持通知动作时处理；这是通知消息的优先快捷路由。
             # 只有未命中该快捷路由的普通 Focus target 才进入 Planner。
             capabilities = runtime_capabilities_from_stream(self.chat_stream)
+
+            structured_event_candidates = [
+                (message, get_system_event(message)) for message in recent_messages_list
+            ]
+            event_candidates = [
+                (message, event)
+                for message, event in structured_event_candidates
+                if event is not None
+            ]
+            sender_bearing_event = any(
+                event is not None and self._get_system_event(message) is None
+                for message, event in structured_event_candidates
+            )
+            valid_system_events = [
+                (message, event)
+                for message, event in structured_event_candidates
+                if event is not None and self._get_system_event(message) is not None
+            ]
+            valid_system_events = [
+                (message, event) for message, event in valid_system_events if event is not None
+            ]
+            # Count the envelope candidate for wake/throttle policy as well.
+            # Sender-bearing candidates are malformed and never become a
+            # direct-reply target, but they must not re-enable notice shortcuts
+            # when a recovered row bypasses the normal Bot ingress guard.
+            has_system_event = bool(event_candidates)
+            latest_system_event_message = valid_system_events[-1][0] if valid_system_events else None
+
+            # Bypass remains an adapter capability.  A system event in that exact
+            # unread batch is sent straight to Replyer; it must not be converted
+            # into a planner prompt merely because it is senderless.
             bypass_session = capabilities.planner_bypass
-            bypass_planner = bool(bypass_session)
+            # Sender-bearing envelopes are rejected at Bot ingress.  If a
+            # hand-built/recovered malformed row still reaches this layer,
+            # keep it on the ordinary Planner path rather than granting it the
+            # senderless Bilibili direct-reply capability.
+            bypass_planner = bool(bypass_session and not sender_bearing_event)
             focus_switch_target_turn = self._is_focus_switch_target_turn(
                 focus_turn,
                 recent_messages_list,
                 planner_bypass=bypass_planner,
             )
-            allow_no_reply = not focus_switch_target_turn
+
+            # 系统事件属于环境变化而不是强制应答的用户请求，因此始终允许 no_reply。
+            allow_no_reply = True if has_system_event else not focus_switch_target_turn
             if self._should_use_notice_shortcut(
                 recent_messages_list,
                 capabilities.notice_actions,
@@ -1036,7 +1131,7 @@ class HeartFChatting:
                 # 过滤被屏蔽用户的消息
                 message_list_before_now = self._filter_blocked_users(message_list_before_now, caller="observe")
                 promise_snippets = []
-                if not self.chat_stream.group_info:  # 群聊不启用誓言缓存
+                if not self.chat_stream.group_info and not has_system_event:  # 群聊不启用誓言缓存
                     promise_snippets = promise_cache_manager.collect_snippets_for_messages(
                         self.stream_id, message_list_before_now
                     )
@@ -1054,7 +1149,11 @@ class HeartFChatting:
                 event_only_focus_turn = bool(
                     focus_turn is not None and self._is_focus_event_only_turn(focus_turn, recent_messages_list)
                 )
-                gate_required = bool(focus_turn is not None and focus_turn.events)
+                gate_required = bool(
+                    focus_turn is not None
+                    and focus_turn.events
+                    and not (bypass_planner and has_system_event)
+                )
 
                 logger.debug(
                     f"{self.log_prefix} bypass_planner={bypass_planner}, messages={len(message_list_before_now)}"
@@ -1068,7 +1167,7 @@ class HeartFChatting:
                         available_actions,
                         message_list_before_now,
                     )
-                    if focus_turn is not None
+                    if focus_turn is not None and not (bypass_planner and has_system_event)
                     else None
                 )
                 if forced_priority_action is not None:
@@ -1165,43 +1264,25 @@ class HeartFChatting:
                             self._record_dropped_focus_switch(focus_turn, gate_action.action_data)
                         return disposition is not SwitchDisposition.RETRY
 
-                async def build_current_planner_prompt():
-                    with Timer("Planner Prompt构建", cycle_timers):
-                        return await self.action_planner.build_planner_prompt(
-                            is_group_chat=is_group_chat,
-                            chat_target_info=chat_target_info,
-                            current_available_actions=available_actions,
-                            chat_content_block=chat_content_block,
-                            message_id_list=message_id_list,
-                            interest=global_config.personality.interest,
-                            allow_no_reply=allow_no_reply,
-                        )
-
-                if focus_gate_stayed:
-                    with suppress_focus_planner_context():
-                        prompt_info = await build_current_planner_prompt()
-                else:
-                    prompt_info = await build_current_planner_prompt()
-                with Timer("ON_PLAN事件", cycle_timers):
-                    continue_flag, modified_message = await events_manager.handle_nacho_events(
-                        EventType.ON_PLAN, None, prompt_info[0], None, self.chat_stream.stream_id
-                    )
-                if not continue_flag:
-                    return False
-                if modified_message and modified_message._modify_flags.modify_llm_prompt:
-                    prompt_info = (modified_message.llm_prompt, prompt_info[1])
-
                 cycle_timers["Planner前准备"] = time.perf_counter() - pre_planner_started_at
 
                 if bypass_planner:
                     logger.info(f"{self.log_prefix} [HFC] Bypassing Planner for {self.chat_stream.platform}")
 
-                    # Skip bot's own messages to prevent self-reply loops
+                    # An event in the exact unread batch is itself the reply target;
+                    # actor metadata never becomes a user sender.  Ordinary bypass
+                    # messages retain the historical latest non-bot target rule.
                     bot_id = str(global_config.bot.qq_account)
-                    target_msg = None
-                    if message_list_before_now:
+                    if latest_system_event_message is not None:
+                        target_msg = latest_system_event_message
+                    else:
+                        target_msg = None
                         for msg in reversed(message_list_before_now):
-                            if str(msg.user_info.user_id) != bot_id:
+                            user_info = getattr(msg, "user_info", None)
+                            user_id = getattr(user_info, "user_id", None) if user_info is not None else None
+                            if not user_id:
+                                continue
+                            if str(user_id) != bot_id:
                                 target_msg = msg
                                 break
                     if target_msg is None:
@@ -1213,13 +1294,21 @@ class HeartFChatting:
                     if recent_messages_list and len(recent_messages_list) > 1:
                         pending_lines = []
                         for msg in recent_messages_list:
-                            if str(msg.user_info.user_id) == bot_id:
-                                continue
-                            nick = getattr(msg.user_info, "user_nickname", None) or str(msg.user_info.user_id)
+                            user_info = getattr(msg, "user_info", None)
                             text = getattr(msg, "processed_plain_text", "") or ""
-                            if text:
-                                pending_lines.append(f"{nick}: {text}")
+                            if not text:
+                                continue
+                            event = self._get_system_event(msg)
+                            if event is not None or user_info is None:
+                                pending_lines.append(f"[系统事件] {text}")
+                                continue
+                            user_id = getattr(user_info, "user_id", None)
+                            if user_id is not None and str(user_id) == bot_id:
+                                continue
+                            nick = getattr(user_info, "user_nickname", None) or str(user_id or "")
+                            pending_lines.append(f"{nick}: {text}")
                         if len(pending_lines) > 1:
+                            pending_lines = pending_lines[-20:]
                             summary = "\n".join(pending_lines)
                             bypass_extra_info = (
                                 f"[消息堆积提示] 以下是最近堆积的 {len(pending_lines)} 条消息，"
@@ -1241,6 +1330,32 @@ class HeartFChatting:
                         )
                     ]
                 else:
+                    async def build_current_planner_prompt():
+                        with Timer("Planner Prompt构建", cycle_timers):
+                            return await self.action_planner.build_planner_prompt(
+                                is_group_chat=is_group_chat,
+                                chat_target_info=chat_target_info,
+                                current_available_actions=available_actions,
+                                chat_content_block=chat_content_block,
+                                message_id_list=message_id_list,
+                                interest=global_config.personality.interest,
+                                allow_no_reply=allow_no_reply,
+                            )
+
+                    if focus_gate_stayed:
+                        with suppress_focus_planner_context():
+                            prompt_info = await build_current_planner_prompt()
+                    else:
+                        prompt_info = await build_current_planner_prompt()
+                    with Timer("ON_PLAN事件", cycle_timers):
+                        continue_flag, modified_message = await events_manager.handle_nacho_events(
+                            EventType.ON_PLAN, None, prompt_info[0], None, self.chat_stream.stream_id
+                        )
+                    if not continue_flag:
+                        return False
+                    if modified_message and modified_message._modify_flags.modify_llm_prompt:
+                        prompt_info = (modified_message.llm_prompt, prompt_info[1])
+
                     with Timer("规划器", cycle_timers):
                         # 获取当前有效的屏蔽用户ID集合传递给规划器
                         _active_blocked = (

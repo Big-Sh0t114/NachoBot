@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field, replace
 from typing import Any, AsyncIterator, Awaitable, Callable, Mapping, Protocol
+from ncnk_message import get_system_event
 
 from src.common.logger import get_logger
 
@@ -566,8 +567,11 @@ class FocusCoordinator:
                     has_handoff=not metadata_only,
                 ).allowed
             )
+            is_system_event = get_system_event(message) is not None
+
             should_surface = may_emit and (
-                force_priority_switch
+                is_system_event
+                or force_priority_switch
                 or attention.visible
                 or attention.is_mentioned
                 or attention.is_at

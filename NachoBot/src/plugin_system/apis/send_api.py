@@ -300,6 +300,7 @@ async def _send_to_target_receipt_permitted(
 
         reply_to_platform_id = ""
         anchor_message: Union["MessageRecv", None] = None
+        effective_set_reply = set_reply
         if reply_message:
             reply_chat_id = str(getattr(reply_message, "chat_id", "") or "")
             if reply_chat_id and reply_chat_id != str(stream_id):
@@ -307,14 +308,18 @@ async def _send_to_target_receipt_permitted(
                     f"[SendAPI] 拒绝跨流引用回复: reply_chat_id={reply_chat_id}, target={stream_id}"
                 )
                 return SendReceipt(SendStatus.FAILED, stream_id, detail="cross_stream_reply")
-            anchor_message = db_message_to_message_recv(reply_message)
-            logger.info(f"[SendAPI] 找到匹配的回复消息，发送者: {anchor_message.message_info.user_info.user_id}")  # type: ignore
-            if anchor_message:
+
+            reply_user_info = getattr(reply_message, "user_info", None)
+            if reply_user_info is None:
+                # structured system_event 没有平台 sender，因此不能构造原生引用回复锚点。
+                # 业务层仍然是在回复该事件；发送层仅降级为普通消息，不能伪造用户。
+                effective_set_reply = False
+                logger.debug("[SendAPI] 回复目标为 senderless system_event，跳过平台原生引用锚点")
+            else:
+                anchor_message = db_message_to_message_recv(reply_message)
+                logger.info(f"[SendAPI] 找到匹配的回复消息，发送者: {reply_user_info.user_id}")
                 anchor_message.update_chat_stream(target_stream)
-                assert anchor_message.message_info.user_info, "用户信息缺失"
-                reply_to_platform_id = (
-                    f"{anchor_message.message_info.platform}:{anchor_message.message_info.user_info.user_id}"
-                )
+                reply_to_platform_id = f"{anchor_message.message_info.platform}:{reply_user_info.user_id}"
 
         # 构建发送消息对象
         bot_message = MessageSending(
@@ -355,7 +360,7 @@ async def _send_to_target_receipt_permitted(
         sent_msg = await message_sender.send_message(
             bot_message,
             typing=typing,
-            set_reply=set_reply,
+            set_reply=effective_set_reply,
             storage_message=storage_message,
             show_log=show_log,
         )
@@ -417,13 +422,18 @@ def db_message_to_message_recv(message_obj: "DatabaseMessages") -> MessageRecv:
     Returns:
         Optional[MessageRecv]: 找到的消息，如果没找到则返回None
     """
-    # 构建MessageRecv对象
-    user_info = {
-        "platform": message_obj.user_info.platform or "",
-        "user_id": message_obj.user_info.user_id or "",
-        "user_nickname": message_obj.user_info.user_nickname or "",
-        "user_cardname": message_obj.user_info.user_cardname or "",
-    }
+    # 构建MessageRecv对象。structured system_event 没有 sender，必须保持 user_info=None，
+    # 不能为了兼容引用回复而伪造一个空 UserInfo。
+    message_user_info = getattr(message_obj, "user_info", None)
+    if message_user_info is not None:
+        user_info = {
+            "platform": message_user_info.platform or "",
+            "user_id": message_user_info.user_id or "",
+            "user_nickname": message_user_info.user_nickname or "",
+            "user_cardname": message_user_info.user_cardname or "",
+        }
+    else:
+        user_info = None
 
     group_info = {}
     if message_obj.chat_info.group_info:
