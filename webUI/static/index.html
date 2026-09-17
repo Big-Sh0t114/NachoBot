@@ -505,8 +505,8 @@
                                     <div class="component-card">
                                         <span class="component-icon">🐧</span>
                                         <div class="component-info">
-                                            <span class="component-name">QQ (Napcat)</span>
-                                            <span class="component-desc">通过 NapCat 连接 QQ</span>
+                                        <span class="component-name">QQ (NapCat / SnowLuma)</span>
+                                        <span class="component-desc">选择 NapCat 或 SnowLuma 作为 QQ 后端</span>
                                         </div>
                                     </div>
                                 </label>
@@ -577,8 +577,17 @@
                         <div class="setup-form">
                             <div class="form-section">
                                 <div class="form-section-title">QQ 账号配置</div>
-                                <p class="form-section-hint">填写 bot 的 QQ 号和昵称，将自动写入 bot_config.toml。若选择了 QQ 适配器，QQ
-                                    号还将用于自动配置 NapCat 连接</p>
+                                <p class="form-section-hint">填写 bot 的 QQ 号和昵称，将自动写入 bot_config.toml。NapCat 会使用 QQ 号自动配置连接；SnowLuma 由外部运行时提供连接。</p>
+                                <div class="form-row" id="setup-qq-adapter-row">
+                                    <label class="form-label">QQ 后端</label>
+                                    <select class="form-input" id="setup-qq-adapter">
+                                        <option value="napcat">NapCat（本机客户端）</option>
+                                        <option value="snowluma">SnowLuma（外部运行时）</option>
+                                    </select>
+                                </div>
+                                <p class="form-section-hint setup-snowluma-runtime-hint" id="setup-snowluma-runtime-hint" style="display:none">
+                                    SnowLuma 运行时必须由你单独启动并开启 OneBot WebSocket；WebUI 只管理本地 SnowLuma 适配器，不会启动或检查外部运行时路径。
+                                </p>
                                 <div class="form-row">
                                     <label class="form-label">QQ 号 <span class="form-required">*</span></label>
                                     <input type="text" class="form-input" id="setup-qq-account"
@@ -823,7 +832,7 @@
                             <button class="btn btn-outline" id="btn-verify-all">全部验证</button>
                         </div>
                         <div class="path-check-list" id="path-check-list">
-                            <!-- NapCat Shell (qq) -->
+                            <!-- NapCat Shell (qq + NapCat backend only) -->
                             <div class="path-check-card" id="path-check-napcat" data-type="napcat" style="display:none">
                                 <div class="path-check-header">
                                     <span class="path-check-icon">🐧</span>

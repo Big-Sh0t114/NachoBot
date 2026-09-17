@@ -8,6 +8,14 @@ set "FINAL_RC=0"
 set "ROOT=%~dp0"
 set "NACHOBOT_FFMPEG_DIR=%ROOT%.runtime\ffmpeg"
 
+call :READ_QQ_ADAPTER
+if errorlevel 1 (
+  echo [FATAL] Invalid qq_adapter in NachoBot\.env. Use napcat or snowluma; a missing key defaults to napcat.
+  set "FINAL_RC=1"
+  goto :EXIT
+)
+echo [INFO] QQ adapter: %QQ_ADAPTER%
+
 where uv >nul 2>&1
 if errorlevel 1 (
   echo [INFO] uv not detected, installing...
@@ -99,10 +107,14 @@ title Launch Process
 set "NACHOBOT_MAIN=bot.py"
 set "NACHOBOT_PORT=8000"
 for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$p='%NACHOBOT_DIR%\.env'; if (Test-Path $p) { $m=Get-Content $p | Where-Object { $_ -match '^\s*PORT\s*=\s*(\d+)\s*$' } | Select-Object -First 1; if ($m -and $m -match '^\s*PORT\s*=\s*(\d+)\s*$') { $Matches[1] } else { '8000' } } else { '8000' }"`) do set "NACHOBOT_PORT=%%P"
-set "NAPCAT_DIR=%ROOT%NachoBot-Napcat-Adapter"
-set "NAPCAT_MAIN=main.py"
-set "NAPCAT_PORT=8095"
-for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$p='%NAPCAT_DIR%\config.toml'; if (Test-Path $p) { $c=Get-Content -Raw $p; if ($c -match '(?ms)^\[napcat_server\]\s*.*?^port\s*=\s*(\d+)') { $Matches[1] } else { '8095' } } else { '8095' }"`) do set "NAPCAT_PORT=%%P"
+set "ADAPTER_MAIN=main.py"
+if /i "%QQ_ADAPTER%"=="snowluma" (
+  set "ADAPTER_DIR=%ROOT%NachoBot-SnowLuma-Adapter"
+) else (
+  set "ADAPTER_DIR=%ROOT%NachoBot-Napcat-Adapter"
+  set "ADAPTER_PORT=8095"
+  for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$p='%ROOT%NachoBot-Napcat-Adapter\config.toml'; if (Test-Path $p) { $c=Get-Content -Raw $p; if ($c -match '(?ms)^\[napcat_server\]\s*.*?^port\s*=\s*(\d+)') { $Matches[1] } else { '8095' } } else { '8095' }"`) do set "ADAPTER_PORT=%%P"
+)
 set "NAPCAT_SHELL_DIR=%ROOT%NapCat.Shell"
 set "NAPCAT_SHELL_BAT=launcher-user.bat"
 set "PYTHON_CMD=uv run python"
@@ -120,12 +132,27 @@ echo --- Checking Playwright Chromium...
 uv run python scripts\ensure_playwright.py
 if errorlevel 1 echo [WARN] Playwright Chromium preparation failed; web search will use HTTP fallback.
 
-echo --- Syncing NapCat Adapter...
-cd /d "%NAPCAT_DIR%"
+echo --- Syncing %QQ_ADAPTER% Adapter...
+if not exist "%ADAPTER_DIR%\." (
+  set "FINAL_RC=1"
+  echo [FATAL] %QQ_ADAPTER% adapter setup failed: project directory not found.
+  goto :EXIT
+)
+if not exist "%ADAPTER_DIR%\pyproject.toml" (
+  set "FINAL_RC=1"
+  echo [FATAL] %QQ_ADAPTER% adapter setup failed: pyproject.toml not found.
+  goto :EXIT
+)
+cd /d "%ADAPTER_DIR%"
+if errorlevel 1 (
+  set "FINAL_RC=1"
+  echo [FATAL] %QQ_ADAPTER% adapter setup failed: project directory could not be entered.
+  goto :EXIT
+)
 uv sync --python ">=3.11,<=3.13"
 if errorlevel 1 (
   set "FINAL_RC=1"
-  echo [FATAL] NapCat adapter dependency sync failed.
+  echo [FATAL] %QQ_ADAPTER% adapter dependency sync failed.
   goto :EXIT
 )
 
@@ -135,13 +162,17 @@ if exist "%NACHOBOT_DIR%\%NACHOBOT_MAIN%" (
   timeout /t 5 /nobreak >nul
 )
 
-if exist "%NAPCAT_DIR%\%NAPCAT_MAIN%" (
-  echo --- Start NapCat Adapter...
-  start "NachoBot-Napcat" /D "%NAPCAT_DIR%" cmd /k "set HOST=0.0.0.0 && set PORT=%NAPCAT_PORT% && %PYTHON_CMD% %NAPCAT_MAIN%"
+if exist "%ADAPTER_DIR%\%ADAPTER_MAIN%" (
+  echo --- Start %QQ_ADAPTER% Adapter...
+  if /i "%QQ_ADAPTER%"=="snowluma" (
+    start "NachoBot-SnowLuma" /D "%ADAPTER_DIR%" cmd /k "%PYTHON_CMD% %ADAPTER_MAIN%"
+  ) else (
+    start "NachoBot-Napcat" /D "%ADAPTER_DIR%" cmd /k "set HOST=0.0.0.0 && set PORT=%ADAPTER_PORT% && %PYTHON_CMD% %ADAPTER_MAIN%"
+  )
   timeout /t 5 /nobreak >nul
 )
 
-if exist "%NAPCAT_SHELL_DIR%\%NAPCAT_SHELL_BAT%" (
+if /i "%QQ_ADAPTER%"=="napcat" if exist "%NAPCAT_SHELL_DIR%\%NAPCAT_SHELL_BAT%" (
   echo --- Start NapCat Shell...
   start "NapCatShell" /D "%NAPCAT_SHELL_DIR%" cmd /k "%NAPCAT_SHELL_BAT%"
 )
@@ -157,3 +188,9 @@ if %FINAL_RC% NEQ 0 (
   echo All done.
 )
 endlocal & exit /b %FINAL_RC%
+
+:READ_QQ_ADAPTER
+set "QQ_ADAPTER="
+for /f "usebackq delims=" %%A in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$p=Join-Path '%ROOT%' 'NachoBot\.env'; if (!(Test-Path -LiteralPath $p)) { 'napcat'; exit 0 }; $values=@(); foreach($line in (Get-Content -LiteralPath $p)) { if($line -match '^\s*([^#=][^=]*?)\s*=\s*(.*?)\s*$' -and $Matches[1].Trim().ToLowerInvariant() -eq 'qq_adapter') { $values += $Matches[2].Trim() } }; if($values.Count -eq 0) { 'napcat'; exit 0 }; if($values.Count -gt 1) { exit 1 }; $value=$values[0].ToLowerInvariant(); if([string]::IsNullOrWhiteSpace($value) -or $value -notin @('napcat','snowluma')) { exit 1 }; $value"`) do set "QQ_ADAPTER=%%A"
+if not defined QQ_ADAPTER exit /b 1
+exit /b 0

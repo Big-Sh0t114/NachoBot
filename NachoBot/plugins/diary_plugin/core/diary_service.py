@@ -17,6 +17,7 @@ import time
 from typing import Any, Dict, List, Tuple, Callable
 
 from openai import AsyncOpenAI
+from ncnk_message import get_system_event, system_event_fallback_text
 from .utils import get_bot_personality, DiaryConstants
 from src.plugin_system.apis import config_api, llm_api, get_logger
 
@@ -58,8 +59,23 @@ class DiaryService:
 
         bot_message_count = 0
         user_message_count = 0
+        system_event_count = 0
+        skipped_senderless_count = 0
+        included_message_count = 0
 
         for msg in messages:
+            system_event = get_system_event(msg)
+            user_info = getattr(msg, "user_info", None)
+            if system_event is None and user_info is None:
+                # Senderless rows without a validated event envelope are not
+                # ordinary dialogue and must never be personified as "某人".
+                skipped_senderless_count += 1
+                logger.debug(
+                    "跳过缺少 sender 与 system_event 的日记消息: message_id=%s",
+                    getattr(msg, "message_id", ""),
+                )
+                continue
+
             msg_time = datetime.datetime.fromtimestamp(msg.time)
             hour = msg_time.hour
             if hour != current_hour:
@@ -72,8 +88,27 @@ class DiaryService:
                 timeline_parts.append(f"\n【{time_period}】")
                 current_hour = hour
 
-            nickname = msg.user_info.user_nickname or "某人"
-            user_id = str(msg.user_info.user_id)
+            if system_event is not None:
+                content = getattr(msg, "processed_plain_text", "") or system_event_fallback_text(system_event)
+                actor = system_event.get("actor")
+                actor_name = (
+                    actor.get("name") or actor.get("nickname") or actor.get("user_id")
+                    if isinstance(actor, dict)
+                    else None
+                )
+                if actor_name:
+                    actor_name = str(actor_name).strip()
+                    if actor_name and not content.lstrip().startswith(actor_name):
+                        content = f"{actor_name}{content}"
+                if len(content) > 50:
+                    content = content[:50] + "..."
+                timeline_parts.append(f"[系统事件] {content}")
+                system_event_count += 1
+                included_message_count += 1
+                continue
+
+            nickname = getattr(user_info, "user_nickname", None) or "某人"
+            user_id = str(getattr(user_info, "user_id", "") or "")
 
             if image_processor._is_image_message(msg):
                 description = image_processor._get_image_description(msg)
@@ -93,12 +128,18 @@ class DiaryService:
                 else:
                     timeline_parts.append(f"{nickname}: {content}")
                     user_message_count += 1
+            included_message_count += 1
 
         self._timeline_stats = {
             "total_messages": len(messages),
+            "included_messages": included_message_count,
             "bot_messages": bot_message_count,
             "user_messages": user_message_count,
+            "system_events": system_event_count,
+            "skipped_senderless": skipped_senderless_count,
         }
+        if included_message_count == 0:
+            return "今天没有什么特别的对话。"
         return "\n".join(timeline_parts)
 
     # ===================== Token估算与截断 =====================
@@ -408,10 +449,7 @@ class DiaryService:
 
     async def publish_to_qzone(self, date: str, diary_content: str) -> bool:
         try:
-            napcat_host = self.get_config("qzone_publishing.napcat_host", "127.0.0.1")
-            napcat_port = self.get_config("qzone_publishing.napcat_port", "9998")
-            napcat_token = self.get_config("qzone_publishing.napcat_token", "")
-            success = await self.qzone_api.publish_diary(diary_content, napcat_host, napcat_port, napcat_token)
+            success = await self.qzone_api.publish_diary(diary_content)
 
             diary_data = await self.storage.get_diary(date)
             if diary_data:

@@ -1,6 +1,7 @@
 """Configuration generation and dependency deployment for the WebUI wizard."""
 
 import asyncio
+import copy
 import json
 import os
 import re
@@ -19,6 +20,12 @@ try:
         ROOT_DIR,
         TEMPLATE_MAP,
     )
+    from .qq_adapter_selector import (
+        DEFAULT_QQ_ADAPTER,
+        QQAdapterSelectorError,
+        read_qq_adapter,
+        selector_value_from_request,
+    )
     from .secure_paths import ensure_within, resolve_external_path, resolve_relative_to_root
     from .multimodal_runtime import MultimodalRuntimeManager
 except ImportError:
@@ -28,6 +35,12 @@ except ImportError:
         EnvironmentChecker,
         ROOT_DIR,
         TEMPLATE_MAP,
+    )
+    from qq_adapter_selector import (
+        DEFAULT_QQ_ADAPTER,
+        QQAdapterSelectorError,
+        read_qq_adapter,
+        selector_value_from_request,
     )
     from secure_paths import ensure_within, resolve_external_path, resolve_relative_to_root
     from multimodal_runtime import MultimodalRuntimeManager
@@ -43,6 +56,8 @@ DISCORD_VC_TARGET = "NachoBot-DiscordVC-Adapter/config.toml"
 DISCORD_KOISHI_PLACEHOLDER = "<YOUR_DISCORD_BOT_TOKEN_HERE>"
 DISCORD_VC_PLACEHOLDER = "YOUR_DISCORD_BOT_TOKEN"
 BILIBILI_TARGET = "NachoBot-Bilibili-Adapter/config.toml"
+SNOWLUMA_TARGET = "NachoBot-SnowLuma-Adapter/config.toml"
+NAPCAT_TARGET = "NachoBot-Napcat-Adapter/config.toml"
 
 
 # Sanitized, tracked fallback templates.  The user-owned template files in
@@ -386,7 +401,11 @@ class ConfigInitializer:
             # Never read a current Bilibili config here.  The wizard collects a
             # fresh account UID only when the user explicitly selects Bilibili.
             "bilibili": {"bot_account": ""},
-            "env": {"host": "127.0.0.1", "port": "8000"},
+            "env": {
+                "host": "127.0.0.1",
+                "port": "8000",
+                "qq_adapter": DEFAULT_QQ_ADAPTER,
+            },
         }
 
         # ── bot_config template ──
@@ -439,6 +458,17 @@ class ConfigInitializer:
             except Exception:
                 pass
 
+        # Prefer the current valid live selector; an invalid live .env must
+        # not leak a malformed value into the wizard, so the clean template
+        # default remains the fallback.  No raw environment contents are
+        # returned here.
+        env_live = ROOT_DIR / "NachoBot/.env"
+        if env_live.exists():
+            try:
+                result["env"]["qq_adapter"] = read_qq_adapter(env_live)
+            except Exception:
+                pass
+
         # ── TTS base template ──
         tts_tmpl = ROOT_DIR / "NachoBot-Multimodal-Adapter/template_configs/base_template.toml"
         if tts_tmpl.exists():
@@ -487,6 +517,103 @@ class ConfigInitializer:
             return None
 
     @staticmethod
+    def _load_napcat_chat_policy() -> dict[str, Any] | None:
+        """Read only the shared chat policy from a parseable NapCat config.
+
+        The SnowLuma first-run template must inherit admission policy without
+        inheriting any NapCat connection, token, or unrelated adapter data.
+        Missing, malformed, or incomplete sources intentionally return ``None``
+        so the fail-closed template policy remains unchanged.
+        """
+
+        source_path = resolve_relative_to_root(ROOT_DIR, NAPCAT_TARGET)
+        if not source_path.exists():
+            return None
+        try:
+            document = tomlkit.parse(source_path.read_text(encoding="utf-8"))
+            chat = document.get("chat")
+            if chat is None:
+                return None
+            shared_keys = (
+                "group_list_type",
+                "group_list",
+                "private_list_type",
+                "private_list",
+                "ban_user_id",
+                "ban_qq_bot",
+                "enable_poke",
+            )
+            if any(key not in chat for key in shared_keys):
+                return None
+            return {key: copy.deepcopy(chat[key]) for key in shared_keys}
+        except Exception:
+            return None
+
+    @staticmethod
+    def _resolve_qq_adapter_selection(
+        wizard_data: dict[str, Any],
+        components: set[str],
+    ) -> tuple[str, str | None]:
+        """Resolve/validate the effective QQ backend before any target write."""
+        live_env = ROOT_DIR / "NachoBot/.env"
+        try:
+            current = read_qq_adapter(live_env)
+        except QQAdapterSelectorError as exc:
+            return "", str(exc)
+
+        env_data = wizard_data.get("env", {})
+        if env_data is None:
+            env_data = {}
+        if not isinstance(env_data, dict):
+            return "", "环境变量配置无效"
+
+        if "qq_adapter" not in env_data:
+            selected = current
+        else:
+            try:
+                selected = selector_value_from_request(env_data.get("qq_adapter"))
+            except QQAdapterSelectorError as exc:
+                return "", str(exc)
+
+        if selected != current:
+            try:
+                from .process_manager import assert_qq_adapter_switch_allowed
+            except ImportError:
+                from process_manager import assert_qq_adapter_switch_allowed
+            try:
+                assert_qq_adapter_switch_allowed()
+            except (ValueError, RuntimeError) as exc:
+                return "", str(exc)
+
+        if "qq" in components:
+            template_rel = (
+                "NachoBot-SnowLuma-Adapter/template_config.toml"
+                if selected == "snowluma"
+                else "NachoBot-Napcat-Adapter/template/template_config.toml"
+            )
+            template_text = ConfigInitializer._read_template(template_rel)
+            if template_text is None:
+                return "", f"QQ 适配器模板不存在: {template_rel}"
+            try:
+                document = tomlkit.parse(template_text)
+                if selected == "snowluma":
+                    for section in ("snowluma", "nachobot_server", "voice"):
+                        if section not in document:
+                            return "", f"SnowLuma 模板缺少 [{section}]"
+            except Exception as exc:
+                return "", f"QQ 适配器模板无法验证: {template_rel}"
+
+        return selected, None
+
+    @staticmethod
+    def prevalidate_qq_adapter_selection(
+        wizard_data: dict[str, Any],
+    ) -> tuple[str, str | None]:
+        """Validate selector and switch eligibility without touching QR state or files."""
+        components = set(wizard_data.get("components", []))
+        return ConfigInitializer._resolve_qq_adapter_selection(wizard_data, components)
+
+    @staticmethod
     def generate_configs(wizard_data: dict[str, Any]) -> dict[str, Any]:
         """
         Generate config files from templates, applying wizard form data.
@@ -499,7 +626,7 @@ class ConfigInitializer:
           - tts: dict              — TTS settings (engine, etc.)
           - discord: dict          — Discord settings (token)
           - bilibili: dict         — Bilibili settings (bot_account)
-          - env: dict              — .env overrides (HOST, PORT)
+          - env: dict              — .env overrides (HOST, PORT, qq_adapter)
 
         Returns:
           {"generated": [...], "skipped": [...], "backups": [...], "errors": [...]}
@@ -513,6 +640,37 @@ class ConfigInitializer:
         # Determine whether platform adapters should advertise/use TTS.
         # Relay host/port are independent persistent adapter settings.
         tts_enabled = "tts" in components
+
+        qq_adapter, qq_selection_error = ConfigInitializer._resolve_qq_adapter_selection(
+            wizard_data, components
+        )
+        if qq_selection_error:
+            return {
+                "generated": [],
+                "skipped": list(TEMPLATE_MAP.values()),
+                "backups": [],
+                "errors": [qq_selection_error],
+                "patched": [],
+            }
+
+        # Validate the selected live adapter before any unrelated target can be
+        # backed up or materialized.  SnowLuma preservation must never turn a
+        # malformed current config into a partial wizard deployment.
+        if "qq" in components:
+            selected_target = SNOWLUMA_TARGET if qq_adapter == "snowluma" else NAPCAT_TARGET
+            selected_path = resolve_relative_to_root(ROOT_DIR, selected_target)
+            if selected_path.exists():
+                try:
+                    tomlkit.parse(selected_path.read_text(encoding="utf-8"))
+                except Exception as exc:
+                    label = "SnowLuma" if qq_adapter == "snowluma" else "NapCat"
+                    return {
+                        "generated": [],
+                        "skipped": list(TEMPLATE_MAP.values()),
+                        "backups": [],
+                        "errors": [f"现有 {label} Adapter 配置无法解析，已拒绝部署"],
+                        "patched": [],
+                    }
 
         # Validate both fresh Discord templates before touching any target.  In
         # particular, do not let a malformed/mutated template cause a later
@@ -567,7 +725,7 @@ class ConfigInitializer:
             # Skip components not selected
             component_id = target_rel.split("/")[0]
             should_generate = ConfigInitializer._should_generate(
-                component_id, target_rel, components
+                component_id, target_rel, components, qq_adapter=qq_adapter
             )
             if not should_generate:
                 skipped.append(target_rel)
@@ -583,6 +741,8 @@ class ConfigInitializer:
                 # the NapCat adapter, keep the user's existing inbound WS contract:
                 # NapCat's websocketClient must use the same host/port/token.
                 preserved_napcat_server: dict[str, Any] | None = None
+                preserved_snowluma: dict[str, Any] | None = None
+                seeded_snowluma_chat: dict[str, Any] | None = None
                 preserved_nachobot_server: dict[str, Any] | None = None
                 if (
                     target_rel == "NachoBot-Napcat-Adapter/config.toml"
@@ -608,6 +768,22 @@ class ConfigInitializer:
                         raise ValueError(
                             f"现有 NapCat Adapter 配置无法解析，已拒绝用模板覆盖: {e}"
                         ) from e
+                if target_rel == SNOWLUMA_TARGET and target_path.exists():
+                    try:
+                        existing_doc = tomlkit.parse(target_path.read_text(encoding="utf-8"))
+                        # SnowLuma adapter tables are user-owned.  Preserve the
+                        # complete document and let the wizard override only
+                        # voice.use_tts below; this keeps future adapter tables
+                        # intact as well as the known connection/chat/debug data.
+                        preserved_snowluma = {
+                            key: copy.deepcopy(value) for key, value in existing_doc.items()
+                        }
+                    except Exception as exc:
+                        raise ValueError(
+                            "现有 SnowLuma Adapter 配置无法解析，已拒绝用模板覆盖"
+                        ) from exc
+                elif target_rel == SNOWLUMA_TARGET:
+                    seeded_snowluma_chat = ConfigInitializer._load_napcat_chat_policy()
 
                 # Backup existing file
                 if target_path.exists():
@@ -644,12 +820,35 @@ class ConfigInitializer:
                             generated_upstream[key] = value
                     target_path.write_text(tomlkit.dumps(generated_doc), encoding="utf-8")
 
+                # SnowLuma configuration is user-owned.  Restore every existing
+                # table/key without returning or logging values, then apply only
+                # the wizard-owned voice.use_tts override.
+                if preserved_snowluma is not None:
+                    generated_doc = tomlkit.parse(target_path.read_text(encoding="utf-8"))
+                    for key, value in preserved_snowluma.items():
+                        generated_doc[key] = copy.deepcopy(value)
+                    target_path.write_text(tomlkit.dumps(generated_doc), encoding="utf-8")
+
+                # On first SnowLuma generation only, inherit the existing
+                # NapCat admission policy.  The source helper returns only the
+                # seven shared chat keys and never copies connection/auth data.
+                if seeded_snowluma_chat is not None:
+                    generated_doc = tomlkit.parse(target_path.read_text(encoding="utf-8"))
+                    generated_chat = generated_doc.get("chat")
+                    if generated_chat is None:
+                        generated_chat = tomlkit.table()
+                        generated_doc["chat"] = generated_chat
+                    for key, value in seeded_snowluma_chat.items():
+                        generated_chat[key] = copy.deepcopy(value)
+                    target_path.write_text(tomlkit.dumps(generated_doc), encoding="utf-8")
+
                 # Apply wizard data overrides
                 override_err = ConfigInitializer._apply_overrides(
                     target_path,
                     target_rel,
                     wizard_data,
                     tts_enabled,
+                    qq_adapter=qq_adapter,
                 )
                 if override_err:
                     errors.append(f"覆写失败 {target_rel}: {override_err}")
@@ -660,7 +859,11 @@ class ConfigInitializer:
 
         # Post-generation: synchronize adapter TTS flags in existing configs.
         # Relay host/port are not rewritten here; adapter configs retain their values.
-        patch_results = ConfigInitializer._patch_tts_chain(tts_enabled, components)
+        patch_results = ConfigInitializer._patch_tts_chain(
+            tts_enabled,
+            components,
+            qq_adapter=qq_adapter,
+        )
         errors.extend(patch_results.get("errors", []))
 
         return {
@@ -675,6 +878,7 @@ class ConfigInitializer:
     # Platform relay routing remains independently configurable.
     _TTS_CHAIN_ADAPTERS: list[tuple[str, str, bool]] = [
         ("NachoBot-Napcat-Adapter/config.toml", "qq", True),
+        ("NachoBot-SnowLuma-Adapter/config.toml", "qq", True),
         ("NachoBot-Koishi-Adapter/config.toml", "discord", True),
         # Bilibili connects directly to Core (port 8000), no TTS chain
         # DiscordVC / UniversalVC also connect directly to Core
@@ -684,6 +888,7 @@ class ConfigInitializer:
     def _patch_tts_chain(
         tts_enabled: bool,
         components: set,
+        qq_adapter: str = DEFAULT_QQ_ADAPTER,
     ) -> dict[str, Any]:
         """
         Synchronize voice.use_tts for selected adapters.
@@ -698,6 +903,12 @@ class ConfigInitializer:
             # Only patch adapters the user selected
             if component_id not in components:
                 continue
+            if component_id == "qq":
+                selected_path = (
+                    SNOWLUMA_TARGET if qq_adapter == "snowluma" else NAPCAT_TARGET
+                )
+                if rel_path != selected_path:
+                    continue
 
             config_path = resolve_relative_to_root(ROOT_DIR, rel_path)
             if not config_path.exists():
@@ -924,7 +1135,12 @@ class ConfigInitializer:
         return "未知 Discord 配置目标"
 
     @staticmethod
-    def _should_generate(component_id: str, target_rel: str, components: set) -> bool:
+    def _should_generate(
+        component_id: str,
+        target_rel: str,
+        components: set,
+        qq_adapter: str = DEFAULT_QQ_ADAPTER,
+    ) -> bool:
         """Determine if a config file should be generated based on selected components."""
         # Core configs are always generated
         if component_id == "NachoBot":
@@ -937,6 +1153,15 @@ class ConfigInitializer:
             return True
 
         # Adapter configs only when their component is selected
+        if target_rel in {NAPCAT_TARGET, SNOWLUMA_TARGET}:
+            if "qq" not in components:
+                return False
+            return (
+                target_rel == SNOWLUMA_TARGET
+                if qq_adapter == "snowluma"
+                else target_rel == NAPCAT_TARGET
+            )
+
         mapping = {
             "NachoBot-Napcat-Adapter": "qq",
             "NachoBot-Multimodal-Adapter": "tts",
@@ -958,6 +1183,7 @@ class ConfigInitializer:
         target_rel: str,
         wizard_data: dict[str, Any],
         tts_enabled: bool,
+        qq_adapter: str | None = None,
     ) -> str | None:
         """
         Apply wizard form data to a generated config file.
@@ -970,7 +1196,18 @@ class ConfigInitializer:
             env_data = wizard_data.get("env", {})
             host = env_data.get("host", "127.0.0.1")
             port = env_data.get("port", "8000")
-            target_path.write_text(f"HOST={host}\nPORT={port}\n", encoding="utf-8")
+            try:
+                selector = (
+                    selector_value_from_request(env_data["qq_adapter"])
+                    if "qq_adapter" in env_data
+                    else qq_adapter or read_qq_adapter(target_path)
+                )
+            except QQAdapterSelectorError as exc:
+                return str(exc)
+            target_path.write_text(
+                f"HOST={host}\nPORT={port}\nqq_adapter={selector}\n",
+                encoding="utf-8",
+            )
             return None
 
         # Koishi is a YAML configuration.  Its Discord token is the only
@@ -1074,6 +1311,13 @@ class ConfigInitializer:
                     doc["voice"]["use_tts"] = tts_enabled
                     changed = True
 
+        # -- SnowLuma adapter config.toml --
+        if target_rel == SNOWLUMA_TARGET and filename == "config.toml":
+            if "voice" in doc:
+                if doc["voice"].get("use_tts") != tts_enabled:
+                    doc["voice"]["use_tts"] = tts_enabled
+                    changed = True
+
         # -- Koishi adapter config.toml --
         # Upstream relay routing remains whatever is configured in nachobot_server.
         if "NachoBot-Koishi-Adapter" in target_rel and filename == "config.toml":
@@ -1128,7 +1372,7 @@ class ConfigInitializer:
 class NapCatConfigurator:
     """
     Automatically configure NapCat Shell's onebot11 config files.
-    Adds WebSocket client (NachoBot), diary HTTP server, and bilibili video HTTP server.
+    Adds the NachoBot core WebSocket client while preserving user-managed servers.
     """
 
     # Standard WebSocket client defaults for NachoBot. The actual host/port/token
@@ -1183,77 +1427,6 @@ class NapCatConfigurator:
                 changed = True
         return changed
 
-    # HTTP server defaults. Actual ports/tokens are synchronized from the
-    # corresponding Core plugin configs so WebUI cannot drift from runtime config.
-    _DIARY_HTTP_ENTRY = {
-        "enable": True,
-        "name": "Diary",
-        "host": "127.0.0.1",
-        "port": 9997,
-        "enableCors": True,
-        "enableWebsocket": True,
-        "messagePostFormat": "array",
-        "token": "",
-        "debug": False,
-    }
-
-    _BILIBILI_HTTP_ENTRY = {
-        "enable": True,
-        "name": "BiliBili",
-        "host": "127.0.0.1",
-        "port": 5700,
-        "enableCors": False,
-        "enableWebsocket": False,
-        "messagePostFormat": "array",
-        "token": "",
-        "debug": False,
-    }
-
-    @staticmethod
-    def _load_diary_http_entry() -> dict[str, Any]:
-        """Build the NapCat HTTP server required by diary_plugin."""
-        entry = dict(NapCatConfigurator._DIARY_HTTP_ENTRY)
-        config_path = resolve_relative_to_root(
-            ROOT_DIR, "NachoBot/plugins/diary_plugin/config.toml"
-        )
-        if not config_path.exists():
-            return entry
-
-        try:
-            doc = tomlkit.parse(config_path.read_text(encoding="utf-8"))
-            publishing = doc.get("qzone_publishing", {})
-            entry["port"] = int(publishing.get("napcat_port", 9997))
-            entry["token"] = str(publishing.get("napcat_token", "") or "")
-        except Exception as e:
-            raise ValueError(f"读取 Diary 插件 NapCat 配置失败: {e}") from e
-
-        # qzone_publishing.napcat_host is the client's destination host, not the
-        # address NapCat itself should bind to, so the server bind stays local.
-        return entry
-
-    @staticmethod
-    def _load_bilibili_http_entry() -> dict[str, Any]:
-        """Build the NapCat HTTP server required by bilibili_video_sender_plugin."""
-        entry = dict(NapCatConfigurator._BILIBILI_HTTP_ENTRY)
-        config_path = resolve_relative_to_root(
-            ROOT_DIR, "NachoBot/plugins/bilibili_video_sender_plugin/config.toml"
-        )
-        if not config_path.exists():
-            return entry
-
-        try:
-            doc = tomlkit.parse(config_path.read_text(encoding="utf-8"))
-            api = doc.get("api", {})
-            entry["port"] = int(api.get("port", 5700))
-        except Exception as e:
-            raise ValueError(f"读取 Bilibili 插件 NapCat 配置失败: {e}") from e
-
-        # The plugin posts directly to http://localhost:<api.port> without an
-        # Authorization header, therefore this managed NapCat endpoint must not
-        # require a token.
-        entry["token"] = ""
-        return entry
-
     @staticmethod
     def detect_accounts(napcat_dir: str) -> list[str]:
         """
@@ -1283,10 +1456,8 @@ class NapCatConfigurator:
         """
         Auto-configure NapCat onebot11 config files.
 
-        Adds/reconciles:
-          - WebSocket client from NachoBot-Napcat-Adapter/config.toml
-          - Diary HTTP server from diary_plugin/config.toml
-          - Bilibili HTTP server from bilibili_video_sender_plugin/config.toml
+        Adds/reconciles the WebSocket client from the adapter config while
+        leaving all HTTP server entries user-managed.
 
         Args:
             napcat_dir: Path to NapCat Shell root directory.
@@ -1346,9 +1517,7 @@ class NapCatConfigurator:
             target_files.append(target)
         else:
             # Auto-detect is safe only when exactly one account-specific config
-            # exists. Each OneBot account owns its own HTTP listeners, so writing
-            # the same Diary/Bilibili ports into multiple account configs would
-            # create bind conflicts inside the same NapCat process.
+            # exists. Multiple account-specific files require an explicit choice.
             if len(existing_accounts) == 1:
                 target_files.extend(existing_accounts.values())
             elif len(existing_accounts) > 1:
@@ -1367,8 +1536,6 @@ class NapCatConfigurator:
 
         try:
             desired_ws_entry = NapCatConfigurator._load_adapter_ws_entry()
-            desired_diary_http_entry = NapCatConfigurator._load_diary_http_entry()
-            desired_bilibili_http_entry = NapCatConfigurator._load_bilibili_http_entry()
         except ValueError as e:
             return {"configured": [], "skipped": [], "errors": [str(e)]}
 
@@ -1377,8 +1544,6 @@ class NapCatConfigurator:
                 result = NapCatConfigurator._configure_file(
                     target_path,
                     desired_ws_entry,
-                    desired_diary_http_entry,
-                    desired_bilibili_http_entry,
                 )
                 if result["changed"]:
                     configured.append(str(target_path.name))
@@ -1393,8 +1558,6 @@ class NapCatConfigurator:
     def _configure_file(
         target_path: Path,
         desired_ws_entry: dict[str, Any],
-        desired_diary_http_entry: dict[str, Any],
-        desired_bilibili_http_entry: dict[str, Any],
     ) -> dict[str, bool]:
         """
         Configure a single onebot11 JSON file.
@@ -1460,6 +1623,8 @@ class NapCatConfigurator:
             changed = True
 
         # --- HTTP Servers ---
+        # Validate the existing shape, but never add, remove, or reconcile
+        # entries. These servers may belong to the user or another integration.
         if "httpServers" not in network:
             network["httpServers"] = []
             changed = True
@@ -1468,33 +1633,6 @@ class NapCatConfigurator:
         http_servers = network["httpServers"]
         if any(not isinstance(s, dict) for s in http_servers):
             raise ValueError("network.httpServers 包含非对象条目，已拒绝覆盖")
-
-        # Manage HTTP endpoints by their configured target port only. Do not use
-        # names as a fallback: another bot/account may legitimately have its own
-        # QZone/Diary/BiliBili entry on a different port.
-        diary_port = desired_diary_http_entry["port"]
-        diary = next((s for s in http_servers if s.get("port") == diary_port), None)
-        if diary is None:
-            http_servers.append(dict(desired_diary_http_entry))
-            changed = True
-        elif str(diary.get("name", "")).lower() != "diary":
-            raise ValueError(
-                f"NapCat HTTP 端口 {diary_port} 已被条目 {diary.get('name', '<unnamed>')} 占用"
-            )
-        elif NapCatConfigurator._reconcile_entry(diary, desired_diary_http_entry):
-            changed = True
-
-        bilibili_port = desired_bilibili_http_entry["port"]
-        bilibili = next((s for s in http_servers if s.get("port") == bilibili_port), None)
-        if bilibili is None:
-            http_servers.append(dict(desired_bilibili_http_entry))
-            changed = True
-        elif str(bilibili.get("name", "")).lower() not in {"bilibili", "bili bili"}:
-            raise ValueError(
-                f"NapCat HTTP 端口 {bilibili_port} 已被条目 {bilibili.get('name', '<unnamed>')} 占用"
-            )
-        elif NapCatConfigurator._reconcile_entry(bilibili, desired_bilibili_http_entry):
-            changed = True
 
         # Ensure other standard arrays exist.
         for key in ["httpSseServers", "httpClients", "websocketServers", "plugins"]:
@@ -1539,6 +1677,7 @@ class DependencyInstaller:
     UV_PROJECTS: dict[str, str] = {
         "core": "NachoBot",
         "qq": "NachoBot-Napcat-Adapter",
+        "qq_snowluma": "NachoBot-SnowLuma-Adapter",
         "tts": "NachoBot-Multimodal-Adapter",
         "tts_relay": "NachoBot-Multimodal-Adapter",
         "bilibili": "NachoBot-Bilibili-Adapter",
@@ -1662,9 +1801,22 @@ class DependencyInstaller:
     def get_install_tasks(
         components: list[str],
         multimodal_runtime: str = "gpu",
+        qq_adapter: str | None = None,
     ) -> list[dict[str, str]]:
         """Return install tasks for selected components and Multimodal runtime."""
         runtime = MultimodalRuntimeManager.normalize_profile(multimodal_runtime)
+        try:
+            # The live .env is the sole source of truth.  The optional request
+            # value is only a consistency assertion from the client-visible
+            # wizard payload; accepting it as an override would let a stale or
+            # crafted plan install the other QQ backend.
+            selected_qq = read_qq_adapter(ROOT_DIR / "NachoBot/.env")
+            if qq_adapter is not None:
+                requested_qq = selector_value_from_request(qq_adapter)
+                if requested_qq != selected_qq:
+                    raise ValueError("请求的 qq_adapter 与当前配置不一致")
+        except QQAdapterSelectorError as exc:
+            raise ValueError(str(exc)) from exc
         tasks = []
 
         # Always install core
@@ -1688,14 +1840,24 @@ class DependencyInstaller:
         component_set = set(components)
 
         if "qq" in component_set:
-            tasks.append(
-                {
-                    "id": "qq",
-                    "type": "uv",
-                    "name": "Napcat Adapter",
-                    "dir": "NachoBot-Napcat-Adapter",
-                }
-            )
+            if selected_qq == "snowluma":
+                tasks.append(
+                    {
+                        "id": "qq_snowluma",
+                        "type": "uv",
+                        "name": "SnowLuma 适配器",
+                        "dir": "NachoBot-SnowLuma-Adapter",
+                    }
+                )
+            else:
+                tasks.append(
+                    {
+                        "id": "qq",
+                        "type": "uv",
+                        "name": "Napcat Adapter",
+                        "dir": "NachoBot-Napcat-Adapter",
+                    }
+                )
 
         if "tts" in component_set:
             runtime_label = MultimodalRuntimeManager.PROFILE_META[runtime]["label"]
@@ -1791,6 +1953,25 @@ class DependencyInstaller:
             project_dir = DependencyInstaller._resolve_task_project(task)
         except (KeyError, ValueError) as e:
             return {"status": "error", "message": str(e)}
+
+        # The task list is client-visible and may be stale or crafted after it
+        # was generated.  Re-read the live selector at the final boundary,
+        # immediately before any installer command can run.
+        task_id = str(task.get("id", "")).strip()
+        if task_id in {"qq", "qq_snowluma"}:
+            try:
+                selected_qq = read_qq_adapter(ROOT_DIR / "NachoBot/.env")
+            except QQAdapterSelectorError:
+                return {
+                    "status": "error",
+                    "message": "当前 qq_adapter 配置无效，已拒绝安装 QQ 适配器",
+                }
+            expected_task = "qq_snowluma" if selected_qq == "snowluma" else "qq"
+            if task_id != expected_task:
+                return {
+                    "status": "error",
+                    "message": "安装任务与当前 qq_adapter 选择不匹配",
+                }
         if not project_dir.exists():
             return {"status": "error", "message": f"目录不存在: {project_dir}"}
 

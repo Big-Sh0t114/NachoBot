@@ -31,6 +31,7 @@ TEMPLATE_MAP: dict[str, str] = {
     "NachoBot/template/mcp_config_template.toml": "NachoBot/config/mcp_config.toml",
     "NachoBot/template/template.env": "NachoBot/.env",
     "NachoBot-Napcat-Adapter/template/template_config.toml": "NachoBot-Napcat-Adapter/config.toml",
+    "NachoBot-SnowLuma-Adapter/template_config.toml": "NachoBot-SnowLuma-Adapter/config.toml",
     "NachoBot-Multimodal-Adapter/template_configs/base_template.toml": "NachoBot-Multimodal-Adapter/configs/base.toml",
     "NachoBot-Multimodal-Adapter/template_configs/gpt-sovits_template.toml": "NachoBot-Multimodal-Adapter/configs/gpt-sovits.toml",
     "NachoBot-Multimodal-Adapter/template_configs/vox_template.toml": "NachoBot-Multimodal-Adapter/configs/vox.toml",

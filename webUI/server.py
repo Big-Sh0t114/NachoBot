@@ -19,6 +19,11 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 from config_manager import ConfigManager
+from qq_adapter_selector import (
+    QQAdapterSelectorError,
+    read_qq_adapter,
+    selector_value_from_request,
+)
 from process_manager import ProcessManager
 from plugin_manager import PluginManager
 from db_manager import DatabaseManager
@@ -906,6 +911,12 @@ async def setup_generate_configs(body: SetupWizardData):
             "[Setup] generate_configs called: components=%s, providers=%d, models=%d",
             data.get("components"), len(data.get("providers", [])), len(data.get("models", []))
         )
+        # Validate selector syntax and any live backend switch before entering
+        # the QR lifecycle context.  ConfigInitializer repeats this check after
+        # entering the context to close the TOCTOU window before target writes.
+        _, qq_selection_error = ConfigInitializer.prevalidate_qq_adapter_selection(data)
+        if qq_selection_error:
+            raise HTTPException(400, qq_selection_error)
         # Every config-generation request must first stop and invalidate any
         # prior QR helper.  This protects non-Bilibili runs from racing an old
         # helper and keeps unproven process/QR cleanup fail-closed before any
@@ -923,6 +934,8 @@ async def setup_generate_configs(body: SetupWizardData):
             len(result.get("generated", [])), len(result.get("errors", []))
         )
         return result
+    except HTTPException:
+        raise
     except Exception:
         logger.exception("[Setup] generate_configs failed")
         raise HTTPException(500, "配置生成失败")
@@ -991,11 +1004,26 @@ async def setup_bilibili_login_qr_query(job_id: str = Query(...)):
 class VerifyPathRequest(BaseModel):
     type: str
     path: str = ""
+    qq_adapter: str | None = None
 
 
 @app.post("/api/setup/verify-path")
 async def setup_verify_path(body: VerifyPathRequest):
     """Verify a setup dependency or project-managed runtime."""
+    if body.type == "napcat":
+        try:
+            selected = (
+                selector_value_from_request(body.qq_adapter)
+                if body.qq_adapter is not None
+                else read_qq_adapter(config_mgr.root / "NachoBot/.env")
+            )
+        except QQAdapterSelectorError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if selected != "napcat":
+            raise HTTPException(
+                409,
+                "当前选择的是 SnowLuma，不需要验证 NapCat 路径",
+            )
     result = PathVerifier.verify_path(body.type, body.path)
     return result
 
@@ -1012,11 +1040,19 @@ async def setup_bootstrap_git():
 
 
 @app.get("/api/setup/deps/tasks")
-async def setup_dep_tasks(components: str = "", multimodal_runtime: str = "gpu"):
+async def setup_dep_tasks(
+    components: str = "",
+    multimodal_runtime: str = "gpu",
+    qq_adapter: str | None = None,
+):
     """Return install tasks for selected components and Multimodal runtime."""
     comp_list = [c.strip() for c in components.split(",") if c.strip()]
     try:
-        return DependencyInstaller.get_install_tasks(comp_list, multimodal_runtime)
+        return DependencyInstaller.get_install_tasks(
+            comp_list,
+            multimodal_runtime,
+            qq_adapter=qq_adapter,
+        )
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -1036,18 +1072,33 @@ async def setup_multimodal_runtime_status():
 class NapCatConfigRequest(BaseModel):
     napcat_dir: str
     qq_account: str = ""
+    qq_adapter: str | None = None
 
 
 @app.post("/api/setup/napcat/configure")
 async def setup_configure_napcat(body: NapCatConfigRequest):
-    """Auto-configure NapCat onebot11 WebSocket client + HTTP servers."""
+    """Auto-configure NapCat only when NapCat is the selected QQ backend."""
     try:
+        selected = read_qq_adapter(config_mgr.root / "NachoBot/.env")
+        if body.qq_adapter is not None:
+            requested = selector_value_from_request(body.qq_adapter)
+            if requested != selected:
+                raise HTTPException(409, "QQ 适配器选择已变化，请重新加载设置向导")
+        if selected != "napcat":
+            raise HTTPException(
+                409,
+                "当前选择的是 SnowLuma；请先启动外部 SnowLuma 运行时，无需配置 NapCat",
+            )
         result = NapCatConfigurator.configure(body.napcat_dir, body.qq_account)
         logger.info(
             "[Setup] napcat configure: configured=%s, skipped=%s, errors=%s",
             result["configured"], result["skipped"], result["errors"]
         )
         return result
+    except HTTPException:
+        raise
+    except QQAdapterSelectorError as exc:
+        raise HTTPException(400, str(exc)) from exc
     except Exception:
         logger.exception("[Setup] napcat configure failed")
         raise HTTPException(500, "NapCat 配置失败")

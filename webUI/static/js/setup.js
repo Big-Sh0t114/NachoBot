@@ -73,6 +73,10 @@ const SetupModule = (() => {
                 updateMultimodalRuntimeSelection();
             });
         });
+        document.getElementById('setup-qq-adapter')?.addEventListener('change', () => {
+            updateQqAdapterVisibility();
+            updatePathCheckVisibility();
+        });
 
         // "+" add-row buttons
         document.getElementById('btn-add-provider')?.addEventListener('click', addProviderRow);
@@ -233,6 +237,7 @@ const SetupModule = (() => {
             clearDiscordTokenFromRequest(activeWizardData);
         }
         updateComponentVisuals();
+        updateQqAdapterVisibility();
     }
 
     function updateComponentVisuals() {
@@ -405,6 +410,25 @@ const SetupModule = (() => {
         }
         if (bilibiliSection) {
             bilibiliSection.style.display = selectedComponents.includes('bilibili') ? '' : 'none';
+        }
+        updateQqAdapterVisibility();
+    }
+
+    function getSelectedQqAdapter() {
+        const value = document.getElementById('setup-qq-adapter')?.value || 'napcat';
+        return value === 'snowluma' ? 'snowluma' : 'napcat';
+    }
+
+    function updateQqAdapterVisibility() {
+        const selected = selectedComponents.includes('qq');
+        const adapter = getSelectedQqAdapter();
+        const pathCard = document.getElementById('path-check-napcat');
+        const hint = document.getElementById('setup-snowluma-runtime-hint');
+        if (pathCard && (!selected || adapter !== 'napcat')) {
+            pathCard.style.display = 'none';
+        }
+        if (hint) {
+            hint.style.display = selected && adapter === 'snowluma' ? '' : 'none';
         }
     }
 
@@ -622,6 +646,7 @@ const SetupModule = (() => {
             },
             env: {},
         };
+        wizardData.env.qq_adapter = getSelectedQqAdapter();
 
         // Keep the token in memory only for this request.  It is never
         // persisted in browser storage or included in logs.  Non-Discord
@@ -765,7 +790,9 @@ const SetupModule = (() => {
 
     function getRequiredChecks() {
         const checks = [];
-        if (selectedComponents.includes('qq')) checks.push('napcat');
+        if (selectedComponents.includes('qq') && getSelectedQqAdapter() === 'napcat') {
+            checks.push('napcat');
+        }
         if (selectedComponents.includes('discord')) checks.push('nodejs');
         if (selectedComponents.includes('bilibili')) checks.push('bilibili_dll');
         if (selectedComponents.includes('universalvc')) checks.push('vb_cable');
@@ -806,7 +833,9 @@ const SetupModule = (() => {
         if (resultEl) resultEl.className = 'path-check-result';
 
         try {
-            const res = await apiPost('/api/setup/verify-path', { type, path });
+            const request = { type, path };
+            if (type === 'napcat') request.qq_adapter = getSelectedQqAdapter();
+            const res = await apiPost('/api/setup/verify-path', request);
             pathCheckResults[type] = res.valid;
             if (statusEl) statusEl.textContent = res.valid ? '✅' : '❌';
             if (resultEl) {
@@ -942,8 +971,11 @@ const SetupModule = (() => {
             return;
         }
 
-        // Phase 1.5: Configure NapCat connection (only if qq selected)
-        if (selectedComponents.includes('qq')) {
+        // Phase 1.5: Configure NapCat connection only for the NapCat backend.
+        // SnowLuma is external and must already be running; WebUI never
+        // invents a managed runtime or performs a local path check for it.
+        const qqAdapter = getSelectedQqAdapter();
+        if (selectedComponents.includes('qq') && qqAdapter === 'napcat') {
             addProgressItem(progressDiv, 'napcat-config', '🔗 配置 NapCat 连接', 'running');
             addLogLine(logDiv, '\n[Setup] 正在配置 NapCat WebSocket/HTTP 连接...\n');
 
@@ -953,6 +985,7 @@ const SetupModule = (() => {
                 const ncResult = await apiPost('/api/setup/napcat/configure', {
                     napcat_dir: napcatPath,
                     qq_account: qqAccount,
+                    qq_adapter: qqAdapter,
                 });
 
                 if (ncResult.errors && ncResult.errors.length) {
@@ -975,7 +1008,7 @@ const SetupModule = (() => {
                         '✅ NapCat 已有配置，无需修改');
                 }
 
-                ncResult.configured.forEach(f => addLogLine(logDiv, `[Setup] 已配置: ${f} (WS客户端 + 日记HTTP + B站视频HTTP)\n`));
+                ncResult.configured.forEach(f => addLogLine(logDiv, `[Setup] 已配置: ${f} (NachoBot WebSocket 客户端)\n`));
                 ncResult.skipped.forEach(f => addLogLine(logDiv, `[Setup] 跳过 (已有配置): ${f}\n`));
             } catch (e) {
                 const detail = e?.message || String(e);
@@ -987,6 +1020,9 @@ const SetupModule = (() => {
                 document.getElementById('setup-finish').disabled = true;
                 return;
             }
+        } else if (selectedComponents.includes('qq') && qqAdapter === 'snowluma') {
+            addProgressItem(progressDiv, 'snowluma-info', '🔗 SnowLuma QQ 适配器', 'done');
+            addLogLine(logDiv, '\n[Setup] 已选择 SnowLuma。请先启动外部 SnowLuma 运行时；WebUI 只管理本地 SnowLuma 适配器。\n');
         }
 
         // Phase 2: Install dependencies
@@ -995,7 +1031,8 @@ const SetupModule = (() => {
         try {
             const componentsParam = encodeURIComponent(wizardData.components.join(','));
             const runtimeParam = encodeURIComponent(wizardData.tts?.runtime || getRecommendedMultimodalRuntime());
-            const tasks = await apiGet(`/api/setup/deps/tasks?components=${componentsParam}&multimodal_runtime=${runtimeParam}`);
+            const qqAdapterParam = encodeURIComponent(qqAdapter);
+            const tasks = await apiGet(`/api/setup/deps/tasks?components=${componentsParam}&multimodal_runtime=${runtimeParam}&qq_adapter=${qqAdapterParam}`);
 
             if (tasks.length === 0) {
                 updateProgressItem('dep-install', 'done', '✅ 无需安装依赖');

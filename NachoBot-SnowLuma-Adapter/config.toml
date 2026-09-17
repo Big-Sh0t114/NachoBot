@@ -1,0 +1,54 @@
+[inner]
+version = "0.2.0"
+
+[snowluma]
+scheme = "ws"
+host = "127.0.0.1"
+port = 3001
+path = ""
+token = "1gbMBrLArOZbD_ScStj8jr7GA-v5Amp0fLev5agRuac"
+reconnect_delay_sec = 5.0
+action_timeout_sec = 10.0
+heartbeat_sec = 30.0
+
+[nachobot_server]
+host = "127.0.0.1"
+port = 8070
+platform_name = "qq"
+
+[chat]
+enable_chat_list_filter = true
+group_list_type = "whitelist"
+group_list = [722852338, 1082352342]
+private_list_type = "whitelist"
+private_list = [2231499563, 3286048968, 2661853907, 2401405791, 3360117706, 1659987701, 3667336424, 3121497252, 2296554760, 3659811683, 2682941608, 2466132129, 3815307925, 2946845640, 2284265587, 919609550, 3064689870, 2930904718, 1611096596, 2146014839, 3839761838, 1400590653, 3396865583, 1042175008, 99426339, 2031026631, 3039057508]
+ban_user_id = [3756033211, 1426897212, 3799290249]
+ban_qq_bot = false
+enable_poke = true
+
+[voice]
+use_tts = true
+
+[send]
+# Only throttles actual send_group_msg/send_private_msg, not info/action queries.
+min_interval_sec = 0.5
+
+[visual.image]
+temperature = 0.1
+max_tokens = 8000
+extra_params = {}
+
+[visual.emoji]
+temperature = 0.2
+max_tokens = 8000
+extra_params = {}
+
+[visual.video]
+temperature = 0.1
+max_tokens = 8000
+extra_params = {}
+
+[debug]
+level = "DEBUG"
+raw_payload = false
+raw_outbound = false

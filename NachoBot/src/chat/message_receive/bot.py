@@ -329,9 +329,7 @@ class ChatBot:
                         return True, "target taken", False
 
                     if result == "ERR_PLATFORM_CONFLICT":
-                        reply_text = (
-                            f"绑定失败：身份冲突啦！当前操作会导致同一个身份下出现多个同一平台的账号，这是不被允许的哦~"
-                        )
+                        reply_text = "绑定失败：身份冲突啦！当前操作会导致同一个身份下出现多个同一平台的账号，这是不被允许的哦~"
                         await send_api.text_to_stream(reply_text, message.chat_stream.stream_id)
                         return True, "platform conflict", False
 
@@ -592,8 +590,21 @@ class ChatBot:
             return
         mmc_message_id = message_data.get("echo")
         actual_message_id = message_data.get("actual_id")
-        if MessageStorage.update_message(mmc_message_id, actual_message_id):
+        echo_platform = raw_data.get("platform")
+        if not isinstance(echo_platform, str) or not echo_platform:
+            echo_platform = message_data.get("platform")
+
+        # Resolve the receipt only when both the message id and the platform
+        # match a pending send.  A mismatched platform must not satisfy a
+        # waiter belonging to another adapter route.
+        ack_resolved = send_api.resolve_message_ack(mmc_message_id, echo_platform, actual_message_id)
+        stored = MessageStorage.update_message(mmc_message_id, actual_message_id)
+        if stored:
             logger.debug(f"更新消息ID成功: {mmc_message_id} -> {actual_message_id}")
+        elif ack_resolved:
+            # Media receipts may deliberately use storage_message=False.  The
+            # upstream ACK is still valid even though there is no DB row.
+            logger.debug(f"消息已收到平台ACK但未存储消息: {mmc_message_id}")
         else:
             logger.warning(f"更新消息ID失败: {mmc_message_id} -> {actual_message_id}")
 

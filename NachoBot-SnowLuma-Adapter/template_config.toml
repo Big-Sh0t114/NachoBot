@@ -1,0 +1,54 @@
+[inner]
+version = "0.2.0"
+
+[snowluma]
+scheme = "ws"
+host = "127.0.0.1"
+port = 3001
+path = ""
+token = ""
+reconnect_delay_sec = 5.0
+action_timeout_sec = 10.0
+heartbeat_sec = 30.0
+
+[nachobot_server]
+host = "127.0.0.1"
+port = 8070
+platform_name = "qq"
+
+[chat]
+enable_chat_list_filter = true
+group_list_type = "whitelist"
+group_list = []
+private_list_type = "blacklist"
+private_list = []
+ban_user_id = []
+ban_qq_bot = false
+enable_poke = true
+
+[voice]
+use_tts = false
+
+[send]
+# Only throttles actual send_group_msg/send_private_msg, not info/action queries.
+min_interval_sec = 0.5
+
+[visual.image]
+temperature = 0.1
+max_tokens = 220
+extra_params = { enable_thinking = false }
+
+[visual.emoji]
+temperature = 0.2
+max_tokens = 180
+extra_params = { enable_thinking = false }
+
+[visual.video]
+temperature = 0.1
+max_tokens = 280
+extra_params = { enable_thinking = false }
+
+[debug]
+level = "INFO"
+raw_payload = false
+raw_outbound = false

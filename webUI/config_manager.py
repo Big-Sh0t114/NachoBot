@@ -13,8 +13,18 @@ import tomlkit
 
 try:
     from .secure_paths import ensure_within, resolve_named_file, resolve_relative_to_root
+    from .qq_adapter_selector import (
+        QQAdapterSelectorError,
+        parse_qq_adapter_env,
+        read_qq_adapter,
+    )
 except ImportError:
     from secure_paths import ensure_within, resolve_named_file, resolve_relative_to_root
+    from qq_adapter_selector import (
+        QQAdapterSelectorError,
+        parse_qq_adapter_env,
+        read_qq_adapter,
+    )
 
 # Root of the Nacho-with-u project (parent of webui/)
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -37,6 +47,7 @@ CONFIG_REGISTRY: list[dict[str, str]] = [
     {"id": "tts_perception","group": "多模态适配器", "path": "NachoBot-Multimodal-Adapter/configs/perception.toml", "label": "VLM / ASR 配置"},
     # 各平台适配器
     {"id": "napcat_config",       "group": "Napcat 适配器",    "path": "NachoBot-Napcat-Adapter/config.toml",       "label": "Napcat 适配器配置"},
+    {"id": "snowluma_config",     "group": "SnowLuma 适配器",  "path": "NachoBot-SnowLuma-Adapter/config.toml",     "label": "SnowLuma 适配器配置"},
     {"id": "bilibili_config",     "group": "Bilibili 适配器",  "path": "NachoBot-Bilibili-Adapter/config.toml",     "label": "Bilibili 适配器配置"},
     {"id": "discord_config",      "group": "Discord 适配器",   "path": "NachoBot-DiscordVC-Adapter/config.toml",    "label": "Discord VC 适配器配置"},
     {"id": "koishi_config",       "group": "Discord 适配器",   "path": "NachoBot-Koishi-Adapter/config.toml",       "label": "Koishi 适配器配置"},
@@ -143,12 +154,20 @@ class ConfigManager:
         entry = self._find(file_id)
         full = self._entry_path(entry)
 
+        if full.name == ".env":
+            env_data = dict(data)
+            # Structured callers predating the selector must retain the current
+            # effective backend instead of silently reverting to NapCat.
+            if "qq_adapter" not in env_data:
+                env_data["qq_adapter"] = read_qq_adapter(full)
+            raw = self._env_text_from_data(env_data)
+            self._validate_env_selector_change(full, raw)
+            self._backup(full, backup_type="auto")
+            full.write_text(raw, encoding="utf-8")
+            return
+
         # Backup
         self._backup(full, backup_type="auto")
-
-        if full.name == ".env":
-            self._write_env(full, data)
-            return
 
         # Read existing to preserve formatting, then update values
         if full.exists():
@@ -172,6 +191,12 @@ class ConfigManager:
         full = self._entry_path(entry)
         if validator is not None:
             validator(raw)
+        if full.name == ".env":
+            try:
+                parse_qq_adapter_env(raw)
+            except QQAdapterSelectorError as exc:
+                raise ValueError(str(exc)) from exc
+            self._validate_env_selector_change(full, raw)
         self._backup(full, backup_type="auto")
         full.write_text(raw, encoding="utf-8")
 
@@ -211,6 +236,12 @@ class ConfigManager:
                 tomlkit.parse(backup_raw)
             except Exception as exc:
                 raise ValueError("备份配置包含无效 TOML，恢复已拒绝") from exc
+        else:
+            try:
+                parse_qq_adapter_env(backup_raw)
+            except QQAdapterSelectorError as exc:
+                raise ValueError(str(exc)) from exc
+            self._validate_env_selector_change(full, backup_raw)
         if validator is not None:
             validator(backup_raw)
             
@@ -315,6 +346,33 @@ class ConfigManager:
     def _write_env(path: Path, data: dict[str, str]) -> None:
         lines = [f"{k}={v}" for k, v in data.items()]
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    @staticmethod
+    def _env_text_from_data(data: dict[str, Any]) -> str:
+        """Serialize structured environment data without leaking values."""
+        lines = [f"{key}={value}" for key, value in data.items()]
+        return "\n".join(lines) + "\n"
+
+    @staticmethod
+    def _validate_env_selector_change(path: Path, candidate_raw: str) -> None:
+        """Validate selector changes before a backup or write is attempted."""
+        try:
+            current = read_qq_adapter(path)
+            candidate = parse_qq_adapter_env(candidate_raw)
+        except QQAdapterSelectorError as exc:
+            raise ValueError(str(exc)) from exc
+
+        # Missing -> NapCat is the compatibility interpretation of an old
+        # .env, not a backend switch.  Comparing effective values preserves
+        # that rule while still guarding every actual backend transition.
+        if current == candidate:
+            return
+
+        try:
+            from .process_manager import assert_qq_adapter_switch_allowed
+        except ImportError:
+            from process_manager import assert_qq_adapter_switch_allowed
+        assert_qq_adapter_switch_allowed()
 
     # ---- toml helpers ----
 
