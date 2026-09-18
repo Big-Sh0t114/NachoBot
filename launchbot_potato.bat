@@ -208,11 +208,18 @@ endlocal & exit /b %FINAL_RC%
 
 :VERIFY_SNOWLUMA_COMPONENTS
 setlocal EnableExtensions EnableDelayedExpansion
-set "SNOWLUMA_DIR=%ROOT%SnowLuma"
+set "SNOWLUMA_DIR="
+for /f "usebackq delims=" %%D in (`uv run --project "%ROOT%NachoBot" python "%ROOT%webUI\snowluma_locator.py" --root "%ROOT%" --field path 2^>nul`) do if not defined SNOWLUMA_DIR set "SNOWLUMA_DIR=%%D"
+if not defined SNOWLUMA_DIR (
+  echo [FATAL] SnowLuma Runtime discovery failed; deploy exactly one valid SnowLuma 1.14.x directory.
+  echo [INFO] SnowLuma download: https://github.com/SnowLuma/SnowLuma/releases/latest
+  endlocal & exit /b 1
+)
+for %%D in ("!SNOWLUMA_DIR!") do set "SNOWLUMA_NAME=%%~nxD"
 set "SNOWLUMA_ADAPTER_DIR=%ROOT%NachoBot-SnowLuma-Adapter"
 set "SNOWLUMA_MISSING="
-for %%F in (package.json index.mjs utils-tSVKpzEf.js logger-BAozzyTt.js config-GJCFWjtq.js server-CLw7fwOG.js node.exe launcher.bat client\index.html native\snowluma-win32-x64.dll native\snowluma-win32-x64.node native\websocket-win32-x64.node) do (
-  if not exist "!SNOWLUMA_DIR!\%%F" set "SNOWLUMA_MISSING=!SNOWLUMA_MISSING! SnowLuma/%%F;"
+for %%F in (package.json index.mjs utils-tSVKpzEf.js logger-BAozzyTt.js config-GJCFWjtq.js server-CLw7fwOG.js launcher.bat client\index.html native\snowluma-win32-x64.dll native\snowluma-win32-x64.node native\websocket-win32-x64.node) do (
+  if not exist "!SNOWLUMA_DIR!\%%F" set "SNOWLUMA_MISSING=!SNOWLUMA_MISSING! !SNOWLUMA_NAME!/%%F;"
 )
 if not exist "!SNOWLUMA_ADAPTER_DIR!\main.py" set "SNOWLUMA_MISSING=!SNOWLUMA_MISSING! NachoBot-SnowLuma-Adapter/main.py;"
 if not exist "!SNOWLUMA_ADAPTER_DIR!\pyproject.toml" set "SNOWLUMA_MISSING=!SNOWLUMA_MISSING! NachoBot-SnowLuma-Adapter/pyproject.toml;"
@@ -221,24 +228,31 @@ if defined SNOWLUMA_MISSING (
   echo [INFO] Redeploy from https://github.com/SnowLuma/SnowLuma/releases/latest
   endlocal & exit /b 1
 )
+uv run --project "%ROOT%NachoBot" python "%ROOT%webUI\snowluma_locator.py" --root "%ROOT%" --runtime-path "!SNOWLUMA_DIR!" --check-credentials >nul 2>&1
+if errorlevel 1 (
+  echo [FATAL] SnowLuma credentials are missing or inconsistent; redeploy SnowLuma before starting the Runtime or adapter.
+  endlocal & exit /b 1
+)
 endlocal & exit /b 0
 
 :START_SNOWLUMA_RUNTIME
 setlocal EnableExtensions EnableDelayedExpansion
-set "SNOWLUMA_DIR=%ROOT%SnowLuma"
-set "SNOWLUMA_NODE=!SNOWLUMA_DIR!\node.exe"
+if not defined SNOWLUMA_DIR (
+  for /f "usebackq delims=" %%D in (`uv run --project "%ROOT%NachoBot" python "%ROOT%webUI\snowluma_locator.py" --root "%ROOT%" --field path 2^>nul`) do if not defined SNOWLUMA_DIR set "SNOWLUMA_DIR=%%D"
+)
+if not defined SNOWLUMA_DIR (
+  echo [FATAL] SnowLuma Runtime discovery failed; adapter startup aborted.
+  echo [INFO] SnowLuma download: https://github.com/SnowLuma/SnowLuma/releases/latest
+  endlocal & exit /b 1
+)
 set "SNOWLUMA_PORT=5099"
 set "SNOWLUMA_HOST=127.0.0.1"
 set "SNOWLUMA_ONEBOT_PORT=3001"
-for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$p='%ROOT%SnowLuma\config\runtime.json'; if (Test-Path -LiteralPath $p) { try { $j=Get-Content -Raw -LiteralPath $p | ConvertFrom-Json; $v=[int]$j.webuiPort; if ($v -ge 1 -and $v -le 65535) { $v } else { 5099 } } catch { 5099 } } else { 5099 }"`) do set "SNOWLUMA_PORT=%%P"
-for /f "usebackq delims=" %%H in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$p='%ROOT%SnowLuma\config\runtime.json'; $h='127.0.0.1'; if (Test-Path -LiteralPath $p) { try { $j=Get-Content -Raw -LiteralPath $p | ConvertFrom-Json; if ($null -ne $j.webuiHost -and -not [string]::IsNullOrWhiteSpace([string]$j.webuiHost)) { $h=([string]$j.webuiHost).Trim().ToLowerInvariant() } } catch { $h='__INVALID__' } }; if ($h -ne '127.0.0.1') { '__INVALID__' } else { $h }"`) do set "SNOWLUMA_HOST=%%H"
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$p=Join-Path '%SNOWLUMA_DIR%' 'config\runtime.json'; if (Test-Path -LiteralPath $p) { try { $j=Get-Content -Raw -LiteralPath $p | ConvertFrom-Json; $v=[int]$j.webuiPort; if ($v -ge 1 -and $v -le 65535) { $v } else { 5099 } } catch { 5099 } } else { 5099 }"`) do set "SNOWLUMA_PORT=%%P"
+for /f "usebackq delims=" %%H in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$p=Join-Path '%SNOWLUMA_DIR%' 'config\runtime.json'; $h='127.0.0.1'; if (Test-Path -LiteralPath $p) { try { $j=Get-Content -Raw -LiteralPath $p | ConvertFrom-Json; if ($null -ne $j.webuiHost -and -not [string]::IsNullOrWhiteSpace([string]$j.webuiHost)) { $h=([string]$j.webuiHost).Trim().ToLowerInvariant() } } catch { $h='__INVALID__' } }; if ($h -ne '127.0.0.1') { '__INVALID__' } else { $h }"`) do set "SNOWLUMA_HOST=%%H"
 for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$p='%ROOT%NachoBot-SnowLuma-Adapter\config.toml'; if (Test-Path -LiteralPath $p) { $c=Get-Content -Raw -LiteralPath $p; if ($c -match '(?ms)^\[snowluma\]\s*.*?^port\s*=\s*(\d+)') { $v=[int]$Matches[1]; if ($v -ge 1 -and $v -le 65535) { $v } else { 3001 } } else { 3001 } } else { 3001 }"`) do set "SNOWLUMA_ONEBOT_PORT=%%P"
 if /i "!SNOWLUMA_HOST!"=="__INVALID__" (
   echo [FATAL] SnowLuma webuiHost must be a loopback address; refusing to start.
-  endlocal & exit /b 1
-)
-if not exist "!SNOWLUMA_NODE!" (
-  echo [FATAL] Bundled SnowLuma node.exe not found: !SNOWLUMA_NODE!
   endlocal & exit /b 1
 )
 if not exist "!SNOWLUMA_DIR!\index.mjs" (
@@ -253,8 +267,8 @@ call :CHECK_SNOWLUMA_PORT_FREE "!SNOWLUMA_ONEBOT_PORT!" "OneBot"
 if errorlevel 1 (
   endlocal & exit /b 1
 )
-echo --- Start bundled SnowLuma Runtime on port !SNOWLUMA_PORT!...
-start "SnowLuma Runtime" /D "!SNOWLUMA_DIR!" cmd /k ""!SNOWLUMA_NODE!" index.mjs"
+echo --- Start SnowLuma Runtime via launcher.bat on port !SNOWLUMA_PORT!...
+start "SnowLuma Runtime" /D "!SNOWLUMA_DIR!" /b cmd /d /s /c "call launcher.bat <nul"
 set "SNOWLUMA_READY="
 for /l %%I in (1,1,60) do (
   if not defined SNOWLUMA_READY (

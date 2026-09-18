@@ -40,17 +40,30 @@ try:
         read_qq_adapter,
         selector_value_from_request,
     )
+    from .snowluma_locator import (
+        SnowLumaLocatorError,
+        SnowLumaRuntime,
+        resolve_snowluma_runtime,
+    )
 except ImportError:  # pragma: no cover - direct module imports in older callers
     from qq_adapter_selector import (  # type: ignore
         QQAdapterSelectorError,
         read_qq_adapter,
         selector_value_from_request,
     )
+    from snowluma_locator import (  # type: ignore
+        SnowLumaLocatorError,
+        SnowLumaRuntime,
+        resolve_snowluma_runtime,
+    )
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 SNOWLUMA_RELEASE_URL = "https://github.com/SnowLuma/SnowLuma/releases/latest"
-SNOWLUMA_RUNTIME_RELATIVE = "SnowLuma"
+# Kept as a compatibility export for older integrations.  Runtime discovery
+# must go through snowluma_locator; there is intentionally no fixed directory
+# path here.
+SNOWLUMA_RUNTIME_RELATIVE: str | None = None
 SNOWLUMA_ADAPTER_RELATIVE = "NachoBot-SnowLuma-Adapter"
 SNOWLUMA_DEFAULT_WEBUI_PORT = 5099
 SNOWLUMA_DEFAULT_ONEBOT_PORT = 3001
@@ -69,7 +82,6 @@ REQUIRED_SNOWLUMA_RUNTIME_FILES: tuple[str, ...] = (
     "logger-BAozzyTt.js",
     "config-GJCFWjtq.js",
     "server-CLw7fwOG.js",
-    "node.exe",
     "launcher.bat",
     "client/index.html",
     "native/snowluma-win32-x64.dll",
@@ -93,6 +105,22 @@ class SnowLumaApiError(SnowLumaError):
 
 def _root(value: Path | str | None) -> Path:
     return Path(value or ROOT_DIR).resolve()
+
+
+def _resolve_runtime(
+    root: Path | str | None = None,
+    resolution: SnowLumaRuntime | None = None,
+) -> SnowLumaRuntime:
+    """Return the authoritative runtime selection for one manager operation."""
+
+    if resolution is not None:
+        return resolution
+    try:
+        return resolve_snowluma_runtime(_root(root))
+    except SnowLumaLocatorError as exc:
+        # Keep the public manager error type stable while preserving the
+        # locator's sanitized missing/ambiguity wording.
+        raise SnowLumaError(exc.message) from exc
 
 
 def _bounded_text(value: object, max_length: int = 240) -> str:
@@ -445,7 +473,7 @@ def _synchronize_onebot_document(path: Path, qq_account: str, port: int, token: 
     else:
         current = servers[candidate_index]
         # ``enable`` was used by an older integration and is ignored by
-        # SnowLuma.  Remove it from the managed node while preserving every
+        # SnowLuma.  Remove it from the managed server node while preserving every
         # unrelated field in the surrounding document.
         current.pop("enable", None)
         current.update(desired)
@@ -521,8 +549,20 @@ class SnowLumaManager:
     release_url = SNOWLUMA_RELEASE_URL
 
     @staticmethod
-    def runtime_path(root: Path | str | None = None) -> Path:
-        return _safe_relative(_root(root), SNOWLUMA_RUNTIME_RELATIVE)
+    def runtime_info(
+        root: Path | str | None = None,
+        *,
+        resolution: SnowLumaRuntime | None = None,
+    ) -> SnowLumaRuntime:
+        return _resolve_runtime(root, resolution)
+
+    @staticmethod
+    def runtime_path(
+        root: Path | str | None = None,
+        *,
+        resolution: SnowLumaRuntime | None = None,
+    ) -> Path:
+        return SnowLumaManager.runtime_info(root, resolution=resolution).path
 
     @staticmethod
     def adapter_path(root: Path | str | None = None) -> Path:
@@ -530,20 +570,28 @@ class SnowLumaManager:
 
     @classmethod
     def required_components(
-        cls, root: Path | str | None = None, selected: str = "snowluma"
+        cls,
+        root: Path | str | None = None,
+        selected: str = "snowluma",
+        *,
+        resolution: SnowLumaRuntime | None = None,
     ) -> list[str]:
         base = _root(root)
         selected = str(selected or "").strip().casefold()
         missing: list[str] = []
         if selected == "snowluma":
             adapter = cls.adapter_path(base)
-            runtime = cls.runtime_path(base)
+            try:
+                runtime_info = cls.runtime_info(base, resolution=resolution)
+            except SnowLumaError as exc:
+                return [str(exc)]
+            runtime = runtime_info.path
             for relative in REQUIRED_SNOWLUMA_ADAPTER_FILES:
                 if not (adapter / relative).is_file():
                     missing.append(f"NachoBot-SnowLuma-Adapter/{relative}")
             for relative in REQUIRED_SNOWLUMA_RUNTIME_FILES:
                 if not (runtime / relative).is_file():
-                    missing.append(f"SnowLuma/{relative}")
+                    missing.append(f"{runtime_info.name}/{relative}")
         elif selected == "napcat":
             adapter = _safe_relative(base, "NachoBot-Napcat-Adapter")
             shell = _safe_relative(base, "NapCat.Shell")
@@ -558,25 +606,62 @@ class SnowLumaManager:
 
     @classmethod
     def installation_status(
-        cls, root: Path | str | None = None, selected: str = "snowluma"
+        cls,
+        root: Path | str | None = None,
+        selected: str = "snowluma",
+        *,
+        resolution: SnowLumaRuntime | None = None,
     ) -> dict[str, Any]:
         selected = str(selected or "").strip().casefold()
-        missing = cls.required_components(root, selected)
-        return {
+        runtime_info: SnowLumaRuntime | None = None
+        runtime_error = ""
+        if selected == "snowluma":
+            try:
+                runtime_info = cls.runtime_info(root, resolution=resolution)
+            except SnowLumaError as exc:
+                runtime_error = str(exc)
+        missing = cls.required_components(root, selected, resolution=runtime_info)
+        status: dict[str, Any] = {
             "selected": selected,
             "installed": not missing,
             "missing": missing,
             "download_url": SNOWLUMA_RELEASE_URL if selected == "snowluma" else "",
         }
+        if selected == "snowluma":
+            status.update(
+                {
+                    "runtime_name": runtime_info.name if runtime_info else None,
+                    "runtime_path": str(runtime_info.path) if runtime_info else None,
+                    "runtime_version": runtime_info.version if runtime_info else None,
+                    "runtime_error": runtime_error,
+                }
+            )
+            if runtime_info is not None:
+                status["credential_consistency"] = cls.credential_consistency(
+                    root, resolution=runtime_info
+                )
+        return status
 
     check_installation = installation_status
     check_required_components = installation_status
 
     @classmethod
-    def configured_ports(cls, root: Path | str | None = None) -> dict[str, int]:
+    def configured_ports(
+        cls,
+        root: Path | str | None = None,
+        *,
+        resolution: SnowLumaRuntime | None = None,
+    ) -> dict[str, int]:
         base = _root(root)
-        runtime = cls.runtime_path(base)
-        webui_port = _load_runtime_webui_port(runtime) if (runtime / "config" / "runtime.json").exists() else SNOWLUMA_DEFAULT_WEBUI_PORT
+        try:
+            runtime = cls.runtime_path(base, resolution=resolution)
+        except SnowLumaError:
+            runtime = None
+        webui_port = (
+            _load_runtime_webui_port(runtime)
+            if runtime is not None and (runtime / "config" / "runtime.json").exists()
+            else SNOWLUMA_DEFAULT_WEBUI_PORT
+        )
         adapter_config = cls.adapter_path(base) / "config.toml"
         onebot_port = SNOWLUMA_DEFAULT_ONEBOT_PORT
         try:
@@ -588,11 +673,137 @@ class SnowLumaManager:
         return {"webui": webui_port, "onebot": onebot_port}
 
     @classmethod
+    def credential_consistency(
+        cls,
+        root: Path | str | None = None,
+        *,
+        resolution: SnowLumaRuntime | None = None,
+    ) -> dict[str, Any]:
+        """Return a redacted adapter/OneBot credential consistency status.
+
+        Only endpoint metadata and a boolean/status leave this method.  Token
+        contents, lengths, hashes, and raw configuration text are deliberately
+        excluded so the result is safe for setup/API responses and logs.
+        """
+
+        base = _root(root)
+        try:
+            runtime = cls.runtime_info(base, resolution=resolution)
+        except SnowLumaError as exc:
+            return {
+                "status": "missing",
+                "consistent": False,
+                "message": str(exc),
+                "endpoint": None,
+            }
+
+        adapter_path = cls.adapter_path(base) / "config.toml"
+        endpoint: dict[str, Any] | None = None
+        adapter_token = ""
+        try:
+            adapter_document = tomlkit.parse(adapter_path.read_text(encoding="utf-8"))
+            section = adapter_document.get("snowluma", {})
+            if not isinstance(section, Mapping):
+                raise ValueError
+            adapter_token = section.get("token") if isinstance(section.get("token"), str) else ""
+            endpoint_tuple = _loopback_ws_endpoint(
+                {
+                    "host": section.get("host"),
+                    "port": section.get("port"),
+                    "path": section.get("path"),
+                }
+            )
+            if endpoint_tuple is None:
+                raise ValueError
+            endpoint = {
+                "host": endpoint_tuple[0],
+                "port": endpoint_tuple[1],
+                "path": endpoint_tuple[2],
+            }
+        except Exception:
+            return {
+                "status": "missing",
+                "consistent": False,
+                "message": "SnowLuma 凭据缺失或配置无效，请重新部署 SnowLuma",
+                "endpoint": None,
+            }
+
+        if not adapter_token or endpoint is None:
+            return {
+                "status": "missing",
+                "consistent": False,
+                "message": "SnowLuma 凭据缺失，请重新部署 SnowLuma",
+                "endpoint": endpoint,
+            }
+
+        expected = (endpoint["host"], endpoint["port"], endpoint["path"])
+        matched = 0
+        missing = False
+        mismatch = False
+        config_dir = runtime.path / "config"
+        try:
+            config_files = sorted(config_dir.glob("onebot_*.json"), key=lambda path: path.name.casefold())
+        except OSError:
+            config_files = []
+        for config_path in config_files:
+            try:
+                document = json.loads(config_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(document, dict):
+                continue
+            networks = document.get("networks")
+            servers = networks.get("wsServers") if isinstance(networks, dict) else None
+            if not isinstance(servers, list):
+                continue
+            for server in servers:
+                if not isinstance(server, dict) or _loopback_ws_endpoint(server) != expected:
+                    continue
+                matched += 1
+                token = server.get("accessToken")
+                if not isinstance(token, str) or not token:
+                    missing = True
+                elif token != adapter_token:
+                    mismatch = True
+
+        if mismatch:
+            status = "mismatch"
+            message = "SnowLuma 适配器与 OneBot 凭据不一致，请重新部署 SnowLuma"
+        elif missing or matched == 0:
+            status = "missing"
+            message = "SnowLuma OneBot 凭据缺失，请重新部署 SnowLuma"
+        else:
+            status = "ok"
+            message = "SnowLuma 凭据一致"
+        return {
+            "status": status,
+            "consistent": status == "ok",
+            "message": message,
+            "endpoint": endpoint,
+            "matched_servers": matched,
+        }
+
+    credential_status = credential_consistency
+
+    @classmethod
+    def validate_credential_consistency(
+        cls,
+        root: Path | str | None = None,
+        *,
+        resolution: SnowLumaRuntime | None = None,
+    ) -> dict[str, Any]:
+        result = cls.credential_consistency(root, resolution=resolution)
+        if not result.get("consistent"):
+            raise SnowLumaError(str(result.get("message") or "SnowLuma 凭据缺失，请重新部署 SnowLuma"))
+        return result
+
+    @classmethod
     def validate_launch_boundary(
         cls,
         root: Path | str | None = None,
         *,
         require_free_ports: bool = True,
+        resolution: SnowLumaRuntime | None = None,
     ) -> dict[str, Any]:
         """Validate the local-only, pre-start SnowLuma launch boundary.
 
@@ -605,12 +816,14 @@ class SnowLumaManager:
         host.
         """
         base = _root(root)
-        runtime = cls.runtime_path(base)
+        runtime_info = cls.runtime_info(base, resolution=resolution)
+        runtime = runtime_info.path
         webui_host = _load_runtime_webui_host(runtime)
         if not _is_strict_loopback_host(webui_host):
             raise SnowLumaError("SnowLuma WebUI webuiHost 必须是本机回环地址")
 
-        ports = cls.configured_ports(base)
+        credential = cls.validate_credential_consistency(base, resolution=runtime_info)
+        ports = cls.configured_ports(base, resolution=runtime_info)
         occupied: list[str] = []
         if require_free_ports:
             for label, port in (("WebUI", ports["webui"]), ("OneBot", ports["onebot"])):
@@ -621,7 +834,41 @@ class SnowLumaManager:
                 "SnowLuma 启动前端口已被占用，请停止占用进程后重试："
                 + ", ".join(occupied)
             )
-        return {"webui_host": webui_host, **ports}
+        return {
+            "webui_host": webui_host,
+            "runtime_name": runtime_info.name,
+            "runtime_path": str(runtime_info.path),
+            "runtime_version": runtime_info.version,
+            "credential_consistency": credential,
+            **ports,
+        }
+
+    @classmethod
+    def transport_status(
+        cls,
+        root: Path | str | None = None,
+        *,
+        resolution: SnowLumaRuntime | None = None,
+    ) -> dict[str, Any]:
+        """Report socket transport separately from credential/auth state."""
+
+        ports = cls.configured_ports(root, resolution=resolution)
+        webui_listening = _port_listening(ports["webui"])
+        onebot_listening = _port_listening(ports["onebot"])
+        credential = cls.credential_consistency(root, resolution=resolution)
+        if not webui_listening:
+            transport = "webui_not_listening"
+        elif not onebot_listening:
+            transport = "onebot_not_listening"
+        else:
+            transport = "listening"
+        return {
+            "transport": transport,
+            "webui": "listening" if webui_listening else "not_listening",
+            "onebot": "listening" if onebot_listening else "not_listening",
+            "ports": ports,
+            "credential_consistency": credential,
+        }
 
     @classmethod
     def synchronize(
@@ -646,10 +893,17 @@ class SnowLumaManager:
         token = _validate_token(access_token)
         password = _validate_password(webui_password)
 
-        runtime = cls.runtime_path(base)
+        try:
+            runtime_info = cls.runtime_info(base)
+        except SnowLumaError as exc:
+            # Synchronization callers already handle the transaction-specific
+            # error type.  Preserve the locator's sanitized missing/
+            # ambiguity/version message without exposing a filesystem path.
+            raise SnowLumaSynchronizationError(str(exc)) from exc
+        runtime = runtime_info.path
         adapter = cls.adapter_path(base)
-        version = _load_runtime_version(runtime)
-        ports = cls.configured_ports(base)
+        version = runtime_info.version
+        ports = cls.configured_ports(base, resolution=runtime_info)
         if _port_listening(ports["webui"]):
             raise SnowLumaSynchronizationError("SnowLuma WebUI 正在运行，请停止后再同步磁盘凭据")
         if _port_listening(ports["onebot"]):
@@ -752,7 +1006,11 @@ class SnowLumaAPIClient:
         timeout: float = HTTP_TIMEOUT_SECONDS,
     ) -> None:
         self.root = _root(root)
-        runtime = SnowLumaManager.runtime_path(self.root)
+        try:
+            self.runtime = SnowLumaManager.runtime_info(self.root)
+        except SnowLumaError as exc:
+            raise SnowLumaApiError(str(exc)) from exc
+        runtime = self.runtime.path
         webui_host = _load_runtime_webui_host(runtime)
         if not _is_strict_loopback_host(webui_host):
             raise SnowLumaApiError("SnowLuma WebUI 仅允许配置为本机回环地址")
@@ -952,6 +1210,8 @@ __all__ = [
     "SNOWLUMA_DEFAULT_WEBUI_PORT",
     "SNOWLUMA_RELEASE_URL",
     "SNOWLUMA_RUNTIME_RELATIVE",
+    "SnowLumaLocatorError",
+    "SnowLumaRuntime",
     "SnowLumaAPIClient",
     "SnowLumaApiClient",
     "SnowLumaApiError",

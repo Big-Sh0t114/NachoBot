@@ -17,6 +17,9 @@ assert(html.includes('id="setup-snowluma-access-token"'));
 assert(html.includes('id="setup-snowluma-webui-password"'));
 assert(html.includes('id="path-check-snowluma"'));
 assert(html.includes('https://github.com/SnowLuma/SnowLuma/releases/latest'));
+assert(html.includes('class="btn btn-primary btn-sm setup-refresh-button" id="btn-recheck"'));
+assert(html.includes('↻ 刷新 / 验证'));
+assert(!html.includes('node.exe'));
 assert(setupSource.includes("/api/setup/snowluma/configure"));
 assert(setupSource.includes("pathCheckResults.snowluma !== true"));
 assert(setupSource.includes('clearSnowLumaSecrets();'));
@@ -57,6 +60,8 @@ assert.strictEqual(JSON.stringify(normalized), JSON.stringify({
 assert(contract.qqGroupIsBusy({ services: [{ status: 'starting' }] }));
 assert(!contract.qqGroupIsBusy({ services: [{ status: 'stopped' }] }));
 assert(launcherSource.includes('withSnowLumaPassword'));
+assert(launcherSource.includes('btn btn-primary btn-sm snowluma-refresh-button'));
+assert(launcherSource.includes('↻ 刷新实例'));
 assert(launcherSource.includes('注入'));
 assert(launcherSource.includes('解除注入'));
 

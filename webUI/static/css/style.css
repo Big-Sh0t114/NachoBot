@@ -963,6 +963,11 @@ body {
     min-width: 140px;
 }
 
+.snowluma-refresh-button {
+    min-height: 34px;
+    font-weight: 650;
+}
+
 .snowluma-process-list {
     display: flex;
     flex-direction: column;

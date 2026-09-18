@@ -387,9 +387,17 @@ class EnvironmentChecker:
 
         # SnowLuma runtime WebUI (config/runtime.json) and OneBot WS endpoint
         # (the selected adapter's config.toml).  These are distinct listeners:
-        # the bridge itself does not claim port 3001.
-        runtime_path = ROOT_DIR / "SnowLuma" / "config" / "runtime.json"
-        if runtime_path.exists():
+        # the bridge itself does not claim port 3001.  Resolve the runtime once
+        # so versioned release directories are handled identically to launch.
+        try:
+            from .snowluma_locator import resolve_snowluma_runtime
+        except ImportError:  # pragma: no cover - script context
+            from snowluma_locator import resolve_snowluma_runtime
+        try:
+            runtime_path = resolve_snowluma_runtime(ROOT_DIR).path / "config" / "runtime.json"
+        except Exception:
+            runtime_path = None
+        if runtime_path is not None and runtime_path.exists():
             try:
                 runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
                 if isinstance(runtime, dict):
@@ -637,15 +645,15 @@ class PathVerifier:
         },
         "snowluma": {
             "name": "SnowLuma",
-            "hint": "项目根目录 SnowLuma 与 NachoBot-SnowLuma-Adapter",
+            "hint": "项目根目录下自动发现唯一 SnowLuma 1.14.x Runtime 与适配器",
             "download_url": "https://github.com/SnowLuma/SnowLuma/releases/latest",
-            "default_rel": "SnowLuma",
+            "default_rel": None,
         },
         "snowluma_runtime": {
             "name": "SnowLuma Runtime",
-            "hint": "项目根目录 SnowLuma（node.exe/index.mjs）",
+            "hint": "项目根目录下自动发现唯一 SnowLuma 1.14.x Runtime",
             "download_url": "https://github.com/SnowLuma/SnowLuma/releases/latest",
-            "default_rel": "SnowLuma",
+            "default_rel": None,
         },
         "sovits": {
             "name": "GPT-SoVITS",
@@ -707,10 +715,12 @@ class PathVerifier:
             selected = "snowluma" if check_type == "snowluma" else "snowluma"
             status = SnowLumaManager.installation_status(ROOT_DIR, selected)
             if check_type == "snowluma_runtime":
+                runtime_name = str(status.get("runtime_name") or "")
+                runtime_prefix = f"{runtime_name}/" if runtime_name else ""
                 missing = [
                     item
                     for item in status["missing"]
-                    if item.startswith("SnowLuma/")
+                    if not runtime_prefix or item.startswith(runtime_prefix)
                 ]
                 status = {
                     **status,
@@ -720,7 +730,10 @@ class PathVerifier:
             if status["installed"]:
                 return {
                     "valid": True,
-                    "message": "✅ SnowLuma 运行时与组件已找到",
+                    "message": (
+                        f"✅ SnowLuma 运行时与组件已找到"
+                        + (f"（{status.get('runtime_name')}）" if status.get("runtime_name") else "")
+                    ),
                     "download_url": "",
                     "status": status,
                 }

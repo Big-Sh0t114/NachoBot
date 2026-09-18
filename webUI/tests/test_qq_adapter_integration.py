@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import sys
 from types import SimpleNamespace
 from pathlib import Path
@@ -14,7 +16,56 @@ if str(WEBUI_DIR) not in sys.path:
 import config_manager
 import process_manager
 import setup_deployment
+import snowluma_manager
 from qq_adapter_selector import QQAdapterSelectorError, parse_qq_adapter_env
+
+
+TOKEN = "snowluma-token-123456"
+
+
+def _seed_snowluma_runtime(root: Path, *, runtime_name: str = "SnowLuma") -> Path:
+    """Create a resolver-valid, credential-matched fixture without a bundled Node executable."""
+    runtime = root / runtime_name
+    (runtime / "config").mkdir(parents=True, exist_ok=True)
+    (root / "NachoBot").mkdir(parents=True, exist_ok=True)
+    (root / "NachoBot-SnowLuma-Adapter").mkdir(parents=True, exist_ok=True)
+    (runtime / "package.json").write_text(
+        json.dumps({"name": "snowluma", "version": "1.14.17"}), encoding="utf-8"
+    )
+    (runtime / "launcher.bat").write_text("@echo off\nnode index.mjs\n", encoding="utf-8")
+    (runtime / "index.mjs").write_text("console.log('runtime');\n", encoding="utf-8")
+    (runtime / "config" / "runtime.json").write_text(
+        json.dumps({"webuiHost": "127.0.0.1", "webuiPort": 5099}), encoding="utf-8"
+    )
+    (runtime / "config" / "onebot_123456.json").write_text(
+        json.dumps(
+            {
+                "networks": {
+                    "wsServers": [
+                        {
+                            "enabled": True,
+                            "host": "127.0.0.1",
+                            "port": 3001,
+                            "path": "/",
+                            "accessToken": TOKEN,
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (root / "NachoBot-SnowLuma-Adapter" / "main.py").write_text("", encoding="utf-8")
+    (root / "NachoBot-SnowLuma-Adapter" / "pyproject.toml").write_text(
+        "[project]\nname='adapter'\n", encoding="utf-8"
+    )
+    (root / "NachoBot-SnowLuma-Adapter" / "config.toml").write_text(
+        "[snowluma]\nhost='127.0.0.1'\nport=3001\npath='/'\nscheme='ws'\n"
+        f"token='{TOKEN}'\n\n[nachobot_server]\nport=8123\n\n[voice]\nenabled=false\n",
+        encoding="utf-8",
+    )
+    (root / "NachoBot" / ".env").write_text("qq_adapter=snowluma\n", encoding="utf-8")
+    return runtime
 
 
 def test_selector_parser_supports_legacy_default_and_rejects_ambiguous_values() -> None:
@@ -113,7 +164,6 @@ def test_qq_launchers_gate_full_snowluma_manifest_and_order_runtime_before_adapt
         "logger-BAozzyTt.js",
         "config-GJCFWjtq.js",
         "server-CLw7fwOG.js",
-        "node.exe",
         "launcher.bat",
         "client\\index.html",
         "native\\snowluma-win32-x64.dll",
@@ -123,9 +173,20 @@ def test_qq_launchers_gate_full_snowluma_manifest_and_order_runtime_before_adapt
         "NachoBot-SnowLuma-Adapter/pyproject.toml",
     ):
         assert required in source
+    assert "node.exe" not in source
+    assert "snowluma_locator.py" in source
+    assert "--field path" in source
     assert "runtime.json" in source
     assert "ConvertFrom-Json" in source
-    assert "https://github.com/SnowLuma/SnowLuma/releases/latest" in source
+    release_url = "https://github.com/SnowLuma/SnowLuma/releases/latest"
+    assert release_url in source
+    for failure_message in (
+        "SnowLuma Runtime discovery failed; deploy exactly one valid SnowLuma 1.14.x directory.",
+        "SnowLuma Runtime discovery failed; adapter startup aborted.",
+    ):
+        failure_start = source.index(failure_message)
+        failure_end = source.index("endlocal & exit /b 1", failure_start)
+        assert release_url in source[failure_start:failure_end]
     verify_call = source.index("call :VERIFY_SNOWLUMA_COMPONENTS")
     adapter_sync = source.index('uv sync --python ">=3.11,<=3.13"', verify_call)
     runtime_call = source.index("call :START_SNOWLUMA_RUNTIME", adapter_sync)
@@ -133,7 +194,7 @@ def test_qq_launchers_gate_full_snowluma_manifest_and_order_runtime_before_adapt
     runtime_start = source.index('start "SnowLuma Runtime"', runtime_helper)
     adapter_start = source.index('start "NachoBot-SnowLuma"', runtime_call)
     assert verify_call < adapter_sync < runtime_call < adapter_start
-    assert 'cmd /k ""!SNOWLUMA_NODE!" index.mjs"' in source
+    assert 'cmd /d /s /c "call launcher.bat <nul"' in source
     assert "SNOWLUMA_HOST" in source
     assert "webuiHost" in source
     assert "if ($h -ne '127.0.0.1')" in source
@@ -535,7 +596,8 @@ def test_retained_qq_runtime_blocks_switch_and_conflicting_start(
     monkeypatch: pytest.MonkeyPatch,
     retained_state: process_manager.ServiceState,
 ) -> None:
-    (tmp_path / "NachoBot").mkdir()
+    _seed_snowluma_runtime(tmp_path)
+    (tmp_path / "NachoBot").mkdir(exist_ok=True)
     (tmp_path / "NachoBot" / ".env").write_text(
         "qq_adapter=snowluma\n", encoding="utf-8"
     )
@@ -555,7 +617,8 @@ def test_retained_qq_runtime_blocks_switch_and_conflicting_start(
 def test_terminal_qq_error_without_retained_runtime_does_not_block(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    (tmp_path / "NachoBot").mkdir()
+    _seed_snowluma_runtime(tmp_path)
+    (tmp_path / "NachoBot").mkdir(exist_ok=True)
     (tmp_path / "NachoBot" / ".env").write_text(
         "qq_adapter=snowluma\n", encoding="utf-8"
     )
@@ -820,10 +883,11 @@ def test_process_registry_retains_both_services_but_selects_snowluma_group(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    (tmp_path / "NachoBot").mkdir()
+    _seed_snowluma_runtime(tmp_path)
+    (tmp_path / "NachoBot").mkdir(exist_ok=True)
     (tmp_path / "NachoBot" / ".env").write_text("qq_adapter=snowluma\n", encoding="utf-8")
     snow_dir = tmp_path / "NachoBot-SnowLuma-Adapter"
-    snow_dir.mkdir()
+    snow_dir.mkdir(exist_ok=True)
     (snow_dir / "config.toml").write_text(
         "[snowluma]\nhost = '127.0.0.1'\nport = 3001\npath = '/ws'\n\n"
         "[nachobot_server]\nport = 8123\n",
@@ -839,18 +903,125 @@ def test_process_registry_retains_both_services_but_selects_snowluma_group(
         "snowluma_adapter",
     ]
     runtime_def = process_manager.SERVICE_DEFS["snowluma_runtime"]
-    assert runtime_def.cmd[0] == str((tmp_path / "SnowLuma" / "node.exe").resolve())
-    assert runtime_def.cmd[1:] == ["index.mjs"]
+    assert runtime_def.cmd == ["cmd", "/d", "/s", "/c", "launcher.bat"]
     assert runtime_def.cwd == "SnowLuma"
     snow_def = process_manager.SERVICE_DEFS["snowluma_adapter"]
     assert snow_def.port is None
     assert snow_def.wait_port is False
 
 
-def test_process_manager_rejects_unsafe_snowluma_launch_boundary(
+def test_process_manager_uses_resolved_launcher_cwd_and_system_node_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = _seed_snowluma_runtime(tmp_path, runtime_name="SnowLuma-v1.14.17-win-x64")
+    monkeypatch.setattr(process_manager, "ROOT_DIR", tmp_path)
+    manager = process_manager.ProcessManager(tmp_path)
+    process_manager._register_services()
+    sdef = process_manager.SERVICE_DEFS["snowluma_runtime"]
+    command, cwd, env_extra = manager._resolve_cmd(sdef)
+    assert command == ["cmd", "/d", "/s", "/c", "launcher.bat"]
+    assert Path(cwd) == runtime.resolve()
+    assert "node.exe" not in " ".join(command).lower()
+    assert "PATH" not in env_extra
+
+
+def test_process_manager_missing_runtime_error_includes_official_download_url(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / "NachoBot").mkdir()
+    (tmp_path / "NachoBot" / ".env").write_text(
+        "qq_adapter=snowluma\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(process_manager, "ROOT_DIR", tmp_path)
+    manager = process_manager.ProcessManager(tmp_path)
+    process_manager._register_services(tmp_path)
+
+    with pytest.raises(RuntimeError) as raised:
+        manager._ensure_required_components(("snowluma_runtime",))
+
+    assert snowluma_manager.SNOWLUMA_RELEASE_URL in str(raised.value)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Object lifecycle contract")
+def test_process_manager_start_stop_keeps_launcher_tree_managed_and_closes_stdin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = _seed_snowluma_runtime(tmp_path)
+    monkeypatch.setattr(process_manager, "ROOT_DIR", tmp_path)
+    manager = process_manager.ProcessManager(tmp_path)
+    process_manager._register_services()
+    monkeypatch.setattr(manager, "_ensure_required_components", lambda _services: None)
+    monkeypatch.setattr(manager, "_port_is_open", lambda _port: False)
+
+    import snowluma_manager
+
+    monkeypatch.setattr(snowluma_manager, "_port_listening", lambda _port: False)
+
+    class FakeStdout:
+        async def readline(self) -> bytes:
+            await asyncio.sleep(3600)
+            return b""
+
+    class FakeProcess:
+        pid = 4242
+        returncode = None
+        stdout = FakeStdout()
+
+        def terminate(self) -> None:
+            return None
+
+        def kill(self) -> None:
+            return None
+
+        async def wait(self) -> int:
+            self.returncode = 0
+            return 0
+
+    class FakeJobFacade:
+        def create_assign_resume(self, _pid: int):
+            return SimpleNamespace(closed=False)
+
+        def terminate(self, _job) -> None:
+            return None
+
+        def active_processes(self, _job) -> int:
+            return 0
+
+        def close(self, job) -> None:
+            job.closed = True
+
+    captured: dict[str, object] = {}
+
+    async def fake_create(*command: str, **kwargs: object) -> FakeProcess:
+        captured.update(command=command, kwargs=kwargs)
+        return FakeProcess()
+
+    async def ready(_service_id: str, _port: int, timeout: int | None = 180) -> bool:
+        return True
+
+    monkeypatch.setattr(process_manager.asyncio, "create_subprocess_exec", fake_create)
+    monkeypatch.setattr(manager, "_get_windows_job_facade", lambda: FakeJobFacade())
+    monkeypatch.setattr(manager, "_wait_for_port", ready)
+
+    async def scenario() -> None:
+        await manager.start_service("snowluma_runtime")
+        assert manager.states["snowluma_runtime"].status == process_manager.ServiceStatus.RUNNING
+        assert captured["command"] == ("cmd", "/d", "/s", "/c", "launcher.bat")
+        kwargs = captured["kwargs"]
+        assert isinstance(kwargs, dict)
+        assert kwargs["stdin"] is asyncio.subprocess.DEVNULL
+        assert Path(str(kwargs["cwd"])) == runtime.resolve()
+        await manager.stop_service("snowluma_runtime")
+        assert manager.states["snowluma_runtime"].status == process_manager.ServiceStatus.STOPPED
+
+    asyncio.run(scenario())
+
+
+def test_process_manager_rejects_unsafe_snowluma_launch_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_snowluma_runtime(tmp_path)
+    (tmp_path / "NachoBot").mkdir(exist_ok=True)
     (tmp_path / "NachoBot" / ".env").write_text("qq_adapter=snowluma\n", encoding="utf-8")
     monkeypatch.setattr(process_manager, "ROOT_DIR", tmp_path)
     manager = process_manager.ProcessManager(tmp_path)
@@ -869,7 +1040,8 @@ def test_process_manager_rejects_unsafe_snowluma_launch_boundary(
 def test_snowluma_group_recovery_reuses_managed_running_runtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    (tmp_path / "NachoBot").mkdir()
+    _seed_snowluma_runtime(tmp_path)
+    (tmp_path / "NachoBot").mkdir(exist_ok=True)
     (tmp_path / "NachoBot" / ".env").write_text("qq_adapter=snowluma\n", encoding="utf-8")
     monkeypatch.setattr(process_manager, "ROOT_DIR", tmp_path)
     manager = process_manager.ProcessManager(tmp_path)
@@ -899,7 +1071,8 @@ def test_snowluma_group_recovery_reuses_managed_running_runtime(
 def test_snowluma_group_start_rejects_external_port_conflict_without_running_runtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    (tmp_path / "NachoBot").mkdir()
+    _seed_snowluma_runtime(tmp_path)
+    (tmp_path / "NachoBot").mkdir(exist_ok=True)
     (tmp_path / "NachoBot" / ".env").write_text("qq_adapter=snowluma\n", encoding="utf-8")
     monkeypatch.setattr(process_manager, "ROOT_DIR", tmp_path)
     manager = process_manager.ProcessManager(tmp_path)

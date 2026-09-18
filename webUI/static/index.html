@@ -429,7 +429,7 @@
                     <div class="setup-card">
                         <div class="setup-card-header">
                             <h3>🔍 环境检测</h3>
-                            <button class="btn btn-outline" id="btn-recheck">重新检测</button>
+                            <button class="btn btn-primary btn-sm setup-refresh-button" id="btn-recheck" type="button">↻ 刷新 / 验证</button>
                         </div>
                         <div class="setup-check-list" id="setup-check-list">
                             <div class="setup-check-placeholder">点击下方按钮开始检测...</div>
@@ -844,7 +844,7 @@
                     <div class="setup-card">
                         <div class="setup-card-header">
                             <h3>📦 依赖完整性检查</h3>
-                            <button class="btn btn-outline" id="btn-verify-all">全部验证</button>
+                            <button class="btn btn-primary btn-sm setup-refresh-button" id="btn-verify-all" type="button">↻ 全部刷新 / 验证</button>
                         </div>
                         <div class="path-check-list" id="path-check-list">
                             <!-- NapCat Shell (qq + NapCat backend only) -->
@@ -870,19 +870,19 @@
                                 </div>
                             </div>
 
-                            <!-- SnowLuma (qq + SnowLuma backend only; fixed repository path) -->
+                            <!-- SnowLuma (qq + SnowLuma backend only; authoritative repository discovery) -->
                             <div class="path-check-card" id="path-check-snowluma" data-type="snowluma" style="display:none">
                                 <div class="path-check-header">
                                     <span class="path-check-icon">❄️</span>
                                     <div class="path-check-info">
                                         <span class="path-check-name">SnowLuma Runtime + Adapter</span>
-                                        <span class="path-check-hint">仅检查项目根目录 SnowLuma 与 NachoBot-SnowLuma-Adapter，不能填写外部路径</span>
+                                        <span class="path-check-hint">自动发现项目根目录下唯一的 SnowLuma 1.14.x Runtime 与适配器，不能填写外部路径</span>
                                     </div>
                                     <span class="path-check-status" id="status-snowluma"></span>
                                 </div>
                                 <div class="path-check-body">
-                                    <div class="path-check-auto">项目根目录固定检查（package.json、node.exe、原生模块与适配器文件）</div>
-                                    <button class="btn btn-outline btn-sm btn-verify" data-type="snowluma" type="button">刷新 / 验证</button>
+                                    <div class="path-check-auto">项目根目录自动检查（package.json、launcher.bat、原生模块与适配器文件）</div>
+                                    <button class="btn btn-primary btn-sm btn-verify setup-refresh-button" data-type="snowluma" type="button">↻ 刷新 / 验证</button>
                                     <div class="path-check-result" id="result-snowluma"></div>
                                     <a class="btn-download" id="dl-snowluma"
                                         href="https://github.com/SnowLuma/SnowLuma/releases/latest" target="_blank"

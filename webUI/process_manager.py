@@ -450,7 +450,7 @@ def assert_qq_adapter_switch_allowed(manager: "ProcessManager | None" = None) ->
             raise ValueError("QQ 适配器正在运行或切换中，请先停止当前 QQ 服务")
 
 
-def _register_services():
+def _register_services(root_dir: Path | str | None = None):
     """Build the service and group lookup tables by dynamically reading adapter configs."""
     global SERVICE_DEFS, GROUP_DEFS, _QQ_ADAPTER_SELECTOR_ERROR
     try:
@@ -460,6 +460,23 @@ def _register_services():
     import tomlkit
     import re
 
+    base_root = Path(root_dir or ROOT_DIR).resolve()
+    try:
+        from .snowluma_locator import SnowLumaLocatorError, resolve_snowluma_runtime
+    except ImportError:  # pragma: no cover - direct module/script context
+        from snowluma_locator import SnowLumaLocatorError, resolve_snowluma_runtime
+
+    runtime_info = None
+    try:
+        runtime_info = resolve_snowluma_runtime(base_root)
+    except SnowLumaLocatorError:
+        # Keep the registry inspectable when setup is incomplete.  Start-time
+        # component validation remains fail-closed with the sanitized locator
+        # error, so this fallback never launches an arbitrary directory.
+        runtime_info = None
+    runtime_path = runtime_info.path if runtime_info is not None else None
+    runtime_name = runtime_info.name if runtime_info is not None else ""
+
     # 1. Parse NachoBot .env and resolve the selected QQ backend.  A malformed
     # selector is kept fail-closed for start operations; the registry still
     # remains inspectable so the WebUI can report both retained service IDs.
@@ -467,7 +484,7 @@ def _register_services():
     qq_adapter = DEFAULT_QQ_ADAPTER
     nachobot_host = "127.0.0.1"
     nachobot_port = 8000
-    env_path = ROOT_DIR / "NachoBot" / ".env"
+    env_path = base_root / "NachoBot" / ".env"
     if env_path.exists():
         try:
             qq_adapter = read_qq_adapter(env_path)
@@ -494,7 +511,7 @@ def _register_services():
     # 2. Parse Napcat Adapter config.toml
     napcat_host = "127.0.0.1"
     napcat_port = 8095
-    napcat_config_path = ROOT_DIR / "NachoBot-Napcat-Adapter" / "config.toml"
+    napcat_config_path = base_root / "NachoBot-Napcat-Adapter" / "config.toml"
     if napcat_config_path.exists():
         try:
             doc = tomlkit.parse(napcat_config_path.read_text(encoding="utf-8"))
@@ -510,7 +527,7 @@ def _register_services():
     snowluma_host = "127.0.0.1"
     snowluma_port = 3001
     snowluma_path = "/"
-    snowluma_config_path = ROOT_DIR / "NachoBot-SnowLuma-Adapter" / "config.toml"
+    snowluma_config_path = base_root / "NachoBot-SnowLuma-Adapter" / "config.toml"
     if snowluma_config_path.exists():
         try:
             snow_doc = tomlkit.parse(snowluma_config_path.read_text(encoding="utf-8"))
@@ -521,11 +538,11 @@ def _register_services():
         except Exception:
             pass
 
-    # SnowLuma's node runtime owns the WebUI listener.  Keep this separate
+    # SnowLuma's managed runtime owns the WebUI listener.  Keep this separate
     # from the adapter's OneBot WS port: the bridge does not listen on 3001.
     snowluma_webui_port = 5099
-    snowluma_runtime_config = ROOT_DIR / "SnowLuma" / "config" / "runtime.json"
-    if snowluma_runtime_config.exists():
+    snowluma_runtime_config = runtime_path / "config" / "runtime.json" if runtime_path else None
+    if snowluma_runtime_config is not None and snowluma_runtime_config.exists():
         try:
             runtime_doc = json.loads(snowluma_runtime_config.read_text(encoding="utf-8"))
             if isinstance(runtime_doc, dict):
@@ -549,7 +566,7 @@ def _register_services():
     tts_adapter_host = "127.0.0.1"
     tts_adapter_port = 8070
     tts_engine_port = 9880
-    tts_base_path = ROOT_DIR / "NachoBot-Multimodal-Adapter" / "configs" / "base.toml"
+    tts_base_path = base_root / "NachoBot-Multimodal-Adapter" / "configs" / "base.toml"
     if tts_base_path.exists():
         try:
             doc = tomlkit.parse(tts_base_path.read_text(encoding="utf-8"))
@@ -563,14 +580,14 @@ def _register_services():
             if isinstance(enabled, list) and "Vox" in enabled:
                 engine = "Vox"
 
-            tts_engine_port = _read_tts_engine_port(ROOT_DIR, engine)
+            tts_engine_port = _read_tts_engine_port(base_root, engine)
         except Exception:
             pass
 
     # 4. Parse Perception configs/perception.toml
     perception_host = "127.0.0.1"
     perception_port = 9874
-    perception_config_path = ROOT_DIR / "NachoBot-Multimodal-Adapter" / "configs" / "perception.toml"
+    perception_config_path = base_root / "NachoBot-Multimodal-Adapter" / "configs" / "perception.toml"
     if perception_config_path.exists():
         try:
             doc = tomlkit.parse(perception_config_path.read_text(encoding="utf-8"))
@@ -583,7 +600,7 @@ def _register_services():
     # 5. Parse standalone Live2D adapter config
     live2d_host = "127.0.0.1"
     live2d_port = 8766
-    live2d_config_path = ROOT_DIR / "NachoBot-Live2D-Adapter" / "config.toml"
+    live2d_config_path = base_root / "NachoBot-Live2D-Adapter" / "config.toml"
     if live2d_config_path.exists():
         try:
             doc = tomlkit.parse(live2d_config_path.read_text(encoding="utf-8"))
@@ -595,7 +612,7 @@ def _register_services():
 
     # 6. Parse Koishi configs/koishi.yml
     koishi_port = 5140
-    koishi_yml_path = ROOT_DIR / "koishi-app" / "koishi.yml"
+    koishi_yml_path = base_root / "koishi-app" / "koishi.yml"
     if koishi_yml_path.exists():
         try:
             content = koishi_yml_path.read_text(encoding="utf-8")
@@ -638,12 +655,14 @@ def _register_services():
             "snowluma_runtime",
             "SnowLuma Runtime",
             "qq_adapter",
-            "SnowLuma",
-            [str((ROOT_DIR / "SnowLuma" / "node.exe").resolve()), "index.mjs"],
+            runtime_name,
+            ["cmd", "/d", "/s", "/c", "launcher.bat"],
             port=snowluma_webui_port,
             wait_port=True,
             order=1,
-            detail=f"SnowLuma WebUI · :{snowluma_webui_port}",
+            detail=(
+                f"SnowLuma Runtime {runtime_name or '(自动发现)'} WebUI · :{snowluma_webui_port}"
+            ),
         ),
         ServiceDef("snowluma_adapter", "SnowLuma 适配器", "qq_adapter",
                    "NachoBot-SnowLuma-Adapter", ["uv", "run", "python", "main.py"],
@@ -873,11 +892,11 @@ class ProcessManager:
         }
 
     def get_all_statuses(self) -> list[dict[str, Any]]:
-        _register_services()
+        _register_services(self.root)
         return [self.get_service_status(sid) for sid in SERVICE_DEFS]
 
     def get_group_statuses(self) -> list[dict[str, Any]]:
-        _register_services()
+        _register_services(self.root)
         result = []
         for gid, gdef in GROUP_DEFS.items():
             services = [self.get_service_status(sid) for sid in gdef.services]
@@ -892,7 +911,7 @@ class ProcessManager:
 
     def get_launch_status(self) -> dict[str, Any]:
         """Return the user-facing Core + mutually-exclusive runtime profile state."""
-        _register_services()
+        _register_services(self.root)
         core = self.get_service_status("nachobot")
         profiles: list[dict[str, Any]] = []
         active_profile: str | None = None
@@ -1011,7 +1030,7 @@ class ProcessManager:
 
     def request_start_service(self, service_id: str) -> None:
         """Validate and schedule a service start whose failures remain observable."""
-        _register_services()
+        _register_services(self.root)
         sdef = SERVICE_DEFS.get(service_id)
         if sdef is None:
             raise ValueError(f"Unknown service: {service_id}")
@@ -1040,7 +1059,7 @@ class ProcessManager:
 
     def request_stop_service(self, service_id: str) -> None:
         """Cancel an in-flight start and schedule an orderly service stop."""
-        _register_services()
+        _register_services(self.root)
         sdef = SERVICE_DEFS.get(service_id)
         if sdef is None:
             raise ValueError(f"Unknown service: {service_id}")
@@ -1073,7 +1092,7 @@ class ProcessManager:
 
     def request_start_group(self, group_id: str) -> None:
         """Validate and schedule a group start as one managed operation."""
-        _register_services()
+        _register_services(self.root)
         gdef = GROUP_DEFS.get(group_id)
         if gdef is None:
             raise ValueError(f"Unknown group: {group_id}")
@@ -1090,7 +1109,7 @@ class ProcessManager:
 
     def request_stop_group(self, group_id: str) -> None:
         """Cancel an in-flight group start and schedule reverse-order shutdown."""
-        _register_services()
+        _register_services(self.root)
         gdef = GROUP_DEFS.get(group_id)
         if gdef is None:
             raise ValueError(f"Unknown group: {group_id}")
@@ -1136,7 +1155,7 @@ class ProcessManager:
 
     def request_start_launch(self, profile_id: str, runtime: str | None = None) -> None:
         """Start Core and exactly one functionality profile with an explicit runtime."""
-        _register_services()
+        _register_services(self.root)
         profile_id = str(profile_id or "").strip().lower()
         group_id = LAUNCH_PROFILE_GROUPS.get(profile_id)
         if group_id is None:
@@ -1170,7 +1189,7 @@ class ProcessManager:
 
     def request_stop_launch(self) -> None:
         """Cancel an in-flight launch and stop every runtime profile plus Core."""
-        _register_services()
+        _register_services(self.root)
         existing = self._operation_tasks.get("launch")
         if existing and not existing.done() and self._operation_kinds.get("launch") == "stop":
             return
@@ -1187,7 +1206,7 @@ class ProcessManager:
 
     async def start_launch(self, profile_id: str, runtime: str | None = None) -> None:
         """Run Core + selected profile transactionally, rolling back this launch on failure."""
-        _register_services()
+        _register_services(self.root)
         group_id = LAUNCH_PROFILE_GROUPS.get(profile_id)
         if group_id is None:
             raise ValueError(f"Unknown launch profile: {profile_id}")
@@ -1238,7 +1257,7 @@ class ProcessManager:
 
     async def stop_launch(self) -> None:
         """Stop all mutually-exclusive runtime profiles, then stop Core."""
-        _register_services()
+        _register_services(self.root)
         for group_id in LAUNCH_PROFILE_GROUPS.values():
             await self.stop_group(group_id)
         await self.stop_group("core")
@@ -1291,24 +1310,32 @@ class ProcessManager:
                 f"does not match the active Multimodal relay port :{relay_port}."
             )
 
-    def _ensure_required_components(self, service_ids: tuple[str, ...]) -> None:
+    def _ensure_required_components(self, service_ids: tuple[str, ...]):
         """Reject selected QQ starts before any process/task is scheduled."""
         selected = set(service_ids)
         if not selected.intersection(QQ_SERVICE_IDS):
-            return
+            return None
 
         if selected.intersection({"snowluma_runtime", "snowluma_adapter"}):
             try:
                 from .snowluma_manager import SnowLumaManager, SNOWLUMA_RELEASE_URL
             except ImportError:  # pragma: no cover - direct script context
                 from snowluma_manager import SnowLumaManager, SNOWLUMA_RELEASE_URL
-            missing = SnowLumaManager.required_components(self.root, "snowluma")
+            try:
+                resolution = SnowLumaManager.runtime_info(self.root)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"SnowLuma 运行时无法定位：{exc}；下载地址: {SNOWLUMA_RELEASE_URL}"
+                ) from exc
+            missing = SnowLumaManager.required_components(
+                self.root, "snowluma", resolution=resolution
+            )
             if missing:
                 raise RuntimeError(
                     "SnowLuma 组件缺失，请重新部署 SnowLuma；"
                     f"缺少: {', '.join(missing)}；下载地址: {SNOWLUMA_RELEASE_URL}"
                 )
-            return
+            return resolution
 
         if selected.intersection({"napcat_adapter", "napcat_shell"}):
             try:
@@ -1321,9 +1348,10 @@ class ProcessManager:
                     "NapCat 组件缺失，请重新部署 NapCat；"
                     f"缺少: {', '.join(missing)}"
                 )
+        return None
 
     def _ensure_snowluma_launch_boundary(self, *, require_free_ports: bool = True) -> None:
-        """Reject unsafe SnowLuma host/port state before spawning Node.
+        """Reject unsafe SnowLuma host/port state before spawning the launcher.
 
         The bundled runtime owns both the WebUI and OneBot listeners. Keep
         authoritative parsing and the loopback policy in snowluma_manager so
@@ -1462,7 +1490,7 @@ class ProcessManager:
                     )
 
     async def start_service(self, service_id: str, *, _prepared: bool = False) -> None:
-        _register_services()
+        _register_services(self.root)
         sdef = SERVICE_DEFS.get(service_id)
         if not sdef:
             raise ValueError(f"Unknown service: {service_id}")
@@ -1542,7 +1570,7 @@ class ProcessManager:
             await self._broadcast(service_id, f"[WebUI] ERROR: Cannot resolve command for {sdef.name}\n")
             return
 
-        full_cwd = self.root / cwd if cwd else self.root
+        full_cwd = Path(cwd) if cwd and Path(cwd).is_absolute() else self.root / cwd if cwd else self.root
 
         # Build environment — remove WebUI's own venv to avoid
         # 'VIRTUAL_ENV does not match' warnings in child uv processes
@@ -1569,7 +1597,16 @@ class ProcessManager:
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
-                stdin=asyncio.subprocess.PIPE,
+                # SnowLuma's launcher ends with ``pause`` for interactive
+                # manual use.  A manager-owned runtime receives EOF instead
+                # of an open pipe, so an early launcher failure cannot be
+                # hidden behind that prompt.  Other services retain their
+                # interactive stdin contract.
+                stdin=(
+                    asyncio.subprocess.DEVNULL
+                    if service_id == "snowluma_runtime"
+                    else asyncio.subprocess.PIPE
+                ),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=str(full_cwd),
@@ -1701,7 +1738,7 @@ class ProcessManager:
             return False
 
     async def stop_service(self, service_id: str, *, _prepared: bool = False) -> None:
-        _register_services()
+        _register_services(self.root)
         if service_id not in SERVICE_DEFS:
             raise ValueError(f"Unknown service: {service_id}")
         lock = self._service_locks.setdefault(service_id, asyncio.Lock())
@@ -1743,7 +1780,7 @@ class ProcessManager:
         await self._broadcast(service_id, f"[WebUI] {sdef.name} stopped.\n")
 
     async def start_group(self, group_id: str) -> None:
-        _register_services()
+        _register_services(self.root)
         gdef = GROUP_DEFS.get(group_id)
         if not gdef:
             raise ValueError(f"Unknown group: {group_id}")
@@ -1794,7 +1831,7 @@ class ProcessManager:
             raise
 
     async def stop_group(self, group_id: str) -> None:
-        _register_services()
+        _register_services(self.root)
         gdef = GROUP_DEFS.get(group_id)
         if not gdef:
             raise ValueError(f"Unknown group: {group_id}")
@@ -2363,11 +2400,22 @@ class ProcessManager:
             env_extra = {"PYTHONPATH": f"{nachobot_dir};{bili_dir}"}
             return cmd, sdef.cwd, env_extra
         if sdef.id == "snowluma_runtime":
-            # Never rely on a global Node installation.  The deployed
-            # SnowLuma distribution owns its compatible runtime and the
-            # manager's root may be overridden by isolated tests/worktrees.
-            bundled_node = (self.root / "SnowLuma" / "node.exe").resolve()
-            return [str(bundled_node), "index.mjs"], sdef.cwd, {}
+            try:
+                from .snowluma_locator import resolve_snowluma_runtime
+            except ImportError:  # pragma: no cover - direct module context
+                from snowluma_locator import resolve_snowluma_runtime
+            runtime = resolve_snowluma_runtime(self.root)
+            launcher = runtime.path / "launcher.bat"
+            if not launcher.is_file():
+                raise FileNotFoundError(f"SnowLuma launcher.bat 不存在于已发现的 Runtime 目录")
+            # The launcher owns the runtime's compatible Node selection.  Use
+            # cmd's /d /s /c form without ``start`` so the process manager can
+            # observe early launcher failure and keep it inside its Job Object.
+            # Do not prepend the runtime directory to PATH: a release may not
+            # contain a bundled Node executable, and startup is intentionally delegated to the
+            # launcher's system ``node`` command.  The launcher remains the
+            # only runtime command we execute.
+            return ["cmd", "/d", "/s", "/c", "launcher.bat"], str(runtime.path), {}
         return sdef.cmd, sdef.cwd, {}
 
     def _resolve_tts_engine_cmd(self) -> tuple[list[str], str, dict[str, str]]:

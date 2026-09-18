@@ -509,7 +509,7 @@ const LauncherModule = (() => {
                             </div>
                             <div class="snowluma-process-actions">
                                 <button type="button" class="btn btn-outline btn-sm" data-snowluma-action="${action}" data-snowluma-pid="${process.pid}">${actionLabel}</button>
-                                ${process.injected ? `<button type="button" class="btn btn-outline btn-sm" data-snowluma-action="refresh" data-snowluma-pid="${process.pid}">刷新</button>` : ''}
+                                ${process.injected ? `<button type="button" class="btn btn-primary btn-sm snowluma-refresh-button" data-snowluma-action="refresh" data-snowluma-pid="${process.pid}">↻ 刷新</button>` : ''}
                             </div>
                         </div>
                     `;
@@ -581,7 +581,7 @@ const LauncherModule = (() => {
                         <div class="snowluma-instance-toolbar">
                             <label for="launcher-snowluma-password">WebUI 密码</label>
                             <input type="password" class="form-input" id="launcher-snowluma-password" autocomplete="new-password" placeholder="仅用于本次请求">
-                            <button type="button" class="btn btn-outline btn-sm" data-snowluma-refresh ${(!installed || snowlumaProcessBusy) ? 'disabled' : ''}>刷新实例</button>
+                            <button type="button" class="btn btn-primary btn-sm snowluma-refresh-button" data-snowluma-refresh ${(!installed || snowlumaProcessBusy) ? 'disabled' : ''}>↻ 刷新实例</button>
                         </div>
                         ${snowlumaProcessError ? `<div class="snowluma-process-error">${escapeHtml(snowlumaProcessError)}</div>` : ''}
                         ${snowlumaProcessMarkup()}
