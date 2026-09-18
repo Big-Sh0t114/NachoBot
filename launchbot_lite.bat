@@ -408,18 +408,18 @@ if errorlevel 1 (
   endlocal & exit /b 1
 )
 
-if /i "%QQ_ADAPTER%"=="snowluma" (
-  call :START_SNOWLUMA_RUNTIME
-  if errorlevel 1 (
-    echo [FATAL] SnowLuma Runtime did not become ready; adapter startup aborted.
-    endlocal & exit /b 1
-  )
-)
-
 if exist "%NACHOBOT_DIR%\%NACHOBOT_MAIN%" (
   echo --- Start NachoBot...
   start "NachoBot" /D "%NACHOBOT_DIR%" cmd /k "set HOST=127.0.0.1 && set PORT=%NACHOBOT_PORT% && %PYTHON_CMD% %NACHOBOT_MAIN%"
   timeout /t 5 /nobreak >nul
+)
+
+if /i "%QQ_ADAPTER%"=="snowluma" (
+  call :WAIT_FOR_NACHOBOT_CORE
+  if errorlevel 1 (
+    echo [FATAL] NachoBot Core did not become ready; SnowLuma Runtime startup aborted.
+    endlocal & exit /b 1
+  )
 )
 
 if exist "%ADAPTER_DIR%\%ADAPTER_MAIN%" (
@@ -430,6 +430,14 @@ if exist "%ADAPTER_DIR%\%ADAPTER_MAIN%" (
     start "NachoBot-Napcat" /D "%ADAPTER_DIR%" cmd /k "set HOST=0.0.0.0 && set PORT=%ADAPTER_PORT% && %PYTHON_CMD% %ADAPTER_MAIN%"
   )
   timeout /t 5 /nobreak >nul
+)
+
+if /i "%QQ_ADAPTER%"=="snowluma" (
+  call :START_SNOWLUMA_RUNTIME
+  if errorlevel 1 (
+    echo [FATAL] SnowLuma Runtime did not become ready after adapter startup.
+    endlocal & exit /b 1
+  )
 )
 
 if /i "%QQ_ADAPTER%"=="napcat" if exist "%NAPCAT_SHELL_DIR%\%NAPCAT_SHELL_BAT%" (
@@ -444,7 +452,7 @@ endlocal & exit /b 0
 :VERIFY_SNOWLUMA_COMPONENTS
 setlocal EnableExtensions EnableDelayedExpansion
 set "SNOWLUMA_DIR="
-for /f "usebackq delims=" %%D in (`uv run --project "%ROOT%NachoBot" python "%ROOT%webUI\snowluma_locator.py" --root "%ROOT%" --field path 2^>nul`) do if not defined SNOWLUMA_DIR set "SNOWLUMA_DIR=%%D"
+for /f "usebackq delims=" %%D in (`uv run --project "%ROOT%NachoBot" python "%ROOT%webUI\snowluma_locator.py" --root "%ROOT:~0,-1%" --field path 2^>nul`) do if not defined SNOWLUMA_DIR set "SNOWLUMA_DIR=%%D"
 if not defined SNOWLUMA_DIR (
   echo [FATAL] SnowLuma Runtime discovery failed; deploy exactly one valid SnowLuma 1.14.x directory.
   echo [INFO] SnowLuma download: https://github.com/SnowLuma/SnowLuma/releases/latest
@@ -464,7 +472,7 @@ if defined SNOWLUMA_MISSING (
   echo [INFO] Redeploy from https://github.com/SnowLuma/SnowLuma/releases/latest
   endlocal & exit /b 1
 )
-uv run --project "%ROOT%NachoBot" python "%ROOT%webUI\snowluma_locator.py" --root "%ROOT%" --runtime-path "!SNOWLUMA_DIR!" --check-credentials >nul 2>&1
+uv run --project "%ROOT%NachoBot" python "%ROOT%webUI\snowluma_locator.py" --root "%ROOT:~0,-1%" --runtime-path "!SNOWLUMA_DIR!" --check-credentials >nul 2>&1
 if errorlevel 1 (
   echo [FATAL] SnowLuma credentials are missing or inconsistent; redeploy SnowLuma before starting the Runtime or adapter.
   endlocal & exit /b 1
@@ -474,7 +482,7 @@ endlocal & set "SNOWLUMA_DIR=%SNOWLUMA_DIR%" & set "SNOWLUMA_NAME=%SNOWLUMA_NAME
 :START_SNOWLUMA_RUNTIME
 setlocal EnableExtensions EnableDelayedExpansion
 if not defined SNOWLUMA_DIR (
-  for /f "usebackq delims=" %%D in (`uv run --project "%ROOT%NachoBot" python "%ROOT%webUI\snowluma_locator.py" --root "%ROOT%" --field path 2^>nul`) do if not defined SNOWLUMA_DIR set "SNOWLUMA_DIR=%%D"
+  for /f "usebackq delims=" %%D in (`uv run --project "%ROOT%NachoBot" python "%ROOT%webUI\snowluma_locator.py" --root "%ROOT:~0,-1%" --field path 2^>nul`) do if not defined SNOWLUMA_DIR set "SNOWLUMA_DIR=%%D"
 )
 if not defined SNOWLUMA_DIR (
   echo [FATAL] SnowLuma Runtime discovery failed; adapter startup aborted.
@@ -503,8 +511,8 @@ call :CHECK_SNOWLUMA_PORT_FREE "!SNOWLUMA_ONEBOT_PORT!" "OneBot"
 if errorlevel 1 (
   endlocal & exit /b 1
 )
-echo --- Start SnowLuma Runtime via launcher.bat on port !SNOWLUMA_PORT!...
-start "SnowLuma Runtime" /D "!SNOWLUMA_DIR!" /b cmd /d /s /c "call launcher.bat <nul"
+echo --- Start SnowLuma Runtime in a visible console via launcher.bat on port !SNOWLUMA_PORT!...
+start "SnowLuma Runtime" /D "!SNOWLUMA_DIR!" cmd /d /k "call launcher.bat"
 set "SNOWLUMA_READY="
 for /l %%I in (1,1,60) do (
   if not defined SNOWLUMA_READY (
@@ -519,6 +527,26 @@ for /l %%I in (1,1,60) do (
 )
 if not defined SNOWLUMA_READY (
   echo [FATAL] SnowLuma Runtime :!SNOWLUMA_PORT! did not become ready within 60 seconds.
+  endlocal & exit /b 1
+)
+endlocal & exit /b 0
+
+:WAIT_FOR_NACHOBOT_CORE
+setlocal EnableExtensions EnableDelayedExpansion
+set "NACHOBOT_READY="
+for /l %%I in (1,1,60) do (
+  if not defined NACHOBOT_READY (
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "$client=New-Object System.Net.Sockets.TcpClient; try { $client.Connect('127.0.0.1',%NACHOBOT_PORT%); exit 0 } catch { exit 1 } finally { $client.Dispose() }" >nul 2>&1
+    if not errorlevel 1 (
+      set "NACHOBOT_READY=1"
+      echo [OK] NachoBot Core :%NACHOBOT_PORT% is ready.
+    ) else (
+      timeout /t 1 /nobreak >nul
+    )
+  )
+)
+if not defined NACHOBOT_READY (
+  echo [FATAL] NachoBot Core :%NACHOBOT_PORT% did not become ready within 60 seconds.
   endlocal & exit /b 1
 )
 endlocal & exit /b 0

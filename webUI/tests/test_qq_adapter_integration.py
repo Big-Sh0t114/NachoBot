@@ -176,6 +176,8 @@ def test_qq_launchers_gate_full_snowluma_manifest_and_order_runtime_before_adapt
     assert "node.exe" not in source
     assert "snowluma_locator.py" in source
     assert "--field path" in source
+    assert '--root "%ROOT:~0,-1%"' in source
+    assert '--root "%ROOT%"' not in source
     assert "runtime.json" in source
     assert "ConvertFrom-Json" in source
     release_url = "https://github.com/SnowLuma/SnowLuma/releases/latest"
@@ -192,9 +194,13 @@ def test_qq_launchers_gate_full_snowluma_manifest_and_order_runtime_before_adapt
     runtime_call = source.index("call :START_SNOWLUMA_RUNTIME", adapter_sync)
     runtime_helper = source.index("\n:START_SNOWLUMA_RUNTIME")
     runtime_start = source.index('start "SnowLuma Runtime"', runtime_helper)
-    adapter_start = source.index('start "NachoBot-SnowLuma"', runtime_call)
-    assert verify_call < adapter_sync < runtime_call < adapter_start
-    assert 'cmd /d /s /c "call launcher.bat <nul"' in source
+    core_start = source.index('start "NachoBot"', adapter_sync)
+    core_ready = source.index("call :WAIT_FOR_NACHOBOT_CORE", core_start)
+    adapter_start = source.index('start "NachoBot-SnowLuma"', core_ready)
+    runtime_call = source.index("call :START_SNOWLUMA_RUNTIME", adapter_start)
+    assert verify_call < adapter_sync < core_start < core_ready < adapter_start < runtime_call
+    assert 'start "SnowLuma Runtime" /D "!SNOWLUMA_DIR!" cmd /d /k "call launcher.bat"' in source
+    assert 'start "SnowLuma Runtime" /D "!SNOWLUMA_DIR!" /b' not in source
     assert "SNOWLUMA_HOST" in source
     assert "webuiHost" in source
     assert "if ($h -ne '127.0.0.1')" in source
