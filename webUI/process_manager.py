@@ -668,7 +668,7 @@ def _register_services(root_dir: Path | str | None = None):
                    "NachoBot-SnowLuma-Adapter", ["uv", "run", "python", "main.py"],
                     order=2, detail=(
                        f"SnowLuma Runtime WebSocket · ws://{snowluma_host}:{snowluma_port}"
-                       f"{snowluma_path} · 中继 :{snowluma_relay_port}"
+                       f"{snowluma_path} · port {snowluma_relay_port}"
                    )),
 
         # ── Multimodal FULL ──
@@ -1293,21 +1293,32 @@ class ProcessManager:
                 f"Cannot read relay endpoint from {config_path}: {exc}"
             ) from exc
 
+    def _require_core_owner(self, consumer_service_id: str) -> None:
+        """Require the NachoBot Core bus before starting a platform adapter."""
+
+        consumer_name = SERVICE_DEFS[consumer_service_id].name
+        core_state = self.states.get("nachobot")
+        if core_state is None or core_state.status != ServiceStatus.RUNNING:
+            raise RuntimeError(
+                f"Cannot start {consumer_name}: NachoBot Core is not ready. "
+                "Start NachoBot Core first."
+            )
+
     def _require_relay_owner(self, consumer_service_id: str) -> None:
         consumer_name = SERVICE_DEFS[consumer_service_id].name
         configured_relay_port = SERVICE_DEFS["potato_relay"].port
         relay_port = self._active_relay_port()
         if relay_port is None:
             raise RuntimeError(
-                f"Cannot start {consumer_name}: relay :{configured_relay_port} is not ready. "
+                f"Cannot start {consumer_name}: port {configured_relay_port} is not ready. "
                 "Start one of FULL, LITE, or POTATO first."
             )
 
         consumer_port = self._configured_consumer_relay_port(consumer_service_id)
         if consumer_port != relay_port:
             raise RuntimeError(
-                f"Cannot start {consumer_name}: configured upstream port :{consumer_port} "
-                f"does not match the active Multimodal relay port :{relay_port}."
+                f"Cannot start {consumer_name}: configured upstream port {consumer_port} "
+                f"does not match the active Multimodal port {relay_port}."
             )
 
     def _ensure_required_components(self, service_ids: tuple[str, ...]):
@@ -1396,6 +1407,7 @@ class ProcessManager:
 
         # QQ/Koishi text adapters target the configured Multimodal relay endpoint.
         if service_id in ("napcat_adapter", "snowluma_adapter", "koishi_adapter"):
+            self._require_core_owner(service_id)
             self._require_relay_owner(service_id)
 
         # Keep both QQ adapter definitions available for stale stop handles,

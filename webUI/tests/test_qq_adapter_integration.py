@@ -605,6 +605,9 @@ def test_retained_qq_runtime_blocks_switch_and_conflicting_start(
     manager = process_manager.ProcessManager(tmp_path)
     process_manager._register_services()
     manager.states["napcat_adapter"] = retained_state
+    manager.states["nachobot"] = process_manager.ServiceState(
+        status=process_manager.ServiceStatus.RUNNING
+    )
 
     with pytest.raises(ValueError, match="QQ 适配器"):
         process_manager.assert_qq_adapter_switch_allowed(manager)
@@ -628,9 +631,93 @@ def test_terminal_qq_error_without_retained_runtime_does_not_block(
     manager.states["napcat_adapter"] = process_manager.ServiceState(
         status=process_manager.ServiceStatus.ERROR
     )
+    manager.states["nachobot"] = process_manager.ServiceState(
+        status=process_manager.ServiceStatus.RUNNING
+    )
 
     process_manager.assert_qq_adapter_switch_allowed(manager)
     monkeypatch.setattr(manager, "_require_relay_owner", lambda _service_id: None)
+    manager._validate_service_start("snowluma_adapter")
+
+
+@pytest.mark.parametrize(
+    "core_status",
+    (process_manager.ServiceStatus.STOPPED,
+     process_manager.ServiceStatus.STARTING,
+     process_manager.ServiceStatus.ERROR),
+)
+def test_snowluma_adapter_reports_core_readiness_before_relay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    core_status: process_manager.ServiceStatus,
+) -> None:
+    _seed_snowluma_runtime(tmp_path)
+    (tmp_path / "NachoBot").mkdir(exist_ok=True)
+    (tmp_path / "NachoBot" / ".env").write_text(
+        "qq_adapter=snowluma\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(process_manager, "ROOT_DIR", tmp_path)
+    manager = process_manager.ProcessManager(tmp_path)
+    process_manager._register_services()
+    manager.states["nachobot"] = process_manager.ServiceState(status=core_status)
+    monkeypatch.setattr(
+        manager,
+        "_require_relay_owner",
+        lambda _service_id: pytest.fail("relay validation must wait for Core readiness"),
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        manager._validate_service_start("snowluma_adapter")
+
+    message = str(raised.value)
+    assert message == (
+        "Cannot start SnowLuma 适配器: NachoBot Core is not ready. "
+        "Start NachoBot Core first."
+    )
+    assert "relay" not in message
+    assert "8070" not in message
+    assert "FULL" not in message
+    assert "LITE" not in message
+    assert "POTATO" not in message
+
+
+def test_snowluma_adapter_keeps_relay_error_after_core_is_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_snowluma_runtime(tmp_path)
+    (tmp_path / "NachoBot").mkdir(exist_ok=True)
+    (tmp_path / "NachoBot" / ".env").write_text(
+        "qq_adapter=snowluma\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(process_manager, "ROOT_DIR", tmp_path)
+    manager = process_manager.ProcessManager(tmp_path)
+    process_manager._register_services()
+    manager.states["nachobot"] = process_manager.ServiceState(
+        status=process_manager.ServiceStatus.RUNNING
+    )
+
+    with pytest.raises(RuntimeError, match=r"port 8070 is not ready"):
+        manager._validate_service_start("snowluma_adapter")
+
+
+def test_snowluma_adapter_validation_can_continue_after_core_and_relay_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_snowluma_runtime(tmp_path)
+    (tmp_path / "NachoBot").mkdir(exist_ok=True)
+    (tmp_path / "NachoBot" / ".env").write_text(
+        "qq_adapter=snowluma\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(process_manager, "ROOT_DIR", tmp_path)
+    manager = process_manager.ProcessManager(tmp_path)
+    process_manager._register_services()
+    manager.states["nachobot"] = process_manager.ServiceState(
+        status=process_manager.ServiceStatus.RUNNING
+    )
+    monkeypatch.setattr(manager, "_require_relay_owner", lambda _service_id: None)
+
     manager._validate_service_start("snowluma_adapter")
 
 
@@ -1420,6 +1507,9 @@ def test_snowluma_group_recovery_reuses_managed_running_runtime(
     )
     manager.states["snowluma_adapter"] = process_manager.ServiceState(
         status=process_manager.ServiceStatus.STOPPED
+    )
+    manager.states["nachobot"] = process_manager.ServiceState(
+        status=process_manager.ServiceStatus.RUNNING
     )
 
     manager._validate_group_start("qq_adapter")
