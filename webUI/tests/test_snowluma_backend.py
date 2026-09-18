@@ -9,10 +9,18 @@ from unittest import mock
 import pytest
 
 try:
+    from webUI.snowluma_credentials import (
+        SnowLumaPasswordStore,
+        SnowLumaSecretStoreUnavailable,
+    )
     from webUI import setup_deployment
     from webUI import snowluma_manager as snowluma
     from webUI import snowluma_locator as locator
 except ModuleNotFoundError:  # pytest's webUI project root on Windows
+    from snowluma_credentials import (  # type: ignore
+        SnowLumaPasswordStore,
+        SnowLumaSecretStoreUnavailable,
+    )
     import setup_deployment  # type: ignore
     import snowluma_manager as snowluma  # type: ignore
     import snowluma_locator as locator  # type: ignore
@@ -99,6 +107,29 @@ enabled = false
 
 def _patch_safe_sync(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(snowluma, "_port_listening", lambda _port: False)
+
+
+def test_password_store_fake_protector_round_trip_and_failed_replace_preserves_old(
+    tmp_path: Path,
+) -> None:
+    store = SnowLumaPasswordStore(
+        tmp_path,
+        protect=lambda value: b"cipher:" + value[::-1],
+        unprotect=lambda value: value.removeprefix(b"cipher:")[::-1],
+    )
+    store.save(PASSWORD)
+    original = store.path.read_bytes()
+    assert store.load() == PASSWORD
+    assert PASSWORD.encode() not in original
+
+    failing = SnowLumaPasswordStore(
+        tmp_path,
+        protect=lambda _value: (_ for _ in ()).throw(RuntimeError("injected protector failure")),
+        unprotect=lambda value: value,
+    )
+    with pytest.raises(SnowLumaSecretStoreUnavailable):
+        failing.save("ReplacementPassword!1")
+    assert store.path.read_bytes() == original
 
 
 def test_locator_accepts_versioned_release_without_node_executable(tmp_path: Path) -> None:
@@ -194,6 +225,11 @@ def test_synchronize_writes_real_three_file_schema_and_preserves_generated_at(
 
     assert result.status == "ok"
     assert TOKEN not in result.as_dict().__repr__()
+    assert all("snowluma_webui_password.dpapi" not in item for item in result.files)
+    assert all("snowluma_webui_password.dpapi" not in item for item in result.backups)
+    secret_path = tmp_path / ".runtime/secrets/snowluma_webui_password.dpapi"
+    assert secret_path.is_file()
+    assert PASSWORD.encode() not in secret_path.read_bytes()
     adapter = (tmp_path / "NachoBot-SnowLuma-Adapter/config.toml").read_text(encoding="utf-8")
     assert 'host = "127.0.0.1"' in adapter
     assert 'path = "/"' in adapter
@@ -479,6 +515,55 @@ def test_api_client_login_rejects_success_false(tmp_path: Path) -> None:
     with mock.patch.object(client, "_request", return_value={"success": False}):
         with pytest.raises(snowluma.SnowLumaApiError):
             client.login("request-only-password")
+
+
+def test_api_client_typed_login_states_and_bounded_agreements(tmp_path: Path) -> None:
+    _prepare_runtime(tmp_path)
+    client = snowluma.SnowLumaAPIClient(tmp_path)
+    with mock.patch.object(client, "_request", return_value={"success": False, "needsTotp": True}):
+        with pytest.raises(snowluma.SnowLumaApiError) as raised:
+            client.login(PASSWORD)
+    assert raised.value.code == snowluma.SNOWLUMA_TOTP_REQUIRED
+
+    document = {
+        "id": "eula",
+        "title": "EULA",
+        "declaredVersion": "1.0",
+        "effectiveDate": "2026-01-01",
+        "text": "<not-html>\nfull agreement text",
+    }
+    with mock.patch.object(
+        client,
+        "_request",
+        side_effect=[
+            {"version": "v1", "consentRequired": True, "documents": [document]},
+            {"success": True, "version": "v1"},
+        ],
+    ) as request:
+        agreements = client.get_agreements()
+        consent = client.record_consent("v1")
+    assert agreements["documents"][0]["text"] == document["text"]
+    assert consent == {"status": "ok", "version": "v1"}
+    assert request.call_args_list[1].args == ("POST", "/api/agreements/record-consent", {"version": "v1"})
+
+
+def test_api_client_rejects_oversized_agreement_payload(tmp_path: Path) -> None:
+    _prepare_runtime(tmp_path)
+    client = snowluma.SnowLumaAPIClient(tmp_path)
+    document = {
+        "id": "oversized",
+        "title": "Oversized",
+        "declaredVersion": "1",
+        "effectiveDate": "2026-01-01",
+        "text": "x" * (snowluma.MAX_AGREEMENT_TOTAL_TEXT_BYTES + 1),
+    }
+    with mock.patch.object(
+        client,
+        "_request",
+        return_value={"version": "v1", "consentRequired": True, "documents": [document]},
+    ):
+        with pytest.raises(snowluma.SnowLumaApiError):
+            client.get_agreements()
 
 
 def test_select_qq_adapter_preserves_comments_and_rebuilds_registry(

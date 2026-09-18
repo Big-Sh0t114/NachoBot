@@ -845,6 +845,364 @@ def test_snowluma_login_failure_also_closes_partial_session(
     assert fake.closed == 1
 
 
+def test_snowluma_process_request_uses_saved_password_when_body_is_blank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blank process request must authenticate with the encrypted-store value."""
+    import server
+
+    class FakeStore:
+        def __init__(self) -> None:
+            self.loads = 0
+            self.saves: list[str] = []
+
+        def load(self) -> str:
+            self.loads += 1
+            return "saved-password-synthetic"
+
+        def save(self, value: str) -> None:
+            self.saves.append(value)
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.login_values: list[str] = []
+            self.closed = 0
+
+        def login(self, password: str) -> dict[str, bool]:
+            self.login_values.append(password)
+            return {"ok": True}
+
+        def list_processes(self) -> list[dict[str, int]]:
+            return [{"pid": 123}]
+
+        def close(self) -> None:
+            self.closed += 1
+
+    store = FakeStore()
+    client = FakeClient()
+    monkeypatch.setattr(server, "SnowLumaPasswordStore", lambda _root: store)
+    monkeypatch.setattr(server, "SnowLumaAPIClient", lambda _root: client)
+
+    async def direct_to_thread(function: object, *args: object) -> object:
+        return function(*args)  # type: ignore[operator]
+
+    monkeypatch.setattr(server.asyncio, "to_thread", direct_to_thread)
+    result = asyncio.run(
+        server.setup_snowluma_processes(server.SnowLumaProcessRequest(password=""))
+    )
+
+    assert result == {"list": [{"pid": 123}]}
+    assert store.loads == 1
+    assert store.saves == []
+    assert client.login_values == ["saved-password-synthetic"]
+    assert client.closed == 1
+
+
+def test_snowluma_manual_password_replaces_expired_saved_value_after_login(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import server
+
+    class FakeStore:
+        def __init__(self) -> None:
+            self.saved_value = "expired-password-synthetic"
+            self.loads = 0
+            self.saves: list[str] = []
+
+        def load(self) -> str:
+            self.loads += 1
+            return self.saved_value
+
+        def save(self, value: str) -> None:
+            self.saves.append(value)
+            self.saved_value = value
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.login_values: list[str] = []
+            self.closed = 0
+
+        def login(self, password: str) -> dict[str, bool]:
+            self.login_values.append(password)
+            return {"ok": True}
+
+        def list_processes(self) -> list[dict[str, int]]:
+            return [{"pid": 456}]
+
+        def close(self) -> None:
+            self.closed += 1
+
+    store = FakeStore()
+    client = FakeClient()
+    monkeypatch.setattr(server, "SnowLumaPasswordStore", lambda _root: store)
+    monkeypatch.setattr(server, "SnowLumaAPIClient", lambda _root: client)
+
+    async def direct_to_thread(function: object, *args: object) -> object:
+        return function(*args)  # type: ignore[operator]
+
+    monkeypatch.setattr(server.asyncio, "to_thread", direct_to_thread)
+    result = asyncio.run(
+        server.setup_snowluma_processes(
+            server.SnowLumaProcessRequest(password="manual-password-synthetic")
+        )
+    )
+
+    assert result == {"list": [{"pid": 456}]}
+    assert store.loads == 1
+    assert store.saves == ["manual-password-synthetic"]
+    assert store.saved_value == "manual-password-synthetic"
+    assert client.login_values == ["manual-password-synthetic"]
+    assert client.closed == 1
+
+
+def test_snowluma_manual_login_failure_preserves_saved_value_and_skips_save(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import server
+    from fastapi import HTTPException
+    from snowluma_manager import SnowLumaApiError
+
+    class FakeStore:
+        def __init__(self) -> None:
+            self.saved_value = "old-password-synthetic"
+            self.loads = 0
+            self.saves: list[str] = []
+
+        def load(self) -> str:
+            self.loads += 1
+            return self.saved_value
+
+        def save(self, value: str) -> None:
+            self.saves.append(value)
+            self.saved_value = value
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.login_values: list[str] = []
+            self.closed = 0
+
+        def login(self, password: str) -> dict[str, bool]:
+            self.login_values.append(password)
+            raise SnowLumaApiError(
+                "synthetic login rejected",
+                code=server.SNOWLUMA_PASSWORD_REQUIRED,
+                http_status=428,
+            )
+
+        def close(self) -> None:
+            self.closed += 1
+
+    store = FakeStore()
+    client = FakeClient()
+    monkeypatch.setattr(server, "SnowLumaPasswordStore", lambda _root: store)
+    monkeypatch.setattr(server, "SnowLumaAPIClient", lambda _root: client)
+
+    async def direct_to_thread(function: object, *args: object) -> object:
+        return function(*args)  # type: ignore[operator]
+
+    monkeypatch.setattr(server.asyncio, "to_thread", direct_to_thread)
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(
+            server.setup_snowluma_processes(
+                server.SnowLumaProcessRequest(password="wrong-password-synthetic")
+            )
+        )
+
+    assert raised.value.status_code == 428
+    assert raised.value.detail["code"] == server.SNOWLUMA_PASSWORD_REQUIRED
+    assert store.loads == 1
+    assert store.saves == []
+    assert store.saved_value == "old-password-synthetic"
+    assert client.login_values == ["wrong-password-synthetic"]
+    assert client.closed == 1
+
+
+def _synthetic_agreement_payload(version: str, *, required: bool = True) -> dict[str, object]:
+    return {
+        "version": version,
+        "consentRequired": required,
+        "documents": [
+            {
+                "id": "terms",
+                "title": "Synthetic Terms",
+                "declaredVersion": version,
+                "effectiveDate": "2026-01-01",
+                "text": "Synthetic agreement text.",
+            }
+        ],
+    }
+
+
+def test_snowluma_first_agreement_gate_is_structured_428_and_closes_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import server
+    from fastapi import HTTPException
+
+    class FakeStore:
+        def load(self) -> str:
+            return "saved-password-synthetic"
+
+        def save(self, value: str) -> None:
+            pytest.fail("saved credentials must not be replaced for an automatic request")
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.login_values: list[str] = []
+            self.closed = 0
+            self.list_called = False
+
+        def login(self, password: str) -> dict[str, bool]:
+            self.login_values.append(password)
+            return {"ok": True}
+
+        def get_agreements(self) -> dict[str, object]:
+            return _synthetic_agreement_payload("v1", required=True)
+
+        def list_processes(self) -> list[dict[str, int]]:
+            self.list_called = True
+            return [{"pid": 789}]
+
+        def close(self) -> None:
+            self.closed += 1
+
+    store = FakeStore()
+    client = FakeClient()
+    monkeypatch.setattr(server, "SnowLumaPasswordStore", lambda _root: store)
+    monkeypatch.setattr(server, "SnowLumaAPIClient", lambda _root: client)
+
+    async def direct_to_thread(function: object, *args: object) -> object:
+        return function(*args)  # type: ignore[operator]
+
+    monkeypatch.setattr(server.asyncio, "to_thread", direct_to_thread)
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(
+            server.setup_snowluma_processes(
+                server.SnowLumaProcessRequest(password="")
+            )
+        )
+
+    assert raised.value.status_code == 428
+    assert raised.value.status_code not in {401, 502}
+    assert raised.value.detail["code"] == server.SNOWLUMA_AGREEMENT_REQUIRED
+    assert raised.value.detail["version"] == "v1"
+    assert raised.value.detail["documents"][0]["text"] == "Synthetic agreement text."
+    assert client.login_values == ["saved-password-synthetic"]
+    assert client.list_called is False
+    assert client.closed == 1
+
+
+def test_snowluma_agreement_accept_only_version_rechecks_and_records_consent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import server
+
+    class FakeStore:
+        def load(self) -> str:
+            return "saved-password-synthetic"
+
+        def save(self, value: str) -> None:
+            pytest.fail("agreement acceptance must use the saved credential")
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.events: list[object] = []
+            self.closed = 0
+
+        def login(self, password: str) -> dict[str, bool]:
+            self.events.append(("login", password))
+            return {"ok": True}
+
+        def get_agreements(self) -> dict[str, object]:
+            self.events.append("get_agreements")
+            return _synthetic_agreement_payload("v1", required=True)
+
+        def record_consent(self, version: str) -> dict[str, str]:
+            self.events.append(("record_consent", version))
+            return {"status": "ok", "version": version}
+
+        def close(self) -> None:
+            self.events.append("close")
+            self.closed += 1
+
+    store = FakeStore()
+    client = FakeClient()
+    monkeypatch.setattr(server, "SnowLumaPasswordStore", lambda _root: store)
+    monkeypatch.setattr(server, "SnowLumaAPIClient", lambda _root: client)
+
+    async def direct_to_thread(function: object, *args: object) -> object:
+        return function(*args)  # type: ignore[operator]
+
+    monkeypatch.setattr(server.asyncio, "to_thread", direct_to_thread)
+    result = asyncio.run(
+        server.setup_snowluma_accept_agreement(
+            server.SnowLumaAgreementAcceptRequest(version="v1")
+        )
+    )
+
+    assert result == {"status": "ok", "version": "v1"}
+    assert client.events == [
+        ("login", "saved-password-synthetic"),
+        "get_agreements",
+        ("record_consent", "v1"),
+        "close",
+    ]
+    assert client.closed == 1
+    with pytest.raises(Exception):
+        server.SnowLumaAgreementAcceptRequest(version="v1", password="manual-password-synthetic")
+
+
+def test_snowluma_agreement_accept_version_mismatch_is_428_and_closes_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import server
+    from fastapi import HTTPException
+
+    class FakeStore:
+        def load(self) -> str:
+            return "saved-password-synthetic"
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.recorded = False
+            self.closed = 0
+
+        def login(self, password: str) -> dict[str, bool]:
+            return {"ok": True}
+
+        def get_agreements(self) -> dict[str, object]:
+            return _synthetic_agreement_payload("v2", required=True)
+
+        def record_consent(self, version: str) -> dict[str, str]:
+            self.recorded = True
+            return {"status": "ok", "version": version}
+
+        def close(self) -> None:
+            self.closed += 1
+
+    store = FakeStore()
+    client = FakeClient()
+    monkeypatch.setattr(server, "SnowLumaPasswordStore", lambda _root: store)
+    monkeypatch.setattr(server, "SnowLumaAPIClient", lambda _root: client)
+
+    async def direct_to_thread(function: object, *args: object) -> object:
+        return function(*args)  # type: ignore[operator]
+
+    monkeypatch.setattr(server.asyncio, "to_thread", direct_to_thread)
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(
+            server.setup_snowluma_accept_agreement(
+                server.SnowLumaAgreementAcceptRequest(version="v1")
+            )
+        )
+
+    assert raised.value.status_code == 428
+    assert raised.value.detail["code"] == server.SNOWLUMA_AGREEMENT_VERSION_MISMATCH
+    assert raised.value.detail["currentVersion"] == "v2"
+    assert client.recorded is False
+    assert client.closed == 1
+
+
 def test_busy_switch_prevalidation_also_skips_qr_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

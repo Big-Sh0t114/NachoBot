@@ -48,12 +48,29 @@ from security import WebUISecurity, validate_webui_config_raw
 from webui_config import CONFIG_PATH, webui_config
 from multimodal_runtime import MultimodalRuntimeManager
 try:
+    from snowluma_credentials import (
+        SnowLumaPasswordStore,
+        SnowLumaSecretStoreUnavailable,
+    )
+except ImportError:  # pragma: no cover - package import context
+    from .snowluma_credentials import (
+        SnowLumaPasswordStore,
+        SnowLumaSecretStoreUnavailable,
+    )
+try:
     from snowluma_manager import (
         SNOWLUMA_RELEASE_URL,
+        SNOWLUMA_AGREEMENT_REQUIRED,
+        SNOWLUMA_AGREEMENT_VERSION_MISMATCH,
+        SNOWLUMA_PASSWORD_CHANGE_REQUIRED,
+        SNOWLUMA_PASSWORD_REQUIRED,
+        SNOWLUMA_SECRET_STORE_UNAVAILABLE,
+        SNOWLUMA_TOTP_REQUIRED,
         SnowLumaAPIClient,
         SnowLumaApiError,
         SnowLumaManager,
         SnowLumaSynchronizationError,
+        _validate_agreement_payload,
     )
 except ImportError:  # pragma: no cover - package import context
     from .snowluma_manager import (
@@ -62,6 +79,7 @@ except ImportError:  # pragma: no cover - package import context
         SnowLumaApiError,
         SnowLumaManager,
         SnowLumaSynchronizationError,
+        _validate_agreement_payload,
     )
 
 logger = logging.getLogger("webui")
@@ -1222,13 +1240,118 @@ async def setup_configure_snowluma(body: SnowLumaConfigureRequest):
 
 
 class SnowLumaProcessRequest(BaseModel):
-    password: str
+    # Omitted/blank uses the CurrentUser-protected deployment password.  The
+    # loopback WebUI treats local API clients as trusted when no WebUI token
+    # is configured; explicit agreement clicks remain mandatory.
+    password: str | None = None
 
 
-def _snowluma_client(password: str) -> SnowLumaAPIClient:
+def _snowluma_http_error(exc: SnowLumaApiError) -> HTTPException:
+    """Map typed SnowLuma states without returning secret material."""
+
+    code = getattr(exc, "code", "UPSTREAM_ERROR")
+    details = getattr(exc, "details", {}) or {}
+    if code == SNOWLUMA_SECRET_STORE_UNAVAILABLE:
+        status = 503
+    elif code in {
+        SNOWLUMA_PASSWORD_REQUIRED,
+        SNOWLUMA_AGREEMENT_REQUIRED,
+        SNOWLUMA_TOTP_REQUIRED,
+        SNOWLUMA_PASSWORD_CHANGE_REQUIRED,
+        SNOWLUMA_AGREEMENT_VERSION_MISMATCH,
+    }:
+        status = 428
+    else:
+        status = 502
+    payload: dict[str, object] = {"code": code, "message": str(exc)}
+    if code == SNOWLUMA_AGREEMENT_REQUIRED:
+        payload.update({
+            key: details[key]
+            for key in ("version", "documents", "consentRequired")
+            if key in details
+        })
+    elif code == SNOWLUMA_AGREEMENT_VERSION_MISMATCH and "currentVersion" in details:
+        payload["currentVersion"] = details["currentVersion"]
+    return HTTPException(status, detail=payload)
+
+
+def _manual_snowluma_password(value: object) -> str | None:
+    if not isinstance(value, str) or value == "":
+        return None
+    return value
+
+
+def _snowluma_password_for_request(
+    manual_password: object,
+) -> tuple[str, bool, SnowLumaPasswordStore]:
+    """Select manual-over-saved credentials without exposing either value."""
+
+    manual = _manual_snowluma_password(manual_password)
+    try:
+        store = SnowLumaPasswordStore(config_mgr.root)
+    except Exception as exc:
+        raise SnowLumaApiError(
+            "SnowLuma 密码安全存储不可用",
+            code=SNOWLUMA_SECRET_STORE_UNAVAILABLE,
+            http_status=503,
+        ) from exc
+    if manual is not None:
+        # Validate the existing ciphertext first.  A corrupt/foreign DPAPI
+        # blob is an unavailable store, not permission to overwrite evidence
+        # that may belong to another Windows account.
+        try:
+            load = getattr(store, "load", None)
+            if callable(load):
+                load()
+        except Exception as exc:
+            raise SnowLumaApiError(
+                "SnowLuma 密码安全存储不可用",
+                code=SNOWLUMA_SECRET_STORE_UNAVAILABLE,
+                http_status=503,
+            ) from exc
+        return manual, True, store
+    try:
+        load = getattr(store, "load", None)
+        if not callable(load):
+            raise SnowLumaSecretStoreUnavailable("secure password storage is unavailable")
+        saved = load()
+    except Exception as exc:
+        raise SnowLumaApiError(
+            "SnowLuma 密码安全存储不可用",
+            code=SNOWLUMA_SECRET_STORE_UNAVAILABLE,
+            http_status=503,
+        ) from exc
+    if not saved:
+        raise SnowLumaApiError(
+            "SnowLuma WebUI 需要手动输入密码",
+            code=SNOWLUMA_PASSWORD_REQUIRED,
+            http_status=428,
+        )
+    return saved, False, store
+
+
+def _snowluma_client(password: str | None) -> SnowLumaAPIClient:
+    selected_password, manual, store = _snowluma_password_for_request(password)
     client = SnowLumaAPIClient(config_mgr.root)
     try:
-        client.login(password)
+        login_result = client.login(selected_password)
+        if manual:
+            try:
+                # Persist only after SnowLuma accepted the login.  The store
+                # replaces ciphertext atomically and never logs the value.
+                store.save(selected_password)
+            except Exception as exc:
+                raise SnowLumaApiError(
+                    "SnowLuma 密码安全存储不可用",
+                    code=SNOWLUMA_SECRET_STORE_UNAVAILABLE,
+                    http_status=503,
+                ) from exc
+        if isinstance(login_result, dict) and login_result.get("mustChangePassword") is True:
+            raise SnowLumaApiError(
+                "SnowLuma WebUI 要求先修改密码",
+                code=SNOWLUMA_PASSWORD_CHANGE_REQUIRED,
+                http_status=428,
+            )
     except BaseException:
         # Login may have established a cookie/token before rejecting the
         # response.  Best-effort close here; the login error remains primary.
@@ -1258,28 +1381,49 @@ def _close_snowluma_client(client: SnowLumaAPIClient) -> None:
         logger.debug("SnowLuma session cleanup failed", exc_info=True)
 
 
-def _snowluma_list_processes(password: str) -> list[dict[str, object]]:
-    """Run login plus the blocking process-list request in one worker call."""
+def _snowluma_check_agreement(client: SnowLumaAPIClient) -> None:
+    """Inspect SnowLuma's official agreement gate before an operation."""
+
+    inspect_agreements = getattr(client, "get_agreements", None)
+    if not callable(inspect_agreements):
+        # Compatibility test doubles/old clients may omit this optional API;
+        # the production SnowLumaAPIClient always supplies it.
+        return
+    payload = _validate_agreement_payload(inspect_agreements())
+    if isinstance(payload, dict) and payload.get("consentRequired") is True:
+        raise SnowLumaApiError(
+            "SnowLuma 需要先阅读并同意协议",
+            code=SNOWLUMA_AGREEMENT_REQUIRED,
+            details=payload,
+            http_status=428,
+        )
+
+
+def _snowluma_list_processes(password: str | None) -> list[dict[str, object]]:
+    """Run auth, agreement inspection, and the blocking process-list request."""
     client = _snowluma_client(password)
     try:
+        _snowluma_check_agreement(client)
         return client.list_processes()
     finally:
         _close_snowluma_client(client)
 
 
-def _snowluma_probe_login(password: str, pid: int) -> dict[str, object]:
-    """Run login plus the blocking probe request in one worker call."""
+def _snowluma_probe_login(password: str | None, pid: int) -> dict[str, object]:
+    """Run auth, agreement inspection, and the blocking probe request."""
     client = _snowluma_client(password)
     try:
+        _snowluma_check_agreement(client)
         return client.probe_login(pid)
     finally:
         _close_snowluma_client(client)
 
 
-def _snowluma_process_action(password: str, pid: int, action: str) -> dict[str, object]:
-    """Run login plus the blocking process action in one worker call."""
+def _snowluma_process_action(password: str | None, pid: int, action: str) -> dict[str, object]:
+    """Run auth, agreement inspection, and the blocking process action."""
     client = _snowluma_client(password)
     try:
+        _snowluma_check_agreement(client)
         return client.process_action(pid, action)
     finally:
         _close_snowluma_client(client)
@@ -1287,12 +1431,12 @@ def _snowluma_process_action(password: str, pid: int, action: str) -> dict[str, 
 
 @app.post("/api/setup/snowluma/processes")
 async def setup_snowluma_processes(body: SnowLumaProcessRequest):
-    """List managed QQ processes using request-only SnowLuma credentials."""
+    """List managed QQ processes using saved credentials or manual fallback."""
     try:
         processes = await asyncio.to_thread(_snowluma_list_processes, body.password)
         return {"list": processes}
     except SnowLumaApiError as exc:
-        raise HTTPException(502, str(exc)) from exc
+        raise _snowluma_http_error(exc) from exc
 
 
 @app.post("/api/setup/snowluma/processes/list")
@@ -1301,7 +1445,7 @@ async def setup_snowluma_processes_alias(body: SnowLumaProcessRequest):
 
 
 class SnowLumaProcessActionRequest(BaseModel):
-    password: str
+    password: str | None = None
 
 
 def _validate_process_path_pid(pid: str) -> int:
@@ -1323,7 +1467,7 @@ async def setup_snowluma_probe_login(pid: str, body: SnowLumaProcessActionReques
     except HTTPException:
         raise
     except SnowLumaApiError as exc:
-        raise HTTPException(502, str(exc)) from exc
+        raise _snowluma_http_error(exc) from exc
 
 
 @app.post("/api/setup/snowluma/processes/{pid}/{action}")
@@ -1346,7 +1490,50 @@ async def setup_snowluma_process_action(
     except HTTPException:
         raise
     except SnowLumaApiError as exc:
-        raise HTTPException(502, str(exc)) from exc
+        raise _snowluma_http_error(exc) from exc
+
+
+class SnowLumaAgreementAcceptRequest(BaseModel):
+    version: str
+
+    class Config:
+        extra = "forbid"
+
+
+def _snowluma_accept_agreement(version: str) -> dict[str, object]:
+    """Re-fetch current agreements, then call SnowLuma's official consent API."""
+
+    client = _snowluma_client(None)
+    try:
+        current = _validate_agreement_payload(client.get_agreements())
+        current_version = current.get("version") if isinstance(current, dict) else None
+        if not isinstance(current_version, str) or current_version != version:
+            raise SnowLumaApiError(
+                "SnowLuma 协议版本已更新，请重新阅读并确认",
+                code=SNOWLUMA_AGREEMENT_VERSION_MISMATCH,
+                details={"currentVersion": current_version}
+                if isinstance(current_version, str)
+                else {},
+                http_status=428,
+            )
+        # ``record_consent`` is the only consent write; this endpoint never
+        # writes consent.json or sets SnowLuma acceptance environment flags.
+        return client.record_consent(version)
+    finally:
+        _close_snowluma_client(client)
+
+
+@app.post("/api/setup/snowluma/agreements/accept")
+async def setup_snowluma_accept_agreement(body: SnowLumaAgreementAcceptRequest):
+    try:
+        return await asyncio.to_thread(_snowluma_accept_agreement, body.version)
+    except SnowLumaApiError as exc:
+        raise _snowluma_http_error(exc) from exc
+
+
+@app.post("/api/setup/snowluma/agreement/accept")
+async def setup_snowluma_accept_agreement_alias(body: SnowLumaAgreementAcceptRequest):
+    return await setup_snowluma_accept_agreement(body)
 
 
 @app.websocket("/ws/setup/install")

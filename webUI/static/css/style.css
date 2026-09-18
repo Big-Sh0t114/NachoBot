@@ -1020,6 +1020,82 @@ body {
     background: rgba(239, 68, 68, 0.07);
 }
 
+/* SnowLuma agreement gate: document text is inserted with textContent by
+   launcher.js and remains scrollable without becoming executable markup. */
+.snowluma-agreement-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1.25rem;
+    background: rgba(15, 23, 42, 0.62);
+}
+
+.snowluma-agreement-dialog {
+    display: flex;
+    flex-direction: column;
+    width: min(860px, 100%);
+    max-height: min(88vh, 920px);
+    padding: 1.25rem;
+    overflow: hidden;
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-lg);
+    background: var(--bg-primary);
+    box-shadow: 0 24px 70px rgba(15, 23, 42, 0.28);
+}
+
+.snowluma-agreement-title {
+    margin: 0;
+    font-size: 1.12rem;
+}
+
+.snowluma-agreement-version,
+.snowluma-agreement-metadata {
+    margin: 0.35rem 0;
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+}
+
+.snowluma-agreement-documents {
+    flex: 1 1 auto;
+    min-height: 0;
+    margin-top: 0.75rem;
+    overflow: auto;
+    padding-right: 0.4rem;
+}
+
+.snowluma-agreement-document {
+    margin: 0 0 1rem;
+    padding: 0.9rem;
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-md);
+    background: var(--bg-secondary);
+}
+
+.snowluma-agreement-document h3 {
+    margin: 0;
+    font-size: 0.98rem;
+}
+
+.snowluma-agreement-text {
+    max-height: 28rem;
+    margin: 0.55rem 0 0;
+    overflow: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font: inherit;
+    line-height: 1.5;
+}
+
+.snowluma-agreement-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.6rem;
+    padding-top: 1rem;
+}
+
 /* ===================================================================
    Terminal Tab
    =================================================================== */
