@@ -70,17 +70,17 @@
 
 <tr>
 <td><code>launchbot.bat</code></td>
-<td>Core + NapCat + 托管 TTS + VLM/ASR</td>
+<td>Core + NapCat 或 SnowLuma + 托管 TTS + VLM/ASR</td>
 </tr>
 
 <tr>
 <td><code>launchbot_lite.bat</code></td>
-<td>Core + NapCat + 托管 TTS，不启动 VLM/ASR</td>
+<td>Core + NapCat 或 SnowLuma + 托管 TTS，不启动 VLM/ASR</td>
 </tr>
 
 <tr>
 <td><code>launchbot_potato.bat</code></td>
-<td>Core + NapCat + 纯消息中继，不加载任何本地模型</td>
+<td>Core + NapCat 或 SnowLuma + 纯消息中继，不加载任何本地模型</td>
 </tr>
 
 <tr>
@@ -102,7 +102,8 @@
 
 
 <p>
-三个 <code>launchbot*</code> 档位都以 QQ/NapCat 主链路为基础；<br>
+三个 <code>launchbot*</code> 档位都支持 QQ/NapCat 与 QQ/SnowLuma 两条等价主链路；<br>
+选择 SnowLuma 时，脚本会先校验并启动项目内托管 Runtime，再启动 SnowLuma 适配器；<br>
 Bilibili、Discord 和 UniversalVC 按需另行启动
 </p>
 
@@ -128,6 +129,8 @@ Bilibili、Discord 和 UniversalVC 按需另行启动
 🎮 <b><a href="./NachoBot-DiscordVC-Adapter">Discord 适配器</a></b>：Slash 指令、语音频道发言<br>
 
 🐱 <b><a href="./NachoBot-Napcat-Adapter">NapCat 适配器</a></b>：QQ 消息收发与心跳重连机制<br>
+
+❄️ <b><a href="./NachoBot-SnowLuma-Adapter">SnowLuma 适配器</a></b>：由 WebUI 与 launchbot 档位托管 Runtime 的 QQ 消息链路<br>
 
 🌐 <b><a href="./koishi-app">Koishi 框架</a></b>：Discord 接入的底层依赖与插件管理
 

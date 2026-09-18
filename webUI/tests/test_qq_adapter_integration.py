@@ -98,6 +98,53 @@ def test_qq_launchers_fail_closed_when_selected_adapter_sync_fails(launcher_name
     assert "project directory could not be entered" in cd_guard
 
 
+@pytest.mark.parametrize(
+    "launcher_name",
+    ("launchbot.bat", "launchbot_lite.bat", "launchbot_potato.bat"),
+)
+def test_qq_launchers_gate_full_snowluma_manifest_and_order_runtime_before_adapter(
+    launcher_name: str,
+) -> None:
+    source = (WEBUI_DIR.parent / launcher_name).read_text(encoding="utf-8")
+    for required in (
+        "package.json",
+        "index.mjs",
+        "utils-tSVKpzEf.js",
+        "logger-BAozzyTt.js",
+        "config-GJCFWjtq.js",
+        "server-CLw7fwOG.js",
+        "node.exe",
+        "launcher.bat",
+        "client\\index.html",
+        "native\\snowluma-win32-x64.dll",
+        "native\\snowluma-win32-x64.node",
+        "native\\websocket-win32-x64.node",
+        "NachoBot-SnowLuma-Adapter/main.py",
+        "NachoBot-SnowLuma-Adapter/pyproject.toml",
+    ):
+        assert required in source
+    assert "runtime.json" in source
+    assert "ConvertFrom-Json" in source
+    assert "https://github.com/SnowLuma/SnowLuma/releases/latest" in source
+    verify_call = source.index("call :VERIFY_SNOWLUMA_COMPONENTS")
+    adapter_sync = source.index('uv sync --python ">=3.11,<=3.13"', verify_call)
+    runtime_call = source.index("call :START_SNOWLUMA_RUNTIME", adapter_sync)
+    runtime_helper = source.index("\n:START_SNOWLUMA_RUNTIME")
+    runtime_start = source.index('start "SnowLuma Runtime"', runtime_helper)
+    adapter_start = source.index('start "NachoBot-SnowLuma"', runtime_call)
+    assert verify_call < adapter_sync < runtime_call < adapter_start
+    assert 'cmd /k ""!SNOWLUMA_NODE!" index.mjs"' in source
+    assert "SNOWLUMA_HOST" in source
+    assert "webuiHost" in source
+    assert "if ($h -ne '127.0.0.1')" in source
+    assert "localhost" not in source[source.index("SNOWLUMA_HOST"):runtime_start]
+    assert "::1" not in source[source.index("SNOWLUMA_HOST"):runtime_start]
+    assert "SNOWLUMA_ONEBOT_PORT" in source
+    assert source.index('call :CHECK_SNOWLUMA_PORT_FREE "!SNOWLUMA_PORT!" "WebUI"') < source.index(
+        'call :CHECK_SNOWLUMA_PORT_FREE "!SNOWLUMA_ONEBOT_PORT!" "OneBot"'
+    ) < runtime_start
+
+
 def test_snowluma_manifest_and_standalone_launcher_provision_dependencies() -> None:
     import tomllib
 
@@ -584,6 +631,157 @@ def test_setup_generation_prevalidates_before_entering_qr_context(
     assert spy.entered is False
 
 
+def test_setup_backend_component_checks_use_live_selector_and_report_both_urls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import server
+    from fastapi import HTTPException
+
+    env_path = tmp_path / "NachoBot" / ".env"
+    env_path.parent.mkdir(parents=True)
+    env_path.write_text("qq_adapter=snowluma\n", encoding="utf-8")
+    monkeypatch.setattr(server.config_mgr, "root", tmp_path)
+    status = asyncio.run(server.setup_qq_adapter_status())
+    assert set(status) >= {"selected", "napcat", "snowluma"}
+    assert status["selected"] == "snowluma"
+    assert status["napcat"]["download_url"].startswith("https://github.com/NapNeko/")
+    assert status["snowluma"]["download_url"].endswith("/releases/latest")
+
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(
+            server.setup_verify_path(
+                server.VerifyPathRequest(type="napcat", path="", qq_adapter="napcat")
+            )
+        )
+    assert raised.value.status_code == 409
+    assert "选择已变化" in str(raised.value.detail)
+
+
+def test_snowluma_process_handlers_offload_whole_blocking_operations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import server
+
+    calls: list[tuple[object, tuple[object, ...]]] = []
+
+    async def fake_to_thread(function: object, *args: object) -> object:
+        calls.append((function, args))
+        return function(*args)  # type: ignore[operator]
+
+    monkeypatch.setattr(server.asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(
+        server,
+        "_snowluma_list_processes",
+        lambda password: [{"pid": 123, "uin": "10001"}],
+    )
+    monkeypatch.setattr(
+        server,
+        "_snowluma_probe_login",
+        lambda password, pid: {"pid": pid},
+    )
+    monkeypatch.setattr(
+        server,
+        "_snowluma_process_action",
+        lambda password, pid, action: {"pid": pid, "action": action},
+    )
+
+    password = "request-only-password"
+    listed = asyncio.run(server.setup_snowluma_processes(server.SnowLumaProcessRequest(password=password)))
+    probed = asyncio.run(
+        server.setup_snowluma_probe_login("123", server.SnowLumaProcessActionRequest(password=password))
+    )
+    acted = asyncio.run(
+        server.setup_snowluma_process_action(
+            "123", "refresh", server.SnowLumaProcessActionRequest(password=password)
+        )
+    )
+
+    assert listed["list"][0]["uin"] == "10001"
+    assert probed["info"]["pid"] == 123
+    assert acted["action"] == "refresh"
+    assert [args for _, args in calls] == [(password,), (password, 123), (password, 123, "refresh")]
+
+
+def test_snowluma_server_helpers_logout_on_success_and_primary_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import server
+    from snowluma_manager import SnowLumaApiError
+
+    secret = "request-only-password"
+
+    class FakeClient:
+        def __init__(self, fail: bool) -> None:
+            self.fail = fail
+            self.closed = 0
+
+        def list_processes(self):
+            if self.fail:
+                raise SnowLumaApiError("primary list failure")
+            return [{"pid": 123}]
+
+        def probe_login(self, pid: int):
+            if self.fail:
+                raise SnowLumaApiError("primary probe failure")
+            return {"pid": pid}
+
+        def process_action(self, pid: int, action: str):
+            if self.fail:
+                raise SnowLumaApiError("primary action failure")
+            return {"pid": pid, "action": action}
+
+        def close(self):
+            self.closed += 1
+            raise SnowLumaApiError("logout failure must not replace primary error")
+
+    cases = (
+        ("_snowluma_list_processes", (secret,), [{"pid": 123}], "primary list failure"),
+        ("_snowluma_probe_login", (secret, 123), {"pid": 123}, "primary probe failure"),
+        (
+            "_snowluma_process_action",
+            (secret, 123, "refresh"),
+            {"pid": 123, "action": "refresh"},
+            "primary action failure",
+        ),
+    )
+    for helper_name, args, expected, failure_message in cases:
+        for fail in (False, True):
+            client = FakeClient(fail)
+            monkeypatch.setattr(server, "_snowluma_client", lambda _password, c=client: c)
+            helper = getattr(server, helper_name)
+            if fail:
+                with pytest.raises(SnowLumaApiError, match=failure_message):
+                    helper(*args)
+            else:
+                assert helper(*args) == expected
+            assert client.closed == 1
+            assert secret not in repr(expected)
+
+
+def test_snowluma_login_failure_also_closes_partial_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import server
+    from snowluma_manager import SnowLumaApiError
+
+    class LoginFailClient:
+        closed = 0
+
+        def login(self, password: str) -> None:
+            raise SnowLumaApiError("primary login failure")
+
+        def close(self) -> None:
+            type(self).closed += 1
+            raise SnowLumaApiError("logout failure")
+
+    fake = LoginFailClient()
+    monkeypatch.setattr(server, "SnowLumaAPIClient", lambda _root: fake)
+    with pytest.raises(SnowLumaApiError, match="primary login failure"):
+        server._snowluma_client("request-only-password")
+    assert fake.closed == 1
+
+
 def test_busy_switch_prevalidation_also_skips_qr_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -633,13 +831,90 @@ def test_process_registry_retains_both_services_but_selects_snowluma_group(
     )
     monkeypatch.setattr(process_manager, "ROOT_DIR", tmp_path)
     process_manager._register_services()
-    assert {"napcat_adapter", "snowluma_adapter", "napcat_shell"}.issubset(
+    assert {"napcat_adapter", "snowluma_runtime", "snowluma_adapter", "napcat_shell"}.issubset(
         process_manager.SERVICE_DEFS
     )
-    assert process_manager.GROUP_DEFS["qq_adapter"].services == ["snowluma_adapter"]
+    assert process_manager.GROUP_DEFS["qq_adapter"].services == [
+        "snowluma_runtime",
+        "snowluma_adapter",
+    ]
+    runtime_def = process_manager.SERVICE_DEFS["snowluma_runtime"]
+    assert runtime_def.cmd[0] == str((tmp_path / "SnowLuma" / "node.exe").resolve())
+    assert runtime_def.cmd[1:] == ["index.mjs"]
+    assert runtime_def.cwd == "SnowLuma"
     snow_def = process_manager.SERVICE_DEFS["snowluma_adapter"]
     assert snow_def.port is None
     assert snow_def.wait_port is False
+
+
+def test_process_manager_rejects_unsafe_snowluma_launch_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "NachoBot").mkdir()
+    (tmp_path / "NachoBot" / ".env").write_text("qq_adapter=snowluma\n", encoding="utf-8")
+    monkeypatch.setattr(process_manager, "ROOT_DIR", tmp_path)
+    manager = process_manager.ProcessManager(tmp_path)
+    process_manager._register_services()
+
+    import snowluma_manager
+
+    def reject_boundary(root: Path, **kwargs: object) -> None:
+        raise snowluma_manager.SnowLumaError("SnowLuma WebUI webuiHost 必须是本机回环地址")
+
+    monkeypatch.setattr(snowluma_manager.SnowLumaManager, "validate_launch_boundary", reject_boundary)
+    with pytest.raises(RuntimeError, match="webuiHost"):
+        manager._validate_service_start("snowluma_runtime")
+
+
+def test_snowluma_group_recovery_reuses_managed_running_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "NachoBot").mkdir()
+    (tmp_path / "NachoBot" / ".env").write_text("qq_adapter=snowluma\n", encoding="utf-8")
+    monkeypatch.setattr(process_manager, "ROOT_DIR", tmp_path)
+    manager = process_manager.ProcessManager(tmp_path)
+    process_manager._register_services()
+    monkeypatch.setattr(manager, "_ensure_required_components", lambda _services: None)
+    monkeypatch.setattr(manager, "_require_relay_owner", lambda _service_id: None)
+
+    calls: list[bool] = []
+    import snowluma_manager
+
+    def boundary(_root: Path, *, require_free_ports: bool = True) -> dict[str, object]:
+        calls.append(require_free_ports)
+        return {}
+
+    monkeypatch.setattr(snowluma_manager.SnowLumaManager, "validate_launch_boundary", boundary)
+    manager.states["snowluma_runtime"] = process_manager.ServiceState(
+        status=process_manager.ServiceStatus.RUNNING
+    )
+    manager.states["snowluma_adapter"] = process_manager.ServiceState(
+        status=process_manager.ServiceStatus.STOPPED
+    )
+
+    manager._validate_group_start("qq_adapter")
+    assert calls and all(require_free_ports is False for require_free_ports in calls)
+
+
+def test_snowluma_group_start_rejects_external_port_conflict_without_running_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "NachoBot").mkdir()
+    (tmp_path / "NachoBot" / ".env").write_text("qq_adapter=snowluma\n", encoding="utf-8")
+    monkeypatch.setattr(process_manager, "ROOT_DIR", tmp_path)
+    manager = process_manager.ProcessManager(tmp_path)
+    process_manager._register_services()
+    monkeypatch.setattr(manager, "_ensure_required_components", lambda _services: None)
+
+    import snowluma_manager
+
+    def reject(_root: Path, *, require_free_ports: bool = True) -> dict[str, object]:
+        assert require_free_ports is True
+        raise snowluma_manager.SnowLumaError("SnowLuma OneBot :3001 已被占用")
+
+    monkeypatch.setattr(snowluma_manager.SnowLumaManager, "validate_launch_boundary", reject)
+    with pytest.raises(RuntimeError, match="3001"):
+        manager._validate_group_start("qq_adapter")
 
 
 def test_env_switch_is_rejected_before_backup_when_managed_qq_is_running(

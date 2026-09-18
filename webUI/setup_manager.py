@@ -19,6 +19,7 @@ try:
         ConfigInitializer,
         DependencyInstaller,
         NapCatConfigurator,
+        select_qq_adapter,
     )
     from .setup_bilibili_login import (
         BilibiliLoginCleanupError,
@@ -42,6 +43,7 @@ except ImportError:
         ConfigInitializer,
         DependencyInstaller,
         NapCatConfigurator,
+        select_qq_adapter,
     )
     from setup_bilibili_login import (
         BilibiliLoginCleanupError,
@@ -72,5 +74,6 @@ __all__ = [
     "EnvironmentChecker",
     "NapCatConfigurator",
     "PathVerifier",
+    "select_qq_adapter",
     "bilibili_login_manager",
 ]

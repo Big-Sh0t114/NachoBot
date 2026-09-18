@@ -6,6 +6,8 @@ import json
 import os
 import re
 import shutil
+import time
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -23,6 +25,7 @@ try:
     from .qq_adapter_selector import (
         DEFAULT_QQ_ADAPTER,
         QQAdapterSelectorError,
+        parse_qq_adapter_env,
         read_qq_adapter,
         selector_value_from_request,
     )
@@ -39,6 +42,7 @@ except ImportError:
     from qq_adapter_selector import (
         DEFAULT_QQ_ADAPTER,
         QQAdapterSelectorError,
+        parse_qq_adapter_env,
         read_qq_adapter,
         selector_value_from_request,
     )
@@ -58,6 +62,131 @@ DISCORD_VC_PLACEHOLDER = "YOUR_DISCORD_BOT_TOKEN"
 BILIBILI_TARGET = "NachoBot-Bilibili-Adapter/config.toml"
 SNOWLUMA_TARGET = "NachoBot-SnowLuma-Adapter/config.toml"
 NAPCAT_TARGET = "NachoBot-Napcat-Adapter/config.toml"
+
+
+def select_qq_adapter(
+    requested: object,
+    *,
+    root: Path | None = None,
+    process_manager: object | None = None,
+) -> dict[str, Any]:
+    """Safely update only ``qq_adapter`` in the live ``.env`` file.
+
+    The live selector is the authority for side effects.  This helper keeps
+    comments/unrelated variables byte-for-byte intact, creates a recoverable
+    backup before replacement, fences an active QQ runtime, and rebuilds the
+    process registry after a successful selection.
+    """
+    base = (root or ROOT_DIR).resolve()
+    env_path = base / "NachoBot" / ".env"
+    try:
+        selected = selector_value_from_request(requested)
+        current = read_qq_adapter(env_path)
+    except QQAdapterSelectorError as exc:
+        raise ValueError("QQ 适配器选择无效") from exc
+
+    if selected == current:
+        return {"status": "ok", "selected": current, "changed": False, "backup": None}
+
+    try:
+        try:
+            from .process_manager import assert_qq_adapter_switch_allowed
+        except ImportError:  # pragma: no cover - direct script context
+            from process_manager import assert_qq_adapter_switch_allowed
+        assert_qq_adapter_switch_allowed(process_manager)
+    except (ValueError, RuntimeError):
+        raise
+
+    try:
+        raw = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+    except OSError as exc:
+        raise ValueError("无法读取 QQ 适配器选择") from exc
+
+    # Validate again from the exact text that is about to be edited.  This
+    # closes a duplicate/invalid-selector race without returning raw content.
+    try:
+        live_current = parse_qq_adapter_env(raw)
+    except QQAdapterSelectorError as exc:
+        raise ValueError("当前 qq_adapter 配置无效，请重新加载设置向导") from exc
+    if live_current != current:
+        raise ValueError("当前 qq_adapter 选择已变化，请重新加载设置向导")
+
+    newline = "\r\n" if "\r\n" in raw else "\n"
+    lines = raw.splitlines(keepends=True)
+    replaced = False
+    rendered: list[str] = []
+    for line in lines:
+        body = line.rstrip("\r\n")
+        key, separator, value = body.partition("=")
+        if separator and key.strip().casefold() == "qq_adapter":
+            # Keep indentation, spacing before '=', inline comments, and the
+            # original line ending; only the authority value changes.
+            comment = ""
+            value_without_comment = value
+            if "#" in value:
+                value_without_comment, comment_tail = value.split("#", 1)
+                comment = "#" + comment_tail
+            leading = value_without_comment[: len(value_without_comment) - len(value_without_comment.lstrip())]
+            trailing = value_without_comment[len(value_without_comment.rstrip()):]
+            # Preserve whitespace around the old value and the inline comment
+            # byte-for-byte while replacing only the selector token itself.
+            rendered.append(
+                f"{key}{separator}{leading}{selected}{trailing}{comment}{line[len(body):]}"
+            )
+            replaced = True
+        else:
+            rendered.append(line)
+    if not replaced:
+        if raw and not raw.endswith(("\n", "\r")):
+            rendered.append(newline)
+        rendered.append(f"qq_adapter={selected}{newline}")
+    candidate = "".join(rendered)
+
+    backup_name: str | None = None
+    if env_path.exists():
+        backup_dir = base / "config-save" / "setup_backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        safe_stamp = time.strftime("%Y%m%d_%H%M%S")
+        backup_path = backup_dir / f"NachoBot__env.qq-adapter.{safe_stamp}.bak"
+        # Avoid collisions when two setup requests arrive in one second.
+        suffix = 0
+        while backup_path.exists():
+            suffix += 1
+            backup_path = backup_dir / f"NachoBot__env.qq-adapter.{safe_stamp}.{suffix}.bak"
+        shutil.copy2(env_path, backup_path)
+        backup_name = backup_path.name
+
+    try:
+        env_path.parent.mkdir(parents=True, exist_ok=True)
+        env_path.write_text(candidate, encoding="utf-8")
+        if read_qq_adapter(env_path) != selected:
+            raise ValueError("qq_adapter 写入校验失败")
+    except Exception as exc:
+        # Restore the exact bytes if the write or post-write authority check
+        # fails.  The backup remains available for manual recovery.
+        try:
+            if env_path.exists() and backup_name:
+                shutil.copy2(base / "config-save" / "setup_backups" / backup_name, env_path)
+            elif not backup_name:
+                env_path.unlink(missing_ok=True)
+        except Exception as rollback_exc:
+            raise ValueError("QQ 适配器选择写入失败，回滚失败") from rollback_exc
+        raise ValueError("QQ 适配器选择写入失败，已回滚") from exc
+
+    try:
+        try:
+            from .process_manager import _register_services
+        except ImportError:  # pragma: no cover - direct script context
+            from process_manager import _register_services
+        _register_services()
+    except Exception as exc:
+        raise ValueError("QQ 适配器已写入，但服务注册表刷新失败") from exc
+    return {
+        "status": "ok",
+        "selected": selected,
+        "changed": True,
+        "backup": backup_name,
+    }
 
 
 # Sanitized, tracked fallback templates.  The user-owned template files in
@@ -382,7 +511,7 @@ class ConfigInitializer:
 
     @staticmethod
     def get_defaults() -> dict[str, Any]:
-        """Read template config files and return default values for the wizard form."""
+        """Read live config files, falling back to templates for the wizard form."""
         result: dict[str, Any] = {
             "core": {"qq_account": "", "nickname": "NachoBot"},
             "providers": [],
@@ -401,6 +530,9 @@ class ConfigInitializer:
             # Never read a current Bilibili config here.  The wizard collects a
             # fresh account UID only when the user explicitly selects Bilibili.
             "bilibili": {"bot_account": ""},
+            # SnowLuma credentials are request-only and are never prefilled
+            # from the live runtime or returned from an existing config.
+            "snowluma": {"access_token": "", "webui_password": ""},
             "env": {
                 "host": "127.0.0.1",
                 "port": "8000",
@@ -408,97 +540,253 @@ class ConfigInitializer:
             },
         }
 
-        # ── bot_config template ──
+        def source_path(live_path: Path, template_path: Path) -> tuple[Path, bool]:
+            """Return the selected source and whether it is a live config."""
+            if live_path.is_file():
+                return live_path, True
+            return template_path, False
+
+        def live_config_error(role: str) -> ValueError:
+            """Return an error that identifies only the failed config role."""
+            return ValueError(f"Invalid live {role} configuration")
+
+        def parse_toml_source(
+            path: Path,
+            is_live: bool,
+            role: str,
+        ) -> Any | None:
+            """Parse a selected TOML source without exposing live contents."""
+            try:
+                return tomlkit.parse(path.read_text(encoding="utf-8"))
+            except Exception:
+                if is_live:
+                    raise live_config_error(role) from None
+                return None
+
+        def require_mapping(value: Any) -> Mapping[str, Any]:
+            if not isinstance(value, Mapping):
+                raise TypeError("expected TOML table")
+            return value
+
+        def string_value(
+            section: Mapping[str, Any],
+            key: str,
+            default: str = "",
+        ) -> str:
+            value = section.get(key, default)
+            if not isinstance(value, str):
+                raise TypeError("expected TOML string")
+            return str(value)
+
+        def array_value(
+            section: Mapping[str, Any],
+            key: str,
+        ) -> list[Any]:
+            value = section.get(key, [])
+            if not isinstance(value, list):
+                raise TypeError("expected TOML array")
+            return list(value)
+
+        def commit_toml_source(
+            path: Path,
+            is_live: bool,
+            role: str,
+            extract: Callable[[Mapping[str, Any]], dict[str, Any]],
+            commit: Callable[[dict[str, Any]], None],
+        ) -> None:
+            """Extract atomically, failing closed for an invalid live source."""
+            try:
+                document = parse_toml_source(path, is_live, role)
+                if document is None:
+                    return
+                values = extract(require_mapping(document))
+            except Exception:
+                if is_live:
+                    raise live_config_error(role) from None
+                return
+            commit(values)
+
+        # ── bot_config (live deployment, then template) ──
         bot_tmpl = ROOT_DIR / "NachoBot/template/bot_config_template.toml"
-        if bot_tmpl.exists():
-            try:
-                doc = tomlkit.parse(bot_tmpl.read_text(encoding="utf-8"))
-                bot = doc.get("bot", {})
-                result["core"]["qq_account"] = str(bot.get("qq_account", ""))
-                result["core"]["nickname"] = str(bot.get("nickname", "NachoBot"))
-            except Exception:
-                pass
+        bot_path, bot_is_live = source_path(
+            ROOT_DIR / "NachoBot/config/bot_config.toml",
+            bot_tmpl,
+        )
+        if bot_path.is_file():
+            def extract_bot(document: Mapping[str, Any]) -> dict[str, Any]:
+                bot = require_mapping(document.get("bot", {}))
+                return {
+                    "qq_account": string_value(bot, "qq_account"),
+                    "nickname": string_value(bot, "nickname", "NachoBot"),
+                }
 
-        # ── model_config template — providers & models ──
+            commit_toml_source(
+                bot_path,
+                bot_is_live,
+                "bot_config",
+                extract_bot,
+                lambda values: result["core"].update(values),
+            )
+
+        # ── model_config (live deployment, then template) — providers & models ──
         model_tmpl = ROOT_DIR / "NachoBot/template/model_config_template.toml"
-        if model_tmpl.exists():
-            try:
-                doc = tomlkit.parse(model_tmpl.read_text(encoding="utf-8"))
-                for p in doc.get("api_providers", []):
-                    result["providers"].append({
-                        "name": str(p.get("name", "")),
-                        "base_url": str(p.get("base_url", "")),
-                        "api_key": str(p.get("api_key", "")),
+        model_path, model_is_live = source_path(
+            ROOT_DIR / "NachoBot/config/model_config.toml",
+            model_tmpl,
+        )
+        if model_path.is_file():
+            def extract_model(document: Mapping[str, Any]) -> dict[str, Any]:
+                providers: list[dict[str, str]] = []
+                for provider_value in array_value(document, "api_providers"):
+                    provider = require_mapping(provider_value)
+                    providers.append({
+                        "name": string_value(provider, "name"),
+                        "base_url": string_value(provider, "base_url"),
+                        "api_key": string_value(provider, "api_key"),
                     })
-                for m in doc.get("models", []):
-                    result["models"].append({
-                        "model_identifier": str(m.get("model_identifier", "")),
-                        "model_name": str(m.get("name", "")),
-                        "api_provider": str(m.get("api_provider", "")),
-                    })
-                # Extract per-group model assignments from model_task_config
-                mtc = doc.get("model_task_config", {})
-                for group_name in ("replyer0", "planner", "utils", "utils_small", "tool_use"):
-                    if group_name in mtc:
-                        ml = mtc[group_name].get("model_list", [])
-                        result["model_groups"][group_name] = ", ".join(str(x) for x in ml)
-            except Exception:
-                pass
 
-        # ── .env template ──
+                models: list[dict[str, str]] = []
+                for model_value in array_value(document, "models"):
+                    model = require_mapping(model_value)
+                    models.append({
+                        "model_identifier": string_value(model, "model_identifier"),
+                        "model_name": string_value(model, "name"),
+                        "api_provider": string_value(model, "api_provider"),
+                    })
+
+                model_groups: dict[str, str] = {}
+                mtc = require_mapping(document.get("model_task_config", {}))
+                for group_name in ("replyer0", "planner", "utils", "utils_small", "tool_use"):
+                    if group_name not in mtc:
+                        continue
+                    group = require_mapping(mtc[group_name])
+                    model_list = array_value(group, "model_list")
+                    if not all(isinstance(model_name, str) for model_name in model_list):
+                        raise TypeError("expected model names")
+                    model_groups[group_name] = ", ".join(model_list)
+
+                return {
+                    "providers": providers,
+                    "models": models,
+                    "model_groups": model_groups,
+                }
+
+            def commit_model(values: dict[str, Any]) -> None:
+                result["providers"] = values["providers"]
+                result["models"] = values["models"]
+                result["model_groups"] = values["model_groups"]
+
+            commit_toml_source(
+                model_path,
+                model_is_live,
+                "model_config",
+                extract_model,
+                commit_model,
+            )
+
+        # ── .env (live deployment, then template) ──
         env_tmpl = ROOT_DIR / "NachoBot/template/template.env"
-        if env_tmpl.exists():
+        env_live = ROOT_DIR / "NachoBot/.env"
+        env_path, env_is_live = source_path(env_live, env_tmpl)
+        env_values = dict(result["env"])
+        env_text: str | None = None
+        if env_path.is_file():
             try:
-                for line in env_tmpl.read_text(encoding="utf-8").splitlines():
+                env_text = env_path.read_text(encoding="utf-8")
+                for line in env_text.splitlines():
                     line = line.strip()
                     if line.startswith("HOST="):
-                        result["env"]["host"] = line.split("=", 1)[1]
+                        env_values["host"] = line.split("=", 1)[1]
                     elif line.startswith("PORT="):
-                        result["env"]["port"] = line.split("=", 1)[1]
+                        env_values["port"] = line.split("=", 1)[1]
             except Exception:
-                pass
+                if env_is_live:
+                    raise live_config_error(".env") from None
 
-        # Prefer the current valid live selector; an invalid live .env must
-        # not leak a malformed value into the wizard, so the clean template
-        # default remains the fallback.  No raw environment contents are
-        # returned here.
-        env_live = ROOT_DIR / "NachoBot/.env"
-        if env_live.exists():
+        # Prefer the current valid live selector.  An invalid live .env must
+        # not leak a malformed value into the wizard, so use the template
+        # selector (or the built-in default) as the fallback.  No raw
+        # environment contents are returned here.
+        if env_tmpl.is_file():
             try:
-                result["env"]["qq_adapter"] = read_qq_adapter(env_live)
+                template_env_text = (
+                    env_text
+                    if env_path == env_tmpl
+                    else env_tmpl.read_text(encoding="utf-8")
+                )
+                env_values["qq_adapter"] = parse_qq_adapter_env(
+                    template_env_text
+                )
             except Exception:
                 pass
+        if env_live.is_file():
+            try:
+                if env_text is None:
+                    raise OSError("live .env was not read")
+                env_values["qq_adapter"] = parse_qq_adapter_env(
+                    env_text
+                )
+            except Exception:
+                # Invalid selector values intentionally fall back to the
+                # template selector; a read failure was already surfaced
+                # above while loading the selected live source.
+                pass
+        result["env"] = env_values
 
-        # ── TTS base template ──
+        # ── TTS base config (live deployment, then template) ──
         tts_tmpl = ROOT_DIR / "NachoBot-Multimodal-Adapter/template_configs/base_template.toml"
-        if tts_tmpl.exists():
-            try:
-                doc = tomlkit.parse(tts_tmpl.read_text(encoding="utf-8"))
-                enabled = doc.get("enabled_tts", {}).get("enabled", [])
-                if enabled:
-                    result["tts"]["engine"] = str(enabled[0])
-            except Exception:
-                pass
+        tts_path, tts_is_live = source_path(
+            ROOT_DIR / "NachoBot-Multimodal-Adapter/configs/base.toml",
+            tts_tmpl,
+        )
+        if tts_path.is_file():
+            def extract_tts(document: Mapping[str, Any]) -> dict[str, Any]:
+                enabled_tts = require_mapping(document.get("enabled_tts", {}))
+                enabled = array_value(enabled_tts, "enabled")
+                if not all(isinstance(engine, str) for engine in enabled):
+                    raise TypeError("expected TTS names")
+                return {"engine": str(enabled[0])} if enabled else {}
 
-        # ── UniversalVC template ──
+            commit_toml_source(
+                tts_path,
+                tts_is_live,
+                "TTS base",
+                extract_tts,
+                lambda values: result["tts"].update(values),
+            )
+
+        # ── UniversalVC config (live deployment, then template) ──
         uvc_tmpl = ROOT_DIR / "NachoBot-UniversalVC-Adapter/template/config_template.toml"
-        if uvc_tmpl.exists():
-            try:
-                doc = tomlkit.parse(uvc_tmpl.read_text(encoding="utf-8"))
-                result["universalvc"]["target_process_name"] = str(
-                    doc.get("capture", {}).get("target_process_name", "")
-                )
-                result["universalvc"]["output_device"] = str(
-                    doc.get("output", {}).get("device_name", "")
-                )
-                result["universalvc"]["denoise_enabled"] = bool(
-                    doc.get("denoise", {}).get("enabled", False)
-                )
-                result["universalvc"]["speaker_enabled"] = bool(
-                    doc.get("speaker", {}).get("enabled", True)
-                )
-            except Exception:
-                pass
+        uvc_path, uvc_is_live = source_path(
+            ROOT_DIR / "NachoBot-UniversalVC-Adapter/config.toml",
+            uvc_tmpl,
+        )
+        if uvc_path.is_file():
+            def extract_universalvc(document: Mapping[str, Any]) -> dict[str, Any]:
+                capture = require_mapping(document.get("capture", {}))
+                output = require_mapping(document.get("output", {}))
+                denoise = require_mapping(document.get("denoise", {}))
+                speaker = require_mapping(document.get("speaker", {}))
+
+                denoise_enabled = denoise.get("enabled", False)
+                speaker_enabled = speaker.get("enabled", True)
+                if not isinstance(denoise_enabled, bool) or not isinstance(speaker_enabled, bool):
+                    raise TypeError("expected boolean UniversalVC setting")
+
+                return {
+                    "target_process_name": string_value(capture, "target_process_name"),
+                    "output_device": string_value(output, "device_name"),
+                    "denoise_enabled": denoise_enabled,
+                    "speaker_enabled": speaker_enabled,
+                }
+
+            commit_toml_source(
+                uvc_path,
+                uvc_is_live,
+                "UniversalVC",
+                extract_universalvc,
+                lambda values: result["universalvc"].update(values),
+            )
 
         return result
 

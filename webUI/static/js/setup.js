@@ -14,6 +14,10 @@ const SetupModule = (() => {
     let bilibiliLoginJobId = null;
     let bilibiliLoginContext = null;
     let activeWizardData = null;
+    // SnowLuma credentials are request-only.  Keep this reference only for
+    // the duration of the dedicated configure call and erase it in finally.
+    let snowlumaRequestFields = null;
+    let qqAdapterSelectionPromise = null;
 
     // Track path verification results
     let pathCheckResults = {};
@@ -73,10 +77,7 @@ const SetupModule = (() => {
                 updateMultimodalRuntimeSelection();
             });
         });
-        document.getElementById('setup-qq-adapter')?.addEventListener('change', () => {
-            updateQqAdapterVisibility();
-            updatePathCheckVisibility();
-        });
+        document.getElementById('setup-qq-adapter')?.addEventListener('change', onQqAdapterChange);
 
         // "+" add-row buttons
         document.getElementById('btn-add-provider')?.addEventListener('click', addProviderRow);
@@ -423,13 +424,71 @@ const SetupModule = (() => {
         const selected = selectedComponents.includes('qq');
         const adapter = getSelectedQqAdapter();
         const pathCard = document.getElementById('path-check-napcat');
+        const snowlumaSection = document.getElementById('setup-snowluma-section');
         const hint = document.getElementById('setup-snowluma-runtime-hint');
         if (pathCard && (!selected || adapter !== 'napcat')) {
             pathCard.style.display = 'none';
         }
+        if (snowlumaSection) {
+            snowlumaSection.style.display = selected && adapter === 'snowluma' ? '' : 'none';
+        }
         if (hint) {
             hint.style.display = selected && adapter === 'snowluma' ? '' : 'none';
         }
+        if (!selected || adapter !== 'snowluma') clearSnowLumaSecrets();
+    }
+
+    function onQqAdapterChange() {
+        const select = document.getElementById('setup-qq-adapter');
+        if (!select || qqAdapterSelectionPromise) return;
+        const next = getSelectedQqAdapter();
+        const previous = select.dataset.liveValue || (next === 'snowluma' ? 'napcat' : 'snowluma');
+        updateQqAdapterVisibility();
+        select.disabled = true;
+        qqAdapterSelectionPromise = (async () => {
+            try {
+                await apiPost('/api/setup/qq-adapter', { qq_adapter: next });
+                select.dataset.liveValue = next;
+                updatePathCheckVisibility();
+            } catch (e) {
+                select.value = previous;
+                updateQqAdapterVisibility();
+                toast(`QQ 后端切换失败: ${e?.message || '请求失败'}`, 'error');
+            } finally {
+                select.disabled = false;
+                qqAdapterSelectionPromise = null;
+                updatePathCheckVisibility();
+            }
+        })();
+    }
+
+    function validateSnowLumaCredentials() {
+        if (!selectedComponents.includes('qq') || getSelectedQqAdapter() !== 'snowluma') {
+            return true;
+        }
+        const tokenInput = document.getElementById('setup-snowluma-access-token');
+        const passwordInput = document.getElementById('setup-snowluma-webui-password');
+        const token = tokenInput?.value || '';
+        const password = passwordInput?.value || '';
+        const tokenValid = token.length >= 16 && !/\s/.test(token);
+        const passwordValid = password.length >= 10
+            && !/\s/.test(password)
+            && /[a-z]/.test(password)
+            && /[A-Z]/.test(password)
+            && /[^A-Za-z0-9]/.test(password);
+        tokenInput?.classList.toggle('input-error', !tokenValid);
+        passwordInput?.classList.toggle('input-error', !passwordValid);
+        if (!tokenValid) {
+            alert('SnowLuma access token 至少需要 16 个字符且不能包含空白');
+            tokenInput?.focus();
+            return false;
+        }
+        if (!passwordValid) {
+            alert('SnowLuma WebUI 密码至少 10 位，需包含大小写字母和特殊字符且不能包含空白');
+            passwordInput?.focus();
+            return false;
+        }
+        return true;
     }
 
     // -- Provider rows --
@@ -667,6 +726,10 @@ const SetupModule = (() => {
     // ---- Step 3 → Step 4 validation ----
 
     function onStep3Next() {
+        if (qqAdapterSelectionPromise) {
+            toast('QQ 后端选择仍在保存，请稍候再继续', 'info');
+            return;
+        }
         // Check single-value validation
         let allValid = true;
         document.querySelectorAll('#setup-step-3 .setup-single-value').forEach(input => {
@@ -783,6 +846,8 @@ const SetupModule = (() => {
             bilibiliBotAccount.classList.remove('input-error');
         }
 
+        if (!validateSnowLumaCredentials()) return;
+
         goToStep(4);
     }
 
@@ -790,8 +855,8 @@ const SetupModule = (() => {
 
     function getRequiredChecks() {
         const checks = [];
-        if (selectedComponents.includes('qq') && getSelectedQqAdapter() === 'napcat') {
-            checks.push('napcat');
+        if (selectedComponents.includes('qq')) {
+            checks.push(getSelectedQqAdapter() === 'snowluma' ? 'snowluma' : 'napcat');
         }
         if (selectedComponents.includes('discord')) checks.push('nodejs');
         if (selectedComponents.includes('bilibili')) checks.push('bilibili_dll');
@@ -801,10 +866,11 @@ const SetupModule = (() => {
 
     function updatePathCheckVisibility() {
         const checks = getRequiredChecks();
-        const allTypes = ['napcat', 'nodejs', 'bilibili_dll', 'vb_cable'];
+        const allTypes = ['napcat', 'snowluma', 'nodejs', 'bilibili_dll', 'vb_cable'];
         // Map type to card ID
         const cardMap = {
             napcat: 'path-check-napcat',
+            snowluma: 'path-check-snowluma',
             nodejs: 'path-check-nodejs',
             bilibili_dll: 'path-check-bilibili',
             vb_cable: 'path-check-vb-cable',
@@ -834,7 +900,9 @@ const SetupModule = (() => {
 
         try {
             const request = { type, path };
-            if (type === 'napcat') request.qq_adapter = getSelectedQqAdapter();
+            if (type === 'napcat' || type === 'snowluma') {
+                request.qq_adapter = getSelectedQqAdapter();
+            }
             const res = await apiPost('/api/setup/verify-path', request);
             pathCheckResults[type] = res.valid;
             if (statusEl) statusEl.textContent = res.valid ? '✅' : '❌';
@@ -971,9 +1039,9 @@ const SetupModule = (() => {
             return;
         }
 
-        // Phase 1.5: Configure NapCat connection only for the NapCat backend.
-        // SnowLuma is external and must already be running; WebUI never
-        // invents a managed runtime or performs a local path check for it.
+        // Phase 1.5: Configure the selected QQ backend after general config
+        // generation and before dependency installation.  SnowLuma's
+        // credentials are request-only and are cleared in finally.
         const qqAdapter = getSelectedQqAdapter();
         if (selectedComponents.includes('qq') && qqAdapter === 'napcat') {
             addProgressItem(progressDiv, 'napcat-config', '🔗 配置 NapCat 连接', 'running');
@@ -1021,8 +1089,42 @@ const SetupModule = (() => {
                 return;
             }
         } else if (selectedComponents.includes('qq') && qqAdapter === 'snowluma') {
-            addProgressItem(progressDiv, 'snowluma-info', '🔗 SnowLuma QQ 适配器', 'done');
-            addLogLine(logDiv, '\n[Setup] 已选择 SnowLuma。请先启动外部 SnowLuma 运行时；WebUI 只管理本地 SnowLuma 适配器。\n');
+            addProgressItem(progressDiv, 'snowluma-config', '🔗 配置 SnowLuma Runtime 与连接', 'running');
+            try {
+                if (pathCheckResults.snowluma !== true) {
+                    throw new Error('SnowLuma 组件检查未通过，请返回上一步重新验证');
+                }
+                const tokenInput = document.getElementById('setup-snowluma-access-token');
+                const passwordInput = document.getElementById('setup-snowluma-webui-password');
+                snowlumaRequestFields = {
+                    qq_account: wizardData.core?.qq_account || '',
+                    snowluma_access_token: tokenInput?.value || '',
+                    snowluma_webui_password: passwordInput?.value || '',
+                    qq_adapter: qqAdapter,
+                };
+                const snowResult = await runSnowLumaConfigureAttempt(
+                    snowlumaRequestFields,
+                    requestData => apiPost('/api/setup/snowluma/configure', requestData)
+                );
+                updateProgressItem('snowluma-config', 'done', '✅ SnowLuma Runtime 与连接配置完成');
+                if (snowResult?.generated?.length) {
+                    addLogLine(logDiv, `[Setup] SnowLuma 已更新 ${snowResult.generated.length} 个运行时配置文件\n`);
+                }
+            } catch (e) {
+                const detail = e?.message || 'SnowLuma 配置失败';
+                updateProgressItem('snowluma-config', 'error', `❌ SnowLuma 配置失败: ${detail}`);
+                addLogLine(logDiv, `[Setup] ERROR: SnowLuma 配置失败: ${detail}\n`);
+                addLogLine(logDiv, '[Setup] SnowLuma 配置失败，已中止部署。请修复错误后重试。\n');
+                deploying = false;
+                document.getElementById('setup-prev-5').disabled = false;
+                document.getElementById('setup-finish').disabled = true;
+                return;
+            } finally {
+                // This is intentionally adjacent to the dedicated request so
+                // a success, validation error, or transport failure cannot
+                // leave either secret in DOM or JS state.
+                clearSnowLumaSecrets();
+            }
         }
 
         // Phase 2: Install dependencies
@@ -1248,6 +1350,17 @@ const SetupModule = (() => {
         }
     }
 
+    async function runSnowLumaConfigureAttempt(requestData, request) {
+        snowlumaRequestFields = requestData;
+        try {
+            // apiPost serializes requestData synchronously before returning its
+            // promise; cleanup therefore runs only after serialization settles.
+            return await request(requestData);
+        } finally {
+            clearSnowLumaSecrets(requestData);
+        }
+    }
+
     function clearDiscordTokenFromRequest(wizardData) {
         const activeData = wizardData || activeWizardData;
         const discordTokenInput = document.getElementById('setup-discord-token');
@@ -1257,6 +1370,22 @@ const SetupModule = (() => {
         }
         if (activeData?.discord) delete activeData.discord.token;
         if (activeData === activeWizardData) activeWizardData = null;
+    }
+
+    function clearSnowLumaSecrets(requestData) {
+        const activeData = requestData || snowlumaRequestFields;
+        const tokenInput = document.getElementById('setup-snowluma-access-token');
+        const passwordInput = document.getElementById('setup-snowluma-webui-password');
+        [tokenInput, passwordInput].forEach(input => {
+            if (!input) return;
+            input.value = '';
+            input.classList?.remove('input-error');
+        });
+        if (activeData) {
+            delete activeData.snowluma_access_token;
+            delete activeData.snowluma_webui_password;
+        }
+        if (activeData === snowlumaRequestFields) snowlumaRequestFields = null;
     }
 
     function completeDeployment(progressDiv) {
@@ -1347,7 +1476,9 @@ const SetupModule = (() => {
             onComponentToggle,
             runGitBootstrapAttempt,
             runDiscordConfigAttempt,
+            runSnowLumaConfigureAttempt,
             clearDiscordTokenFromRequest,
+            clearSnowLumaSecrets,
         },
     };
 })();

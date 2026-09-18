@@ -12,6 +12,10 @@ const LauncherModule = (() => {
     let runtimeSelectionTouched = false;
     let installingRuntime = null;
     let pollInterval = null;
+    let qqAdapterStatus = null;
+    let snowlumaProcesses = null;
+    let snowlumaProcessError = '';
+    let snowlumaProcessBusy = false;
 
     const LAUNCH_PROFILES = Object.freeze({
         full: {
@@ -72,10 +76,11 @@ const LauncherModule = (() => {
 
     async function refresh() {
         try {
-            [launch, groups, runtimeStatus] = await Promise.all([
+            [launch, groups, runtimeStatus, qqAdapterStatus] = await Promise.all([
                 apiGet('/api/launch'),
                 apiGet('/api/groups'),
                 apiGet('/api/setup/deps/multimodal/status'),
+                apiGet('/api/setup/qq-adapter'),
             ]);
             if (launch.active_profile) {
                 selectedProfile = launch.active_profile;
@@ -438,8 +443,266 @@ const LauncherModule = (() => {
         }
     }
 
+    function qqGroupIsBusy(group) {
+        return (group?.services || []).some(service =>
+            service.status === 'starting' || service.status === 'running' || service.status === 'stopping'
+        );
+    }
+
+    function qqGroupIsTransitioning(group) {
+        return (group?.services || []).some(service =>
+            service.status === 'starting' || service.status === 'stopping'
+        );
+    }
+
+    function selectedQqAdapter(group) {
+        if (qqAdapterStatus?.selected === 'snowluma') return 'snowluma';
+        if (qqAdapterStatus?.selected === 'napcat') return 'napcat';
+        return String(group?.name || '').toLowerCase().includes('snowluma') ? 'snowluma' : 'napcat';
+    }
+
+    function qqComponentStatus(adapter) {
+        return qqAdapterStatus?.[adapter] || {
+            selected: adapter,
+            installed: false,
+            missing: ['状态尚未刷新'],
+            download_url: adapter === 'snowluma'
+                ? 'https://github.com/SnowLuma/SnowLuma/releases/latest'
+                : 'https://github.com/NapNeko/NapCatQQ/releases',
+        };
+    }
+
+    function normalizeSnowLumaProcess(item) {
+        const rawPid = Number(item?.pid);
+        return {
+            pid: Number.isInteger(rawPid) && rawPid > 0 ? rawPid : 0,
+            name: String(item?.name || 'QQ').slice(0, 120),
+            uin: item?.uin ? String(item.uin).slice(0, 40) : '',
+            status: String(item?.status || '').slice(0, 120),
+            injected: Boolean(item?.injected),
+            connected: Boolean(item?.connected),
+            loggedIn: Boolean(item?.loggedIn),
+        };
+    }
+
+    function snowlumaProcessMarkup() {
+        if (!Array.isArray(snowlumaProcesses)) return '';
+        if (!snowlumaProcesses.length) {
+            return '<div class="snowluma-process-empty">未发现可管理的 QQ 进程，请确认 SnowLuma Runtime 已启动。</div>';
+        }
+        return `
+            <div class="snowluma-process-list">
+                ${snowlumaProcesses.map(raw => {
+                    const process = normalizeSnowLumaProcess(raw);
+                    if (!process.pid) return '';
+                    const account = process.uin || '未登录/未知';
+                    const state = process.status || (process.loggedIn ? '已登录' : '未知');
+                    const action = process.injected ? 'unload' : 'load';
+                    const actionLabel = process.injected ? '解除注入' : '注入';
+                    return `
+                        <div class="snowluma-process-row" data-snowluma-pid="${process.pid}">
+                            <div class="snowluma-process-main">
+                                <strong>${escapeHtml(process.name)}</strong>
+                                <span>PID ${process.pid}</span>
+                                <span>QQ: ${escapeHtml(account)}</span>
+                                <span>状态: ${escapeHtml(state)}</span>
+                            </div>
+                            <div class="snowluma-process-actions">
+                                <button type="button" class="btn btn-outline btn-sm" data-snowluma-action="${action}" data-snowluma-pid="${process.pid}">${actionLabel}</button>
+                                ${process.injected ? `<button type="button" class="btn btn-outline btn-sm" data-snowluma-action="refresh" data-snowluma-pid="${process.pid}">刷新</button>` : ''}
+                            </div>
+                        </div>
+                    `;
+                }).join('')}
+            </div>
+        `;
+    }
+
+    function snowlumaGroupCardInnerHTML(group) {
+        const adapter = selectedQqAdapter(group);
+        const component = qqComponentStatus(adapter);
+        const services = group.services || [];
+        const runCount = services.filter(s => s.status === 'running').length;
+        const errCount = services.filter(s => s.status === 'error').length;
+        const anyStarting = services.some(s => s.status === 'starting');
+        const anyStopping = services.some(s => s.status === 'stopping');
+        const anyRunning = runCount > 0;
+        const busy = qqGroupIsBusy(group);
+        const transitioning = qqGroupIsTransitioning(group);
+        const badge = errCount > 0
+            ? ['error', '错误']
+            : anyStarting
+                ? ['starting', '启动中']
+                : anyStopping
+                    ? ['partial', '停止中']
+                    : runCount === services.length && services.length
+                        ? ['running', '运行中']
+                        : runCount > 0
+                            ? ['partial', `${runCount}/${services.length}`]
+                            : ['stopped', '已停止'];
+        const downloadUrl = component.download_url || (
+            adapter === 'snowluma'
+                ? 'https://github.com/SnowLuma/SnowLuma/releases/latest'
+                : 'https://github.com/NapNeko/NapCatQQ/releases'
+        );
+        const missing = Array.isArray(component.missing) ? component.missing : [];
+        const installed = component.installed === true;
+        const startDisabled = transitioning || !installed;
+        const selectedSnowLuma = adapter === 'snowluma';
+        return `
+            <div class="group-card-header">
+                <div class="group-info">
+                    <span class="group-icon">${svgIcon('message-circle')}</span>
+                    <div>
+                        <div class="group-name">QQ / ${selectedSnowLuma ? 'SnowLuma' : 'NapCat'}</div>
+                        <div class="group-detail">选择后由 WebUI 管理对应 QQ 运行时与适配器</div>
+                    </div>
+                </div>
+                <span class="group-status-badge ${badge[0]}">${badge[1]}</span>
+            </div>
+            <div class="group-card-body qq-launch-body">
+                <div class="qq-adapter-selector-row">
+                    <label for="launcher-qq-adapter"><strong>QQ 后端</strong></label>
+                    <select id="launcher-qq-adapter" class="form-select" ${busy ? 'disabled' : ''}>
+                        <option value="napcat" ${adapter === 'napcat' ? 'selected' : ''}>NapCat</option>
+                        <option value="snowluma" ${selectedSnowLuma ? 'selected' : ''}>SnowLuma</option>
+                    </select>
+                </div>
+                <div class="qq-component-status ${installed ? 'installed' : 'missing'}">
+                    <div class="qq-component-status-heading">
+                        <strong>${installed ? '✓ 组件已安装' : '⚠ 组件缺失'}</strong>
+                        <span>${selectedSnowLuma ? 'SnowLuma Runtime + Adapter' : 'NapCat Shell + Adapter'}</span>
+                    </div>
+                    ${missing.length ? `<div class="qq-component-missing">缺少: ${escapeHtml(missing.join('、'))}</div>` : ''}
+                    ${!installed ? `<div class="qq-component-guidance">请下载或重新部署所选组件后再启动。</div><a class="btn-download" href="${escapeHtml(downloadUrl)}" target="_blank" rel="noopener noreferrer">📥 官方下载 / 重新部署</a>` : ''}
+                </div>
+                ${selectedSnowLuma ? `
+                    <div class="snowluma-instance-panel">
+                        <div class="snowluma-instance-toolbar">
+                            <label for="launcher-snowluma-password">WebUI 密码</label>
+                            <input type="password" class="form-input" id="launcher-snowluma-password" autocomplete="new-password" placeholder="仅用于本次请求">
+                            <button type="button" class="btn btn-outline btn-sm" data-snowluma-refresh ${(!installed || snowlumaProcessBusy) ? 'disabled' : ''}>刷新实例</button>
+                        </div>
+                        ${snowlumaProcessError ? `<div class="snowluma-process-error">${escapeHtml(snowlumaProcessError)}</div>` : ''}
+                        ${snowlumaProcessMarkup()}
+                    </div>
+                ` : ''}
+                <div class="qq-service-status-list">
+                    ${services.map(service => `
+                        <div class="service-row">
+                            <div class="service-info"><div class="service-dot ${service.status}"></div><div class="service-text"><span class="service-name">${escapeHtml(service.name)}</span>${service.detail ? `<span class="service-detail">${escapeHtml(service.detail)}</span>` : ''}</div></div>
+                            ${service.port ? `<span class="service-port">:${service.port}</span>` : ''}
+                        </div>
+                    `).join('')}
+                </div>
+            </div>
+            <div class="group-card-footer">
+                <button class="btn ${anyRunning ? 'btn-outline' : 'btn-primary'} btn-full" id="btn-start-${group.id}" ${startDisabled ? 'disabled' : ''}>
+                    ${svgIcon(anyRunning ? 'rotate-ccw' : 'play')}${anyRunning ? '重启组' : '启动组'}
+                </button>
+                ${(anyRunning || anyStarting) ? `<button class="btn btn-danger" id="btn-stop-${group.id}">${svgIcon('square')}${anyStarting && !anyRunning ? '取消启动' : '停止'}</button>` : ''}
+            </div>
+        `;
+    }
+
+    function bindSnowLumaCardEvents(card, group) {
+        card.querySelector('#launcher-qq-adapter')?.addEventListener('change', event => {
+            selectQqAdapter(event.target.value, group, card);
+        });
+        card.querySelector('[data-snowluma-refresh]')?.addEventListener('click', () => {
+            refreshSnowLumaProcesses(card);
+        });
+        card.querySelectorAll('[data-snowluma-action]').forEach(button => {
+            button.addEventListener('click', () => {
+                processSnowLumaAction(card, Number(button.dataset.snowlumaPid), button.dataset.snowlumaAction);
+            });
+        });
+        const anyRunning = group.services.some(s => s.status === 'running');
+        card.querySelector(`#btn-start-${group.id}`)?.addEventListener('click', () => startGroup(group.id, anyRunning));
+        card.querySelector(`#btn-stop-${group.id}`)?.addEventListener('click', () => stopGroup(group.id));
+    }
+
+    async function selectQqAdapter(adapter, group, card) {
+        if (!['napcat', 'snowluma'].includes(adapter) || qqGroupIsBusy(group)) return;
+        const select = card.querySelector('#launcher-qq-adapter');
+        if (select) select.disabled = true;
+        try {
+            await apiPost('/api/setup/qq-adapter', { qq_adapter: adapter });
+            toast(`已切换到 ${adapter === 'snowluma' ? 'SnowLuma' : 'NapCat'}`, 'success');
+            await refresh();
+        } catch (e) {
+            toast(`切换 QQ 后端失败: ${e?.message || '请求失败'}`, 'error');
+            if (select) select.value = selectedQqAdapter(group);
+        }
+    }
+
+    async function refreshSnowLumaProcesses(card) {
+        if (snowlumaProcessBusy) return;
+        if (!(card.querySelector('#launcher-snowluma-password')?.value || '')) {
+            toast('请输入 SnowLuma WebUI 密码后刷新实例', 'error');
+            return;
+        }
+        snowlumaProcessBusy = true;
+        snowlumaProcessError = '';
+        render();
+        try {
+            const result = await withSnowLumaPassword(
+                card,
+                password => apiPost('/api/setup/snowluma/processes', { password }),
+            );
+            const list = Array.isArray(result?.list)
+                ? result.list
+                : Array.isArray(result?.processes) ? result.processes : [];
+            snowlumaProcesses = list.map(normalizeSnowLumaProcess);
+        } catch (e) {
+            snowlumaProcessError = e?.message || 'SnowLuma 实例刷新失败';
+            toast(snowlumaProcessError, 'error');
+        } finally {
+            snowlumaProcessBusy = false;
+            render();
+        }
+    }
+
+    async function processSnowLumaAction(card, pid, action) {
+        if (!Number.isInteger(pid) || pid <= 0 || !['load', 'unload', 'refresh'].includes(action)) return;
+        if (!(card.querySelector('#launcher-snowluma-password')?.value || '')) {
+            toast('请输入 SnowLuma WebUI 密码后执行实例操作', 'error');
+            return;
+        }
+        try {
+            await withSnowLumaPassword(
+                card,
+                password => apiPost(`/api/setup/snowluma/processes/${pid}/${action}`, { password }),
+            );
+            if (action === 'load' || action === 'unload') {
+                const current = Array.isArray(snowlumaProcesses) ? snowlumaProcesses.find(item => item.pid === pid) : null;
+                if (current) current.injected = action === 'load';
+            }
+            toast(`PID ${pid} ${action === 'load' ? '注入' : action === 'unload' ? '解除注入' : '刷新'}完成`, 'success');
+            render();
+        } catch (e) {
+            toast(e?.message || 'SnowLuma 实例操作失败', 'error');
+        }
+    }
+
+    function clearSnowLumaPasswordInput(card) {
+        const input = card?.querySelector('#launcher-snowluma-password');
+        if (input) input.value = '';
+    }
+
+    async function withSnowLumaPassword(card, request) {
+        let password = card?.querySelector('#launcher-snowluma-password')?.value || '';
+        try {
+            return await request(password);
+        } finally {
+            password = '';
+            clearSnowLumaPasswordInput(card);
+        }
+    }
+
     /** Generate the inner HTML for a group card (without the wrapper div). */
     function groupCardInnerHTML(group) {
+        if (group.id === 'qq_adapter') return snowlumaGroupCardInnerHTML(group);
         const runCount = group.services.filter(s => s.status === 'running').length;
         const errCount = group.services.filter(s => s.status === 'error').length;
         const total = group.services.length;
@@ -504,8 +767,11 @@ const LauncherModule = (() => {
         const newHTML = groupCardInnerHTML(group);
         // Only touch the DOM if something actually changed
         if (card._lastHTML !== newHTML) {
+            const requestOnlyPassword = card.querySelector('#launcher-snowluma-password')?.value || '';
             card._lastHTML = newHTML;
             card.innerHTML = newHTML;
+            const passwordInput = card.querySelector('#launcher-snowluma-password');
+            if (passwordInput && requestOnlyPassword) passwordInput.value = requestOnlyPassword;
             bindCardEvents(card, group);
         }
     }
@@ -521,6 +787,10 @@ const LauncherModule = (() => {
     }
 
     function bindCardEvents(card, group) {
+        if (group.id === 'qq_adapter') {
+            bindSnowLumaCardEvents(card, group);
+            return;
+        }
         const anyRunning = group.services.some(s => s.status === 'running');
 
         const startBtn = card.querySelector(`#btn-start-${group.id}`);
@@ -536,6 +806,14 @@ const LauncherModule = (() => {
 
     async function startGroup(groupId, isRestart) {
         try {
+            if (groupId === 'qq_adapter') {
+                const group = groups.find(item => item.id === groupId);
+                const adapter = selectedQqAdapter(group);
+                const component = qqComponentStatus(adapter);
+                if (component.installed !== true) {
+                    throw new Error(`所选 ${adapter === 'snowluma' ? 'SnowLuma' : 'NapCat'} 组件缺失，请先下载或重新部署`);
+                }
+            }
             if (isRestart) {
                 await apiPost(`/api/groups/${groupId}/stop`);
                 // Wait a bit before restarting
@@ -564,5 +842,16 @@ const LauncherModule = (() => {
         }
     }
 
-    return { init, refresh };
+    return {
+        init,
+        refresh,
+        // Test-only pure hooks keep the instance rendering/action contract
+        // executable without starting a browser or contacting SnowLuma.
+        __test: {
+            normalizeSnowLumaProcess,
+            snowlumaProcessMarkup,
+            qqGroupIsBusy,
+            withSnowLumaPassword,
+        },
+    };
 })();

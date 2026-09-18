@@ -14,15 +14,27 @@ const tokenInput = {
         add(value) { this._values.add(value); },
         remove(value) { this._values.delete(value); },
         contains(value) { return this._values.has(value); },
+        toggle(value, force) {
+            if (force) this._values.add(value);
+            else if (force === false) this._values.delete(value);
+            else if (this._values.has(value)) this._values.delete(value);
+            else this._values.add(value);
+        },
     },
 };
 const bilibiliInput = { value: '' };
+const snowlumaTokenInput = { value: '', classList: tokenInput.classList };
+const snowlumaPasswordInput = { value: '', classList: tokenInput.classList };
+const qqAdapterInput = { value: 'napcat' };
 let checkedComponents = [];
 
 const documentStub = {
     getElementById(id) {
         if (id === 'setup-discord-token') return tokenInput;
         if (id === 'setup-bilibili-bot-account') return bilibiliInput;
+        if (id === 'setup-snowluma-access-token') return snowlumaTokenInput;
+        if (id === 'setup-snowluma-webui-password') return snowlumaPasswordInput;
+        if (id === 'setup-qq-adapter') return qqAdapterInput;
         return null;
     },
     querySelectorAll(selector) {
@@ -127,6 +139,45 @@ async function main() {
         assert.strictEqual(observedToken, 'example-value');
         assertCleared(wizardData);
     }
+
+    checkedComponents = [{ value: 'qq' }];
+    qqAdapterInput.value = 'snowluma';
+    snowlumaTokenInput.value = 'snowluma-token-123456';
+    snowlumaPasswordInput.value = 'GoodPassword!1';
+    let observedSnow = null;
+    const snowRequest = {
+        qq_account: '123456',
+        snowluma_access_token: snowlumaTokenInput.value,
+        snowluma_webui_password: snowlumaPasswordInput.value,
+        qq_adapter: 'snowluma',
+    };
+    await contract.runSnowLumaConfigureAttempt(snowRequest, async data => {
+        observedSnow = { ...data };
+        return { status: 'ok' };
+    });
+    assert.strictEqual(observedSnow.snowluma_access_token, 'snowluma-token-123456');
+    assert.strictEqual(observedSnow.snowluma_webui_password, 'GoodPassword!1');
+    assert.strictEqual(snowlumaTokenInput.value, '');
+    assert.strictEqual(snowlumaPasswordInput.value, '');
+    assert(!Object.prototype.hasOwnProperty.call(snowRequest, 'snowluma_access_token'));
+    assert(!Object.prototype.hasOwnProperty.call(snowRequest, 'snowluma_webui_password'));
+
+    snowlumaTokenInput.value = 'snowluma-token-123456';
+    snowlumaPasswordInput.value = 'GoodPassword!1';
+    const failedSnow = {
+        snowluma_access_token: snowlumaTokenInput.value,
+        snowluma_webui_password: snowlumaPasswordInput.value,
+    };
+    await assert.rejects(
+        contract.runSnowLumaConfigureAttempt(failedSnow, async () => {
+            throw new Error('SnowLuma configure failed');
+        }),
+        /SnowLuma configure failed/
+    );
+    assert.strictEqual(snowlumaTokenInput.value, '');
+    assert.strictEqual(snowlumaPasswordInput.value, '');
+    assert(!Object.prototype.hasOwnProperty.call(failedSnow, 'snowluma_access_token'));
+    assert(!Object.prototype.hasOwnProperty.call(failedSnow, 'snowluma_webui_password'));
 }
 
 main().then(

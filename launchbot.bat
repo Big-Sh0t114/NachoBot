@@ -378,6 +378,13 @@ set "NAPCAT_SHELL_BAT=launcher-user.bat"
 set "PYTHON_CMD=uv run python"
 set "MAX_WAIT=60"
 
+if /i "%QQ_ADAPTER%"=="snowluma" (
+  call :VERIFY_SNOWLUMA_COMPONENTS
+  if errorlevel 1 (
+    endlocal & exit /b 1
+  )
+)
+
 echo --- Syncing NachoBot...
 cd /d "%NACHOBOT_DIR%"
 uv sync --python ">=3.11,<=3.13"
@@ -406,6 +413,14 @@ if errorlevel 1 (
   endlocal & exit /b 1
 )
 
+if /i "%QQ_ADAPTER%"=="snowluma" (
+  call :START_SNOWLUMA_RUNTIME
+  if errorlevel 1 (
+    echo [FATAL] SnowLuma Runtime did not become ready; adapter startup aborted.
+    endlocal & exit /b 1
+  )
+)
+
 if exist "%NACHOBOT_DIR%\%NACHOBOT_MAIN%" (
   echo --- Start NachoBot...
   start "NachoBot" /D "%NACHOBOT_DIR%" cmd /k "set HOST=127.0.0.1 && set PORT=%NACHOBOT_PORT% && %PYTHON_CMD% %NACHOBOT_MAIN%"
@@ -429,6 +444,84 @@ if /i "%QQ_ADAPTER%"=="napcat" if exist "%NAPCAT_SHELL_DIR%\%NAPCAT_SHELL_BAT%" 
 
 echo.
 echo Startup complete.
+endlocal & exit /b 0
+
+:VERIFY_SNOWLUMA_COMPONENTS
+setlocal EnableExtensions EnableDelayedExpansion
+set "SNOWLUMA_DIR=%ROOT%SnowLuma"
+set "SNOWLUMA_ADAPTER_DIR=%ROOT%NachoBot-SnowLuma-Adapter"
+set "SNOWLUMA_MISSING="
+for %%F in (package.json index.mjs utils-tSVKpzEf.js logger-BAozzyTt.js config-GJCFWjtq.js server-CLw7fwOG.js node.exe launcher.bat client\index.html native\snowluma-win32-x64.dll native\snowluma-win32-x64.node native\websocket-win32-x64.node) do (
+  if not exist "!SNOWLUMA_DIR!\%%F" set "SNOWLUMA_MISSING=!SNOWLUMA_MISSING! SnowLuma/%%F;"
+)
+if not exist "!SNOWLUMA_ADAPTER_DIR!\main.py" set "SNOWLUMA_MISSING=!SNOWLUMA_MISSING! NachoBot-SnowLuma-Adapter/main.py;"
+if not exist "!SNOWLUMA_ADAPTER_DIR!\pyproject.toml" set "SNOWLUMA_MISSING=!SNOWLUMA_MISSING! NachoBot-SnowLuma-Adapter/pyproject.toml;"
+if defined SNOWLUMA_MISSING (
+  echo [FATAL] SnowLuma components are incomplete: !SNOWLUMA_MISSING!
+  echo [INFO] Redeploy from https://github.com/SnowLuma/SnowLuma/releases/latest
+  endlocal & exit /b 1
+)
+endlocal & exit /b 0
+
+:START_SNOWLUMA_RUNTIME
+setlocal EnableExtensions EnableDelayedExpansion
+set "SNOWLUMA_DIR=%ROOT%SnowLuma"
+set "SNOWLUMA_NODE=!SNOWLUMA_DIR!\node.exe"
+set "SNOWLUMA_PORT=5099"
+set "SNOWLUMA_HOST=127.0.0.1"
+set "SNOWLUMA_ONEBOT_PORT=3001"
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$p='%ROOT%SnowLuma\config\runtime.json'; if (Test-Path -LiteralPath $p) { try { $j=Get-Content -Raw -LiteralPath $p | ConvertFrom-Json; $v=[int]$j.webuiPort; if ($v -ge 1 -and $v -le 65535) { $v } else { 5099 } } catch { 5099 } } else { 5099 }"`) do set "SNOWLUMA_PORT=%%P"
+for /f "usebackq delims=" %%H in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$p='%ROOT%SnowLuma\config\runtime.json'; $h='127.0.0.1'; if (Test-Path -LiteralPath $p) { try { $j=Get-Content -Raw -LiteralPath $p | ConvertFrom-Json; if ($null -ne $j.webuiHost -and -not [string]::IsNullOrWhiteSpace([string]$j.webuiHost)) { $h=([string]$j.webuiHost).Trim().ToLowerInvariant() } } catch { $h='__INVALID__' } }; if ($h -ne '127.0.0.1') { '__INVALID__' } else { $h }"`) do set "SNOWLUMA_HOST=%%H"
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$p='%ROOT%NachoBot-SnowLuma-Adapter\config.toml'; if (Test-Path -LiteralPath $p) { $c=Get-Content -Raw -LiteralPath $p; if ($c -match '(?ms)^\[snowluma\]\s*.*?^port\s*=\s*(\d+)') { $v=[int]$Matches[1]; if ($v -ge 1 -and $v -le 65535) { $v } else { 3001 } } else { 3001 } } else { 3001 }"`) do set "SNOWLUMA_ONEBOT_PORT=%%P"
+if /i "!SNOWLUMA_HOST!"=="__INVALID__" (
+  echo [FATAL] SnowLuma webuiHost must be a loopback address; refusing to start.
+  endlocal & exit /b 1
+)
+if not exist "!SNOWLUMA_NODE!" (
+  echo [FATAL] Bundled SnowLuma node.exe not found: !SNOWLUMA_NODE!
+  endlocal & exit /b 1
+)
+if not exist "!SNOWLUMA_DIR!\index.mjs" (
+  echo [FATAL] SnowLuma index.mjs not found: !SNOWLUMA_DIR!\index.mjs
+  endlocal & exit /b 1
+)
+call :CHECK_SNOWLUMA_PORT_FREE "!SNOWLUMA_PORT!" "WebUI"
+if errorlevel 1 (
+  endlocal & exit /b 1
+)
+call :CHECK_SNOWLUMA_PORT_FREE "!SNOWLUMA_ONEBOT_PORT!" "OneBot"
+if errorlevel 1 (
+  endlocal & exit /b 1
+)
+echo --- Start bundled SnowLuma Runtime on port !SNOWLUMA_PORT!...
+start "SnowLuma Runtime" /D "!SNOWLUMA_DIR!" cmd /k ""!SNOWLUMA_NODE!" index.mjs"
+set "SNOWLUMA_READY="
+for /l %%I in (1,1,60) do (
+  if not defined SNOWLUMA_READY (
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "$client=New-Object System.Net.Sockets.TcpClient; try { $client.Connect('127.0.0.1',!SNOWLUMA_PORT!); exit 0 } catch { exit 1 } finally { $client.Dispose() }" >nul 2>&1
+    if not errorlevel 1 (
+      set "SNOWLUMA_READY=1"
+      echo [OK] SnowLuma Runtime :!SNOWLUMA_PORT! is ready.
+    ) else (
+      timeout /t 1 /nobreak >nul
+    )
+  )
+)
+if not defined SNOWLUMA_READY (
+  echo [FATAL] SnowLuma Runtime :!SNOWLUMA_PORT! did not become ready within 60 seconds.
+  endlocal & exit /b 1
+)
+endlocal & exit /b 0
+
+:CHECK_SNOWLUMA_PORT_FREE
+setlocal EnableExtensions
+set "CHECK_PORT=%~1"
+set "CHECK_LABEL=%~2"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$client=New-Object System.Net.Sockets.TcpClient; try { $client.Connect('127.0.0.1',%~1); exit 0 } catch { exit 1 } finally { $client.Dispose() }" >nul 2>&1
+if not errorlevel 1 (
+  echo [FATAL] SnowLuma %CHECK_LABEL% port :%CHECK_PORT% is already occupied; refusing to start bundled runtime.
+  endlocal & exit /b 1
+)
 endlocal & exit /b 0
 
 :READ_QQ_ADAPTER
