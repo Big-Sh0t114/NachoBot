@@ -1,0 +1,6 @@
+config.toml
+logs/
+runtime/
+*.wav
+__pycache__/
+.venv/
