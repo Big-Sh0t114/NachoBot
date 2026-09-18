@@ -321,6 +321,35 @@ def _loopback_ws_endpoint(entry: Mapping[str, Any]) -> tuple[str, int, str] | No
     return ("127.0.0.1", port, _normalized_path(entry.get("path")))
 
 
+def _credential_ws_endpoint(entry: Mapping[str, Any]) -> tuple[str, int, str] | None:
+    """Normalize only loopback addresses accepted by the standalone checker.
+
+    The broader helper above is intentionally retained for deployment conflict
+    detection, where an existing wildcard listener must still be recognized.
+    Credential preflight is stricter so the WebUI and BAT paths have one
+    authority boundary and never disagree about a wildcard-bound endpoint.
+    """
+
+    if not isinstance(entry, Mapping):
+        return None
+    host = str(entry.get("host") or "").strip().casefold()
+    if host not in {"127.0.0.1", "localhost", "::1", "[::1]"}:
+        return None
+    port = _valid_port(entry.get("port"), 0)
+    if not port:
+        return None
+    return ("127.0.0.1", port, _normalized_path(entry.get("path")))
+
+
+def _credential_qq_account(value: object) -> str | None:
+    """Return a safe, non-secret account authority from adapter metadata."""
+
+    if not isinstance(value, str):
+        return None
+    account = value.strip()
+    return account if re.fullmatch(r"\d{5,20}", account) else None
+
+
 def _load_runtime_webui_port(runtime_dir: Path) -> int:
     runtime_config = runtime_dir / "config" / "runtime.json"
     try:
@@ -453,6 +482,7 @@ def _synchronize_adapter_document(
     path: Path,
     onebot_port: int,
     access_token: str,
+    qq_account: str,
 ) -> bytes:
     if not path.is_file():
         raise SnowLumaSynchronizationError(
@@ -475,6 +505,9 @@ def _synchronize_adapter_document(
     # can never survive a successful deployment.
     section["scheme"] = "ws"
     section["token"] = access_token
+    # Keep the selected account as non-secret authority metadata so startup
+    # checks do not let an unrelated account veto this deployment.
+    section["qq_account"] = qq_account
     return tomlkit.dumps(document).encode("utf-8")
 
 
@@ -783,7 +816,11 @@ class SnowLumaManager:
             if not isinstance(section, Mapping):
                 raise ValueError
             adapter_token = section.get("token") if isinstance(section.get("token"), str) else ""
-            endpoint_tuple = _loopback_ws_endpoint(
+            authority_value = section.get("qq_account")
+            authority_account = _credential_qq_account(authority_value)
+            if authority_value is not None and authority_account is None:
+                raise ValueError
+            endpoint_tuple = _credential_ws_endpoint(
                 {
                     "host": section.get("host"),
                     "port": section.get("port"),
@@ -817,11 +854,17 @@ class SnowLumaManager:
         matched = 0
         missing = False
         mismatch = False
+        correct = False
         config_dir = runtime.path / "config"
-        try:
-            config_files = sorted(config_dir.glob("onebot_*.json"), key=lambda path: path.name.casefold())
-        except OSError:
-            config_files = []
+        if authority_account is not None:
+            config_files = (config_dir / f"onebot_{authority_account}.json",)
+        else:
+            try:
+                config_files = sorted(
+                    config_dir.glob("onebot_*.json"), key=lambda path: path.name.casefold()
+                )
+            except OSError:
+                config_files = []
         for config_path in config_files:
             try:
                 document = json.loads(config_path.read_text(encoding="utf-8"))
@@ -834,24 +877,41 @@ class SnowLumaManager:
             if not isinstance(servers, list):
                 continue
             for server in servers:
-                if not isinstance(server, dict) or _loopback_ws_endpoint(server) != expected:
+                if (
+                    not isinstance(server, dict)
+                    # SnowLuma disables an adapter only for literal false;
+                    # omitted/legacy values are enabled by the runtime.
+                    or server.get("enabled") is False
+                    or _credential_ws_endpoint(server) != expected
+                ):
                     continue
                 matched += 1
                 token = server.get("accessToken")
                 if not isinstance(token, str) or not token:
                     missing = True
+                elif token == adapter_token:
+                    correct = True
                 elif token != adapter_token:
                     mismatch = True
 
-        if mismatch:
+        if mismatch and authority_account is not None:
             status = "mismatch"
             message = "SnowLuma 适配器与 OneBot 凭据不一致，请重新部署 SnowLuma"
-        elif missing or matched == 0:
+        elif authority_account is not None and (missing or matched == 0):
             status = "missing"
             message = "SnowLuma OneBot 凭据缺失，请重新部署 SnowLuma"
-        else:
+        elif authority_account is not None and correct:
             status = "ok"
             message = "SnowLuma 凭据一致"
+        elif authority_account is None and correct:
+            status = "ok"
+            message = "SnowLuma 凭据一致"
+        elif authority_account is None and mismatch:
+            status = "mismatch"
+            message = "SnowLuma 适配器与 OneBot 凭据不一致，请重新部署 SnowLuma"
+        else:
+            status = "missing"
+            message = "SnowLuma OneBot 凭据缺失，请重新部署 SnowLuma"
         return {
             "status": status,
             "consistent": status == "ok",
@@ -1027,7 +1087,7 @@ class SnowLumaManager:
             # target.  DPAPI/protector failure therefore leaves all configs
             # untouched, including an existing valid ciphertext.
             staged[adapter_path] = _synchronize_adapter_document(
-                adapter_path, ports["onebot"], token
+                adapter_path, ports["onebot"], token, account
             )
             staged[onebot_path] = _synchronize_onebot_document(
                 onebot_path, account, ports["onebot"], token

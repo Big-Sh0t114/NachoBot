@@ -213,6 +213,15 @@ def _normalized_endpoint(value: object) -> tuple[str, int, str] | None:
     return ("127.0.0.1", port, path.rstrip("/") or "/")
 
 
+def _credential_qq_account(value: object) -> str | None:
+    """Return a safe, non-secret account authority from adapter metadata."""
+
+    if not isinstance(value, str):
+        return None
+    account = value.strip()
+    return account if re.fullmatch(r"\d{5,20}", account) else None
+
+
 def credential_consistency(
     root: Path | str | None = None,
     *,
@@ -243,6 +252,10 @@ def credential_consistency(
         if not isinstance(section, dict):
             raise ValueError
         token = section.get("token")
+        authority_value = section.get("qq_account")
+        authority_account = _credential_qq_account(authority_value)
+        if authority_value is not None and authority_account is None:
+            raise ValueError
         endpoint = _normalized_endpoint(section)
         if not isinstance(token, str) or not token or endpoint is None:
             raise ValueError
@@ -257,11 +270,17 @@ def credential_consistency(
     matched = 0
     missing = False
     mismatch = False
+    correct = False
     config_dir = selected.path / "config"
-    try:
-        config_files = sorted(config_dir.glob("onebot_*.json"), key=lambda item: item.name.casefold())
-    except OSError:
-        config_files = []
+    if authority_account is not None:
+        config_files = (config_dir / f"onebot_{authority_account}.json",)
+    else:
+        try:
+            config_files = sorted(
+                config_dir.glob("onebot_*.json"), key=lambda item: item.name.casefold()
+            )
+        except OSError:
+            config_files = []
     for config_path in config_files:
         try:
             onebot = json.loads(config_path.read_text(encoding="utf-8"))
@@ -274,24 +293,41 @@ def credential_consistency(
         if not isinstance(servers, list):
             continue
         for server in servers:
-            if not isinstance(server, dict) or _normalized_endpoint(server) != endpoint:
+            if (
+                not isinstance(server, dict)
+                # SnowLuma disables an adapter only for literal false;
+                # omitted/legacy values are enabled by the runtime.
+                or server.get("enabled") is False
+                or _normalized_endpoint(server) != endpoint
+            ):
                 continue
             matched += 1
             candidate = server.get("accessToken")
             if not isinstance(candidate, str) or not candidate:
                 missing = True
+            elif candidate == token:
+                correct = True
             elif candidate != token:
                 mismatch = True
 
-    if mismatch:
+    if mismatch and authority_account is not None:
         status = "mismatch"
         message = "SnowLuma 适配器与 OneBot 凭据不一致，请重新部署 SnowLuma"
-    elif missing or matched == 0:
+    elif authority_account is not None and (missing or matched == 0):
         status = "missing"
         message = "SnowLuma OneBot 凭据缺失，请重新部署 SnowLuma"
-    else:
+    elif authority_account is not None and correct:
         status = "ok"
         message = "ok"
+    elif authority_account is None and correct:
+        status = "ok"
+        message = "ok"
+    elif authority_account is None and mismatch:
+        status = "mismatch"
+        message = "SnowLuma 适配器与 OneBot 凭据不一致，请重新部署 SnowLuma"
+    else:
+        status = "missing"
+        message = "SnowLuma OneBot 凭据缺失，请重新部署 SnowLuma"
     return {
         "status": status,
         "consistent": status == "ok",

@@ -109,6 +109,21 @@ def _patch_safe_sync(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(snowluma, "_port_listening", lambda _port: False)
 
 
+def _write_onebot_servers(root: Path, account: str, servers: list[dict[str, object]]) -> None:
+    _write(
+        root,
+        f"SnowLuma/config/onebot_{account}.json",
+        json.dumps({"networks": {"wsServers": servers}}),
+    )
+
+
+def _credential_statuses(root: Path) -> tuple[dict[str, object], dict[str, object]]:
+    return (
+        snowluma.SnowLumaManager.credential_consistency(root),
+        locator.credential_consistency(root),
+    )
+
+
 def test_password_store_fake_protector_round_trip_and_failed_replace_preserves_old(
     tmp_path: Path,
 ) -> None:
@@ -190,6 +205,202 @@ def test_credential_consistency_is_redacted_and_rejects_mismatch_before_launch(
         snowluma.SnowLumaManager.validate_launch_boundary(tmp_path)
 
 
+def test_legacy_multi_account_correct_and_stale_is_ok_for_manager_and_locator(
+    tmp_path: Path,
+) -> None:
+    _prepare_runtime(tmp_path)
+    _write_onebot_servers(
+        tmp_path,
+        "999999",
+        [
+            {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 3001,
+                "path": "/",
+                "accessToken": "stale-token-123456",
+            }
+        ],
+    )
+
+    manager_status, locator_status = _credential_statuses(tmp_path)
+    assert manager_status["status"] == locator_status["status"] == "ok"
+    assert manager_status["consistent"] is locator_status["consistent"] is True
+    assert TOKEN not in repr(manager_status)
+    assert TOKEN not in repr(locator_status)
+
+
+def test_authoritative_account_mismatch_wins_over_another_matching_account(
+    tmp_path: Path,
+) -> None:
+    _prepare_runtime(tmp_path)
+    adapter_path = tmp_path / "NachoBot-SnowLuma-Adapter/config.toml"
+    adapter_path.write_text(
+        adapter_path.read_text(encoding="utf-8").replace(
+            'scheme = "ws"\n', 'scheme = "ws"\nqq_account = "123456"\n'
+        ),
+        encoding="utf-8",
+    )
+    _write_onebot_servers(
+        tmp_path,
+        "123456",
+        [
+            {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 3001,
+                "path": "/",
+                "accessToken": "stale-token-123456",
+            },
+            {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 3001,
+                "path": "/",
+                "accessToken": TOKEN,
+            },
+        ],
+    )
+    _write_onebot_servers(
+        tmp_path,
+        "999999",
+        [
+            {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 3001,
+                "path": "/",
+                "accessToken": TOKEN,
+            }
+        ],
+    )
+
+    manager_status, locator_status = _credential_statuses(tmp_path)
+    assert manager_status["status"] == locator_status["status"] == "mismatch"
+    assert manager_status["consistent"] is locator_status["consistent"] is False
+    assert "123456" not in repr(manager_status)
+    assert "123456" not in repr(locator_status)
+    assert TOKEN not in repr(manager_status)
+    assert TOKEN not in repr(locator_status)
+
+
+def test_authoritative_account_correct_ignores_unrelated_stale_account(
+    tmp_path: Path,
+) -> None:
+    _prepare_runtime(tmp_path)
+    adapter_path = tmp_path / "NachoBot-SnowLuma-Adapter/config.toml"
+    adapter_path.write_text(
+        adapter_path.read_text(encoding="utf-8").replace(
+            'scheme = "ws"\n', 'scheme = "ws"\nqq_account = "123456"\n'
+        ),
+        encoding="utf-8",
+    )
+    _write_onebot_servers(
+        tmp_path,
+        "999999",
+        [
+            {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 3001,
+                "path": "/",
+                "accessToken": "stale-token-123456",
+            }
+        ],
+    )
+
+    manager_status, locator_status = _credential_statuses(tmp_path)
+    assert manager_status["status"] == locator_status["status"] == "ok"
+    assert manager_status["consistent"] is locator_status["consistent"] is True
+    assert TOKEN not in repr(manager_status)
+    assert TOKEN not in repr(locator_status)
+
+
+def test_invalid_authority_metadata_fails_closed_for_manager_and_locator(
+    tmp_path: Path,
+) -> None:
+    _prepare_runtime(tmp_path)
+    adapter_path = tmp_path / "NachoBot-SnowLuma-Adapter/config.toml"
+    adapter_path.write_text(
+        adapter_path.read_text(encoding="utf-8").replace(
+            'scheme = "ws"\n', 'scheme = "ws"\nqq_account = "not-a-qq"\n'
+        ),
+        encoding="utf-8",
+    )
+
+    manager_status, locator_status = _credential_statuses(tmp_path)
+    assert manager_status["status"] == locator_status["status"] == "missing"
+    assert manager_status["consistent"] is locator_status["consistent"] is False
+    assert TOKEN not in repr(manager_status)
+    assert TOKEN not in repr(locator_status)
+
+
+def test_manager_and_locator_reject_wildcard_credential_endpoint_equally(
+    tmp_path: Path,
+) -> None:
+    _prepare_runtime(tmp_path)
+    adapter_path = tmp_path / "NachoBot-SnowLuma-Adapter/config.toml"
+    adapter_path.write_text(
+        adapter_path.read_text(encoding="utf-8").replace(
+            'host = "127.0.0.1"\n', 'host = "0.0.0.0"\n', 1
+        ),
+        encoding="utf-8",
+    )
+
+    manager_status, locator_status = _credential_statuses(tmp_path)
+    assert manager_status["status"] == locator_status["status"] == "missing"
+    assert manager_status["consistent"] is locator_status["consistent"] is False
+    assert manager_status["endpoint"] is locator_status["endpoint"] is None
+
+
+def test_implicit_enabled_entry_matches_snowluma_runtime_semantics(
+    tmp_path: Path,
+) -> None:
+    _prepare_runtime(tmp_path)
+    onebot_path = tmp_path / "SnowLuma/config/onebot_123456.json"
+    document = json.loads(onebot_path.read_text(encoding="utf-8"))
+    document["networks"]["wsServers"][0].pop("enabled")
+    onebot_path.write_text(json.dumps(document), encoding="utf-8")
+
+    manager_status, locator_status = _credential_statuses(tmp_path)
+    assert manager_status["status"] == locator_status["status"] == "ok"
+    assert manager_status["consistent"] is locator_status["consistent"] is True
+
+
+def test_disabled_entries_never_satisfy_or_veto_credential_consistency(
+    tmp_path: Path,
+) -> None:
+    _prepare_runtime(tmp_path)
+    disabled_stale = {
+        "enabled": False,
+        "host": "127.0.0.1",
+        "port": 3001,
+        "path": "/",
+        "accessToken": "stale-token-123456",
+    }
+    _write_onebot_servers(tmp_path, "123456", [disabled_stale])
+    _write_onebot_servers(tmp_path, "999999", [dict(disabled_stale)])
+
+    manager_status, locator_status = _credential_statuses(tmp_path)
+    assert manager_status["status"] == locator_status["status"] == "missing"
+    assert manager_status["consistent"] is locator_status["consistent"] is False
+
+    _write_onebot_servers(
+        tmp_path,
+        "999999",
+        [
+            {
+                **disabled_stale,
+                "enabled": True,
+                "accessToken": TOKEN,
+            }
+        ],
+    )
+    manager_status, locator_status = _credential_statuses(tmp_path)
+    assert manager_status["status"] == locator_status["status"] == "ok"
+    assert manager_status["consistent"] is locator_status["consistent"] is True
+
+
 def test_transport_status_distinguishes_closed_onebot_from_credentials(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _prepare_runtime(tmp_path)
     monkeypatch.setattr(snowluma, "_port_listening", lambda _port: False)
@@ -234,6 +445,7 @@ def test_synchronize_writes_real_three_file_schema_and_preserves_generated_at(
     assert 'host = "127.0.0.1"' in adapter
     assert 'path = "/"' in adapter
     assert 'scheme = "ws"' in adapter
+    assert 'qq_account = "123456"' in adapter
     assert f'token = "{TOKEN}"' in adapter
     runtime = snowluma.SnowLumaManager.runtime_path(tmp_path)
     onebot = json.loads((runtime / "config/onebot_123456.json").read_text(encoding="utf-8"))
