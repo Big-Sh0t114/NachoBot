@@ -121,8 +121,81 @@ assert(launcherSource.includes('/api/setup/snowluma/agreements/accept'));
 assert(launcherSource.includes('已阅读并同意'));
 assert(launcherSource.includes('textContent'));
 assert(!launcherSource.includes('仅用于本次请求'));
+const actionStart = launcherSource.indexOf('async function processSnowLumaAction');
+const actionEnd = launcherSource.indexOf('async function withSnowLumaPassword', actionStart);
+assert(actionStart >= 0 && actionEnd > actionStart, 'SnowLuma action handler must remain discoverable');
+const actionSource = launcherSource.slice(actionStart, actionEnd);
+assert(!actionSource.includes('current.injected ='), 'actions must not mutate injected state optimistically');
+assert(actionSource.includes('shouldScheduleSnowLumaUnloadReconciliation'), 'only unload verification failures may schedule delayed reconciliation');
+assert(actionSource.includes('requireFresh: true'), 'actions must require a fresh post-action list');
+assert(
+    contract.snowlumaUnloadReconciliationDelayMs >= 1_500
+        && contract.snowlumaUnloadReconciliationDelayMs <= 3_000,
+    'unload reconciliation delay must be bounded around the watcher tick',
+);
+const schedulerStart = launcherSource.indexOf('function scheduleSnowLumaUnloadReconciliation');
+const schedulerEnd = launcherSource.indexOf('async function processSnowLumaAction', schedulerStart);
+assert(schedulerStart >= 0 && schedulerEnd > schedulerStart, 'unload scheduler must remain discoverable');
+const schedulerSource = launcherSource.slice(schedulerStart, schedulerEnd);
+assert.strictEqual(
+    (schedulerSource.match(/schedule\(\(\) => \{/g) || []).length,
+    1,
+    'unload verification failure must schedule exactly one delayed refresh',
+);
+assert(schedulerSource.includes('void refresh(card, true).catch(() => {});'));
+const successRefreshIndex = actionSource.indexOf('refreshSnowLumaProcesses(card, {');
+const successToastIndex = actionSource.indexOf('toast(`PID ${pid}');
+assert(successRefreshIndex >= 0 && successRefreshIndex < successToastIndex, 'success toast must follow immediate refresh');
 
 (async () => {
+    let refreshCalls = 0;
+    let releaseInitialRefresh;
+    const initialRefresh = new Promise(resolve => {
+        releaseInitialRefresh = resolve;
+    });
+    const refreshFlight = contract.createSnowLumaRefreshFlight();
+    const inFlightRefresh = refreshFlight(() => {
+        refreshCalls += 1;
+        return initialRefresh;
+    });
+    const requiredRefresh = refreshFlight(() => {
+        refreshCalls += 1;
+        return { ok: true };
+    }, { requireFresh: true });
+    await Promise.resolve();
+    assert.strictEqual(refreshCalls, 1, 'an action refresh must wait for an existing refresh instead of running in parallel');
+    releaseInitialRefresh({ ok: true });
+    await requiredRefresh;
+    await inFlightRefresh;
+    assert.strictEqual(refreshCalls, 2, 'an action refresh must perform one new fetch after the existing refresh settles');
+
+    let actionSuccess = false;
+    await assert.rejects(
+        contract.runSnowLumaActionAndRefresh(
+            async () => ({ ok: true }),
+            async () => ({ ok: false }),
+            () => { actionSuccess = true; },
+        ),
+        error => error?.code === 'PROCESS_REFRESH_FAILED',
+        'required refresh failure must prevent the normal action success callback',
+    );
+    assert(!actionSuccess, 'required refresh failure must not show success');
+
+    const scheduled = [];
+    let delayedRefreshCalls = 0;
+    const fakeSchedule = (callback, delay) => scheduled.push({ callback, delay });
+    const fakeRefresh = async () => {
+        delayedRefreshCalls += 1;
+    };
+    assert(contract.shouldScheduleSnowLumaUnloadReconciliation({ code: 'UNLOAD_VERIFICATION_FAILED' }));
+    assert(!contract.shouldScheduleSnowLumaUnloadReconciliation({ code: 'PASSWORD_REQUIRED' }));
+    assert(!contract.shouldScheduleSnowLumaUnloadReconciliation({ code: 'AGREEMENT_REQUIRED' }));
+    contract.scheduleSnowLumaUnloadReconciliation({}, fakeSchedule, fakeRefresh);
+    assert.strictEqual(scheduled.length, 1, 'unload failure must schedule one delayed reconciliation');
+    assert.strictEqual(scheduled[0].delay, contract.snowlumaUnloadReconciliationDelayMs);
+    await scheduled[0].callback();
+    assert.strictEqual(delayedRefreshCalls, 1, 'delayed reconciliation must invoke the refresh once');
+
     const passwordInput = { value: 'secret-success' };
     const fakeCard = {
         querySelector(selector) {

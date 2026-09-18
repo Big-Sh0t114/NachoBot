@@ -429,7 +429,8 @@
                     <div class="setup-card">
                         <div class="setup-card-header">
                             <h3>🔍 环境检测</h3>
-                            <button class="btn btn-primary btn-sm setup-refresh-button" id="btn-recheck" type="button">↻ 刷新 / 验证</button>
+                            <button class="btn btn-primary btn-sm setup-refresh-button" id="btn-recheck" type="button">↻
+                                刷新 / 验证</button>
                         </div>
                         <div class="setup-check-list" id="setup-check-list">
                             <div class="setup-check-placeholder">点击下方按钮开始检测...</div>
@@ -505,8 +506,8 @@
                                     <div class="component-card">
                                         <span class="component-icon">🐧</span>
                                         <div class="component-info">
-                                        <span class="component-name">QQ (NapCat / SnowLuma)</span>
-                                        <span class="component-desc">选择 NapCat 或 SnowLuma 作为 QQ 后端</span>
+                                            <span class="component-name">QQ (NapCat / SnowLuma)</span>
+                                            <span class="component-desc">选择 NapCat 或 SnowLuma 作为 QQ 后端</span>
                                         </div>
                                     </div>
                                 </label>
@@ -577,15 +578,17 @@
                         <div class="setup-form">
                             <div class="form-section">
                                 <div class="form-section-title">QQ 账号配置</div>
-                                <p class="form-section-hint">填写 bot 的 QQ 号和昵称，将自动写入 bot_config.toml。NapCat 与 SnowLuma 都由 WebUI 管理启动与连接。</p>
+                                <p class="form-section-hint">填写 bot 的 QQ 号和昵称，将自动写入 bot_config.toml。NapCat 与 SnowLuma 都由
+                                    WebUI 管理启动与连接。</p>
                                 <div class="form-row" id="setup-qq-adapter-row">
                                     <label class="form-label">QQ 后端</label>
                                     <select class="form-input" id="setup-qq-adapter">
-                                        <option value="napcat">NapCat（本机客户端）</option>
-                                        <option value="snowluma">SnowLuma（托管运行时）</option>
+                                        <option value="napcat">NapCat（无头轻量--低占用）</option>
+                                        <option value="snowluma">SnowLuma（原生注入--高保护）</option>
                                     </select>
                                 </div>
-                                <p class="form-section-hint setup-snowluma-runtime-hint" id="setup-snowluma-runtime-hint" style="display:none">
+                                <p class="form-section-hint setup-snowluma-runtime-hint"
+                                    id="setup-snowluma-runtime-hint" style="display:none">
                                     WebUI 会先启动项目内的 SnowLuma Runtime，再启动适配器。以下凭据只用于本次部署或实例操作，不会预填、写入浏览器存储或出现在日志中。
                                 </p>
                                 <div class="form-row">
@@ -598,16 +601,19 @@
                                     <input type="text" class="form-input" id="setup-nickname"
                                         placeholder="例如: NachoBot（留空使用默认值）">
                                 </div>
-                                <div class="form-section setup-snowluma-section" id="setup-snowluma-section" style="display:none">
+                                <div class="form-section setup-snowluma-section" id="setup-snowluma-section"
+                                    style="display:none">
                                     <div class="form-section-title">SnowLuma 凭据</div>
                                     <div class="form-row">
-                                        <label class="form-label">OneBot Access Token <span class="form-required">*</span></label>
+                                        <label class="form-label">OneBot Access Token <span
+                                                class="form-required">*</span></label>
                                         <input type="password" class="form-input" id="setup-snowluma-access-token"
-                                            minlength="16" pattern="\S{16,}" autocomplete="new-password" spellcheck="false" required
-                                            placeholder="至少 16 个字符，不能包含空白">
+                                            minlength="16" pattern="\S{16,}" autocomplete="new-password"
+                                            spellcheck="false" required placeholder="至少 16 个字符，不能包含空白">
                                     </div>
                                     <div class="form-row">
-                                        <label class="form-label">SnowLuma WebUI 密码 <span class="form-required">*</span></label>
+                                        <label class="form-label">SnowLuma WebUI 密码 <span
+                                                class="form-required">*</span></label>
                                         <input type="password" class="form-input" id="setup-snowluma-webui-password"
                                             minlength="10" autocomplete="new-password" spellcheck="false" required
                                             placeholder="至少 10 位，含大小写字母和特殊字符">
@@ -633,10 +639,10 @@
                                 <div class="form-section-title">Bilibili Bot 配置</div>
                                 <p class="form-section-hint">选择 Bilibili 时必须填写 Bot UID（B站账号 UID）</p>
                                 <div class="form-row">
-                                    <label class="form-label">Bilibili Bot UID <span class="form-required">*</span></label>
+                                    <label class="form-label">Bilibili Bot UID <span
+                                            class="form-required">*</span></label>
                                     <input type="text" class="form-input" id="setup-bilibili-bot-account"
-                                        inputmode="numeric" pattern="[0-9]+" required
-                                        placeholder="例如: 123456789">
+                                        inputmode="numeric" pattern="[0-9]+" required placeholder="例如: 123456789">
                                 </div>
                             </div>
                         </div>
@@ -834,7 +840,8 @@
                                         <span class="component-icon">🔗</span>
                                         <div class="component-info">
                                             <span class="component-name">仅中继 / 不安装本地模型</span>
-                                            <span class="component-desc">仅安装消息中继所需的最小依赖，不安装 Torch、Transformers、ASR/VLM 等本地模型栈</span>
+                                            <span class="component-desc">仅安装消息中继所需的最小依赖，不安装 Torch、Transformers、ASR/VLM
+                                                等本地模型栈</span>
                                         </div>
                                     </div>
                                 </label>
@@ -844,7 +851,8 @@
                     <div class="setup-card">
                         <div class="setup-card-header">
                             <h3>📦 依赖完整性检查</h3>
-                            <button class="btn btn-primary btn-sm setup-refresh-button" id="btn-verify-all" type="button">↻ 全部刷新 / 验证</button>
+                            <button class="btn btn-primary btn-sm setup-refresh-button" id="btn-verify-all"
+                                type="button">↻ 全部刷新 / 验证</button>
                         </div>
                         <div class="path-check-list" id="path-check-list">
                             <!-- NapCat Shell (qq + NapCat backend only) -->
@@ -871,18 +879,21 @@
                             </div>
 
                             <!-- SnowLuma (qq + SnowLuma backend only; authoritative repository discovery) -->
-                            <div class="path-check-card" id="path-check-snowluma" data-type="snowluma" style="display:none">
+                            <div class="path-check-card" id="path-check-snowluma" data-type="snowluma"
+                                style="display:none">
                                 <div class="path-check-header">
                                     <span class="path-check-icon">❄️</span>
                                     <div class="path-check-info">
                                         <span class="path-check-name">SnowLuma Runtime + Adapter</span>
-                                        <span class="path-check-hint">自动发现项目根目录下唯一的 SnowLuma 1.14.x Runtime 与适配器，不能填写外部路径</span>
+                                        <span class="path-check-hint">自动发现项目根目录下唯一的 SnowLuma 1.14.x Runtime
+                                            与适配器，不能填写外部路径</span>
                                     </div>
                                     <span class="path-check-status" id="status-snowluma"></span>
                                 </div>
                                 <div class="path-check-body">
                                     <div class="path-check-auto">项目根目录自动检查（package.json、launcher.bat、原生模块与适配器文件）</div>
-                                    <button class="btn btn-primary btn-sm btn-verify setup-refresh-button" data-type="snowluma" type="button">↻ 刷新 / 验证</button>
+                                    <button class="btn btn-primary btn-sm btn-verify setup-refresh-button"
+                                        data-type="snowluma" type="button">↻ 刷新 / 验证</button>
                                     <div class="path-check-result" id="result-snowluma"></div>
                                     <a class="btn-download" id="dl-snowluma"
                                         href="https://github.com/SnowLuma/SnowLuma/releases/latest" target="_blank"

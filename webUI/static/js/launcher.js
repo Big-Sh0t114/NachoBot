@@ -16,6 +16,7 @@ const LauncherModule = (() => {
     let snowlumaProcesses = null;
     let snowlumaProcessError = '';
     let snowlumaProcessBusy = false;
+    let snowlumaProcessRefreshToken = null;
     let snowlumaRuntimeRunning = false;
     let snowlumaAgreementModal = null;
     let snowlumaOptimisticStart = false;
@@ -51,6 +52,32 @@ const LauncherModule = (() => {
     });
 
     const HIDDEN_LAUNCH_GROUPS = new Set(['core', 'tts_full', 'tts_lite', 'potato']);
+    const SNOWLUMA_PROCESS_REFRESH_FAILED = 'PROCESS_REFRESH_FAILED';
+    const SNOWLUMA_PROCESS_REFRESH_MESSAGE = '操作已提交，但 SnowLuma 实例状态刷新失败，请点击“刷新实例”确认状态';
+
+    function createSnowLumaRefreshFlight() {
+        let inFlight = null;
+        return async function run(execute, { requireFresh = false } = {}) {
+            if (!requireFresh && inFlight) return inFlight;
+            if (requireFresh && inFlight) {
+                const previous = inFlight;
+                try {
+                    await previous;
+                } catch (_) {
+                    // A required refresh still needs its own post-action fetch.
+                }
+                if (inFlight && inFlight !== previous) return inFlight;
+            }
+            const current = Promise.resolve().then(execute);
+            const tracked = current.finally(() => {
+                if (inFlight === tracked) inFlight = null;
+            });
+            inFlight = tracked;
+            return tracked;
+        };
+    }
+
+    const snowlumaProcessRefreshFlight = createSnowLumaRefreshFlight();
 
     async function snowlumaApiPost(url, body = {}) {
         const response = await fetch(url, {
@@ -600,6 +627,7 @@ const LauncherModule = (() => {
     const SNOWLUMA_START_SERVICE_IDS = new Set(['snowluma_runtime', 'snowluma_adapter']);
     const SNOWLUMA_OPTIMISTIC_START_DETAIL = '正在启动 SnowLuma Runtime + Adapter…';
     const SNOWLUMA_OPTIMISTIC_START_TIMEOUT_MS = 60_000;
+    const SNOWLUMA_UNLOAD_RECONCILIATION_DELAY_MS = 1_800;
 
     function applySnowLumaOptimisticStart(group) {
         if (!group || group.id !== 'qq_adapter') return group;
@@ -899,8 +927,22 @@ const LauncherModule = (() => {
         }
     }
 
-    async function refreshSnowLumaProcesses(card, automatic = false) {
-        if (snowlumaProcessBusy) return;
+    function normalizeSnowLumaRefreshOptions(automaticOrOptions = false, extraOptions = {}) {
+        if (automaticOrOptions && typeof automaticOrOptions === 'object') {
+            return { ...automaticOrOptions };
+        }
+        return { automatic: automaticOrOptions === true, ...extraOptions };
+    }
+
+    function createSnowLumaProcessRefreshError() {
+        const error = new Error(SNOWLUMA_PROCESS_REFRESH_MESSAGE);
+        error.code = SNOWLUMA_PROCESS_REFRESH_FAILED;
+        return error;
+    }
+
+    async function performSnowLumaProcessRefresh(card, options) {
+        const refreshToken = {};
+        snowlumaProcessRefreshToken = refreshToken;
         snowlumaProcessBusy = true;
         snowlumaProcessError = '';
         render();
@@ -913,43 +955,99 @@ const LauncherModule = (() => {
                 ? result.list
                 : Array.isArray(result?.processes) ? result.processes : [];
             snowlumaProcesses = list.map(normalizeSnowLumaProcess);
+            return { ok: true };
         } catch (e) {
             const code = snowlumaErrorCode(e);
+            const suppressFailureUi = options.throwOnFailure === true;
             if (code === 'PASSWORD_REQUIRED') {
                 snowlumaProcessError = '请输入 SnowLuma WebUI 密码后重试';
-                toast(snowlumaProcessError, 'error');
-                focusSnowLumaPasswordInput(card);
+                if (!suppressFailureUi) {
+                    toast(snowlumaProcessError, 'error');
+                    focusSnowLumaPasswordInput(card);
+                }
             } else if (code === 'AGREEMENT_REQUIRED') {
                 snowlumaProcessError = '请先阅读并同意 SnowLuma 协议';
-                toast(snowlumaProcessError, 'error');
+                if (!suppressFailureUi) toast(snowlumaProcessError, 'error');
             } else {
                 snowlumaProcessError = e?.message || 'SnowLuma 实例刷新失败';
-                if (!automatic) toast(snowlumaProcessError, 'error');
+                if (!options.automatic && !suppressFailureUi) toast(snowlumaProcessError, 'error');
             }
+            return { ok: false, error: e };
         } finally {
-            snowlumaProcessBusy = false;
-            render();
+            if (snowlumaProcessRefreshToken === refreshToken) {
+                snowlumaProcessRefreshToken = null;
+                snowlumaProcessBusy = false;
+                render();
+            }
         }
+    }
+
+    async function refreshSnowLumaProcesses(card, automaticOrOptions = false, extraOptions = {}) {
+        const options = normalizeSnowLumaRefreshOptions(automaticOrOptions, extraOptions);
+        const result = await snowlumaProcessRefreshFlight(
+            () => performSnowLumaProcessRefresh(card, options),
+            { requireFresh: options.requireFresh === true },
+        );
+        if (options.throwOnFailure === true && result?.ok !== true) {
+            throw createSnowLumaProcessRefreshError();
+        }
+        return result;
+    }
+
+    async function runSnowLumaActionAndRefresh(actionRequest, refreshRequest, onSuccess) {
+        await actionRequest();
+        const result = await refreshRequest();
+        if (!result || result.ok !== true) throw createSnowLumaProcessRefreshError();
+        onSuccess();
+    }
+
+    function shouldScheduleSnowLumaUnloadReconciliation(error) {
+        return snowlumaErrorCode(error) === 'UNLOAD_VERIFICATION_FAILED';
+    }
+
+    function scheduleSnowLumaUnloadReconciliation(
+        card,
+        schedule = setTimeout,
+        refresh = refreshSnowLumaProcesses,
+    ) {
+        schedule(() => {
+            void refresh(card, true).catch(() => {});
+        }, SNOWLUMA_UNLOAD_RECONCILIATION_DELAY_MS);
     }
 
     async function processSnowLumaAction(card, pid, action) {
         if (!Number.isInteger(pid) || pid <= 0 || !['load', 'unload', 'refresh'].includes(action)) return;
         try {
-            await withSnowLumaPassword(
-                card,
-                password => snowlumaApiPost(
-                    `/api/setup/snowluma/processes/${pid}/${action}`,
-                    password ? { password } : {},
+            await runSnowLumaActionAndRefresh(
+                () => withSnowLumaPassword(
+                    card,
+                    password => snowlumaApiPost(
+                        `/api/setup/snowluma/processes/${pid}/${action}`,
+                        password ? { password } : {},
+                    ),
                 ),
+                () => refreshSnowLumaProcesses(card, {
+                    automatic: true,
+                    requireFresh: true,
+                    throwOnFailure: true,
+                }),
+                () => toast(`PID ${pid} ${action === 'load' ? '注入' : action === 'unload' ? '解除注入' : '刷新'}完成`, 'success'),
             );
-            if (action === 'load' || action === 'unload') {
-                const current = Array.isArray(snowlumaProcesses) ? snowlumaProcesses.find(item => item.pid === pid) : null;
-                if (current) current.injected = action === 'load';
-            }
-            toast(`PID ${pid} ${action === 'load' ? '注入' : action === 'unload' ? '解除注入' : '刷新'}完成`, 'success');
-            render();
         } catch (e) {
-            if (snowlumaErrorCode(e) === 'PASSWORD_REQUIRED') {
+            const code = snowlumaErrorCode(e);
+            if (shouldScheduleSnowLumaUnloadReconciliation(e)) {
+                // SnowLuma's watcher adopts a still-live pipe on its next
+                // tick.  Keep the current list for the immediate error
+                // feedback, then reconcile exactly once after that tick.
+                toast(e?.message || 'SnowLuma 未能解除注入，请稍后重试', 'error');
+                scheduleSnowLumaUnloadReconciliation(card);
+                return;
+            }
+            if (code === SNOWLUMA_PROCESS_REFRESH_FAILED) {
+                toast(SNOWLUMA_PROCESS_REFRESH_MESSAGE, 'error');
+                return;
+            }
+            if (code === 'PASSWORD_REQUIRED') {
                 toast('请输入 SnowLuma WebUI 密码后重试', 'error');
                 focusSnowLumaPasswordInput(card);
             } else {
@@ -1153,10 +1251,15 @@ const LauncherModule = (() => {
             withSnowLumaPassword,
             showSnowLumaAgreement,
             snowlumaErrorCode,
+            createSnowLumaRefreshFlight,
+            runSnowLumaActionAndRefresh,
+            scheduleSnowLumaUnloadReconciliation,
+            shouldScheduleSnowLumaUnloadReconciliation,
             applySnowLumaOptimisticStart,
             reconcileSnowLumaOptimisticGroup,
             snowLumaStartReachedTerminalState,
             snowlumaOptimisticStartTimeoutMs: SNOWLUMA_OPTIMISTIC_START_TIMEOUT_MS,
+            snowlumaUnloadReconciliationDelayMs: SNOWLUMA_UNLOAD_RECONCILIATION_DELAY_MS,
         },
     };
 })();

@@ -394,6 +394,90 @@ def test_api_client_uses_list_fields_without_probing_and_sanitizes_fields(tmp_pa
     request.assert_called_once_with("GET", "/api/processes")
 
 
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {
+            "success": True,
+            "process": {
+                "status": "connecting",
+                "injected": False,
+                "error": "unload verification failed: pipe still up",
+            },
+        },
+        [],
+        {"success": True},
+        {"success": True, "process": []},
+        {"success": True, "process": {"status": "available"}},
+        {"success": True, "process": {"status": "available", "injected": None}},
+        {"success": True, "process": {"status": "available", "injected": 0}},
+        {"process": {"status": "available", "injected": False}},
+        {"success": True, "process": {"status": " Available", "injected": False}},
+        {"success": True, "process": {"status": "available ", "injected": False}},
+        {"success": True, "process": {"status": "AVAILABLE", "injected": False}},
+    ),
+    ids=(
+        "connecting",
+        "non_mapping_payload",
+        "missing_process",
+        "non_mapping_process",
+        "missing_injected",
+        "null_injected",
+        "numeric_injected",
+        "missing_success",
+        "leading_space_status",
+        "trailing_space_status",
+        "case_variant_status",
+    ),
+)
+def test_api_client_unload_requires_verified_terminal_state(
+    tmp_path: Path, payload: object
+) -> None:
+    _prepare_runtime(tmp_path)
+    client = snowluma.SnowLumaAPIClient(tmp_path)
+    client._token = "session-token"
+    with mock.patch.object(client, "_request", return_value=payload) as request:
+        with pytest.raises(snowluma.SnowLumaApiError, match="未能解除注入") as raised:
+            client.process_action(123, "unload")
+    assert "pipe still up" not in str(raised.value)
+    assert raised.value.code == snowluma.SNOWLUMA_UNLOAD_VERIFICATION_FAILED
+    assert raised.value.http_status == 502
+    request.assert_called_once_with("POST", "/api/processes/123/unload", {})
+
+
+def test_api_client_unload_accepts_verified_terminal_state(tmp_path: Path) -> None:
+    _prepare_runtime(tmp_path)
+    client = snowluma.SnowLumaAPIClient(tmp_path)
+    client._token = "session-token"
+    payload = {
+        "success": True,
+        "process": {"status": "available", "injected": False},
+    }
+    with mock.patch.object(client, "_request", return_value=payload) as request:
+        assert client.process_action(123, "unload") == {
+            "status": "ok",
+            "pid": 123,
+            "action": "unload",
+        }
+    request.assert_called_once_with("POST", "/api/processes/123/unload", {})
+
+
+@pytest.mark.parametrize("action", ("load", "refresh"))
+def test_api_client_non_unload_actions_keep_success_contract(
+    tmp_path: Path, action: str
+) -> None:
+    _prepare_runtime(tmp_path)
+    client = snowluma.SnowLumaAPIClient(tmp_path)
+    client._token = "session-token"
+    with mock.patch.object(client, "_request", return_value={"success": True}) as request:
+        assert client.process_action(123, action) == {
+            "status": "ok",
+            "pid": 123,
+            "action": action,
+        }
+    request.assert_called_once_with("POST", f"/api/processes/123/{action}", {})
+
+
 def test_api_client_probe_login_uses_get_transport_contract(tmp_path: Path) -> None:
     _prepare_runtime(tmp_path)
     client = snowluma.SnowLumaAPIClient(tmp_path)

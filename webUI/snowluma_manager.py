@@ -145,6 +145,10 @@ SNOWLUMA_TOTP_REQUIRED = "TOTP_REQUIRED"
 SNOWLUMA_PASSWORD_CHANGE_REQUIRED = "PASSWORD_CHANGE_REQUIRED"
 SNOWLUMA_SECRET_STORE_UNAVAILABLE = "SECRET_STORE_UNAVAILABLE"
 SNOWLUMA_AGREEMENT_VERSION_MISMATCH = "AGREEMENT_VERSION_MISMATCH"
+SNOWLUMA_UNLOAD_VERIFICATION_FAILED = "UNLOAD_VERIFICATION_FAILED"
+SNOWLUMA_UNLOAD_VERIFICATION_ERROR = (
+    "SnowLuma 未能解除注入，注入管道仍存在；请查看 SnowLuma 日志或退出 QQ 后重试"
+)
 SNOWLUMA_OPERATOR_CODES = frozenset(
     {
         SNOWLUMA_PASSWORD_REQUIRED,
@@ -1413,6 +1417,37 @@ class SnowLumaAPIClient:
             raise SnowLumaApiError("SnowLuma API 操作失败")
         return payload
 
+    @staticmethod
+    def _ensure_unload_terminal(payload: object) -> None:
+        """Require SnowLuma's explicit terminal state for a verified unload."""
+
+        if not isinstance(payload, Mapping) or payload.get("success") is not True:
+            raise SnowLumaApiError(
+                SNOWLUMA_UNLOAD_VERIFICATION_ERROR,
+                code=SNOWLUMA_UNLOAD_VERIFICATION_FAILED,
+                http_status=502,
+            )
+        process = payload.get("process")
+        if not isinstance(process, Mapping):
+            raise SnowLumaApiError(
+                SNOWLUMA_UNLOAD_VERIFICATION_ERROR,
+                code=SNOWLUMA_UNLOAD_VERIFICATION_FAILED,
+                http_status=502,
+            )
+        status = process.get("status")
+        injected = process.get("injected")
+        if (
+            not isinstance(status, str)
+            or status != "available"
+            or type(injected) is not bool
+            or injected is not False
+        ):
+            raise SnowLumaApiError(
+                SNOWLUMA_UNLOAD_VERIFICATION_ERROR,
+                code=SNOWLUMA_UNLOAD_VERIFICATION_FAILED,
+                http_status=502,
+            )
+
     def get_agreements(self) -> dict[str, Any]:
         """Fetch and validate the complete official agreement payload."""
 
@@ -1523,6 +1558,8 @@ class SnowLumaAPIClient:
         payload = self._ensure_success(
             self._request("POST", f"/api/processes/{valid_pid}/{action}", {})
         )
+        if action == "unload":
+            self._ensure_unload_terminal(payload)
         return {"status": "ok", "pid": valid_pid, "action": action}
 
     load = lambda self, pid: self.process_action(pid, "load")
@@ -1554,6 +1591,7 @@ __all__ = [
     "SNOWLUMA_PASSWORD_REQUIRED",
     "SNOWLUMA_SECRET_STORE_UNAVAILABLE",
     "SNOWLUMA_TOTP_REQUIRED",
+    "SNOWLUMA_UNLOAD_VERIFICATION_FAILED",
     "SNOWLUMA_RELEASE_URL",
     "SNOWLUMA_RUNTIME_RELATIVE",
     "SnowLumaLocatorError",
