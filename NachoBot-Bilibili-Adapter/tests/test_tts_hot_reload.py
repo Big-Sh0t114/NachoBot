@@ -102,6 +102,296 @@ class LiveEventFilterTests(unittest.TestCase):
         asyncio.run(scenario())
 
 
+class BilibiliV2ProtocolTests(unittest.TestCase):
+    def test_v2_commands_are_dispatched_after_suffix_normalization(self):
+        async def scenario():
+            worker = LiveRoomWorker.__new__(LiveRoomWorker)
+            worker.logger = SimpleNamespace(debug=Mock(), warning=Mock())
+            worker._handle_danmu_event = AsyncMock()
+            worker._handle_gift_event = AsyncMock()
+            worker._handle_gift_v2_event = AsyncMock()
+            worker._handle_superchat_event = AsyncMock()
+            worker._handle_guard_event = AsyncMock()
+            worker._handle_guard_v2_event = AsyncMock()
+            worker._handle_interact_word_event = AsyncMock()
+
+            await worker._handle_event({"cmd": "SEND_GIFT_V2:0:2", "data": {"pb": "x"}})
+            await worker._handle_event({"cmd": "USER_TOAST_MSG_V2:extra", "data": {}})
+            await worker._handle_event({"cmd": "SUPER_CHAT_MESSAGE:extra", "data": {}})
+            await worker._handle_event({"cmd": "INTERACT_WORD_V2:extra", "data": {}})
+
+            worker._handle_gift_v2_event.assert_awaited_once()
+            worker._handle_guard_v2_event.assert_awaited_once()
+            worker._handle_superchat_event.assert_awaited_once()
+            worker._handle_interact_word_event.assert_awaited_once()
+
+        asyncio.run(scenario())
+
+    def test_send_gift_v2_forwards_every_gift_list_item(self):
+        async def scenario():
+            worker = LiveRoomWorker.__new__(LiveRoomWorker)
+            worker.room_id = 100
+            worker.logger = SimpleNamespace(info=Mock(), warning=Mock())
+            worker.adapter = SimpleNamespace(handle_incoming_gift=AsyncMock())
+
+            proto = SimpleNamespace(
+                uid=12345,
+                uname="测试用户",
+                gift_list=[
+                    SimpleNamespace(
+                        gift_name="礼物A",
+                        num=2,
+                        total_coin=20000,
+                        coin_type="gold",
+                        price=10000,
+                        timestamp=1000,
+                        gift_id=1,
+                        tid="tid-a",
+                    ),
+                    SimpleNamespace(
+                        gift_name="礼物B",
+                        num=1,
+                        total_coin=0,
+                        coin_type="gold",
+                        price=5000,
+                        timestamp=1001,
+                        gift_id=2,
+                        tid="tid-b",
+                    ),
+                ],
+            )
+
+            with patch(
+                "bili_src.live.live_worker.SendGiftBroadcast.from_base64",
+                return_value=proto,
+            ):
+                await worker._handle_gift_v2_event(
+                    {"cmd": "SEND_GIFT_V2", "data": {"pb": "encoded"}},
+                    "SEND_GIFT_V2",
+                )
+
+            self.assertEqual(worker.adapter.handle_incoming_gift.await_count, 2)
+            first = worker.adapter.handle_incoming_gift.await_args_list[0].kwargs
+            second = worker.adapter.handle_incoming_gift.await_args_list[1].kwargs
+
+            self.assertEqual(first["gift_name"], "礼物A")
+            self.assertEqual(first["num"], 2)
+            self.assertEqual(first["price"], 10)
+            self.assertEqual(first["user_id"], "12345")
+            self.assertEqual(first["user_name"], "测试用户")
+            self.assertEqual(first["timestamp"], 1000.0)
+
+            self.assertEqual(second["gift_name"], "礼物B")
+            self.assertEqual(second["num"], 1)
+            self.assertEqual(second["price"], 5)
+            self.assertEqual(second["timestamp"], 1001.0)
+
+        asyncio.run(scenario())
+
+    def test_guard_v2_and_guard_buy_are_deduplicated(self):
+        async def scenario():
+            worker = LiveRoomWorker.__new__(LiveRoomWorker)
+            worker.room_id = 100
+            worker._guard_event_seen = {}
+            worker.logger = SimpleNamespace(info=Mock(), debug=Mock())
+            worker.adapter = SimpleNamespace(handle_incoming_guard=AsyncMock())
+
+            toast_payload = {
+                "cmd": "USER_TOAST_MSG_V2",
+                "data": {
+                    "sender_uinfo": {"uid": 12345, "base": {"name": "测试用户"}},
+                    "guard_info": {
+                        "guard_level": 3,
+                        "start_time": 1700000000,
+                        "end_time": 1700000000,
+                    },
+                    "pay_info": {"num": 1, "price": 198000, "unit": "月"},
+                    "gift_info": {"gift_id": 10003},
+                    "option": {"source": 0},
+                    "toast_msg": "测试用户开通了舰长",
+                },
+            }
+            await worker._handle_guard_v2_event(toast_payload)
+
+            guard_buy_payload = {
+                "cmd": "GUARD_BUY",
+                "data": {
+                    "uid": 12345,
+                    "username": "测试用户",
+                    "guard_level": 3,
+                    "num": 1,
+                    "price": 198000,
+                    "gift_name": "舰长",
+                    "start_time": 1700000000,
+                },
+            }
+            await worker._handle_guard_event(guard_buy_payload)
+
+            # source=2 is the companion duplicate emitted by current Bilibili.
+            source2_payload = {
+                "cmd": "USER_TOAST_MSG_V2",
+                "data": {
+                    "sender_uinfo": {"uid": 54321, "base": {"name": "重复用户"}},
+                    "guard_info": {"guard_level": 3, "start_time": 1700000001},
+                    "pay_info": {"num": 1, "price": 198000, "unit": "月"},
+                    "gift_info": {"gift_id": 10003},
+                    "option": {"source": 2},
+                },
+            }
+            await worker._handle_guard_v2_event(source2_payload)
+
+            worker.adapter.handle_incoming_guard.assert_awaited_once()
+            call = worker.adapter.handle_incoming_guard.await_args.kwargs
+            self.assertEqual(call["user_id"], "12345")
+            self.assertEqual(call["user_name"], "测试用户")
+            self.assertEqual(call["guard_level"], 3)
+            self.assertEqual(call["num"], 1)
+            self.assertEqual(call["price"], 198)
+            self.assertEqual(call["timestamp"], 1700000000.0)
+
+        asyncio.run(scenario())
+
+    def test_interact_word_v2_uses_protobuf_model(self):
+        async def scenario():
+            worker = LiveRoomWorker.__new__(LiveRoomWorker)
+            worker.room_id = 100
+            worker.logger = SimpleNamespace(info=Mock(), warning=Mock())
+            worker.adapter = SimpleNamespace(handle_incoming_guard_entry=AsyncMock())
+
+            proto = SimpleNamespace(
+                uid=12345,
+                uname="测试舰长",
+                msg_type=1,
+                privilege_type=3,
+                timestamp=1700000100,
+            )
+            with patch(
+                "bili_src.live.live_worker.InteractWordV2.from_base64",
+                return_value=proto,
+            ):
+                await worker._handle_interact_word_event(
+                    {"cmd": "INTERACT_WORD_V2", "data": {"pb": "encoded"}},
+                    "INTERACT_WORD_V2",
+                )
+
+            worker.adapter.handle_incoming_guard_entry.assert_awaited_once_with(
+                room_id=100,
+                user_id="12345",
+                user_name="测试舰长",
+                guard_level=3,
+                timestamp=1700000100.0,
+            )
+
+        asyncio.run(scenario())
+
+
+class BilibiliTestCommandV2Tests(unittest.TestCase):
+    @staticmethod
+    def _build_adapter():
+        adapter = BilibiliAdapter.__new__(BilibiliAdapter)
+        adapter.config = SimpleNamespace(
+            dede_user_id="12345",
+            screen_manual_user_ids=[],
+        )
+        adapter.api = SimpleNamespace()
+        adapter.logger = SimpleNamespace(info=Mock(), error=Mock())
+        adapter._send_danmu = AsyncMock()
+        adapter.handle_incoming_gift = AsyncMock()
+        adapter.handle_incoming_superchat = AsyncMock()
+        adapter.handle_incoming_guard = AsyncMock()
+        adapter.handle_incoming_danmu = AsyncMock()
+        return adapter
+
+    def test_v1_and_v2_direct_test_commands_are_supported(self):
+        async def scenario():
+            adapter = self._build_adapter()
+
+            for command in (
+                "#test_gift",
+                "#test_sc 测试SC",
+                "#test_sc_v2 测试SC V2",
+                "#test_guard",
+                "#guard_enable=[level:C,message:测试舰长弹幕]",
+                "#guard_enable_v2=[level:C,message:测试舰长弹幕V2]",
+            ):
+                handled = await adapter._handle_test_command(
+                    room_id=100,
+                    user_id="12345",
+                    text=command,
+                    user_name="测试用户",
+                )
+                self.assertTrue(handled, command)
+
+            adapter.handle_incoming_gift.assert_awaited_once()
+            self.assertEqual(adapter.handle_incoming_superchat.await_count, 2)
+            adapter.handle_incoming_guard.assert_awaited_once()
+            self.assertEqual(adapter.handle_incoming_danmu.await_count, 2)
+
+        asyncio.run(scenario())
+
+    def test_protocol_v2_test_commands_use_live_worker_dispatch(self):
+        async def scenario():
+            adapter = self._build_adapter()
+            payloads = []
+
+            class FakeWorker:
+                def __init__(self, *args, **kwargs):
+                    pass
+
+                async def _handle_event(self, payload):
+                    payloads.append(payload)
+
+            with patch.object(adapter_module, "LiveRoomWorker", FakeWorker):
+                for command in (
+                    "#test_gift_v2",
+                    "#test_guard_v2",
+                    "#guard_entry",
+                    "#guard_entry_v2",
+                ):
+                    handled = await adapter._handle_test_command(
+                        room_id=100,
+                        user_id="12345",
+                        text=command,
+                        user_name="测试用户",
+                    )
+                    self.assertTrue(handled, command)
+
+            self.assertEqual(
+                [payload["cmd"] for payload in payloads],
+                [
+                    "SEND_GIFT_V2",
+                    "USER_TOAST_MSG_V2",
+                    "INTERACT_WORD",
+                    "INTERACT_WORD_V2",
+                ],
+            )
+
+            from bili_src.live.v2_models import InteractWordV2, SendGiftBroadcast
+
+            gift = SendGiftBroadcast.from_base64(payloads[0]["data"]["pb"])
+            self.assertEqual(gift.uid, 12345)
+            self.assertEqual(gift.uname, "测试用户")
+            self.assertEqual(len(gift.gift_list), 1)
+            self.assertEqual(gift.gift_list[0].gift_name, "测试V2礼物(TestGiftV2)")
+
+            toast = payloads[1]["data"]
+            self.assertEqual(toast["sender_uinfo"]["uid"], 12345)
+            self.assertEqual(toast["guard_info"]["guard_level"], 3)
+            self.assertEqual(toast["option"]["source"], 0)
+
+            entry_v1 = payloads[2]["data"]
+            self.assertEqual(entry_v1["msg_type"], 1)
+            self.assertEqual(entry_v1["privilege_type"], 3)
+
+            entry_v2 = InteractWordV2.from_base64(payloads[3]["data"]["pb"])
+            self.assertEqual(entry_v2.uid, 12345)
+            self.assertEqual(entry_v2.uname, "测试用户")
+            self.assertEqual(entry_v2.msg_type, 1)
+            self.assertEqual(entry_v2.privilege_type, 3)
+
+        asyncio.run(scenario())
+
+
 class BilibiliSystemEventTests(unittest.TestCase):
     def test_queued_gift_and_guard_entry_are_stamped_at_send_boundary(self):
         async def scenario():

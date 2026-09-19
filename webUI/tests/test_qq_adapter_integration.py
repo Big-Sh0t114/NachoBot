@@ -1350,8 +1350,8 @@ def test_process_registry_retains_both_services_but_selects_snowluma_group(
         process_manager.SERVICE_DEFS
     )
     assert process_manager.GROUP_DEFS["qq_adapter"].services == [
-        "snowluma_runtime",
         "snowluma_adapter",
+        "snowluma_runtime",
     ]
     runtime_def = process_manager.SERVICE_DEFS["snowluma_runtime"]
     assert runtime_def.cmd == ["cmd", "/d", "/s", "/c", "launcher.bat"]

@@ -659,14 +659,14 @@ def _register_services(root_dir: Path | str | None = None):
             ["cmd", "/d", "/s", "/c", "launcher.bat"],
             port=snowluma_webui_port,
             wait_port=True,
-            order=1,
+            order=2,
             detail=(
                 f"SnowLuma Runtime {runtime_name or '(自动发现)'} WebUI · :{snowluma_webui_port}"
             ),
         ),
         ServiceDef("snowluma_adapter", "SnowLuma 适配器", "qq_adapter",
                    "NachoBot-SnowLuma-Adapter", ["uv", "run", "python", "main.py"],
-                    order=2, detail=(
+                    order=1, detail=(
                        f"SnowLuma Runtime WebSocket · ws://{snowluma_host}:{snowluma_port}"
                        f"{snowluma_path} · port {snowluma_relay_port}"
                    )),
@@ -763,11 +763,11 @@ def _register_services(root_dir: Path | str | None = None):
             "qq_adapter",
             "QQ / SnowLuma" if qq_adapter == "snowluma" else "QQ / NapCat",
             "🐧",
-             ["snowluma_runtime", "snowluma_adapter"]
+             ["snowluma_adapter", "snowluma_runtime"]
              if qq_adapter == "snowluma"
              else ["napcat_adapter", "napcat_shell"],
             (
-                "WebUI 先启动托管 SnowLuma Runtime，再启动本地适配器"
+                "WebUI 先启动本地 SnowLuma 适配器，再启动托管 Runtime"
                 if qq_adapter == "snowluma"
                 else "QQ 消息适配器与 NapCat 客户端"
             ),

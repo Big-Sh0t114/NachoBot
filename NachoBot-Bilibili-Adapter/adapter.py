@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 from loguru import logger
 import re
@@ -43,6 +44,11 @@ from bili_src.core.utils import (  # noqa: E402
 )
 from bili_src.api.api import BilibiliApi  # noqa: E402
 from bili_src.live.live_worker import LiveRoomWorker  # noqa: E402
+from bili_src.live.v2_models import (  # noqa: E402
+    InteractWordV2,
+    SendGiftBroadcast,
+    SendGiftV2GiftItem,
+)
 from bili_src.live.screen_monitor import ScreenMonitor  # noqa: E402
 from bili_src.live.two_phase_search import append_live_search_protocol  # noqa: E402
 from bili_src.audio.mic_capture import MicCaptureWorker, MicConfig  # noqa: E402
@@ -657,9 +663,16 @@ class BilibiliAdapter:
         Handle test commands for simulating live events.
         Only allows owner (dede_user_id) to trigger.
         Commands:
-        - #test_gift: Simulate sending a gift
+        - #test_gift: Simulate sending a legacy gift
+        - #test_gift_v2: Simulate a SEND_GIFT_V2 protobuf gift
         - #test_sc <msg>: Simulate sending a superchat
-        - #test_guard: Simulate opening a guard
+        - #test_sc_v2 <msg>: V2-named superchat test (current protocol is still SUPER_CHAT_MESSAGE)
+        - #test_guard: Simulate opening a legacy guard
+        - #test_guard_v2: Simulate a USER_TOAST_MSG_V2 guard event
+        - #guard_enable=[level:G/A/C,message:text]: Simulate guard-level danmu
+        - #guard_enable_v2=[level:G/A/C,message:text]: V2-named guard-level danmu test
+        - #guard_entry: Simulate INTERACT_WORD guard entry
+        - #guard_entry_v2: Simulate INTERACT_WORD_V2 protobuf guard entry
         - #test_clear: Clear any temporary test state (placeholder)
         """
         if not (text.startswith("#test_") or text.startswith("#guard_")):
@@ -719,7 +732,42 @@ class BilibiliAdapter:
                 )
                 return True
 
-            elif cmd == "#test_sc":
+            elif cmd == "#test_gift_v2":
+                gift_proto = SendGiftBroadcast(
+                    uid=int(user_id),
+                    uname=user_name,
+                    gift_list=[
+                        SendGiftV2GiftItem(
+                            gift_id=999999,
+                            gift_name="测试V2礼物(TestGiftV2)",
+                            num=1,
+                            gift_type=0,
+                            price=100000,
+                            total_coin=100000,
+                            coin_type="gold",
+                            tid=f"test-v2-{uuid.uuid4().hex}",
+                            timestamp=int(now_ts),
+                            rnd=uuid.uuid4().hex,
+                            action="赠送",
+                        )
+                    ],
+                )
+                payload = {
+                    "cmd": "SEND_GIFT_V2",
+                    "data": {
+                        "pb": base64.b64encode(gift_proto.dumps()).decode("ascii")
+                    },
+                }
+                test_worker = LiveRoomWorker(
+                    room_id, self.config, self.api, self, self.logger
+                )
+                await test_worker._handle_event(payload)
+                await self._send_danmu(
+                    room_id, "【测试】已触发 SEND_GIFT_V2 礼物事件", None, None
+                )
+                return True
+
+            elif cmd in {"#test_sc", "#test_sc_v2"}:
                 msg = arg if arg else "这是测试SC内容(Test SC Message)"
                 await self.handle_incoming_superchat(
                     room_id=room_id,
@@ -729,12 +777,16 @@ class BilibiliAdapter:
                     user_name=user_name,
                     timestamp=now_ts,
                 )
-                await self._send_danmu(room_id, "【测试】已触发模拟SC事件", None, None)
+                label = "V2" if cmd.endswith("_v2") else "V1"
+                await self._send_danmu(
+                    room_id,
+                    f"【测试】已触发模拟SC事件 ({label}; 当前线上命令仍为 SUPER_CHAT_MESSAGE)",
+                    None,
+                    None,
+                )
                 return True
 
-                return True
-
-            elif cmd == "#guard_enable":
+            elif cmd in {"#guard_enable", "#guard_enable_v2"}:
                 # Parse args format: [level:<G/A/C>,message:<text>]
                 # Simplified parsing: looking for pattern or just simplistic split
                 # Expected arg: "[level:G,message:Hello]" or similar
@@ -780,10 +832,88 @@ class BilibiliAdapter:
                 else:
                     await self._send_danmu(
                         room_id,
-                        "【测试】参数错误，用法: #guard_enable=[level:G/A/C,message:内容]",
+                        "【测试】参数错误，用法: #guard_enable[_v2]=[level:G/A/C,message:内容]",
                         None,
                         None,
                     )
+                return True
+
+            elif cmd == "#guard_entry":
+                payload = {
+                    "cmd": "INTERACT_WORD",
+                    "data": {
+                        "uid": int(user_id),
+                        "uname": user_name,
+                        "msg_type": 1,
+                        "privilege_type": 3,
+                        "timestamp": int(now_ts),
+                    },
+                }
+                test_worker = LiveRoomWorker(
+                    room_id, self.config, self.api, self, self.logger
+                )
+                await test_worker._handle_event(payload)
+                await self._send_danmu(
+                    room_id, "【测试】已触发 INTERACT_WORD 舰长进入事件", None, None
+                )
+                return True
+
+            elif cmd == "#guard_entry_v2":
+                entry_proto = InteractWordV2(
+                    uid=int(user_id),
+                    uname=user_name,
+                    msg_type=1,
+                    timestamp=int(now_ts),
+                    privilege_type=3,
+                )
+                payload = {
+                    "cmd": "INTERACT_WORD_V2",
+                    "data": {
+                        "pb": base64.b64encode(entry_proto.dumps()).decode("ascii")
+                    },
+                }
+                test_worker = LiveRoomWorker(
+                    room_id, self.config, self.api, self, self.logger
+                )
+                await test_worker._handle_event(payload)
+                await self._send_danmu(
+                    room_id, "【测试】已触发 INTERACT_WORD_V2 舰长进入事件", None, None
+                )
+                return True
+
+            elif cmd == "#test_guard_v2":
+                payload = {
+                    "cmd": "USER_TOAST_MSG_V2",
+                    "data": {
+                        "sender_uinfo": {
+                            "uid": int(user_id),
+                            "base": {"name": user_name},
+                        },
+                        "guard_info": {
+                            "guard_level": 3,
+                            "start_time": int(now_ts),
+                            "end_time": int(now_ts),
+                        },
+                        "pay_info": {
+                            "num": 1,
+                            "price": 198000,
+                            "unit": "月",
+                        },
+                        "gift_info": {
+                            "gift_id": 10003,
+                            "gift_name": "舰长(Captain V2)",
+                        },
+                        "option": {"source": 0},
+                        "toast_msg": f"{user_name} 开通了舰长",
+                    },
+                }
+                test_worker = LiveRoomWorker(
+                    room_id, self.config, self.api, self, self.logger
+                )
+                await test_worker._handle_event(payload)
+                await self._send_danmu(
+                    room_id, "【测试】已触发 USER_TOAST_MSG_V2 上舰事件", None, None
+                )
                 return True
 
             elif cmd == "#test_guard":

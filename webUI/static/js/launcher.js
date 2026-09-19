@@ -625,7 +625,7 @@ const LauncherModule = (() => {
     }
 
     const SNOWLUMA_START_SERVICE_IDS = new Set(['snowluma_runtime', 'snowluma_adapter']);
-    const SNOWLUMA_OPTIMISTIC_START_DETAIL = '正在启动 SnowLuma Runtime + Adapter…';
+    const SNOWLUMA_OPTIMISTIC_START_DETAIL = '正在启动 SnowLuma Adapter + Runtime…';
     const SNOWLUMA_OPTIMISTIC_START_TIMEOUT_MS = 60_000;
     const SNOWLUMA_UNLOAD_RECONCILIATION_DELAY_MS = 1_800;
 
@@ -862,7 +862,7 @@ const LauncherModule = (() => {
                 <div class="qq-component-status ${installed ? 'installed' : 'missing'}">
                     <div class="qq-component-status-heading">
                         <strong>${installed ? '✓ 组件已安装' : '⚠ 组件缺失'}</strong>
-                        <span>${selectedSnowLuma ? 'SnowLuma Runtime + Adapter' : 'NapCat Shell + Adapter'}</span>
+                        <span>${selectedSnowLuma ? 'SnowLuma Adapter + Runtime' : 'NapCat Shell + Adapter'}</span>
                     </div>
                     ${missing.length ? `<div class="qq-component-missing">缺少: ${escapeHtml(missing.join('、'))}</div>` : ''}
                     ${!installed ? `<div class="qq-component-guidance">请下载或重新部署所选组件后再启动。</div><a class="btn-download" href="${escapeHtml(downloadUrl)}" target="_blank" rel="noopener noreferrer">📥 官方下载 / 重新部署</a>` : ''}

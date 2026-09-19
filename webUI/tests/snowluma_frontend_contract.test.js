@@ -60,7 +60,7 @@ assert.strictEqual(JSON.stringify(normalized), JSON.stringify({
 assert(contract.qqGroupIsBusy({ services: [{ status: 'starting' }] }));
 assert(!contract.qqGroupIsBusy({ services: [{ status: 'stopped' }] }));
 assert(launcherSource.includes('snowlumaOptimisticStart'));
-assert(launcherSource.includes('正在启动 SnowLuma Runtime + Adapter'));
+assert(launcherSource.includes('正在启动 SnowLuma Adapter + Runtime'));
 assert(launcherSource.includes('await new Promise(resolve => setTimeout(resolve, 3000))'));
 assert(launcherSource.includes('clearSnowLumaOptimisticStart(true)'));
 assert(launcherSource.includes('clearTimeout'));
@@ -72,8 +72,8 @@ assert(
 const stoppedSnowLumaGroup = {
     id: 'qq_adapter',
     services: [
-        { id: 'snowluma_runtime', status: 'stopped', detail: '' },
         { id: 'snowluma_adapter', status: 'stopped', detail: '' },
+        { id: 'snowluma_runtime', status: 'stopped', detail: '' },
         { id: 'unrelated', status: 'running', detail: 'keep' },
     ],
 };
@@ -83,7 +83,7 @@ assert.deepStrictEqual(
     ['starting', 'starting'],
     'SnowLuma runtime and adapter must enter starting immediately',
 );
-assert(optimisticSnowLumaGroup.services[0].detail.includes('正在启动 SnowLuma Runtime + Adapter'));
+assert(optimisticSnowLumaGroup.services[0].detail.includes('正在启动 SnowLuma Adapter + Runtime'));
 assert.strictEqual(optimisticSnowLumaGroup.services[2].status, 'running');
 assert.strictEqual(stoppedSnowLumaGroup.services[0].status, 'stopped', 'optimistic rendering must not mutate backend state');
 const stalePoll = contract.reconcileSnowLumaOptimisticGroup(stoppedSnowLumaGroup, true);
@@ -109,7 +109,7 @@ const errorPoll = contract.reconcileSnowLumaOptimisticGroup({
     )),
 }, true);
 assert(!errorPoll.active, 'explicit error must clear optimistic starting');
-assert.strictEqual(errorPoll.group.services[1].status, 'error');
+assert.strictEqual(errorPoll.group.services[0].status, 'error');
 assert(launcherSource.includes('withSnowLumaPassword'));
 assert(launcherSource.includes('btn btn-primary btn-sm snowluma-refresh-button'));
 assert(launcherSource.includes('↻ 刷新实例'));
