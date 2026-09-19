@@ -1,5 +1,5 @@
 import asyncio
-from loguru import logger
+import json
 import re
 import time
 import random
@@ -39,8 +39,8 @@ class TTSManager:
         send_danmu_callback: Callable,
         live2d_start_reply_callback: Optional[Callable] = None,
         live2d_finish_reply_callback: Optional[Callable] = None,
-        live2d_execute_action_callback: Optional[Callable] = None,
-        extract_json_emotion_callback: Optional[Callable] = None,
+        live2d_apply_control_callback: Optional[Callable] = None,
+        prepare_reply_callback: Optional[Callable] = None,
         tts_model_class: Any = None,
         tts_import_error: Optional[str] = None,
         tts_config_dir: Optional[Path] = None,
@@ -53,8 +53,8 @@ class TTSManager:
         self.send_danmu = send_danmu_callback
         self.on_start_replying = live2d_start_reply_callback
         self.on_reply_finished = live2d_finish_reply_callback
-        self.execute_live2d_action = live2d_execute_action_callback
-        self.extract_json_emotion = extract_json_emotion_callback
+        self.apply_live2d_control = live2d_apply_control_callback
+        self.prepare_reply = prepare_reply_callback
         
         self.tts_model_class = tts_model_class
         self.tts_import_error = tts_import_error
@@ -145,6 +145,26 @@ class TTSManager:
             )
         return await resolve_emotion_preset_remote(text, base_config_path=base_path)
 
+    async def _prepare_idle_reply(self, idle_item: Any) -> Any:
+        """Normalize idle strings/dicts through the Live2D owner when present."""
+
+        if self.prepare_reply is None:
+            if isinstance(idle_item, dict):
+                return idle_item.get("reply", str(idle_item))
+            return str(idle_item)
+
+        if isinstance(idle_item, dict):
+            raw_item = json.dumps(idle_item, ensure_ascii=False)
+        else:
+            raw_item = str(idle_item)
+        return await self.prepare_reply(raw_item)
+
+    @staticmethod
+    def _prepared_value(prepared: Any, key: str, default: Any = None) -> Any:
+        if isinstance(prepared, dict):
+            return prepared.get(key, default)
+        return getattr(prepared, key, default)
+
     def is_tts_enabled(self, room_id: int) -> bool:
         if room_id in self._tts_manual_overrides:
             return self._tts_manual_overrides[room_id]
@@ -195,8 +215,11 @@ class TTSManager:
                 tomlkit.dump(doc, f)
 
             self.logger.info(f"Persisted TTS config for room {room_id}: enable={enable}")
-        except Exception as e:
-            self.logger.error(f"Error persisting TTS config: {e}")
+        except Exception as exc:
+            self.logger.error(
+                "Error persisting TTS config: error_type={}",
+                type(exc).__name__,
+            )
             raise
 
     def save_idle_tts_config(self, enable: bool) -> None:
@@ -230,8 +253,11 @@ class TTSManager:
                 tomlkit.dump(doc, f)
 
             self.logger.info(f"Persisted idle_tts config: enable={enable}")
-        except Exception as e:
-            self.logger.error(f"Error persisting idle_tts config: {e}")
+        except Exception as exc:
+            self.logger.error(
+                "Error persisting idle_tts config: error_type={}",
+                type(exc).__name__,
+            )
             raise
 
     def handle_tts_manual_command(self, room_id: int, user_id: str, text: str, user_name: str, allowed_user_ids: set) -> bool:
@@ -263,8 +289,11 @@ class TTSManager:
             if self.config_path:
                 try:
                     self.save_idle_tts_config(enable)
-                except Exception as e:
-                    self.logger.error(f"Failed to persist Idle TTS config: {e}")
+                except Exception as exc:
+                    self.logger.error(
+                        "Failed to persist Idle TTS config: error_type={}",
+                        type(exc).__name__,
+                    )
             return True
 
         enable = command == "#tts_on"
@@ -282,8 +311,11 @@ class TTSManager:
         if self.config_path:
             try:
                 self.save_tts_config(room_id, enable)
-            except Exception as e:
-                self.logger.error(f"Failed to persist TTS config: {e}")
+            except Exception as exc:
+                self.logger.error(
+                    "Failed to persist TTS config: error_type={}",
+                    type(exc).__name__,
+                )
 
         return True
 
@@ -322,7 +354,10 @@ class TTSManager:
         text_zh = "".join(m.strip() for m in zh_matches if m.strip())
 
         if not text_jp and not text_zh:
-            self.logger.warning(f"Failed to parse bilingual tags. Original text: {repr(text[:100])}...")
+            self.logger.warning(
+                "Failed to parse bilingual tags: text_chars={}",
+                len(text),
+            )
             cleaned = re.sub(r"</?[A-Z]{2}>", "", text).strip()
             return "", cleaned
 
@@ -346,7 +381,11 @@ class TTSManager:
             repaired = repaired + "</JP>" * open_jp
 
         if repaired != text:
-            self.logger.info(f"Tag repair applied: {repr(text[:50])} -> {repr(repaired[:50])}")
+            self.logger.info(
+                "Tag repair applied: original_chars={} repaired_chars={}",
+                len(text),
+                len(repaired),
+            )
 
         return repaired
 
@@ -359,8 +398,11 @@ class TTSManager:
             with open(target_path, "w", encoding="utf-8-sig") as f:
                 f.write(text)
             self.logger.info(f"Subtitle updated: {target_path}")
-        except Exception as e:
-            self.logger.error(f"Failed to update subtitle: {e}")
+        except Exception as exc:
+            self.logger.error(
+                "Failed to update subtitle: error_type={}",
+                type(exc).__name__,
+            )
 
     async def idle_tts_loop(self) -> None:
         if not self.config.idle_tts_texts:
@@ -381,16 +423,12 @@ class TTSManager:
                 self.logger.info(f"Idle time ({idle_duration:.1f}s) reached target ({self._next_idle_target:.1f}s). Triggering preset TTS.")
                 self.reset_idle_timer()
                 try:
-                    if isinstance(idle_item, dict):
-                        parsed_text = idle_item.get("reply", str(idle_item))
-                        emotion = idle_item.get("emotion")
-                        action = idle_item.get("action")
+                    prepared = await self._prepare_idle_reply(idle_item)
+                    if isinstance(prepared, str):
+                        parsed_text = prepared
                     else:
-                        parsed_text = str(idle_item)
-                        emotion = None
-                        action = None
-                        if self.extract_json_emotion:
-                            parsed_text, emotion, action = self.extract_json_emotion(parsed_text)
+                        parsed_text = str(self._prepared_value(prepared, "reply", "") or "")
+                    control_id = self._prepared_value(prepared, "control_id")
                     
                     text_jp, text_zh = self.parse_bilingual_response(parsed_text)
                     display_text = text_zh if text_zh else parsed_text
@@ -408,12 +446,20 @@ class TTSManager:
                     if resolve_emotion_preset_remote is not None:
                         try:
                             preset_name = await self._resolve_remote_emotion_preset(cleaned_tts_text)
-                        except Exception as e:
-                            self.logger.error(f"Failed to resolve emotion preset: {e}")
+                        except Exception as exc:
+                            self.logger.error(
+                                "Failed to resolve emotion preset: error_type={}",
+                                type(exc).__name__,
+                            )
 
                     first_segment = True
                     for idx, seg_text in enumerate(segments):
-                        self.logger.info(f"Idle TTS 生成第 {idx+1}/{len(segments)} 段: {seg_text}")
+                        self.logger.info(
+                            "Idle TTS segment {}/{}: chars={}",
+                            idx + 1,
+                            len(segments),
+                            len(seg_text),
+                        )
                         audio_data = await self._synthesize_tts_segment(
                             seg_text,
                             platform=self.config.platform,
@@ -423,16 +469,18 @@ class TTSManager:
 
                         if first_segment and audio_data:
                             first_segment = False
-                            if self.on_start_replying and self.execute_live2d_action:
+                            if self.on_start_replying:
                                 await self.on_start_replying()
-                                self.execute_live2d_action(emotion, action)
-                                if not action:
-                                    pass
+                            if self.apply_live2d_control and control_id:
+                                await self.apply_live2d_control(control_id)
 
                         if audio_data:
                             await asyncio.to_thread(self.audio_player.play_idle, audio_data)
-                except Exception as e:
-                    self.logger.error(f"Failed to generate/play idle TTS: {e}")
+                except Exception as exc:
+                    self.logger.error(
+                        "Failed to generate/play idle TTS: error_type={}",
+                        type(exc).__name__,
+                    )
 
     async def wait_and_process_tts(self, room_id: int, delay: float = 0.5) -> None:
         try:
@@ -440,10 +488,20 @@ class TTSManager:
             await self.process_buffered_live_reply(room_id)
         except asyncio.CancelledError:
             pass
-        except Exception as e:
-            self.logger.error(f"TTS timer error: {e}")
+        except Exception as exc:
+            self.logger.error(
+                "TTS timer error: error_type={}",
+                type(exc).__name__,
+            )
 
-    def buffer_tts_reply(self, room_id: int, text: str, reply_mid: str, reply_dmid: str, emotion: Optional[str] = None, action: Optional[str] = None):
+    def buffer_tts_reply(
+        self,
+        room_id: int,
+        text: str,
+        reply_mid: str,
+        reply_dmid: str,
+        control_id: Optional[str] = None,
+    ):
         # Normalize full-width symbols and brackets to standard uppercase tags
         text = text.replace("＜", "<").replace("＞", ">")
         text = text.replace("／", "/")
@@ -459,14 +517,10 @@ class TTSManager:
                 "reply_mid": reply_mid,
                 "reply_dmid": reply_dmid,
                 "start_time": time.time(),
-                "emotion": emotion,
-                "action": action,
+                "control_id": control_id,
             }
-        elif emotion or action:
-            if emotion:
-                self._tts_metadata[room_id]["emotion"] = emotion
-            if action:
-                self._tts_metadata[room_id]["action"] = action
+        elif control_id:
+            self._tts_metadata[room_id]["control_id"] = control_id
 
         if room_id in self._tts_timer:
             self._tts_timer[room_id].cancel()
@@ -489,8 +543,13 @@ class TTSManager:
             is_balanced = (open_zh == close_zh) and (open_jp == close_jp)
 
             self.logger.info(
-                f"SmartBuffering Check: balanced={is_balanced} (ZH:{open_zh}/{close_zh} JP:{open_jp}/{close_jp}) "
-                f"len={len(full_text)} content={repr(full_text[:100])}..."
+                "SmartBuffering Check: balanced={} (ZH:{}/{} JP:{}/{}) chars={}",
+                is_balanced,
+                open_zh,
+                close_zh,
+                open_jp,
+                close_jp,
+                len(full_text),
             )
 
             metadata = self._tts_metadata.get(room_id, {})
@@ -512,8 +571,25 @@ class TTSManager:
 
             reply_mid = metadata.get("reply_mid")
             reply_dmid = metadata.get("reply_dmid")
+            control_id = metadata.get("control_id")
+            reply_started = False
+            control_apply_attempted = False
 
-            self.logger.info(f"Processing buffered TTS reply for room {room_id}: {full_text[:50]}...")
+            async def activate_reply() -> None:
+                nonlocal reply_started, control_apply_attempted
+                if not reply_started and self.on_start_replying:
+                    reply_started = True
+                    await self.on_start_replying()
+                if not control_apply_attempted and self.apply_live2d_control and control_id:
+                    control_apply_attempted = True
+                    await self.apply_live2d_control(control_id)
+
+            self.logger.info(
+                "Processing buffered TTS reply for room {}: chars={} buffer_segments={}",
+                room_id,
+                len(full_text),
+                len(buffer),
+            )
 
             room_config = self.config.live_room_prompts.get(room_id, {})
             tts_config = room_config.get("tts", {})
@@ -542,7 +618,12 @@ class TTSManager:
 
                 if tts_text:
                     cleaned_tts_text = _clean_text_for_tts(tts_text)
-                    self.logger.info(f"TTS Generating for room {room_id} (lang={room_lang}): {cleaned_tts_text}")
+                    self.logger.info(
+                        "TTS Generating for room {} (lang={}): chars={}",
+                        room_id,
+                        room_lang,
+                        len(cleaned_tts_text),
+                    )
                     try:
                         # 分段流式：按句切分文本，逐句生成并立即送入播放队列
                         from nachobot_multimodal.utils.text_splitter import split_text_for_streaming
@@ -553,12 +634,20 @@ class TTSManager:
                         if resolve_emotion_preset_remote is not None:
                             try:
                                 preset_name = await self._resolve_remote_emotion_preset(cleaned_tts_text)
-                            except Exception as e:
-                                self.logger.error(f"Failed to resolve emotion preset: {e}")
+                            except Exception as exc:
+                                self.logger.error(
+                                    "Failed to resolve emotion preset: error_type={}",
+                                    type(exc).__name__,
+                                )
 
                         first_segment = True
                         for idx, seg_text in enumerate(segments):
-                            self.logger.info(f"TTS 生成第 {idx+1}/{len(segments)} 段: {seg_text}")
+                            self.logger.info(
+                                "TTS segment {}/{}: chars={}",
+                                idx + 1,
+                                len(segments),
+                                len(seg_text),
+                            )
                             audio_data = await self._synthesize_tts_segment(
                                 seg_text,
                                 platform=self.config.platform,
@@ -568,15 +657,14 @@ class TTSManager:
 
                             if first_segment and audio_data:
                                 first_segment = False
-                                # 首段音频就绪后触发 Live2D 动作
-                                if self.on_start_replying and self.execute_live2d_action:
-                                    try:
-                                        await self.on_start_replying()
-                                        emotion = metadata.get("emotion")
-                                        action = metadata.get("action")
-                                        self.execute_live2d_action(emotion, action)
-                                    except Exception as e:
-                                        self.logger.error(f"Live2D reply hook error: {e}")
+                                # 首段音频就绪后触发 Live2D 控制，最多一次
+                                try:
+                                    await activate_reply()
+                                except Exception as exc:
+                                    self.logger.error(
+                                        "Live2D reply hook error: error_type={}",
+                                        type(exc).__name__,
+                                    )
                                 self.audio_player.interrupt_idle()
 
                             if audio_data:
@@ -584,21 +672,27 @@ class TTSManager:
 
                         self.logger.info(f"TTS Played successfully for room {room_id}")
                         return
-                    except Exception as e:
-                        self.logger.error(f"TTS generation failed: {e}")
+                    except Exception as exc:
+                        self.logger.error(
+                            "TTS generation failed: error_type={}",
+                            type(exc).__name__,
+                        )
                         self.logger.info("Fallback to sending danmu due to TTS error")
                 else:
-                    self.logger.warning(f"TTS enabled for room {room_id} but no parseable text for TTS. Sending raw text as danmu.")
+                    self.logger.warning(
+                        "TTS enabled for room {} but no parseable text for TTS. Sending danmu.",
+                        room_id,
+                    )
 
             # Fallback
-            if self.on_start_replying and self.execute_live2d_action:
+            if self.on_start_replying or self.apply_live2d_control:
                 try:
-                    await self.on_start_replying()
-                    emotion = metadata.get("emotion")
-                    action = metadata.get("action")
-                    self.execute_live2d_action(emotion, action)
-                except Exception as e:
-                    self.logger.error(f"Live2D reply hook error: {e}")
+                    await activate_reply()
+                except Exception as exc:
+                    self.logger.error(
+                        "Live2D reply hook error: error_type={}",
+                        type(exc).__name__,
+                    )
 
             safe_danmu_text = msg_to_send
             if len(safe_danmu_text) > 30:
@@ -609,10 +703,16 @@ class TTSManager:
             if self.on_reply_finished:
                 try:
                     await self.on_reply_finished()
-                except Exception as e:
-                    self.logger.error(f"Live2D reply hook error: {e}")
+                except Exception as exc:
+                    self.logger.error(
+                        "Live2D reply hook error: error_type={}",
+                        type(exc).__name__,
+                    )
 
-        except Exception as e:
-            self.logger.error(f"Error processing buffered TTS reply: {e}")
+        except Exception as exc:
+            self.logger.error(
+                "Error processing buffered TTS reply: error_type={}",
+                type(exc).__name__,
+            )
             self._tts_buffer.pop(room_id, None)
             self._tts_metadata.pop(room_id, None)

@@ -1,5 +1,4 @@
 import asyncio
-from loguru import logger
 import time
 from typing import Any, Dict, Optional
 
@@ -14,6 +13,7 @@ from bili_src.core.utils import (
     BILIBILI_DANMU_SEND_DELAY_SECONDS,
 )
 from bili_src.live.two_phase_search import BilibiliLiveSearchOrchestrator
+from bili_src.live2d.remote_controller import PreparedReplyResult
 
 
 class OutgoingHandler:
@@ -59,13 +59,15 @@ class OutgoingHandler:
             return
 
         original_text = text
-        text, emotion, action = (
-            self.adapter.live2d_manager.extract_json_emotion_from_text(original_text)
-        )
+        prepared = await self.adapter.live2d_manager.prepare_reply(original_text)
+        text = prepared.reply
+        if not text:
+            self.logger.warning("Outgoing reply suppressed after Live2D preparation")
+            return
 
         comment_target = self.adapter.comment_handler.resolve_comment_target(message)
         if comment_target:
-            self.adapter.live2d_manager.execute_extracted_live2d_action(emotion, action)
+            await self.adapter.live2d_manager.apply_control(prepared.control_id)
             await self.adapter.comment_handler.send_comment_reply_from_context(
                 comment_target, text
             )
@@ -83,13 +85,14 @@ class OutgoingHandler:
                     "room_id": room_id,
                     "reply_mid": reply_mid or "",
                     "reply_dmid": reply_dmid or "",
-                }
+                },
+                prepared=prepared,
             )
             return
 
         private_target = self.adapter.private_handler.resolve_private_target(message)
         if private_target:
-            self.adapter.live2d_manager.execute_extracted_live2d_action(emotion, action)
+            await self.adapter.live2d_manager.apply_control(prepared.control_id)
             await self.adapter.private_handler.send_private_message(
                 private_target, text
             )
@@ -123,7 +126,7 @@ class OutgoingHandler:
         command_name = str(command_data.get("name") or "")
         args = command_data.get("args") or {}
         if command_name == "BILI_COMMENT_REPLY":
-            await self.adapter._handle_comment_reply(args)
+            await self._handle_comment_reply(args)
             return
         if command_name == "BILI_LIVE_REPLY":
             await self._handle_live_reply(args)
@@ -135,12 +138,11 @@ class OutgoingHandler:
 
     async def _handle_comment_reply(self, args: Dict[str, Any]) -> None:
         raw_msg = str(args.get("message") or "")
-        text, emotion, action = (
-            self.adapter.live2d_manager.extract_json_emotion_from_text(raw_msg)
-        )
+        prepared = await self.adapter.live2d_manager.prepare_reply(raw_msg)
+        text = prepared.reply
         text = _strip_emoji(text).strip()
 
-        self.adapter.live2d_manager.execute_extracted_live2d_action(emotion, action)
+        await self.adapter.live2d_manager.apply_control(prepared.control_id)
 
         if not text:
             self.logger.warning("Empty comment reply text")
@@ -159,7 +161,12 @@ class OutgoingHandler:
         target = (comment_type, oid, root_id, parent_id)
         await self.adapter.comment_handler.send_comment_reply_from_context(target, text)
 
-    async def _handle_live_reply(self, args: Dict[str, Any]) -> None:
+    async def _handle_live_reply(
+        self,
+        args: Dict[str, Any],
+        *,
+        prepared: PreparedReplyResult | None = None,
+    ) -> None:
         raw_message = str(args.get("message") or "")
         try:
             room_id = int(args.get("room_id"))
@@ -168,9 +175,11 @@ class OutgoingHandler:
             return
         reply_mid = str(args.get("reply_mid") or "")
         reply_dmid = str(args.get("reply_dmid") or "")
+        if prepared is None:
+            prepared = await self.adapter.live2d_manager.prepare_reply(raw_message)
 
         handled = await self.live_search.handle(
-            raw_message,
+            prepared,
             room_id=room_id,
             reply_mid=reply_mid,
             reply_dmid=reply_dmid,
@@ -179,20 +188,18 @@ class OutgoingHandler:
         if handled:
             return
 
-        await self._deliver_live_reply(raw_message, room_id, reply_mid, reply_dmid)
+        await self._deliver_live_reply(prepared, room_id, reply_mid, reply_dmid)
 
     async def _deliver_live_reply(
         self,
-        raw_message: str,
+        prepared: PreparedReplyResult,
         room_id: int,
         reply_mid: str,
         reply_dmid: str,
     ) -> None:
         """Deliver one already-orchestrated live reply through TTS/Live2D/danmu."""
 
-        text, emotion, action = (
-            self.adapter.live2d_manager.extract_json_emotion_from_text(raw_message)
-        )
+        text = prepared.reply
         text = _strip_emoji(text).strip()
 
         if text:
@@ -220,27 +227,30 @@ class OutgoingHandler:
                 text=text,
                 reply_mid=reply_mid,
                 reply_dmid=reply_dmid,
-                emotion=emotion,
-                action=action,
+                control_id=prepared.control_id,
             )
             return
 
         if self.adapter.live2d_manager.controller:
             try:
                 await self.adapter.live2d_manager.controller.on_start_replying()
-                self.adapter.live2d_manager.execute_extracted_live2d_action(
-                    emotion, action
+                await self.adapter.live2d_manager.apply_control(prepared.control_id)
+            except Exception as exc:
+                self.logger.error(
+                    "Live2D reply hook error: error_type={}",
+                    type(exc).__name__,
                 )
-            except Exception as e:
-                self.logger.error(f"Live2D reply hook error: {e}")
 
         await self._send_danmu(room_id, text, reply_mid or None, reply_dmid or None)
 
         if self.adapter.live2d_manager.controller:
             try:
                 await self.adapter.live2d_manager.controller.on_reply_finished()
-            except Exception as e:
-                self.logger.error(f"Live2D reply hook error: {e}")
+            except Exception as exc:
+                self.logger.error(
+                    "Live2D reply hook error: error_type={}",
+                    type(exc).__name__,
+                )
 
     async def _send_danmu(
         self,
@@ -260,11 +270,12 @@ class OutgoingHandler:
             self.logger.warning("Empty danmu after splitting")
             return
         self.logger.info(
-            "Send danmu: room_id={} reply_mid={} reply_dmid={} text={}",
+            "Send danmu: room_id={} reply_mid={} reply_dmid={} chars={} segments={}",
             room_id,
             reply_mid or "",
             reply_dmid or "",
-            text,
+            len(text),
+            len(segments),
         )
         for idx, segment in enumerate(segments):
             segment_reply_mid = reply_mid if idx == 0 else None
@@ -276,8 +287,9 @@ class OutgoingHandler:
                     reply_mid=segment_reply_mid or None,
                     reply_dmid=segment_reply_dmid or None,
                 )
-                if (resp or {}).get("code") != 0:
-                    self.logger.warning(f"Danmu send failed: {resp}")
+                response_code = resp.get("code") if isinstance(resp, dict) else None
+                if response_code != 0:
+                    self.logger.warning("Danmu send failed: code={}", response_code)
                 else:
                     dmid = None
                     data = (resp or {}).get("data", {})
@@ -288,7 +300,10 @@ class OutgoingHandler:
                     )
                     self.logger.info("Danmu send ok")
             except Exception as exc:
-                self.logger.error(f"Danmu send error: {exc}")
+                self.logger.error(
+                    "Danmu send error: error_type={}",
+                    type(exc).__name__,
+                )
             if idx < len(segments) - 1:
                 await asyncio.sleep(BILIBILI_DANMU_SEND_DELAY_SECONDS)
 

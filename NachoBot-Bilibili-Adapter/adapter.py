@@ -240,8 +240,8 @@ class BilibiliAdapter:
             live2d_finish_reply_callback=self.live2d_manager.controller.on_reply_finished
             if self.live2d_manager.controller
             else None,
-            live2d_execute_action_callback=self.live2d_manager.execute_extracted_live2d_action,
-            extract_json_emotion_callback=self.live2d_manager.extract_json_emotion_from_text,
+            live2d_apply_control_callback=self.live2d_manager.apply_control,
+            prepare_reply_callback=self.live2d_manager.prepare_reply,
             tts_model_class=TTSModel,
             tts_import_error=_tts_import_error,
         )

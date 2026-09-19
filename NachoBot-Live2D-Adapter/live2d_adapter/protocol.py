@@ -7,13 +7,14 @@ objects must never cross this boundary.
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-import json
-from typing import Any, Mapping
+from typing import Any
 from uuid import uuid4
 
-PROTOCOL_VERSION = "1.0"
+PROTOCOL_VERSION = "1.1"
 COMMAND_MESSAGE_TYPE = "avatar.command"
 INTERACTION_MESSAGE_TYPE = "avatar.interaction"
 
@@ -35,6 +36,8 @@ class AvatarEvent(StrEnum):
     PARAM_TWEEN = "param_tween"
     PLAY_AUDIO = "play_audio"
     STOP_AUDIO = "stop_audio"
+    PREPARE_REPLY = "prepare_reply"
+    APPLY_CONTROL = "apply_control"
     SHUTDOWN = "shutdown"
     PING = "ping"
 
@@ -46,6 +49,8 @@ class AvatarInteraction(StrEnum):
     CLICK = "click"
     POKE = "poke"
     PONG = "pong"
+    REPLY_PREPARED = "reply_prepared"
+    CONTROL_APPLIED = "control_applied"
     ERROR = "error"
 
 
@@ -57,7 +62,7 @@ class AvatarCommand:
     version: str = PROTOCOL_VERSION
 
     @classmethod
-    def from_mapping(cls, raw: Mapping[str, Any]) -> "AvatarCommand":
+    def from_mapping(cls, raw: Mapping[str, Any]) -> AvatarCommand:
         message_type = raw.get("type")
         if message_type != COMMAND_MESSAGE_TYPE:
             raise ProtocolError(
@@ -93,7 +98,7 @@ class AvatarCommand:
         )
 
     @classmethod
-    def from_json(cls, raw_json: str) -> "AvatarCommand":
+    def from_json(cls, raw_json: str) -> AvatarCommand:
         try:
             raw = json.loads(raw_json)
         except json.JSONDecodeError as exc:

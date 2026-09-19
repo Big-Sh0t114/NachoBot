@@ -482,12 +482,11 @@ class PrivateHandler:
         self, args: Dict[str, Any], message: Optional[MessageBase]
     ) -> None:
         raw_msg = str(args.get("message") or "")
-        text, emotion, action = (
-            self.adapter.live2d_manager.extract_json_emotion_from_text(raw_msg)
-        )
+        prepared = await self.adapter.live2d_manager.prepare_reply(raw_msg)
+        text = prepared.reply
         text = _strip_emoji(text).strip()
 
-        self.adapter.live2d_manager.execute_extracted_live2d_action(emotion, action)
+        await self.adapter.live2d_manager.apply_control(prepared.control_id)
 
         if not text:
             return
