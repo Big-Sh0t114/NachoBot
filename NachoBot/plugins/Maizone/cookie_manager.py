@@ -3,6 +3,7 @@ import json
 import asyncio
 import time
 import re
+import ast
 from pathlib import Path
 
 import httpx
@@ -21,8 +22,11 @@ qrcode_url = "https://ssl.ptlogin2.qq.com/ptqrshow?appid=549000912&e=2&l=M&s=3&d
 login_check_url = "https://xui.ptlogin2.qq.com/ssl/ptqrlogin?u1=https://qzs.qq.com/qzone/v5/loginsucc.html?para=izone&ptqrtoken={}&ptredirect=0&h=1&t=1&g=1&from_ui=1&ptlang=2052&action=0-0-1656992258324&js_ver=22070111&js_type=1&login_sig=&pt_uistyle=40&aid=549000912&daid=5&has_onekey=1&&o1vId=1e61428d61cb5015701ad73d5fb59f73"
 check_sig_url = "https://ptlogin2.qzone.qq.com/check_sig?pttype=1&uin={}&service=ptqrlogin&nodirect=1&ptsigx={}&s_url=https://qzs.qq.com/qzone/v5/loginsucc.html?para=izone&f_url=&ptlang=2052&ptredirect=100&aid=549000912&daid=5&j_later=0&low_login_hour=0&regmaster=0&pt_login_type=3&pt_aid=0&pt_aaid=16&pt_light=0&pt_3rd_aid=0"
 
-# 内存中的上次扫码登录时间
-_last_qr_login_time = 0
+# Credential refresh throttling and QR prompting are separate clocks.  A
+# successful adapter/client-key refresh must not suppress a later QR prompt,
+# and loading a local fallback must update neither clock.
+_last_cookie_refresh_time = 0.0
+_last_qr_login_time = 0.0
 qrcode_path = str(Path(__file__).parent.resolve() / "qrcode.png")
 
 
@@ -51,9 +55,39 @@ def update_last_qr_login_time():
     _last_qr_login_time = time.time()
 
 
+def update_last_cookie_refresh_time():
+    """Record a genuinely fresh credential refresh."""
+    global _last_cookie_refresh_time
+    _last_cookie_refresh_time = time.time()
+
+
+def validate_qzone_cookies(cookies: object) -> dict[str, str]:
+    """Return normalized Qzone cookies or reject incomplete credentials."""
+    if not isinstance(cookies, dict):
+        raise CookieRefreshError("QQ空间cookie格式无效")
+    normalized = {
+        str(key).strip(): str(value).strip()
+        for key, value in cookies.items()
+        if str(key).strip() and value is not None and str(value).strip()
+    }
+    if not normalized.get("p_skey"):
+        raise CookieRefreshError("QQ空间cookie缺少p_skey")
+    if not (normalized.get("uin") or normalized.get("p_uin")):
+        raise CookieRefreshError("QQ空间cookie缺少账号标识")
+    return normalized
+
+
 def parse_cookie_string(cookie_str: str) -> dict:
     """将cookie字符串解析为字典"""
-    return {pair.split("=", 1)[0]: pair.split("=", 1)[1] for pair in cookie_str.split("; ")}
+    cookies = {}
+    for raw_pair in cookie_str.split(";"):
+        pair = raw_pair.strip()
+        if not pair or "=" not in pair:
+            continue
+        key, value = pair.split("=", 1)
+        if key.strip():
+            cookies[key.strip()] = value.strip()
+    return cookies
 
 
 class QzoneLogin:
@@ -102,7 +136,7 @@ class QzoneLogin:
                         response_header_dict = req.headers
 
                         # 检出url
-                        url = eval(req.text.replace("ptuiCB", ""))[2]
+                        url = ast.literal_eval(req.text.replace("ptuiCB", ""))[2]
 
                         # 获取ptsigx
                         m = re.findall(r"ptsigx=[A-z \d]*&", url)
@@ -180,10 +214,10 @@ async def renew_cookies(platform: str | None = None):
     4. 如果二维码登录失败，尝试读取本地cookie文件
     """
     # 1小时内无需更新cookie
-    global _last_qr_login_time
+    global _last_cookie_refresh_time
     current_time = time.time()
-    duration = current_time - _last_qr_login_time
-    if duration < 1 * 3600 and _last_qr_login_time != 0:
+    duration = current_time - _last_cookie_refresh_time
+    if duration < 1 * 3600 and _last_cookie_refresh_time != 0:
         logger.info(f"上次更新cookie在{duration}秒前，跳过更新cookie")
         return
     # 尝试通过核心平台能力获取cookie
@@ -192,13 +226,15 @@ async def renew_cookies(platform: str | None = None):
     directory = os.path.dirname(file_path)
     fresh_cookie = False
     try:
-        cookie_dict = await platform_api.get_platform_cookies("user.qzone.qq.com", platform=platform)
+        cookie_dict = validate_qzone_cookies(
+            await platform_api.get_platform_cookies("qzone.qq.com", platform=platform)
+        )
         fresh_cookie = True
     # 尝试通过clientkey获取cookie
     except Exception as e:
         logger.error(f"平台cookie获取异常: {type(e).__name__}。尝试通过ClientKey获取cookie")
         try:
-            cookie_dict = await fetch_cookies_by_clientkey()
+            cookie_dict = validate_qzone_cookies(await fetch_cookies_by_clientkey())
             fresh_cookie = True
         # 尝试使用二维码登录或读取本地cookie
         except Exception as e:
@@ -211,7 +247,7 @@ async def renew_cookies(platform: str | None = None):
                     if not os.path.exists(file_path):
                         raise FileNotFoundError(f"未找到本地cookie文件: {file_path}")
                     with open(file_path, "r", encoding="utf-8") as f:
-                        cookie_dict = json.load(f)
+                        cookie_dict = validate_qzone_cookies(json.load(f))
                     logger.info("读取本地cookie文件")
                 except FileNotFoundError as e3:
                     logger.error(f"本地cookie文件不存在: {str(e3)}")
@@ -222,7 +258,7 @@ async def renew_cookies(platform: str | None = None):
                     # 使用二维码登录
                     logger.info("开始二维码登录流程...")
                     login = QzoneLogin()
-                    cookie_dict = await login.login_via_qrcode()
+                    cookie_dict = validate_qzone_cookies(await login.login_via_qrcode())
                     fresh_cookie = True
                     logger.info("二维码登录成功")
                 # 尝试寻找本地cookie文件
@@ -232,7 +268,7 @@ async def renew_cookies(platform: str | None = None):
                         if not os.path.exists(file_path):
                             raise FileNotFoundError(f"未找到本地cookie文件: {file_path}")
                         with open(file_path, "r", encoding="utf-8") as f:
-                            cookie_dict = json.load(f)
+                            cookie_dict = validate_qzone_cookies(json.load(f))
                         logger.warning("读取本地cookie文件，可能cookie已过期")
                     except FileNotFoundError as e3:
                         logger.error(f"本地cookie文件不存在: {str(e3)}")
@@ -240,8 +276,11 @@ async def renew_cookies(platform: str | None = None):
 
     # Only fresh credentials may refresh the QR-login clock.  A local fallback
     # is deliberately not written back as a successful renewal.
-    if not isinstance(cookie_dict, dict) or not cookie_dict:
-        raise CookieRefreshError("获取到的cookie为空")
+    cookie_dict = validate_qzone_cookies(cookie_dict)
+
+    if not fresh_cookie:
+        logger.warning("仅使用本地cookie回退；未将其标记为新鲜凭据")
+        return
 
     # 将cookie字典保存到路径
     try:
@@ -251,8 +290,7 @@ async def renew_cookies(platform: str | None = None):
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(cookie_dict, f, indent=4, ensure_ascii=False)
         logger.info(f"[OK] cookies 已保存至: {file_path}")
-        if fresh_cookie:
-            update_last_qr_login_time()
+        update_last_cookie_refresh_time()
     # 异常处理
     except PermissionError as e:
         logger.error(f"文件写入权限不足: {str(e)}")
@@ -267,4 +305,3 @@ async def renew_cookies(platform: str | None = None):
         logger.error(f"处理cookie时发生异常: {str(e)}")
 
         raise CookieRefreshError(f"处理cookie时发生异常: {str(e)}") from e
-

@@ -16,7 +16,11 @@ from src.chat.utils.utils_image import get_image_manager
 logger = get_logger('Maizone.QzoneAPI')
 
 
-class QzoneAuthError(RuntimeError):
+class QzoneAPIError(RuntimeError):
+    """QQ Space returned an invalid response or rejected an operation."""
+
+
+class QzoneAuthError(QzoneAPIError):
     """QQ Space rejected the current credentials."""
 
 
@@ -66,8 +70,27 @@ def extract_code_html(html_content: str) -> Any | None:
                     data = json5.loads(json_str)
                     return data.get("code")
         return None
-    except:
+    except Exception:
         return None
+
+
+def extract_callback_payload(html_content: str) -> dict[str, Any] | None:
+    """Extract the object passed to Qzone's frame callback."""
+    try:
+        soup = bs4.BeautifulSoup(html_content, 'html.parser')
+        for script in soup.find_all('script'):
+            script_content = script.string or ""
+            marker = 'frameElement.callback('
+            if marker not in script_content:
+                continue
+            start_index = script_content.find(marker) + len(marker)
+            end_index = script_content.rfind(');')
+            if start_index < end_index:
+                payload = json5.loads(script_content[start_index:end_index].strip().rstrip(';'))
+                return payload if isinstance(payload, dict) else None
+    except (TypeError, ValueError):
+        return None
+    return None
 
 
 def extract_code_json(json_response) -> Any | None:
@@ -101,8 +124,8 @@ class QzoneAPI:
     LIST_URL = "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msglist_v6"
     ZONE_LIST_URL = "https://user.qzone.qq.com/proxy/domain/ic2.qzone.qq.com/cgi-bin/feeds/feeds3_html_more"
 
-    def __init__(self, cookies_dict: dict = {}):
-        self.cookies = cookies_dict
+    def __init__(self, cookies_dict: dict | None = None):
+        self.cookies = cookies_dict or {}
         self.gtk2 = ''
         self.uin = int(config_api.get_global_config('bot.qq_account', ""))
         self.qq_nickname = ""
@@ -114,15 +137,18 @@ class QzoneAPI:
             self,
             method: str,
             url: str,
-            params: dict = {},
-            data: dict = {},
-            headers: dict = {},
-            cookies: dict = None,
+            params: dict | None = None,
+            data: dict | None = None,
+            headers: dict | None = None,
+            cookies: dict | None = None,
             timeout: int = 10
     ) -> httpx.Response:
         """发送带cookies的httpx异步请求，返回response"""
         if cookies is None:
             cookies = self.cookies
+        params = params or {}
+        data = data or {}
+        headers = headers or {}
 
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             response = await client.request(
@@ -141,8 +167,20 @@ class QzoneAPI:
             return
         code = payload.get("code")
         subcode = payload.get("subcode")
-        if code == -3000 or subcode == -4001:
+        if str(code) == "-3000" or str(subcode) == "-4001":
             raise QzoneAuthError("QQ空间登录态已失效，请重新登录")
+
+    @classmethod
+    def _raise_for_qzone_error(cls, payload: Any, operation: str) -> None:
+        if not isinstance(payload, dict):
+            raise QzoneAPIError(f"{operation}失败：QQ空间响应格式无效")
+        cls._raise_if_auth_error(payload)
+        code = payload.get("code")
+        subcode = payload.get("subcode")
+        if code not in (None, 0, "0"):
+            raise QzoneAPIError(f"{operation}失败：code={code}")
+        if subcode not in (None, 0, "0"):
+            raise QzoneAPIError(f"{operation}失败：subcode={subcode}")
 
     async def get_image_base64_by_url(self, url: str) -> str:
         """
@@ -226,7 +264,7 @@ class QzoneAPI:
         else:
             raise Exception("上传图片失败")
 
-    async def publish_emotion(self, content: str, images: list[bytes] = []) -> str:
+    async def publish_emotion(self, content: str, images: list[bytes] | None = None) -> str:
         """
         将说说内容和图片上传到QQ空间。图片会先上传并生成对应的pic_bo和richval值，然后与文本内容一起提交。
 
@@ -258,6 +296,7 @@ class QzoneAPI:
             "qzreferrer": "https://user.qzone.qq.com/" + str(self.uin)
         }
 
+        images = images or []
         if len(images) > 0:
             pic_bos = []
             richvals = []
@@ -292,7 +331,7 @@ class QzoneAPI:
         else:
             raise Exception("发表说说失败: " + res.text)
 
-    async def like(self, fid: str, target_qq: str) -> bool:
+    async def like(self, fid: str, target_qq: str, abstime: int = 0) -> bool:
         """
         点赞指定说说。
 
@@ -315,7 +354,7 @@ class QzoneAPI:
             'appid': 311,  # 应用ID(说说:311)
             'from': 1,  # 来源
             'typeid': 0,  # 类型ID
-            'abstime': int(time.time()),  # 当前时间戳
+            'abstime': abstime,  # 目标说说的真实发表时间；未知时使用0
             'fid': fid,  # 动态ID
             'active': 0,  # 活动ID
             'format': 'json',  # 返回格式
@@ -333,13 +372,14 @@ class QzoneAPI:
                 'origin': 'https://user.qzone.qq.com'
             },
         )
-        if res.status_code == 200:
-            if extract_code_json(res.text) != 0:
-                logger.error("点赞失败" + res.text)
-                return False
-            return True
-        else:
-            raise Exception("点赞失败: " + res.text)
+        if res.status_code != 200:
+            raise QzoneAPIError(f"点赞失败：HTTP {res.status_code}")
+        try:
+            payload = json.loads(res.text)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise QzoneAPIError("点赞失败：QQ空间响应格式无效") from exc
+        self._raise_for_qzone_error(payload, "点赞")
+        return True
 
     async def comment(self, fid: str, target_qq: str, content: str) -> bool:
         """
@@ -384,13 +424,11 @@ class QzoneAPI:
                 'origin': 'https://user.qzone.qq.com'
             },
         )
-        if res.status_code == 200:
-            if extract_code_html(res.text) != 0:
-                logger.error("评论失败" + res.text)
-                return False
-            return True
-        else:
-            raise Exception("评论失败: " + res.text)
+        if res.status_code != 200:
+            raise QzoneAPIError(f"评论失败：HTTP {res.status_code}")
+        payload = extract_callback_payload(res.text)
+        self._raise_for_qzone_error(payload, "评论")
+        return True
 
     async def reply(self, fid: str, target_qq: str, target_nickname: str, content: str, comment_tid: str) -> bool:
         """
@@ -435,13 +473,11 @@ class QzoneAPI:
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
             },
         )
-        if res.status_code == 200:
-            if extract_code_html(res.text) != 0:
-                logger.error("回复失败" + res.text)
-                return False
-            return True
-        else:
-            raise Exception(f"回复失败，错误码: {res.status_code}")
+        if res.status_code != 200:
+            raise QzoneAPIError(f"回复失败：HTTP {res.status_code}")
+        payload = extract_callback_payload(res.text)
+        self._raise_for_qzone_error(payload, "回复")
+        return True
 
     async def get_list(self, target_qq: str, num: int) -> list[dict[str, Any]]:
         """
@@ -453,10 +489,8 @@ class QzoneAPI:
 
         Returns:
             list[dict[str, Any]]: 包含说说信息的字典列表，每条字典包含说说的ID（tid）、发布时间（created_time）、内容（content）、图片描述（images）、视频url（videos）及转发内容（rt_con）。
-            若发生错误，则返回包含错误信息的字典列表。如['error': '错误信息']。
         Raises:
-            Exception: 如果请求失败或响应状态码不是200，将抛出异常。
-            Exception: 如果解析JSON数据失败，将返回包含错误信息的字典列表。
+            QzoneAPIError: 请求失败、登录失效或响应无法解析。
         """
         logger.info(f'即将获取 {target_qq} 的说说列表...')
         res = await self.do(
@@ -498,16 +532,23 @@ class QzoneAPI:
         try:
             # 2. 解析JSON数据
             json_data = json.loads(json_str)
-            logger.debug(f"原始说说数据: {json_data}")
-            uin_nickname = json_data.get('logininfo').get('name')
-            self.qq_nickname = uin_nickname
-
+            logger.debug(
+                "说说列表响应已解析: "
+                f"code={json_data.get('code') if isinstance(json_data, dict) else 'invalid'}"
+            )
             self._raise_if_auth_error(json_data)
-            if json_data.get('code') != 0:
-                return [{"error": json_data.get('message')}]
+            self._raise_for_qzone_error(json_data, "获取说说列表")
+            login_info = json_data.get('logininfo')
+            if not isinstance(login_info, dict):
+                raise QzoneAPIError("获取说说列表失败：响应缺少logininfo")
+            uin_nickname = str(login_info.get('name') or '')
+            self.qq_nickname = uin_nickname
+            msg_list = json_data.get("msglist")
+            if not isinstance(msg_list, list):
+                raise QzoneAPIError("获取说说列表失败：响应缺少msglist")
             # 3. 提取说说内容
             feeds_list = []
-            for msg in json_data.get("msglist", []):
+            for msg in msg_list:
                 # 已评论过的说说不再阅读
                 is_comment = False
                 if 'commentlist' in msg:
@@ -522,7 +563,11 @@ class QzoneAPI:
 
                 if not is_comment:
                     # 存储结果
-                    timestamp = msg.get("created_time", "")
+                    raw_timestamp = msg.get("created_time", 0)
+                    try:
+                        timestamp = max(0, int(raw_timestamp or 0))
+                    except (TypeError, ValueError):
+                        timestamp = 0
                     if timestamp:
                         time_tuple = time.localtime(timestamp)
                         # 格式化为字符串（年-月-日 时:分:秒）
@@ -575,19 +620,19 @@ class QzoneAPI:
                                              "created_time": comment_time})
                     # 存储信息
                     feeds_list.append({"tid": tid,
+                                       "abstime": timestamp,
                                        "created_time": created_time,
                                        "content": content,
                                        "images": images,
                                        "videos": videos,
                                        "rt_con": rt_con,
                                        "comments": comments})
-            if len(feeds_list) == 0:
-                return [{"error": '你已经看过最近的所有说说了，没有必要再看一遍'}]
             return feeds_list
 
+        except QzoneAPIError:
+            raise
         except Exception as e:
-            logger.error(str(json_data))
-            return [{"error": f'{e},你没有看到任何东西'}]
+            raise QzoneAPIError(f"解析说说列表失败：{type(e).__name__}") from e
 
     async def monitor_get_list(self) -> list[dict[str, Any]]:
         """
@@ -597,8 +642,7 @@ class QzoneAPI:
             list[dict[str, Any]]: 包含说说信息的字典列表，每条字典包含目标QQ号（target_qq）、说说ID(tid)、内容(content)、图片描述(images)、视频url(videos)、转发内容(rt_con)及评论内容(comments)。
 
         Raises:
-            Exception: 如果请求失败或响应状态码不是200，将抛出异常。
-            Exception: 如果解析JSON数据失败，将记录错误日志并返回空列表。
+            QzoneAPIError: 请求失败、登录失效或响应无法解析。
         """
         res = await self.do(
             method="GET",
@@ -643,16 +687,16 @@ class QzoneAPI:
             envelope = json5.loads(data)
             self._raise_if_auth_error(envelope)
             if not isinstance(envelope, dict) or not isinstance(envelope.get('data'), dict):
-                raise ValueError("QQ空间返回缺少data字段")
+                raise QzoneAPIError("QQ空间返回缺少data字段")
             data = envelope['data'].get('data')
             if not isinstance(data, list):
-                raise ValueError("QQ空间动态数据格式无效")
+                raise QzoneAPIError("QQ空间动态数据格式无效")
             #logger.debug(f"初解析原始说说数据: {data}")
         except Exception as e:
             logger.error(f"解析错误: {e}")
-            if isinstance(e, QzoneAuthError):
+            if isinstance(e, QzoneAPIError):
                 raise
-            return [{"error": str(e)}]
+            raise QzoneAPIError("解析QQ空间动态响应失败") from e
             # 3. 提取说说内容
         try:
             feeds_list = []
@@ -665,6 +709,11 @@ class QzoneAPI:
                 if appid != '311':
                     continue
                 target_qq = feed.get('uin', '')
+                raw_abstime = feed.get('abstime', 0)
+                try:
+                    abstime = max(0, int(raw_abstime or 0))
+                except (TypeError, ValueError):
+                    abstime = 0
                 if target_qq == str(self.uin):
                     num_self += 1  # 统计自己的说说数量
                 tid = feed.get('key', '')
@@ -763,6 +812,7 @@ class QzoneAPI:
                 feeds_list.append({
                     'target_qq': target_qq,
                     'tid': tid,
+                    'abstime': abstime,
                     'content': text,
                     'images': images,
                     'videos': videos,
@@ -774,7 +824,9 @@ class QzoneAPI:
             return feeds_list
         except Exception as e:
             logger.error(f'解析说说错误：{str(e)}', exc_info=True)
-            return []
+            if isinstance(e, QzoneAPIError):
+                raise
+            raise QzoneAPIError("解析QQ空间动态内容失败") from e
 
     async def get_send_history(self, num: int) -> str:
         """

@@ -144,6 +144,7 @@ class FeedMonitor:
                         content = content + image
                 fid = feed["tid"]
                 target_qq = feed["target_qq"]
+                abstime = feed.get("abstime", 0)
                 rt_con = feed.get("rt_con", "")
                 comments_list = feed["comments"]
                 # 回复自己的说说评论
@@ -263,7 +264,7 @@ class FeedMonitor:
                     return False, "评论说说失败"
                 logger.info(f"发送评论'{comment}'成功")
                 # 点赞说说
-                success = await like_feed(target_qq, fid)
+                success = await like_feed(target_qq, fid, abstime=abstime)
                 if not success:
                     logger.error(f"点赞说说{content}失败")
                     return False, "点赞说说失败"

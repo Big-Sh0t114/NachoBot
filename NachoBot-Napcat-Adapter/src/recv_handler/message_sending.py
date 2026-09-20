@@ -34,10 +34,9 @@ class MessageSending:
         发送自定义消息
         """
         try:
-            await self.nachobot_router.send_custom_message(
+            return bool(await self.nachobot_router.send_custom_message(
                 platform=platform, message_type_name=message_type, message=custom_message
-            )
-            return True
+            ))
         except Exception as e:
             logger.error(f"发送自定义消息失败: {str(e)}")
             logger.error("请检查与Nachobot之间的连接")

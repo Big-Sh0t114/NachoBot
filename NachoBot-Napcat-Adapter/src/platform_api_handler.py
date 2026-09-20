@@ -94,7 +94,7 @@ async def _send_response(
     *,
     cookies: str | None = None,
     error_code: str | None = None,
-) -> None:
+) -> bool:
     response: Dict[str, Any] = {
         "version": _PROTOCOL_VERSION,
         "request_id": request_id,
@@ -107,14 +107,20 @@ async def _send_response(
     elif status == "error" and error_code:
         response["error"] = {"code": error_code}
     try:
-        await message_send_instance.send_custom_message(
+        sent = await message_send_instance.send_custom_message(
             custom_message=response,
             platform=_local_platform(),
             message_type=_RESPONSE_TYPE,
         )
+        if not sent:
+            logger.error(
+                f"发送平台能力响应失败 operation={operation} request_id={request_id[:8]}"
+            )
+        return sent
     except Exception:
         # Do not include request parameters or upstream data in adapter logs.
         logger.error("发送平台能力响应失败")
+        return False
 
 
 async def handle_platform_api_request(raw_data: Dict[str, Any]) -> None:
@@ -122,8 +128,29 @@ async def handle_platform_api_request(raw_data: Dict[str, Any]) -> None:
 
     validated = _validate_request(raw_data)
     if validated is None:
+        content = _request_content(raw_data)
+        request_id = content.get("request_id") if content else None
+        operation = content.get("operation") if content else None
+        logger.warning(
+            "平台能力请求校验失败 "
+            f"operation={operation if isinstance(operation, str) else 'invalid'} "
+            f"request_id={request_id[:8] if isinstance(request_id, str) else 'invalid'}"
+        )
+        if (
+            isinstance(raw_data, dict)
+            and raw_data.get("platform") == _local_platform()
+            and isinstance(request_id, str)
+            and _REQUEST_ID_RE.fullmatch(request_id)
+            and operation in {_COOKIE_OPERATION, *_QZONE_OPERATIONS}
+        ):
+            await _send_response(
+                request_id, operation, "error", error_code="invalid_request"
+            )
         return
     request_id, operation, params = validated
+    logger.debug(
+        f"收到平台能力请求 operation={operation} request_id={request_id[:8]}"
+    )
 
     if operation in _QZONE_OPERATIONS:
         # NapCat does not expose a stable native Qzone write action.  Reply

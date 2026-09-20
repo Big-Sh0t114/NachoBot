@@ -3,6 +3,5 @@ __pycache__/
 cookies-*.json
 qrcode.png
 processed_list.json
-images/*
-!images/.gitkeep
+images/done_ref.*
 config.toml

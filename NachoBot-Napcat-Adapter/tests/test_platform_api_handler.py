@@ -109,8 +109,28 @@ def test_invalid_request_never_reaches_upstream(monkeypatch):
         return {"status": "ok", "data": {"cookies": "ignored"}}
 
     monkeypatch.setattr(handler.nc_message_sender, "send_message_to_napcat", fake_upstream)
+    responses = []
+
+    async def fake_response(request_id, operation, status, *, cookies=None, error_code=None):
+        responses.append((request_id, operation, status, error_code))
+
+    monkeypatch.setattr(handler, "_send_response", fake_response)
     _run(handler.handle_platform_api_request(_request(request_id="short")))
     assert not called
+    assert responses == []
+
+
+def test_invalid_correlated_request_returns_error_instead_of_timing_out(monkeypatch):
+    monkeypatch.setattr(handler, "_local_platform", lambda: "qq")
+    responses = []
+
+    async def fake_response(request_id, operation, status, *, cookies=None, error_code=None):
+        responses.append((request_id, operation, status, error_code))
+
+    monkeypatch.setattr(handler, "_send_response", fake_response)
+    request = _request(params={"domain": "example.com", "extra": "x"})
+    _run(handler.handle_platform_api_request(request))
+    assert responses == [("A" * 32, "get_platform_cookies", "error", "invalid_request")]
 
 
 @pytest.mark.parametrize("version", [None, 2])

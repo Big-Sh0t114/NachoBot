@@ -837,33 +837,59 @@ class SnowLumaBridge:
         """Handle the small, allowlisted capability API exposed by Core."""
         content = raw_message.get("content") if isinstance(raw_message, Mapping) else None
         if not isinstance(content, Mapping):
+            logger.warning("SnowLuma platform API request rejected reason=missing_content")
             return
         request_id = content.get("request_id")
         operation = content.get("operation")
         platform = content.get("platform")
         params = content.get("params")
+        request_label = request_id[:8] if isinstance(request_id, str) else "invalid"
+        logger.debug(
+            "SnowLuma platform API request received operation={} request_id={}",
+            operation if isinstance(operation, str) else "invalid",
+            request_label,
+        )
+        outer_platform = raw_message.get("platform")
         if (
             content.get("version") != _PLATFORM_API_VERSION
             or not isinstance(request_id, str)
             or not _REQUEST_ID_RE.fullmatch(request_id)
             or operation not in _PLATFORM_API_OPERATIONS
+            or outer_platform not in (None, global_config.nachobot.platform_name)
             or platform != global_config.nachobot.platform_name
             or not isinstance(params, Mapping)
         ):
+            logger.warning(
+                "SnowLuma platform API request rejected operation={} request_id={} reason=invalid_envelope",
+                operation if isinstance(operation, str) else "invalid",
+                request_label,
+            )
+            if (
+                isinstance(request_id, str)
+                and _REQUEST_ID_RE.fullmatch(request_id)
+                and operation in _PLATFORM_API_OPERATIONS
+                and outer_platform in (None, global_config.nachobot.platform_name)
+            ):
+                await self._send_platform_api_response(
+                    request_id, operation, "error", "invalid_request"
+                )
             return
 
         try:
             if operation == "get_platform_cookies":
                 if set(params) != {"domain"} or not isinstance(params["domain"], str):
+                    await self._send_platform_api_response(request_id, operation, "error", "invalid_request")
                     return
                 domain = params["domain"].strip().lower()
                 if not domain or len(domain) > 253 or not _DOMAIN_RE.fullmatch(domain):
+                    await self._send_platform_api_response(request_id, operation, "error", "invalid_request")
                     return
                 response = await self.client.call_action("get_cookies", {"domain": domain})
                 data = response.get("data") if isinstance(response.get("data"), Mapping) else {}
                 result = {"cookies": data.get("cookies")} if isinstance(data.get("cookies"), str) else None
             elif operation == "like_qzone":
                 if set(params) != {"tid", "target_uin", "abstime"}:
+                    await self._send_platform_api_response(request_id, operation, "error", "invalid_request")
                     return
                 tid = params["tid"]
                 target_uin = params["target_uin"]
@@ -871,16 +897,21 @@ class SnowLumaBridge:
                 if (
                     not isinstance(tid, str)
                     or not _TID_RE.fullmatch(tid)
+                    or isinstance(target_uin, bool)
+                    or not isinstance(target_uin, int)
                     or not _QQ_RE.fullmatch(str(target_uin))
                     or isinstance(abstime, bool)
                     or not isinstance(abstime, int)
                     or abstime < 0
+                    or abstime > 2**63 - 1
                 ):
+                    await self._send_platform_api_response(request_id, operation, "error", "invalid_request")
                     return
                 response = await self.client.call_action("like_qzone", dict(params))
                 result = {"success": True}
             else:
                 if set(params) != {"tid", "target_uin", "content"}:
+                    await self._send_platform_api_response(request_id, operation, "error", "invalid_request")
                     return
                 tid = params["tid"]
                 comment = params["content"]
@@ -888,11 +919,14 @@ class SnowLumaBridge:
                 if (
                     not isinstance(tid, str)
                     or not _TID_RE.fullmatch(tid)
+                    or isinstance(target_uin, bool)
+                    or not isinstance(target_uin, int)
                     or not _QQ_RE.fullmatch(str(target_uin))
                     or not isinstance(comment, str)
                     or not comment.strip()
                     or len(comment) > 3000
                 ):
+                    await self._send_platform_api_response(request_id, operation, "error", "invalid_request")
                     return
                 response = await self.client.call_action("comment_qzone", dict(params))
                 result = {"success": True}
@@ -902,6 +936,11 @@ class SnowLumaBridge:
                 await self._send_platform_api_response(request_id, operation, "error", "upstream_error")
             else:
                 await self._send_platform_api_response(request_id, operation, "ok", data=result)
+                logger.info(
+                    "SnowLuma platform API request succeeded operation={} request_id={}",
+                    operation,
+                    request_label,
+                )
         except Exception as exc:
             logger.warning("SnowLuma platform API operation failed operation={} error={}", operation, safe_exception(exc))
             await self._send_platform_api_response(request_id, operation, "error", "upstream_error")
@@ -926,11 +965,17 @@ class SnowLumaBridge:
             response["data"] = data
         elif status == "error":
             response["error"] = {"code": error_code or "upstream_error"}
-        await self.router.send_custom_message(
+        sent = await self.router.send_custom_message(
             platform=global_config.nachobot.platform_name,
             message_type_name=PLATFORM_API_RESPONSE_TYPE,
             message=response,
         )
+        if not sent:
+            logger.error(
+                "SnowLuma platform API response send failed operation={} request_id={}",
+                operation,
+                request_id[:8],
+            )
 
     async def handle_core_message(self, raw_message_base_dict: dict[str, Any]) -> None:
         logger.debug("SnowLuma Core outbound dispatch start keys={}", ",".join(sorted(raw_message_base_dict)) or "-")

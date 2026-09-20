@@ -253,9 +253,24 @@ class ReadFeedAction(BaseAction):
         num = self.get_config("read.read_number", 5)
         like_possibility = self.get_config("read.like_possibility", 1.0)
         comment_possibility = self.get_config("read.comment_possibility", 1.0)
-        feeds_list = await read_feed(target_qq, num)
-        if "error" not in feeds_list[0]:
-            logger.info(f"成功读取到{len(feeds_list)}条说说")
+        try:
+            feeds_list = await read_feed(target_qq, num)
+        except Exception as e:
+            logger.error(f"读取说说失败: {type(e).__name__}: {e}")
+            await self.store_action_info(
+                action_build_into_prompt=True,
+                action_prompt_display="执行阅读说说动作失败：QQ空间请求失败",
+                action_done=False,
+            )
+            return False, "读取说说失败"
+        if not feeds_list:
+            await self.store_action_info(
+                action_build_into_prompt=True,
+                action_prompt_display="执行阅读说说动作完成：没有可处理的新说说",
+                action_done=True,
+            )
+            return True, "没有可处理的新说说"
+        logger.info(f"成功读取到{len(feeds_list)}条说说")
         # 模型配置
         models = llm_api.get_available_models()
         text_model = self.get_config("models.text_model", "replyer_1")
@@ -265,18 +280,6 @@ class ReadFeedAction(BaseAction):
 
         bot_personality = config_api.get_global_config("personality.personality", "一个机器人")
         bot_expression = config_api.get_global_config("personality.reply_style", "内容积极向上")
-        # 错误处理，如对方设置了访问权限
-        if "error" in feeds_list[0]:
-            await self.store_action_info(
-                action_build_into_prompt=True,
-                action_prompt_display=f"执行阅读说说动作失败：未能读取到说说，错误原因：{feeds_list[0].get('error')}",
-                action_done=False,
-            )
-            if not await reply_send(
-                self.chat_stream, f"执行阅读说说动作失败：未能读取到说说，原因：{feeds_list[0].get('error')}"
-            ):
-                return False, "生成回复失败"
-            return False, feeds_list[0].get("error")
         # 逐条点赞回复
         processed_list = _load_processed_list()
         for feed in feeds_list:
@@ -286,6 +289,7 @@ class ReadFeedAction(BaseAction):
                 for image in feed["images"]:
                     content = content + image
             fid = feed["tid"]
+            abstime = feed.get("abstime", 0)
             rt_con = feed.get("rt_con", "")
             if random.random() <= comment_possibility:
                 # 评论说说
@@ -331,7 +335,7 @@ class ReadFeedAction(BaseAction):
 
             # 点赞说说
             if random.random() <= like_possibility:
-                success = await like_feed(target_qq, fid)
+                success = await like_feed(target_qq, fid, abstime=abstime)
                 if not success:
                     logger.error(f"点赞说说'{content}'失败")
                     return False, "点赞说说失败"

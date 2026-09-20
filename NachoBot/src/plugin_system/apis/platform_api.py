@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from src.common.message.api import get_global_api
+from src.common.logger import get_logger
 from src.config.config import global_config
 
 PLATFORM_API_REQUEST_TYPE = "platform_api_request"
@@ -28,6 +29,8 @@ _DOMAIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
 _QZONE_TID_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,256}$")
 _QQ_RE = re.compile(r"^[1-9][0-9]{0,19}$")
 _MAX_QZONE_COMMENT_LENGTH = 3000
+
+logger = get_logger("platform_api")
 
 
 @dataclass(frozen=True)
@@ -180,6 +183,8 @@ async def handle_platform_api_response(raw_data: Dict[str, Any]) -> None:
     if pending is None or response_platform != pending.platform:
         return
 
+    request_label = request_id[:8]
+
     if envelope.get("platform") not in (None, pending.platform):
         return
     # A response without the mandatory version is incomplete and cannot
@@ -209,6 +214,13 @@ async def handle_platform_api_response(raw_data: Dict[str, Any]) -> None:
             raise PlatformAPIError("adapter returned a malformed platform API response")
         if not pending.future.done():
             pending.future.set_result(data)
+        logger.debug(
+            "平台能力响应已匹配: platform=%s operation=%s request_id=%s status=%s",
+            pending.platform,
+            pending.operation,
+            request_label,
+            status,
+        )
     except Exception as exc:
         _pending_requests.pop(request_id, None)
         if not pending.future.done():
@@ -243,7 +255,14 @@ async def _call_platform_operation(
         "platform": expected_platform,
         "params": params,
     }
+    request_label = request_id[:8]
     try:
+        logger.debug(
+            "发送平台能力请求: platform=%s operation=%s request_id=%s",
+            expected_platform,
+            operation,
+            request_label,
+        )
         sent = await get_global_api().send_custom_message(
             expected_platform,
             PLATFORM_API_REQUEST_TYPE,
@@ -251,10 +270,24 @@ async def _call_platform_operation(
         )
         if not sent:
             raise PlatformAPIError("platform API request could not be sent")
-        return await asyncio.wait_for(future, timeout_value)
+        result = await asyncio.wait_for(future, timeout_value)
+        logger.info(
+            "平台能力请求成功: platform=%s operation=%s request_id=%s",
+            expected_platform,
+            operation,
+            request_label,
+        )
+        return result
     except asyncio.CancelledError:
         raise
     except asyncio.TimeoutError as exc:
+        logger.error(
+            "平台能力请求超时: platform=%s operation=%s request_id=%s timeout=%ss",
+            expected_platform,
+            operation,
+            request_label,
+            timeout_value,
+        )
         raise PlatformAPIError("platform API request timed out") from exc
     finally:
         _pending_requests.pop(request_id, None)

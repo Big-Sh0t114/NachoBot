@@ -163,7 +163,7 @@ async def generate_image(provider: str, image_model: str, api_key: str, image_pr
                         Path(image_dir).mkdir(parents=True, exist_ok=True)
 
                         # 保存图片
-                        filename = f"ms_result.jpg"
+                        filename = "ms_result.jpg"
                         save_path = Path(image_dir) / filename
                         image.save(save_path)
                         logger.info(f"图片已保存至: {save_path}")
@@ -297,7 +297,7 @@ async def send_feed(message: str,
             tid = await qzone.publish_emotion(message, images)
             logger.info(f"成功发送说说，tid: {tid}")
             return True
-        except Exception as e:
+        except Exception:
             logger.error("发送说说失败")
             logger.error(traceback.format_exc())
             return False
@@ -330,7 +330,7 @@ async def send_feed(message: str,
             image_model = config_api.get_plugin_config(plugin_config, "models.image_model",
                                                        "Kwai-Kolors/Kolors")  # 获取图片模型配置
             enable_ref = config_api.get_plugin_config(plugin_config, "models.image_ref", False)  # 启用参考图
-            logger.info(f"正在生成图片提示词...")
+            logger.info("正在生成图片提示词...")
             # 生成图片提示词
             prompt = f"""
                 请根据以下QQ空间说说内容配图，并构建生成配图的风格和prompt。
@@ -397,7 +397,7 @@ async def send_feed(message: str,
         tid = await qzone.publish_emotion(message, images)
         logger.info(f"成功发送说说，tid: {tid}")
         return True
-    except Exception as e:
+    except Exception:
         logger.error("发送说说失败")
         logger.error(traceback.format_exc())
         return False
@@ -412,7 +412,10 @@ async def read_feed(target_qq: str, num: int) -> list[dict]:
         num (int): 要获取的说说数量。
 
     Returns:
-        list: 包含说说信息的列表。若发生错误，则返回{'error': '错误原因'}
+        list: 包含说说信息的列表；确实没有动态时返回空列表。
+
+    Raises:
+        Exception: QQ空间拒绝请求或响应无法解析时向调用方传播。
 
     """
     qzone = create_qzone_api()
@@ -421,10 +424,10 @@ async def read_feed(target_qq: str, num: int) -> list[dict]:
         feeds_list = await qzone.get_list(target_qq, num)
         logger.debug(f"获取到的说说列表: {format_feed_list(feeds_list)}")
         return feeds_list
-    except Exception as e:
+    except Exception:
         logger.error("获取list失败")
         logger.error(traceback.format_exc())
-        return []
+        raise
 
 
 async def monitor_read_feed() -> list[dict]:
@@ -435,7 +438,7 @@ async def monitor_read_feed() -> list[dict]:
         list: 包含说说信息的列表。
 
     Raises:
-        Exception: 如果在获取说说列表时发生错误，将记录错误日志并返回空列表。
+        Exception: 如果在获取说说列表时发生错误，记录后向调用方传播。
     """
     qzone = create_qzone_api()
 
@@ -445,13 +448,13 @@ async def monitor_read_feed() -> list[dict]:
         return feeds_list
     except QzoneAuthError:
         raise
-    except Exception as e:
+    except Exception:
         logger.error("获取list失败")
         logger.error(traceback.format_exc())
-        return []
+        raise
 
 
-async def like_feed(target_qq: str, fid: str) -> bool:
+async def like_feed(target_qq: str, fid: str, abstime: int = 0) -> bool:
     """
     调用QZone API的`like`方法点赞指定说说。
 
@@ -466,12 +469,12 @@ async def like_feed(target_qq: str, fid: str) -> bool:
         Exception: 如果在点赞过程中发生错误，将记录错误日志并返回False。
     """
     try:
-        success = await platform_api.like_qzone(fid, target_qq, abstime=0)
+        success = await platform_api.like_qzone(fid, target_qq, abstime=abstime)
     except platform_api.PlatformAPINotSupportedError:
         qzone = create_qzone_api()
         if qzone is None:
             return False
-        success = await qzone.like(fid, target_qq)
+        success = await qzone.like(fid, target_qq, abstime=abstime)
     if not success:
         logger.error("点赞失败")
         logger.error(traceback.format_exc())
