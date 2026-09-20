@@ -1,3 +1,5 @@
+9/21
+    修复sandbox envelope错误解析所有reply_to_user字段的问题
 9/20
     解耦live2d控制结构化输出至live2d适配器
     添加Maizone插件

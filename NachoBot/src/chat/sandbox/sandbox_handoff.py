@@ -221,6 +221,7 @@ class SandboxEnvelopeResult:
 
 
 _ENVELOPE_KEYS = {"sandbox_edit_decision", "reply_to_user", "file_edit_query"}
+_SANDBOX_ENVELOPE_MARKER = "sandbox_edit_decision"
 
 
 def parse_sandbox_confirmation(
@@ -238,10 +239,10 @@ def parse_sandbox_confirmation(
     try:
         payload = json.loads(stripped)
     except (TypeError, json.JSONDecodeError):
-        if any(key in stripped for key in _ENVELOPE_KEYS):
+        if _SANDBOX_ENVELOPE_MARKER in stripped:
             return SandboxEnvelopeResult(invalid_text, envelope_seen=True)
         return SandboxEnvelopeResult(text)
-    if not isinstance(payload, dict) or not (_ENVELOPE_KEYS & set(payload)):
+    if not isinstance(payload, dict) or _SANDBOX_ENVELOPE_MARKER not in payload:
         return SandboxEnvelopeResult(text)
     if set(payload) != _ENVELOPE_KEYS:
         return SandboxEnvelopeResult(invalid_text, envelope_seen=True)

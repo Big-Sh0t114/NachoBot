@@ -2722,12 +2722,15 @@ class HeartFChatting:
 
         # 8. 解析 Replyer 的 JSON 决策
         ban_decision = self._parse_ban_decision(llm_response.content)
+        if ban_decision is None:
+            logger.warning(f"{self.log_prefix} ban_user Replyer 决策解析失败，拒绝执行禁言")
+            return {"action_type": "ban_user", "success": False, "reply_text": ""}
 
         reply_text = ""
         ban_executed = False
         duration_minutes = 0
 
-        if ban_decision and ban_decision.get("ban_decision"):
+        if ban_decision.get("ban_decision"):
             # Replyer 决定禁言
             duration_minutes = min(int(ban_decision.get("duration_minutes", 10)), 1440)
             duration_minutes = max(duration_minutes, 1)  # 至少1分钟
@@ -2774,15 +2777,6 @@ class HeartFChatting:
                     actions=chosen_action_plan_infos,
                     selected_expressions=llm_response.selected_expressions,
                 )
-        elif llm_response.reply_set:
-            _, reply_text, _ = await self._send_and_store_reply(
-                response_set=llm_response.reply_set,
-                action_message=action_planner_info.action_message,
-                cycle_timers=cycle_timers,
-                thinking_id=thinking_id,
-                actions=chosen_action_plan_infos,
-                selected_expressions=llm_response.selected_expressions,
-            )
 
         # 10. 存储 action info
         await database_api.store_action_info(
