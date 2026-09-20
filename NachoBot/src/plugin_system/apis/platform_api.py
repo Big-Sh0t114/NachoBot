@@ -2,7 +2,8 @@
 
 Plugins intentionally do not know how a platform adapter is reached.  This
 module is the small, typed surface used for capabilities that cannot be
-represented as a normal message (currently cookie retrieval).
+represented as a normal message.  Every operation is explicitly allowlisted;
+this is not a generic adapter RPC escape hatch.
 """
 
 from __future__ import annotations
@@ -19,14 +20,20 @@ from src.config.config import global_config
 PLATFORM_API_REQUEST_TYPE = "platform_api_request"
 PLATFORM_API_RESPONSE_TYPE = "platform_api_response"
 GET_PLATFORM_COOKIES_OPERATION = "get_platform_cookies"
+LIKE_QZONE_OPERATION = "like_qzone"
+COMMENT_QZONE_OPERATION = "comment_qzone"
 _PROTOCOL_VERSION = 1
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_-]{20,256}$")
 _DOMAIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
+_QZONE_TID_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,256}$")
+_QQ_RE = re.compile(r"^[1-9][0-9]{0,19}$")
+_MAX_QZONE_COMMENT_LENGTH = 3000
 
 
 @dataclass(frozen=True)
 class _PendingPlatformRequest:
     platform: str
+    operation: str
     future: asyncio.Future
 
 
@@ -36,6 +43,20 @@ _pending_requests: Dict[str, _PendingPlatformRequest] = {}
 class PlatformAPIError(RuntimeError):
     """Raised when an adapter cannot satisfy a typed platform request."""
 
+    def __init__(self, message: str, *, code: str = "upstream_error") -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class PlatformAPINotSupportedError(PlatformAPIError):
+    """Raised when the selected adapter explicitly lacks a capability."""
+
+    def __init__(self, operation: str) -> None:
+        super().__init__(
+            f"platform adapter does not support {operation}",
+            code="unsupported_operation",
+        )
+
 
 def _validate_domain(domain: str) -> str:
     if not isinstance(domain, str):
@@ -43,6 +64,41 @@ def _validate_domain(domain: str) -> str:
     normalized = domain.strip().lower()
     if not normalized or len(normalized) > 253 or not _DOMAIN_RE.fullmatch(normalized):
         raise ValueError("invalid platform cookie domain")
+    return normalized
+
+
+def _validate_qzone_tid(tid: str) -> str:
+    if not isinstance(tid, str):
+        raise TypeError("tid must be a string")
+    normalized = tid.strip()
+    if not _QZONE_TID_RE.fullmatch(normalized):
+        raise ValueError("invalid Qzone tid")
+    return normalized
+
+
+def _validate_qzone_uin(target_uin: str | int) -> int:
+    if isinstance(target_uin, bool):
+        raise TypeError("target_uin must be a QQ number")
+    normalized = str(target_uin).strip()
+    if not _QQ_RE.fullmatch(normalized):
+        raise ValueError("invalid target_uin")
+    return int(normalized)
+
+
+def _validate_abstime(abstime: int) -> int:
+    if isinstance(abstime, bool) or not isinstance(abstime, int):
+        raise TypeError("abstime must be an integer")
+    if abstime < 0 or abstime > 2**63 - 1:
+        raise ValueError("invalid abstime")
+    return abstime
+
+
+def _validate_comment_content(content: str) -> str:
+    if not isinstance(content, str):
+        raise TypeError("content must be a string")
+    normalized = content.strip()
+    if not normalized or len(normalized) > _MAX_QZONE_COMMENT_LENGTH:
+        raise ValueError("invalid Qzone comment content")
     return normalized
 
 
@@ -134,36 +190,38 @@ async def handle_platform_api_response(raw_data: Dict[str, Any]) -> None:
     if envelope["version"] != _PROTOCOL_VERSION:
         _fail_pending_request(request_id, pending, "unsupported platform API response")
         return
-    if envelope.get("operation") != GET_PLATFORM_COOKIES_OPERATION:
+    if envelope.get("operation") != pending.operation:
         _fail_pending_request(request_id, pending, "unexpected platform API operation")
         return
 
     try:
         status = envelope.get("status")
         data = envelope.get("data")
-        if status != "ok" or not isinstance(data, dict) or not isinstance(data.get("cookies"), str):
-            raise PlatformAPIError("adapter returned an invalid cookie response")
+        if status == "error":
+            error = envelope.get("error")
+            error_code = error.get("code") if isinstance(error, dict) else None
+            if error_code == "unsupported_operation":
+                raise PlatformAPINotSupportedError(pending.operation)
+            if not isinstance(error_code, str) or not error_code:
+                error_code = "upstream_error"
+            raise PlatformAPIError("platform adapter request failed", code=error_code)
+        if status != "ok" or not isinstance(data, dict):
+            raise PlatformAPIError("adapter returned a malformed platform API response")
         if not pending.future.done():
-            pending.future.set_result(data["cookies"])
+            pending.future.set_result(data)
     except Exception as exc:
         _pending_requests.pop(request_id, None)
         if not pending.future.done():
             pending.future.set_exception(exc if isinstance(exc, Exception) else PlatformAPIError("invalid response"))
 
 
-async def get_platform_cookies(
-    domain: str,
+async def _call_platform_operation(
+    operation: str,
+    params: dict[str, Any],
     *,
     platform: Optional[str] = None,
     timeout: float = 30.0,
-) -> dict[str, str]:
-    """Get cookies for ``domain`` through the selected platform adapter.
-
-    The adapter receives only this typed operation.  Cookie values are never
-    written to logs by this module.
-    """
-
-    normalized_domain = _validate_domain(domain)
+) -> dict[str, Any]:
     expected_platform = _resolve_platform(platform)
     try:
         timeout_value = float(timeout)
@@ -176,14 +234,14 @@ async def get_platform_cookies(
     while request_id in _pending_requests:
         request_id = _new_request_id()
     future = asyncio.get_running_loop().create_future()
-    _pending_requests[request_id] = _PendingPlatformRequest(expected_platform, future)
+    _pending_requests[request_id] = _PendingPlatformRequest(expected_platform, operation, future)
 
     request = {
         "version": _PROTOCOL_VERSION,
         "request_id": request_id,
-        "operation": GET_PLATFORM_COOKIES_OPERATION,
+        "operation": operation,
         "platform": expected_platform,
-        "params": {"domain": normalized_domain},
+        "params": params,
     }
     try:
         sent = await get_global_api().send_custom_message(
@@ -193,14 +251,87 @@ async def get_platform_cookies(
         )
         if not sent:
             raise PlatformAPIError("platform API request could not be sent")
-        cookie_string = await asyncio.wait_for(future, timeout_value)
-        return _parse_cookie_string(cookie_string)
+        return await asyncio.wait_for(future, timeout_value)
     except asyncio.CancelledError:
         raise
     except asyncio.TimeoutError as exc:
         raise PlatformAPIError("platform API request timed out") from exc
     finally:
         _pending_requests.pop(request_id, None)
+
+
+async def get_platform_cookies(
+    domain: str,
+    *,
+    platform: Optional[str] = None,
+    timeout: float = 30.0,
+) -> dict[str, str]:
+    """Get cookies for ``domain`` through the selected platform adapter.
+
+    Cookie values are never written to logs by this module.
+    """
+
+    normalized_domain = _validate_domain(domain)
+    data = await _call_platform_operation(
+        GET_PLATFORM_COOKIES_OPERATION,
+        {"domain": normalized_domain},
+        platform=platform,
+        timeout=timeout,
+    )
+    cookie_string = data.get("cookies")
+    if not isinstance(cookie_string, str):
+        raise PlatformAPIError("adapter returned malformed cookies")
+    return _parse_cookie_string(cookie_string)
+
+
+async def like_qzone(
+    tid: str,
+    target_uin: str | int,
+    *,
+    abstime: int = 0,
+    platform: Optional[str] = None,
+    timeout: float = 30.0,
+) -> bool:
+    """Like a Qzone feed through an adapter-native implementation."""
+
+    data = await _call_platform_operation(
+        LIKE_QZONE_OPERATION,
+        {
+            "tid": _validate_qzone_tid(tid),
+            "target_uin": _validate_qzone_uin(target_uin),
+            "abstime": _validate_abstime(abstime),
+        },
+        platform=platform,
+        timeout=timeout,
+    )
+    if data.get("success") is not True:
+        raise PlatformAPIError("adapter returned malformed Qzone like response")
+    return True
+
+
+async def comment_qzone(
+    tid: str,
+    target_uin: str | int,
+    content: str,
+    *,
+    platform: Optional[str] = None,
+    timeout: float = 30.0,
+) -> bool:
+    """Comment on a Qzone feed through an adapter-native implementation."""
+
+    data = await _call_platform_operation(
+        COMMENT_QZONE_OPERATION,
+        {
+            "tid": _validate_qzone_tid(tid),
+            "target_uin": _validate_qzone_uin(target_uin),
+            "content": _validate_comment_content(content),
+        },
+        platform=platform,
+        timeout=timeout,
+    )
+    if data.get("success") is not True:
+        raise PlatformAPIError("adapter returned malformed Qzone comment response")
+    return True
 
 
 def pending_request_count() -> int:
@@ -210,11 +341,16 @@ def pending_request_count() -> int:
 
 
 __all__ = [
+    "COMMENT_QZONE_OPERATION",
     "GET_PLATFORM_COOKIES_OPERATION",
+    "LIKE_QZONE_OPERATION",
     "PLATFORM_API_REQUEST_TYPE",
     "PLATFORM_API_RESPONSE_TYPE",
     "PlatformAPIError",
+    "PlatformAPINotSupportedError",
+    "comment_qzone",
     "get_platform_cookies",
     "handle_platform_api_response",
+    "like_qzone",
     "pending_request_count",
 ]

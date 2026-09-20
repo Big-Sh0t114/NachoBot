@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+cookies-*.json
+qrcode.png
+processed_list.json
+images/*
+!images/.gitkeep
+config.toml

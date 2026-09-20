@@ -5,6 +5,7 @@ import base64
 import json
 import time
 import random
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -31,8 +32,17 @@ from .log_safety import safe_endpoint, safe_exception, segment_summary
 from .logger import custom_logger, logger
 from .snowluma_client import SnowLumaClient
 
+PLATFORM_API_REQUEST_TYPE = "platform_api_request"
+PLATFORM_API_RESPONSE_TYPE = "platform_api_response"
+_PLATFORM_API_VERSION = 1
+_PLATFORM_API_OPERATIONS = {"get_platform_cookies", "like_qzone", "comment_qzone"}
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_-]{20,256}$")
+_DOMAIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
+_TID_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,256}$")
+_QQ_RE = re.compile(r"^[1-9][0-9]{0,19}$")
+
 ACCEPT_FORMAT = [
-    "text", "image", "emoji", "reply", "voice", "command", "voiceurl",
+    "text", "image", "emoji", "reply", "voice", "tts_text", "command", "voiceurl",
     "music", "videourl", "file", "imageurl", "forward", "video", "face",
 ]
 VISUAL_TYPES = {"image", "emoji", "video"}
@@ -88,6 +98,7 @@ class SnowLumaBridge:
 
     async def run(self) -> None:
         self.router.register_class_handler(self.handle_core_message)
+        self.router.register_custom_message_handler(PLATFORM_API_REQUEST_TYPE, self.handle_platform_api_request)
         logger.info("SnowLuma bridge starting core_endpoint=ws://{}:{}/ws", global_config.nachobot.host, global_config.nachobot.port)
         await asyncio.gather(self.router.run(), self.client.run())
 
@@ -822,6 +833,105 @@ class SnowLumaBridge:
     # ------------------------------------------------------------------
     # NachoBot Core -> SnowLuma
     # ------------------------------------------------------------------
+    async def handle_platform_api_request(self, raw_message: dict[str, Any]) -> None:
+        """Handle the small, allowlisted capability API exposed by Core."""
+        content = raw_message.get("content") if isinstance(raw_message, Mapping) else None
+        if not isinstance(content, Mapping):
+            return
+        request_id = content.get("request_id")
+        operation = content.get("operation")
+        platform = content.get("platform")
+        params = content.get("params")
+        if (
+            content.get("version") != _PLATFORM_API_VERSION
+            or not isinstance(request_id, str)
+            or not _REQUEST_ID_RE.fullmatch(request_id)
+            or operation not in _PLATFORM_API_OPERATIONS
+            or platform != global_config.nachobot.platform_name
+            or not isinstance(params, Mapping)
+        ):
+            return
+
+        try:
+            if operation == "get_platform_cookies":
+                if set(params) != {"domain"} or not isinstance(params["domain"], str):
+                    return
+                domain = params["domain"].strip().lower()
+                if not domain or len(domain) > 253 or not _DOMAIN_RE.fullmatch(domain):
+                    return
+                response = await self.client.call_action("get_cookies", {"domain": domain})
+                data = response.get("data") if isinstance(response.get("data"), Mapping) else {}
+                result = {"cookies": data.get("cookies")} if isinstance(data.get("cookies"), str) else None
+            elif operation == "like_qzone":
+                if set(params) != {"tid", "target_uin", "abstime"}:
+                    return
+                tid = params["tid"]
+                target_uin = params["target_uin"]
+                abstime = params["abstime"]
+                if (
+                    not isinstance(tid, str)
+                    or not _TID_RE.fullmatch(tid)
+                    or not _QQ_RE.fullmatch(str(target_uin))
+                    or isinstance(abstime, bool)
+                    or not isinstance(abstime, int)
+                    or abstime < 0
+                ):
+                    return
+                response = await self.client.call_action("like_qzone", dict(params))
+                result = {"success": True}
+            else:
+                if set(params) != {"tid", "target_uin", "content"}:
+                    return
+                tid = params["tid"]
+                comment = params["content"]
+                target_uin = params["target_uin"]
+                if (
+                    not isinstance(tid, str)
+                    or not _TID_RE.fullmatch(tid)
+                    or not _QQ_RE.fullmatch(str(target_uin))
+                    or not isinstance(comment, str)
+                    or not comment.strip()
+                    or len(comment) > 3000
+                ):
+                    return
+                response = await self.client.call_action("comment_qzone", dict(params))
+                result = {"success": True}
+
+            error = self.client.action_error(response)
+            if error or result is None:
+                await self._send_platform_api_response(request_id, operation, "error", "upstream_error")
+            else:
+                await self._send_platform_api_response(request_id, operation, "ok", data=result)
+        except Exception as exc:
+            logger.warning("SnowLuma platform API operation failed operation={} error={}", operation, safe_exception(exc))
+            await self._send_platform_api_response(request_id, operation, "error", "upstream_error")
+
+    async def _send_platform_api_response(
+        self,
+        request_id: str,
+        operation: str,
+        status: str,
+        error_code: str | None = None,
+        *,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        response: dict[str, Any] = {
+            "version": _PLATFORM_API_VERSION,
+            "request_id": request_id,
+            "operation": operation,
+            "platform": global_config.nachobot.platform_name,
+            "status": status,
+        }
+        if status == "ok" and data is not None:
+            response["data"] = data
+        elif status == "error":
+            response["error"] = {"code": error_code or "upstream_error"}
+        await self.router.send_custom_message(
+            platform=global_config.nachobot.platform_name,
+            message_type_name=PLATFORM_API_RESPONSE_TYPE,
+            message=response,
+        )
+
     async def handle_core_message(self, raw_message_base_dict: dict[str, Any]) -> None:
         logger.debug("SnowLuma Core outbound dispatch start keys={}", ",".join(sorted(raw_message_base_dict)) or "-")
         try:

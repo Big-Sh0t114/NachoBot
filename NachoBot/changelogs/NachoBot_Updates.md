@@ -1,5 +1,6 @@
 9/20
     解耦live2d控制结构化输出至live2d适配器
+    添加Maizone插件
 9/19
     更新兼容Bilibili直播v2协议
 9/18

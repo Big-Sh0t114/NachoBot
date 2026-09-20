@@ -75,6 +75,42 @@ def test_cookie_request_uses_correlated_platform_envelope_and_parses_equals_once
     _run(scenario())
 
 
+@pytest.mark.parametrize(
+    ("operation", "params", "data"),
+    [
+        ("like_qzone", {"tid": "tid-1", "target_uin": 12345, "abstime": 0}, {"success": True}),
+        ("comment_qzone", {"tid": "tid-1", "target_uin": 12345, "content": "hello"}, {"success": True}),
+    ],
+)
+def test_qzone_write_requests_return_typed_success(monkeypatch, operation, params, data):
+    fake = _FakeCoreAPI()
+    monkeypatch.setattr(platform_api, "get_global_api", lambda: fake)
+
+    async def scenario():
+        call = platform_api.like_qzone if operation == "like_qzone" else platform_api.comment_qzone
+        task = asyncio.create_task(
+            call(params["tid"], params["target_uin"], params["content"], platform="qq", timeout=1)
+            if operation == "comment_qzone"
+            else call(params["tid"], params["target_uin"], abstime=0, platform="qq", timeout=1)
+        )
+        await fake.send_started.wait()
+        envelope = fake.requests[0][2]
+        assert envelope["operation"] == operation
+        await platform_api.handle_platform_api_response(
+            {"platform": "qq", "content": {
+                "version": 1,
+                "request_id": envelope["request_id"],
+                "operation": operation,
+                "platform": "qq",
+                "status": "ok",
+                "data": data,
+            }}
+        )
+        assert await task is True
+
+    _run(scenario())
+
+
 def test_platform_none_uses_configured_platform_with_multiple_transports(monkeypatch):
     fake = _FakeCoreAPI()
     fake.connection = SimpleNamespace(platform_websockets={"qq": object(), "other": object()})
