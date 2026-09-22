@@ -3,9 +3,18 @@ import os
 import re
 import time
 import asyncio
+import json
 
 from typing import Dict, Any, Optional
-from ncnk_message import UserInfo, Seg
+from ncnk_message import (
+    Seg,
+    UserInfo,
+    SystemEventState,
+    classify_system_event_route,
+    classify_system_event,
+    get_system_event,
+    system_event_fallback_text,
+)
 
 from src.common.logger import get_logger
 from src.config.config import global_config
@@ -19,7 +28,7 @@ from src.chat.utils.prompt_builder import Prompt, global_prompt_manager
 from src.chat.advanced.advanced_manager import advanced_manager
 from src.plugin_system.core import component_registry, events_manager, global_announcement_manager
 from src.plugin_system.base import BaseCommand, EventType
-from src.plugin_system.apis import send_api
+from src.plugin_system.apis import database_api, send_api
 from src.live.platform_event_tracker import track_platform_event
 from src.chat.keyword_cache import promise_cache_manager
 from src.person_info.bind_manager import bind_manager  # 导入多平台绑定管理器
@@ -33,45 +42,77 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..
 logger = get_logger("chat")
 
 
-def _check_ban_words(text: str, chat: ChatStream, userinfo: UserInfo) -> bool:
-    """检查消息是否包含过滤词
+def _routing_user_info_for_system_event(message: MessageRecv, event: dict[str, Any]) -> UserInfo | None:
+    """Validate an explicit private route and build a routing-only identity.
 
-    Args:
-        text: 待检查的文本
-        chat: 聊天对象
-        userinfo: 用户信息
-
-    Returns:
-        bool: 是否包含过滤词
+    Structured events never put this identity back into
+    ``message.message_info.user_info``.  Group events remain keyed solely by
+    their group metadata and therefore do not require a route.
     """
+
+    if message.message_info.group_info is not None:
+        return None
+
+    route_result = classify_system_event_route(message)
+    if not route_result.is_valid or route_result.route is None:
+        raise ValueError("private system_event requires a valid system_event_route")
+
+    route = route_result.route
+    platform = str(message.message_info.platform or "")
+    if route.get("platform") != platform:
+        raise ValueError("system_event_route platform does not match message platform")
+
+    peer = route.get("peer")
+    peer_id = str(peer.get("user_id", "")).strip() if isinstance(peer, dict) else ""
+    if not peer_id:
+        raise ValueError("system_event_route peer user_id is required")
+
+    if event.get("type") == "qq.poke":
+        actor = event.get("actor")
+        actor_id = str(actor.get("user_id", "")).strip() if isinstance(actor, dict) else ""
+        if not actor_id or actor_id != peer_id:
+            raise ValueError("qq.poke route peer user_id must match actor user_id")
+
+    nickname = (
+        (peer.get("nickname") or peer.get("name"))
+        if isinstance(peer, dict)
+        else None
+    )
+    cardname = peer.get("cardname") if isinstance(peer, dict) else None
+    return UserInfo(
+        platform=platform,
+        user_id=peer_id,
+        user_nickname=nickname or peer_id,
+        user_cardname=cardname,
+    )
+
+
+def _check_ban_words(text: str, chat: ChatStream, userinfo: Optional[UserInfo]) -> bool:
+    """检查消息是否包含过滤词。system_event 允许没有 sender。"""
     for word in global_config.message_receive.ban_words:
         if word in text:
             chat_name = chat.group_info.group_name if chat.group_info else "私聊"
-            logger.info(f"[{chat_name}]{userinfo.user_nickname}:{text}")
+            if userinfo is None:
+                logger.info(f"[{chat_name}][系统事件] {text}")
+            else:
+                logger.info(f"[{chat_name}]{userinfo.user_nickname}:{text}")
             logger.info(f"[过滤词识别]消息中含有{word}，filtered")
             return True
     return False
 
 
-def _check_ban_regex(text: str, chat: ChatStream, userinfo: UserInfo) -> bool:
-    """检查消息是否匹配过滤正则表达式
-
-    Args:
-        text: 待检查的文本
-        chat: 聊天对象
-        userinfo: 用户信息
-
-    Returns:
-        bool: 是否匹配过滤正则
-    """
-    # 检查text是否为None或空字符串
+def _check_ban_regex(text: str, chat: ChatStream, userinfo: Optional[UserInfo]) -> bool:
+    """检查消息是否匹配过滤正则表达式。system_event 允许没有 sender。"""
     if text is None or not text:
         return False
 
     for pattern in global_config.message_receive.ban_msgs_regex:
         if re.search(pattern, text):
             chat_name = chat.group_info.group_name if chat.group_info else "私聊"
-            logger.info(f"[{chat_name}]{userinfo.user_nickname}:{text}")
+            if userinfo is None:
+                logger.info(f"[{chat_name}][系统事件] {text}")
+            else:
+                logger.info(f"[{chat_name}]{userinfo.user_nickname}:{text}")
             logger.info(f"[正则表达式过滤]消息匹配到{pattern}，filtered")
             return True
     return False
@@ -288,9 +329,7 @@ class ChatBot:
                         return True, "target taken", False
 
                     if result == "ERR_PLATFORM_CONFLICT":
-                        reply_text = (
-                            f"绑定失败：身份冲突啦！当前操作会导致同一个身份下出现多个同一平台的账号，这是不被允许的哦~"
-                        )
+                        reply_text = "绑定失败：身份冲突啦！当前操作会导致同一个身份下出现多个同一平台的账号，这是不被允许的哦~"
                         await send_api.text_to_stream(reply_text, message.chat_stream.stream_id)
                         return True, "platform conflict", False
 
@@ -427,15 +466,117 @@ class ChatBot:
             logger.error(f"处理命令时出错: {e}")
             return False, None, True  # 出错时继续处理消息
 
-    async def handle_notice_message(self, message: MessageRecv):
-        if message.message_info.message_id == "notice":
-            # 给 notice 消息一个唯一的 ID，避免被 message_repository 过滤
-            message.message_info.message_id = f"notice_{int(time.time() * 1000)}"
-            message.is_notify = True
-            logger.info(f"notice消息处理: {message.message_info.message_id}")
-            # print(message)
+    async def handle_notice_message(self, message: MessageRecv) -> bool:
+        system_event = get_system_event(message)
+        is_system_event = system_event is not None
+        is_legacy_notice = message.message_info.message_id == "notice"
 
-            return True
+        if not is_system_event and not is_legacy_notice:
+            return False
+
+        # 旧 notice 使用固定 message_id，会被 message_repository 判重；继续为其生成唯一 ID。
+        # 其他适配器的 system_event 若已有稳定 message_id，则保持原值。
+        if is_legacy_notice:
+            message.message_info.message_id = f"notice_{int(time.time() * 1000)}"
+
+        message.is_notify = True
+
+        if is_system_event:
+            logger.info(
+                "系统事件处理: type=%s, message_id=%s",
+                system_event.get("type"),
+                message.message_info.message_id,
+            )
+            event_data = system_event.get("data")
+            fast_poke = event_data.get("fast_poke") if isinstance(event_data, dict) else None
+            if isinstance(fast_poke, dict) and fast_poke.get("triggered"):
+                logger.info(
+                    "快速回戳事件: result=%s, message_id=%s",
+                    fast_poke.get("result", "unknown"),
+                    message.message_info.message_id,
+                )
+        else:
+            logger.info(f"notice消息处理: {message.message_info.message_id}")
+
+        return True
+
+    async def _register_fast_poke_action(self, message: MessageRecv, chat: ChatStream) -> bool:
+        """Persist an adapter fast-poke as a Bot action in this chat's context.
+
+        Napcat performs this shortcut before Core receives the structured event,
+        so the normal action executor never sees it.  The event metadata is the
+        acknowledgement boundary: only an explicitly triggered fast-poke is
+        registered, and the system-event message id provides an idempotent
+        action key if the same in-memory message is processed again.
+        """
+
+        system_event = get_system_event(message)
+        if system_event is None or system_event.get("type") != "qq.poke":
+            return False
+
+        event_data = system_event.get("data")
+        fast_poke = event_data.get("fast_poke") if isinstance(event_data, dict) else None
+        if not isinstance(fast_poke, dict) or fast_poke.get("triggered") is not True:
+            return False
+
+        result = str(fast_poke.get("result") or "unknown")
+        actor = system_event.get("actor")
+        actor_data = dict(actor) if isinstance(actor, dict) else {}
+        actor_label = str(
+            actor_data.get("name")
+            or actor_data.get("nickname")
+            or actor_data.get("user_id")
+            or "对方"
+        )
+        result_descriptions = {
+            "success": f"你快速回戳了{actor_label}",
+            "failed": f"你尝试快速回戳{actor_label}，但平台返回失败",
+            "timeout": f"你尝试快速回戳{actor_label}，但平台响应超时",
+            "error": f"你尝试快速回戳{actor_label}，但执行异常",
+            "pending": f"你正在尝试快速回戳{actor_label}",
+        }
+        action_prompt_display = result_descriptions.get(
+            result,
+            f"你尝试快速回戳{actor_label}，结果未知",
+        )
+
+        message_id = str(message.message_info.message_id or "unknown")
+        stream_id = str(getattr(chat, "stream_id", "") or "unknown")
+        action_id = f"system_event.fast_poke:{stream_id}:{message_id}"
+        action_data = {
+            "source": "system_event.fast_poke",
+            "system_event_type": system_event.get("type"),
+            "system_event_message_id": message_id,
+            "result": result,
+            "actor": actor_data or None,
+        }
+        group_info = getattr(message.message_info, "group_info", None)
+        if group_info is not None and getattr(group_info, "group_id", None) is not None:
+            action_data["group_id"] = str(group_info.group_id)
+
+        stored_action = await database_api.store_action_info(
+            chat_stream=chat,
+            action_build_into_prompt=True,
+            action_prompt_display=action_prompt_display,
+            action_done=result == "success",
+            thinking_id=action_id,
+            action_data=action_data,
+            action_name="active_poke",
+        )
+        if stored_action is None:
+            logger.warning(
+                "快速回戳 Bot 动作注册失败: result=%s, message_id=%s",
+                result,
+                message_id,
+            )
+            return False
+
+        logger.info(
+            "快速回戳已注册为 Bot 动作: result=%s, message_id=%s",
+            result,
+            message_id,
+        )
+        return True
 
     async def echo_message_process(self, raw_data: Dict[str, Any]) -> None:
         """
@@ -449,8 +590,21 @@ class ChatBot:
             return
         mmc_message_id = message_data.get("echo")
         actual_message_id = message_data.get("actual_id")
-        if MessageStorage.update_message(mmc_message_id, actual_message_id):
+        echo_platform = raw_data.get("platform")
+        if not isinstance(echo_platform, str) or not echo_platform:
+            echo_platform = message_data.get("platform")
+
+        # Resolve the receipt only when both the message id and the platform
+        # match a pending send.  A mismatched platform must not satisfy a
+        # waiter belonging to another adapter route.
+        ack_resolved = send_api.resolve_message_ack(mmc_message_id, echo_platform, actual_message_id)
+        stored = MessageStorage.update_message(mmc_message_id, actual_message_id)
+        if stored:
             logger.debug(f"更新消息ID成功: {mmc_message_id} -> {actual_message_id}")
+        elif ack_resolved:
+            # Media receipts may deliberately use storage_message=False.  The
+            # upstream ACK is still valid even though there is no DB row.
+            logger.debug(f"消息已收到平台ACK但未存储消息: {mmc_message_id}")
         else:
             logger.warning(f"更新消息ID失败: {mmc_message_id} -> {actual_message_id}")
 
@@ -472,8 +626,6 @@ class ChatBot:
             # 确保所有任务已启动
             await self._ensure_started()
 
-            promise_cache_manager.touch_activity()
-
             platform = message_data["message_info"].get("platform")
 
             # Debug Log: Trace incoming platform
@@ -491,62 +643,127 @@ class ChatBot:
             # print(message_data)
             # logger.debug(str(message_data))
             message = MessageRecv(message_data)
+            # Classify immediately after construction.  A malformed envelope or
+            # sender-bearing event is never allowed to fall through as an ordinary
+            # user message, and no user-message-only hooks may run first.
+            system_event_result = classify_system_event(message)
+            message.system_event_state = system_event_result.state
+            is_system_event = system_event_result.state is SystemEventState.VALID
+            if system_event_result.state is SystemEventState.INVALID:
+                logger.warning("丢弃包含无效 structured system_event 的消息")
+                return
+            routing_user_info = None
+            if is_system_event:
+                if message.message_info.user_info is not None:
+                    logger.warning("丢弃同时带有 user_info 的 structured system_event 消息")
+                    return
+                if message.message_info.sender_info is not None:
+                    logger.warning("丢弃同时带有 sender_info 的 structured system_event 消息")
+                    return
+                try:
+                    routing_user_info = _routing_user_info_for_system_event(
+                        message,
+                        system_event_result.event,  # type: ignore[arg-type]
+                    )
+                except ValueError as exc:
+                    logger.warning("丢弃无法确定路由的 structured system_event 消息: %s", exc)
+                    return
+            if is_system_event:
+                # Normalize the validated envelope while retaining every unrelated
+                # additional_config key.  This is the sole Core-side contract edge.
+                additional_config = message.message_info.additional_config
+                if isinstance(additional_config, str):
+                    try:
+                        additional_config = json.loads(additional_config)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        additional_config = {}
+                if not isinstance(additional_config, dict):
+                    additional_config = {}
+                additional_config["system_event"] = system_event_result.event
+                if routing_user_info is not None:
+                    route_result = classify_system_event_route(additional_config)
+                    if route_result.is_valid and route_result.route is not None:
+                        additional_config["system_event_route"] = route_result.route
+                message.message_info.additional_config = additional_config
+            else:
+                # Activity accounting is a user-message concern.  Keep it
+                # after the shared classifier so malformed and sender-bearing
+                # system-event payloads cannot update ordinary activity state.
+                promise_cache_manager.touch_activity()
+
             group_info = message.message_info.group_info
             user_info = message.message_info.user_info
 
-            continue_flag, modified_message = await events_manager.handle_nacho_events(
-                EventType.ON_MESSAGE_PRE_PROCESS, message
-            )
-            if not continue_flag:
-                return
-            if modified_message and modified_message._modify_flags.modify_message_segments:
-                message.message_segment = Seg(type="seglist", data=modified_message.message_segments)
+            if not is_system_event:
+                continue_flag, modified_message = await events_manager.handle_nacho_events(
+                    EventType.ON_MESSAGE_PRE_PROCESS, message
+                )
+                if not continue_flag:
+                    return
+                if modified_message and modified_message._modify_flags.modify_message_segments:
+                    message.message_segment = Seg(type="seglist", data=modified_message.message_segments)
 
             if await self.handle_notice_message(message):
                 # return
                 pass
 
-            get_chat_manager().register_message(message)
+            get_chat_manager().register_message(
+                message,
+                routing_user_info=routing_user_info,
+            )
 
             chat = await get_chat_manager().get_or_create_stream(
                 platform=message.message_info.platform,  # type: ignore
                 user_info=user_info,  # type: ignore
                 group_info=group_info,
                 message=message,
+                routing_user_info=routing_user_info,
             )
 
             message.update_chat_stream(chat)
 
+            if is_system_event:
+                # Adapter-side shortcuts bypass the Core action executor.  Register
+                # their acknowledged result after routing so the action is tied to
+                # the correct group/private stream and is visible to this turn's
+                # Planner/Replyer context.
+                await self._register_fast_poke_action(message, chat)
+
             # 处理消息内容，生成纯文本
             await message.process()
+            if is_system_event and not (message.processed_plain_text or "").strip():
+                message.processed_plain_text = system_event_fallback_text(system_event_result.event)
 
             # 全局监听：处理适配器声明的打赏/会员事件
             asyncio.create_task(track_platform_event(message))
 
-            # 约定/誓言缓存处理
-            promise_cache_hits = promise_cache_manager.handle_message(message)
-            if promise_cache_hits:
-                message.promise_cache_hits = promise_cache_hits  # 动态附加，供后续流程使用
+            if not is_system_event:
+                # 约定/誓言缓存处理
+                promise_cache_hits = promise_cache_manager.handle_message(message)
+                if promise_cache_hits:
+                    message.promise_cache_hits = promise_cache_hits  # 动态附加，供后续流程使用
 
             # if await self.check_ban_content(message):
             #     logger.warning(f"检测到消息中含有违法，色情，暴力，反动，敏感内容，消息内容：{message.processed_plain_text}，发送者：{message.message_info.user_info.user_nickname}")
             #     return
 
             # 过滤检查
-            if _check_ban_words(message.processed_plain_text, chat, user_info) or _check_ban_regex(  # type: ignore
-                message.raw_message,  # type: ignore
-                chat,
-                user_info,  # type: ignore
+            if not is_system_event and (
+                _check_ban_words(message.processed_plain_text, chat, user_info)
+                or _check_ban_regex(message.raw_message, chat, user_info)
             ):
                 return
 
-            if await consume_sandbox_callback_reply(message, chat):
+            if not is_system_event and await consume_sandbox_callback_reply(message, chat):
                 await MessageStorage.store_message(message, chat)
                 logger.info("replyer 已将 sandbox CALL_BACK 用户答复回传，跳过普通消息处理")
                 return
 
-            # 命令处理 - 使用新插件系统检查并处理命令
-            is_command, cmd_result, continue_process = await self._process_commands_with_new_system(message)
+            if is_system_event:
+                is_command, cmd_result, continue_process = False, None, True
+            else:
+                # 命令处理 - 使用新插件系统检查并处理命令
+                is_command, cmd_result, continue_process = await self._process_commands_with_new_system(message)
 
             # 如果是命令且不需要继续处理，则直接返回
             if is_command and not continue_process:
@@ -554,11 +771,12 @@ class ChatBot:
                 logger.info(f"命令处理完成，跳过后续消息处理: {cmd_result}")
                 return
 
-            continue_flag, modified_message = await events_manager.handle_nacho_events(EventType.ON_MESSAGE, message)
-            if not continue_flag:
-                return
-            if modified_message and modified_message._modify_flags.modify_plain_text:
-                message.processed_plain_text = modified_message.plain_text
+            if not is_system_event:
+                continue_flag, modified_message = await events_manager.handle_nacho_events(EventType.ON_MESSAGE, message)
+                if not continue_flag:
+                    return
+                if modified_message and modified_message._modify_flags.modify_plain_text:
+                    message.processed_plain_text = modified_message.plain_text
 
             # 确认从接口发来的message是否有自定义的prompt模板信息
             if message.message_info.template_info and not message.message_info.template_info.template_default:

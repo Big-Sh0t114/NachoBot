@@ -1,0 +1,25 @@
+[project]
+name = "NachoBotSnowLumaAdapter"
+version = "0.2.0"
+description = "SnowLuma adapter for NachoBot Core using ncnk_message"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "aiohttp>=3.14.3,<4",
+    "cryptography>=50.0.0",
+    "fastapi>=0.140.13",
+    "loguru>=0.7.3",
+    "starlette>=1.3.1",
+    "uvicorn>=0.35.0",
+]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "B"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"

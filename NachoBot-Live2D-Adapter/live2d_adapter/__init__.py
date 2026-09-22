@@ -1,6 +1,13 @@
 """Standalone Live2D rendering adapter for NachoBot."""
 
 from .config import AdapterConfig, ConfigError, ModelAdaptationConfig, load_config
+from .control_pipeline import (
+    ACTION_TO_CANONICAL_ID,
+    ALLOWED_EMOTIONS,
+    ApplyOutcome,
+    ControlPipeline,
+    PreparedReply,
+)
 from .model_adapter import (
     Live2DModelAdapter,
     ModelAdaptationError,
@@ -28,6 +35,9 @@ __all__ = [
     "AvatarInteraction",
     "AvatarRuntime",
     "AvatarWebSocketServer",
+    "ACTION_TO_CANONICAL_ID",
+    "ALLOWED_EMOTIONS",
+    "ApplyOutcome",
     "ConfigError",
     "InteractionEvent",
     "Live2DModelAdapter",
@@ -35,6 +45,8 @@ __all__ = [
     "ModelAdaptationError",
     "ModelMetadata",
     "ProtocolError",
+    "ControlPipeline",
+    "PreparedReply",
     "inspect_model",
     "load_config",
 ]

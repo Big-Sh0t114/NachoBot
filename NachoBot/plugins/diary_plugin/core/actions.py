@@ -619,69 +619,9 @@ class DiaryGeneratorAction(BaseAction):
             # 【下午2点】
             # 李四: 下午有什么安排吗？
         """
-        if not messages:
-            return "今天没有什么特别的对话。"
-        
-        timeline_parts = []
-        current_hour = -1
-        bot_qq_account = str(config_api.get_global_config("bot.qq_account", ""))
-        
-        # 初始化图片处理器
-        from .image_processor import ImageProcessor
-        image_processor = ImageProcessor()
-        
-        bot_message_count = 0
-        user_message_count = 0
-        
-        for msg in messages:
-            msg_time = datetime.datetime.fromtimestamp(msg.time)
-            hour = msg_time.hour
-            # 按时间段分组
-            if hour != current_hour:
-                if 6 <= hour < 12:
-                    time_period = f"上午{hour}点"
-                elif 12 <= hour < 18:
-                    time_period = f"下午{hour}点"
-                else:
-                    time_period = f"晚上{hour}点"
-                timeline_parts.append(f"\n【{time_period}】")
-                current_hour = hour
-            
-            # 获取用户信息
-            nickname = msg.user_info.user_nickname or '某人'
-            user_id = str(msg.user_info.user_id)
-            
-            # 判断消息类型并处理
-            if image_processor._is_image_message(msg):
-                # 图片消息处理
-                description = image_processor._get_image_description(msg)
-                if user_id == bot_qq_account:
-                    timeline_parts.append(f"我: [图片]{description}")
-                    bot_message_count += 1
-                else:
-                    timeline_parts.append(f"{nickname}: [图片]{description}")
-                    user_message_count += 1
-            else:
-                # 文本消息处理（保持原有逻辑）
-                content = msg.processed_plain_text or ''
-                if content and len(content) > 50:
-                    content = content[:50] + "..."
-                # 判断是否为Bot消息
-                if user_id == bot_qq_account:
-                    timeline_parts.append(f"我: {content}")
-                    bot_message_count += 1
-                else:
-                    timeline_parts.append(f"{nickname}: {content}")
-                    user_message_count += 1
-        
-        # 存储统计信息
-        self._timeline_stats = {
-            "total_messages": len(messages),
-            "bot_messages": bot_message_count,
-            "user_messages": user_message_count
-        }
-        
-        return "\n".join(timeline_parts)
+        timeline = self.diary_service.build_chat_timeline(messages)
+        self._timeline_stats = dict(getattr(self.diary_service, "_timeline_stats", {}))
+        return timeline
 
     def _estimate_tokens(self, text: str) -> int:
         """估算文本的token数量"""
@@ -904,15 +844,12 @@ class DiaryGeneratorAction(BaseAction):
             bool: 发布是否成功
         
         Note:
-            - 需要配置Napcat服务的主机和端口
+            - Cookie获取由核心平台能力负责
             - 发布结果会更新到本地存储中
             - 失败时会记录详细的错误信息
         """
         try:
-            napcat_host = self.get_config("qzone_publishing.napcat_host", "127.0.0.1")
-            napcat_port = self.get_config("qzone_publishing.napcat_port", "9998")
-            napcat_token = self.get_config("qzone_publishing.napcat_token", "")
-            success = await self.qzone_api.publish_diary(diary_content, napcat_host, napcat_port, napcat_token)
+            success = await self.qzone_api.publish_diary(diary_content)
             
             diary_data = await self.storage.get_diary(date)
             if diary_data:

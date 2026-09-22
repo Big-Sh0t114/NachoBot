@@ -19,6 +19,7 @@ class _SetupMarkupParser(HTMLParser):
         self.bilibili_sections: list[dict[str, str]] = []
         self.bilibili_inputs: list[dict[str, str]] = []
         self.discord_inputs: list[dict[str, str]] = []
+        self.snowluma_inputs: list[dict[str, str]] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attributes = {key: value or "" for key, value in attrs}
@@ -33,6 +34,11 @@ class _SetupMarkupParser(HTMLParser):
             self.portal_links.append(attributes)
         if tag == "input" and self._discord_depth and attributes.get("id") == "setup-discord-token":
             self.discord_inputs.append(attributes)
+        if tag == "input" and attributes.get("id") in {
+            "setup-snowluma-access-token",
+            "setup-snowluma-webui-password",
+        }:
+            self.snowluma_inputs.append(attributes)
         if tag == "div" and attributes.get("id") == "setup-bilibili-section":
             self.bilibili_sections.append(attributes)
         if tag == "input" and attributes.get("id") == "setup-bilibili-bot-account":
@@ -80,6 +86,20 @@ class SetupFrontendSecretContractTests(unittest.TestCase):
         self.assertEqual(bilibili_input.get("pattern"), "[0-9]+")
         self.assertIn("required", bilibili_input)
 
+        snowluma_by_id = {attrs.get("id"): attrs for attrs in parser.snowluma_inputs}
+        self.assertEqual(set(snowluma_by_id), {
+            "setup-snowluma-access-token",
+            "setup-snowluma-webui-password",
+        })
+        for secret_id, minimum in (
+            ("setup-snowluma-access-token", "16"),
+            ("setup-snowluma-webui-password", "10"),
+        ):
+            secret_input = snowluma_by_id[secret_id]
+            self.assertEqual(secret_input.get("type"), "password")
+            self.assertEqual(secret_input.get("minlength"), minimum)
+            self.assertIn("required", secret_input)
+
     def test_frontend_secret_contract(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         fixture = repo_root / "webUI" / "tests" / "frontend_secret_contract.test.js"
@@ -92,6 +112,19 @@ class SetupFrontendSecretContractTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, "frontend contract fixture failed")
+
+    def test_snowluma_frontend_contract(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        fixture = repo_root / "webUI" / "tests" / "snowluma_frontend_contract.test.js"
+        result = subprocess.run(
+            ["node", str(fixture)],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, "SnowLuma frontend contract fixture failed")
 
 
 if __name__ == "__main__":

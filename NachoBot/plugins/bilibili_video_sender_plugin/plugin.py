@@ -13,9 +13,7 @@ import urllib.parse
 import urllib.request
 import subprocess
 import shutil
-import aiohttp
 import uuid
-import time
 
 from functools import lru_cache
 from pathlib import Path
@@ -23,7 +21,14 @@ from typing import Any, Dict, Iterator, List, Mapping, Optional, Tuple, Type
 
 from static_ffmpeg import run
 
+from .log_safety import video_link_log_fields
+
 from src.common.logger import get_logger
+from src.plugin_system.base import BaseEventHandler, BasePlugin, ComponentInfo
+from src.plugin_system.base.component_types import EventType, NachoMessages
+from src.plugin_system.base.config_types import ConfigField
+from src.plugin_system.apis.plugin_register_api import register_plugin
+from src.plugin_system.apis import send_api
 
 # 为模块级独立函数创建logger
 _utils_logger = get_logger("plugin.bilibili_video_sender.utils")
@@ -55,23 +60,6 @@ def convert_windows_to_wsl_path(windows_path: str) -> str:
     except Exception:
         # 转换失败时返回原路径
         return windows_path
-
-
-from src.plugin_system.base import (
-    BaseAction,
-    BaseCommand,
-    BaseEventHandler,
-    BasePlugin,
-    ComponentInfo,
-)
-from src.plugin_system.base.config_types import ConfigField
-from src.plugin_system.base.component_types import (
-    ActionActivationType,
-    EventType,
-    NachoMessages,
-)
-from src.plugin_system.apis.plugin_register_api import register_plugin
-from src.plugin_system.apis import send_api
 
 
 class FFmpegManager:
@@ -299,7 +287,7 @@ def _prepare_split_dir() -> str:
                         if current_time - mtime > 3600:  # 1小时
                             shutil.rmtree(item_path)
                             _utils_logger.debug(f"已清理过期分块目录: {item}")
-                    except Exception as e:
+                    except Exception:
                         # 忽略清理错误 (可能是被锁定)
                         pass
     except Exception as e:
@@ -420,7 +408,7 @@ class BilibiliParser:
         return json.loads(data.decode("utf-8", errors="ignore"))
 
     @staticmethod
-    def _follow_redirect(url: str) -> str:
+    def _follow_redirect(url: str, *, log_urls: bool = True) -> str:
         """解析 b23.tv 短链，仅读取重定向目标，不继续请求 Bilibili 视频页面。"""
 
         class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -438,12 +426,10 @@ class BilibiliParser:
                 location = exc.headers.get("Location")
                 if location:
                     resolved_url = urllib.parse.urljoin(url, location)
-                    BilibiliParser._logger.debug(
-                        "B23 short URL resolved",
-                        original_url=url,
-                        resolved_url=resolved_url,
-                        status=exc.code,
-                    )
+                    log_fields: Dict[str, Any] = {"status": exc.code}
+                    if log_urls:
+                        log_fields.update(original_url=url, resolved_url=resolved_url)
+                    BilibiliParser._logger.debug("B23 short URL resolved", **log_fields)
                     return resolved_url
             raise
 
@@ -459,19 +445,19 @@ class BilibiliParser:
         return None
 
     @staticmethod
-    def find_first_bilibili_url(text: str) -> Optional[str]:
+    def find_first_bilibili_url(text: str, *, log_urls: bool = True) -> Optional[str]:
         # 先匹配 b23.tv 短链
         short = BilibiliParser.B23_SHORT_PATTERN.search(text)
         if short:
             short_url = short.group(0)
             try:
-                return BilibiliParser._follow_redirect(short_url)
+                return BilibiliParser._follow_redirect(short_url, log_urls=log_urls)
             except Exception as exc:
-                BilibiliParser._logger.error(
-                    "B23 short URL resolution failed",
-                    url=short_url,
-                    error=f"{type(exc).__name__}: {exc}",
-                )
+                log_fields = {"error_type": type(exc).__name__}
+                if log_urls:
+                    log_fields["url"] = short_url
+                    log_fields["error"] = f"{type(exc).__name__}: {exc}"
+                BilibiliParser._logger.error("B23 short URL resolution failed", **log_fields)
                 # 保持现有兼容行为：解析失败时仍回退为原短链
                 return short_url
 
@@ -525,7 +511,7 @@ class BilibiliParser:
                 except (TypeError, ValueError):
                     continue
             for candidate in BilibiliParser._iter_card_url_candidates(payload):
-                url = BilibiliParser.find_first_bilibili_url(candidate)
+                url = BilibiliParser.find_first_bilibili_url(candidate, log_urls=False)
                 if url:
                     return url
         return None
@@ -589,8 +575,6 @@ class BilibiliParser:
 
         # 鉴权状态
         has_cookie = bool(sessdata)
-        has_buvid3 = bool(buvid3)
-
         if not has_cookie:
             BilibiliParser._logger.warning("未提供Cookie，将使用游客模式（清晰度限制）")
 
@@ -830,7 +814,7 @@ class BilibiliParser:
         """强制获取dash格式的视频和音频流"""
         opts = options or {}
 
-        BilibiliParser._logger.debug(f"=== Force fetch DASH format ===")
+        BilibiliParser._logger.debug("=== Force fetch DASH format ===")
         BilibiliParser._logger.debug(f"Video ID: aid={aid}, cid={cid}")
         BilibiliParser._logger.debug(f"Config: {opts}")
 
@@ -1080,8 +1064,6 @@ class BilibiliParser:
             BilibiliParser._logger.info(f"清晰度配置: {qn_name} (qn={qn})")
 
         # 检查其他配置
-        fnval = int(opts.get("fnval", 4048))
-
         platform = str(opts.get("platform", "pc"))
         if platform not in ["pc", "html5"]:
             validation_result["warnings"].append(f"platform值{platform}不是标准值")
@@ -1471,7 +1453,7 @@ class VideoSplitter:
             )
 
             # 构建输出文件模式
-            output_pattern = os.path.join(output_dir, f"part_%03d.mp4")
+            output_pattern = os.path.join(output_dir, "part_%03d.mp4")
 
             # 构建FFmpeg命令
             cmd = [
@@ -1606,7 +1588,7 @@ class VideoSplitter:
                 segment_duration = duration / segments
 
                 # 构建FFmpeg命令
-                output_pattern = os.path.join(output_dir, f"part_%03d.mp4")
+                output_pattern = os.path.join(output_dir, "part_%03d.mp4")
                 cmd = [
                     self.ffmpeg_path,
                     "-i",
@@ -1671,7 +1653,7 @@ class VideoSplitter:
                             best_result = []
                             for split_file in split_files:
                                 # 为最佳结果创建副本文件
-                                best_file = split_file.replace(".mp4", f"_best.mp4")
+                                best_file = split_file.replace(".mp4", "_best.mp4")
                                 import shutil
 
                                 shutil.copy2(split_file, best_file)
@@ -1753,11 +1735,9 @@ class VideoSplitter:
             os.makedirs(output_dir, exist_ok=True)
 
             # 获取输入文件名（不含扩展名），处理中文文件名
-            base_name = os.path.splitext(os.path.basename(input_path))[0]
-
             # 为了避免Windows上的中文路径问题，使用英文标识符
             # 构建输出文件模式，使用英文标识符避免编码问题
-            output_pattern = os.path.join(output_dir, f"part_%03d.mp4")
+            output_pattern = os.path.join(output_dir, "part_%03d.mp4")
 
             # 每3分钟分割一次（180秒）
 
@@ -2062,65 +2042,6 @@ class BilibiliAutoSendHandler(BaseEventHandler):
             # 旧版本：返回3元组 (success, continue_processing, result)
             return success, continue_processing, result
 
-    def _is_private_message(self, message: NachoMessages) -> bool:
-        """检测消息是否为私聊消息"""
-
-        # 方法1：从message_base_info中获取group_id，如果没有group_id则为私聊
-        if message.message_base_info:
-            group_id = message.message_base_info.get("group_id")
-            if group_id is None or group_id == "" or group_id == "0":
-                self._logger.debug("检测到私聊消息（无group_id）")
-                return True
-            else:
-                self._logger.debug(f"检测到群聊消息（group_id: {group_id}）")
-                return False
-
-        # 方法2：从additional_data中获取
-        if message.additional_data:
-            group_id = message.additional_data.get("group_id")
-            if group_id is None or group_id == "" or group_id == "0":
-                self._logger.debug("检测到私聊消息（additional_data无group_id）")
-                return True
-            else:
-                self._logger.debug(f"检测到群聊消息（additional_data group_id: {group_id}）")
-                return False
-
-        # 默认当作群聊处理
-        self._logger.debug("无法确定消息类型，默认当作群聊处理")
-        return False
-
-    def _get_user_id(self, message: NachoMessages) -> str | None:
-        """从消息中获取用户ID"""
-        # 方法1：从message_base_info中获取
-        if message.message_base_info:
-            user_id = message.message_base_info.get("user_id")
-            if user_id:
-                return str(user_id)
-
-        # 方法2：从additional_data中获取
-        if message.additional_data:
-            user_id = message.additional_data.get("user_id")
-            if user_id:
-                return str(user_id)
-
-        return None
-
-    def _get_group_id(self, message: NachoMessages) -> str | None:
-        """从消息中获取群ID"""
-        # 方法1：从message_base_info中获取
-        if message.message_base_info:
-            group_id = message.message_base_info.get("group_id")
-            if group_id and group_id != "" and group_id != "0":
-                return str(group_id)
-
-        # 方法2：从additional_data中获取
-        if message.additional_data:
-            group_id = message.additional_data.get("group_id")
-            if group_id and group_id != "" and group_id != "0":
-                return str(group_id)
-
-        return None
-
     def _get_stream_id(self, message: NachoMessages) -> str | None:
         """从消息中获取stream_id"""
 
@@ -2170,110 +2091,29 @@ class BilibiliAutoSendHandler(BaseEventHandler):
         """发送文本消息"""
         try:
             return await send_api.text_to_stream(content, stream_id)
-        except Exception as e:
+        except Exception:
             # 记录错误但不抛出异常，避免影响其他处理器
             return False
 
-    async def _send_private_video(self, original_path: str, converted_path: str, user_id: str) -> bool:
-        """通过API发送私聊视频
-
-        Args:
-            original_path: 原始文件路径（用于文件检查）
-            converted_path: 转换后的路径（用于发送URI）
-            user_id: 目标用户ID
-        """
+    async def _send_video_file(self, original_path: str, converted_path: str, stream_id: str) -> bool:
+        """Send a local video through the core media API and wait for its receipt."""
+        if not os.path.exists(original_path):
+            self._logger.error("视频文件不存在")
+            return False
 
         try:
-            # 获取配置的端口
-            port = self.get_config("api.port", 5700)
-            api_url = f"http://localhost:{port}/send_private_msg"
-
-            # 检查文件是否存在（使用原始路径）
-            if not os.path.exists(original_path):
-                self._logger.error(f"视频文件不存在: {original_path}")
-                return False
-
-            # 构造本地文件路径，使用file://协议（使用转换后路径）
-            file_uri = f"file://{converted_path}"
-
-            self._logger.debug(f"Private video send - original path: {original_path}")
-            self._logger.debug(f"Private video send - converted path: {converted_path}")
-            self._logger.debug(f"Private video send - send URI: {file_uri}")
-
-            # 构造请求数据
-            request_data = {"user_id": user_id, "message": [{"type": "video", "data": {"file": file_uri}}]}
-
-            self._logger.debug(f"Sending private video API request: {api_url}")
-            self._logger.debug(f"Request data: {request_data}")
-
-            # 发送API请求
-            async with aiohttp.ClientSession() as session:
-                async with session.post(api_url, json=request_data, timeout=300) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        self._logger.debug(f"Private video sent successfully: {result}")
-                        return True
-                    else:
-                        error_text = await response.text()
-                        self._logger.error(f"Failed to send private video: HTTP {response.status}, {error_text}")
-                        return False
-
-        except asyncio.TimeoutError:
-            self._logger.error("Private video sending timeout")
-            return False
+            receipt = await send_api.local_media_to_stream_receipt(
+                "videofile",
+                converted_path,
+                stream_id,
+                storage_message=False,
+                show_log=False,
+            )
+            return bool(getattr(receipt, "delivered", receipt))
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
-            self._logger.error(f"Private video sending error: {e}")
-            return False
-
-    async def _send_group_video(self, original_path: str, converted_path: str, group_id: str) -> bool:
-        """通过API发送群视频
-
-        Args:
-            original_path: 原始文件路径（用于文件检查）
-            converted_path: 转换后的路径（用于发送URI）
-            group_id: 目标群ID
-        """
-
-        try:
-            # 获取配置的端口
-            port = self.get_config("api.port", 5700)
-            api_url = f"http://localhost:{port}/send_group_msg"
-
-            # 检查文件是否存在（使用原始路径）
-            if not os.path.exists(original_path):
-                self._logger.error(f"视频文件不存在: {original_path}")
-                return False
-
-            # 构造本地文件路径，使用file://协议（使用转换后路径）
-            file_uri = f"file://{converted_path}"
-
-            self._logger.debug(f"Group video send - original path: {original_path}")
-            self._logger.debug(f"Group video send - converted path: {converted_path}")
-            self._logger.debug(f"Group video send - send URI: {file_uri}")
-
-            # 构造请求数据
-            request_data = {"group_id": group_id, "message": [{"type": "video", "data": {"file": file_uri}}]}
-
-            self._logger.debug(f"Sending group video API request: {api_url}")
-            self._logger.debug(f"Request data: {request_data}")
-
-            # 发送API请求
-            async with aiohttp.ClientSession() as session:
-                async with session.post(api_url, json=request_data, timeout=300) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        self._logger.debug(f"Group video sent successfully: {result}")
-                        return True
-                    else:
-                        error_text = await response.text()
-                        self._logger.error(f"Failed to send group video: HTTP {response.status}, {error_text}")
-                        return False
-
-        except asyncio.TimeoutError:
-            self._logger.error("Group video sending timeout")
-            return False
-        except Exception as e:
-            self._logger.error(f"Group video sending error: {e}")
+            self._logger.error(f"视频发送失败: {e}")
             return False
 
     async def execute(self, message: NachoMessages) -> Tuple[bool, bool, str | None]:
@@ -2291,7 +2131,14 @@ class BilibiliAutoSendHandler(BaseEventHandler):
         if not url:
             return self._make_return_value(True, True, None)
 
-        self._logger.info("Bilibili video link detected", url=url, source=detection_source)
+        self._logger.info(
+            "Bilibili video link detected",
+            **video_link_log_fields(
+                url,
+                detection_source,
+                video_id=BilibiliParser._extract_bvid(url),
+            ),
+        )
 
         # 获取stream_id用于发送消息
         stream_id = self._get_stream_id(message)
@@ -2385,7 +2232,14 @@ class BilibiliAutoSendHandler(BaseEventHandler):
         def _blocking() -> Optional[Tuple[BilibiliVideoInfo, List[str], str]]:
             info = BilibiliParser.get_view_info_by_url(url)
             if not info:
-                self._logger.error("Failed to parse video info", url=url)
+                self._logger.error(
+                    "Failed to parse video info",
+                    **video_link_log_fields(
+                        url,
+                        detection_source,
+                        video_id=BilibiliParser._extract_bvid(url),
+                    ),
+                )
                 return None
 
             self._logger.debug("Video info parsed", title=info.title, aid=info.aid, cid=info.cid)
@@ -2404,8 +2258,12 @@ class BilibiliAutoSendHandler(BaseEventHandler):
         try:
             result = await loop.run_in_executor(None, _blocking)
         except Exception as exc:  # noqa: BLE001 - 简要兜底
-            error_msg = f"解析失败：{exc}"
-            self._logger.error(error_msg)
+            if detection_source == "qq_card":
+                error_msg = "解析失败"
+                self._logger.error(error_msg, source=detection_source, error_type=type(exc).__name__)
+            else:
+                error_msg = f"解析失败：{exc}"
+                self._logger.error(error_msg)
             return self._make_return_value(True, True, "解析失败")
 
         if not result:
@@ -2536,8 +2394,6 @@ class BilibiliAutoSendHandler(BaseEventHandler):
                     # 尝试使用FFmpeg合并
                     try:
                         import subprocess
-                        import shutil
-
                         # 使用跨平台FFmpeg管理器获取ffmpeg路径
                         ffmpeg_path = _ffmpeg_manager.get_ffmpeg_path()
                         if ffmpeg_path:
@@ -2569,7 +2425,7 @@ class BilibiliAutoSendHandler(BaseEventHandler):
                                     video_format = "unknown"
 
                                 # 如果有音频文件，检查其格式
-                                audio_format = "none"
+                                _audio_format = "none"
                                 if audio_temp and os.path.exists(audio_temp):
                                     probe_cmd = [
                                         ffprobe_path,
@@ -2582,7 +2438,7 @@ class BilibiliAutoSendHandler(BaseEventHandler):
                                         audio_temp,
                                     ]
                                     try:
-                                        audio_format = (
+                                        _audio_format = (
                                             subprocess.run(probe_cmd, capture_output=True, text=False)
                                             .stdout.decode("utf-8", errors="replace")
                                             .strip()
@@ -2592,7 +2448,7 @@ class BilibiliAutoSendHandler(BaseEventHandler):
                             else:
                                 self._logger.warning(f"ffprobe not found, unable to check file format: {ffprobe_path}")
                                 video_format = "unknown"
-                                audio_format = "none"
+                                _audio_format = "none"
 
                             # 根据文件格式决定处理方式
                             if "m4s" in video_format.lower() or video_temp.lower().endswith(".m4s"):
@@ -2785,13 +2641,7 @@ class BilibiliAutoSendHandler(BaseEventHandler):
                                 final_split_files.append(compressed_part_path)
                                 compression_stats["compressed"] += 1
 
-                                # 删除原始分片（如果配置允许）
-                                if delete_original:
-                                    try:
-                                        os.remove(part_path)
-                                        self._logger.debug(f"Original part {part_path} deleted")
-                                    except Exception as e:
-                                        self._logger.warning(f"Failed to delete original part: {e}")
+                                # Keep the source part until the platform acknowledges delivery.
                             else:
                                 self._logger.warning(f"Part {i + 1} compression failed, using original file")
                                 final_split_files.append(part_path)
@@ -2864,6 +2714,10 @@ class BilibiliAutoSendHandler(BaseEventHandler):
 
                 self._logger.debug(f"Found {len(all_split_files)} part files, starting to send")
 
+                if not all_split_files:
+                    await self._send_text("视频分块未生成可发送片段，临时文件已保留。", stream_id)
+                    return self._make_return_value(False, True, "视频分块失败")
+
                 # 为所有分片进行WSL路径转换
                 enable_conversion = self.get_config("wsl.enable_path_conversion", True)
                 if enable_conversion:
@@ -2878,7 +2732,9 @@ class BilibiliAutoSendHandler(BaseEventHandler):
                     converted_all_split_files = all_split_files
 
                 # 按顺序发送所有分片
-                for i, (original_path, converted_path) in enumerate(zip(all_split_files, converted_all_split_files)):
+                for i, (original_path, converted_path) in enumerate(
+                    zip(all_split_files, converted_all_split_files, strict=True)
+                ):
                     part_caption = f"{caption} - Part {i + 1}"
 
                     if await self._send_video_part(original_path, converted_path, part_caption, stream_id, message):
@@ -2889,8 +2745,8 @@ class BilibiliAutoSendHandler(BaseEventHandler):
                         failed_files.append(original_path)
                 # 不删除分块文件与目录，保留给外部发送软件使用；将于下一次下载前清理
 
-                # 根据配置决定是否删除原始下载文件
-                if delete_original:
+                # A source file is disposable only after every part has been acknowledged.
+                if delete_original and not failed_files:
                     try:
                         os.remove(temp_path)
                         self._logger.debug("Original download file deleted")
@@ -2899,7 +2755,10 @@ class BilibiliAutoSendHandler(BaseEventHandler):
                 else:
                     self._logger.debug("Original download file retained")
 
-                self._logger.info(f"Video split sent successfully, {sent_count}/{len(all_split_files)} parts sent")
+                self._logger.info(f"Video split sent: {sent_count}/{len(all_split_files)} parts acknowledged")
+                if failed_files:
+                    await self._send_text("视频解析成功，但部分片段发送失败，临时文件已保留。", stream_id)
+                    return self._make_return_value(False, True, f"分块视频发送失败（{sent_count}/{len(all_split_files)}个片段）")
                 return self._make_return_value(True, True, f"已发送分块视频（{sent_count}个片段）")
             else:
                 self._logger.warning("Video split failed, sending original video")
@@ -2936,13 +2795,7 @@ class BilibiliAutoSendHandler(BaseEventHandler):
                     )
                     final_video_path = compressed_path
 
-                    # 删除原始文件（如果配置允许）
-                    if delete_original:
-                        try:
-                            os.remove(temp_path)
-                            self._logger.debug(f"Original video file {temp_path} deleted")
-                        except Exception as e:
-                            self._logger.warning(f"Failed to delete original video file: {e}")
+                    # Keep the source until the platform acknowledges the compressed file.
                 else:
                     self._logger.debug("Single video compression failed, using original file")
             elif video_size_mb > max_video_size_mb:
@@ -2964,51 +2817,30 @@ class BilibiliAutoSendHandler(BaseEventHandler):
                 self._logger.debug(f"Sending single video - original path: {path}")
                 self._logger.debug(f"Sending single video - converted path: {converted_path}")
 
-                # 检查是否为私聊消息
-                is_private = self._is_private_message(message)
-
-                if is_private:
-                    # 私聊消息，使用专用API发送
-                    user_id = self._get_user_id(message)
-                    if user_id:
-                        self._logger.debug(f"Private message detected, sending private video API to user: {user_id}")
-                        return await self._send_private_video(path, converted_path, user_id)
-                    else:
-                        self._logger.error("Private message but unable to get user ID")
-                        return False
-                else:
-                    # 群聊消息，使用群视频API
-                    group_id = self._get_group_id(message)
-                    if group_id:
-                        self._logger.debug(f"Group message detected, sending group video API to group: {group_id}")
-                        return await self._send_group_video(path, converted_path, group_id)
-                    else:
-                        self._logger.error("Group message detected but unable to get group ID, sending failed")
-                        return False
+                return await self._send_video_file(path, converted_path, stream_id)
 
             sent_ok = await _try_send(final_video_path)
             if not sent_ok:
                 self._logger.debug("Video sending failed")
-                await self._send_text("视频解析成功，但发送失败。请检查网络连接和API配置。", stream_id)
+                await self._send_text("视频解析成功，但发送失败。请检查平台连接配置。", stream_id)
             else:
                 self._logger.info("Video file sent successfully")
 
-            # 删除临时文件
-            try:
-                # 删除最终处理的文件
-                if os.path.exists(final_video_path):
-                    os.remove(final_video_path)
-                    self._logger.debug(f"Processed video file {final_video_path} deleted")
-
-                # 如果还有原始文件且不同于最终文件，也删除
-                if final_video_path != temp_path and os.path.exists(temp_path):
-                    os.remove(temp_path)
-                    self._logger.debug(f"Original video file {temp_path} deleted")
-            except Exception as e:
-                self._logger.warning(f"Failed to delete temporary file: {e}")
+            # Delete only after a real upstream acknowledgement. Failed deliveries retain
+            # both the original and any transformed file for recovery.
+            if sent_ok:
+                try:
+                    if final_video_path != temp_path and os.path.exists(final_video_path):
+                        os.remove(final_video_path)
+                        self._logger.debug(f"Processed video file {final_video_path} deleted")
+                    if delete_original and os.path.exists(temp_path):
+                        os.remove(temp_path)
+                        self._logger.debug(f"Original video file {temp_path} deleted")
+                except Exception as e:
+                    self._logger.warning(f"Failed to delete temporary file: {e}")
 
         self._logger.info("Bilibili video processing completed")
-        return self._make_return_value(True, True, "已发送视频（若宿主支持）")
+        return self._make_return_value(sent_ok, True, "已发送视频" if sent_ok else "视频发送失败，临时文件已保留")
 
     async def _send_video_part(
         self, original_path: str, converted_path: str, caption: str, stream_id: str, message: NachoMessages
@@ -3038,33 +2870,7 @@ class BilibiliAutoSendHandler(BaseEventHandler):
                 f"Preparing to send video part: {original_path} -> {converted_path}, size: {file_size} bytes"
             )
 
-            # 检查是否为私聊消息
-            is_private = self._is_private_message(message)
-
-            if is_private:
-                # 私聊消息，使用专用API发送
-                user_id = self._get_user_id(message)
-                if user_id:
-                    self._logger.debug(
-                        f"Private message detected in split video, sending private video API to user: {user_id}"
-                    )
-                    return await self._send_private_video(original_path, converted_path, user_id)
-                else:
-                    self._logger.error("Private message but unable to get user ID")
-                    return False
-            else:
-                # 群聊消息，使用群视频API
-                group_id = self._get_group_id(message)
-                if group_id:
-                    self._logger.debug(
-                        f"Group message detected in split video, sending group video API to group: {group_id}"
-                    )
-                    return await self._send_group_video(original_path, converted_path, group_id)
-                else:
-                    self._logger.error(
-                        "Group message detected in split video but unable to get group ID, sending failed"
-                    )
-                    return False
+            return await self._send_video_file(original_path, converted_path, stream_id)
 
         except Exception as e:
             self._logger.debug(f"Failed to send video part: {e}")
@@ -3162,9 +2968,6 @@ class BilibiliVideoSenderPlugin(BasePlugin):
             "enable_path_conversion": ConfigField(
                 type=bool, default=True, description="是否启用Windows到WSL的路径转换"
             ),
-        },
-        "api": {
-            "port": ConfigField(type=int, default=5700, description="API服务端口号"),
         },
     }
 

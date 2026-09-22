@@ -7,7 +7,6 @@
 主要功能：
 - JSON文件存储管理：提供日记数据的本地存储和检索
 - QQ空间API集成：实现日记内容自动发布到QQ空间
-- QQ空间API集成：实现日记内容自动发布到QQ空间
 
 模块组件：
 - DiaryStorage: JSON文件存储的日记管理类
@@ -25,10 +24,7 @@ import json
 import os
 from typing import List, Dict, Any, Optional
 
-from src.plugin_system.apis import (
-    config_api,
-    get_logger,
-)
+from src.plugin_system.apis import config_api, get_logger, platform_api
 
 # 导入共享的工具类
 from .utils import format_date_str
@@ -41,7 +37,7 @@ class DiaryQzoneAPI:
     日记插件专用的QQ空间API
 
     该类封装了与QQ空间交互的所有功能，包括Cookie管理、API调用和内容发布。
-    通过Napcat服务自动获取和更新QQ空间的认证信息，实现日记内容的自动发布。
+    通过核心平台能力自动获取和更新QQ空间的认证信息，实现日记内容的自动发布。
 
     主要功能：
     - 自动获取和更新QQ空间Cookie
@@ -55,12 +51,12 @@ class DiaryQzoneAPI:
     - QQ空间认证状态检查和维护
 
     依赖服务：
-    - Napcat服务：用于获取QQ空间Cookie
+    - 核心平台能力：用于获取QQ空间Cookie
     - QQ空间API：用于发布说说内容
 
     注意事项：
     - 需要正确配置Bot的QQ账号
-    - 需要Napcat服务正常运行
+    - 需要平台适配器正常运行
     - Cookie会自动缓存到本地文件
     """
 
@@ -84,57 +80,10 @@ class DiaryQzoneAPI:
         safe_uin = max(self.uin, 0)  # 确保非负数
         self.cookie_file = os.path.join(os.path.dirname(__file__), "..", "data", f"qzone_cookies_{safe_uin}.json")
 
-    async def _fetch_cookies_by_napcat(self, host: str, port: str, napcat_token: str = "") -> dict:
-        """通过Napcat自动获取cookies"""
-        import httpx
-
-        url = f"http://{host}:{port}/get_cookies"
-        domain = "user.qzone.qq.com"
-
-        try:
-            headers = {"Content-Type": "application/json"}
-            if napcat_token:
-                headers["Authorization"] = f"Bearer {napcat_token}"
-
-            payload = {"domain": domain}
-
-            # 显式禁用代理，因为这是本地请求
-            async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
-                resp = await client.post(url, json=payload, headers=headers)
-                resp.raise_for_status()
-
-                if resp.status_code != 200:
-                    raise RuntimeError(f"Napcat服务返回错误状态码: {resp.status_code}")
-
-                data = resp.json()
-                if data.get("status") != "ok" or "cookies" not in data.get("data", {}):
-                    raise RuntimeError(f"获取cookie失败: {data}")
-
-                cookie_str = data["data"]["cookies"]
-
-                # 安全的cookie解析
-                cookies = {}
-                try:
-                    for pair in cookie_str.split("; "):
-                        if "=" in pair:
-                            key, value = pair.split("=", 1)
-                            cookies[key] = value
-                        else:
-                            logger.warning(f"跳过格式错误的cookie: {pair}")
-                except Exception as parse_error:
-                    logger.error(f"Cookie解析失败: {parse_error}")
-                    raise RuntimeError(f"Cookie格式错误: {cookie_str}")
-
-                return cookies
-
-        except Exception as e:
-            logger.error(f"通过Napcat获取cookies失败: {e}")
-            raise
-
-    async def _renew_cookies(self, host: str = "127.0.0.1", port: str = "9998", napcat_token: str = ""):
+    async def _renew_cookies(self, platform: str | None = None):
         """自动更新cookies并保存"""
         try:
-            cookie_dict = await self._fetch_cookies_by_napcat(host, port, napcat_token)
+            cookie_dict = await platform_api.get_platform_cookies("user.qzone.qq.com", platform=platform)
 
             cookie_dir = os.path.dirname(self.cookie_file)
             os.makedirs(cookie_dir, exist_ok=True)
@@ -191,13 +140,13 @@ class DiaryQzoneAPI:
         return str(hash_val & 2147483647)
 
     async def publish_diary(
-        self, content: str, napcat_host: str = "127.0.0.1", napcat_port: str = "9998", napcat_token: str = ""
+        self, content: str, platform: str | None = None
     ) -> bool:
         """发布日记到QQ空间"""
         try:
             import httpx
 
-            cookie_success = await self._renew_cookies(napcat_host, napcat_port, napcat_token)
+            cookie_success = await self._renew_cookies(platform)
             if not cookie_success:
                 logger.error("无法获取QQ空间cookies")
                 return False

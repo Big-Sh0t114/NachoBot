@@ -68,6 +68,12 @@ class SendMessageHandleClass:
         elif seg.type == "video":
             video_path = seg.data
             new_payload = cls.build_payload(payload, cls.handle_video_message(video_path), False)
+        elif seg.type == "voicefile":
+            voice_path = seg.data
+            new_payload = cls.build_payload(payload, cls.handle_voicefile_message(voice_path), False)
+        elif seg.type == "videofile":
+            video_path = seg.data
+            new_payload = cls.build_payload(payload, cls.handle_videofile_message(video_path), False)
         elif seg.type == "forward" and not in_forward:
             forward_message_content: List[Dict] = seg.data
             new_payload: List[Dict] = [
@@ -214,3 +220,19 @@ class SendMessageHandleClass:
             "type": "video",
             "data": {"file": f"base64://{encoded_video}"},
         }
+
+    @staticmethod
+    def handle_voicefile_message(file_path: str) -> dict:
+        """Translate a generic local path to a platform record segment."""
+
+        if not isinstance(file_path, str) or not file_path:
+            return {}
+        return {"type": "record", "data": {"file": f"file://{file_path}"}}
+
+    @staticmethod
+    def handle_videofile_message(file_path: str) -> dict:
+        """Translate a generic local path to a platform video segment."""
+
+        if not isinstance(file_path, str) or not file_path:
+            return {}
+        return {"type": "video", "data": {"file": f"file://{file_path}"}}

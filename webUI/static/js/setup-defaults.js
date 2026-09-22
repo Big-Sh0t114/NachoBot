@@ -43,6 +43,12 @@ window.SetupDefaults = (() => {
                 // Core fields
                 const qqEl = document.getElementById('setup-qq-account');
                 if (qqEl) qqEl.value = defaults.core?.qq_account || '';
+                const qqAdapterEl = document.getElementById('setup-qq-adapter');
+                if (qqAdapterEl) {
+                    const selected = defaults.env?.qq_adapter || 'napcat';
+                    qqAdapterEl.value = selected === 'snowluma' ? 'snowluma' : 'napcat';
+                    qqAdapterEl.dispatchEvent(new Event('change', { bubbles: true }));
+                }
                 const nickEl = document.getElementById('setup-nickname');
                 if (nickEl) nickEl.value = defaults.core?.nickname || '';
 

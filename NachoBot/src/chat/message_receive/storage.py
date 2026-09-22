@@ -90,7 +90,17 @@ class MessageStorage:
                 selected_expressions = ""
 
             chat_info_dict = chat_stream.to_dict()
-            user_info_dict = message.message_info.user_info.to_dict()  # type: ignore
+            user_info = getattr(message.message_info, "user_info", None)
+            user_info_dict = user_info.to_dict() if user_info else {}
+            additional_config = getattr(message.message_info, "additional_config", None)
+            if isinstance(additional_config, dict):
+                serialized_additional_config = json.dumps(additional_config, ensure_ascii=False)
+            elif isinstance(additional_config, str):
+                # Preserve legacy/persisted JSON verbatim; the event classifier
+                # accepts both mapping and JSON-string forms.
+                serialized_additional_config = additional_config
+            else:
+                serialized_additional_config = None
 
             # message_id 现在是 TextField，直接使用字符串值
             msg_id = message.message_info.message_id
@@ -111,9 +121,12 @@ class MessageStorage:
                 reply_probability_boost=reply_probability_boost,
                 chat_info_stream_id=chat_info_dict.get("stream_id"),
                 chat_info_platform=chat_info_dict.get("platform"),
-                chat_info_user_platform=user_info_from_chat.get("platform"),
-                chat_info_user_id=user_info_from_chat.get("user_id"),
-                chat_info_user_nickname=user_info_from_chat.get("user_nickname"),
+                # messages 表的 chat_info_user_platform/id/nickname 是 NOT NULL。
+                # system_event 的 ChatStream 没有 sender，因此数据库层使用空字符串占位；
+                # 读取层会在这些 sender 字段全为空时恢复为 user_info=None。
+                chat_info_user_platform=user_info_from_chat.get("platform") or "",
+                chat_info_user_id=user_info_from_chat.get("user_id") or "",
+                chat_info_user_nickname=user_info_from_chat.get("user_nickname") or "",
                 chat_info_user_cardname=user_info_from_chat.get("user_cardname"),
                 chat_info_group_platform=group_info_from_chat.get("platform"),
                 chat_info_group_id=group_info_from_chat.get("group_id"),
@@ -131,6 +144,7 @@ class MessageStorage:
                 interest_value=interest_value,
                 priority_mode=priority_mode,
                 priority_info=priority_info,
+                additional_config=serialized_additional_config,
                 is_emoji=is_emoji,
                 is_picid=is_picid,
                 is_notify=is_notify,

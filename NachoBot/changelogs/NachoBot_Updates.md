@@ -1,3 +1,15 @@
+9/21
+    修复sandbox envelope错误解析所有reply_to_user字段的问题
+9/20
+    解耦live2d控制结构化输出至live2d适配器
+    添加Maizone插件
+9/19
+    更新兼容Bilibili直播v2协议
+9/18
+    完善Snowluma适配器的接入
+9/17
+    添加底层系统信息注册
+    加入Snowluma适配器
 9/14
     添加tts客户端热切换，不再在客户端启动时固定后端字段
 9/13

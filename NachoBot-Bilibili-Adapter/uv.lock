@@ -1081,6 +1081,7 @@ dependencies = [
     { name = "onnxruntime" },
     { name = "openai" },
     { name = "pillow" },
+    { name = "pure-protobuf" },
     { name = "pynput" },
     { name = "qrcode" },
     { name = "requests" },
@@ -1108,6 +1109,7 @@ requires-dist = [
     { name = "onnxruntime", specifier = ">=1.27.0" },
     { name = "openai", specifier = ">=2.50.0" },
     { name = "pillow", specifier = ">=12.2.0" },
+    { name = "pure-protobuf", specifier = "~=3.1.2" },
     { name = "pynput", specifier = ">=1.7.7" },
     { name = "qrcode", specifier = ">=7.4.2" },
     { name = "requests", specifier = ">=2.31.0" },
@@ -1575,6 +1577,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/d8/bc/6d6c7ba8709c85f8f2c390b2b118d6fb08a783676a572271851bf45a7d22/protobuf-7.35.1-cp310-abi3-win32.whl", hash = "sha256:353652e4efd0bca5b5fc2656abf8307ef351f0cf938c9eba09f0e09c20a25c30", size = 428945, upload-time = "2026-06-11T21:55:37.034Z" },
     { url = "https://files.pythonhosted.org/packages/0a/19/8d0cb6f20a1ef7b18f1c8986ad5783f22f84cce39c6ce9a6e645ea55192e/protobuf-7.35.1-cp310-abi3-win_amd64.whl", hash = "sha256:230a75ddfc2de4806e56696ce9640c1cdfdb6543b7cfce98d42a4c0a0e7bdb87", size = 439996, upload-time = "2026-06-11T21:55:38.123Z" },
     { url = "https://files.pythonhosted.org/packages/19/c7/5f7c636ec43e0c545e28d1f1db71990108306f7bdcb89f069ba97e428e7f/protobuf-7.35.1-py3-none-any.whl", hash = "sha256:4bc97768d8fe4ad6743c8a19403e314511ed9f6d13205b687e52421c023ac1b9", size = 171659, upload-time = "2026-06-11T21:55:39.155Z" },
+]
+
+[[package]]
+name = "pure-protobuf"
+version = "3.1.5"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/11/49/2bbc64c052c63a63ba5c9af561734e8e5c6e440b1ce325617fca4b5ecea6/pure_protobuf-3.1.5.tar.gz", hash = "sha256:2e33554cbe2e664a099546f6fd1d6130e409df2d7a8c68b6ee9ce56f4c5d6dfc", size = 17351, upload-time = "2025-09-02T21:45:16.493Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f4/ef/cad3d78e86f75a56e64d238d73393d37cf5c874d31819735ae2dba35e4b3/pure_protobuf-3.1.5-py3-none-any.whl", hash = "sha256:a7e9f57522d6e6f04f683cb4cded4eecfb18a1912b5a4aaed1745c1265f5620a", size = 28122, upload-time = "2025-09-02T21:45:15.605Z" },
 ]
 
 [[package]]

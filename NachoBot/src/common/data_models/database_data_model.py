@@ -41,7 +41,7 @@ class DatabaseChatInfo(BaseDataModel):
     platform: str = field(default_factory=str)
     create_time: float = field(default_factory=float)
     last_active_time: float = field(default_factory=float)
-    user_info: DatabaseUserInfo = field(default_factory=DatabaseUserInfo)
+    user_info: Optional[DatabaseUserInfo] = None
     group_info: Optional[DatabaseGroupInfo] = None
 
     # def __post_init__(self):
@@ -124,17 +124,41 @@ class DatabaseMessages(BaseDataModel):
         self.selected_expressions = selected_expressions
 
         self.group_info: Optional[DatabaseGroupInfo] = None
-        self.user_info = DatabaseUserInfo(
-            user_id=user_id,
-            user_nickname=user_nickname,
-            user_cardname=user_cardname,
-            platform=user_platform,
-        )
-        if chat_info_group_id and chat_info_group_name:
+
+        # 数据库 sender 字段全空时必须保持真正的 None。system_event 的 actor
+        # 只存在 additional_config.system_event 中，不能被重建成空 DatabaseUserInfo。
+        self.user_info: Optional[DatabaseUserInfo] = None
+        if any((user_id, user_nickname, user_cardname, user_platform)):
+            self.user_info = DatabaseUserInfo(
+                user_id=user_id,
+                user_nickname=user_nickname,
+                user_cardname=user_cardname,
+                platform=user_platform,
+            )
+
+        # A platform event can arrive before the group name lookup completes;
+        # the stable group id is enough to retain its group context.
+        if chat_info_group_id:
             self.group_info = DatabaseGroupInfo(
                 group_id=chat_info_group_id,
-                group_name=chat_info_group_name,
+                group_name=chat_info_group_name or "",
                 group_platform=chat_info_group_platform,
+            )
+
+        chat_user_info: Optional[DatabaseUserInfo] = None
+        if any(
+            (
+                chat_info_user_id,
+                chat_info_user_nickname,
+                chat_info_user_cardname,
+                chat_info_user_platform,
+            )
+        ):
+            chat_user_info = DatabaseUserInfo(
+                user_id=chat_info_user_id,
+                user_nickname=chat_info_user_nickname,
+                user_cardname=chat_info_user_cardname,
+                platform=chat_info_user_platform,
             )
 
         self.chat_info = DatabaseChatInfo(
@@ -142,12 +166,7 @@ class DatabaseMessages(BaseDataModel):
             platform=chat_info_platform,
             create_time=chat_info_create_time,
             last_active_time=chat_info_last_active_time,
-            user_info=DatabaseUserInfo(
-                user_id=chat_info_user_id,
-                user_nickname=chat_info_user_nickname,
-                user_cardname=chat_info_user_cardname,
-                platform=chat_info_user_platform,
-            ),
+            user_info=chat_user_info,
             group_info=self.group_info,
         )
 
@@ -188,10 +207,10 @@ class DatabaseMessages(BaseDataModel):
             "is_command": self.is_command,
             "is_notify": self.is_notify,
             "selected_expressions": self.selected_expressions,
-            "user_id": self.user_info.user_id,
-            "user_nickname": self.user_info.user_nickname,
-            "user_cardname": self.user_info.user_cardname,
-            "user_platform": self.user_info.platform,
+            "user_id": self.user_info.user_id if self.user_info else None,
+            "user_nickname": self.user_info.user_nickname if self.user_info else None,
+            "user_cardname": self.user_info.user_cardname if self.user_info else None,
+            "user_platform": self.user_info.platform if self.user_info else None,
             "chat_info_group_id": self.group_info.group_id if self.group_info else None,
             "chat_info_group_name": self.group_info.group_name if self.group_info else None,
             "chat_info_group_platform": self.group_info.group_platform if self.group_info else None,
@@ -199,10 +218,10 @@ class DatabaseMessages(BaseDataModel):
             "chat_info_platform": self.chat_info.platform,
             "chat_info_create_time": self.chat_info.create_time,
             "chat_info_last_active_time": self.chat_info.last_active_time,
-            "chat_info_user_platform": self.chat_info.user_info.platform,
-            "chat_info_user_id": self.chat_info.user_info.user_id,
-            "chat_info_user_nickname": self.chat_info.user_info.user_nickname,
-            "chat_info_user_cardname": self.chat_info.user_info.user_cardname,
+            "chat_info_user_platform": self.chat_info.user_info.platform if self.chat_info.user_info else None,
+            "chat_info_user_id": self.chat_info.user_info.user_id if self.chat_info.user_info else None,
+            "chat_info_user_nickname": self.chat_info.user_info.user_nickname if self.chat_info.user_info else None,
+            "chat_info_user_cardname": self.chat_info.user_info.user_cardname if self.chat_info.user_info else None,
         }
 
 

@@ -19,6 +19,11 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 from config_manager import ConfigManager
+from qq_adapter_selector import (
+    QQAdapterSelectorError,
+    read_qq_adapter,
+    selector_value_from_request,
+)
 from process_manager import ProcessManager
 from plugin_manager import PluginManager
 from db_manager import DatabaseManager
@@ -34,12 +39,48 @@ from setup_manager import (
     DependencyInstaller,
     EnvironmentChecker,
     NapCatConfigurator,
+    select_qq_adapter,
     PathVerifier,
     bilibili_login_manager,
 )
+from setup_checks import NAPCAT_RELEASE_URL
 from security import WebUISecurity, validate_webui_config_raw
 from webui_config import CONFIG_PATH, webui_config
 from multimodal_runtime import MultimodalRuntimeManager
+try:
+    from snowluma_credentials import (
+        SnowLumaPasswordStore,
+        SnowLumaSecretStoreUnavailable,
+    )
+except ImportError:  # pragma: no cover - package import context
+    from .snowluma_credentials import (
+        SnowLumaPasswordStore,
+        SnowLumaSecretStoreUnavailable,
+    )
+try:
+    from snowluma_manager import (
+        SNOWLUMA_RELEASE_URL,
+        SNOWLUMA_AGREEMENT_REQUIRED,
+        SNOWLUMA_AGREEMENT_VERSION_MISMATCH,
+        SNOWLUMA_PASSWORD_CHANGE_REQUIRED,
+        SNOWLUMA_PASSWORD_REQUIRED,
+        SNOWLUMA_SECRET_STORE_UNAVAILABLE,
+        SNOWLUMA_TOTP_REQUIRED,
+        SnowLumaAPIClient,
+        SnowLumaApiError,
+        SnowLumaManager,
+        SnowLumaSynchronizationError,
+        _validate_agreement_payload,
+    )
+except ImportError:  # pragma: no cover - package import context
+    from .snowluma_manager import (
+        SNOWLUMA_RELEASE_URL,
+        SnowLumaAPIClient,
+        SnowLumaApiError,
+        SnowLumaManager,
+        SnowLumaSynchronizationError,
+        _validate_agreement_payload,
+    )
 
 logger = logging.getLogger("webui")
 
@@ -886,6 +927,55 @@ async def setup_config_defaults():
     return ConfigInitializer.get_defaults()
 
 
+class QQAdapterSelectionRequest(BaseModel):
+    qq_adapter: str
+
+
+@app.get("/api/setup/qq-adapter")
+async def setup_qq_adapter_status():
+    """Return only the live QQ selector and component status."""
+    try:
+        selected = read_qq_adapter(config_mgr.root / "NachoBot/.env")
+    except QQAdapterSelectorError:
+        raise HTTPException(400, "当前 qq_adapter 配置无效，请重新选择")
+    return {
+        "selected": selected,
+        "supported": ["napcat", "snowluma"],
+        "napcat": {
+            **SnowLumaManager.installation_status(config_mgr.root, "napcat"),
+            "download_url": NAPCAT_RELEASE_URL,
+        },
+        "snowluma": SnowLumaManager.installation_status(config_mgr.root, "snowluma"),
+    }
+
+
+@app.post("/api/setup/qq-adapter")
+async def setup_qq_adapter_select(body: QQAdapterSelectionRequest):
+    """Select NapCat/SnowLuma through the live .env authority."""
+    try:
+        return select_qq_adapter(body.qq_adapter, root=config_mgr.root, process_manager=process_mgr)
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/setup/qq-adapter/select")
+async def setup_qq_adapter_select_alias(body: QQAdapterSelectionRequest):
+    return await setup_qq_adapter_select(body)
+
+
+@app.get("/api/setup/snowluma/status")
+async def setup_snowluma_status():
+    """Expose install/path/port status without credential material."""
+    status = SnowLumaManager.installation_status(config_mgr.root, "snowluma")
+    status["ports"] = SnowLumaManager.configured_ports(config_mgr.root)
+    status["release_url"] = SNOWLUMA_RELEASE_URL
+    try:
+        status["selected"] = read_qq_adapter(config_mgr.root / "NachoBot/.env") == "snowluma"
+    except QQAdapterSelectorError:
+        status["selected"] = False
+    return status
+
+
 class SetupWizardData(BaseModel):
     components: list[str] = []
     core: dict = {}
@@ -895,6 +985,11 @@ class SetupWizardData(BaseModel):
     discord: dict = {}
     bilibili: dict = {}
     env: dict = {}
+    # Credentials are accepted by the schema for the dedicated SnowLuma
+    # configure flow, but generic config generation never logs or persists
+    # these values.
+    snowluma_access_token: str | None = None
+    snowluma_webui_password: str | None = None
 
 
 @app.post("/api/setup/configs/generate")
@@ -906,6 +1001,12 @@ async def setup_generate_configs(body: SetupWizardData):
             "[Setup] generate_configs called: components=%s, providers=%d, models=%d",
             data.get("components"), len(data.get("providers", [])), len(data.get("models", []))
         )
+        # Validate selector syntax and any live backend switch before entering
+        # the QR lifecycle context.  ConfigInitializer repeats this check after
+        # entering the context to close the TOCTOU window before target writes.
+        _, qq_selection_error = ConfigInitializer.prevalidate_qq_adapter_selection(data)
+        if qq_selection_error:
+            raise HTTPException(400, qq_selection_error)
         # Every config-generation request must first stop and invalidate any
         # prior QR helper.  This protects non-Bilibili runs from racing an old
         # helper and keeps unproven process/QR cleanup fail-closed before any
@@ -923,6 +1024,8 @@ async def setup_generate_configs(body: SetupWizardData):
             len(result.get("generated", [])), len(result.get("errors", []))
         )
         return result
+    except HTTPException:
+        raise
     except Exception:
         logger.exception("[Setup] generate_configs failed")
         raise HTTPException(500, "配置生成失败")
@@ -991,11 +1094,30 @@ async def setup_bilibili_login_qr_query(job_id: str = Query(...)):
 class VerifyPathRequest(BaseModel):
     type: str
     path: str = ""
+    qq_adapter: str | None = None
 
 
 @app.post("/api/setup/verify-path")
 async def setup_verify_path(body: VerifyPathRequest):
     """Verify a setup dependency or project-managed runtime."""
+    if body.type in {"napcat", "snowluma", "snowluma_runtime"}:
+        try:
+            # The live .env remains the selector authority.  A client-visible
+            # selector is only a stale-form consistency assertion and cannot
+            # authorize checking the other backend's components.
+            selected = read_qq_adapter(config_mgr.root / "NachoBot/.env")
+            if body.qq_adapter is not None:
+                requested = selector_value_from_request(body.qq_adapter)
+                if requested != selected:
+                    raise HTTPException(409, "QQ 适配器选择已变化，请重新加载设置向导")
+        except QQAdapterSelectorError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        expected = "napcat" if body.type == "napcat" else "snowluma"
+        if selected != expected:
+            raise HTTPException(
+                409,
+                f"当前选择的是 {selected}，不需要验证 {expected} 组件",
+            )
     result = PathVerifier.verify_path(body.type, body.path)
     return result
 
@@ -1012,11 +1134,19 @@ async def setup_bootstrap_git():
 
 
 @app.get("/api/setup/deps/tasks")
-async def setup_dep_tasks(components: str = "", multimodal_runtime: str = "gpu"):
+async def setup_dep_tasks(
+    components: str = "",
+    multimodal_runtime: str = "gpu",
+    qq_adapter: str | None = None,
+):
     """Return install tasks for selected components and Multimodal runtime."""
     comp_list = [c.strip() for c in components.split(",") if c.strip()]
     try:
-        return DependencyInstaller.get_install_tasks(comp_list, multimodal_runtime)
+        return DependencyInstaller.get_install_tasks(
+            comp_list,
+            multimodal_runtime,
+            qq_adapter=qq_adapter,
+        )
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -1036,21 +1166,374 @@ async def setup_multimodal_runtime_status():
 class NapCatConfigRequest(BaseModel):
     napcat_dir: str
     qq_account: str = ""
+    qq_adapter: str | None = None
 
 
 @app.post("/api/setup/napcat/configure")
 async def setup_configure_napcat(body: NapCatConfigRequest):
-    """Auto-configure NapCat onebot11 WebSocket client + HTTP servers."""
+    """Auto-configure NapCat only when NapCat is the selected QQ backend."""
     try:
+        selected = read_qq_adapter(config_mgr.root / "NachoBot/.env")
+        if body.qq_adapter is not None:
+            requested = selector_value_from_request(body.qq_adapter)
+            if requested != selected:
+                raise HTTPException(409, "QQ 适配器选择已变化，请重新加载设置向导")
+        if selected != "napcat":
+            raise HTTPException(
+                409,
+                "当前选择的是 SnowLuma；WebUI 会管理 SnowLuma Runtime，无需配置 NapCat",
+            )
         result = NapCatConfigurator.configure(body.napcat_dir, body.qq_account)
         logger.info(
             "[Setup] napcat configure: configured=%s, skipped=%s, errors=%s",
             result["configured"], result["skipped"], result["errors"]
         )
         return result
+    except HTTPException:
+        raise
+    except QQAdapterSelectorError as exc:
+        raise HTTPException(400, str(exc)) from exc
     except Exception:
         logger.exception("[Setup] napcat configure failed")
         raise HTTPException(500, "NapCat 配置失败")
+
+
+class SnowLumaConfigureRequest(BaseModel):
+    qq_account: str
+    snowluma_access_token: str
+    snowluma_webui_password: str
+    qq_adapter: str | None = None
+    # SnowLuma's local auth migration is deliberately offline.  Any TOTP
+    # field in this request is rejected rather than silently bypassed.
+    totp: str | None = None
+
+
+@app.post("/api/setup/snowluma/configure")
+async def setup_configure_snowluma(body: SnowLumaConfigureRequest):
+    """Synchronize the three SnowLuma credential files in one transaction."""
+    try:
+        live_selector = read_qq_adapter(config_mgr.root / "NachoBot/.env")
+        if live_selector != "snowluma":
+            raise HTTPException(409, "当前选择的不是 SnowLuma，请重新加载设置向导")
+        if body.qq_adapter is not None:
+            requested = selector_value_from_request(body.qq_adapter)
+            if requested != live_selector:
+                raise HTTPException(409, "QQ 适配器选择已变化，请重新加载设置向导")
+        if body.totp is not None:
+            raise HTTPException(409, "SnowLuma TOTP 已启用，请先在 SnowLuma 中完成凭据迁移")
+        result = SnowLumaManager.synchronize(
+            config_mgr.root,
+            body.qq_account,
+            body.snowluma_access_token,
+            body.snowluma_webui_password,
+            process_manager=process_mgr,
+            expected_adapter=live_selector,
+        )
+        return result.as_dict()
+    except HTTPException:
+        raise
+    except (SnowLumaSynchronizationError, SnowLumaApiError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception:
+        logger.exception("[Setup] SnowLuma configure failed")
+        raise HTTPException(500, "SnowLuma 配置失败")
+
+
+class SnowLumaProcessRequest(BaseModel):
+    # Omitted/blank uses the CurrentUser-protected deployment password.  The
+    # loopback WebUI treats local API clients as trusted when no WebUI token
+    # is configured; explicit agreement clicks remain mandatory.
+    password: str | None = None
+
+
+def _snowluma_http_error(exc: SnowLumaApiError) -> HTTPException:
+    """Map typed SnowLuma states without returning secret material."""
+
+    code = getattr(exc, "code", "UPSTREAM_ERROR")
+    details = getattr(exc, "details", {}) or {}
+    if code == SNOWLUMA_SECRET_STORE_UNAVAILABLE:
+        status = 503
+    elif code in {
+        SNOWLUMA_PASSWORD_REQUIRED,
+        SNOWLUMA_AGREEMENT_REQUIRED,
+        SNOWLUMA_TOTP_REQUIRED,
+        SNOWLUMA_PASSWORD_CHANGE_REQUIRED,
+        SNOWLUMA_AGREEMENT_VERSION_MISMATCH,
+    }:
+        status = 428
+    else:
+        status = 502
+    payload: dict[str, object] = {"code": code, "message": str(exc)}
+    if code == SNOWLUMA_AGREEMENT_REQUIRED:
+        payload.update({
+            key: details[key]
+            for key in ("version", "documents", "consentRequired")
+            if key in details
+        })
+    elif code == SNOWLUMA_AGREEMENT_VERSION_MISMATCH and "currentVersion" in details:
+        payload["currentVersion"] = details["currentVersion"]
+    return HTTPException(status, detail=payload)
+
+
+def _manual_snowluma_password(value: object) -> str | None:
+    if not isinstance(value, str) or value == "":
+        return None
+    return value
+
+
+def _snowluma_password_for_request(
+    manual_password: object,
+) -> tuple[str, bool, SnowLumaPasswordStore]:
+    """Select manual-over-saved credentials without exposing either value."""
+
+    manual = _manual_snowluma_password(manual_password)
+    try:
+        store = SnowLumaPasswordStore(config_mgr.root)
+    except Exception as exc:
+        raise SnowLumaApiError(
+            "SnowLuma 密码安全存储不可用",
+            code=SNOWLUMA_SECRET_STORE_UNAVAILABLE,
+            http_status=503,
+        ) from exc
+    if manual is not None:
+        # Validate the existing ciphertext first.  A corrupt/foreign DPAPI
+        # blob is an unavailable store, not permission to overwrite evidence
+        # that may belong to another Windows account.
+        try:
+            load = getattr(store, "load", None)
+            if callable(load):
+                load()
+        except Exception as exc:
+            raise SnowLumaApiError(
+                "SnowLuma 密码安全存储不可用",
+                code=SNOWLUMA_SECRET_STORE_UNAVAILABLE,
+                http_status=503,
+            ) from exc
+        return manual, True, store
+    try:
+        load = getattr(store, "load", None)
+        if not callable(load):
+            raise SnowLumaSecretStoreUnavailable("secure password storage is unavailable")
+        saved = load()
+    except Exception as exc:
+        raise SnowLumaApiError(
+            "SnowLuma 密码安全存储不可用",
+            code=SNOWLUMA_SECRET_STORE_UNAVAILABLE,
+            http_status=503,
+        ) from exc
+    if not saved:
+        raise SnowLumaApiError(
+            "SnowLuma WebUI 需要手动输入密码",
+            code=SNOWLUMA_PASSWORD_REQUIRED,
+            http_status=428,
+        )
+    return saved, False, store
+
+
+def _snowluma_client(password: str | None) -> SnowLumaAPIClient:
+    selected_password, manual, store = _snowluma_password_for_request(password)
+    client = SnowLumaAPIClient(config_mgr.root)
+    try:
+        login_result = client.login(selected_password)
+        if manual:
+            try:
+                # Persist only after SnowLuma accepted the login.  The store
+                # replaces ciphertext atomically and never logs the value.
+                store.save(selected_password)
+            except Exception as exc:
+                raise SnowLumaApiError(
+                    "SnowLuma 密码安全存储不可用",
+                    code=SNOWLUMA_SECRET_STORE_UNAVAILABLE,
+                    http_status=503,
+                ) from exc
+        if isinstance(login_result, dict) and login_result.get("mustChangePassword") is True:
+            raise SnowLumaApiError(
+                "SnowLuma WebUI 要求先修改密码",
+                code=SNOWLUMA_PASSWORD_CHANGE_REQUIRED,
+                http_status=428,
+            )
+    except BaseException:
+        # Login may have established a cookie/token before rejecting the
+        # response.  Best-effort close here; the login error remains primary.
+        try:
+            _close_snowluma_client(client)
+        except Exception:
+            pass
+        raise
+    return client
+
+
+def _close_snowluma_client(client: SnowLumaAPIClient) -> None:
+    """Best-effort session cleanup that never replaces an operation error."""
+    try:
+        close = getattr(client, "close", None)
+        if callable(close):
+            # SnowLumaAPIClient.close() is the single owner of the bundled
+            # POST /api/logout contract and local token/cookie clearing.
+            close()
+        else:  # pragma: no cover - compatibility with older test doubles
+            logout = getattr(client, "logout", None)
+            if callable(logout):
+                logout()
+    except Exception:
+        # Never log request credentials or upstream response content. The
+        # operation/login exception is the only user-visible failure.
+        logger.debug("SnowLuma session cleanup failed", exc_info=True)
+
+
+def _snowluma_check_agreement(client: SnowLumaAPIClient) -> None:
+    """Inspect SnowLuma's official agreement gate before an operation."""
+
+    inspect_agreements = getattr(client, "get_agreements", None)
+    if not callable(inspect_agreements):
+        # Compatibility test doubles/old clients may omit this optional API;
+        # the production SnowLumaAPIClient always supplies it.
+        return
+    payload = _validate_agreement_payload(inspect_agreements())
+    if isinstance(payload, dict) and payload.get("consentRequired") is True:
+        raise SnowLumaApiError(
+            "SnowLuma 需要先阅读并同意协议",
+            code=SNOWLUMA_AGREEMENT_REQUIRED,
+            details=payload,
+            http_status=428,
+        )
+
+
+def _snowluma_list_processes(password: str | None) -> list[dict[str, object]]:
+    """Run auth, agreement inspection, and the blocking process-list request."""
+    client = _snowluma_client(password)
+    try:
+        _snowluma_check_agreement(client)
+        return client.list_processes()
+    finally:
+        _close_snowluma_client(client)
+
+
+def _snowluma_probe_login(password: str | None, pid: int) -> dict[str, object]:
+    """Run auth, agreement inspection, and the blocking probe request."""
+    client = _snowluma_client(password)
+    try:
+        _snowluma_check_agreement(client)
+        return client.probe_login(pid)
+    finally:
+        _close_snowluma_client(client)
+
+
+def _snowluma_process_action(password: str | None, pid: int, action: str) -> dict[str, object]:
+    """Run auth, agreement inspection, and the blocking process action."""
+    client = _snowluma_client(password)
+    try:
+        _snowluma_check_agreement(client)
+        return client.process_action(pid, action)
+    finally:
+        _close_snowluma_client(client)
+
+
+@app.post("/api/setup/snowluma/processes")
+async def setup_snowluma_processes(body: SnowLumaProcessRequest):
+    """List managed QQ processes using saved credentials or manual fallback."""
+    try:
+        processes = await asyncio.to_thread(_snowluma_list_processes, body.password)
+        return {"list": processes}
+    except SnowLumaApiError as exc:
+        raise _snowluma_http_error(exc) from exc
+
+
+@app.post("/api/setup/snowluma/processes/list")
+async def setup_snowluma_processes_alias(body: SnowLumaProcessRequest):
+    return await setup_snowluma_processes(body)
+
+
+class SnowLumaProcessActionRequest(BaseModel):
+    password: str | None = None
+
+
+def _validate_process_path_pid(pid: str) -> int:
+    try:
+        value = int(pid)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, "PID 无效") from exc
+    if value < 1 or value > 4_194_304:
+        raise HTTPException(400, "PID 无效")
+    return value
+
+
+@app.post("/api/setup/snowluma/processes/{pid}/probe-login")
+async def setup_snowluma_probe_login(pid: str, body: SnowLumaProcessActionRequest):
+    try:
+        valid_pid = _validate_process_path_pid(pid)
+        info = await asyncio.to_thread(_snowluma_probe_login, body.password, valid_pid)
+        return {"info": info}
+    except HTTPException:
+        raise
+    except SnowLumaApiError as exc:
+        raise _snowluma_http_error(exc) from exc
+
+
+@app.post("/api/setup/snowluma/processes/{pid}/{action}")
+async def setup_snowluma_process_action(
+    pid: str,
+    action: str,
+    body: SnowLumaProcessActionRequest,
+):
+    if action not in {"load", "unload", "refresh"}:
+        raise HTTPException(400, "SnowLuma 进程操作无效")
+    try:
+        valid_pid = _validate_process_path_pid(pid)
+        result = await asyncio.to_thread(
+            _snowluma_process_action,
+            body.password,
+            valid_pid,
+            action,
+        )
+        return result
+    except HTTPException:
+        raise
+    except SnowLumaApiError as exc:
+        raise _snowluma_http_error(exc) from exc
+
+
+class SnowLumaAgreementAcceptRequest(BaseModel):
+    version: str
+
+    class Config:
+        extra = "forbid"
+
+
+def _snowluma_accept_agreement(version: str) -> dict[str, object]:
+    """Re-fetch current agreements, then call SnowLuma's official consent API."""
+
+    client = _snowluma_client(None)
+    try:
+        current = _validate_agreement_payload(client.get_agreements())
+        current_version = current.get("version") if isinstance(current, dict) else None
+        if not isinstance(current_version, str) or current_version != version:
+            raise SnowLumaApiError(
+                "SnowLuma 协议版本已更新，请重新阅读并确认",
+                code=SNOWLUMA_AGREEMENT_VERSION_MISMATCH,
+                details={"currentVersion": current_version}
+                if isinstance(current_version, str)
+                else {},
+                http_status=428,
+            )
+        # ``record_consent`` is the only consent write; this endpoint never
+        # writes consent.json or sets SnowLuma acceptance environment flags.
+        return client.record_consent(version)
+    finally:
+        _close_snowluma_client(client)
+
+
+@app.post("/api/setup/snowluma/agreements/accept")
+async def setup_snowluma_accept_agreement(body: SnowLumaAgreementAcceptRequest):
+    try:
+        return await asyncio.to_thread(_snowluma_accept_agreement, body.version)
+    except SnowLumaApiError as exc:
+        raise _snowluma_http_error(exc) from exc
+
+
+@app.post("/api/setup/snowluma/agreement/accept")
+async def setup_snowluma_accept_agreement_alias(body: SnowLumaAgreementAcceptRequest):
+    return await setup_snowluma_accept_agreement(body)
 
 
 @app.websocket("/ws/setup/install")

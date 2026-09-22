@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from loguru import logger
-from collections.abc import Iterable
 from urllib.parse import parse_qs, urlsplit
+from uuid import uuid4
 
 from websockets.exceptions import ConnectionClosed
 from websockets.legacy.server import WebSocketServerProtocol, serve
@@ -20,7 +19,6 @@ from .protocol import (
     error_event,
 )
 from .runtime import AvatarRuntime
-
 
 MAX_WEBSOCKET_MESSAGE_BYTES = 8 * 1024 * 1024
 class AvatarWebSocketServer:
@@ -37,6 +35,7 @@ class AvatarWebSocketServer:
         self.logger = logger
         self._clients: set[WebSocketServerProtocol] = set()
         self._clients_lock = asyncio.Lock()
+        self._client_send_locks: dict[WebSocketServerProtocol, asyncio.Lock] = {}
         self._server = None
 
     async def run(self) -> None:
@@ -101,40 +100,56 @@ class AvatarWebSocketServer:
             await websocket.close(code=4401, reason="unauthorized")
             return
 
+        client_id = uuid4().hex
         async with self._clients_lock:
             self._clients.add(websocket)
+            self._client_send_locks[websocket] = asyncio.Lock()
 
         remote_address = getattr(websocket, "remote_address", None)
         self.logger.info("Live2D client connected: %s", remote_address)
 
         try:
-            await websocket.send(
+            await self._safe_send(
+                websocket,
                 InteractionEvent(
                     event=AvatarInteraction.READY,
-                    payload={"running": self.runtime.is_running},
+                    payload={
+                        "running": self.runtime.is_running,
+                        "protocol_version": "1.1",
+                        "capabilities": {
+                            "prepare_reply": True,
+                            "apply_control": True,
+                            "commands": ["prepare_reply", "apply_control"],
+                            "interactions": ["reply_prepared", "control_applied"],
+                        },
+                    },
                 ).to_json()
             )
 
             async for raw_message in websocket:
                 if not isinstance(raw_message, str):
-                    await websocket.send(error_event("binary messages are unsupported").to_json())
+                    await self._safe_send(
+                        websocket,
+                        error_event("binary messages are unsupported").to_json(),
+                    )
                     continue
 
                 request_id: str | None = None
                 try:
                     command = AvatarCommand.from_json(raw_message)
                     request_id = command.request_id
-                    response = await self.runtime.dispatch(command)
+                    response = await self.runtime.dispatch(command, client_id=client_id)
                     if response is not None:
-                        await websocket.send(response.to_json())
+                        await self._safe_send(websocket, response.to_json())
                     if command.event is AvatarEvent.SHUTDOWN:
                         asyncio.create_task(self.stop())
                         return
                 except ProtocolError as exc:
-                    await websocket.send(error_event(str(exc), request_id).to_json())
+                    await self._safe_send(websocket, error_event(str(exc), request_id).to_json())
                 except Exception as exc:
                     self.logger.exception("Unhandled Live2D command error")
-                    await websocket.send(
+                    await self._safe_send(
+                        websocket,
                         error_event(f"internal adapter error: {exc}", request_id).to_json()
                     )
         except ConnectionClosed:
@@ -142,6 +157,8 @@ class AvatarWebSocketServer:
         finally:
             async with self._clients_lock:
                 self._clients.discard(websocket)
+                self._client_send_locks.pop(websocket, None)
+            self.runtime.discard_client_controls(client_id)
             self.logger.info("Live2D client disconnected: %s", remote_address)
 
     def _is_authorized(self, request_path: str) -> bool:
@@ -177,15 +194,22 @@ class AvatarWebSocketServer:
         message: str,
     ) -> None:
         try:
-            await websocket.send(message)
+            async with self._clients_lock:
+                send_lock = self._client_send_locks.get(websocket)
+            if send_lock is None:
+                send_lock = asyncio.Lock()
+            async with send_lock:
+                await websocket.send(message)
         except ConnectionClosed:
             async with self._clients_lock:
                 self._clients.discard(websocket)
+                self._client_send_locks.pop(websocket, None)
 
     async def _close_clients(self) -> None:
         async with self._clients_lock:
             clients = tuple(self._clients)
             self._clients.clear()
+            self._client_send_locks.clear()
 
         await asyncio.gather(
             *(client.close(code=1001, reason="adapter shutting down") for client in clients),

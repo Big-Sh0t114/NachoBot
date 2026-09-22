@@ -41,9 +41,6 @@ style = "diary"
 [qzone_publishing]
 qzone_min_word_count = 150
 qzone_max_word_count = 500
-napcat_host = "127.0.0.1"
-napcat_port = "9997"
-napcat_token = ""
 
 [schedule]
 schedule_time = "23:30"
@@ -58,12 +55,12 @@ target_chats = ["group:群号", "private:QQ号"]
 - `whitelist` + 空列表：禁用定时任务；有内容时只处理列出的会话。
 - `blacklist` + 空列表：处理全部会话；有内容时排除列出的会话。
 
-## NapCat 与模型
+## 平台能力与模型
 
-- QQ 空间发布需要 NapCat 正向 HTTP Server，端口和 Token 必须与 `[qzone_publishing]` 一致。
-- WebUI 部署向导会读取这里的实际设置并协调 NapCat 配置；发现损坏 JSON、账号不匹配或端口冲突时不会静默覆盖。
+- QQ 空间 Cookie 由核心平台能力统一获取，插件只负责发布内容。
+- WebUI 部署向导只配置核心 WebSocket 客户端，并保留用户已有的其他服务配置。
 - `[custom_model]` 仅支持 OpenAI 兼容接口。API Key 不要写入 README、日志或提交记录。
 
-依赖已纳入 Core 的 `pyproject.toml`，在 `NachoBot` 目录执行 `uv sync --locked` 即可。定时调度发生异常时会重试，但仍应检查时区、过滤列表、最少消息数和 NapCat 连通性。
+依赖已纳入 Core 的 `pyproject.toml`，在 `NachoBot` 目录执行 `uv sync --locked` 即可。定时调度发生异常时会重试，但仍应检查时区、过滤列表、最少消息数和平台适配器连通性。
 
 本插件基于 [bockegai/diary_plugin](https://github.com/bockegai/diary_plugin)，采用 MIT 许可证。

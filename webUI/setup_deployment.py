@@ -1,10 +1,13 @@
 """Configuration generation and dependency deployment for the WebUI wizard."""
 
 import asyncio
+import copy
 import json
 import os
 import re
 import shutil
+import time
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -19,6 +22,13 @@ try:
         ROOT_DIR,
         TEMPLATE_MAP,
     )
+    from .qq_adapter_selector import (
+        DEFAULT_QQ_ADAPTER,
+        QQAdapterSelectorError,
+        parse_qq_adapter_env,
+        read_qq_adapter,
+        selector_value_from_request,
+    )
     from .secure_paths import ensure_within, resolve_external_path, resolve_relative_to_root
     from .multimodal_runtime import MultimodalRuntimeManager
 except ImportError:
@@ -28,6 +38,13 @@ except ImportError:
         EnvironmentChecker,
         ROOT_DIR,
         TEMPLATE_MAP,
+    )
+    from qq_adapter_selector import (
+        DEFAULT_QQ_ADAPTER,
+        QQAdapterSelectorError,
+        parse_qq_adapter_env,
+        read_qq_adapter,
+        selector_value_from_request,
     )
     from secure_paths import ensure_within, resolve_external_path, resolve_relative_to_root
     from multimodal_runtime import MultimodalRuntimeManager
@@ -43,6 +60,133 @@ DISCORD_VC_TARGET = "NachoBot-DiscordVC-Adapter/config.toml"
 DISCORD_KOISHI_PLACEHOLDER = "<YOUR_DISCORD_BOT_TOKEN_HERE>"
 DISCORD_VC_PLACEHOLDER = "YOUR_DISCORD_BOT_TOKEN"
 BILIBILI_TARGET = "NachoBot-Bilibili-Adapter/config.toml"
+SNOWLUMA_TARGET = "NachoBot-SnowLuma-Adapter/config.toml"
+NAPCAT_TARGET = "NachoBot-Napcat-Adapter/config.toml"
+
+
+def select_qq_adapter(
+    requested: object,
+    *,
+    root: Path | None = None,
+    process_manager: object | None = None,
+) -> dict[str, Any]:
+    """Safely update only ``qq_adapter`` in the live ``.env`` file.
+
+    The live selector is the authority for side effects.  This helper keeps
+    comments/unrelated variables byte-for-byte intact, creates a recoverable
+    backup before replacement, fences an active QQ runtime, and rebuilds the
+    process registry after a successful selection.
+    """
+    base = (root or ROOT_DIR).resolve()
+    env_path = base / "NachoBot" / ".env"
+    try:
+        selected = selector_value_from_request(requested)
+        current = read_qq_adapter(env_path)
+    except QQAdapterSelectorError as exc:
+        raise ValueError("QQ 适配器选择无效") from exc
+
+    if selected == current:
+        return {"status": "ok", "selected": current, "changed": False, "backup": None}
+
+    try:
+        try:
+            from .process_manager import assert_qq_adapter_switch_allowed
+        except ImportError:  # pragma: no cover - direct script context
+            from process_manager import assert_qq_adapter_switch_allowed
+        assert_qq_adapter_switch_allowed(process_manager)
+    except (ValueError, RuntimeError):
+        raise
+
+    try:
+        raw = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+    except OSError as exc:
+        raise ValueError("无法读取 QQ 适配器选择") from exc
+
+    # Validate again from the exact text that is about to be edited.  This
+    # closes a duplicate/invalid-selector race without returning raw content.
+    try:
+        live_current = parse_qq_adapter_env(raw)
+    except QQAdapterSelectorError as exc:
+        raise ValueError("当前 qq_adapter 配置无效，请重新加载设置向导") from exc
+    if live_current != current:
+        raise ValueError("当前 qq_adapter 选择已变化，请重新加载设置向导")
+
+    newline = "\r\n" if "\r\n" in raw else "\n"
+    lines = raw.splitlines(keepends=True)
+    replaced = False
+    rendered: list[str] = []
+    for line in lines:
+        body = line.rstrip("\r\n")
+        key, separator, value = body.partition("=")
+        if separator and key.strip().casefold() == "qq_adapter":
+            # Keep indentation, spacing before '=', inline comments, and the
+            # original line ending; only the authority value changes.
+            comment = ""
+            value_without_comment = value
+            if "#" in value:
+                value_without_comment, comment_tail = value.split("#", 1)
+                comment = "#" + comment_tail
+            leading = value_without_comment[: len(value_without_comment) - len(value_without_comment.lstrip())]
+            trailing = value_without_comment[len(value_without_comment.rstrip()):]
+            # Preserve whitespace around the old value and the inline comment
+            # byte-for-byte while replacing only the selector token itself.
+            rendered.append(
+                f"{key}{separator}{leading}{selected}{trailing}{comment}{line[len(body):]}"
+            )
+            replaced = True
+        else:
+            rendered.append(line)
+    if not replaced:
+        if raw and not raw.endswith(("\n", "\r")):
+            rendered.append(newline)
+        rendered.append(f"qq_adapter={selected}{newline}")
+    candidate = "".join(rendered)
+
+    backup_name: str | None = None
+    if env_path.exists():
+        backup_dir = base / "config-save" / "setup_backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        safe_stamp = time.strftime("%Y%m%d_%H%M%S")
+        backup_path = backup_dir / f"NachoBot__env.qq-adapter.{safe_stamp}.bak"
+        # Avoid collisions when two setup requests arrive in one second.
+        suffix = 0
+        while backup_path.exists():
+            suffix += 1
+            backup_path = backup_dir / f"NachoBot__env.qq-adapter.{safe_stamp}.{suffix}.bak"
+        shutil.copy2(env_path, backup_path)
+        backup_name = backup_path.name
+
+    try:
+        env_path.parent.mkdir(parents=True, exist_ok=True)
+        env_path.write_text(candidate, encoding="utf-8")
+        if read_qq_adapter(env_path) != selected:
+            raise ValueError("qq_adapter 写入校验失败")
+    except Exception as exc:
+        # Restore the exact bytes if the write or post-write authority check
+        # fails.  The backup remains available for manual recovery.
+        try:
+            if env_path.exists() and backup_name:
+                shutil.copy2(base / "config-save" / "setup_backups" / backup_name, env_path)
+            elif not backup_name:
+                env_path.unlink(missing_ok=True)
+        except Exception as rollback_exc:
+            raise ValueError("QQ 适配器选择写入失败，回滚失败") from rollback_exc
+        raise ValueError("QQ 适配器选择写入失败，已回滚") from exc
+
+    try:
+        try:
+            from .process_manager import _register_services
+        except ImportError:  # pragma: no cover - direct script context
+            from process_manager import _register_services
+        _register_services()
+    except Exception as exc:
+        raise ValueError("QQ 适配器已写入，但服务注册表刷新失败") from exc
+    return {
+        "status": "ok",
+        "selected": selected,
+        "changed": True,
+        "backup": backup_name,
+    }
 
 
 # Sanitized, tracked fallback templates.  The user-owned template files in
@@ -367,7 +511,7 @@ class ConfigInitializer:
 
     @staticmethod
     def get_defaults() -> dict[str, Any]:
-        """Read template config files and return default values for the wizard form."""
+        """Read live config files, falling back to templates for the wizard form."""
         result: dict[str, Any] = {
             "core": {"qq_account": "", "nickname": "NachoBot"},
             "providers": [],
@@ -386,89 +530,263 @@ class ConfigInitializer:
             # Never read a current Bilibili config here.  The wizard collects a
             # fresh account UID only when the user explicitly selects Bilibili.
             "bilibili": {"bot_account": ""},
-            "env": {"host": "127.0.0.1", "port": "8000"},
+            # SnowLuma credentials are request-only and are never prefilled
+            # from the live runtime or returned from an existing config.
+            "snowluma": {"access_token": "", "webui_password": ""},
+            "env": {
+                "host": "127.0.0.1",
+                "port": "8000",
+                "qq_adapter": DEFAULT_QQ_ADAPTER,
+            },
         }
 
-        # ── bot_config template ──
+        def source_path(live_path: Path, template_path: Path) -> tuple[Path, bool]:
+            """Return the selected source and whether it is a live config."""
+            if live_path.is_file():
+                return live_path, True
+            return template_path, False
+
+        def live_config_error(role: str) -> ValueError:
+            """Return an error that identifies only the failed config role."""
+            return ValueError(f"Invalid live {role} configuration")
+
+        def parse_toml_source(
+            path: Path,
+            is_live: bool,
+            role: str,
+        ) -> Any | None:
+            """Parse a selected TOML source without exposing live contents."""
+            try:
+                return tomlkit.parse(path.read_text(encoding="utf-8"))
+            except Exception:
+                if is_live:
+                    raise live_config_error(role) from None
+                return None
+
+        def require_mapping(value: Any) -> Mapping[str, Any]:
+            if not isinstance(value, Mapping):
+                raise TypeError("expected TOML table")
+            return value
+
+        def string_value(
+            section: Mapping[str, Any],
+            key: str,
+            default: str = "",
+        ) -> str:
+            value = section.get(key, default)
+            if not isinstance(value, str):
+                raise TypeError("expected TOML string")
+            return str(value)
+
+        def array_value(
+            section: Mapping[str, Any],
+            key: str,
+        ) -> list[Any]:
+            value = section.get(key, [])
+            if not isinstance(value, list):
+                raise TypeError("expected TOML array")
+            return list(value)
+
+        def commit_toml_source(
+            path: Path,
+            is_live: bool,
+            role: str,
+            extract: Callable[[Mapping[str, Any]], dict[str, Any]],
+            commit: Callable[[dict[str, Any]], None],
+        ) -> None:
+            """Extract atomically, failing closed for an invalid live source."""
+            try:
+                document = parse_toml_source(path, is_live, role)
+                if document is None:
+                    return
+                values = extract(require_mapping(document))
+            except Exception:
+                if is_live:
+                    raise live_config_error(role) from None
+                return
+            commit(values)
+
+        # ── bot_config (live deployment, then template) ──
         bot_tmpl = ROOT_DIR / "NachoBot/template/bot_config_template.toml"
-        if bot_tmpl.exists():
-            try:
-                doc = tomlkit.parse(bot_tmpl.read_text(encoding="utf-8"))
-                bot = doc.get("bot", {})
-                result["core"]["qq_account"] = str(bot.get("qq_account", ""))
-                result["core"]["nickname"] = str(bot.get("nickname", "NachoBot"))
-            except Exception:
-                pass
+        bot_path, bot_is_live = source_path(
+            ROOT_DIR / "NachoBot/config/bot_config.toml",
+            bot_tmpl,
+        )
+        if bot_path.is_file():
+            def extract_bot(document: Mapping[str, Any]) -> dict[str, Any]:
+                bot = require_mapping(document.get("bot", {}))
+                return {
+                    "qq_account": string_value(bot, "qq_account"),
+                    "nickname": string_value(bot, "nickname", "NachoBot"),
+                }
 
-        # ── model_config template — providers & models ──
+            commit_toml_source(
+                bot_path,
+                bot_is_live,
+                "bot_config",
+                extract_bot,
+                lambda values: result["core"].update(values),
+            )
+
+        # ── model_config (live deployment, then template) — providers & models ──
         model_tmpl = ROOT_DIR / "NachoBot/template/model_config_template.toml"
-        if model_tmpl.exists():
-            try:
-                doc = tomlkit.parse(model_tmpl.read_text(encoding="utf-8"))
-                for p in doc.get("api_providers", []):
-                    result["providers"].append({
-                        "name": str(p.get("name", "")),
-                        "base_url": str(p.get("base_url", "")),
-                        "api_key": str(p.get("api_key", "")),
+        model_path, model_is_live = source_path(
+            ROOT_DIR / "NachoBot/config/model_config.toml",
+            model_tmpl,
+        )
+        if model_path.is_file():
+            def extract_model(document: Mapping[str, Any]) -> dict[str, Any]:
+                providers: list[dict[str, str]] = []
+                for provider_value in array_value(document, "api_providers"):
+                    provider = require_mapping(provider_value)
+                    providers.append({
+                        "name": string_value(provider, "name"),
+                        "base_url": string_value(provider, "base_url"),
+                        "api_key": string_value(provider, "api_key"),
                     })
-                for m in doc.get("models", []):
-                    result["models"].append({
-                        "model_identifier": str(m.get("model_identifier", "")),
-                        "model_name": str(m.get("name", "")),
-                        "api_provider": str(m.get("api_provider", "")),
-                    })
-                # Extract per-group model assignments from model_task_config
-                mtc = doc.get("model_task_config", {})
-                for group_name in ("replyer0", "planner", "utils", "utils_small", "tool_use"):
-                    if group_name in mtc:
-                        ml = mtc[group_name].get("model_list", [])
-                        result["model_groups"][group_name] = ", ".join(str(x) for x in ml)
-            except Exception:
-                pass
 
-        # ── .env template ──
+                models: list[dict[str, str]] = []
+                for model_value in array_value(document, "models"):
+                    model = require_mapping(model_value)
+                    models.append({
+                        "model_identifier": string_value(model, "model_identifier"),
+                        "model_name": string_value(model, "name"),
+                        "api_provider": string_value(model, "api_provider"),
+                    })
+
+                model_groups: dict[str, str] = {}
+                mtc = require_mapping(document.get("model_task_config", {}))
+                for group_name in ("replyer0", "planner", "utils", "utils_small", "tool_use"):
+                    if group_name not in mtc:
+                        continue
+                    group = require_mapping(mtc[group_name])
+                    model_list = array_value(group, "model_list")
+                    if not all(isinstance(model_name, str) for model_name in model_list):
+                        raise TypeError("expected model names")
+                    model_groups[group_name] = ", ".join(model_list)
+
+                return {
+                    "providers": providers,
+                    "models": models,
+                    "model_groups": model_groups,
+                }
+
+            def commit_model(values: dict[str, Any]) -> None:
+                result["providers"] = values["providers"]
+                result["models"] = values["models"]
+                result["model_groups"] = values["model_groups"]
+
+            commit_toml_source(
+                model_path,
+                model_is_live,
+                "model_config",
+                extract_model,
+                commit_model,
+            )
+
+        # ── .env (live deployment, then template) ──
         env_tmpl = ROOT_DIR / "NachoBot/template/template.env"
-        if env_tmpl.exists():
+        env_live = ROOT_DIR / "NachoBot/.env"
+        env_path, env_is_live = source_path(env_live, env_tmpl)
+        env_values = dict(result["env"])
+        env_text: str | None = None
+        if env_path.is_file():
             try:
-                for line in env_tmpl.read_text(encoding="utf-8").splitlines():
+                env_text = env_path.read_text(encoding="utf-8")
+                for line in env_text.splitlines():
                     line = line.strip()
                     if line.startswith("HOST="):
-                        result["env"]["host"] = line.split("=", 1)[1]
+                        env_values["host"] = line.split("=", 1)[1]
                     elif line.startswith("PORT="):
-                        result["env"]["port"] = line.split("=", 1)[1]
+                        env_values["port"] = line.split("=", 1)[1]
+            except Exception:
+                if env_is_live:
+                    raise live_config_error(".env") from None
+
+        # Prefer the current valid live selector.  An invalid live .env must
+        # not leak a malformed value into the wizard, so use the template
+        # selector (or the built-in default) as the fallback.  No raw
+        # environment contents are returned here.
+        if env_tmpl.is_file():
+            try:
+                template_env_text = (
+                    env_text
+                    if env_path == env_tmpl
+                    else env_tmpl.read_text(encoding="utf-8")
+                )
+                env_values["qq_adapter"] = parse_qq_adapter_env(
+                    template_env_text
+                )
             except Exception:
                 pass
+        if env_live.is_file():
+            try:
+                if env_text is None:
+                    raise OSError("live .env was not read")
+                env_values["qq_adapter"] = parse_qq_adapter_env(
+                    env_text
+                )
+            except Exception:
+                # Invalid selector values intentionally fall back to the
+                # template selector; a read failure was already surfaced
+                # above while loading the selected live source.
+                pass
+        result["env"] = env_values
 
-        # ── TTS base template ──
+        # ── TTS base config (live deployment, then template) ──
         tts_tmpl = ROOT_DIR / "NachoBot-Multimodal-Adapter/template_configs/base_template.toml"
-        if tts_tmpl.exists():
-            try:
-                doc = tomlkit.parse(tts_tmpl.read_text(encoding="utf-8"))
-                enabled = doc.get("enabled_tts", {}).get("enabled", [])
-                if enabled:
-                    result["tts"]["engine"] = str(enabled[0])
-            except Exception:
-                pass
+        tts_path, tts_is_live = source_path(
+            ROOT_DIR / "NachoBot-Multimodal-Adapter/configs/base.toml",
+            tts_tmpl,
+        )
+        if tts_path.is_file():
+            def extract_tts(document: Mapping[str, Any]) -> dict[str, Any]:
+                enabled_tts = require_mapping(document.get("enabled_tts", {}))
+                enabled = array_value(enabled_tts, "enabled")
+                if not all(isinstance(engine, str) for engine in enabled):
+                    raise TypeError("expected TTS names")
+                return {"engine": str(enabled[0])} if enabled else {}
 
-        # ── UniversalVC template ──
+            commit_toml_source(
+                tts_path,
+                tts_is_live,
+                "TTS base",
+                extract_tts,
+                lambda values: result["tts"].update(values),
+            )
+
+        # ── UniversalVC config (live deployment, then template) ──
         uvc_tmpl = ROOT_DIR / "NachoBot-UniversalVC-Adapter/template/config_template.toml"
-        if uvc_tmpl.exists():
-            try:
-                doc = tomlkit.parse(uvc_tmpl.read_text(encoding="utf-8"))
-                result["universalvc"]["target_process_name"] = str(
-                    doc.get("capture", {}).get("target_process_name", "")
-                )
-                result["universalvc"]["output_device"] = str(
-                    doc.get("output", {}).get("device_name", "")
-                )
-                result["universalvc"]["denoise_enabled"] = bool(
-                    doc.get("denoise", {}).get("enabled", False)
-                )
-                result["universalvc"]["speaker_enabled"] = bool(
-                    doc.get("speaker", {}).get("enabled", True)
-                )
-            except Exception:
-                pass
+        uvc_path, uvc_is_live = source_path(
+            ROOT_DIR / "NachoBot-UniversalVC-Adapter/config.toml",
+            uvc_tmpl,
+        )
+        if uvc_path.is_file():
+            def extract_universalvc(document: Mapping[str, Any]) -> dict[str, Any]:
+                capture = require_mapping(document.get("capture", {}))
+                output = require_mapping(document.get("output", {}))
+                denoise = require_mapping(document.get("denoise", {}))
+                speaker = require_mapping(document.get("speaker", {}))
+
+                denoise_enabled = denoise.get("enabled", False)
+                speaker_enabled = speaker.get("enabled", True)
+                if not isinstance(denoise_enabled, bool) or not isinstance(speaker_enabled, bool):
+                    raise TypeError("expected boolean UniversalVC setting")
+
+                return {
+                    "target_process_name": string_value(capture, "target_process_name"),
+                    "output_device": string_value(output, "device_name"),
+                    "denoise_enabled": denoise_enabled,
+                    "speaker_enabled": speaker_enabled,
+                }
+
+            commit_toml_source(
+                uvc_path,
+                uvc_is_live,
+                "UniversalVC",
+                extract_universalvc,
+                lambda values: result["universalvc"].update(values),
+            )
 
         return result
 
@@ -487,6 +805,103 @@ class ConfigInitializer:
             return None
 
     @staticmethod
+    def _load_napcat_chat_policy() -> dict[str, Any] | None:
+        """Read only the shared chat policy from a parseable NapCat config.
+
+        The SnowLuma first-run template must inherit admission policy without
+        inheriting any NapCat connection, token, or unrelated adapter data.
+        Missing, malformed, or incomplete sources intentionally return ``None``
+        so the fail-closed template policy remains unchanged.
+        """
+
+        source_path = resolve_relative_to_root(ROOT_DIR, NAPCAT_TARGET)
+        if not source_path.exists():
+            return None
+        try:
+            document = tomlkit.parse(source_path.read_text(encoding="utf-8"))
+            chat = document.get("chat")
+            if chat is None:
+                return None
+            shared_keys = (
+                "group_list_type",
+                "group_list",
+                "private_list_type",
+                "private_list",
+                "ban_user_id",
+                "ban_qq_bot",
+                "enable_poke",
+            )
+            if any(key not in chat for key in shared_keys):
+                return None
+            return {key: copy.deepcopy(chat[key]) for key in shared_keys}
+        except Exception:
+            return None
+
+    @staticmethod
+    def _resolve_qq_adapter_selection(
+        wizard_data: dict[str, Any],
+        components: set[str],
+    ) -> tuple[str, str | None]:
+        """Resolve/validate the effective QQ backend before any target write."""
+        live_env = ROOT_DIR / "NachoBot/.env"
+        try:
+            current = read_qq_adapter(live_env)
+        except QQAdapterSelectorError as exc:
+            return "", str(exc)
+
+        env_data = wizard_data.get("env", {})
+        if env_data is None:
+            env_data = {}
+        if not isinstance(env_data, dict):
+            return "", "环境变量配置无效"
+
+        if "qq_adapter" not in env_data:
+            selected = current
+        else:
+            try:
+                selected = selector_value_from_request(env_data.get("qq_adapter"))
+            except QQAdapterSelectorError as exc:
+                return "", str(exc)
+
+        if selected != current:
+            try:
+                from .process_manager import assert_qq_adapter_switch_allowed
+            except ImportError:
+                from process_manager import assert_qq_adapter_switch_allowed
+            try:
+                assert_qq_adapter_switch_allowed()
+            except (ValueError, RuntimeError) as exc:
+                return "", str(exc)
+
+        if "qq" in components:
+            template_rel = (
+                "NachoBot-SnowLuma-Adapter/template_config.toml"
+                if selected == "snowluma"
+                else "NachoBot-Napcat-Adapter/template/template_config.toml"
+            )
+            template_text = ConfigInitializer._read_template(template_rel)
+            if template_text is None:
+                return "", f"QQ 适配器模板不存在: {template_rel}"
+            try:
+                document = tomlkit.parse(template_text)
+                if selected == "snowluma":
+                    for section in ("snowluma", "nachobot_server", "voice"):
+                        if section not in document:
+                            return "", f"SnowLuma 模板缺少 [{section}]"
+            except Exception as exc:
+                return "", f"QQ 适配器模板无法验证: {template_rel}"
+
+        return selected, None
+
+    @staticmethod
+    def prevalidate_qq_adapter_selection(
+        wizard_data: dict[str, Any],
+    ) -> tuple[str, str | None]:
+        """Validate selector and switch eligibility without touching QR state or files."""
+        components = set(wizard_data.get("components", []))
+        return ConfigInitializer._resolve_qq_adapter_selection(wizard_data, components)
+
+    @staticmethod
     def generate_configs(wizard_data: dict[str, Any]) -> dict[str, Any]:
         """
         Generate config files from templates, applying wizard form data.
@@ -499,7 +914,7 @@ class ConfigInitializer:
           - tts: dict              — TTS settings (engine, etc.)
           - discord: dict          — Discord settings (token)
           - bilibili: dict         — Bilibili settings (bot_account)
-          - env: dict              — .env overrides (HOST, PORT)
+          - env: dict              — .env overrides (HOST, PORT, qq_adapter)
 
         Returns:
           {"generated": [...], "skipped": [...], "backups": [...], "errors": [...]}
@@ -513,6 +928,37 @@ class ConfigInitializer:
         # Determine whether platform adapters should advertise/use TTS.
         # Relay host/port are independent persistent adapter settings.
         tts_enabled = "tts" in components
+
+        qq_adapter, qq_selection_error = ConfigInitializer._resolve_qq_adapter_selection(
+            wizard_data, components
+        )
+        if qq_selection_error:
+            return {
+                "generated": [],
+                "skipped": list(TEMPLATE_MAP.values()),
+                "backups": [],
+                "errors": [qq_selection_error],
+                "patched": [],
+            }
+
+        # Validate the selected live adapter before any unrelated target can be
+        # backed up or materialized.  SnowLuma preservation must never turn a
+        # malformed current config into a partial wizard deployment.
+        if "qq" in components:
+            selected_target = SNOWLUMA_TARGET if qq_adapter == "snowluma" else NAPCAT_TARGET
+            selected_path = resolve_relative_to_root(ROOT_DIR, selected_target)
+            if selected_path.exists():
+                try:
+                    tomlkit.parse(selected_path.read_text(encoding="utf-8"))
+                except Exception as exc:
+                    label = "SnowLuma" if qq_adapter == "snowluma" else "NapCat"
+                    return {
+                        "generated": [],
+                        "skipped": list(TEMPLATE_MAP.values()),
+                        "backups": [],
+                        "errors": [f"现有 {label} Adapter 配置无法解析，已拒绝部署"],
+                        "patched": [],
+                    }
 
         # Validate both fresh Discord templates before touching any target.  In
         # particular, do not let a malformed/mutated template cause a later
@@ -567,7 +1013,7 @@ class ConfigInitializer:
             # Skip components not selected
             component_id = target_rel.split("/")[0]
             should_generate = ConfigInitializer._should_generate(
-                component_id, target_rel, components
+                component_id, target_rel, components, qq_adapter=qq_adapter
             )
             if not should_generate:
                 skipped.append(target_rel)
@@ -583,6 +1029,8 @@ class ConfigInitializer:
                 # the NapCat adapter, keep the user's existing inbound WS contract:
                 # NapCat's websocketClient must use the same host/port/token.
                 preserved_napcat_server: dict[str, Any] | None = None
+                preserved_snowluma: dict[str, Any] | None = None
+                seeded_snowluma_chat: dict[str, Any] | None = None
                 preserved_nachobot_server: dict[str, Any] | None = None
                 if (
                     target_rel == "NachoBot-Napcat-Adapter/config.toml"
@@ -608,6 +1056,22 @@ class ConfigInitializer:
                         raise ValueError(
                             f"现有 NapCat Adapter 配置无法解析，已拒绝用模板覆盖: {e}"
                         ) from e
+                if target_rel == SNOWLUMA_TARGET and target_path.exists():
+                    try:
+                        existing_doc = tomlkit.parse(target_path.read_text(encoding="utf-8"))
+                        # SnowLuma adapter tables are user-owned.  Preserve the
+                        # complete document and let the wizard override only
+                        # voice.use_tts below; this keeps future adapter tables
+                        # intact as well as the known connection/chat/debug data.
+                        preserved_snowluma = {
+                            key: copy.deepcopy(value) for key, value in existing_doc.items()
+                        }
+                    except Exception as exc:
+                        raise ValueError(
+                            "现有 SnowLuma Adapter 配置无法解析，已拒绝用模板覆盖"
+                        ) from exc
+                elif target_rel == SNOWLUMA_TARGET:
+                    seeded_snowluma_chat = ConfigInitializer._load_napcat_chat_policy()
 
                 # Backup existing file
                 if target_path.exists():
@@ -644,12 +1108,35 @@ class ConfigInitializer:
                             generated_upstream[key] = value
                     target_path.write_text(tomlkit.dumps(generated_doc), encoding="utf-8")
 
+                # SnowLuma configuration is user-owned.  Restore every existing
+                # table/key without returning or logging values, then apply only
+                # the wizard-owned voice.use_tts override.
+                if preserved_snowluma is not None:
+                    generated_doc = tomlkit.parse(target_path.read_text(encoding="utf-8"))
+                    for key, value in preserved_snowluma.items():
+                        generated_doc[key] = copy.deepcopy(value)
+                    target_path.write_text(tomlkit.dumps(generated_doc), encoding="utf-8")
+
+                # On first SnowLuma generation only, inherit the existing
+                # NapCat admission policy.  The source helper returns only the
+                # seven shared chat keys and never copies connection/auth data.
+                if seeded_snowluma_chat is not None:
+                    generated_doc = tomlkit.parse(target_path.read_text(encoding="utf-8"))
+                    generated_chat = generated_doc.get("chat")
+                    if generated_chat is None:
+                        generated_chat = tomlkit.table()
+                        generated_doc["chat"] = generated_chat
+                    for key, value in seeded_snowluma_chat.items():
+                        generated_chat[key] = copy.deepcopy(value)
+                    target_path.write_text(tomlkit.dumps(generated_doc), encoding="utf-8")
+
                 # Apply wizard data overrides
                 override_err = ConfigInitializer._apply_overrides(
                     target_path,
                     target_rel,
                     wizard_data,
                     tts_enabled,
+                    qq_adapter=qq_adapter,
                 )
                 if override_err:
                     errors.append(f"覆写失败 {target_rel}: {override_err}")
@@ -660,7 +1147,11 @@ class ConfigInitializer:
 
         # Post-generation: synchronize adapter TTS flags in existing configs.
         # Relay host/port are not rewritten here; adapter configs retain their values.
-        patch_results = ConfigInitializer._patch_tts_chain(tts_enabled, components)
+        patch_results = ConfigInitializer._patch_tts_chain(
+            tts_enabled,
+            components,
+            qq_adapter=qq_adapter,
+        )
         errors.extend(patch_results.get("errors", []))
 
         return {
@@ -675,6 +1166,7 @@ class ConfigInitializer:
     # Platform relay routing remains independently configurable.
     _TTS_CHAIN_ADAPTERS: list[tuple[str, str, bool]] = [
         ("NachoBot-Napcat-Adapter/config.toml", "qq", True),
+        ("NachoBot-SnowLuma-Adapter/config.toml", "qq", True),
         ("NachoBot-Koishi-Adapter/config.toml", "discord", True),
         # Bilibili connects directly to Core (port 8000), no TTS chain
         # DiscordVC / UniversalVC also connect directly to Core
@@ -684,6 +1176,7 @@ class ConfigInitializer:
     def _patch_tts_chain(
         tts_enabled: bool,
         components: set,
+        qq_adapter: str = DEFAULT_QQ_ADAPTER,
     ) -> dict[str, Any]:
         """
         Synchronize voice.use_tts for selected adapters.
@@ -698,6 +1191,12 @@ class ConfigInitializer:
             # Only patch adapters the user selected
             if component_id not in components:
                 continue
+            if component_id == "qq":
+                selected_path = (
+                    SNOWLUMA_TARGET if qq_adapter == "snowluma" else NAPCAT_TARGET
+                )
+                if rel_path != selected_path:
+                    continue
 
             config_path = resolve_relative_to_root(ROOT_DIR, rel_path)
             if not config_path.exists():
@@ -924,7 +1423,12 @@ class ConfigInitializer:
         return "未知 Discord 配置目标"
 
     @staticmethod
-    def _should_generate(component_id: str, target_rel: str, components: set) -> bool:
+    def _should_generate(
+        component_id: str,
+        target_rel: str,
+        components: set,
+        qq_adapter: str = DEFAULT_QQ_ADAPTER,
+    ) -> bool:
         """Determine if a config file should be generated based on selected components."""
         # Core configs are always generated
         if component_id == "NachoBot":
@@ -937,6 +1441,15 @@ class ConfigInitializer:
             return True
 
         # Adapter configs only when their component is selected
+        if target_rel in {NAPCAT_TARGET, SNOWLUMA_TARGET}:
+            if "qq" not in components:
+                return False
+            return (
+                target_rel == SNOWLUMA_TARGET
+                if qq_adapter == "snowluma"
+                else target_rel == NAPCAT_TARGET
+            )
+
         mapping = {
             "NachoBot-Napcat-Adapter": "qq",
             "NachoBot-Multimodal-Adapter": "tts",
@@ -958,6 +1471,7 @@ class ConfigInitializer:
         target_rel: str,
         wizard_data: dict[str, Any],
         tts_enabled: bool,
+        qq_adapter: str | None = None,
     ) -> str | None:
         """
         Apply wizard form data to a generated config file.
@@ -970,7 +1484,18 @@ class ConfigInitializer:
             env_data = wizard_data.get("env", {})
             host = env_data.get("host", "127.0.0.1")
             port = env_data.get("port", "8000")
-            target_path.write_text(f"HOST={host}\nPORT={port}\n", encoding="utf-8")
+            try:
+                selector = (
+                    selector_value_from_request(env_data["qq_adapter"])
+                    if "qq_adapter" in env_data
+                    else qq_adapter or read_qq_adapter(target_path)
+                )
+            except QQAdapterSelectorError as exc:
+                return str(exc)
+            target_path.write_text(
+                f"HOST={host}\nPORT={port}\nqq_adapter={selector}\n",
+                encoding="utf-8",
+            )
             return None
 
         # Koishi is a YAML configuration.  Its Discord token is the only
@@ -1074,6 +1599,13 @@ class ConfigInitializer:
                     doc["voice"]["use_tts"] = tts_enabled
                     changed = True
 
+        # -- SnowLuma adapter config.toml --
+        if target_rel == SNOWLUMA_TARGET and filename == "config.toml":
+            if "voice" in doc:
+                if doc["voice"].get("use_tts") != tts_enabled:
+                    doc["voice"]["use_tts"] = tts_enabled
+                    changed = True
+
         # -- Koishi adapter config.toml --
         # Upstream relay routing remains whatever is configured in nachobot_server.
         if "NachoBot-Koishi-Adapter" in target_rel and filename == "config.toml":
@@ -1128,7 +1660,7 @@ class ConfigInitializer:
 class NapCatConfigurator:
     """
     Automatically configure NapCat Shell's onebot11 config files.
-    Adds WebSocket client (NachoBot), diary HTTP server, and bilibili video HTTP server.
+    Adds the NachoBot core WebSocket client while preserving user-managed servers.
     """
 
     # Standard WebSocket client defaults for NachoBot. The actual host/port/token
@@ -1183,77 +1715,6 @@ class NapCatConfigurator:
                 changed = True
         return changed
 
-    # HTTP server defaults. Actual ports/tokens are synchronized from the
-    # corresponding Core plugin configs so WebUI cannot drift from runtime config.
-    _DIARY_HTTP_ENTRY = {
-        "enable": True,
-        "name": "Diary",
-        "host": "127.0.0.1",
-        "port": 9997,
-        "enableCors": True,
-        "enableWebsocket": True,
-        "messagePostFormat": "array",
-        "token": "",
-        "debug": False,
-    }
-
-    _BILIBILI_HTTP_ENTRY = {
-        "enable": True,
-        "name": "BiliBili",
-        "host": "127.0.0.1",
-        "port": 5700,
-        "enableCors": False,
-        "enableWebsocket": False,
-        "messagePostFormat": "array",
-        "token": "",
-        "debug": False,
-    }
-
-    @staticmethod
-    def _load_diary_http_entry() -> dict[str, Any]:
-        """Build the NapCat HTTP server required by diary_plugin."""
-        entry = dict(NapCatConfigurator._DIARY_HTTP_ENTRY)
-        config_path = resolve_relative_to_root(
-            ROOT_DIR, "NachoBot/plugins/diary_plugin/config.toml"
-        )
-        if not config_path.exists():
-            return entry
-
-        try:
-            doc = tomlkit.parse(config_path.read_text(encoding="utf-8"))
-            publishing = doc.get("qzone_publishing", {})
-            entry["port"] = int(publishing.get("napcat_port", 9997))
-            entry["token"] = str(publishing.get("napcat_token", "") or "")
-        except Exception as e:
-            raise ValueError(f"读取 Diary 插件 NapCat 配置失败: {e}") from e
-
-        # qzone_publishing.napcat_host is the client's destination host, not the
-        # address NapCat itself should bind to, so the server bind stays local.
-        return entry
-
-    @staticmethod
-    def _load_bilibili_http_entry() -> dict[str, Any]:
-        """Build the NapCat HTTP server required by bilibili_video_sender_plugin."""
-        entry = dict(NapCatConfigurator._BILIBILI_HTTP_ENTRY)
-        config_path = resolve_relative_to_root(
-            ROOT_DIR, "NachoBot/plugins/bilibili_video_sender_plugin/config.toml"
-        )
-        if not config_path.exists():
-            return entry
-
-        try:
-            doc = tomlkit.parse(config_path.read_text(encoding="utf-8"))
-            api = doc.get("api", {})
-            entry["port"] = int(api.get("port", 5700))
-        except Exception as e:
-            raise ValueError(f"读取 Bilibili 插件 NapCat 配置失败: {e}") from e
-
-        # The plugin posts directly to http://localhost:<api.port> without an
-        # Authorization header, therefore this managed NapCat endpoint must not
-        # require a token.
-        entry["token"] = ""
-        return entry
-
     @staticmethod
     def detect_accounts(napcat_dir: str) -> list[str]:
         """
@@ -1283,10 +1744,8 @@ class NapCatConfigurator:
         """
         Auto-configure NapCat onebot11 config files.
 
-        Adds/reconciles:
-          - WebSocket client from NachoBot-Napcat-Adapter/config.toml
-          - Diary HTTP server from diary_plugin/config.toml
-          - Bilibili HTTP server from bilibili_video_sender_plugin/config.toml
+        Adds/reconciles the WebSocket client from the adapter config while
+        leaving all HTTP server entries user-managed.
 
         Args:
             napcat_dir: Path to NapCat Shell root directory.
@@ -1346,9 +1805,7 @@ class NapCatConfigurator:
             target_files.append(target)
         else:
             # Auto-detect is safe only when exactly one account-specific config
-            # exists. Each OneBot account owns its own HTTP listeners, so writing
-            # the same Diary/Bilibili ports into multiple account configs would
-            # create bind conflicts inside the same NapCat process.
+            # exists. Multiple account-specific files require an explicit choice.
             if len(existing_accounts) == 1:
                 target_files.extend(existing_accounts.values())
             elif len(existing_accounts) > 1:
@@ -1367,8 +1824,6 @@ class NapCatConfigurator:
 
         try:
             desired_ws_entry = NapCatConfigurator._load_adapter_ws_entry()
-            desired_diary_http_entry = NapCatConfigurator._load_diary_http_entry()
-            desired_bilibili_http_entry = NapCatConfigurator._load_bilibili_http_entry()
         except ValueError as e:
             return {"configured": [], "skipped": [], "errors": [str(e)]}
 
@@ -1377,8 +1832,6 @@ class NapCatConfigurator:
                 result = NapCatConfigurator._configure_file(
                     target_path,
                     desired_ws_entry,
-                    desired_diary_http_entry,
-                    desired_bilibili_http_entry,
                 )
                 if result["changed"]:
                     configured.append(str(target_path.name))
@@ -1393,8 +1846,6 @@ class NapCatConfigurator:
     def _configure_file(
         target_path: Path,
         desired_ws_entry: dict[str, Any],
-        desired_diary_http_entry: dict[str, Any],
-        desired_bilibili_http_entry: dict[str, Any],
     ) -> dict[str, bool]:
         """
         Configure a single onebot11 JSON file.
@@ -1460,6 +1911,8 @@ class NapCatConfigurator:
             changed = True
 
         # --- HTTP Servers ---
+        # Validate the existing shape, but never add, remove, or reconcile
+        # entries. These servers may belong to the user or another integration.
         if "httpServers" not in network:
             network["httpServers"] = []
             changed = True
@@ -1468,33 +1921,6 @@ class NapCatConfigurator:
         http_servers = network["httpServers"]
         if any(not isinstance(s, dict) for s in http_servers):
             raise ValueError("network.httpServers 包含非对象条目，已拒绝覆盖")
-
-        # Manage HTTP endpoints by their configured target port only. Do not use
-        # names as a fallback: another bot/account may legitimately have its own
-        # QZone/Diary/BiliBili entry on a different port.
-        diary_port = desired_diary_http_entry["port"]
-        diary = next((s for s in http_servers if s.get("port") == diary_port), None)
-        if diary is None:
-            http_servers.append(dict(desired_diary_http_entry))
-            changed = True
-        elif str(diary.get("name", "")).lower() != "diary":
-            raise ValueError(
-                f"NapCat HTTP 端口 {diary_port} 已被条目 {diary.get('name', '<unnamed>')} 占用"
-            )
-        elif NapCatConfigurator._reconcile_entry(diary, desired_diary_http_entry):
-            changed = True
-
-        bilibili_port = desired_bilibili_http_entry["port"]
-        bilibili = next((s for s in http_servers if s.get("port") == bilibili_port), None)
-        if bilibili is None:
-            http_servers.append(dict(desired_bilibili_http_entry))
-            changed = True
-        elif str(bilibili.get("name", "")).lower() not in {"bilibili", "bili bili"}:
-            raise ValueError(
-                f"NapCat HTTP 端口 {bilibili_port} 已被条目 {bilibili.get('name', '<unnamed>')} 占用"
-            )
-        elif NapCatConfigurator._reconcile_entry(bilibili, desired_bilibili_http_entry):
-            changed = True
 
         # Ensure other standard arrays exist.
         for key in ["httpSseServers", "httpClients", "websocketServers", "plugins"]:
@@ -1539,6 +1965,7 @@ class DependencyInstaller:
     UV_PROJECTS: dict[str, str] = {
         "core": "NachoBot",
         "qq": "NachoBot-Napcat-Adapter",
+        "qq_snowluma": "NachoBot-SnowLuma-Adapter",
         "tts": "NachoBot-Multimodal-Adapter",
         "tts_relay": "NachoBot-Multimodal-Adapter",
         "bilibili": "NachoBot-Bilibili-Adapter",
@@ -1662,9 +2089,22 @@ class DependencyInstaller:
     def get_install_tasks(
         components: list[str],
         multimodal_runtime: str = "gpu",
+        qq_adapter: str | None = None,
     ) -> list[dict[str, str]]:
         """Return install tasks for selected components and Multimodal runtime."""
         runtime = MultimodalRuntimeManager.normalize_profile(multimodal_runtime)
+        try:
+            # The live .env is the sole source of truth.  The optional request
+            # value is only a consistency assertion from the client-visible
+            # wizard payload; accepting it as an override would let a stale or
+            # crafted plan install the other QQ backend.
+            selected_qq = read_qq_adapter(ROOT_DIR / "NachoBot/.env")
+            if qq_adapter is not None:
+                requested_qq = selector_value_from_request(qq_adapter)
+                if requested_qq != selected_qq:
+                    raise ValueError("请求的 qq_adapter 与当前配置不一致")
+        except QQAdapterSelectorError as exc:
+            raise ValueError(str(exc)) from exc
         tasks = []
 
         # Always install core
@@ -1688,14 +2128,24 @@ class DependencyInstaller:
         component_set = set(components)
 
         if "qq" in component_set:
-            tasks.append(
-                {
-                    "id": "qq",
-                    "type": "uv",
-                    "name": "Napcat Adapter",
-                    "dir": "NachoBot-Napcat-Adapter",
-                }
-            )
+            if selected_qq == "snowluma":
+                tasks.append(
+                    {
+                        "id": "qq_snowluma",
+                        "type": "uv",
+                        "name": "SnowLuma 适配器",
+                        "dir": "NachoBot-SnowLuma-Adapter",
+                    }
+                )
+            else:
+                tasks.append(
+                    {
+                        "id": "qq",
+                        "type": "uv",
+                        "name": "Napcat Adapter",
+                        "dir": "NachoBot-Napcat-Adapter",
+                    }
+                )
 
         if "tts" in component_set:
             runtime_label = MultimodalRuntimeManager.PROFILE_META[runtime]["label"]
@@ -1791,6 +2241,25 @@ class DependencyInstaller:
             project_dir = DependencyInstaller._resolve_task_project(task)
         except (KeyError, ValueError) as e:
             return {"status": "error", "message": str(e)}
+
+        # The task list is client-visible and may be stale or crafted after it
+        # was generated.  Re-read the live selector at the final boundary,
+        # immediately before any installer command can run.
+        task_id = str(task.get("id", "")).strip()
+        if task_id in {"qq", "qq_snowluma"}:
+            try:
+                selected_qq = read_qq_adapter(ROOT_DIR / "NachoBot/.env")
+            except QQAdapterSelectorError:
+                return {
+                    "status": "error",
+                    "message": "当前 qq_adapter 配置无效，已拒绝安装 QQ 适配器",
+                }
+            expected_task = "qq_snowluma" if selected_qq == "snowluma" else "qq"
+            if task_id != expected_task:
+                return {
+                    "status": "error",
+                    "message": "安装任务与当前 qq_adapter 选择不匹配",
+                }
         if not project_dir.exists():
             return {"status": "error", "message": f"目录不存在: {project_dir}"}
 

@@ -19,11 +19,13 @@
     await send_api.custom_message("video", video_data, "123456", True)
 """
 
+import asyncio
+import secrets
 import traceback
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Union, Dict, List, TYPE_CHECKING, Tuple
+from typing import Any, Optional, Union, Dict, List, TYPE_CHECKING, Tuple
 
 from src.common.logger import get_logger
 from src.common.data_models.message_data_model import ReplyContentType
@@ -31,6 +33,7 @@ from src.config.config import global_config
 from src.chat.message_receive.chat_stream import get_chat_manager
 from src.chat.message_receive.uni_message_sender import UniversalMessageSender
 from src.chat.message_receive.message import MessageSending, MessageRecv
+from src.chat.message_receive.storage import MessageStorage
 from src.chat.focus.coordinator import focus_coordinator
 from src.chat.focus.models import EffectKind, StaleFocusLeaseError
 from ncnk_message import Seg, UserInfo, MessageBase, BaseMessageInfo
@@ -61,6 +64,48 @@ class SendReceipt:
     @property
     def delivered(self) -> bool:
         return self.status is SendStatus.DELIVERED
+
+
+# ACK waiters are keyed by both the core-generated message id and the target
+# platform.  The platform binding prevents an adapter on another route from
+# satisfying a pending delivery.
+_pending_ack_waiters: Dict[Tuple[str, str], asyncio.Future] = {}
+
+
+def _register_ack_waiter(message_id: str, platform: str) -> asyncio.Future:
+    key = (str(platform), str(message_id))
+    if key in _pending_ack_waiters:
+        raise RuntimeError("duplicate message ACK waiter")
+    future = asyncio.get_running_loop().create_future()
+    _pending_ack_waiters[key] = future
+    return future
+
+
+def _remove_ack_waiter(message_id: str, platform: str) -> None:
+    _pending_ack_waiters.pop((str(platform), str(message_id)), None)
+
+
+def resolve_message_ack(message_id: Any, platform: Any, actual_message_id: Any) -> bool:
+    """Resolve a message delivery waiter if its platform binding matches."""
+
+    if not isinstance(message_id, str) or not message_id:
+        return False
+    if not isinstance(platform, str) or not platform:
+        return False
+    if actual_message_id is None or actual_message_id == "":
+        return False
+    future = _pending_ack_waiters.pop((platform, message_id), None)
+    if future is None:
+        return False
+    if not future.done():
+        future.set_result(str(actual_message_id))
+    return True
+
+
+def pending_ack_count() -> int:
+    """Return the number of message ACK waiters (for diagnostics/tests)."""
+
+    return len(_pending_ack_waiters)
 
 
 # =============================================================================
@@ -204,6 +249,8 @@ async def _send_to_target_receipt(
     storage_message: bool = True,
     show_log: bool = True,
     selected_expressions: Optional[List[int]] = None,
+    wait_for_platform_ack: bool = False,
+    ack_timeout: float = 300.0,
 ) -> SendReceipt:
     """发送聊天生成的回复，并返回经过 Focus 围栏的真实投递结果。
 
@@ -227,6 +274,8 @@ async def _send_to_target_receipt(
                 storage_message=storage_message,
                 show_log=show_log,
                 selected_expressions=selected_expressions,
+                wait_for_platform_ack=wait_for_platform_ack,
+                ack_timeout=ack_timeout,
             )
     except StaleFocusLeaseError as exc:
         logger.warning(f"[SendAPI] Focus 租约失效，拒绝发送到 {stream_id}: {exc}")
@@ -243,6 +292,8 @@ async def _send_to_target_receipt_permitted(
     storage_message: bool = True,
     show_log: bool = True,
     selected_expressions: Optional[List[int]] = None,
+    wait_for_platform_ack: bool = False,
+    ack_timeout: float = 300.0,
 ) -> SendReceipt:
     """向指定目标发送消息的内部实现
 
@@ -289,7 +340,7 @@ async def _send_to_target_receipt_permitted(
 
         # 生成消息ID
         current_time = time.time()
-        message_id = f"send_api_{int(current_time * 1000)}"
+        message_id = f"send_api_{int(current_time * 1000)}_{secrets.token_hex(8)}"
 
         # 构建机器人用户信息
         bot_user_info = UserInfo(
@@ -300,6 +351,7 @@ async def _send_to_target_receipt_permitted(
 
         reply_to_platform_id = ""
         anchor_message: Union["MessageRecv", None] = None
+        effective_set_reply = set_reply
         if reply_message:
             reply_chat_id = str(getattr(reply_message, "chat_id", "") or "")
             if reply_chat_id and reply_chat_id != str(stream_id):
@@ -307,14 +359,18 @@ async def _send_to_target_receipt_permitted(
                     f"[SendAPI] 拒绝跨流引用回复: reply_chat_id={reply_chat_id}, target={stream_id}"
                 )
                 return SendReceipt(SendStatus.FAILED, stream_id, detail="cross_stream_reply")
-            anchor_message = db_message_to_message_recv(reply_message)
-            logger.info(f"[SendAPI] 找到匹配的回复消息，发送者: {anchor_message.message_info.user_info.user_id}")  # type: ignore
-            if anchor_message:
+
+            reply_user_info = getattr(reply_message, "user_info", None)
+            if reply_user_info is None:
+                # structured system_event 没有平台 sender，因此不能构造原生引用回复锚点。
+                # 业务层仍然是在回复该事件；发送层仅降级为普通消息，不能伪造用户。
+                effective_set_reply = False
+                logger.debug("[SendAPI] 回复目标为 senderless system_event，跳过平台原生引用锚点")
+            else:
+                anchor_message = db_message_to_message_recv(reply_message)
+                logger.info(f"[SendAPI] 找到匹配的回复消息，发送者: {reply_user_info.user_id}")
                 anchor_message.update_chat_stream(target_stream)
-                assert anchor_message.message_info.user_info, "用户信息缺失"
-                reply_to_platform_id = (
-                    f"{anchor_message.message_info.platform}:{anchor_message.message_info.user_info.user_id}"
-                )
+                reply_to_platform_id = f"{anchor_message.message_info.platform}:{reply_user_info.user_id}"
 
         # 构建发送消息对象
         bot_message = MessageSending(
@@ -351,24 +407,59 @@ async def _send_to_target_receipt_permitted(
         except Exception as e:
             logger.debug(f"[SendAPI] 写入TTS语种元数据失败: {e}")
 
-        # 发送消息
-        sent_msg = await message_sender.send_message(
-            bot_message,
-            typing=typing,
-            set_reply=set_reply,
-            storage_message=storage_message,
-            show_log=show_log,
-        )
+        ack_future: Optional[asyncio.Future] = None
+        if wait_for_platform_ack:
+            try:
+                ack_timeout_value = float(ack_timeout)
+            except (TypeError, ValueError):
+                return SendReceipt(SendStatus.FAILED, stream_id, message_id=message_id, detail="invalid_ack_timeout")
+            if ack_timeout_value <= 0:
+                return SendReceipt(SendStatus.FAILED, stream_id, message_id=message_id, detail="invalid_ack_timeout")
+            ack_future = _register_ack_waiter(message_id, str(target_stream.platform))
 
-        if sent_msg:
+        try:
+            # 发送消息。ACK waiter 必须在这次 enqueue 前注册，以免快速平台
+            # 回执在发送函数返回之前抵达而被丢弃。
+            sent_msg = await message_sender.send_message(
+                bot_message,
+                typing=typing,
+                set_reply=effective_set_reply,
+                storage_message=storage_message,
+                show_log=show_log,
+            )
+
+            if not sent_msg:
+                logger.error("[SendAPI] 发送消息失败")
+                return SendReceipt(SendStatus.FAILED, stream_id, message_id=message_id, detail="adapter_failed")
+
             logger.debug(f"[SendAPI] 成功发送消息到 {stream_id}")
             delivered_message_id = str(
                 getattr(getattr(sent_msg, "message_info", None), "message_id", None) or message_id
             )
+            if ack_future is not None:
+                try:
+                    delivered_message_id = await asyncio.wait_for(ack_future, ack_timeout_value)
+                except asyncio.TimeoutError:
+                    return SendReceipt(
+                        SendStatus.FAILED,
+                        stream_id,
+                        message_id=message_id,
+                        detail="platform_ack_timeout",
+                    )
+                # UniversalMessageSender stores after the transport enqueue.
+                # Re-apply the platform id here to cover an ACK that raced the
+                # storage step; unstored messages simply have no matching row.
+                if storage_message:
+                    try:
+                        MessageStorage.update_message(message_id, delivered_message_id)
+                    except Exception:
+                        logger.debug("[SendAPI] ACK 后更新消息ID失败", exc_info=True)
             return SendReceipt(SendStatus.DELIVERED, stream_id, message_id=delivered_message_id)
-        else:
-            logger.error("[SendAPI] 发送消息失败")
-            return SendReceipt(SendStatus.FAILED, stream_id, message_id=message_id, detail="adapter_failed")
+        except asyncio.CancelledError:
+            raise
+        finally:
+            if ack_future is not None:
+                _remove_ack_waiter(message_id, str(target_stream.platform))
 
     except Exception as e:
         logger.error(f"[SendAPI] 发送消息时出错: {e}")
@@ -417,13 +508,18 @@ def db_message_to_message_recv(message_obj: "DatabaseMessages") -> MessageRecv:
     Returns:
         Optional[MessageRecv]: 找到的消息，如果没找到则返回None
     """
-    # 构建MessageRecv对象
-    user_info = {
-        "platform": message_obj.user_info.platform or "",
-        "user_id": message_obj.user_info.user_id or "",
-        "user_nickname": message_obj.user_info.user_nickname or "",
-        "user_cardname": message_obj.user_info.user_cardname or "",
-    }
+    # 构建MessageRecv对象。structured system_event 没有 sender，必须保持 user_info=None，
+    # 不能为了兼容引用回复而伪造一个空 UserInfo。
+    message_user_info = getattr(message_obj, "user_info", None)
+    if message_user_info is not None:
+        user_info = {
+            "platform": message_user_info.platform or "",
+            "user_id": message_user_info.user_id or "",
+            "user_nickname": message_user_info.user_nickname or "",
+            "user_cardname": message_user_info.user_cardname or "",
+        }
+    else:
+        user_info = None
 
     group_info = {}
     if message_obj.chat_info.group_info:
@@ -482,6 +578,67 @@ async def text_to_stream_receipt(
         storage_message=storage_message,
         selected_expressions=selected_expressions,
     )
+
+
+async def custom_to_stream_receipt(
+    message_type: str,
+    content: str | Dict,
+    stream_id: str,
+    display_message: str = "",
+    typing: bool = False,
+    reply_message: Optional["DatabaseMessages"] = None,
+    set_reply: bool = False,
+    storage_message: bool = False,
+    show_log: bool = True,
+    ack_timeout: float = 300.0,
+) -> SendReceipt:
+    """Send a custom segment and wait for the adapter's platform ACK.
+
+    This is an additive receipt API.  Existing bool APIs intentionally remain
+    enqueue-oriented for compatibility; media-producing plugins use this
+    function when deleting a local path must be gated on real delivery.
+    """
+
+    return await _send_to_target_receipt_permitted(
+        message_segment=Seg(type=message_type, data=content),  # type: ignore
+        stream_id=stream_id,
+        display_message=display_message,
+        typing=typing,
+        set_reply=set_reply,
+        reply_message=reply_message,
+        storage_message=storage_message,
+        show_log=show_log,
+        wait_for_platform_ack=True,
+        ack_timeout=ack_timeout,
+    )
+
+
+async def local_media_to_stream_receipt(
+    media_type: str,
+    local_path: str,
+    stream_id: str,
+    *,
+    storage_message: bool = False,
+    show_log: bool = True,
+    ack_timeout: float = 300.0,
+) -> SendReceipt:
+    """Send a generic local media segment after waiting for platform ACK."""
+
+    if media_type not in {"videofile", "voicefile"}:
+        raise ValueError("unsupported local media type")
+    return await custom_to_stream_receipt(
+        media_type,
+        local_path,
+        stream_id,
+        storage_message=storage_message,
+        show_log=show_log,
+        ack_timeout=ack_timeout,
+    )
+
+
+# A descriptive alias for callers that do not need to distinguish the
+# underlying segment helper.
+media_to_stream_receipt = local_media_to_stream_receipt
 
 
 async def background_text_to_stream_receipt(

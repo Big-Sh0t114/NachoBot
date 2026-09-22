@@ -1,19 +1,17 @@
 """Bilibili live-room search reply orchestration.
 
-The Core only transports the JSON envelope.  Parsing the live-room protocol,
-performing the search, generating the follow-up, and delivering both replies
-belong to this adapter.
+The Core only transports model text.  Live2D prepares the reply-control
+envelope; performing the public search, generating the follow-up, and delivering
+both replies belong to this adapter.
 """
 
 from __future__ import annotations
 
 import asyncio
 import html
-import json
 import re
 import time
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional
@@ -21,6 +19,8 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 
 import aiohttp
 from bs4 import BeautifulSoup
+
+from bili_src.live2d.remote_controller import PreparedReplyResult
 
 
 LIVE_SEARCH_PROTOCOL_MARKER = "[Bilibili直播两阶段联网搜索输出协议]"
@@ -44,63 +44,6 @@ def append_live_search_protocol(prompt: str, *, enabled: bool) -> str:
     if not enabled or LIVE_SEARCH_PROTOCOL_MARKER in prompt:
         return prompt
     return f"{prompt.rstrip()}\n\n{LIVE_SEARCH_PROTOCOL}" if prompt else LIVE_SEARCH_PROTOCOL
-
-
-@dataclass(frozen=True, slots=True)
-class LiveSearchEnvelope:
-    reply: str
-    emotion: Optional[str]
-    action: Optional[str]
-    web_search: bool
-    search_query: str
-
-
-def parse_live_search_envelope(content: str) -> Optional[LiveSearchEnvelope]:
-    """Parse the strict adapter protocol without intercepting other JSON replies."""
-
-    text = str(content or "").strip()
-    if not text:
-        return None
-
-    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL | re.IGNORECASE)
-    if fenced:
-        candidate = fenced.group(1)
-    else:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start < 0 or end <= start:
-            return None
-        candidate = text[start : end + 1]
-
-    try:
-        data = json.loads(candidate, strict=False)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return None
-    if not isinstance(data, dict):
-        return None
-
-    # Search control and Live2D metadata share one envelope.  Requiring the
-    # three search keys still prevents unrelated JSON from being intercepted,
-    # while emotion/action remain compatible with the existing avatar parser.
-    if not {"reply", "web_search", "search_query"}.issubset(data):
-        return None
-
-    reply = data.get("reply", "")
-    emotion_value = data.get("emotion")
-    action_value = data.get("action")
-    query = data.get("search_query", "")
-    search_flag = data.get("web_search", False)
-    wants_search = search_flag is True or (
-        isinstance(search_flag, str)
-        and search_flag.strip().casefold() in {"true", "yes", "1"}
-    )
-    return LiveSearchEnvelope(
-        reply=reply.strip() if isinstance(reply, str) else str(reply or "").strip(),
-        emotion=str(emotion_value).strip() if emotion_value not in (None, "") else None,
-        action=str(action_value).strip() if action_value not in (None, "") else None,
-        web_search=wants_search,
-        search_query=query.strip() if isinstance(query, str) else str(query or "").strip(),
-    )
 
 
 class PublicWebSearch:
@@ -151,7 +94,11 @@ class PublicWebSearch:
             return ""
 
         started_at = time.perf_counter()
-        self._logger.info(f"[BilibiliSearch] 开始联网搜索: query={query}")
+        query_chars = len(query)
+        self._logger.info(
+            "[BilibiliSearch] 开始联网搜索: query_chars={}",
+            query_chars,
+        )
         timeout = aiohttp.ClientTimeout(total=self._timeout_seconds)
         async with aiohttp.ClientSession(timeout=timeout, headers=self._headers) as session:
             # DuckDuckGo HTML is a real result page.  The Instant Answer API is
@@ -162,7 +109,10 @@ class PublicWebSearch:
             if not self._results_match_query(query, results):
                 if results:
                     self._logger.warning(
-                        f"[BilibiliSearch] DuckDuckGo 结果与查询不匹配，已丢弃: query={query}"
+                        "[BilibiliSearch] DuckDuckGo 结果与查询不匹配，已丢弃: "
+                        "query_chars={} result_count={}",
+                        query_chars,
+                        len(results),
                     )
                 results = []
 
@@ -172,20 +122,19 @@ class PublicWebSearch:
                 if not self._results_match_query(query, results):
                     if results:
                         self._logger.warning(
-                            f"[BilibiliSearch] Bing RSS 结果与查询不匹配，已丢弃: query={query}"
+                            "[BilibiliSearch] Bing RSS 结果与查询不匹配，已丢弃: "
+                            "query_chars={} result_count={}",
+                            query_chars,
+                            len(results),
                         )
                     results = []
 
         elapsed_ms = int((time.perf_counter() - started_at) * 1000)
         self._logger.info(
             f"[BilibiliSearch] 联网搜索完成: engine={engine}, "
-            f"result_count={len(results)}, elapsed_ms={elapsed_ms}, query={query}"
+            f"result_count={len(results)}, elapsed_ms={elapsed_ms}, "
+            f"query_chars={query_chars}"
         )
-        if results:
-            preview = " | ".join(
-                self._clean_text(item.get("title", "")) for item in results[:3]
-            )
-            self._logger.info(f"[BilibiliSearch] 搜索结果标题: {preview[:300]}")
         return self._format_results(query, results)
 
     async def _search_duckduckgo_html(
@@ -197,7 +146,10 @@ class PublicWebSearch:
                 response.raise_for_status()
                 return self.parse_duckduckgo_html(await response.text())
         except Exception as exc:
-            self._logger.warning(f"[BilibiliSearch] DuckDuckGo HTML 搜索失败: {exc}")
+            self._logger.warning(
+                "[BilibiliSearch] DuckDuckGo HTML 搜索失败: error_type={}",
+                type(exc).__name__,
+            )
             return []
 
     async def _search_bing_rss(
@@ -209,7 +161,10 @@ class PublicWebSearch:
                 response.raise_for_status()
                 return self.parse_bing_rss(await response.text())
         except Exception as exc:
-            self._logger.warning(f"[BilibiliSearch] Bing RSS 搜索失败: {exc}")
+            self._logger.warning(
+                "[BilibiliSearch] Bing RSS 搜索失败: error_type={}",
+                type(exc).__name__,
+            )
             return []
 
     def parse_bing_rss(self, content: str) -> List[Dict[str, str]]:
@@ -331,7 +286,7 @@ class PublicWebSearch:
         return "\n".join(lines)
 
 
-Delivery = Callable[[str, int, str, str], Awaitable[None]]
+Delivery = Callable[[Any, int, str, str], Awaitable[None]]
 
 
 class BilibiliLiveSearchOrchestrator:
@@ -353,9 +308,15 @@ class BilibiliLiveSearchOrchestrator:
         self._model_client = model_client
         self._tasks: set[asyncio.Task] = set()
 
+    @staticmethod
+    def _prepared_field(prepared: Any, name: str, default: Any = None) -> Any:
+        if isinstance(prepared, Mapping):
+            return prepared.get(name, default)
+        return getattr(prepared, name, default)
+
     async def handle(
         self,
-        raw_message: str,
+        prepared: Any,
         *,
         room_id: int,
         reply_mid: str,
@@ -365,40 +326,29 @@ class BilibiliLiveSearchOrchestrator:
         if not getattr(self._adapter.config, "live_network_search_enabled", False):
             return False
 
-        envelope = parse_live_search_envelope(raw_message)
-        if envelope is None:
-            return False
-
-        initial_reply = envelope.reply
-        if envelope.web_search and not initial_reply:
+        initial_reply = str(self._prepared_field(prepared, "reply", "") or "").strip()
+        web_search = bool(self._prepared_field(prepared, "web_search", False))
+        search_query = str(self._prepared_field(prepared, "search_query", "") or "").strip()
+        control_id = self._prepared_field(prepared, "control_id")
+        if web_search and not initial_reply:
             initial_reply = self._fallback_reply(room_id)
         if initial_reply:
-            # Preserve Live2D metadata for the normal outgoing delivery path.
-            # Search-control fields are intentionally omitted from the payload
-            # handed to _deliver_live_reply so only reply/emotion/action reach
-            # the existing avatar JSON parser.
-            delivery_payload = json.dumps(
-                {
-                    "reply": initial_reply,
-                    "emotion": envelope.emotion,
-                    "action": envelope.action,
-                },
-                ensure_ascii=False,
-            )
-            await deliver(delivery_payload, room_id, reply_mid, reply_dmid)
+            if initial_reply != self._prepared_field(prepared, "reply", ""):
+                prepared = PreparedReplyResult(initial_reply, False, "", control_id)
+            await deliver(prepared, room_id, reply_mid, reply_dmid)
 
-        if envelope.web_search and envelope.search_query:
+        if web_search and search_query:
             task = asyncio.create_task(
                 self._run_followup(
                     room_id=room_id,
-                    query=envelope.search_query,
+                    query=search_query,
                     initial_reply=initial_reply,
                     deliver=deliver,
                 )
             )
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
-        elif envelope.web_search:
+        elif web_search:
             self._logger.warning("[BilibiliSearch] web_search=true 但 search_query 为空")
         return True
 
@@ -417,28 +367,43 @@ class BilibiliLiveSearchOrchestrator:
         deliver: Delivery,
     ) -> None:
         try:
-            self._logger.info(f"[BilibiliSearch] Pass 2 开始搜索: query={query}")
+            query_chars = len(query)
+            self._logger.info(
+                "[BilibiliSearch] Pass 2 开始搜索: query_chars={}",
+                query_chars,
+            )
             search_results = await asyncio.wait_for(self._search_client.search(query), timeout=30.0)
             if not search_results:
-                self._logger.info(f"[BilibiliSearch] 搜索无结果: query={query}")
+                self._logger.info(
+                    "[BilibiliSearch] 搜索无结果: query_chars={} result_count=0",
+                    query_chars,
+                )
                 return
 
             self._logger.info(
-                f"[BilibiliSearch] Pass 2 搜索上下文已就绪: chars={len(search_results)}, "
-                f"query={query}"
+                "[BilibiliSearch] Pass 2 搜索上下文已就绪: chars={} query_chars={}",
+                len(search_results),
+                query_chars,
             )
             prompt = self._build_followup_prompt(room_id, query, initial_reply, search_results)
             response = await self._get_model_client().call_replyer(prompt)
             if response and response.strip():
-                await deliver(response.strip(), room_id, "", "")
+                prepared = await self._adapter.live2d_manager.prepare_reply(response.strip())
+                await deliver(prepared, room_id, "", "")
             else:
                 self._logger.warning("[BilibiliSearch] Pass 2 模型返回空内容")
         except asyncio.CancelledError:
             raise
         except asyncio.TimeoutError:
-            self._logger.warning(f"[BilibiliSearch] 搜索超时: query={query}")
+            self._logger.warning(
+                "[BilibiliSearch] 搜索超时: query_chars={}",
+                len(query),
+            )
         except Exception as exc:
-            self._logger.error(f"[BilibiliSearch] Pass 2 执行失败: {exc}")
+            self._logger.error(
+                "[BilibiliSearch] Pass 2 执行失败: error_type={}",
+                type(exc).__name__,
+            )
 
     def _get_model_client(self):
         if self._model_client is None:
@@ -473,8 +438,8 @@ class BilibiliLiveSearchOrchestrator:
 只依据其中可核实的信息回答；若存在与问题直接相关的明确数值，必须保留数值和单位。
 若没有足够的相关信息，只简短说明未查到可靠答案，不得补充与问题无关的日期、节日或常识。
 表达自然、口语化，单次回复尽量控制在 80 字以内。
-最终必须只输出一个合法 JSON 对象，不得输出 Markdown 代码块、前后缀或解释，固定包含 reply、emotion、action 三个字段：
-{{"reply":"最终回复","emotion":"normal","action":"一般"}}
+最终必须只输出一个合法 JSON 对象，不得输出 Markdown 代码块、前后缀或解释，固定包含 reply、emotion、action、web_search、search_query 五个字段：
+{{"reply":"最终回复","emotion":"normal","action":"一般","web_search":false,"search_query":""}}
 emotion 只能从 "normal"、"shy"、"disgust"、"angry" 中四选一。
 action 只能从 "待机/放松"、"点头/同意"、"摇头/否定"、"转身向左/看左边"、"转身向右/看右边"、"眨眼/卖萌/Wink"、"身体晃动/开心/兴奋"、"歪头/疑惑/思考"、"害羞/移开视线/不好意思"、"一般" 中选择一个，大多数情况使用 "一般"。"""
 

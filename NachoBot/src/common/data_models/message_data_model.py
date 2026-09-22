@@ -21,19 +21,24 @@ class MessageAndActionModel(BaseDataModel):
     chat_info_platform: str = field(default_factory=str)
     is_action_record: bool = field(default=False)
     action_name: Optional[str] = None
+    is_notify: bool = field(default=False)
+    additional_config: Optional[str | dict] = None
 
     @classmethod
     def from_DatabaseMessages(cls, message: "DatabaseMessages"):
+        user_info = getattr(message, "user_info", None)
         return cls(
             chat_id=message.chat_id,
             time=message.time,
-            user_id=message.user_info.user_id,
-            user_platform=message.user_info.platform,
-            user_nickname=message.user_info.user_nickname,
-            user_cardname=message.user_info.user_cardname,
+            user_id=getattr(user_info, "user_id", "") or "",
+            user_platform=getattr(user_info, "platform", "") or "",
+            user_nickname=getattr(user_info, "user_nickname", "") or "",
+            user_cardname=getattr(user_info, "user_cardname", None),
             processed_plain_text=message.processed_plain_text,
             display_message=message.display_message,
             chat_info_platform=message.chat_info.platform,
+            is_notify=bool(getattr(message, "is_notify", False)),
+            additional_config=getattr(message, "additional_config", None),
         )
 
 

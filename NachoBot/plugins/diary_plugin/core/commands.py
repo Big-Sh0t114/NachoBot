@@ -387,7 +387,7 @@ class DiaryManageCommand(BaseCommand):
                 end_time = self._calculate_end_time(date_obj, date)
                 logger.debug(f"[DEBUG] 时间范围: {date} ({start_time} - {end_time})")
             except ValueError as date_error:
-                raise ValueError(f"日期格式错误: {date}, 错误: {date_error}")
+                raise ValueError(f"日期格式错误: {date}, 错误: {date_error}")  # noqa: B904
 
             error_context = "环境检测阶段"
             # 检测命令环境
@@ -1109,7 +1109,7 @@ class DiaryManageCommand(BaseCommand):
                                 await style_send(self.message.chat_stream, "已成功发布到QQ空间！", self.send_text)
                         else:
                             await self.send_text(
-                                "⚠️ QQ空间发布失败,可能原因:\n1. Napcat服务未启动\n2. 端口配置错误\n3. QQ空间权限问题\n4. Bot账号配置错误"
+                                "⚠️ QQ空间发布失败,可能原因:\n1. 平台适配器未启动\n2. 平台连接配置错误\n3. QQ空间权限问题\n4. Bot账号配置错误"
                             )
                     else:
                         await self.send_text(f"❌ 生成失败:{result}")

@@ -14,6 +14,7 @@ NachoBot / 平台适配器
 NachoBot-Live2D-Adapter
         │
         ├─ protocol.py   版本化协议
+        ├─ control_pipeline.py  回复解析、校验与一次性控制暂存
         ├─ server.py     WebSocket 服务
         ├─ runtime.py    协议到渲染命令的转换
         └─ renderer.py   PyGame/OpenGL/Live2D 渲染
@@ -151,14 +152,14 @@ live2d_reconnect_seconds = 3.0
 
 ## 协议
 
-当前协议版本：`1.0`。
+当前协议版本：`1.1`（主版本仍为 `1`，因此与既有 `1.x` 客户端保持兼容）。
 
 ### 命令信封
 
 ```json
 {
   "type": "avatar.command",
-  "version": "1.0",
+  "version": "1.1",
   "request_id": "optional-request-id",
   "event": "state",
   "payload": {
@@ -177,6 +178,13 @@ live2d_reconnect_seconds = 3.0
 - `random_motion`
 - `gaze`
 - `param_tween`
+- `prepare_reply`：payload 为原始回复文本（通常使用 `reply` 字段）。响应事件
+  `reply_prepared` 会复用请求的 `request_id`，payload 只包含规范化的
+  `reply`、`web_search`、`search_query` 和不透明 `control_id`；`control_id`
+  稳定地等于 prepare 请求的 `request_id`。
+- `apply_control`：payload 为 `control_id`。响应事件 `control_applied` 会返回
+  `applied`、`already_applied` 或明确的 `unknown`/过期状态。每个控制最多向
+  渲染队列入队一次，重复请求不会重复触发情绪或动作。
 - `ping`
 - `shutdown`
 
@@ -185,10 +193,15 @@ live2d_reconnect_seconds = 3.0
 ```json
 {
   "type": "avatar.interaction",
-  "version": "1.0",
+  "version": "1.1",
   "event": "ready",
   "payload": {
-    "running": true
+    "running": true,
+    "protocol_version": "1.1",
+    "capabilities": {
+      "prepare_reply": true,
+      "apply_control": true
+    }
   }
 }
 ```
@@ -199,9 +212,17 @@ live2d_reconnect_seconds = 3.0
 - `click`
 - `poke`
 - `pong`
+- `reply_prepared`
+- `control_applied`
 - `error`
 
 协议只保证主版本兼容。客户端和服务端的 major version 不一致时，服务端会返回协议错误。
+
+`prepare_reply` 负责识别 plain text、JSON 或 fenced JSON，校验允许的 emotion，
+并把既有中文动作标签映射为 canonical action ID；`IDLE`/`GENERAL` 继续忽略。
+暂存控制按 WebSocket 客户端隔离，并同时受 TTL 与最大数量限制。客户端断开时，
+该客户端的暂存控制会被丢弃。控制只在 Bilibili 发送前或首段 TTS 音频就绪时由
+`apply_control` 触发；解析阶段不会改变模型状态。
 
 ## 交互行为
 

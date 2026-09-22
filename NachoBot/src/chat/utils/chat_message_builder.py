@@ -4,6 +4,7 @@ import re
 
 from typing import List, Dict, Any, Tuple, Optional, Callable
 from rich.traceback import install
+from ncnk_message import get_system_event, system_event_fallback_text
 
 from src.config.config import global_config
 from src.common.logger import get_logger
@@ -183,6 +184,7 @@ def get_raw_msg_by_timestamp_with_chat_inclusive(
     limit: int = 0,
     limit_mode: str = "latest",
     filter_bot=False,
+    filter_command=False,
 ) -> List[DatabaseMessages]:
     """获取在特定聊天从指定时间戳到指定时间戳的消息（包含边界），按时间升序排序，返回消息列表
     limit: 限制返回的消息数量，0为不限制
@@ -193,7 +195,12 @@ def get_raw_msg_by_timestamp_with_chat_inclusive(
     sort_order = [("time", 1)] if limit == 0 else None
     # 直接将 limit_mode 传递给 find_messages
     return find_messages(
-        message_filter=filter_query, sort=sort_order, limit=limit, limit_mode=limit_mode, filter_bot=filter_bot
+        message_filter=filter_query,
+        sort=sort_order,
+        limit=limit,
+        limit_mode=limit_mode,
+        filter_bot=filter_bot,
+        filter_command=filter_command,
     )
 
 
@@ -500,6 +507,26 @@ def _build_readable_messages_internal(
         timestamp = message.time
         content = message.display_message or message.processed_plain_text or ""
 
+        # system_event 没有 message sender；actor/target 只存在于事件元数据中。
+        system_event = get_system_event(message)
+        if system_event is not None:
+            content = content or system_event_fallback_text(system_event)
+            actor = system_event.get("actor")
+            actor_name = (
+                (actor.get("name") or actor.get("user_id"))
+                if isinstance(actor, dict)
+                else None
+            )
+            if actor_name:
+                actor_name = str(actor_name).strip()
+                if actor_name and not content.lstrip().startswith(actor_name):
+                    content = f"{actor_name}{content}"
+            if show_pic:
+                content = process_pic_ids(content)
+            if timestamp is not None and content:
+                detailed_messages_raw.append((timestamp, "[系统事件]", content, False))
+            continue
+
         # 将tts_text标记转换为可读提示，避免模型模仿原始占位格式
         if "[tts_text:" in content:
             content = re.sub(r"\[tts_text:([^\]]+)\]", r"(语音消息：\1)", content)
@@ -587,6 +614,8 @@ def _build_readable_messages_internal(
         if is_action:
             # 对于动作记录，使用特殊格式
             output_lines.append(f"{id_prefix}{readable_time}, {content}")
+        elif name == "[系统事件]":
+            output_lines.append(f"{id_prefix}{readable_time}, [系统事件] {content}")
         else:
             output_lines.append(f"{id_prefix}{readable_time}, {name}: {content}")
         output_lines.append("\n")  # 在每个消息块后添加换行，保持可读性
@@ -948,8 +977,27 @@ async def build_anonymous_messages(messages: List[DatabaseMessages]) -> str:
 
     for msg in messages:
         try:
+            system_event = get_system_event(msg)
+            if system_event is not None:
+                content = msg.display_message or msg.processed_plain_text or system_event_fallback_text(system_event)
+                actor = system_event.get("actor")
+                actor_name = (
+                    (actor.get("name") or actor.get("user_id"))
+                    if isinstance(actor, dict)
+                    else None
+                )
+                if actor_name and not content.lstrip().startswith(str(actor_name).strip()):
+                    content = f"{str(actor_name).strip()}{content}"
+                output_lines.append(f"[系统事件] {content.strip()}\n")
+                continue
+
+            user_info = getattr(msg, "user_info", None)
+            if user_info is None:
+                # Senderless non-event rows are not user dialogue and should
+                # not be converted into an anonymous person.
+                continue
             platform = msg.chat_info.platform
-            user_id = msg.user_info.user_id
+            user_id = user_info.user_id
             content = msg.display_message or msg.processed_plain_text or ""
 
             if "ᶠ" in content:

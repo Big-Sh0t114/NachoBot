@@ -1,0 +1,42 @@
+{
+  "manifest_version": 1,
+  "name": "Maizone（麦麦空间）",
+  "version": "2.4.2",
+  "description": "让你的麦麦发QQ空间，评论，点赞",
+  "author": {
+    "name": "internetsb",
+    "url": "https://github.com/internetsb"
+  },
+  "license": "MIT",
+  
+  "host_application": {
+    "min_version": "0.10.3",
+    "max_version": "0.10.3"
+  },
+  "homepage_url": "https://github.com/internetsb/Maizone",
+  "repository_url": "https://github.com/internetsb/Maizone",
+  "keywords": ["Qzone", "qq空间", "说说", "动态", "评论", "点赞"],
+  "categories": ["网络", "qq空间"],
+  
+  "plugin_info": {
+    "is_built_in": false,
+    "components": [
+      {
+        "type": "action",
+        "name": "send_feed",
+        "description": "根据指定主题发送一条说说"
+      },
+      {
+        "type": "action", 
+        "name": "read_feed",
+		"description": "读取指定好友最近的说说，并评论点赞"
+      },
+      {
+        "type": "command",
+        "name": "send_post", 
+        "description": "根据指定主题发送一条说说（命令：#send_post）"
+      }
+    ]
+  }
+}
+

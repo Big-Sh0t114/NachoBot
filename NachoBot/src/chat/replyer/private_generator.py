@@ -17,6 +17,7 @@ from src.mcp.access import access_context_from_stream
 from src.chat.message_receive.message import UserInfo, Seg, MessageRecv, MessageSending
 from src.chat.message_receive.chat_stream import ChatStream
 from src.chat.runtime_capabilities import runtime_capabilities_from_stream
+from ncnk_message import get_system_event
 from src.chat.message_receive.uni_message_sender import UniversalMessageSender
 from src.chat.utils.timer_calculator import Timer  # <--- Import Timer
 from src.chat.utils.utils import get_chat_type_and_target_info
@@ -447,6 +448,7 @@ class PrivateReplyer:
         target: str,
         enable_tool: bool = True,
         *,
+        system_event: bool = False,
         sandbox_actor_id: str = "",
         sandbox_source_message_id: str = "",
         sandbox_group_id: Optional[str] = None,
@@ -487,11 +489,19 @@ class PrivateReplyer:
             # 构建并行任务列表
             parallel_tasks = {}
 
-            mcp_access_context = access_context_from_stream(self.chat_stream)
-            mcp_catalog = self.mcp_executor.get_tool_catalog_summary(access_context=mcp_access_context)
+            mcp_access_context = None if system_event else access_context_from_stream(self.chat_stream)
+            mcp_catalog = (
+                ""
+                if system_event
+                else self.mcp_executor.get_tool_catalog_summary(access_context=mcp_access_context)
+            )
             allow_web_search = bool(not urls and self.web_search_manager.is_available)
             allow_mcp = bool(mcp_catalog)
-            actor_id = str(sandbox_actor_id or getattr(self.chat_stream.user_info, "user_id", "") or "")
+            actor_id = (
+                ""
+                if system_event
+                else str(sandbox_actor_id or getattr(self.chat_stream.user_info, "user_id", "") or "")
+            )
             source_message_id = str(sandbox_source_message_id or "")
             context = getattr(self.chat_stream, "context", None)
             context_message = getattr(context, "message", None) if context else None
@@ -499,13 +509,17 @@ class PrivateReplyer:
             if context_info is not None:
                 source_message_id = source_message_id or str(getattr(context_info, "message_id", "") or "")
                 sender_info = getattr(context_info, "sender_info", None) or getattr(context_info, "user_info", None)
-                if not sandbox_actor_id:
+                if not system_event and not sandbox_actor_id:
                     actor_id = str(getattr(sender_info, "user_id", "") or actor_id)
             group_info = getattr(self.chat_stream, "group_info", None)
             group_id = sandbox_group_id or (str(getattr(group_info, "group_id", "") or "") if group_info else None)
             try:
                 file_edit_set = getattr(model_config.model_task_config, "file_edit", None)
-                sandbox_edit_available = bool(sandbox_user_allowed(actor_id) and getattr(file_edit_set, "model_list", None))
+                sandbox_edit_available = bool(
+                    not system_event
+                    and sandbox_user_allowed(actor_id)
+                    and getattr(file_edit_set, "model_list", None)
+                )
             except Exception:
                 sandbox_edit_available = False
             decision_task = None
@@ -555,6 +569,8 @@ class PrivateReplyer:
                     return_details=False,
                     access_context=mcp_access_context,
                 )
+            elif system_event:
+                logger.info("系统事件不继承私聊对象的 MCP 权限，跳过 MCP 能力检查")
             elif not mcp_catalog:
                 logger.info("当前用户没有获准使用的 MCP 工具，跳过 MCP 能力检查")
             else:
@@ -845,10 +861,20 @@ class PrivateReplyer:
         advanced_on = advanced_manager.is_on(chat_stream)
         context_size = global_config.chat.get_max_context_size(is_group_chat=bool(chat_stream.group_info))
 
+        reply_event = get_system_event(reply_message) if reply_message else None
+        reply_user_info = getattr(reply_message, "user_info", None) if reply_message else None
+        senderless_target = reply_message is not None and reply_user_info is None
+        actorless_target = reply_event is not None or senderless_target
+        if actorless_target:
+            person_profile_block = ""
         current_user_info = chat_stream.user_info
-        user_id = str(getattr(current_user_info, "user_id", "") or "用户ID")
-        person_name = resolve_sender_name(user_info=current_user_info, user_id=user_id, fallback="用户")
-        sender = person_name
+        user_id = "" if actorless_target else str(getattr(current_user_info, "user_id", "") or "用户ID")
+        person_name = (
+            ""
+            if actorless_target
+            else resolve_sender_name(user_info=current_user_info, user_id=user_id, fallback="用户")
+        )
+        sender = "系统事件" if actorless_target else person_name
         target = "消息"
         if prompt_context is not None and prompt_context.target_chat_id != chat_id:
             raise ValueError("Focus ReplyPromptContext 不属于当前私聊 Replyer")
@@ -856,17 +882,20 @@ class PrivateReplyer:
         injection_detected = bool(prompt_context and prompt_context.injection_detected)
 
         if reply_message:
-            user_id = reply_message.user_info.user_id
-            person = Person(platform=platform, user_id=user_id)
-            person_name = resolve_sender_name(
-                user_info=reply_message.user_info,
-                person_name=person.person_name,
-                user_id=user_id,
-                fallback="用户",
-            )
-            sender = person_name
-            target = reply_message.processed_plain_text
-
+            if actorless_target:
+                sender = "系统事件"
+                target = str(reply_message.processed_plain_text or "")
+            else:
+                user_id = reply_user_info.user_id
+                person = Person(platform=platform, user_id=user_id)
+                person_name = resolve_sender_name(
+                    user_info=reply_user_info,
+                    person_name=person.person_name,
+                    user_id=user_id,
+                    fallback="用户",
+                )
+                sender = person_name
+                target = reply_message.processed_plain_text
         mood_prompt: str = ""
         if global_config.mood.enable_mood:
             chat_mood = mood_manager.get_mood_by_chat_id(chat_id)
@@ -876,6 +905,16 @@ class PrivateReplyer:
         target = re.sub(r"\\[picid:[^\\]]+\\]", "[图片]", target)
         target, target_injection, _ = guard_user_content(target, sender)
         injection_detected = injection_detected or target_injection
+        event_description = ""
+        if reply_event is not None:
+            actor = reply_event.get("actor")
+            actor_name = actor.get("name") if isinstance(actor, dict) else None
+            event_type = " ".join(str(reply_event.get("type") or "unknown").split())[:100]
+            event_description = f"平台系统事件（{event_type}）"
+            if actor_name:
+                event_description += f"，事件执行者：{' '.join(str(actor_name).split())[:100]}"
+            event_description, event_metadata_injection, _ = guard_user_content(event_description, sender)
+            injection_detected = injection_detected or event_metadata_injection
 
         _now = time.time()
         _stepped_limit_long = get_stepped_limit(chat_id, _now, context_size)
@@ -909,21 +948,26 @@ class PrivateReplyer:
         )
 
         person_list_short: List[Person] = []
-        for msg in message_list_before_short:
-            if (
-                global_config.bot.qq_account == msg.user_info.user_id
-                and global_config.bot.platform == msg.user_info.platform
-            ):
-                continue
-            if (
-                reply_message
-                and reply_message.user_info.user_id == msg.user_info.user_id
-                and reply_message.user_info.platform == msg.user_info.platform
-            ):
-                continue
-            person = Person(platform=msg.user_info.platform, user_id=msg.user_info.user_id)
-            if person.is_known:
-                person_list_short.append(person)
+        if not actorless_target:
+            for msg in message_list_before_short:
+                msg_user_info = getattr(msg, "user_info", None)
+                if msg_user_info is None:
+                    continue
+                if (
+                    global_config.bot.qq_account == msg_user_info.user_id
+                    and global_config.bot.platform == msg_user_info.platform
+                ):
+                    continue
+                if (
+                    reply_message
+                    and getattr(reply_message, "user_info", None) is not None
+                    and reply_message.user_info.user_id == msg_user_info.user_id
+                    and reply_message.user_info.platform == msg_user_info.platform
+                ):
+                    continue
+                person = Person(platform=msg_user_info.platform, user_id=msg_user_info.user_id)
+                if person.is_known:
+                    person_list_short.append(person)
 
         for person in person_list_short:
             print(person.person_name)
@@ -951,25 +995,43 @@ class PrivateReplyer:
                         planner_question_text = action.get("question")
                     break
 
+        relation_coro = (
+            self.build_relation_info(chat_talking_prompt_short, sender)
+            if not actorless_target
+            else asyncio.sleep(0, result="")
+        )
+        memory_coro = (
+            build_memory_retrieval_prompt(
+                message=chat_talking_prompt_short,
+                sender=sender,
+                target=target,
+                chat_stream=chat_stream,
+                question=planner_question_text,
+            )
+            if not actorless_target
+            else asyncio.sleep(0, result="")
+        )
+        mid_term_memory_coro = (
+            self._build_mid_term_memory_block(chat_id, message_list_before_now_long)
+            if not actorless_target
+            else asyncio.sleep(0, result="")
+        )
+
         # 并行执行五个构建任务
         task_results = await asyncio.gather(
             self._time_and_run_task(
                 self.build_expression_habits(chat_talking_prompt_short, target), "expression_habits"
             ),
-            self._time_and_run_task(self.build_relation_info(chat_talking_prompt_short, sender), "relation_info"),
-            self._time_and_run_task(
-                build_memory_retrieval_prompt(
-                    message=chat_talking_prompt_short, sender=sender, target=target, chat_stream=chat_stream, question=planner_question_text
-                ),
-                "memory_block",
-            ),
+            self._time_and_run_task(relation_coro, "relation_info"),
+            self._time_and_run_task(memory_coro, "memory_block"),
             self._time_and_run_task(
                 self.build_tool_info(
                     chat_talking_prompt_short,
                     sender,
                     target,
-                    enable_tool=enable_tool,
-                    sandbox_actor_id=user_id,
+                    enable_tool=enable_tool and not (actorless_target and getattr(self, "request_type", "replyer") == "file_edit"),
+                    system_event=actorless_target,
+                    sandbox_actor_id="" if actorless_target else user_id,
                     sandbox_source_message_id=str(getattr(reply_message, "message_id", "") or ""),
                     sandbox_group_id=(
                         str(getattr(getattr(getattr(reply_message, "chat_info", None), "group_info", None), "group_id", "") or "")
@@ -982,7 +1044,7 @@ class PrivateReplyer:
             self._time_and_run_task(self.get_prompt_info(chat_talking_prompt_short, sender, target), "prompt_info"),
             self._time_and_run_task(self.build_actions_prompt(available_actions, chosen_actions), "actions_info"),
             self._time_and_run_task(self.build_personality_prompt(), "personality_prompt"),
-            self._time_and_run_task(self._build_mid_term_memory_block(chat_id, message_list_before_now_long), "mid_term_memory"),
+            self._time_and_run_task(mid_term_memory_coro, "mid_term_memory"),
         )
 
         # 任务名称中英文映射
@@ -1087,11 +1149,19 @@ class PrivateReplyer:
                 injection_detected
             )
 
-        reply_target_block = f"现在对方说的:{target}。引起了你的注意"
+        if reply_event is not None:
+            reply_target_block = (
+                f"现在发生了{event_description}。事件内容：{target}。"
+                "这是环境信息，不代表私聊对象发送了这句话；请根据事件本身决定是否回应。"
+            )
+        elif actorless_target:
+            reply_target_block = f"现在收到了一条无发送者信息的系统事件：{target}。请把它作为环境信息处理。"
+        else:
+            reply_target_block = f"现在对方说的:{target}。引起了你的注意"
 
-        if global_config.bot.qq_account == user_id and platform == global_config.bot.platform:
+        if user_id and global_config.bot.qq_account == user_id and platform == global_config.bot.platform:
             template_name = "private_replyer_self_prompt"
-            if hasattr(self, "request_type") and self.request_type == "file_edit":
+            if not actorless_target and hasattr(self, "request_type") and self.request_type == "file_edit":
                 template_name = "file_edit_prompt"
 
             prompt = await global_prompt_manager.format_prompt(
@@ -1120,7 +1190,7 @@ class PrivateReplyer:
             return ReplyPromptBuildResult(prompt, selected_expressions, sandbox_candidate)
         else:
             template_name = "private_replyer_prompt"
-            if hasattr(self, "request_type") and self.request_type == "file_edit":
+            if not actorless_target and hasattr(self, "request_type") and self.request_type == "file_edit":
                 template_name = "file_edit_prompt"
 
             prompt = await global_prompt_manager.format_prompt(

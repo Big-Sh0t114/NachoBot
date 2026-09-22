@@ -19,9 +19,12 @@ from src.plugin_system.apis import (
     send_api,
     tool_api,
     frequency_api,
+    platform_api,
 )
 from .logging_api import get_logger
 from .plugin_register_api import register_plugin
+
+get_platform_cookies = platform_api.get_platform_cookies
 
 # 导出所有API模块，使它们可以通过 apis.xxx 方式访问
 __all__ = [
@@ -40,4 +43,6 @@ __all__ = [
     "register_plugin",
     "tool_api",
     "frequency_api",
+    "platform_api",
+    "get_platform_cookies",
 ]

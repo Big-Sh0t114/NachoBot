@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from dataclasses import dataclass
 import json
-from loguru import logger
+import re
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
@@ -13,15 +14,47 @@ from uuid import uuid4
 import websockets
 from websockets.exceptions import ConnectionClosed
 
-PROTOCOL_VERSION = "1.0"
+
+PROTOCOL_VERSION = "1.1"
 COMMAND_MESSAGE_TYPE = "avatar.command"
 INTERACTION_MESSAGE_TYPE = "avatar.interaction"
 
-
 MAX_REMOTE_AUDIO_BYTES = 4 * 1024 * 1024
 MAX_WEBSOCKET_MESSAGE_BYTES = 8 * 1024 * 1024
+REQUEST_TIMEOUT_SECONDS = 8.0
+
+
+class Live2DRemoteError(RuntimeError):
+    """A correlated Live2D request could not be completed."""
+
+
+class Live2DCapabilityUnavailable(Live2DRemoteError):
+    """The connected adapter does not advertise a requested capability."""
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedReplyResult:
+    """Normalized reply data returned to Bilibili without avatar semantics."""
+
+    reply: str
+    web_search: bool
+    search_query: str
+    control_id: str | None
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "reply": self.reply,
+            "web_search": self.web_search,
+            "search_query": self.search_query,
+            "control_id": self.control_id,
+        }
+
+    def __getitem__(self, key: str) -> Any:
+        return self.to_payload()[key]
+
+
 class RemoteLive2DController:
-    """Compatibility-oriented controller for the extracted Live2D process."""
+    """Lifecycle owner and transport facade for the extracted Live2D process."""
 
     def __init__(self, adapter: Any, logger):
         self.adapter = adapter
@@ -41,10 +74,23 @@ class RemoteLive2DController:
         self._runner_task: asyncio.Task[None] | None = None
         self._send_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=256)
         self._connected = asyncio.Event()
+        self._ready = asyncio.Event()
+        self._active_websocket: Any | None = None
+        self._send_lock = asyncio.Lock()
+        self._pending_requests: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._capabilities: set[str] = set()
+        self._degradation_logged: set[str] = set()
 
     @property
     def connected(self) -> bool:
         return self._connected.is_set()
+
+    @property
+    def capabilities(self) -> frozenset[str]:
+        return frozenset(self._capabilities)
+
+    def has_capability(self, capability: str) -> bool:
+        return capability in self._capabilities
 
     async def start(self) -> None:
         if self.is_running:
@@ -55,11 +101,13 @@ class RemoteLive2DController:
             self._connection_loop(),
             name="bilibili-live2d-remote-controller",
         )
-        self.logger.info("Remote Live2D controller started: {}", self.url)
+        self.logger.info("Remote Live2D controller started")
 
     async def stop(self) -> None:
         self.is_running = False
         self._connected.clear()
+        self._ready.clear()
+        self._fail_pending(Live2DRemoteError("Live2D controller stopped"))
         task = self._runner_task
         self._runner_task = None
         if task is not None:
@@ -68,6 +116,8 @@ class RemoteLive2DController:
                 await task
             except asyncio.CancelledError:
                 pass
+        self._active_websocket = None
+        self._capabilities.clear()
         self.logger.info("Remote Live2D controller stopped")
 
     async def on_message_received(self, message: Any = None) -> None:
@@ -115,6 +165,58 @@ class RemoteLive2DController:
         await self.send_live2d_event("stop_audio", None)
         return True
 
+    async def prepare_reply(self, raw_reply: str) -> PreparedReplyResult:
+        """Prepare a reply through Live2D, with a deliberately narrow fallback."""
+
+        if self.connected and not self._ready.is_set():
+            try:
+                await asyncio.wait_for(
+                    self._ready.wait(),
+                    timeout=min(REQUEST_TIMEOUT_SECONDS, 2.0),
+                )
+            except (asyncio.TimeoutError, Live2DRemoteError):
+                pass
+        if not self.has_capability("prepare_reply"):
+            self._log_degradation_once("prepare_reply")
+            return self._fallback_prepare_reply(raw_reply)
+
+        try:
+            payload = await self._request(
+                "prepare_reply",
+                {"reply": str(raw_reply or "")},
+            )
+            if not {"reply", "web_search", "search_query", "control_id"}.issubset(payload):
+                raise Live2DRemoteError("Live2D prepare response is incomplete")
+            return PreparedReplyResult(
+                reply=str(payload.get("reply") or ""),
+                web_search=bool(payload.get("web_search", False)),
+                search_query=str(payload.get("search_query") or ""),
+                control_id=str(payload.get("control_id") or "") or None,
+            )
+        except Exception as exc:
+            self._log_degradation_once("prepare_reply", exc)
+            return self._fallback_prepare_reply(raw_reply)
+
+    async def apply_control(self, control_id: str | None) -> bool:
+        """Apply one previously prepared control; never retries automatically."""
+
+        if not control_id or not self.has_capability("apply_control"):
+            if control_id:
+                self._log_degradation_once("apply_control")
+            return False
+        try:
+            payload = await self._request(
+                "apply_control",
+                {"control_id": str(control_id)},
+            )
+        except Exception as exc:
+            self.logger.warning("Live2D control application unavailable: {}", type(exc).__name__)
+            return False
+        status = str(payload.get("status") or "")
+        return status in {"applied", "already_applied"} or bool(
+            payload.get("applied") or payload.get("already_applied")
+        )
+
     async def send_live2d_event(self, event_type: str, content: Any) -> None:
         protocol_event, payload = self._translate_legacy_event(event_type, content)
         envelope = {
@@ -155,6 +257,47 @@ class RemoteLive2DController:
 
         loop.call_soon_threadsafe(create_task)
 
+    async def _request(self, event: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.is_running:
+            raise Live2DRemoteError("Live2D controller is not running")
+        if not self.connected or not self._ready.is_set():
+            raise Live2DCapabilityUnavailable("Live2D adapter is not ready")
+        if event not in self._capabilities:
+            raise Live2DCapabilityUnavailable(f"Live2D capability unavailable: {event}")
+
+        websocket = self._active_websocket
+        if websocket is None:
+            raise Live2DCapabilityUnavailable("Live2D WebSocket is not active")
+        request_id = uuid4().hex
+        future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        raw_message = json.dumps(
+            {
+                "type": COMMAND_MESSAGE_TYPE,
+                "version": PROTOCOL_VERSION,
+                "request_id": request_id,
+                "event": event,
+                "payload": payload,
+            },
+            ensure_ascii=False,
+        )
+
+        # The future is registered before the serialized direct send so a fast
+        # response cannot be lost.  Direct RPCs never enter the lossy queue.
+        self._pending_requests[request_id] = future
+        try:
+            async with self._send_lock:
+                if websocket is not self._active_websocket:
+                    raise Live2DRemoteError("Live2D WebSocket changed before send")
+                await websocket.send(raw_message)
+            return await asyncio.wait_for(
+                asyncio.shield(future),
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+        finally:
+            if not future.done():
+                future.cancel()
+            self._pending_requests.pop(request_id, None)
+
     async def _connection_loop(self) -> None:
         while self.is_running:
             try:
@@ -165,6 +308,9 @@ class RemoteLive2DController:
                     ping_timeout=20,
                     max_size=MAX_WEBSOCKET_MESSAGE_BYTES,
                 ) as websocket:
+                    self._active_websocket = websocket
+                    self._capabilities.clear()
+                    self._ready.clear()
                     self._connected.set()
                     self.logger.info("Connected to standalone Live2D adapter")
                     sender = asyncio.create_task(self._sender_loop(websocket))
@@ -187,11 +333,15 @@ class RemoteLive2DController:
             except Exception as exc:
                 self.logger.warning(
                     "Live2D adapter connection lost: {}; reconnecting in {:.1f}s",
-                    exc,
+                    type(exc).__name__,
                     self.reconnect_seconds,
                 )
             finally:
                 self._connected.clear()
+                self._ready.clear()
+                self._active_websocket = None
+                self._capabilities.clear()
+                self._fail_pending(Live2DRemoteError("Live2D connection closed"))
 
             if self.is_running:
                 await asyncio.sleep(self.reconnect_seconds)
@@ -200,7 +350,8 @@ class RemoteLive2DController:
         while self.is_running:
             raw_message = await self._send_queue.get()
             try:
-                await websocket.send(raw_message)
+                async with self._send_lock:
+                    await websocket.send(raw_message)
             except Exception:
                 try:
                     self._send_queue.put_nowait(raw_message)
@@ -236,17 +387,41 @@ class RemoteLive2DController:
         if not isinstance(payload, dict):
             payload = {}
 
+        request_id = str(envelope.get("request_id") or "")
+        if request_id:
+            future = self._pending_requests.get(request_id)
+            if future is not None and not future.done():
+                if event == "error":
+                    future.set_exception(
+                        Live2DRemoteError(str(payload.get("message") or "remote error"))
+                    )
+                else:
+                    future.set_result(payload)
+                return
+
         if event == "ready":
+            capabilities = payload.get("capabilities")
+            if isinstance(capabilities, dict):
+                self._capabilities = {
+                    str(name)
+                    for name, enabled in capabilities.items()
+                    if enabled and str(name) in {"prepare_reply", "apply_control"}
+                }
+            else:
+                advertised = payload.get("commands")
+                self._capabilities = {
+                    str(name)
+                    for name in advertised or []
+                    if str(name) in {"prepare_reply", "apply_control"}
+                }
+            self._ready.set()
             self.logger.info("Standalone Live2D renderer reported ready")
         elif event == "error":
-            self.logger.error(
-                "Standalone Live2D adapter error: {}",
-                payload.get("message", "unknown error"),
-            )
+            self.logger.error("Standalone Live2D adapter error: response_event={}", event)
         elif event == "poke":
             await self._handle_poke()
         elif event == "click":
-            self.logger.debug("Live2D model clicked: {}", payload)
+            self.logger.debug("Live2D model clicked")
 
     async def _handle_poke(self) -> None:
         config = self.adapter.config
@@ -258,6 +433,97 @@ class RemoteLive2DController:
         user_id = str(getattr(config, "live_master_user_id", "1"))
         user_name = str(getattr(config, "live_master_user_name", "主人"))
         await self.adapter.handle_incoming_poke(int(room_id), user_id, user_name)
+
+    def _fail_pending(self, exception: Exception) -> None:
+        for future in tuple(self._pending_requests.values()):
+            if not future.done():
+                future.set_exception(exception)
+        self._pending_requests.clear()
+
+    def _log_degradation_once(self, operation: str, exception: Exception | None = None) -> None:
+        if operation in self._degradation_logged:
+            return
+        self._degradation_logged.add(operation)
+        suffix = f" ({type(exception).__name__})" if exception else ""
+        self.logger.warning(
+            "Live2D {} capability unavailable; using plain-text fallback{}",
+            operation,
+            suffix,
+        )
+
+    @staticmethod
+    def _fallback_prepare_reply(raw_reply: str) -> PreparedReplyResult:
+        """Limited compatibility fallback; never interprets control metadata."""
+
+        text = str(raw_reply or "").strip()
+        if not text:
+            return PreparedReplyResult("", False, "", None)
+
+        # A fenced block is always structured-output territory.  Only a JSON
+        # object with a string reply is safe to expose; fenced arrays, scalars,
+        # malformed JSON, and plain fenced prose must never leak through.
+        fenced = re.fullmatch(
+            r"\s*```(?:json)?\s*(.*?)\s*```\s*",
+            text,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if fenced:
+            candidate = fenced.group(1).strip()
+            try:
+                value = json.loads(candidate, strict=False)
+            except (TypeError, json.JSONDecodeError):
+                return PreparedReplyResult("", False, "", None)
+            if not isinstance(value, dict):
+                return PreparedReplyResult("", False, "", None)
+            reply = value.get("reply")
+            if not isinstance(reply, str):
+                return PreparedReplyResult("", False, "", None)
+            return PreparedReplyResult(reply.strip(), False, "", None)
+
+        # Valid JSON scalars/arrays are structured output too, even when they
+        # do not contain braces.  Ordinary prose remains untouched because it
+        # is not valid JSON.
+        try:
+            parsed = json.loads(text, strict=False)
+        except (TypeError, json.JSONDecodeError):
+            parsed = None
+        else:
+            if not isinstance(parsed, dict):
+                return PreparedReplyResult("", False, "", None)
+
+        if "{" not in text and "}" not in text:
+            if text.startswith(("[", '"')):
+                return PreparedReplyResult("", False, "", None)
+            return PreparedReplyResult(text, False, "", None)
+
+        # Decode an object from surrounding model prose without ever exposing
+        # the raw structure.  Requiring exactly one identifiable object avoids
+        # guessing when multiple JSON fragments are present.
+        decoder = json.JSONDecoder(strict=False)
+        objects: list[dict[str, Any]] = []
+        search_from = 0
+        while True:
+            start = text.find("{", search_from)
+            if start < 0:
+                break
+            try:
+                value, end = decoder.raw_decode(text[start:])
+            except (TypeError, json.JSONDecodeError):
+                search_from = start + 1
+                continue
+            if isinstance(value, dict):
+                objects.append(value)
+                # Skip nested objects belonging to this decoded object.
+                search_from = start + end
+            else:
+                search_from = start + 1
+        if len(objects) != 1:
+            return PreparedReplyResult("", False, "", None)
+
+        reply = objects[0].get("reply")
+        if not isinstance(reply, str):
+            return PreparedReplyResult("", False, "", None)
+        return PreparedReplyResult(reply.strip(), False, "", None)
 
     def _build_url(self) -> str:
         if not self.token:
@@ -316,3 +582,11 @@ class RemoteLive2DController:
         if event_type == "stop_audio":
             return "stop_audio", {}
         raise ValueError(f"Unsupported Live2D event type: {event_type}")
+
+
+__all__ = [
+    "Live2DCapabilityUnavailable",
+    "Live2DRemoteError",
+    "PreparedReplyResult",
+    "RemoteLive2DController",
+]

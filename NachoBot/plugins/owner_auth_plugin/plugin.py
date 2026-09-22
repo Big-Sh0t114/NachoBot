@@ -21,6 +21,7 @@
 import time
 import threading
 import importlib
+import inspect
 import re
 import os
 import sys
@@ -476,33 +477,20 @@ def patch_build_prompt_reply_context() -> None:
                 logger.error("[主人验证补丁] 原始方法未保存，无法调用")
                 return "", []
 
-            # 调用原始方法获取基础prompt，兼容不同版本参数名
-            try:
-                base_result = await _original_build_prompt_reply_context(
-                    self,
-                    extra_info=extra_info,
-                    reply_reason=reply_reason,
-                    available_actions=available_actions,
-                    choosen_actions=choosen_actions,
-                    enable_tool=enable_tool,
-                    reply_message=reply_message,
-                    prompt_context=prompt_context,
-                )
-            except TypeError as te:
-                # 如果旧版本参数名不匹配，尝试使用新版 'chosen_actions'
-                if "unexpected keyword argument 'choosen_actions'" in str(te):
-                    base_result = await _original_build_prompt_reply_context(
-                        self,
-                        extra_info=extra_info,
-                        reply_reason=reply_reason,
-                        available_actions=available_actions,
-                        chosen_actions=choosen_actions,
-                        enable_tool=enable_tool,
-                        reply_message=reply_message,
-                        prompt_context=prompt_context,
-                    )
-                else:
-                    raise
+            # 插件入口兼容旧/新拼写，但调用原始方法前先检查签名，
+            # 避免通过一次预期 TypeError 来探测版本。
+            original_params = inspect.signature(_original_build_prompt_reply_context).parameters
+            action_kwarg_name = "chosen_actions" if "chosen_actions" in original_params else "choosen_actions"
+            call_kwargs = {
+                "extra_info": extra_info,
+                "reply_reason": reply_reason,
+                "available_actions": available_actions,
+                action_kwarg_name: choosen_actions,
+                "enable_tool": enable_tool,
+                "reply_message": reply_message,
+                "prompt_context": prompt_context,
+            }
+            base_result = await _original_build_prompt_reply_context(self, **call_kwargs)
 
             base_prompt, rebuild_result = _normalize_prompt_build_result(base_result)
 

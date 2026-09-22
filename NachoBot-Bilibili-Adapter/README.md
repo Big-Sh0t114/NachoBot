@@ -21,7 +21,21 @@
    - `uv run python main.py`
 
 ## Live2D 远程适配器
-Live2D 渲染已拆分到独立的 `NachoBot-Live2D-Adapter`，本项目只通过 WebSocket 发送平台无关的状态、情感和动作事件。
+Live2D 渲染、回复结构化解析和情绪/动作校验已拆分到独立的
+`NachoBot-Live2D-Adapter`。本项目只通过版本化 WebSocket 发送状态、音频和
+普通平台无关命令，并通过 `prepare_reply` / `apply_control` 消费一个只含
+`reply`、`web_search`、`search_query`、`control_id` 的规范化结果；Bilibili
+不会再从原始模型 JSON 解析情绪、动作或搜索字段。
+
+prepare 与 apply 是两个独立阶段：普通弹幕在发送前 apply，TTS 在首段音频就绪
+时 apply，评论和私信沿用各自原有的发送动作钩子。Live2D 服务按客户端隔离
+暂存控制并保证 apply exactly once；实际公网搜索、第二次模型调用、平台发送和
+TTS 仍由本适配器负责。
+
+若服务不可用或未声明 1.1 的 prepare/apply capability，适配器只回退为普通文本：
+纯文本原样传递；合法 JSON/fenced JSON 只提取 `reply`；疑似但格式错误的 JSON
+会被抑制。回退时 `web_search=false`、`search_query` 为空且 `control_id=None`，
+因此不会执行公网搜索，也不会在 Bilibili 本地复制 Live2D 控制解析。
 
 `[live]` 下仅保留以下配置：
 - `enable_live2D`：是否启用远程 Live2D 连接。

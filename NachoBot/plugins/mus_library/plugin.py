@@ -1,13 +1,21 @@
 from __future__ import annotations
 from pathlib import Path
 from typing import Optional, Tuple, List, Type, Dict
-import json, re, base64, random, difflib
-import hashlib, time
-import asyncio, os, tempfile, wave, audioop
-import urllib.request, urllib.error
-from urllib.parse import urljoin
+import json
+import re
+import base64
+import random
+import difflib
+import hashlib
+import time
+import asyncio
+import os
+import tempfile
+import wave
+import audioop
 
 from src.plugin_system import BasePlugin, register_plugin, BaseCommand
+from src.plugin_system.apis import send_api
 
 
 PLUGIN_DIR = Path(__file__).resolve().parent
@@ -286,11 +294,52 @@ async def _play_song(cmd: BaseCommand, song: dict) -> Tuple[bool, Optional[str],
     debug_timing = bool(cmd.get_config("mus_library.debug_timing", _cfg(cmd, "debug_timing", False)))
 
     src_wav = await _trim_wav(wav, 0)
+    stream_id = str(getattr(getattr(cmd, "message", None), "chat_stream", None) and getattr(cmd.message.chat_stream, "stream_id", "") or "")
+    if not stream_id:
+        await cmd.send_text("[mus_library] 发送失败：缺少聊天流。")
+        return False, "stream_missing", True
+
+    async def _send_embedded_voice(data: bytes) -> bool:
+        try:
+            receipt = await send_api.custom_to_stream_receipt(
+                "voice",
+                base64.b64encode(data).decode("ascii"),
+                stream_id,
+                storage_message=False,
+                show_log=False,
+            )
+            return bool(getattr(receipt, "delivered", receipt))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return False
+
+    async def _send_local_voice(path: Path) -> bool:
+        try:
+            receipt = await send_api.local_media_to_stream_receipt(
+                "voicefile",
+                str(path),
+                stream_id,
+                storage_message=False,
+                show_log=False,
+            )
+            return bool(getattr(receipt, "delivered", receipt))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return False
+
+    def _cleanup_trimmed() -> None:
+        if src_wav != wav:
+            try:
+                src_wav.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     if prefer_silk:
         if debug_timing:
             try:
-                import rsilk  # type: ignore
+                __import__("rsilk")
 
                 try:
                     await cmd.send_text(f"[mus_library] rsilk OK @ {silk_bitrate}bps")
@@ -306,7 +355,7 @@ async def _play_song(cmd: BaseCommand, song: dict) -> Tuple[bool, Optional[str],
         t0 = time.time()
         silk, hit = await _get_or_build_silk(src_wav, silk_bitrate, cache_ttl_hours)
         if silk:
-            ok = await _send_record_v11(cmd, silk)
+            ok = await _send_embedded_voice(silk)
             if ok:
                 if debug_timing:
                     ms = int((time.time() - t0) * 1000)
@@ -315,32 +364,8 @@ async def _play_song(cmd: BaseCommand, song: dict) -> Tuple[bool, Optional[str],
                         await cmd.send_text(f"[mus_library] SILK {src} {ms}ms @{silk_bitrate}bps -> {cache_path.name}")
                     except Exception:
                         pass
-                if src_wav != wav:
-                    try:
-                        src_wav.unlink(missing_ok=True)
-                    except Exception:
-                        pass
+                _cleanup_trimmed()
                 return True, f"play:{song.get('title', '?')}", True
-            else:
-                print(f"[mus_library] HTTP send failed for SILK. Fallback to WS sending SILK...")
-                try:
-                    # Fallback: try sending SILK via WS directly
-                    voice_b64 = base64.b64encode(silk).decode("ascii")
-                    ok = await cmd.send_voice(voice_b64)
-                    if ok:
-                        if debug_timing:
-                            try:
-                                await cmd.send_text(f"[mus_library] SILK(WS) sent. Fallback success.")
-                            except Exception:
-                                pass
-                        if src_wav != wav:
-                            try:
-                                src_wav.unlink(missing_ok=True)
-                            except Exception:
-                                pass
-                        return True, f"play_ws:{song.get('title', '?')}", True
-                except Exception as e:
-                    print(f"[mus_library] SILK WS fallback failed: {e}")
 
         else:
             if debug_timing:
@@ -349,56 +374,34 @@ async def _play_song(cmd: BaseCommand, song: dict) -> Tuple[bool, Optional[str],
                 except Exception:
                     pass
 
-    # Safety check: Do not send large WAVs over WS
+    # Embedded data is convenient for small audio; local media keeps large
+    # payloads out of the core WebSocket envelope.
     try:
         fsize = src_wav.stat().st_size
         if fsize > 2 * 1024 * 1024:  # 2MB limit
-            await cmd.send_text(
-                f"[mus_library] 发送失败：HTTP接口未配置或连接失败，且文件过大({fsize / 1024 / 1024:.1f}MB)无法通过WS发送。请检查 config.toml 中的 onebot_base 配置。"
-            )
-            if src_wav != wav:
-                src_wav.unlink(missing_ok=True)
-            return True, "file_too_large", True
+            if await _send_local_voice(src_wav):
+                _cleanup_trimmed()
+                return True, f"file:{song.get('title', '?')}", True
+            await cmd.send_text("[mus_library] 发送失败：大音频未收到平台确认，临时文件已保留。")
+            return False, "file_delivery_failed", True
     except Exception:
         pass
 
     try:
-        voice_b64 = base64.b64encode(src_wav.read_bytes()).decode("ascii")
-        ok = await cmd.send_voice(voice_b64)
+        ok = await _send_embedded_voice(src_wav.read_bytes())
         if ok:
-            if src_wav != wav:
-                try:
-                    src_wav.unlink(missing_ok=True)
-                except Exception:
-                    pass
+            _cleanup_trimmed()
             return True, f"play:{song.get('title', '?')}", True
     except Exception:
         pass
 
-    ok = await _send_file_v11(cmd, src_wav)
+    ok = await _send_local_voice(src_wav)
     if ok:
-        if src_wav != wav:
-            try:
-                src_wav.unlink(missing_ok=True)
-            except Exception:
-                pass
+        _cleanup_trimmed()
         return True, f"file:{song.get('title', '?')}", True
 
-    if src_wav != wav:
-        try:
-            src_wav.unlink(missing_ok=True)
-        except Exception:
-            pass
-    await cmd.send_text("[mus_library] 发送失败：适配器不支持语音/文件。")
-    return True, "adapter_unsupported", True
-
-
-def _as_base64_uri_from_bytes(b: bytes) -> str:
-    return "base64://" + base64.b64encode(b).decode("ascii")
-
-
-def _as_base64_uri_from_path(p: Path) -> str:
-    return "base64://" + base64.b64encode(p.read_bytes()).decode("ascii")
+    await cmd.send_text("[mus_library] 发送失败：未收到平台确认，临时文件已保留。")
+    return False, "adapter_unsupported", True
 
 
 async def _trim_wav(src: Path, max_seconds: int) -> Path:
@@ -495,89 +498,6 @@ async def _get_or_build_silk(wav_path: Path, bit_rate: int, ttl_hours: float) ->
     return silk, False
 
 
-async def _http_post_json(url: str, payload: dict, headers: Dict[str, str] | None = None) -> tuple[int, str]:
-    def _do():
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        hdr = {"Content-Type": "application/json; charset=utf-8"}
-        if headers:
-            hdr.update(headers)
-        req = urllib.request.Request(url, data=data, headers=hdr)
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return resp.getcode(), resp.read().decode("utf-8", "ignore")
-
-    try:
-        return await asyncio.to_thread(_do)
-    except urllib.error.HTTPError as e:
-        try:
-            body = e.read().decode("utf-8", "ignore")
-        except Exception:
-            body = str(e)
-        print(f"[mus_library] HTTP POST Error {e.code}: {body}")
-        return e.code, body
-    except Exception as e:
-        print(f"[mus_library] HTTP POST Exception: {type(e).__name__}: {e}")
-        return 0, f"{type(e).__name__}: {e}"
-
-
-async def _send_record_v11(cmd: BaseCommand, silk_bytes: bytes) -> bool:
-    """用 OneBot v11 的 record 段发送语音（群聊/私聊）。"""
-    ob_base = str(_cfg(cmd, "onebot_base", "http://127.0.0.1:5700")).rstrip("/")
-    token = _cfg(cmd, "onebot_token", "")
-    headers = {"Content-Type": "application/json; charset=utf-8"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
-    msg = getattr(cmd, "message", None)
-    force_gid = _cfg(cmd, "nonebot_force_group_id", None) or _cfg(cmd, "onebot_force_group_id", None)
-    group_id = (
-        (str(force_gid).strip() if force_gid else None)
-        or getattr(msg, "group_id", None)
-        or getattr(getattr(cmd, "chat_stream", None), "group_id", None)
-    )
-    user_id = getattr(msg, "user_id", None) or getattr(getattr(cmd, "chat_stream", None), "user_id", None)
-
-    uri = _as_base64_uri_from_bytes(silk_bytes)
-
-    if group_id:
-        url = urljoin(ob_base + "/", "send_group_msg")
-        payload = {"group_id": int(group_id), "message": [{"type": "record", "data": {"file": uri}}]}
-        code, body = await _http_post_json(url, payload, headers)
-        if (200 <= code < 300) and ('"status":"ok"' in body.lower() or '"retcode":0' in body):
-            return True
-    if user_id:
-        url = urljoin(ob_base + "/", "send_private_msg")
-        payload = {"user_id": int(user_id), "message": [{"type": "record", "data": {"file": uri}}]}
-        code, body = await _http_post_json(url, payload, headers)
-        if (200 <= code < 300) and ('"status":"ok"' in body.lower() or '"retcode":0' in body):
-            return True
-    return False
-
-
-async def _send_file_v11(cmd: BaseCommand, wav_path: Path) -> bool:
-    """兜底：上传群文件（base64 传输，规避中文路径）。私聊无官方上传接口，忽略。"""
-    ob_base = str(_cfg(cmd, "onebot_base", "http://127.0.0.1:5700")).rstrip("/")
-    token = _cfg(cmd, "onebot_token", "")
-    headers = {"Content-Type": "application/json; charset=utf-8"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
-    msg = getattr(cmd, "message", None)
-    force_gid = _cfg(cmd, "nonebot_force_group_id", None) or _cfg(cmd, "onebot_force_group_id", None)
-    group_id = (
-        (str(force_gid).strip() if force_gid else None)
-        or getattr(msg, "group_id", None)
-        or getattr(getattr(cmd, "chat_stream", None), "group_id", None)
-    )
-
-    if not group_id:
-        return False
-
-    url = urljoin(ob_base + "/", "upload_group_file")
-    payload = {"group_id": int(group_id), "file": _as_base64_uri_from_path(wav_path), "name": wav_path.name}
-    code, body = await _http_post_json(url, payload, headers)
-    return (200 <= code < 300) and ('"status":"ok"' in body.lower() or '"retcode":0' in body)
-
-
 class PlayMusicCommand(BaseCommand):
     """点歌命令：点歌/播放/来首 + 关键词"""
 
@@ -628,8 +548,9 @@ class PlayMusicCommand(BaseCommand):
         except Exception as e:
             try:
                 await self.send_text(f"[mus_library] 执行异常: {type(e).__name__}: {e}")
-            finally:
-                return True, "exception", True
+            except Exception:
+                pass
+            return True, "exception", True
 
 
 class RandomMusicCommand(BaseCommand):
@@ -657,8 +578,9 @@ class RandomMusicCommand(BaseCommand):
         except Exception as e:
             try:
                 await self.send_text(f"[mus_library] 随机播放异常: {type(e).__name__}: {e}")
-            finally:
-                return True, "exception", True
+            except Exception:
+                pass
+            return True, "exception", True
 
 
 @register_plugin
@@ -682,17 +604,10 @@ class MusicPlayerPlugin(BasePlugin):
         "plugin": {
             "enable": {"type": "boolean", "default": True, "description": "是否启用插件"},
         },
-        "onebot_base": {"type": "string", "default": "http://127.0.0.1:5700", "description": "Napcat OneBot HTTP 地址"},
-        "onebot_token": {"type": "string", "default": "", "description": "Napcat OneBot HTTP Token（可留空）"},
-        "nonebot_force_group_id": {
-            "type": "string",
-            "default": "",
-            "description": "可选：强制把消息发到此群（拿不到 group_id 时兜底）",
-        },
         "prefer_silk": {
             "type": "boolean",
             "default": True,
-            "description": "优先本地转 SILK 并以 record 段发送（低延迟）",
+            "description": "优先本地转 SILK 并以核心语音能力发送（低延迟）",
         },
         "silk_bitrate": {"type": "integer", "default": 24000, "description": "SILK 编码比特率（8k~40k）"},
         "cache_ttl_hours": {"type": "number", "default": 0, "description": "SILK 磁盘缓存有效期（小时，0 关闭）"},

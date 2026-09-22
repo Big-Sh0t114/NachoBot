@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 from loguru import logger
 import re
@@ -27,6 +28,7 @@ from ncnk_message import (  # noqa: E402
     TargetConfig,
     TemplateInfo,
     UserInfo,
+    build_system_event,
     get_core_token_from_env,
 )
 
@@ -42,6 +44,11 @@ from bili_src.core.utils import (  # noqa: E402
 )
 from bili_src.api.api import BilibiliApi  # noqa: E402
 from bili_src.live.live_worker import LiveRoomWorker  # noqa: E402
+from bili_src.live.v2_models import (  # noqa: E402
+    InteractWordV2,
+    SendGiftBroadcast,
+    SendGiftV2GiftItem,
+)
 from bili_src.live.screen_monitor import ScreenMonitor  # noqa: E402
 from bili_src.live.two_phase_search import append_live_search_protocol  # noqa: E402
 from bili_src.audio.mic_capture import MicCaptureWorker, MicConfig  # noqa: E402
@@ -233,8 +240,8 @@ class BilibiliAdapter:
             live2d_finish_reply_callback=self.live2d_manager.controller.on_reply_finished
             if self.live2d_manager.controller
             else None,
-            live2d_execute_action_callback=self.live2d_manager.execute_extracted_live2d_action,
-            extract_json_emotion_callback=self.live2d_manager.extract_json_emotion_from_text,
+            live2d_apply_control_callback=self.live2d_manager.apply_control,
+            prepare_reply_callback=self.live2d_manager.prepare_reply,
             tts_model_class=TTSModel,
             tts_import_error=_tts_import_error,
         )
@@ -656,9 +663,16 @@ class BilibiliAdapter:
         Handle test commands for simulating live events.
         Only allows owner (dede_user_id) to trigger.
         Commands:
-        - #test_gift: Simulate sending a gift
+        - #test_gift: Simulate sending a legacy gift
+        - #test_gift_v2: Simulate a SEND_GIFT_V2 protobuf gift
         - #test_sc <msg>: Simulate sending a superchat
-        - #test_guard: Simulate opening a guard
+        - #test_sc_v2 <msg>: V2-named superchat test (current protocol is still SUPER_CHAT_MESSAGE)
+        - #test_guard: Simulate opening a legacy guard
+        - #test_guard_v2: Simulate a USER_TOAST_MSG_V2 guard event
+        - #guard_enable=[level:G/A/C,message:text]: Simulate guard-level danmu
+        - #guard_enable_v2=[level:G/A/C,message:text]: V2-named guard-level danmu test
+        - #guard_entry: Simulate INTERACT_WORD guard entry
+        - #guard_entry_v2: Simulate INTERACT_WORD_V2 protobuf guard entry
         - #test_clear: Clear any temporary test state (placeholder)
         """
         if not (text.startswith("#test_") or text.startswith("#guard_")):
@@ -718,7 +732,42 @@ class BilibiliAdapter:
                 )
                 return True
 
-            elif cmd == "#test_sc":
+            elif cmd == "#test_gift_v2":
+                gift_proto = SendGiftBroadcast(
+                    uid=int(user_id),
+                    uname=user_name,
+                    gift_list=[
+                        SendGiftV2GiftItem(
+                            gift_id=999999,
+                            gift_name="测试V2礼物(TestGiftV2)",
+                            num=1,
+                            gift_type=0,
+                            price=100000,
+                            total_coin=100000,
+                            coin_type="gold",
+                            tid=f"test-v2-{uuid.uuid4().hex}",
+                            timestamp=int(now_ts),
+                            rnd=uuid.uuid4().hex,
+                            action="赠送",
+                        )
+                    ],
+                )
+                payload = {
+                    "cmd": "SEND_GIFT_V2",
+                    "data": {
+                        "pb": base64.b64encode(gift_proto.dumps()).decode("ascii")
+                    },
+                }
+                test_worker = LiveRoomWorker(
+                    room_id, self.config, self.api, self, self.logger
+                )
+                await test_worker._handle_event(payload)
+                await self._send_danmu(
+                    room_id, "【测试】已触发 SEND_GIFT_V2 礼物事件", None, None
+                )
+                return True
+
+            elif cmd in {"#test_sc", "#test_sc_v2"}:
                 msg = arg if arg else "这是测试SC内容(Test SC Message)"
                 await self.handle_incoming_superchat(
                     room_id=room_id,
@@ -728,12 +777,16 @@ class BilibiliAdapter:
                     user_name=user_name,
                     timestamp=now_ts,
                 )
-                await self._send_danmu(room_id, "【测试】已触发模拟SC事件", None, None)
+                label = "V2" if cmd.endswith("_v2") else "V1"
+                await self._send_danmu(
+                    room_id,
+                    f"【测试】已触发模拟SC事件 ({label}; 当前线上命令仍为 SUPER_CHAT_MESSAGE)",
+                    None,
+                    None,
+                )
                 return True
 
-                return True
-
-            elif cmd == "#guard_enable":
+            elif cmd in {"#guard_enable", "#guard_enable_v2"}:
                 # Parse args format: [level:<G/A/C>,message:<text>]
                 # Simplified parsing: looking for pattern or just simplistic split
                 # Expected arg: "[level:G,message:Hello]" or similar
@@ -779,10 +832,88 @@ class BilibiliAdapter:
                 else:
                     await self._send_danmu(
                         room_id,
-                        "【测试】参数错误，用法: #guard_enable=[level:G/A/C,message:内容]",
+                        "【测试】参数错误，用法: #guard_enable[_v2]=[level:G/A/C,message:内容]",
                         None,
                         None,
                     )
+                return True
+
+            elif cmd == "#guard_entry":
+                payload = {
+                    "cmd": "INTERACT_WORD",
+                    "data": {
+                        "uid": int(user_id),
+                        "uname": user_name,
+                        "msg_type": 1,
+                        "privilege_type": 3,
+                        "timestamp": int(now_ts),
+                    },
+                }
+                test_worker = LiveRoomWorker(
+                    room_id, self.config, self.api, self, self.logger
+                )
+                await test_worker._handle_event(payload)
+                await self._send_danmu(
+                    room_id, "【测试】已触发 INTERACT_WORD 舰长进入事件", None, None
+                )
+                return True
+
+            elif cmd == "#guard_entry_v2":
+                entry_proto = InteractWordV2(
+                    uid=int(user_id),
+                    uname=user_name,
+                    msg_type=1,
+                    timestamp=int(now_ts),
+                    privilege_type=3,
+                )
+                payload = {
+                    "cmd": "INTERACT_WORD_V2",
+                    "data": {
+                        "pb": base64.b64encode(entry_proto.dumps()).decode("ascii")
+                    },
+                }
+                test_worker = LiveRoomWorker(
+                    room_id, self.config, self.api, self, self.logger
+                )
+                await test_worker._handle_event(payload)
+                await self._send_danmu(
+                    room_id, "【测试】已触发 INTERACT_WORD_V2 舰长进入事件", None, None
+                )
+                return True
+
+            elif cmd == "#test_guard_v2":
+                payload = {
+                    "cmd": "USER_TOAST_MSG_V2",
+                    "data": {
+                        "sender_uinfo": {
+                            "uid": int(user_id),
+                            "base": {"name": user_name},
+                        },
+                        "guard_info": {
+                            "guard_level": 3,
+                            "start_time": int(now_ts),
+                            "end_time": int(now_ts),
+                        },
+                        "pay_info": {
+                            "num": 1,
+                            "price": 198000,
+                            "unit": "月",
+                        },
+                        "gift_info": {
+                            "gift_id": 10003,
+                            "gift_name": "舰长(Captain V2)",
+                        },
+                        "option": {"source": 0},
+                        "toast_msg": f"{user_name} 开通了舰长",
+                    },
+                }
+                test_worker = LiveRoomWorker(
+                    room_id, self.config, self.api, self, self.logger
+                )
+                await test_worker._handle_event(payload)
+                await self._send_danmu(
+                    room_id, "【测试】已触发 USER_TOAST_MSG_V2 上舰事件", None, None
+                )
                 return True
 
             elif cmd == "#test_guard":
@@ -994,34 +1125,38 @@ class BilibiliAdapter:
                 }
             self.event_manager.gift_buffer[key]["count"] += num
             self.event_manager.gift_buffer[key]["price"] = price
-            self.event_manager.gift_buffer[key]["timestamp"] = (
-                timestamp  # Update to latest
-            )
-            self.event_manager.last_gift_time[key] = time.time()  # Update act time
+            self.event_manager.gift_buffer[key]["timestamp"] = timestamp
+            self.event_manager.last_gift_time[key] = time.time()
             return
 
-        # Build prompt using helper
+        # system_event 没有 message sender；actor 只保留在 metadata 中。
         prompt_text = f"送出了 {gift_name} x{num}"
         template_info = await self._get_template_info(room_id, user_id, prompt_text)
 
-        # Prepare additional config for high value gifts logic if needed
-        # Ensuring mention logic is consistent
-        additional_config = self._build_live_additional_config(room_id)
-        # if template_info:
-        #    additional_config = template_info.additional_config or {}
-
-        # Force mention for gifts to ensure reaction
-        additional_config["is_mentioned"] = 1.0
+        additional_config = self._build_live_additional_config(
+            room_id,
+            platform_event={
+                "kind": "support",
+                "amount": max(0, price) * max(1, num),
+            },
+        )
+        additional_config["system_event"] = build_system_event(
+            "bilibili.gift",
+            actor={"user_id": str(user_id), "name": user_name},
+            target=None,
+            data={
+                "room_id": str(room_id),
+                "gift_name": gift_name,
+                "num": num,
+                "price": price,
+            },
+        )
 
         message_info = BaseMessageInfo(
             platform=self.config.platform,
             message_id=str(uuid.uuid4()),
             time=timestamp,
-            user_info=UserInfo(
-                platform=self.config.platform,
-                user_id=user_id,
-                user_nickname=user_name,
-            ),
+            user_info=None,
             group_info=GroupInfo(
                 platform=self.config.platform,
                 group_id=str(room_id),
@@ -1035,8 +1170,6 @@ class BilibiliAdapter:
             additional_config=additional_config,
         )
 
-        # Use seglist to include both gift info and text prompt
-        # Include gift metadata alongside readable HeartFlow text.
         gift_segment = Seg(type="gift", data=f"{gift_name}:{num}")
         text_segment = Seg(type="text", data=prompt_text)
 
@@ -1050,6 +1183,8 @@ class BilibiliAdapter:
                     "num": num,
                     "price": price,
                     "room_id": room_id,
+                    "user_id": user_id,
+                    "user_name": user_name,
                 },
                 ensure_ascii=True,
             ),
@@ -1073,34 +1208,29 @@ class BilibiliAdapter:
         user_name: str,
     ) -> None:
         self.tts_manager.reset_idle_timer()
-        """
-        Handle a poke event (simulated or real).
-        """
+        """Handle a poke event (simulated or real) as a structured system event."""
         self.logger.info(f"Poke event received from {user_name} ({user_id})")
 
         timestamp = time.time()
-
-        # Standard format for poke/notice
-        text = f"{user_name}用鼠标戳了戳你"
-
-        # Resolve template info to ensuring correct persona/TTS settings
+        text = "用鼠标戳了戳你"
         template_info = await self._get_template_info(room_id, user_id, text)
 
         additional_config = self._build_live_additional_config(
             room_id,
             {"room_id": room_id},
         )
+        additional_config["system_event"] = build_system_event(
+            "bilibili.poke",
+            actor={"user_id": str(user_id), "name": user_name},
+            target=None,
+            data={"room_id": str(room_id)},
+        )
 
         message_info = BaseMessageInfo(
             platform=self.config.platform,
-            # Special ID for notice messages as seen in bot.py logic
-            message_id="notice",
+            message_id=str(uuid.uuid4()),
             time=timestamp,
-            user_info=UserInfo(
-                platform=self.config.platform,
-                user_id=user_id,
-                user_nickname=user_name,
-            ),
+            user_info=None,
             group_info=GroupInfo(
                 platform=self.config.platform,
                 group_id=str(room_id),
@@ -1117,10 +1247,17 @@ class BilibiliAdapter:
         message = MessageBase(
             message_info=message_info,
             message_segment=Seg(type="text", data=text),
-            raw_message=None,
+            raw_message=json.dumps(
+                {
+                    "type": "poke",
+                    "room_id": room_id,
+                    "user_id": user_id,
+                    "user_name": user_name,
+                },
+                ensure_ascii=True,
+            ),
         )
 
-        # High priority to ensure immediate reaction
         self.event_manager.push_to_event_queue(20, message)
 
     async def handle_mic_message(self, room_id: int, text: str) -> None:
@@ -1190,22 +1327,6 @@ class BilibiliAdapter:
             f"SuperChat: [{room_id}] {user_name}({user_id}): {message_text} (Price: {price} CNY)"
         )
 
-        # if room_id in self._live_streamer_controllers:
-        #     controller = self._live_streamer_controllers[room_id]
-        #     await controller.inject_priority_event(
-        #         PriorityEvent(
-        #             event_type="superchat",
-        #             user_name=user_name,
-        #             user_id=user_id,
-        #             timestamp=timestamp,
-        #             sc_message=message_text,
-        #             sc_price=price,
-        #         )
-        #     )
-        #     self.logger.info("[LiveStreamer] SC injected as priority event")
-        #     return  # Don't process through normal path
-
-        # Build prompt using helper
         prompt_text = f"发送了超级弹幕(SC)：{message_text} (价值 {price} 元)"
         template_info = await self._get_template_info(room_id, user_id, prompt_text)
 
@@ -1216,21 +1337,22 @@ class BilibiliAdapter:
                 "amount": max(0, price),
             },
         )
-        # if template_info:
-        #    additional_config = template_info.additional_config or {}
-
-        # Force mention for SC to ensure reaction
-        additional_config["is_mentioned"] = 1.0
+        additional_config["system_event"] = build_system_event(
+            "bilibili.superchat",
+            actor={"user_id": str(user_id), "name": user_name},
+            target=None,
+            data={
+                "room_id": str(room_id),
+                "message": message_text,
+                "price": price,
+            },
+        )
 
         message_info = BaseMessageInfo(
             platform=self.config.platform,
             message_id=str(uuid.uuid4()),
             time=timestamp,
-            user_info=UserInfo(
-                platform=self.config.platform,
-                user_id=user_id,
-                user_nickname=user_name,
-            ),
+            user_info=None,
             group_info=GroupInfo(
                 platform=self.config.platform,
                 group_id=str(room_id),
@@ -1260,6 +1382,8 @@ class BilibiliAdapter:
                     "text": message_text,
                     "price": price,
                     "room_id": room_id,
+                    "user_id": user_id,
+                    "user_name": user_name,
                 },
                 ensure_ascii=True,
             ),
@@ -1282,23 +1406,8 @@ class BilibiliAdapter:
     ) -> None:
         self.tts_manager.reset_idle_timer()
         self.logger.info(
-            f"Guard: [{room_id}] {user_name}({user_id}) became {guard_name} (Level: {guard_level}) - PATCHED_VERIFIED"
+            f"Guard: [{room_id}] {user_name}({user_id}) became {guard_name} (Level: {guard_level})"
         )
-
-        # if room_id in self._live_streamer_controllers:
-        #     controller = self._live_streamer_controllers[room_id]
-        #     await controller.inject_priority_event(
-        #         PriorityEvent(
-        #             event_type="guard",
-        #             user_name=user_name,
-        #             user_id=user_id,
-        #             timestamp=timestamp,
-        #             guard_name=guard_name,
-        #             guard_level=guard_level,
-        #         )
-        #     )
-        #     self.logger.info("[LiveStreamer] Guard injected as priority event")
-        #     return  # Don't process through normal path
 
         prompt_text = f"开通了 {guard_name} ({num} 个月)"
         template_info = await self._get_template_info(room_id, user_id, prompt_text)
@@ -1311,21 +1420,24 @@ class BilibiliAdapter:
                 "membership_days": 30,
             },
         )
-        # if template_info:
-        #    additional_config = template_info.additional_config or {}
-
-        # Force mention for Guardian to ensure reaction
-        additional_config["is_mentioned"] = 1.0
+        additional_config["system_event"] = build_system_event(
+            "bilibili.guard_buy",
+            actor={"user_id": str(user_id), "name": user_name},
+            target=None,
+            data={
+                "room_id": str(room_id),
+                "guard_name": guard_name,
+                "guard_level": guard_level,
+                "num": num,
+                "price": price,
+            },
+        )
 
         message_info = BaseMessageInfo(
             platform=self.config.platform,
             message_id=str(uuid.uuid4()),
             time=timestamp,
-            user_info=UserInfo(
-                platform=self.config.platform,
-                user_id=user_id,
-                user_nickname=user_name,
-            ),
+            user_info=None,
             group_info=GroupInfo(
                 platform=self.config.platform,
                 group_id=str(room_id),
@@ -1339,7 +1451,6 @@ class BilibiliAdapter:
             additional_config=additional_config,
         )
 
-        # Priority Info for VIP
         priority_segment = Seg(
             type="priority_info",
             data={
@@ -1360,12 +1471,13 @@ class BilibiliAdapter:
                     "level": guard_level,
                     "room_id": room_id,
                     "price": price,
+                    "user_id": user_id,
+                    "user_name": user_name,
                 },
                 ensure_ascii=True,
             ),
         )
 
-        # Bypass queue for immediate core processing
         asyncio.create_task(self._send_to_nachobot(message))
 
     async def handle_incoming_guard_entry(
@@ -1383,26 +1495,26 @@ class BilibiliAdapter:
             f"GuardEntry: [{room_id}] {user_name}({user_id}) entered as {guard_label}"
         )
 
-        prompt_text = f"{guard_label} {user_name} 进入了直播间"
+        prompt_text = f"以{guard_label}身份进入了直播间"
         template_info = await self._get_template_info(room_id, user_id, prompt_text)
 
-        additional_config = self._build_live_additional_config(
-            room_id,
-            {
-                "room_id": room_id,
-                "is_mentioned": 1.0,
+        additional_config = self._build_live_additional_config(room_id)
+        additional_config["system_event"] = build_system_event(
+            "bilibili.guard_entry",
+            actor={"user_id": str(user_id), "name": user_name},
+            target=None,
+            data={
+                "room_id": str(room_id),
+                "guard_level": guard_level,
+                "guard_label": guard_label,
             },
         )
 
         message_info = BaseMessageInfo(
             platform=self.config.platform,
-            message_id="notice",
+            message_id=str(uuid.uuid4()),
             time=timestamp,
-            user_info=UserInfo(
-                platform=self.config.platform,
-                user_id=user_id,
-                user_nickname=user_name,
-            ),
+            user_info=None,
             group_info=GroupInfo(
                 platform=self.config.platform,
                 group_id=str(room_id),
@@ -1419,10 +1531,19 @@ class BilibiliAdapter:
         message = MessageBase(
             message_info=message_info,
             message_segment=Seg(type="text", data=prompt_text),
-            raw_message=None,
+            raw_message=json.dumps(
+                {
+                    "type": "guard_entry",
+                    "room_id": room_id,
+                    "user_id": user_id,
+                    "user_name": user_name,
+                    "guard_level": guard_level,
+                    "guard_label": guard_label,
+                },
+                ensure_ascii=True,
+            ),
         )
 
-        # Priority 20: same as VIP/Mention to ensure bot notices and greets
         self.event_manager.push_to_event_queue(20, message)
 
     # ========== Prompt Resolution ==========
@@ -1581,6 +1702,24 @@ class BilibiliAdapter:
     # ========== Command Handlers ==========
 
     async def _send_to_nachobot(self, message: MessageBase) -> None:
+        additional_config = getattr(message.message_info, "additional_config", None)
+        system_event = (
+            additional_config.get("system_event")
+            if isinstance(additional_config, dict)
+            else None
+        )
+        if isinstance(system_event, dict):
+            event_data = system_event.get("data")
+            if not isinstance(event_data, dict):
+                event_data = {}
+                system_event["data"] = event_data
+
+            # Core 的非 Focus 未读查询以严格的 time > last_read_time
+            # 判定。排队或延迟处理的事件必须以实际入站时刻排序，同时把
+            # 平台原始发生时间保留在 metadata 中。
+            event_data.setdefault("occurred_at", message.message_info.time)
+            message.message_info.time = time.time()
+
         self.logger.info(
             "Forward to NachoBot: platform={} group_id={} message_id={}",
             message.message_info.platform,

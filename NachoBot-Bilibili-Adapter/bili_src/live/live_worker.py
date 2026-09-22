@@ -22,6 +22,7 @@ from bili_src.core.config import (
     _proxy_dicts_to_urls,
 )
 from bili_src.core.utils import _normalize_text
+from bili_src.live.v2_models import InteractWordV2, SendGiftBroadcast
 
 if TYPE_CHECKING:
     from bili_src.api.api import BilibiliApi
@@ -47,6 +48,9 @@ class LiveRoomWorker:
         self._proxy_index: int = 0
         self._proxy_cycle: Optional[List[str]] = None
         self._authed = False
+        # GUARD_BUY and USER_TOAST_MSG_V2 may describe the same purchase.
+        # Keep a short-lived exact-event cache so one 上舰 only reaches Core once.
+        self._guard_event_seen: Dict[Tuple[str, int, int, int], float] = {}
 
     async def stop(self) -> None:
         self._stop_event.set()
@@ -483,6 +487,81 @@ class LiveRoomWorker:
             price=price,
         )
 
+    async def _handle_gift_v2_event(self, payload: Dict[str, Any], cmd: str) -> None:
+        """Handle SEND_GIFT_V2 protobuf payloads.
+
+        One V2 broadcast can contain multiple gifts in ``gift_list``.  Each item
+        is forwarded separately so the existing aggregation and priority logic
+        keeps exactly the same semantics as SEND_GIFT.
+        """
+        data = payload.get("data") or {}
+        pb_b64 = data.get("pb")
+        if not pb_b64:
+            self.logger.warning(
+                "{} missing data.pb: room={} keys={}",
+                cmd,
+                self.room_id,
+                sorted(data.keys()),
+            )
+            return
+
+        try:
+            proto = SendGiftBroadcast.from_base64(str(pb_b64))
+        except Exception as exc:
+            self.logger.opt(exception=True).warning(
+                "{} protobuf decode failed: room={} error={}",
+                cmd,
+                self.room_id,
+                exc,
+            )
+            return
+
+        if not proto.gift_list:
+            self.logger.warning(
+                "{} decoded with empty gift_list: room={} user={}({})",
+                cmd,
+                self.room_id,
+                proto.uname,
+                proto.uid,
+            )
+            return
+
+        for gift in proto.gift_list:
+            num = max(1, self._safe_get_int(gift.num, 1))
+            total_coin = self._safe_get_int(gift.total_coin, 0)
+            coin_type = str(gift.coin_type or "")
+
+            # handle_incoming_gift expects a per-item CNY price because it later
+            # multiplies price * num for aggregation/value classification.
+            price = 0
+            if coin_type == "gold":
+                if total_coin > 0:
+                    price = (total_coin // num) // 1000
+                elif gift.price:
+                    price = self._safe_get_int(gift.price, 0) // 1000
+
+            event_timestamp = self._safe_get_float(gift.timestamp, 0.0) or time.time()
+            self.logger.info(
+                "Gift V2 event processed: {} x{} from {} (Price: {} CNY, cmd: {}, gift_id={}, tid={})",
+                gift.gift_name,
+                num,
+                proto.uname,
+                price,
+                cmd,
+                gift.gift_id,
+                gift.tid,
+            )
+
+            await self.adapter.handle_incoming_gift(
+                room_id=self.room_id,
+                gift_name=str(gift.gift_name or ""),
+                num=num,
+                user_id=str(proto.uid or ""),
+                user_name=str(proto.uname or ""),
+                timestamp=event_timestamp,
+                price=price,
+            )
+
     async def _handle_superchat_event(self, payload: Dict[str, Any]) -> None:
         data = payload.get("data") or {}
         user_info = data.get("user_info") or {}
@@ -503,6 +582,29 @@ class LiveRoomWorker:
             timestamp=timestamp,
         )
 
+    def _is_duplicate_guard_event(
+        self,
+        user_id: str,
+        guard_level: int,
+        num: int,
+        start_time: int,
+    ) -> bool:
+        """Deduplicate GUARD_BUY / USER_TOAST_MSG_V2 for the same purchase."""
+        if start_time <= 0:
+            return False
+
+        now = time.monotonic()
+        expiry = now - 120.0
+        stale = [key for key, seen_at in self._guard_event_seen.items() if seen_at < expiry]
+        for key in stale:
+            self._guard_event_seen.pop(key, None)
+
+        key = (str(user_id), int(guard_level), int(num), int(start_time))
+        if key in self._guard_event_seen:
+            return True
+        self._guard_event_seen[key] = now
+        return False
+
     async def _handle_guard_event(self, payload: Dict[str, Any]) -> None:
         data = payload.get("data") or {}
         user_name = str(data.get("username") or "")
@@ -511,9 +613,20 @@ class LiveRoomWorker:
         num = self._safe_get_int(data.get("num"), 1)
         guard_level = self._safe_get_int(data.get("guard_level"), 3)
         gift_name = str(data.get("gift_name") or "舰长")
+        start_time = self._safe_get_int(data.get("start_time"), 0)
 
-        timestamp = time.time()
+        if self._is_duplicate_guard_event(user_id, guard_level, num, start_time):
+            self.logger.debug(
+                "Duplicate GUARD_BUY ignored: room={} user={} level={} num={} start_time={}",
+                self.room_id,
+                user_id,
+                guard_level,
+                num,
+                start_time,
+            )
+            return
 
+        timestamp = self._safe_get_float(start_time, 0.0) or time.time()
         price_coin = self._safe_get_int(data.get("price"), 0)
         price = price_coin // 1000
 
@@ -528,25 +641,126 @@ class LiveRoomWorker:
             price=price,
         )
 
+    async def _handle_guard_v2_event(self, payload: Dict[str, Any]) -> None:
+        """Handle USER_TOAST_MSG_V2, Bilibili's richer guard notification."""
+        data = payload.get("data") or {}
+        sender_info = data.get("sender_uinfo") or {}
+        sender_base = sender_info.get("base") or {}
+        guard_info = data.get("guard_info") or {}
+        pay_info = data.get("pay_info") or {}
+        gift_info = data.get("gift_info") or {}
+        option = data.get("option") or {}
+
+        user_id = str(sender_info.get("uid") or data.get("uid") or "")
+        user_name = str(
+            sender_base.get("name")
+            or sender_info.get("uname")
+            or data.get("username")
+            or ""
+        )
+        guard_level = self._safe_get_int(
+            guard_info.get("guard_level") or data.get("guard_level"), 3
+        )
+        num = self._safe_get_int(pay_info.get("num") or data.get("num"), 1)
+        start_time = self._safe_get_int(
+            guard_info.get("start_time") or data.get("start_time"), 0
+        )
+        source = self._safe_get_int(option.get("source"), 0)
+
+        # Current Bilibili behaviour emits source=0 for the real paid event and
+        # then source=2 for a companion/gifted duplicate.  Match the official
+        # comment stream/blivedm behaviour and ignore source=2.
+        if source == 2:
+            self.logger.debug(
+                "USER_TOAST_MSG_V2 source=2 ignored: room={} user={} level={}",
+                self.room_id,
+                user_id,
+                guard_level,
+            )
+            return
+
+        if self._is_duplicate_guard_event(user_id, guard_level, num, start_time):
+            self.logger.debug(
+                "Duplicate USER_TOAST_MSG_V2 ignored: room={} user={} level={} num={} start_time={}",
+                self.room_id,
+                user_id,
+                guard_level,
+                num,
+                start_time,
+            )
+            return
+
+        guard_name = str(
+            gift_info.get("gift_name")
+            or {1: "总督", 2: "提督", 3: "舰长"}.get(guard_level, "舰长")
+        )
+        price_coin = self._safe_get_int(pay_info.get("price") or data.get("price"), 0)
+        price = price_coin // 1000
+        timestamp = self._safe_get_float(start_time, 0.0) or time.time()
+
+        self.logger.info(
+            "Guard V2: room={} user={}({}) guard={} level={} num={} unit={} price={} source={}",
+            self.room_id,
+            user_name,
+            user_id,
+            guard_name,
+            guard_level,
+            num,
+            str(pay_info.get("unit") or ""),
+            price,
+            source,
+        )
+
+        await self.adapter.handle_incoming_guard(
+            room_id=self.room_id,
+            guard_name=guard_name,
+            num=num,
+            user_id=user_id,
+            user_name=user_name,
+            timestamp=timestamp,
+            guard_level=guard_level,
+            price=price,
+            unit=str(pay_info.get("unit") or ""),
+            source=source,
+            gift_id=self._safe_get_int(gift_info.get("gift_id"), 0),
+            toast_msg=str(data.get("toast_msg") or ""),
+        )
+
     async def _handle_event(self, payload: Dict[str, Any]) -> None:
-        cmd = payload.get("cmd") or ""
+        raw_cmd = str(payload.get("cmd") or "")
+        # Bilibili may append parameters after ':' (historically DANMU_MSG did).
+        # Dispatch on the canonical command while preserving raw_cmd in logs.
+        cmd = raw_cmd.split(":", 1)[0]
         if cmd == "HEARTBEAT_REPLY":
             return
 
-        self.logger.debug(f"Received command: {cmd}")
+        self.logger.debug("Received command: {}", raw_cmd)
 
         if cmd.startswith("DANMU_MSG"):
             await self._handle_danmu_event(payload)
-        elif cmd == "SEND_GIFT":
+        elif cmd in {"SEND_GIFT", "COMBO_SEND"}:
             await self._handle_gift_event(payload, cmd)
-        elif cmd == "COMBO_SEND":
-            await self._handle_gift_event(payload, cmd)
+        elif cmd == "SEND_GIFT_V2":
+            await self._handle_gift_v2_event(payload, cmd)
         elif cmd == "SUPER_CHAT_MESSAGE":
             await self._handle_superchat_event(payload)
         elif cmd == "GUARD_BUY":
             await self._handle_guard_event(payload)
+        elif cmd == "USER_TOAST_MSG_V2":
+            await self._handle_guard_v2_event(payload)
         elif cmd.startswith("INTERACT_WORD"):
             await self._handle_interact_word_event(payload, cmd)
+        elif cmd.endswith("_V2"):
+            # Do not silently lose newly rolled-out V2 protocols.  One log line
+            # is enough to expose the command/data shape for the next schema update.
+            data = payload.get("data")
+            keys = sorted(data.keys()) if isinstance(data, dict) else []
+            self.logger.warning(
+                "Unhandled Bilibili V2 command: room={} cmd={} data_keys={}",
+                self.room_id,
+                raw_cmd,
+                keys,
+            )
 
     async def _handle_interact_word_event(self, payload: Dict[str, Any], cmd: str = "") -> None:
         """Handle INTERACT_WORD / INTERACT_WORD_V2 events.
@@ -559,13 +773,20 @@ class LiveRoomWorker:
 
         if pb_b64:
             # --- V2 protobuf path ---
-            parsed = self._decode_interact_word_pb(pb_b64)
-            if parsed is None:
-                self.logger.warning(
-                    "INTERACT_WORD_V2 protobuf decode failed: room={}", self.room_id
+            try:
+                proto = InteractWordV2.from_base64(str(pb_b64))
+            except Exception as exc:
+                self.logger.opt(exception=True).warning(
+                    "INTERACT_WORD_V2 protobuf decode failed: room={} error={}",
+                    self.room_id,
+                    exc,
                 )
                 return
-            uid, uname, msg_type, privilege_type, ts = parsed
+            uid = proto.uid
+            uname = proto.uname
+            msg_type = proto.msg_type
+            privilege_type = proto.privilege_type
+            ts = proto.timestamp
         else:
             # --- V1 JSON fallback ---
             uid = str(data.get("uid") or "")

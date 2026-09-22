@@ -62,6 +62,20 @@ class WebUITTSRequest(BaseModel):
 
 
 class TTSPipeline:
+    """8070 message relay plus TTS/emotion service.
+
+    Platform adapters connect here instead of competing with this relay for
+    Core's single connection per platform.  Besides ordinary MessageBase
+    traffic, platform capability requests and responses must pass through
+    this hop unchanged.
+    """
+
+    _CORE_TO_PLATFORM_CUSTOM_TYPES = ("platform_api_request",)
+    _PLATFORM_TO_CORE_CUSTOM_TYPES = (
+        "platform_api_response",
+        "platform_status",
+        "message_id_echo",
+    )
 
     def __init__(
         self,
@@ -104,6 +118,16 @@ class TTSPipeline:
 
         self.server.register_message_handler(self.server_handle)
         self.router.register_class_handler(self.client_handle)
+        for message_type in self._CORE_TO_PLATFORM_CUSTOM_TYPES:
+            self.router.register_custom_message_handler(
+                message_type,
+                self._core_custom_handler(message_type),
+            )
+        for message_type in self._PLATFORM_TO_CORE_CUSTOM_TYPES:
+            self.server.register_custom_message_handler(
+                message_type,
+                self._platform_custom_handler(message_type),
+            )
 
         # 按群/用户分组的文本缓冲队列和处理任务
         self.text_buffer_dict: Dict[str, asyncio.Queue[Tuple[str, MessageBase]]] = {}
@@ -265,6 +289,40 @@ class TTSPipeline:
         ):
             message.message_info.format_info.accept_format.append("tts_text")
         await self.router.send_message(message)
+
+    @staticmethod
+    def _custom_message_parts(message_data: dict, message_type: str) -> tuple[str, dict]:
+        content = message_data.get("content")
+        if not isinstance(content, dict):
+            raise ValueError(f"{message_type} content 必须是字典")
+        platform = str(message_data.get("platform") or content.get("platform") or "").strip()
+        if not platform:
+            raise ValueError(f"{message_type} 缺少 platform")
+        return platform, content
+
+    def _core_custom_handler(self, message_type: str):
+        async def forward(message_data: dict) -> None:
+            try:
+                platform, content = self._custom_message_parts(message_data, message_type)
+                sent = await self.server.send_custom_message(platform, message_type, content)
+                if not sent:
+                    logger.warning(f"平台能力下行转发失败: platform={platform} type={message_type}")
+            except Exception as exc:
+                logger.warning(f"平台能力下行转发异常: type={message_type} error={exc}")
+
+        return forward
+
+    def _platform_custom_handler(self, message_type: str):
+        async def forward(message_data: dict) -> None:
+            try:
+                platform, content = self._custom_message_parts(message_data, message_type)
+                sent = await self.router.send_custom_message(platform, message_type, content)
+                if not sent:
+                    logger.warning(f"平台能力上行转发失败: platform={platform} type={message_type}")
+            except Exception as exc:
+                logger.warning(f"平台能力上行转发异常: type={message_type} error={exc}")
+
+        return forward
 
     def process_seg(self, seg: Seg) -> Tuple[str, Optional[str]]:
         """处理消息段，提取文本内容与显式语种"""
@@ -601,7 +659,13 @@ class TTSPipeline:
 
 
 async def main():
-    """主程序入口"""
+    """Run the 8070 platform relay and TTS/emotion service.
+
+    Platform adapters connect to this service, which keeps exactly one
+    upstream connection per platform to Core 8000 and transparently carries
+    ordinary and platform capability messages in both directions.
+    """
+
     config_path = Path(__file__).parent / "configs" / "base.toml"
     pipeline = TTSPipeline(
         str(config_path),

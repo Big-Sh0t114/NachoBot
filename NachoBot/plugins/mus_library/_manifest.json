@@ -10,7 +10,7 @@
     "music",
     "audio",
     "silk",
-    "onebot",
+    "platform-media",
     "command"
   ],
   "categories": [
@@ -35,7 +35,7 @@
     ],
     "features": [
       "内置曲库点歌与随机播放",
-      "OneBot 语音/文件发送",
+      "核心平台语音/文件发送",
       "可选 SILK 编码与磁盘缓存"
     ]
   }

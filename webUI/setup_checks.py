@@ -1,6 +1,7 @@
 """Environment and external-path checks for the WebUI setup wizard."""
 
 import os
+import json
 import socket
 import subprocess
 import shutil
@@ -31,6 +32,7 @@ TEMPLATE_MAP: dict[str, str] = {
     "NachoBot/template/mcp_config_template.toml": "NachoBot/config/mcp_config.toml",
     "NachoBot/template/template.env": "NachoBot/.env",
     "NachoBot-Napcat-Adapter/template/template_config.toml": "NachoBot-Napcat-Adapter/config.toml",
+    "NachoBot-SnowLuma-Adapter/template_config.toml": "NachoBot-SnowLuma-Adapter/config.toml",
     "NachoBot-Multimodal-Adapter/template_configs/base_template.toml": "NachoBot-Multimodal-Adapter/configs/base.toml",
     "NachoBot-Multimodal-Adapter/template_configs/gpt-sovits_template.toml": "NachoBot-Multimodal-Adapter/configs/gpt-sovits.toml",
     "NachoBot-Multimodal-Adapter/template_configs/vox_template.toml": "NachoBot-Multimodal-Adapter/configs/vox.toml",
@@ -49,7 +51,16 @@ DEFAULT_PORTS: dict[str, int] = {
     "VLM / ASR API": 9874,
     "Koishi": 5140,
     "WebUI": 8088,
+    # SnowLuma is a managed QQ backend.  Keep its two endpoints visible in
+    # setup checks even when the optional distribution has not been deployed
+    # yet; the defaults are the upstream 1.14.x defaults.
+    "SnowLuma WebUI": 5099,
+    "SnowLuma OneBot WS": 3001,
 }
+
+# Keep official component links in one place so setup status and path cards
+# cannot drift from the launcher guidance.
+NAPCAT_RELEASE_URL = "https://github.com/NapNeko/NapCatQQ/releases"
 
 
 # =========================================================================
@@ -61,6 +72,31 @@ class EnvironmentChecker:
     @staticmethod
     def check_all() -> dict[str, Any]:
         """Run all environment checks and return results."""
+        try:
+            from .qq_adapter_selector import QQAdapterSelectorError, read_qq_adapter
+        except ImportError:  # pragma: no cover - script context
+            from qq_adapter_selector import QQAdapterSelectorError, read_qq_adapter
+
+        env_path = ROOT_DIR / "NachoBot" / ".env"
+        try:
+            selected_qq = read_qq_adapter(env_path)
+            selector_error = None
+        except QQAdapterSelectorError as exc:
+            # Never return the raw .env value in an error.  The selector parser
+            # already emits sanitized diagnostics, but keep this boundary
+            # defensive for future parser changes.
+            selected_qq = None
+            selector_error = "QQ 适配器选择无效"
+
+        try:
+            from .snowluma_manager import SnowLumaManager
+        except ImportError:  # pragma: no cover - script context
+            from snowluma_manager import SnowLumaManager
+
+        snowluma = SnowLumaManager.installation_status(ROOT_DIR, "snowluma")
+        if selector_error:
+            snowluma["selected"] = selected_qq
+            snowluma["selector_error"] = selector_error
         return {
             "python": EnvironmentChecker.check_python(),
             "git": EnvironmentChecker.check_git(),
@@ -69,6 +105,14 @@ class EnvironmentChecker:
             "gpu": EnvironmentChecker.check_gpu(),
             "ports": EnvironmentChecker.check_ports(),
             "configs": EnvironmentChecker.check_configs(),
+            # This is intentionally additive: existing setup consumers retain
+            # all prior keys while newer consumers can gate QQ deployment on
+            # the selected backend and its component status.
+            "qq_adapter": {
+                "selected": selected_qq,
+                "error": selector_error,
+            },
+            "snowluma": snowluma,
         }
 
     @staticmethod
@@ -341,6 +385,41 @@ class EnvironmentChecker:
             except Exception:
                 pass
 
+        # SnowLuma runtime WebUI (config/runtime.json) and OneBot WS endpoint
+        # (the selected adapter's config.toml).  These are distinct listeners:
+        # the bridge itself does not claim port 3001.  Resolve the runtime once
+        # so versioned release directories are handled identically to launch.
+        try:
+            from .snowluma_locator import resolve_snowluma_runtime
+        except ImportError:  # pragma: no cover - script context
+            from snowluma_locator import resolve_snowluma_runtime
+        try:
+            runtime_path = resolve_snowluma_runtime(ROOT_DIR).path / "config" / "runtime.json"
+        except Exception:
+            runtime_path = None
+        if runtime_path is not None and runtime_path.exists():
+            try:
+                runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
+                if isinstance(runtime, dict):
+                    value = runtime.get("webuiPort", ports["SnowLuma WebUI"])
+                    port = int(value)
+                    if 1 <= port <= 65535:
+                        ports["SnowLuma WebUI"] = port
+            except Exception:
+                pass
+
+        snow_adapter_path = ROOT_DIR / "NachoBot-SnowLuma-Adapter" / "config.toml"
+        if snow_adapter_path.exists():
+            try:
+                snow = tomllib.loads(snow_adapter_path.read_text(encoding="utf-8"))
+                section = snow.get("snowluma", {})
+                value = section.get("port", ports["SnowLuma OneBot WS"])
+                port = int(value)
+                if 1 <= port <= 65535:
+                    ports["SnowLuma OneBot WS"] = port
+            except Exception:
+                pass
+
         return ports
 
     @staticmethod
@@ -561,8 +640,20 @@ class PathVerifier:
         "napcat": {
             "name": "NapCat Shell",
             "hint": "NapCat Shell 安装目录（包含 launcher-user.bat）",
-            "download_url": "https://github.com/NapNeko/NapCatQQ/releases",
+            "download_url": NAPCAT_RELEASE_URL,
             "default_rel": "NapCat.Shell",
+        },
+        "snowluma": {
+            "name": "SnowLuma",
+            "hint": "项目根目录下自动发现唯一 SnowLuma 1.14.x Runtime 与适配器",
+            "download_url": "https://github.com/SnowLuma/SnowLuma/releases/latest",
+            "default_rel": None,
+        },
+        "snowluma_runtime": {
+            "name": "SnowLuma Runtime",
+            "hint": "项目根目录下自动发现唯一 SnowLuma 1.14.x Runtime",
+            "download_url": "https://github.com/SnowLuma/SnowLuma/releases/latest",
+            "default_rel": None,
         },
         "sovits": {
             "name": "GPT-SoVITS",
@@ -613,6 +704,45 @@ class PathVerifier:
             }
 
         download_url = info["download_url"]
+
+        # SnowLuma's managed runtime is deliberately rooted at the repository
+        # (the setup wizard must not accept an arbitrary executable directory).
+        if check_type in {"snowluma", "snowluma_runtime"}:
+            try:
+                from .snowluma_manager import SnowLumaManager
+            except ImportError:  # pragma: no cover - script context
+                from snowluma_manager import SnowLumaManager
+            selected = "snowluma" if check_type == "snowluma" else "snowluma"
+            status = SnowLumaManager.installation_status(ROOT_DIR, selected)
+            if check_type == "snowluma_runtime":
+                runtime_name = str(status.get("runtime_name") or "")
+                runtime_prefix = f"{runtime_name}/" if runtime_name else ""
+                missing = [
+                    item
+                    for item in status["missing"]
+                    if not runtime_prefix or item.startswith(runtime_prefix)
+                ]
+                status = {
+                    **status,
+                    "installed": not missing,
+                    "missing": missing,
+                }
+            if status["installed"]:
+                return {
+                    "valid": True,
+                    "message": (
+                        f"✅ SnowLuma 运行时与组件已找到"
+                        + (f"（{status.get('runtime_name')}）" if status.get("runtime_name") else "")
+                    ),
+                    "download_url": "",
+                    "status": status,
+                }
+            return {
+                "valid": False,
+                "message": "❌ SnowLuma 组件缺失，请重新部署 SnowLuma",
+                "download_url": download_url,
+                "status": status,
+            }
 
         # -- Node.js: check via PATH, no user path needed --
         if check_type == "nodejs":

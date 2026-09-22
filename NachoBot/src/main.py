@@ -137,6 +137,15 @@ class MainSystem:
         # 将bot.py中的chat_bot.message_process消息处理函数注册到api.py的消息处理基类中
         self.app.register_message_handler(chat_bot.message_process)
         self.app.register_custom_message_handler("message_id_echo", chat_bot.echo_message_process)
+        from src.plugin_system.apis.platform_api import (
+            PLATFORM_API_RESPONSE_TYPE,
+            handle_platform_api_response,
+        )
+
+        self.app.register_custom_message_handler(
+            PLATFORM_API_RESPONSE_TYPE,
+            handle_platform_api_response,
+        )
 
         await check_and_run_migrations()
 

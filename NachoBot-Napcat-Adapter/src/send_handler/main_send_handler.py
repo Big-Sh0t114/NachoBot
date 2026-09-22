@@ -73,7 +73,7 @@ class SendHandler:
             logger.critical("现在暂时不支持解析此回复！")
             return None
 
-        if group_info and user_info:
+        if group_info:
             logger.debug("发送群聊消息")
             target_id = group_info.group_id
             action = "send_group_msg"

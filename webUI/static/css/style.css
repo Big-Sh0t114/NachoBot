@@ -886,6 +886,216 @@ body {
     margin-top: auto;
 }
 
+/* QQ backend selector and managed SnowLuma instance controls */
+.qq-launch-body {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.qq-adapter-selector-row,
+.snowluma-instance-toolbar,
+.qq-component-status-heading {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.qq-adapter-selector-row {
+    justify-content: space-between;
+}
+
+.qq-adapter-selector-row .form-select {
+    min-width: 150px;
+}
+
+.qq-component-status {
+    border-radius: var(--radius-md);
+    padding: 12px 14px;
+    border: 1px solid var(--border-light);
+    background: rgba(15, 118, 110, 0.05);
+}
+
+.qq-component-status.missing {
+    border-color: rgba(245, 158, 11, 0.35);
+    background: rgba(245, 158, 11, 0.08);
+}
+
+.qq-component-status-heading {
+    justify-content: space-between;
+    color: var(--text-primary);
+}
+
+.qq-component-status-heading span,
+.qq-component-missing,
+.qq-component-guidance {
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+}
+
+.qq-component-missing,
+.qq-component-guidance {
+    margin-top: 6px;
+}
+
+.qq-component-status .btn-download {
+    display: inline-block;
+    margin-top: 8px;
+}
+
+.snowluma-instance-panel {
+    border-top: 1px solid var(--border-light);
+    padding-top: 12px;
+}
+
+.snowluma-instance-toolbar {
+    flex-wrap: wrap;
+}
+
+.snowluma-instance-toolbar label {
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+    white-space: nowrap;
+}
+
+.snowluma-instance-toolbar .form-input {
+    flex: 1 1 180px;
+    min-width: 140px;
+}
+
+.snowluma-refresh-button {
+    min-height: 34px;
+    font-weight: 650;
+}
+
+.snowluma-process-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.snowluma-process-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 10px 12px;
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-md);
+    background: var(--bg-secondary);
+}
+
+.snowluma-process-main {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+}
+
+.snowluma-process-main strong {
+    color: var(--text-primary);
+}
+
+.snowluma-process-actions {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
+.snowluma-process-empty,
+.snowluma-process-error {
+    margin-top: 10px;
+    padding: 8px 10px;
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    background: rgba(100, 116, 139, 0.08);
+}
+
+.snowluma-process-error {
+    color: var(--error);
+    background: rgba(239, 68, 68, 0.07);
+}
+
+/* SnowLuma agreement gate: document text is inserted with textContent by
+   launcher.js and remains scrollable without becoming executable markup. */
+.snowluma-agreement-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1.25rem;
+    background: rgba(15, 23, 42, 0.62);
+}
+
+.snowluma-agreement-dialog {
+    display: flex;
+    flex-direction: column;
+    width: min(860px, 100%);
+    max-height: min(88vh, 920px);
+    padding: 1.25rem;
+    overflow: hidden;
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-lg);
+    background: var(--bg-primary);
+    box-shadow: 0 24px 70px rgba(15, 23, 42, 0.28);
+}
+
+.snowluma-agreement-title {
+    margin: 0;
+    font-size: 1.12rem;
+}
+
+.snowluma-agreement-version,
+.snowluma-agreement-metadata {
+    margin: 0.35rem 0;
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+}
+
+.snowluma-agreement-documents {
+    flex: 1 1 auto;
+    min-height: 0;
+    margin-top: 0.75rem;
+    overflow: auto;
+    padding-right: 0.4rem;
+}
+
+.snowluma-agreement-document {
+    margin: 0 0 1rem;
+    padding: 0.9rem;
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-md);
+    background: var(--bg-secondary);
+}
+
+.snowluma-agreement-document h3 {
+    margin: 0;
+    font-size: 0.98rem;
+}
+
+.snowluma-agreement-text {
+    max-height: 28rem;
+    margin: 0.55rem 0 0;
+    overflow: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font: inherit;
+    line-height: 1.5;
+}
+
+.snowluma-agreement-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.6rem;
+    padding-top: 1rem;
+}
+
 /* ===================================================================
    Terminal Tab
    =================================================================== */
@@ -1042,6 +1252,7 @@ body {
 .log-tag.nachobot       { background: #3b82f6; color: #fff; }
 .log-tag.napcat_adapter  { background: #8b5cf6; color: #fff; }
 .log-tag.napcat_shell    { background: #6366f1; color: #fff; }
+.log-tag.snowluma_adapter { background: #0f766e; color: #fff; }
 .log-tag.tts_engine_full,
 .log-tag.tts_engine_lite { background: #f59e0b; color: #1e293b; }
 .log-tag.tts_adapter_full,

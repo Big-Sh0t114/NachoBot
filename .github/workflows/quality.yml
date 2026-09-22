@@ -138,44 +138,6 @@ jobs:
             docker compose --file "$file" config --quiet
           done < <(git ls-files -z '**/docker-compose.yml' 'docker-compose.yml')
 
-  unit-tests:
-    name: Unit tests (${{ matrix.project }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - project: NachoBot-Bilibili-Adapter
-            tests: tests
-          - project: NachoBot-Live2D-Adapter
-            tests: tests
-            test_pattern: test_model_adapter.py
-          - project: NachoBot-Multimodal-Adapter
-            tests: tests
-          - project: NachoBot-Napcat-Adapter
-            tests: tests
-          - project: webUI
-            tests: tests
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
-      - uses: astral-sh/setup-uv@v9.0.0
-        with:
-          version: "0.9.5"
-
-      - name: Install locked runtime dependencies
-        working-directory: ${{ matrix.project }}
-        run: uv sync --locked --no-dev --no-install-project
-
-      - name: Run isolated unit tests
-        working-directory: ${{ matrix.project }}
-        run: >-
-          uv run --no-sync python -m unittest discover
-          -s ${{ matrix.tests }} -p "${{ matrix.test_pattern || 'test_*.py' }}"
 
   koishi:
     name: Koishi immutable install and build

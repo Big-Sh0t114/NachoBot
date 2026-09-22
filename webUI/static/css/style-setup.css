@@ -753,6 +753,13 @@
     white-space: nowrap;
 }
 
+/* High-salience refresh/verification controls retain the solid primary
+   treatment on the setup wizard instead of blending into outline actions. */
+.setup-refresh-button {
+    min-height: 34px;
+    font-weight: 650;
+}
+
 .path-check-result {
     font-size: 0.85rem;
     min-height: 1.2em;
