@@ -43,7 +43,7 @@ _QQ_RE = re.compile(r"^[1-9][0-9]{0,19}$")
 
 ACCEPT_FORMAT = [
     "text", "image", "emoji", "reply", "voice", "tts_text", "command", "voiceurl",
-    "music", "videourl", "file", "imageurl", "forward", "video", "face",
+    "voicefile", "music", "videourl", "videofile", "file", "imageurl", "forward", "video", "face",
 ]
 VISUAL_TYPES = {"image", "emoji", "video"}
 
@@ -1161,9 +1161,13 @@ class SnowLumaBridge:
                 logger.warning("SnowLuma outbound segment degraded kind=voice reason=tts_disabled")
             elif kind == "voiceurl" and data:
                 out.append({"type": "record", "data": {"file": self._mapping_ref(data)}})
+            elif kind == "voicefile" and data:
+                out.append({"type": "record", "data": {"file": self._mapping_ref(data)}})
             elif kind == "video" and data:
                 out.append({"type": "video", "data": {"file": self._file_ref(data)}})
             elif kind == "videourl" and data:
+                out.append({"type": "video", "data": {"file": self._mapping_ref(data)}})
+            elif kind == "videofile" and data:
                 out.append({"type": "video", "data": {"file": self._mapping_ref(data)}})
             elif kind == "music" and data:
                 out.append({"type": "music", "data": {"type": "163", "id": str(data)}})
