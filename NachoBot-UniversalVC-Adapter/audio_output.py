@@ -1,5 +1,5 @@
 """
-Audio Output Module - Plays TTS audio to a virtual audio cable device.
+Audio Output Module - Plays Core-produced audio to a virtual audio cable device.
 
 Uses sounddevice to output WAV audio files to a specified virtual audio
 cable (e.g., VB-Audio Virtual Cable), allowing the bot's voice to be
@@ -250,4 +250,3 @@ class AudioOutput:
             self.logger.error(f"WAV file not found: {wav_path}")
         except Exception as e:
             self.logger.exception(f"Error playing WAV: {e}")
-

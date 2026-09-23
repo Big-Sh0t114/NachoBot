@@ -7,8 +7,6 @@ from typing import Any, Optional
 from src.common.logger import get_logger
 from src.common.database.database import db
 from src.common.database.database_model import ImageDescriptions
-from src.config.config import model_config
-from src.llm_models.utils_model import LLMRequest
 from src.chat.utils.visual_policy import (
     CORE_GENERIC_VIDEO_PROMPT,
     resolve_visual_task_policy,
@@ -30,7 +28,9 @@ class VideoManager:
     def __init__(self):
         if not self._initialized:
             os.makedirs(os.path.join(self.VIDEO_DIR, "video"), exist_ok=True)
-            self.vlm = LLMRequest(model_set=model_config.model_task_config.video, request_type="video")
+            # Video understanding is a Core facade operation; model selection
+            # belongs to the local Multimodal runtime or Core remote provider.
+            self.vlm = None
             try:
                 db.connect(reuse_if_open=True)
                 db.create_tables([ImageDescriptions], safe=True)
@@ -47,7 +47,10 @@ class VideoManager:
         if path and os.path.exists(path):
             try:
                 with open(path, "rb") as f:
-                    return f.read()
+                    data = f.read(64 * 1024 * 1024 + 1)
+                if len(data) > 64 * 1024 * 1024:
+                    raise ValueError("video exceeds the 64MB perception bound")
+                return data
             except Exception as e:
                 logger.error(f"读取本地视频失败: {e}")
 
@@ -59,6 +62,8 @@ class VideoManager:
                 async with httpx.AsyncClient() as client:
                     resp = await client.get(url, timeout=60)
                     if resp.status_code == 200:
+                        if len(resp.content) > 64 * 1024 * 1024:
+                            raise ValueError("video exceeds the 64MB perception bound")
                         return resp.content
             except Exception as e:
                 logger.error(f"下载视频失败: {e}")
@@ -82,7 +87,7 @@ class VideoManager:
                 "video",
                 default_prompt=CORE_GENERIC_VIDEO_PROMPT,
                 default_temperature=0.4,
-                default_max_tokens=int(getattr(self.vlm.model_for_task, "max_tokens", 800)),
+                default_max_tokens=800,
             )
 
             # 检查是否有缓存
@@ -97,14 +102,22 @@ class VideoManager:
             video_base64 = base64.b64encode(video_bytes).decode("utf-8")
 
             # 请注意：由于不支持任意视频格式，一律先标注为 mp4 交由远端处理
-            description, _ = await self.vlm.generate_response_for_video(
+            from src.multimodal import get_multimodal_router
+
+            result = await get_multimodal_router().understand_video(
+                video_base64,
                 prompt=policy.prompt,
-                video_base64=video_base64,
-                video_format="mp4",
-                temperature=policy.temperature,
-                max_tokens=policy.max_tokens,
-                extra_params=dict(policy.extra_params),
+                media_format="mp4",
+                metadata={
+                    "temperature": policy.temperature,
+                    "max_tokens": policy.max_tokens,
+                    "extra_params": dict(policy.extra_params),
+                },
             )
+            description = result.text
+
+            if result.degraded:
+                return description
 
             if not description:
                 logger.warning("VLM未能生成视频描述")

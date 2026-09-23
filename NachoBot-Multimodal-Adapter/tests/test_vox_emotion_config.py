@@ -1,6 +1,9 @@
 import sys
+import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -15,7 +18,7 @@ class VoxEmotionConfigTests(unittest.TestCase):
             {
                 "tts": {
                     "host": "127.0.0.1",
-                    "port": 9880,
+                    "port": 9881,
                     "model_dir": "",
                     "models": {
                         "presets": {
@@ -68,7 +71,7 @@ class VoxEmotionConfigTests(unittest.TestCase):
             {
                 "tts": {
                     "host": "127.0.0.1",
-                    "port": 9880,
+                    "port": 9881,
                     "model_dir": "",
                     "models": {"presets": {"default": {"name": "default"}}},
                 },
@@ -85,6 +88,48 @@ class VoxEmotionConfigTests(unittest.TestCase):
             "tabularisai/multilingual-emotion-classification",
         )
         self.assertEqual(config.emotion.label_preset_map, {})
+
+    def test_vox_constructs_and_eagerly_loads_enabled_classifier(self) -> None:
+        from nachobot_multimodal.tts.backends.Vox.tts_model import TTSModel
+
+        created = []
+
+        class FakeClassifier:
+            loaded = False
+
+            def __init__(self, **kwargs):
+                created.append(kwargs)
+
+            def load(self):
+                self.loaded = True
+
+        fake_module = types.ModuleType("nachobot_multimodal.utils.emotion_classifier")
+        fake_module.EmotionClassifier = FakeClassifier
+        with mock.patch.dict(sys.modules, {fake_module.__name__: fake_module}):
+            with tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "vox.toml"
+                path.write_text(
+                    """
+[tts]
+host = "127.0.0.1"
+port = 9881
+model_dir = ""
+[tts.models.presets.default]
+name = "default"
+[pipeline]
+default_preset = "default"
+[pipeline.platform_presets]
+[emotion]
+enabled = true
+classifier_model = "fake-model"
+classifier_device = "cpu"
+use_fp16 = false
+""",
+                    encoding="utf-8",
+                )
+                model = TTSModel(config_path=path)
+        self.assertEqual(created, [{"model_name": "fake-model", "device": "cpu", "use_fp16": False}])
+        self.assertTrue(model.emotion_ready)
 
 
 if __name__ == "__main__":

@@ -46,8 +46,8 @@ TEMPLATE_MAP: dict[str, str] = {
 DEFAULT_PORTS: dict[str, int] = {
     "NachoBot Core": 8000,
     "Napcat Adapter": 8095,
-    "Multimodal Adapter": 8070,
-    "TTS Engine": 9880,
+    # One public TTS Runtime; its backend listener is private to that process.
+    "TTS Runtime": 9880,
     "VLM / ASR API": 9874,
     "Koishi": 5140,
     "WebUI": 8088,
@@ -341,23 +341,13 @@ class EnvironmentChecker:
             except Exception:
                 pass
 
-        # Multimodal relay and selected TTS engine
+        # The public TTS Runtime always listens on 9880. Backend-specific
+        # listeners are private to the supervised process and are not probed.
         multimodal_dir = ROOT_DIR / "NachoBot-Multimodal-Adapter"
         base_path = multimodal_dir / "configs" / "base.toml"
         if base_path.exists():
             try:
-                base = tomllib.loads(base_path.read_text(encoding="utf-8"))
-                ports["Multimodal Adapter"] = int(
-                    base.get("server", {}).get("port", ports["Multimodal Adapter"])
-                )
-                enabled = base.get("enabled_tts", {}).get("enabled", ["GPT_Sovits"])
-                engine_config = "vox.toml" if isinstance(enabled, list) and "Vox" in enabled else "gpt-sovits.toml"
-                engine_path = multimodal_dir / "configs" / engine_config
-                if engine_path.exists():
-                    engine = tomllib.loads(engine_path.read_text(encoding="utf-8"))
-                    ports["TTS Engine"] = int(
-                        engine.get("tts", {}).get("port", ports["TTS Engine"])
-                    )
+                tomllib.loads(base_path.read_text(encoding="utf-8"))
             except Exception:
                 pass
 
@@ -366,9 +356,10 @@ class EnvironmentChecker:
         if perception_path.exists():
             try:
                 perception = tomllib.loads(perception_path.read_text(encoding="utf-8"))
-                ports["VLM / ASR API"] = int(
+                runtime_port = int(
                     perception.get("perception", {}).get("port", ports["VLM / ASR API"])
                 )
+                ports["VLM / ASR API"] = runtime_port
             except Exception:
                 pass
 

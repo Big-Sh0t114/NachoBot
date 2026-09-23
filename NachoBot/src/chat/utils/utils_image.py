@@ -44,7 +44,10 @@ class ImageManager:
             self._ensure_image_dir()
 
             self._initialized = True
-            self.vlm = LLMRequest(model_set=model_config.model_task_config.vlm, request_type="image")
+            # Image perception is routed by Core.  Keep the attribute as a
+            # compatibility marker for callers that inspect ImageManager, but
+            # do not instantiate a provider/model in Core-owned utilities.
+            self.vlm = None
 
             try:
                 db.connect(reuse_if_open=True)
@@ -135,7 +138,7 @@ class ImageManager:
                 default_prompt=CORE_GENERIC_EMOJI_PROMPT,
                 default_gif_prompt=CORE_GENERIC_GIF_EMOJI_PROMPT,
                 default_temperature=0.4,
-                default_max_tokens=int(getattr(self.vlm.model_for_task, "max_tokens", 800)),
+                default_max_tokens=800,
             )
 
             # 优先使用EmojiManager查询已注册表情包的描述
@@ -168,23 +171,37 @@ class ImageManager:
                     logger.warning("GIF转换失败，无法获取描述")
                     return "[表情包(GIF处理失败)]"
                 vlm_prompt = policy.gif_prompt or policy.prompt
-                detailed_description, _ = await self.vlm.generate_response_for_image(
-                    vlm_prompt,
+                from src.multimodal import get_multimodal_router
+
+                perception = await get_multimodal_router().describe_image(
                     image_base64_processed,
-                    "jpg",
-                    temperature=policy.temperature,
-                    max_tokens=policy.max_tokens,
-                    extra_params=dict(policy.extra_params),
+                    media_format="jpg",
+                    prompt=vlm_prompt,
+                    metadata={
+                        "temperature": policy.temperature,
+                        "max_tokens": policy.max_tokens,
+                        "extra_params": dict(policy.extra_params),
+                    },
                 )
+                if perception.degraded:
+                    return perception.text or "[表情包(VLM描述生成失败)]"
+                detailed_description = perception.text
             else:
-                detailed_description, _ = await self.vlm.generate_response_for_image(
-                    policy.prompt,
+                from src.multimodal import get_multimodal_router
+
+                perception = await get_multimodal_router().describe_image(
                     image_base64,
-                    image_format,
-                    temperature=policy.temperature,
-                    max_tokens=policy.max_tokens,
-                    extra_params=dict(policy.extra_params),
+                    media_format=image_format,
+                    prompt=policy.prompt,
+                    metadata={
+                        "temperature": policy.temperature,
+                        "max_tokens": policy.max_tokens,
+                        "extra_params": dict(policy.extra_params),
+                    },
                 )
+                if perception.degraded:
+                    return perception.text or "[表情包(VLM描述生成失败)]"
+                detailed_description = perception.text
 
             if detailed_description is None:
                 logger.warning("VLM未能生成表情包详细描述")
@@ -323,14 +340,21 @@ class ImageManager:
             # 调用AI获取描述
             image_format = Image.open(io.BytesIO(image_bytes)).format.lower()  # type: ignore
             logger.info(f"[VLM调用] 为图片生成新描述 (Hash: {image_hash[:8]}...)")
-            description, _ = await self.vlm.generate_response_for_image(
-                policy.prompt,
+            from src.multimodal import get_multimodal_router
+
+            perception = await get_multimodal_router().describe_image(
                 image_base64,
-                image_format,
-                temperature=policy.temperature,
-                max_tokens=policy.max_tokens,
-                extra_params=dict(policy.extra_params),
+                media_format=image_format,
+                prompt=policy.prompt,
+                metadata={
+                    "temperature": policy.temperature,
+                    "max_tokens": policy.max_tokens,
+                    "extra_params": dict(policy.extra_params),
+                },
             )
+            if perception.degraded:
+                return perception.text or "[图片(描述生成失败)]"
+            description = perception.text
 
             if description is None:
                 logger.warning("AI未能生成图片描述")
@@ -664,14 +688,22 @@ class ImageManager:
             image_format = Image.open(io.BytesIO(image_bytes)).format.lower()  # type: ignore
 
             # 获取VLM描述
-            description, _ = await self.vlm.generate_response_for_image(
-                policy.prompt,
+            from src.multimodal import get_multimodal_router
+
+            perception = await get_multimodal_router().describe_image(
                 image_base64,
-                image_format,
-                temperature=policy.temperature,
-                max_tokens=policy.max_tokens,
-                extra_params=dict(policy.extra_params),
+                media_format=image_format,
+                prompt=policy.prompt,
+                metadata={
+                    "temperature": policy.temperature,
+                    "max_tokens": policy.max_tokens,
+                    "extra_params": dict(policy.extra_params),
+                },
             )
+            if perception.degraded:
+                logger.warning("VLM perception degraded; do not cache a failure marker")
+                return
+            description = perception.text
 
             if description is None:
                 logger.warning("VLM未能生成图片描述")

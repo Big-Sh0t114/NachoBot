@@ -1,6 +1,7 @@
 """Florence-2-large VLM module for image captioning.
 
-Lazily loads the Transformers-native Florence-2-large model on first call.
+The perception service explicitly loads the Transformers-native Florence-2-large
+model during startup. Inference refuses to perform a first-request load.
 Independent of any TTS plugin — reads device config from perception.toml.
 """
 
@@ -27,7 +28,7 @@ FLORENCE_DETAILED_CAPTION_TASK = "<MORE_DETAILED_CAPTION>"
 FLORENCE_DETAILED_CAPTION_MAX_NEW_TOKENS = 256
 FLORENCE_DETAILED_CAPTION_NUM_BEAMS = 3
 
-# ── Global model state (lazy-loaded) ──────────────────────────────────
+# ── Global model state (startup-loaded) ───────────────────────────────
 _model = None
 _processor = None
 _device = None
@@ -209,7 +210,8 @@ def caption_image(
     import torch
     from PIL import Image
 
-    load_model()
+    if not _loaded:
+        raise RuntimeError("Florence-2 model is not preloaded")
 
     task = str(task or "").strip()
     if not task:

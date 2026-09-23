@@ -18,8 +18,8 @@ RUN uv sync --locked --no-dev --no-install-project
 COPY . .
 COPY --from=nachobot /ncnk_message /workspace/NachoBot/ncnk_message
 
-# Keep a runnable default in the image; Compose normally replaces this with
-# the host's persistent configs volume.
+# Keep runnable local-runtime defaults in the image; Compose normally replaces
+# these with the host's persistent configs volume.
 RUN mkdir -p configs && \
     cp template_configs/base_template.toml configs/base.toml && \
     cp template_configs/perception_template.toml configs/perception.toml && \
@@ -30,7 +30,7 @@ ENV PATH="/workspace/NachoBot-Multimodal-Adapter/.venv/bin:${PATH}" \
     PYTHONPATH=/workspace/NachoBot \
     PYTHONUNBUFFERED=1
 
-EXPOSE 8070
+EXPOSE 9880 9874
 
 VOLUME ["/workspace/NachoBot-Multimodal-Adapter/configs", "/workspace/NachoBot-Multimodal-Adapter/models", "/workspace/NachoBot-Multimodal-Adapter/logs"]
 

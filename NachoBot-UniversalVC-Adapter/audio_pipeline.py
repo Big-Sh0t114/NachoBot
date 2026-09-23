@@ -1,38 +1,25 @@
-"""
-Audio Pipeline — Unified real-time processing: Denoise → VAD → Speaker ID → ASR.
-
-Receives raw float32 PCM frames from AudioCapture and orchestrates the full
-processing chain, emitting (speaker_id, speaker_name, text) results via callback.
-"""
+"""UniversalVC capture pipeline: Denoise → VAD → Speaker ID → Core voice."""
 
 import asyncio
-from collections import deque
 import logging
-from typing import Callable, Deque, Dict, Optional
+from typing import Callable, Optional
 
 import numpy as np
 from scipy.signal import resample_poly
-
-from multimodal_bridge import ensure_multimodal_import
-
-ensure_multimodal_import()
-
-from nachobot_multimodal.asr.streaming import StreamingASR  # noqa: E402
 
 from config import AdapterConfig
 from denoise import DenoiseProcessor
 from vad_processor import VADProcessor
 from speaker_tracker import SpeakerTracker
+from voice_codec import samples_to_wav_base64
 
 
 class AudioPipeline:
     """Real-time audio processing pipeline."""
 
-    # Target sample rate for VAD / ASR / Speaker embedding
+    # Target sample rate for VAD / speaker embedding / Core voice payload.
     TARGET_SR = 16000
-    ASR_PREROLL_SECONDS = 0.3
-    SYSTEM_STREAM_ID = "system"
-    MIC_STREAM_ID = "microphone"
+    MAX_UTTERANCE_SECONDS = 60.0
 
     def __init__(
         self,
@@ -46,10 +33,10 @@ class AudioPipeline:
         """
         Args:
             config: Full adapter configuration.
-            on_result: async callback(speaker_id: str, speaker_name: str, text: str)
-            on_speech_start: async callback() when speech starts (for TTS interruption)
-            on_mic_speech_start: async callback() when mic speech starts (for TTS pausing)
-            on_mic_speech_end: async callback() when mic speech ends (for TTS resuming)
+            on_result: async callback(speaker_id: str, speaker_name: str, voice_base64: str)
+            on_speech_start: async callback() when speech starts (for playback interruption)
+            on_mic_speech_start: async callback() when mic speech starts (for playback pausing)
+            on_mic_speech_end: async callback() when mic speech ends (for playback resuming)
         """
         self.logger = logger
         self.on_result = on_result
@@ -98,34 +85,10 @@ class AudioPipeline:
             logger=logger,
         )
 
-        # ── Stage 4: ASR ──
-        # Model, provider and thread settings are owned by Multimodal-Adapter.
-        asr_kwargs = {"logger": logger}
-        # Pass remote API config as fallback
-        if config.stt.enabled:
-            asr_kwargs["api_key"] = config.stt.api_key
-            asr_kwargs["base_url"] = config.stt.base_url
-            asr_kwargs["model"] = config.stt.model
-        self.asr = StreamingASR(**asr_kwargs)
-
-        self._asr_active: Dict[str, bool] = {
-            self.SYSTEM_STREAM_ID: False,
-            self.MIC_STREAM_ID: False,
-        }
-        self._asr_preroll: Dict[str, Deque[np.ndarray]] = {
-            self.SYSTEM_STREAM_ID: deque(),
-            self.MIC_STREAM_ID: deque(),
-        }
-        self._asr_preroll_samples: Dict[str, int] = {
-            self.SYSTEM_STREAM_ID: 0,
-            self.MIC_STREAM_ID: 0,
-        }
-
         self.logger.info(
             "AudioPipeline initialized: "
             f"denoise={config.denoise.enabled}, vad=Silero, "
-            f"speaker={config.speaker.enabled}, asr_mode={self.asr.mode}, "
-            f"asr_provider={self.asr.provider}"
+            f"speaker={config.speaker.enabled}, perception=Core"
         )
 
     def set_loop(self, loop: asyncio.AbstractEventLoop):
@@ -173,18 +136,11 @@ class AudioPipeline:
             # Ensure 1D contiguous float32 for sherpa-onnx VAD
             mono_16k = np.ascontiguousarray(mono_16k.ravel(), dtype=np.float32)
 
-            # 4. Feed VAD and incrementally decode while speech is in progress
-            was_speaking = self.vad.is_speaking
+            # 4. Feed VAD.  Recognition is intentionally deferred to Core.
             segments = self.vad.feed(mono_16k)
             is_speaking = self.vad.is_speaking
-            streaming_text = self._feed_streaming_asr(
-                self.SYSTEM_STREAM_ID,
-                mono_16k,
-                was_speaking,
-                is_speaking,
-            )
 
-            # Notify speech start (for TTS interruption)
+            # Notify speech start (for playback interruption)
             if is_speaking and not self._speech_started_notified:
                 self._speech_started_notified = True
                 if self.on_speech_start and self._loop:
@@ -193,15 +149,12 @@ class AudioPipeline:
             if not is_speaking:
                 self._speech_started_notified = False
 
-            # 5. Speaker identification uses the completed VAD segment. ASR has
-            # already been decoded incrementally, so no second decode is needed.
-            for index, seg in enumerate(segments):
+            # 5. Speaker identification uses completed VAD segments; Core
+            # receives the same bounded segment for local/remote perception.
+            for seg in segments:
                 if self._loop:
                     asyncio.run_coroutine_threadsafe(
-                        self._process_segment(
-                            seg.samples,
-                            streaming_text if index == 0 else None,
-                        ),
+                        self._process_segment(seg.samples),
                         self._loop,
                     )
         except Exception as e:
@@ -233,15 +186,8 @@ class AudioPipeline:
 
             mono_16k = np.ascontiguousarray(mono_16k.ravel(), dtype=np.float32)
 
-            was_speaking = self.mic_vad.is_speaking
             segments = self.mic_vad.feed(mono_16k)
             is_speaking = self.mic_vad.is_speaking
-            streaming_text = self._feed_streaming_asr(
-                self.MIC_STREAM_ID,
-                mono_16k,
-                was_speaking,
-                is_speaking,
-            )
 
             if is_speaking and not self._mic_speech_started_notified:
                 self._mic_speech_started_notified = True
@@ -253,13 +199,10 @@ class AudioPipeline:
                 if self.on_mic_speech_end and self._loop:
                     asyncio.run_coroutine_threadsafe(self.on_mic_speech_end(), self._loop)
 
-            for index, seg in enumerate(segments):
+            for seg in segments:
                 if self._loop:
                     asyncio.run_coroutine_threadsafe(
-                        self._process_mic_segment(
-                            seg.samples,
-                            streaming_text if index == 0 else None,
-                        ),
+                        self._process_mic_segment(seg.samples),
                         self._loop,
                     )
         except Exception as e:
@@ -268,15 +211,15 @@ class AudioPipeline:
     async def _process_segment(
         self,
         samples_16k: np.ndarray,
-        streaming_text: Optional[str] = None,
     ):
-        """Finish speaker identification and publish a completed utterance."""
+        """Finish speaker identification and publish a Core voice segment."""
         try:
+            samples_16k = self._bound_samples(samples_16k)
             duration = len(samples_16k) / self.TARGET_SR
             self.logger.info(f"Processing speech segment: {duration:.2f}s")
 
-            # Denoising is retained for speaker identification and one-shot
-            # fallback. The primary ASR path has already decoded incrementally.
+            # Denoising is retained for speaker identification and the Core
+            # voice payload.
             if self.denoiser.enabled:
                 loop = asyncio.get_running_loop()
                 samples_16k = await loop.run_in_executor(
@@ -285,16 +228,19 @@ class AudioPipeline:
 
             # 2. Speaker identification
             speaker_id, speaker_name = self.speaker_tracker.identify(samples_16k)
-
-            # 3. Remote mode needs a complete-buffer request. Local online ASR
-            # never decodes the completed segment a second time.
-            text = streaming_text
-            if not text and not self.asr.supports_streaming:
-                text = await self.asr.recognize_segment_async(samples_16k)
-
-            if text and self.on_result:
-                self.logger.info(f"[{speaker_name}] ({speaker_id}): {text}")
-                await self.on_result(speaker_id, speaker_name, text)
+            voice_data = samples_to_wav_base64(
+                samples_16k,
+                sample_rate=self.TARGET_SR,
+                max_duration_seconds=self.MAX_UTTERANCE_SECONDS,
+            )
+            if voice_data and self.on_result:
+                self.logger.info(
+                    "[%s] (%s): finalized voice segment (%d base64 chars)",
+                    speaker_name,
+                    speaker_id,
+                    len(voice_data),
+                )
+                await self.on_result(speaker_id, speaker_name, voice_data)
 
         except Exception as e:
             self.logger.exception(f"Segment processing error: {e}")
@@ -302,10 +248,10 @@ class AudioPipeline:
     async def _process_mic_segment(
         self,
         samples_16k: np.ndarray,
-        streaming_text: Optional[str] = None,
     ):
-        """Publish a completed microphone utterance with the fixed owner ID."""
+        """Publish a completed microphone voice segment with fixed owner ID."""
         try:
+            samples_16k = self._bound_samples(samples_16k)
             duration = len(samples_16k) / self.TARGET_SR
             self.logger.info(f"Processing mic segment: {duration:.2f}s")
 
@@ -319,88 +265,34 @@ class AudioPipeline:
             speaker_id = self._owner_id
             speaker_name = self._owner_name
 
-            text = streaming_text
-            if not text and not self.asr.supports_streaming:
-                text = await self.asr.recognize_segment_async(samples_16k)
-
-            if text and self.on_result:
-                self.logger.info(f"[{speaker_name}] ({speaker_id}) [Mic]: {text}")
-                await self.on_result(speaker_id, speaker_name, text)
+            voice_data = samples_to_wav_base64(
+                samples_16k,
+                sample_rate=self.TARGET_SR,
+                max_duration_seconds=self.MAX_UTTERANCE_SECONDS,
+            )
+            if voice_data and self.on_result:
+                self.logger.info(
+                    "[%s] (%s) [Mic]: finalized voice segment (%d base64 chars)",
+                    speaker_name,
+                    speaker_id,
+                    len(voice_data),
+                )
+                await self.on_result(speaker_id, speaker_name, voice_data)
 
         except Exception as e:
             self.logger.exception(f"Mic segment processing error: {e}")
 
-    def _feed_streaming_asr(
-        self,
-        stream_id: str,
-        samples_16k: np.ndarray,
-        was_speaking: bool,
-        is_speaking: bool,
-    ) -> Optional[str]:
-        """Advance one online recognizer stream from VAD state transitions."""
-        if not self.asr.supports_streaming:
-            return None
-
-        active = self._asr_active[stream_id]
-        if not active:
-            self._append_asr_preroll(stream_id, samples_16k)
-
-        if not was_speaking and is_speaking:
-            if not self.asr.start_stream(stream_id):
-                self._clear_asr_preroll(stream_id)
-                return None
-            self._asr_active[stream_id] = True
-            active = True
-            preroll = self._take_asr_preroll(stream_id)
-            if preroll.size:
-                self.asr.accept_stream_audio(stream_id, preroll)
-        elif active:
-            self.asr.accept_stream_audio(stream_id, samples_16k)
-
-        if active and was_speaking and not is_speaking:
-            final_text = self.asr.finish_stream(stream_id)
-            self._asr_active[stream_id] = False
-            self._clear_asr_preroll(stream_id)
-            return final_text
-
-        return None
-
-    def _append_asr_preroll(
-        self,
-        stream_id: str,
-        samples_16k: np.ndarray,
-    ) -> None:
-        """Keep a short lead-in so VAD activation does not clip first syllables."""
-        samples = np.ascontiguousarray(samples_16k, dtype=np.float32).ravel().copy()
-        if samples.size == 0:
-            return
-
-        buffer = self._asr_preroll[stream_id]
-        buffer.append(samples)
-        self._asr_preroll_samples[stream_id] += samples.size
-        max_samples = int(self.TARGET_SR * self.ASR_PREROLL_SECONDS)
-
-        while self._asr_preroll_samples[stream_id] > max_samples and buffer:
-            excess = self._asr_preroll_samples[stream_id] - max_samples
-            first = buffer[0]
-            if first.size <= excess:
-                buffer.popleft()
-                self._asr_preroll_samples[stream_id] -= first.size
-            else:
-                buffer[0] = first[excess:].copy()
-                self._asr_preroll_samples[stream_id] -= excess
-
-    def _take_asr_preroll(self, stream_id: str) -> np.ndarray:
-        buffer = self._asr_preroll[stream_id]
-        if not buffer:
-            return np.empty(0, dtype=np.float32)
-        samples = np.concatenate(tuple(buffer)).astype(np.float32, copy=False)
-        self._clear_asr_preroll(stream_id)
-        return np.ascontiguousarray(samples)
-
-    def _clear_asr_preroll(self, stream_id: str) -> None:
-        self._asr_preroll[stream_id].clear()
-        self._asr_preroll_samples[stream_id] = 0
+    def _bound_samples(self, samples_16k: np.ndarray) -> np.ndarray:
+        """Bound a VAD result before denoise/encoding and Core transport."""
+        samples = np.ascontiguousarray(samples_16k, dtype=np.float32).reshape(-1)
+        max_samples = int(self.TARGET_SR * self.MAX_UTTERANCE_SECONDS)
+        if samples.size > max_samples:
+            self.logger.warning(
+                "Speech segment exceeded %.1fs; truncating before Core transport",
+                self.MAX_UTTERANCE_SECONDS,
+            )
+            samples = samples[:max_samples]
+        return samples
 
     def _denoise_segment(self, samples_16k: np.ndarray) -> np.ndarray:
         """Upsample to 48kHz, denoise, and downsample to 16kHz."""

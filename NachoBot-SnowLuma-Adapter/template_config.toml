@@ -13,7 +13,7 @@ heartbeat_sec = 30.0
 
 [nachobot_server]
 host = "127.0.0.1"
-port = 8070
+port = 8000
 platform_name = "qq"
 
 [chat]

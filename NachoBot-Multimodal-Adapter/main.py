@@ -1,60 +1,73 @@
-import asyncio
-import logging
-import os
-import random
-import sys
-import inspect
-from contextlib import asynccontextmanager
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+"""Uniform public TTS API used by the 9880 runtime supervisor.
 
-import toml
-from fastapi import HTTPException, Response
+The supervisor starts one backend-specific raw service on a loopback port,
+waits for its readiness contract, then constructs exactly one fixed client
+here before exposing this app. This module deliberately contains no config
+fingerprint refresh on request boundaries and no platform transport relay.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import sys
+from pathlib import Path
+from typing import Any
+
+from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel, Field
 
-_NACHOBOT_PATH = Path(__file__).resolve().parents[1] / "NachoBot"
-if (_NACHOBOT_PATH / "ncnk_message").is_dir():
-    nachobot_path = str(_NACHOBOT_PATH)
-    if nachobot_path not in sys.path:
-        sys.path.insert(1, nachobot_path)
 
-from ncnk_message import (  # noqa: E402
-    MessageServer,
-    Router,
-    RouteConfig,
-    TargetConfig,
-    MessageBase,
-    Seg,
-    FormatInfo,
-    get_core_token_from_env,
-)
-
-# Keep all Hugging Face models in the adapter-owned cache directory.
-# Honour both the NachoBot-specific endpoint and an existing standard
-# HF_ENDPOINT instead of forcing the official Hub. launchbot.bat defaults
-# NACHOBOT_HF_ENDPOINT to hf-mirror.com for mainland-China deployments.
-os.environ["HF_HOME"] = str(Path(__file__).parent / "models" / "hf_cache")
+# Keep all Hugging Face models in the adapter-owned cache directory. These
+# environment defaults are inherited by the selected child and classifier.
+ADAPTER_ROOT = Path(__file__).resolve().parent
+os.environ.setdefault("HF_HOME", str(ADAPTER_ROOT / "models" / "hf_cache"))
 if os.getenv("NACHOBOT_HF_ENDPOINT", "").strip():
     os.environ["HF_ENDPOINT"] = os.environ["NACHOBOT_HF_ENDPOINT"].strip()
-else:
-    os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "10")
 os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
 
-# 隐藏 ncnk_message 的冗余日志
-logging.getLogger("ncnk_message").setLevel(logging.CRITICAL)
+# Direct file-based imports (including ``python -I`` probes) do not put the
+# adapter root on sys.path. Add the stable package root before importing the
+# adapter namespace; do not depend on the caller's cwd.
+if str(ADAPTER_ROOT) not in sys.path:
+    sys.path.insert(0, str(ADAPTER_ROOT))
+
+SRC_PATH = ADAPTER_ROOT / "src"
+if str(SRC_PATH) not in sys.path:
+    sys.path.insert(0, str(SRC_PATH))
 
 from nachobot_multimodal.config import Config  # noqa: E402
 from nachobot_multimodal.logger import logger  # noqa: E402
-from nachobot_multimodal.tts.base import BaseTTSModel  # noqa: E402
-from nachobot_multimodal.utils.audio_encode import encode_audio, encode_audio_stream  # noqa: E402
 from nachobot_multimodal.utils import post_process  # noqa: E402
-from nachobot_multimodal.utils.tts_runtime import TTSRuntime, TTSRuntimeError  # noqa: E402
+from nachobot_multimodal.utils.tts_resolver import resolve_tts_model_snapshot  # noqa: E402
+
+
+PUBLIC_PORT = 9880
+PRIVATE_PORT = 9881
+
+_BACKEND_ALIASES = {
+    "vox": "Vox",
+    "voxcpm": "Vox",
+    "gpt_sovits": "GPT_Sovits",
+    "gpt-sovits": "GPT_Sovits",
+    "gptsovits": "GPT_Sovits",
+}
+
+
+def normalize_backend(value: object) -> str:
+    """Return the canonical backend plugin name or raise a clear error."""
+
+    normalized = str(value or "").strip().lower()
+    try:
+        return _BACKEND_ALIASES[normalized]
+    except KeyError as exc:
+        raise ValueError("TTS backend must be Vox or GPT_Sovits") from exc
 
 
 class WebUITTSRequest(BaseModel):
-    """Direct synthesis request from the local WebUI."""
+    """Stable Core-facing synthesis request."""
 
     text: str = Field(min_length=1, max_length=10_000)
     platform: str = Field(default="webui", max_length=64)
@@ -62,661 +75,241 @@ class WebUITTSRequest(BaseModel):
 
 
 class TTSPipeline:
-    """8070 message relay plus TTS/emotion service.
+    """One fixed, already-initialized backend client.
 
-    Platform adapters connect here instead of competing with this relay for
-    Core's single connection per platform.  Besides ordinary MessageBase
-    traffic, platform capability requests and responses must pass through
-    this hop unchanged.
+    ``model`` is normally supplied by :class:`TTSRuntimeSupervisor` after the
+    raw child is ready. The injectable path keeps unit tests lightweight and
+    makes the startup/readiness boundary explicit.
     """
-
-    _CORE_TO_PLATFORM_CUSTOM_TYPES = ("platform_api_request",)
-    _PLATFORM_TO_CORE_CUSTOM_TYPES = (
-        "platform_api_response",
-        "platform_status",
-        "message_id_echo",
-    )
 
     def __init__(
         self,
-        config_path: str,
-        no_local_models: bool | None = None,
-    ):  # sourcery skip: dict-comprehension
-        self.tts_list: List[BaseTTSModel] = []
-        self._emotion_classifier = None
-        self._emotion_config = None
-        self._emotion_model_fingerprint: Optional[str] = None
-        self.no_local_models = (
-            no_local_models
-            if no_local_models is not None
-            else os.environ.get("NACHOBOT_NO_LOCAL_MODELS") == "1"
-        )
-        self.config: Config = Config(config_path)
-        self._tts_runtime = (
-            None
-            if self.no_local_models
-            else TTSRuntime(config_dir=Path(self.config.config_path))
-        )
-        # 根据配置刷新日志级别
-        from nachobot_multimodal.logger import set_logging_level
-
-        set_logging_level(self.config.config_data["debug"].get("logging_level", "INFO"))
-        self.server = MessageServer(
-            host=self.config.server.host,
-            port=self.config.server.port,
-        )
-
-        # 设置路由
-        route_config = {}
-        for platform, url in self.config.routes.items():
-            route_config[platform] = TargetConfig(
-                url=url,
-                token=get_core_token_from_env(),
+        config_path: str | Path,
+        *,
+        backend: str | None = None,
+        model: Any | None = None,
+        engine_host: str | None = None,
+        engine_port: int | None = None,
+        backend_alive: bool = True,
+        public_host: str | None = None,
+        public_port: int | None = None,
+    ) -> None:
+        self.config_path = Path(config_path).resolve()
+        self.config = Config(str(self.config_path))
+        self.selected_backend = normalize_backend(backend) if backend else None
+        self.model = model
+        if self.model is None:
+            self.model = self._construct_model(
+                self.selected_backend,
+                engine_host=engine_host,
+                engine_port=engine_port,
             )
+        if self.selected_backend is None:
+            self.selected_backend = self._backend_from_model(self.model)
 
-        self.router = Router(RouteConfig(route_config))
-
-        self.server.register_message_handler(self.server_handle)
-        self.router.register_class_handler(self.client_handle)
-        for message_type in self._CORE_TO_PLATFORM_CUSTOM_TYPES:
-            self.router.register_custom_message_handler(
-                message_type,
-                self._core_custom_handler(message_type),
-            )
-        for message_type in self._PLATFORM_TO_CORE_CUSTOM_TYPES:
-            self.server.register_custom_message_handler(
-                message_type,
-                self._platform_custom_handler(message_type),
-            )
-
-        # 按群/用户分组的文本缓冲队列和处理任务
-        self.text_buffer_dict: Dict[str, asyncio.Queue[Tuple[str, MessageBase]]] = {}
-        self.buffer_task_dict: Dict[str, asyncio.Task] = {}
+        self.tts_list = [self.model]
+        self._backend_alive = bool(backend_alive)
+        self._engine_ready = bool(getattr(self.model, "_initialized", True))
         self._webui_tts_lock = asyncio.Lock()
-
-    def import_module(self):
-        """动态导入TTS适配"""
-        if self.no_local_models or self._tts_runtime is None:
-            logger.info("无模型模式已启用，跳过 TTS 和情感分类模型加载")
-            return
-        if self._tts_runtime.ensure_tts_model():
-            self._sync_runtime_state(self._tts_runtime.model)
-            logger.info("TTS model resolved from current configuration")
-        else:
-            self._sync_runtime_state(None)
-            logger.error(f"TTS configuration unavailable: {self._tts_runtime.error}")
-
-    def _sync_runtime_state(self, model: Optional[BaseTTSModel]) -> None:
-        """Mirror the current runtime model and refresh its optional classifier."""
-
-        self.tts_list = [model] if model is not None else []
-        fingerprint = self._tts_runtime.fingerprint if self._tts_runtime else None
-        emotion_cfg = getattr(getattr(model, "config", None), "emotion", None) if model else None
-        if (
-            model is not None
-            and emotion_cfg is not None
-            and getattr(emotion_cfg, "enabled", False)
-            and self._emotion_classifier is not None
-            and self._emotion_model_fingerprint == fingerprint
-        ):
-            self._emotion_config = emotion_cfg
-            return
-
-        self._emotion_classifier = None
-        self._emotion_config = None
-        self._emotion_model_fingerprint = None
-        if model is None or emotion_cfg is None or not getattr(emotion_cfg, "enabled", False):
-            self._emotion_model_fingerprint = fingerprint
-            return
-
-        try:
-            from nachobot_multimodal.utils.emotion_classifier import EmotionClassifier
-
-            self._emotion_config = emotion_cfg
-            self._emotion_classifier = EmotionClassifier(
-                model_name=emotion_cfg.classifier_model,
-                device=emotion_cfg.classifier_device,
-                use_fp16=emotion_cfg.use_fp16,
-            )
-            self._emotion_model_fingerprint = fingerprint
-            logger.info("情感分类系统已在 TTS Adapter 服务端启用（模型将在首次使用时加载）")
-        except Exception as exc:
-            logger.warning(f"情感分类器初始化失败，将使用默认预设: {exc}")
-
-    @asynccontextmanager
-    async def _model_context(self):
-        if self.no_local_models or self._tts_runtime is None:
-            raise TTSRuntimeError("TTS is disabled in relay-only mode")
-        try:
-            async with self._tts_runtime.model_context() as model:
-                self._sync_runtime_state(model)
-                yield model
-        except Exception:
-            # Resolution failures clear the runtime model; keep compatibility
-            # mirrors and classifier state from serving the old backend.
-            self._sync_runtime_state(self._tts_runtime.model)
-            raise
-
-    async def start(self):
-        """启动服务器和路由，并导入设定的模块"""
-        self.import_module()
+        self._stopped = False
+        self.public_host = public_host or self.config.server.host
+        self.public_port = int(public_port or self.config.server.port or PUBLIC_PORT)
+        self.app = FastAPI(
+            title="NachoBot TTS Runtime",
+            docs_url=None,
+            redoc_url=None,
+        )
         self._register_http_endpoints()
-        py_project_path = Path(__file__).parent / "pyproject.toml"
-        toml_data = toml.load(py_project_path)
-        logger.info(f"版本信息\n\n当前版本: {toml_data['project']['version']}\n")
-        # 创建任务而不是直接返回 gather 结果
-        self.server_task = asyncio.create_task(self.server.run())
-        self.router_task = asyncio.create_task(self.router.run())
-        # 返回任务以便外部可以等待或取消
-        return self.server_task, self.router_task
-
-    def _register_http_endpoints(self):
-        """在 WebSocket 服务器的 FastAPI 应用上注册 HTTP 接口"""
-        app = self.server.connection.app
-
-        @app.get("/api/emotion_preset")
-        async def emotion_preset_endpoint(text: str):
-            """情感预设解析接口
-
-            供外部适配器（DiscordVC/Bilibili/UniversalVC）远程调用，
-            无需在适配器侧安装 torch/transformers。
-
-            Returns:
-                {"preset_name": "..."}  — 如果分类器可用且匹配到预设
-                {"preset_name": null}   — 如果分类器不可用或无匹配
-            """
-            if self.no_local_models or self._tts_runtime is None:
-                return {"preset_name": None}
-            try:
-                async with self._model_context():
-                    preset_name = self._resolve_emotion_preset(text)
-            except Exception as exc:
-                logger.warning(f"情感分类配置不可用: {exc}")
-                preset_name = None
-            return {"preset_name": preset_name}
-
-        @app.get("/api/health")
-        async def health_endpoint():
-            return self._health_payload()
-
-        @app.post("/api/tts")
-        async def webui_tts_endpoint(body: WebUITTSRequest):
-            """Generate one complete WAV response for the local WebUI."""
-            text = body.text.strip()
-            if not text:
-                raise HTTPException(status_code=400, detail="TTS 文本不能为空")
-            if self.no_local_models or self._tts_runtime is None:
-                raise HTTPException(status_code=503, detail="没有启用任何 TTS 引擎")
-
-            try:
-                async with self._webui_tts_lock:
-                    async with self._model_context() as tts_model:
-                        preset_name = self._resolve_emotion_preset(text)
-                        audio_data = await tts_model.tts(
-                            text=text,
-                            platform=body.platform or "webui",
-                            text_lang=body.text_lang,
-                            preset_name=preset_name,
-                            skip_remote_emotion=True,
-                        )
-            except Exception as exc:
-                logger.exception("WebUI TTS 生成失败")
-                raise HTTPException(status_code=502, detail=f"TTS 生成失败：{exc}") from exc
-
-            if not audio_data:
-                raise HTTPException(status_code=502, detail="TTS 服务返回了空音频")
-            return Response(
-                content=audio_data,
-                media_type="audio/wav",
-                headers={"Cache-Control": "no-store"},
-            )
-
-        if self.no_local_models:
-            logger.info(
-                "已注册 HTTP 兼容接口（无模型模式：TTS 和情感分类均禁用）: "
-                "/api/emotion_preset, /api/health, /api/tts"
-            )
-        else:
-            logger.info("已注册 HTTP 接口: /api/emotion_preset, /api/health, /api/tts")
-
-    async def server_handle(self, message_data: dict):
-        """处理服务器收到的消息"""
-        message = MessageBase.from_dict(message_data)
-        if (
-            not self.no_local_models
-            and message.message_info.format_info
-            and "voice" in message.message_info.format_info.accept_format
-        ):
-            message.message_info.format_info.accept_format.append("tts_text")
-        await self.router.send_message(message)
 
     @staticmethod
-    def _custom_message_parts(message_data: dict, message_type: str) -> tuple[str, dict]:
-        content = message_data.get("content")
-        if not isinstance(content, dict):
-            raise ValueError(f"{message_type} content 必须是字典")
-        platform = str(message_data.get("platform") or content.get("platform") or "").strip()
-        if not platform:
-            raise ValueError(f"{message_type} 缺少 platform")
-        return platform, content
+    def _backend_from_model(model: Any) -> str:
+        module = type(model).__module__.lower()
+        if ".vox." in module or module.endswith("vox.tts_model"):
+            return "Vox"
+        if ".gpt_sovits." in module or "gpt_sovits" in module:
+            return "GPT_Sovits"
+        return type(model).__name__
 
-    def _core_custom_handler(self, message_type: str):
-        async def forward(message_data: dict) -> None:
-            try:
-                platform, content = self._custom_message_parts(message_data, message_type)
-                sent = await self.server.send_custom_message(platform, message_type, content)
-                if not sent:
-                    logger.warning(f"平台能力下行转发失败: platform={platform} type={message_type}")
-            except Exception as exc:
-                logger.warning(f"平台能力下行转发异常: type={message_type} error={exc}")
+    def _construct_model(
+        self,
+        backend: str | None,
+        *,
+        engine_host: str | None,
+        engine_port: int | None,
+    ) -> Any:
+        snapshot = resolve_tts_model_snapshot(
+            self.config_path,
+            fixed_backend=backend,
+        )
+        if snapshot.model_class is None or snapshot.error:
+            raise RuntimeError(snapshot.error or "TTS backend is unavailable")
 
-        return forward
-
-    def _platform_custom_handler(self, message_type: str):
-        async def forward(message_data: dict) -> None:
-            try:
-                platform, content = self._custom_message_parts(message_data, message_type)
-                sent = await self.router.send_custom_message(platform, message_type, content)
-                if not sent:
-                    logger.warning(f"平台能力上行转发失败: platform={platform} type={message_type}")
-            except Exception as exc:
-                logger.warning(f"平台能力上行转发异常: type={message_type} error={exc}")
-
-        return forward
-
-    def process_seg(self, seg: Seg) -> Tuple[str, Optional[str]]:
-        """处理消息段，提取文本内容与显式语种"""
-        message_text = ""
-        text_lang: Optional[str] = None
-        if seg.type == "seglist":
-            for s in seg.data:
-                child_text, child_lang = self.process_seg(s)
-                message_text += child_text
-                if child_lang:
-                    text_lang = child_lang
-        if seg.type == "tts_text":
-            if isinstance(seg.data, dict):
-                message_text += seg.data.get("text", "")
-                text_lang = seg.data.get("lang")
-            else:
-                message_text += seg.data
-        return message_text, text_lang
-
-    async def client_handle(self, message_dict: dict) -> None:
-        # sourcery skip: remove-redundant-if
-        """处理客户端收到的消息并进行TTS转换（分群缓冲）"""
-        message = MessageBase.from_dict(message_dict)
-        if self.no_local_models:
-            await self.server.send_message(message)
-            return
-
-        stream_mode = self.config.tts_base_config.stream_mode
-        if message.message_segment.type != "tts_text" and random.random() > self.config.probability.voice_probability:
-            #  如果概率不满足，直接透传消息
-            await self.server.send_message(message)
-            return
-
-        if stream_mode:
-            await self.send_voice_stream(message)
-            return
-
-        message_text, text_lang = self.process_seg(message.message_segment)
-        if not text_lang and message.message_info.additional_config:
-            text_lang = message.message_info.additional_config.get(
-                "tts_language"
-            ) or message.message_info.additional_config.get("text_lang")
-        if message_text == "":
-            # 非文本消息直接透传
-            await self.server.send_message(message)
-            return
-
-        if not message_text:
-            logger.warning("处理文本为空，跳过发送")
-            return
-
-        # 获取分组ID（优先群id，否则用户id）
-        group_id = getattr(message.message_info.group_info, "group_id", None)
-        if group_id is None:
-            logger.warning("没有群消息id使用用户id代替")
-            group_id = getattr(message.message_info.user_info, "user_id", None)
-        if not group_id:
-            logger.warning("无法定位目标发送位置，跳过TTS处理")
-            await self.server.send_message(message)
-            return
-        group_id = str(group_id)
-
-        # 保证队列存在
-        if group_id not in self.text_buffer_dict:
-            self.text_buffer_dict[group_id] = asyncio.Queue()
-        # 创建处理任务
-        if group_id not in self.buffer_task_dict:
-            self.buffer_task_dict[group_id] = asyncio.create_task(self._buffer_queue_handler(group_id))
-        # 将文本加入队列
-        await self.text_buffer_dict[group_id].put((message_text, message))
-
-    async def _buffer_queue_handler(self, group_id: str) -> None:
-        """处理每个群/用户的缓冲队列，合成语音并发送"""
+        kwargs: dict[str, Any] = {"config_path": snapshot.backend_config_path}
+        if snapshot.plugin == "Vox":
+            kwargs["base_config_path"] = snapshot.base_config_path
+        if engine_host is not None:
+            kwargs["engine_host"] = engine_host
+        if engine_port is not None:
+            kwargs["engine_port"] = engine_port
         try:
-            while not self.text_buffer_dict[group_id].empty():
-                message_text, latest_message_obj = await self.text_buffer_dict[group_id].get()
-                try:
-                    if not message_text or not latest_message_obj:
-                        logger.warning("数据为空，跳过处理")
-                        continue
-                    text: str = message_text.strip()
-                    logger.info(f"[聊天: {group_id}]将合成文本: {text}")
-                    message = latest_message_obj
-                    text_lang = None
-                    if message.message_info.additional_config:
-                        text_lang = message.message_info.additional_config.get(
-                            "tts_language"
-                        ) or message.message_info.additional_config.get("text_lang")
-                    new_seg = await self.get_voice_no_stream(text, message.message_info.platform, text_lang=text_lang)
-                    if not new_seg:
-                        logger.warning("语音消息为空，跳过发送")
-                        continue
-                    if not message.message_info.format_info:
-                        message.message_info.format_info = FormatInfo(
-                            content_format=[],
-                            accept_format=[],
-                        )
-                    message.message_segment = new_seg
-                    message.message_info.format_info.content_format = ["voice"]
-                    if not message.message_info.additional_config:
-                        message.message_info.additional_config = {}
-                    message.message_info.additional_config["original_text"] = text
-                    if text_lang:
-                        message.message_info.additional_config["text_lang"] = text_lang
-                        message.message_info.additional_config["tts_language"] = text_lang
-                    logger.debug(
-                        f"TTS->Napcat 即将发送: platform={message.message_info.platform}, formats={message.message_info.format_info.content_format}"
+            return snapshot.model_class(**kwargs)
+        except TypeError:
+            # Narrow compatibility path for injected/legacy model classes that
+            # only accept the config path. Real selected backends accept the
+            # explicit private endpoint arguments above.
+            kwargs.pop("engine_host", None)
+            kwargs.pop("engine_port", None)
+            return snapshot.model_class(**kwargs)
+
+    @property
+    def model_ready(self) -> bool:
+        """Whether the fixed client and its optional local classifier are ready."""
+
+        model = getattr(self, "model", None)
+        if model is None or not getattr(self, "_engine_ready", True):
+            return False
+        emotion_ready = getattr(model, "emotion_ready", True)
+        return bool(emotion_ready)
+
+    @property
+    def ready(self) -> bool:
+        return bool(
+            getattr(self, "_backend_alive", True)
+            and self.model_ready
+            and not getattr(self, "_stopped", False)
+        )
+
+    @property
+    def backend_alive(self) -> bool:
+        return bool(getattr(self, "_backend_alive", True))
+
+    def set_backend_alive(self, alive: bool) -> None:
+        """Publish child liveness without replacing the fixed client."""
+
+        self._backend_alive = bool(alive)
+
+    def stop(self) -> None:
+        self._stopped = True
+        self._backend_alive = False
+
+    def _register_http_endpoints(self) -> None:
+        """Register only the uniform public routes."""
+
+        @self.app.get("/api/health")
+        async def health_endpoint() -> dict[str, Any]:
+            return self._health_payload()
+
+        @self.app.post("/api/tts")
+        async def tts_endpoint(body: WebUITTSRequest) -> Response:
+            if not self.ready:
+                raise HTTPException(status_code=503, detail="TTS runtime is not ready")
+            text = body.text.strip()
+            if not text:
+                raise HTTPException(status_code=400, detail="TTS text cannot be empty")
+            try:
+                async with self._webui_tts_lock:
+                    # The child may exit while a request is waiting for the
+                    # single-client lock. Recheck before using the client.
+                    if not self.ready:
+                        raise HTTPException(status_code=503, detail="TTS runtime is not ready")
+                    audio_data = await self.model.tts(
+                        text=text,
+                        platform=body.platform,
+                        text_lang=body.text_lang,
                     )
-                    ok = await self.server.send_message(message)
-                    logger.info(
-                        f"TTS->Napcat send: platform={message.message_info.platform}, ok={ok}, formats={message.message_info.format_info.content_format}"
-                    )
-                    if not ok:
-                        logger.warning("send_message 返回 False，检查平台映射或连接状态")
-                except Exception as exc:
-                    logger.exception(f"TTS->Napcat 发送异常: {exc}")
-                finally:
-                    self.text_buffer_dict[group_id].task_done()
-        finally:
-            await self.cleanup_task(group_id)
-
-    async def cleanup_task(self, group_id: str):
-        task = self.buffer_task_dict.pop(group_id)
-        task.cancel()
-
-    def _resolve_emotion_preset(self, text: str) -> str | None:
-        """通过 TabularisAI 固定情绪标签确定使用的 Vox 预设。"""
-        if not self._emotion_classifier or not self._emotion_config:
-            return None
-
-        emotion_cfg = self._emotion_config
-        try:
-            tag, confidence = self._emotion_classifier.classify(text)
-
-            if confidence < emotion_cfg.confidence_threshold:
-                logger.info(
-                    f"情感置信度不足 ({confidence:.3f} < {emotion_cfg.confidence_threshold})，"
-                    f"回退默认预设: {emotion_cfg.default_emotion}"
+                if not audio_data:
+                    raise HTTPException(status_code=502, detail="TTS returned empty audio")
+                if getattr(self.config.tts_base_config, "post_process", False):
+                    audio_data = post_process.simulate_telephone_voice(audio_data)
+                return Response(
+                    content=audio_data,
+                    media_type="audio/wav",
+                    headers={"Cache-Control": "no-store"},
                 )
-                return emotion_cfg.default_emotion
+            except HTTPException:
+                raise
+            except Exception as exc:
+                logger.exception("TTS synthesis failed")
+                raise HTTPException(status_code=502, detail=f"TTS generation failed: {exc}") from exc
 
-            logger.info(f"情感分类结果: {tag} (置信度: {confidence:.3f})")
-
-            preset_name = emotion_cfg.label_preset_map.get(tag)
-            if preset_name:
-                logger.info(f"情感分类选择预设: {preset_name}")
-                return preset_name
-
-            logger.warning(
-                f"固定情绪标签 '{tag}' 未配置预设映射，回退默认预设: {emotion_cfg.default_emotion}"
-            )
-            return emotion_cfg.default_emotion
-        except Exception as e:
-            logger.warning(f"情感分类异常，使用平台默认预设: {e}")
-            return None
-
-    def _health_payload(self) -> dict:
-        """Return non-blocking health metadata for the adapter and WebUI."""
-
-        runtime_status = self._tts_runtime.status() if self._tts_runtime else {
-            "ready": False,
-            "backend": None,
-            "fingerprint": None,
-            "error": None,
-        }
-        desired_status = self._tts_runtime.desired_status() if self._tts_runtime else {
-            "backend": None,
-            "fingerprint": None,
-            "error": None,
-        }
+    def _health_payload(self) -> dict[str, Any]:
+        ready = self.ready
         return {
-            "status": "ok",
-            "mode": "relay_only" if self.no_local_models else "tts",
-            "emotion_classifier": self._emotion_classifier is not None,
-            # Keep the historical module-path value, while advertising a
-            # valid configured backend before the first synthesis can install
-            # a model.  The separate readiness field remains actual state.
-            "tts_backends": [desired_status["backend"]] if desired_status["backend"] else [],
-            "tts_ready": runtime_status["ready"],
-            "tts_error": runtime_status["error"] or desired_status["error"],
+            "status": "ok" if ready else "unhealthy",
+            "ready": ready,
+            # Core's readiness adapter treats this as the canonical model
+            # boundary.  Keep it independent from child liveness: Core also
+            # combines it with ``ready``/``backend_alive`` below.
+            "model_loaded": bool(self.model_ready),
+            "backend": getattr(self, "selected_backend", None),
+            "backend_alive": self.backend_alive,
+            "engine_ready": self.model_ready,
+            "emotion_ready": bool(getattr(getattr(self, "model", None), "emotion_ready", True)),
         }
 
-    async def get_voice_no_stream(self, text: str, platform: str, text_lang: str | None = None) -> Seg | None:
-        """获取语音消息段"""
-        if self.no_local_models or self._tts_runtime is None:
-            logger.warning("没有启用任何tts，跳过处理")
+    async def get_voice_no_stream(
+        self,
+        text: str,
+        platform: str,
+        text_lang: str | None = None,
+    ) -> bytes | None:
+        """Compatibility helper for local callers; uses the fixed client."""
+
+        if not self.ready:
             return None
         try:
-            async with self._model_context() as tts_class:
-                # 服务端情感分类，确定预设名
-                preset_name = self._resolve_emotion_preset(text)
-                # 使用非流式TTS
-                audio_data = await tts_class.tts(
+            async with self._webui_tts_lock:
+                if not self.ready:
+                    return None
+                audio_data = await self.model.tts(
                     text=text,
                     platform=platform,
                     text_lang=text_lang,
-                    preset_name=preset_name,
-                    skip_remote_emotion=True,
                 )
-            if not audio_data:
-                logger.warning("TTS 返回空音频数据，跳过发送")
-                return None
-            if self.config.tts_base_config.post_process:
-                # 如果启用了后处理，进行电话语音模拟
+            if audio_data and getattr(self.config.tts_base_config, "post_process", False):
                 audio_data = post_process.simulate_telephone_voice(audio_data)
-            # 对整个音频数据进行base64编码
-            encoded_audio = encode_audio(audio_data)
-            logger.debug(f"生成语音数据长度: {len(encoded_audio)} (base64)")
-            # 创建语音消息
-            return Seg(type="voice", data=encoded_audio)
-        except Exception as e:
-            self._sync_runtime_state(self._tts_runtime.model)
-            logger.error(f"TTS处理过程中发生错误: {str(e)}")
-            logger.info(f"文本为: {text}")
+            return audio_data or None
+        except Exception as exc:
+            logger.exception("TTS synthesis failed: {}", exc)
             return None
 
-    async def send_voice_stream(self, message: MessageBase) -> None:
-        """流式发送语音消息 (真流式)"""
-        platform = message.message_info.platform
-        message_text, text_lang = self.process_seg(message.message_segment)
-        if not text_lang and message.message_info.additional_config:
-            text_lang = message.message_info.additional_config.get(
-                "tts_language"
-            ) or message.message_info.additional_config.get("text_lang")
-        if not message_text:
-            logger.warning("处理文本为空，跳过发送")
-            return
-        text = message_text
-        if self.no_local_models or self._tts_runtime is None:
-            logger.warning("没有启用任何tts，跳过处理")
-            return None
-        try:
-            async with self._model_context() as tts_class:
-                # 服务端情感分类，确定预设名
-                preset_name = self._resolve_emotion_preset(text)
-                # Keep the runtime context through complete stream consumption.
-                audio_stream = tts_class.tts_stream(
-                    text=text,
-                    platform=platform,
-                    text_lang=text_lang,
-                    preset_name=preset_name,
-                    skip_remote_emotion=True,
-                )
-                if inspect.isawaitable(audio_stream):
-                    audio_stream = await audio_stream
 
-                async def handle_chunk(chunk):
-                    if chunk:  # 确保chunk不为空
-                        try:
-                            encoded_chunk = encode_audio_stream(chunk)
-                            new_seg = Seg(type="voice_stream", data=encoded_chunk)
-                            message.message_segment = new_seg
-                            message.message_info.format_info.content_format = ["voice_stream"]
-                            if not message.message_info.additional_config:
-                                message.message_info.additional_config = {}
-                            message.message_info.additional_config["original_text"] = text
-                            if text_lang:
-                                message.message_info.additional_config["text_lang"] = text_lang
+def create_app(
+    config_path: str | Path,
+    *,
+    backend: str | None = None,
+    model: Any | None = None,
+    engine_host: str | None = None,
+    engine_port: int | None = None,
+    backend_alive: bool = True,
+) -> FastAPI:
+    """Build the fixed public app; startup callers retain the pipeline object."""
 
-                            try:
-                                ok = await self.server.send_message(message)
-                                logger.debug(f"流式分片发送: platform={message.message_info.platform}, ok={ok}")
-                                if not ok:
-                                    logger.warning(f"流式语音发送失败 platform={message.message_info.platform}")
-                            except Exception as exc:
-                                logger.exception(f"流式发送异常: {exc}")
-                        except Exception as exc:
-                            logger.error(f"处理音频块时发生错误: {exc}")
-
-                try:
-                    if hasattr(audio_stream, "__aiter__"):
-                        async for chunk in audio_stream:
-                            await handle_chunk(chunk)
-                    else:
-                        for chunk in audio_stream:
-                            await handle_chunk(chunk)
-                finally:
-                    await self._tts_runtime.close_stream(audio_stream)
-
-                logger.info("流式语音消息发送完成")
-        except Exception as e:
-            self._sync_runtime_state(self._tts_runtime.model)
-            logger.error(f"TTS处理过程中发生错误: {str(e)}")
-            logger.info(f"文本为: {text}")
-            return None
-
-    async def stop(self):
-        """停止服务器和路由"""
-        logger.info("正在停止{}...", "8070 无模型中继服务" if self.no_local_models else "TTS服务")
-        # 停止所有正在运行的缓冲任务
-        for _, task in list(self.buffer_task_dict.items()):
-            if not task.done() and not task.cancelled():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-                except Exception as e:
-                    logger.error(f"取消缓冲任务时出错: {e}")
-
-        # 如果有任务属性，先取消这些任务
-        tasks_to_cancel = []
-        if hasattr(self, "server_task") and not self.server_task.done():
-            self.server_task.cancel()
-            tasks_to_cancel.append(self.server_task)
-
-        if hasattr(self, "router_task") and not self.router_task.done():
-            self.router_task.cancel()
-            tasks_to_cancel.append(self.router_task)
-
-        # 等待任务取消完成
-        if tasks_to_cancel:
-            try:
-                await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
-            except Exception as e:
-                logger.error(f"等待任务取消时出错: {e}")
-
-        # 安全地停止路由器（先停止路由器，因为它包含客户端连接）
-        try:
-            await self.router.stop()
-        except Exception as e:
-            logger.error(f"停止路由器时发生错误: {e}")
-
-        # 安全地停止服务器
-        try:
-            await self.server.stop()
-        except Exception as e:
-            logger.error(f"停止服务器时发生错误: {e}")
-
-        # 给一点时间让连接完全关闭
-        await asyncio.sleep(0.1)
-
-        logger.info("{}已停止", "8070 无模型中继服务" if self.no_local_models else "TTS服务")
+    return TTSPipeline(
+        config_path,
+        backend=backend,
+        model=model,
+        engine_host=engine_host,
+        engine_port=engine_port,
+        backend_alive=backend_alive,
+    ).app
 
 
-async def main():
-    """Run the 8070 platform relay and TTS/emotion service.
+def main() -> None:
+    """Delegate process ownership to the runtime manager."""
 
-    Platform adapters connect to this service, which keeps exactly one
-    upstream connection per platform to Core 8000 and transparently carries
-    ordinary and platform capability messages in both directions.
-    """
+    from scripts.tts_runtime_manager import main as runtime_main
 
-    config_path = Path(__file__).parent / "configs" / "base.toml"
-    pipeline = TTSPipeline(
-        str(config_path),
-        no_local_models="--no-local-models" in sys.argv[1:],
+    raise SystemExit(
+        runtime_main(
+            [
+                "serve",
+                "--config",
+                str(ADAPTER_ROOT / "configs" / "base.toml"),
+            ]
+        )
     )
-
-    try:
-        logger.info(
-            "正在启动{}...",
-            "8070 无模型中继服务" if pipeline.no_local_models else "TTS服务",
-        )
-        # 启动服务
-        server_task, router_task = await pipeline.start()
-        logger.info(
-            "{}已启动，按 Ctrl+C 退出",
-            "8070 无模型中继服务" if pipeline.no_local_models else "TTS服务",
-        )
-
-        # 等待任务完成或中断
-        await asyncio.gather(server_task, router_task)
-
-    except KeyboardInterrupt:
-        logger.debug("\n接收到键盘中断信号...")
-    except Exception as e:
-        logger.error(f"运行过程中发生错误: {str(e)}")
-    finally:
-        logger.info("正在关闭服务...")
-        try:
-            # 增加超时时间，确保有足够时间清理资源
-            await asyncio.wait_for(pipeline.stop(), timeout=15.0)
-            logger.info("服务已安全关闭")
-        except asyncio.TimeoutError:
-            logger.warning("关闭服务超时，强制退出")
-        except Exception as e:
-            logger.error(f"关闭服务时发生错误: {str(e)}")
-
-        # 额外的清理步骤：等待一小段时间让所有资源完全释放
-        await asyncio.sleep(0.2)
 
 
 if __name__ == "__main__":
-    try:
-        # 使用 asyncio.run() 来运行程序，这是现代化的做法
-        # 它会自动处理事件循环的创建和清理
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("\n程序已退出")
-    except Exception as e:
-        logger.error(f"程序启动失败: {str(e)}")
-    finally:
-        # 给系统一点时间完成所有清理工作
-        import time
-
-        time.sleep(0.1)
+    main()

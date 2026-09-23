@@ -1,4 +1,5 @@
 import logging
+import os
 import tomlkit
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -42,6 +43,15 @@ class AdapterConfig:
     prompts: PromptsConfig
     log_level: str = "INFO"
     disable_network_search: bool = False
+
+
+def _resolve_nachobot_config(data: dict) -> NachoBotConfig:
+    """Resolve Core in memory without rewriting credential-bearing config."""
+
+    host = os.environ.get("NACHOBOT_CORE_HOST") or str(data.get("host", "localhost"))
+    raw_port = os.environ.get("NACHOBOT_CORE_PORT") or data.get("port", 8000)
+    port = int(raw_port)
+    return NachoBotConfig(host=host, port=port)
 
 
 def _resolve_prompts_from_core(nachobot_config_dir: Path) -> Dict[str, str]:
@@ -97,7 +107,7 @@ def load_config(path: Path) -> AdapterConfig:
 
     return AdapterConfig(
         discord=DiscordConfig(**discord_data),
-        nachobot=NachoBotConfig(**nachobot_data),
+        nachobot=_resolve_nachobot_config(nachobot_data),
         voice=VoiceConfig(**voice_data),
         prompts=PromptsConfig(**prompts_data),
         log_level=data.get("log_level", "INFO"),

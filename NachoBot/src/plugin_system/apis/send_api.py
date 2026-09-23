@@ -580,6 +580,42 @@ async def text_to_stream_receipt(
     )
 
 
+async def tts_text_to_stream_receipt(
+    text: str,
+    stream_id: str,
+    typing: bool = False,
+    set_reply: bool = False,
+    reply_message: Optional["DatabaseMessages"] = None,
+    storage_message: bool = True,
+    selected_expressions: Optional[List[int]] = None,
+    display_message: str = "",
+    transport_text: str = "",
+    text_lang: str = "",
+) -> SendReceipt:
+    """Send one explicit TTS field through the normal Focus-gated path.
+
+    ``transport_text`` is optional adapter-facing text/control metadata. It is
+    not synthesized; the multimodal router consumes only ``text``. On TTS
+    failure and in potato mode it becomes the plain-text fallback.
+    """
+
+    content: Dict[str, str] = {"text": str(text or "")}
+    if transport_text:
+        content["display_text"] = str(transport_text)
+    if text_lang:
+        content["lang"] = str(text_lang)
+    return await _send_to_target_receipt(
+        message_segment=Seg(type="tts_text", data=content),
+        stream_id=stream_id,
+        display_message=display_message,
+        typing=typing,
+        set_reply=set_reply,
+        reply_message=reply_message,
+        storage_message=storage_message,
+        selected_expressions=selected_expressions,
+    )
+
+
 async def custom_to_stream_receipt(
     message_type: str,
     content: str | Dict,

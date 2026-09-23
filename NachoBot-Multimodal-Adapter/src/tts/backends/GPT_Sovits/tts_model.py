@@ -1,5 +1,6 @@
 import requests
 import aiohttp
+import os
 from typing import Dict, Any, List
 from pathlib import Path
 from nachobot_multimodal.tts.base import BaseTTSModel
@@ -14,15 +15,20 @@ response_error_status_list = [
 
 
 class TTSModel(BaseTTSModel):
-    def __init__(self, config_path: str | Path | None = None):
+    def __init__(
+        self,
+        config_path: str | Path | None = None,
+        engine_host: str | None = None,
+        engine_port: int | None = None,
+    ):
         """初始化TTS模型"""
         self.config = self.load_config(config_path)
         if not self.config:
             raise ValueError("配置文件不存在或加载失败")
         # 记录配置文件所在目录，便于把相对路径转换为绝对路径
         self._config_dir = Path(self.config.config_path).parent.resolve()
-        self.host = self.config.tts.host
-        self.port = self.config.tts.port
+        self.host = engine_host or os.environ.get("NACHOBOT_TTS_ENGINE_HOST") or self.config.tts.host
+        self.port = int(engine_port or os.environ.get("NACHOBOT_TTS_ENGINE_PORT") or self.config.tts.port)
 
         self.base_url = f"http://{self.host}:{self.port}"
         self._ref_audio_path: str = None  # 存储当前使用的参考音频路径

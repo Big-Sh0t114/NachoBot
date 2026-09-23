@@ -5,15 +5,12 @@ services:
       context: .
       additional_contexts:
         nachobot: ../NachoBot
-        multimodal: ../NachoBot-Multimodal-Adapter
     environment:
       - TZ=Asia/Shanghai
       - NACHOBOT_CORE_TOKEN=${NACHOBOT_CORE_TOKEN:-}
     volumes:
       - ./config.toml:/workspace/NachoBot-Bilibili-Adapter/config.toml
       - ../NachoBot/config:/workspace/NachoBot/config:ro
-      - ../NachoBot-Multimodal-Adapter/configs:/workspace/NachoBot-Multimodal-Adapter/configs:ro
-      - ../NachoBot-Multimodal-Adapter/models:/workspace/NachoBot-Multimodal-Adapter/models
       - ./proxy.json:/workspace/NachoBot-Bilibili-Adapter/proxy.json
       - ./idle_texts.json:/workspace/NachoBot-Bilibili-Adapter/idle_texts.json
       - ./subtitles.txt:/workspace/NachoBot-Bilibili-Adapter/subtitles.txt

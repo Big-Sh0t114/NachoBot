@@ -16,7 +16,7 @@ QQ <-> SnowLuma <-> 本适配器 <-> ncnk_message Router <-> NachoBot Core
 - 使用 `echo` 匹配动作响应
 - 接收 OneBot 风格 `post_type=message/notice` 事件
 
-NachoBot 一侧沿用现有 NapCat Adapter 的 Core 链路：
+NachoBot 一侧沿用现有 NapCat Adapter 的 Core 链路，直接连接 `ws://127.0.0.1:8000/ws`：
 
 - `Router + RouteConfig + TargetConfig`
 - `MessageBase / BaseMessageInfo / Seg`
@@ -49,10 +49,10 @@ token = ""
 
 [nachobot_server]
 host = "127.0.0.1"
-port = 8070
+port = 8000
 ```
 
-`nachobot_server.port` 应与当前 Multimodal/Core 消息中继端口一致；如 Core 设置了 token，适配器会通过 `NACHOBOT_CORE_TOKEN` / 当前 `ncnk_message` 的 `get_core_token_from_env()` 读取。
+`nachobot_server.port` 直连 NachoBot Core，默认并要求使用 `8000`。适配器不会改写现有 `config.toml`；如 Core 设置了 token，适配器会通过 `NACHOBOT_CORE_TOKEN` / 当前 `ncnk_message` 的 `get_core_token_from_env()` 读取。
 
 聊天准入默认保持 fail-closed：启用过滤时，`whitelist` 的空名单不会放行任何会话。
 SnowLuma 当前配置的 `[chat]` 共享策略应与现有 NapCat Adapter 同步；WebUI

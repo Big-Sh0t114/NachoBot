@@ -35,8 +35,8 @@ from ncnk_message import (  # noqa: E402
 from bili_src.core.config import (  # noqa: E402
     AdapterConfig,
     PrivateSessionConfig,
-    _resolve_vlm_model_config_list,
 )
+from bili_src.core.multimodal_client import CoreMultimodalClient  # noqa: E402
 from bili_src.core.runtime_profile import build_live_additional_config  # noqa: E402
 from bili_src.core.utils import (  # noqa: E402
     _guard_command_segment,
@@ -55,27 +55,8 @@ from bili_src.audio.mic_capture import MicCaptureWorker, MicConfig  # noqa: E402
 from bili_src.audio.audio_player import AudioPlayer  # noqa: E402
 # from live_streamer import LiveStreamerController, PriorityEvent  # noqa: E402
 
-# Try to import TTS model
-# 修复：动态获取相对路径，替换硬编码的绝对路径
-tts_adapter_path = _root_dir / "NachoBot-Multimodal-Adapter"
-TTSModel = None
-_tts_import_error = None
-
-if tts_adapter_path.exists():
-    if str(tts_adapter_path) not in sys.path:
-        sys.path.insert(0, str(tts_adapter_path))
-    try:
-        from nachobot_multimodal.utils.tts_resolver import resolve_tts_model_class
-        TTSModel, _tts_import_error = resolve_tts_model_class()
-    except ImportError as e:
-        _tts_import_error = str(e)
-    except Exception as e:
-        _tts_import_error = f"Unexpected error: {e}"
-else:
-    _tts_import_error = f"TTS adapter path does not exist: {tts_adapter_path}"
-
-ACCEPT_FORMAT = ["text", "reply", "command"]
-ACCEPT_FORMAT_PRIVATE = ["text", "image", "emoji", "reply", "command"]
+ACCEPT_FORMAT = ["text", "voice", "tts_text", "reply", "command"]
+ACCEPT_FORMAT_PRIVATE = ["text", "voice", "image", "emoji", "reply", "command"]
 
 BILIBILI_DANMU_SEND_DELAY_SECONDS = 0.8
 
@@ -105,6 +86,11 @@ class BilibiliAdapter:
         self.router = Router(route_config, custom_logger=logger)
         self.router.register_class_handler(self.handle_from_nachobot)
         self.api = BilibiliApi(config, logger)
+        self.multimodal_client = CoreMultimodalClient(
+            config.nachobot_host,
+            config.nachobot_port,
+            token=get_core_token_from_env(),
+        )
         self._screen_host_room_id = config.live_host_room_id
         self._screen_monitor: Optional[ScreenMonitor] = None
         self._screen_manual_enable = config.screen_manual_enable
@@ -177,18 +163,14 @@ class BilibiliAdapter:
         self._live_status_cache: Dict[int, Tuple[int, float]] = {}
         self._live_status_cache_seconds = 20
         if self._screen_host_room_id is not None:
-            monitor_configs = self._load_vlm_model_configs()
-            if monitor_configs:
-                self._screen_monitor = ScreenMonitor(
-                    monitor_configs,
-                    logger,
-                    profile=config.screen_vlm,
-                    min_interval_seconds=config.screen_capture_interval_seconds,
-                    capture_active_window=config.screen_capture_active_window,
-                    excluded_exes=config.screen_capture_excluded_exes,
-                )
-            else:
-                self.logger.warning("Screen monitor disabled: VLM config unavailable")
+            self._screen_monitor = ScreenMonitor(
+                logger=logger,
+                profile=config.screen_vlm,
+                min_interval_seconds=config.screen_capture_interval_seconds,
+                capture_active_window=config.screen_capture_active_window,
+                excluded_exes=config.screen_capture_excluded_exes,
+                multimodal_client=self.multimodal_client,
+            )
         else:
             self.logger.info("Screen monitor disabled: host room not configured")
 
@@ -242,8 +224,7 @@ class BilibiliAdapter:
             else None,
             live2d_apply_control_callback=self.live2d_manager.apply_control,
             prepare_reply_callback=self.live2d_manager.prepare_reply,
-            tts_model_class=TTSModel,
-            tts_import_error=_tts_import_error,
+            multimodal_client=self.multimodal_client,
         )
 
     async def _resolve_user_nickname(self, user_id: str) -> str:
@@ -368,15 +349,6 @@ class BilibiliAdapter:
                 self.logger.error(f"Error in mic control loop: {e}")
 
             await asyncio.sleep(5)
-
-    def _load_vlm_model_configs(self) -> list:
-        root_dir = Path(__file__).resolve().parents[1]
-        model_config_path = root_dir / "NachoBot" / "config" / "model_config.toml"
-        return _resolve_vlm_model_config_list(
-            model_config_path,
-            self.logger,
-            self.config.screen_vlm,
-        )
 
     async def _on_speech_start(self):
         """Callback when user starts speaking."""
@@ -620,6 +592,19 @@ class BilibiliAdapter:
         if self.tts_manager.is_tts_enabled(room_id):
             room_lang = self.tts_manager.get_room_language(room_id)
             template_suffix = f"_tts_{room_lang}"
+            if room_lang == "ja":
+                speech_requirement = (
+                    "`reply`只放给观众阅读的中文，`tts_text`放对应的自然日语朗读文本。"
+                )
+            else:
+                speech_requirement = "`reply`和`tts_text`都使用中文。"
+            explicit_tts_contract = (
+                "\n\n【语音输出字段】本直播间已启用语音。最终JSON除现有字段外，"
+                "必须包含非空字符串字段`tts_text`。"
+                f"{speech_requirement}不要在任一字段中输出<JP>/<ZH>标签。"
+            )
+            for key in ("replyer_prompt", "reply_prompt"):
+                template_items[key] = f"{template_items[key]}{explicit_tts_contract}"
 
         return TemplateInfo(
             template_items=template_items,
@@ -1193,13 +1178,14 @@ class BilibiliAdapter:
         # Push to Queue (Priority 20 for High Value Gifts)
         self.event_manager.push_to_event_queue(20, message)
 
-    async def _handle_mic_recognition(self, text: str) -> None:
-        if not text:
+    async def _handle_mic_recognition(self, wav_payload: bytes) -> None:
+        """Forward one captured WAV utterance to Core as a voice segment."""
+        if not wav_payload:
             return
         if not self.mic_worker or not self.mic_worker.config.room_id:
             return
         room_id = self.mic_worker.config.room_id
-        await self.handle_mic_message(room_id, text)
+        await self.handle_mic_message(room_id, wav_payload)
 
     async def handle_incoming_poke(
         self,
@@ -1260,14 +1246,16 @@ class BilibiliAdapter:
 
         self.event_manager.push_to_event_queue(20, message)
 
-    async def handle_mic_message(self, room_id: int, text: str) -> None:
+    async def handle_mic_message(self, room_id: int, wav_payload: bytes) -> None:
+        """Send a captured utterance to Core; ASR never runs in this adapter."""
         self.tts_manager.reset_idle_timer()
         additional_config = self._build_live_additional_config(
             room_id,
             {
                 "room_id": room_id,
                 "is_mentioned": 2.0,
-                "source": "mic_asr",
+                "source": "mic_voice",
+                "media_format": "wav",
             },
         )
 
@@ -1276,8 +1264,11 @@ class BilibiliAdapter:
         master_user_name = str(getattr(self.config, "live_master_user_name", "主人"))
 
         # [FIX] Include template_info so mic messages don't clobber
-        # last_messages with a template-less entry.
-        template_info = await self._get_template_info(room_id, master_user_id, text)
+        # last_messages with a template-less entry.  The transcript is not
+        # available at adapter ingress, so use a stable source label here.
+        template_info = await self._get_template_info(
+            room_id, master_user_id, "[语音消息]"
+        )
 
         message_info = BaseMessageInfo(
             platform=self.config.platform,
@@ -1294,20 +1285,19 @@ class BilibiliAdapter:
                 group_name=str(room_id),
             ),
             format_info=FormatInfo(
-                content_format=["text"],
+                content_format=["voice"],
                 accept_format=ACCEPT_FORMAT,
             ),
             template_info=template_info,
             additional_config=additional_config,
         )
 
-        processed_text = text
-        if not self.config.live_network_search_enabled:
-            processed_text = _mask_urls(processed_text)
-
         message = MessageBase(
             message_info=message_info,
-            message_segment=Seg(type="text", data=processed_text),
+            message_segment=Seg(
+                type="voice",
+                data=base64.b64encode(wav_payload).decode("ascii"),
+            ),
             raw_message=None,
         )
         # Bypass queue for immediate core processing

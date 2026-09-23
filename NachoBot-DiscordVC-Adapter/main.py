@@ -92,7 +92,7 @@ async def main():
     logger = setup_logging(config.log_level)
 
     # Configure Proxy for Discord if enabled
-    # We now pass proxy explicitly to Discord Client and ASR handler
+    # We pass proxy explicitly to Discord Client and voice capture handler
     # instead of setting global env vars, to respect "independence".
     if config.discord.proxy_enabled and config.discord.proxy_url:
         logger.info(f"Proxy enabled: {config.discord.proxy_url} (Independent Mode)")

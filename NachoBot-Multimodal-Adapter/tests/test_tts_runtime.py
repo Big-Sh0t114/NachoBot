@@ -12,7 +12,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from nachobot_multimodal.utils import tts_resolver
-from nachobot_multimodal.utils import emotion_resolver
 from nachobot_multimodal.utils.tts_resolver import TTSResolution, resolve_tts_model_snapshot
 from nachobot_multimodal.utils.tts_runtime import TTSRuntime
 
@@ -291,32 +290,6 @@ class ResolverTests(unittest.TestCase):
             self.assertEqual(first.fingerprint, inactive_edit.fingerprint)
             self.assertNotEqual(first.fingerprint, active_edit.fingerprint)
 
-    def test_emotion_url_refreshes_and_retries_after_invalid_config(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            base_path = Path(temp_dir) / "base.toml"
-            original = '[server]\nhost = "one"\nport = 8070\n'
-            base_path.write_text(original, encoding="utf-8")
-            emotion_resolver._cache_initialized = False
-            emotion_resolver._cached_base_fingerprint = None
-            emotion_resolver._cached_base_path = None
-            emotion_resolver._cached_emotion_api_url = None
-            self.assertEqual(
-                emotion_resolver._get_emotion_api_url(base_path),
-                "http://one:8070/api/emotion_preset",
-            )
-            base_path.write_text('[server]\nhost = "two"\nport = 8070\n', encoding="utf-8")
-            self.assertEqual(
-                emotion_resolver._get_emotion_api_url(base_path),
-                "http://two:8070/api/emotion_preset",
-            )
-            base_path.write_text("[server\n", encoding="utf-8")
-            self.assertIsNone(emotion_resolver._get_emotion_api_url(base_path))
-            base_path.write_text(original, encoding="utf-8")
-            self.assertEqual(
-                emotion_resolver._get_emotion_api_url(base_path),
-                "http://one:8070/api/emotion_preset",
-            )
-
     def test_selected_config_edit_with_same_size_and_mtime_refreshes(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -374,7 +347,7 @@ class BackendParameterTests(unittest.TestCase):
         base_path = root / "base.toml"
         base_path.write_text(
             f'[enabled_tts]\nenabled = ["{enabled}"]\n'
-            '[server]\nhost = "emotion-host"\nport = 8070\n',
+            '[server]\nhost = "127.0.0.1"\nport = 9880\n',
             encoding="utf-8",
         )
         (root / "vox.toml").write_text(
@@ -382,7 +355,7 @@ class BackendParameterTests(unittest.TestCase):
                 [
                     "[tts]",
                     'host = "vox-host"',
-                    "port = 9880",
+                    "port = 9881",
                     'model_dir = ""',
                     "cfg_value = 3.0",
                     "inference_timesteps = 10",
@@ -458,20 +431,15 @@ class BackendParameterTests(unittest.TestCase):
 
                     self.assertTrue(runtime.ensure_tts_model())
                     vox = runtime.model
-                    with mock.patch.object(
-                        vox,
-                        "_resolve_emotion_preset_remote",
-                        new=mock.AsyncMock(side_effect=AssertionError("remote emotion must be skipped")),
-                    ):
-                        await vox.tts(
-                            text="vox text",
-                            platform="webui",
-                            text_lang="zh",
-                            preset_name=None,
-                            skip_remote_emotion=True,
-                        )
+                    await vox.tts(
+                        text="vox text",
+                        platform="webui",
+                        text_lang="zh",
+                        preset_name=None,
+                        skip_remote_emotion=True,
+                    )
 
-                    base_path.write_text('[enabled_tts]\nenabled = ["GPT_Sovits"]\n[server]\nhost = "emotion-host"\nport = 8070\n', encoding="utf-8")
+                    base_path.write_text('[enabled_tts]\nenabled = ["GPT_Sovits"]\n[server]\nhost = "127.0.0.1"\nport = 9880\n', encoding="utf-8")
                     self.assertTrue(runtime.ensure_tts_model())
                     gpt = runtime.model
                     await gpt.tts(
@@ -481,7 +449,7 @@ class BackendParameterTests(unittest.TestCase):
                         prompt_lang="ja",
                     )
 
-                    base_path.write_text('[enabled_tts]\nenabled = ["Vox"]\n[server]\nhost = "emotion-host"\nport = 8070\n', encoding="utf-8")
+                    base_path.write_text('[enabled_tts]\nenabled = ["Vox"]\n[server]\nhost = "127.0.0.1"\nport = 9880\n', encoding="utf-8")
                     self.assertTrue(runtime.ensure_tts_model())
                     vox_again = runtime.model
                     await vox_again.tts(
@@ -495,9 +463,9 @@ class BackendParameterTests(unittest.TestCase):
                 self.assertIsNot(vox, gpt)
                 self.assertIsNot(gpt, vox_again)
                 self.assertEqual([call[0] for call in _HTTPClientSession.calls], [
-                    "http://vox-host:9880/tts",
+                    "http://vox-host:9881/tts",
                     "http://gpt-host:9881/tts",
-                    "http://vox-host:9880/tts",
+                    "http://vox-host:9881/tts",
                 ])
                 vox_params, gpt_params, vox_again_params = [call[1] for call in _HTTPClientSession.calls]
                 self.assertIn("reference_wav_path", vox_params)
@@ -711,7 +679,7 @@ class BackendParameterTests(unittest.TestCase):
                         'test = "default"',
                         '[tts]',
                         'host = "vox-host"',
-                        'port = 9880',
+                        'port = 9881',
                         'model_dir = ""',
                         'cfg_value = 3.0',
                         'inference_timesteps = 10',
@@ -729,6 +697,8 @@ class BackendParameterTests(unittest.TestCase):
                         'inference_timesteps = 10',
                         'normalize = false',
                         'seed = 0',
+                        '[emotion]',
+                        'enabled = false',
                     ]
                 ),
                 encoding="utf-8",

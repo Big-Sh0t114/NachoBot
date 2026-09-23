@@ -1,22 +1,161 @@
 import base64
+import binascii
 import logging
 import os
 import shutil
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from static_ffmpeg import run
 
-from ncnk_message import Seg
+from ncnk_message import MessageBase, Seg
 from config import AdapterConfig
 from utils import allow_reply
+
+
+_BASE_ACCEPT_FORMAT = [
+    "text",
+    "image",
+    "emoji",
+    "reply",
+    "voice",
+    "voice_stream",
+    "voiceurl",
+    "voicefile",
+    "music",
+    "videourl",
+    "video",
+    "videofile",
+    "file",
+    "imageurl",
+]
+
+
+def get_accept_format(use_tts: bool) -> List[str]:
+    """Return the formats this adapter can actually turn into OneBot data.
+
+    ``tts_text`` is a Core-owned action capability rather than an outbound
+    OneBot segment.  Advertise it only when this adapter is configured to
+    request TTS, while keeping already-materialized ``voice`` media usable in
+    either mode.
+    """
+
+    formats = list(_BASE_ACCEPT_FORMAT)
+    if use_tts:
+        formats.insert(formats.index("voiceurl"), "tts_text")
+    return formats
+
+
+# Keep the historical module-level export for callers that only inspect the
+# default capability set.  Message construction below uses the live config.
+ACCEPT_FORMAT = get_accept_format(True)
+
+_SILK_HEADER = b"\x02#!SILK_V3"
+
+
+def _mapping_value(value: Any, *keys: str) -> Any:
+    if not isinstance(value, Mapping):
+        return value
+    for key in keys:
+        candidate = value.get(key)
+        if candidate not in (None, ""):
+            return candidate
+    return None
+
+
+def _data_text(value: Any, *keys: str) -> str:
+    candidate = _mapping_value(value, *keys)
+    if candidate is None:
+        return ""
+    return str(candidate).strip()
+
+
+def _media_ref(value: Any, *, default_scheme: str) -> str:
+    """Normalize Core media data without changing existing OneBot URLs."""
+
+    text = _data_text(value, "file", "path", "url", "data", "audio_base64", "audio")
+    if not text:
+        return ""
+    if text.startswith(("base64://", "file://", "http://", "https://")):
+        return text
+    return f"{default_scheme}://{text}"
+
+
+def _music_data(value: Any) -> Dict[str, Any]:
+    """Build a OneBot music payload from an id or an already-shaped mapping."""
+
+    if isinstance(value, Mapping):
+        data = dict(value)
+        if data.get("id") not in (None, ""):
+            data["id"] = str(data["id"])
+            data.setdefault("type", "163")
+            return data
+        url = _data_text(data, "url", "music_url", "audio")
+        if url:
+            return {
+                "type": "custom",
+                "url": url,
+                **({"audio": _data_text(data, "audio")} if _data_text(data, "audio") else {}),
+                **({"title": _data_text(data, "title")} if _data_text(data, "title") else {}),
+            }
+        return {}
+
+    song_id = str(value or "").strip()
+    return {"type": "163", "id": song_id} if song_id else {}
+
+
+def _forward_nodes(
+    value: Any, config: AdapterConfig, logger: logging.Logger
+) -> List[Dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+
+    nodes: List[Dict[str, Any]] = []
+    for raw_item in value:
+        try:
+            item = raw_item if isinstance(raw_item, MessageBase) else MessageBase.from_dict(raw_item)
+            segment = item.message_segment
+            if segment.type == "id":
+                if segment.data not in (None, ""):
+                    nodes.append({"type": "node", "data": {"id": segment.data}})
+                continue
+
+            user_info = item.message_info.user_info
+            if user_info is None:
+                continue
+            content = seg_to_onebot(segment, config, logger)
+            if not content:
+                continue
+            nodes.append(
+                {
+                    "type": "node",
+                    "data": {
+                        "name": user_info.user_nickname or "QQ用户",
+                        "uin": user_info.user_id,
+                        "content": content,
+                    },
+                }
+            )
+        except Exception as exc:
+            logger.warning("Skipping invalid forward node: %s", type(exc).__name__)
+    return nodes
 
 
 def seg_to_onebot(
     seg_data: Seg, config: AdapterConfig, logger: logging.Logger
 ) -> List[Dict[str, Any]]:
     payload: List[Dict[str, Any]] = []
+    if isinstance(seg_data, dict):
+        try:
+            seg_data = Seg.from_dict(seg_data)
+        except Exception:
+            return payload
+
+    if not isinstance(seg_data, Seg):
+        return payload
+
     if seg_data.type == "seglist" and isinstance(seg_data.data, list):
         for seg in seg_data.data:
             payload.extend(seg_to_onebot(seg, config, logger))
@@ -31,25 +170,28 @@ def seg_to_onebot(
         if target_id and allow_reply(config):
             payload.append({"type": "reply", "data": {"id": target_id}})
     elif seg_data.type == "image":
-        if seg_data.data:
+        file_value = _media_ref(seg_data.data, default_scheme="base64")
+        if file_value:
             payload.append(
                 {
                     "type": "image",
-                    "data": {"file": f"base64://{seg_data.data}", "subtype": 0},
+                    "data": {"file": file_value, "subtype": 0},
                 }
             )
     elif seg_data.type == "emoji":
-        if seg_data.data:
+        file_value = _media_ref(seg_data.data, default_scheme="base64")
+        if file_value:
             payload.append(
                 {
                     "type": "image",
-                    "data": {"file": f"base64://{seg_data.data}", "subtype": 1},
+                    "data": {"file": file_value, "subtype": 1},
                 }
             )
     elif seg_data.type in ("voice", "voice_stream"):
-        if config.use_tts and seg_data.data:
+        if seg_data.data:
+            audio_data = _data_text(seg_data.data, "audio_base64", "audio", "data")
             file_value = voice_to_record_file(
-                str(seg_data.data),
+                audio_data,
                 config,
                 logger,
                 stream=(seg_data.type == "voice_stream"),
@@ -58,37 +200,36 @@ def seg_to_onebot(
                 payload.append(
                     {"type": "record", "data": build_record_data(file_value, config)}
                 )
+    elif seg_data.type == "voicefile":
+        file_value = _media_ref(seg_data.data, default_scheme="file")
+        if file_value:
+            payload.append({"type": "record", "data": build_record_data(file_value, config)})
     elif seg_data.type == "imageurl":
-        if seg_data.data:
-            payload.append({"type": "image", "data": {"file": str(seg_data.data)}})
+        file_value = _media_ref(seg_data.data, default_scheme="file")
+        if file_value:
+            payload.append({"type": "image", "data": {"file": file_value}})
     elif seg_data.type == "voiceurl":
-        if seg_data.data:
-            payload.append({"type": "record", "data": {"file": str(seg_data.data)}})
+        file_value = _media_ref(seg_data.data, default_scheme="file")
+        if file_value:
+            payload.append({"type": "record", "data": {"file": file_value}})
+    elif seg_data.type == "music":
+        music_data = _music_data(seg_data.data)
+        if music_data:
+            payload.append({"type": "music", "data": music_data})
+    elif seg_data.type in ("video", "videofile", "videourl"):
+        default_scheme = "base64" if seg_data.type == "video" else "file"
+        file_value = _media_ref(seg_data.data, default_scheme=default_scheme)
+        if file_value:
+            payload.append({"type": "video", "data": {"file": file_value}})
     elif seg_data.type == "file":
-        if seg_data.data:
-            # Core sends the absolute file path directly for sandbox files via custom_to_stream
-            if isinstance(seg_data.data, str):
-                file_path = seg_data.data
-                file_name = os.path.basename(file_path)
-                payload.append(
-                    {
-                        "type": "video",
-                        "data": {"file": f"file://{file_path}", "name": file_name},
-                    }
-                )
-            elif isinstance(seg_data.data, dict):
-                file_path = seg_data.data.get("file") or seg_data.data.get("path") or ""
-                file_name = seg_data.data.get("name", "file")
-                if file_path:
-                    payload.append(
-                        {
-                            "type": "video",
-                            "data": {
-                                "file": f"file://{file_path}",
-                                "name": file_name,
-                            },
-                        }
-                    )
+        file_value = _media_ref(seg_data.data, default_scheme="file")
+        if file_value:
+            file_name = _data_text(seg_data.data, "name") or os.path.basename(file_value)
+            payload.append(
+                {"type": "file", "data": {"file": file_value, "name": file_name}}
+            )
+    elif seg_data.type == "forward":
+        payload.extend(_forward_nodes(seg_data.data, config, logger))
 
     return payload
 
@@ -161,7 +302,14 @@ def voice_to_record_file(
         return ""
     if str(config.platform).lower() != "discord":
         return f"base64://{audio_b64}"
+    try:
+        is_silk = base64.b64decode(audio_b64, validate=True).startswith(_SILK_HEADER)
+    except (binascii.Error, TypeError, ValueError):
+        is_silk = False
     if stream:
+        if is_silk:
+            logger.warning("SILK voice_stream cannot be labeled as Discord Ogg")
+            return ""
         logger.warning(
             "Discord voice bubble does not support voice_stream, send as raw record"
         )
@@ -169,6 +317,12 @@ def voice_to_record_file(
     ogg_data_url = convert_to_opus_data_url(audio_b64, config, logger)
     if ogg_data_url:
         return ogg_data_url
+    # A Discord record segment is explicitly named as Ogg/Opus below.  Do not
+    # fall back to the original Tencent SILK bytes after conversion failed:
+    # Discord would receive a mislabeled/corrupt attachment.
+    if is_silk:
+        logger.warning("SILK conversion failed; dropping Discord voice segment")
+        return ""
     return f"base64://{audio_b64}"
 
 
@@ -189,7 +343,7 @@ def convert_to_opus_data_url(
         return None
 
     # Check for SILK header
-    is_silk = audio_bytes.startswith(b"\x02#!SILK_V3")
+    is_silk = audio_bytes.startswith(_SILK_HEADER)
 
     if is_silk:
         try:
@@ -199,11 +353,14 @@ def convert_to_opus_data_url(
             audio_bytes = rsilk.decode(audio_bytes, tencent=True)
             logger.info("SILK format detected, successfully decoded to PCM using rsilk")
         except ImportError:
-            logger.warning(
-                "SILK format detected but rsilk is not installed. ffmpeg conversion will likely fail."
-            )
+            logger.warning("SILK format detected but rsilk is not installed")
+            return None
         except Exception as exc:
             logger.warning(f"Failed to decode SILK using rsilk: {exc}")
+            return None
+        if not isinstance(audio_bytes, (bytes, bytearray)) or not audio_bytes:
+            logger.warning("SILK decoder returned no PCM data")
+            return None
 
     ffmpeg_exe = resolve_ffmpeg_exe(config, logger)
     if not ffmpeg_exe:

@@ -3,6 +3,7 @@ import json
 import time
 import urllib.parse
 import uuid
+from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
 import websockets
@@ -31,32 +32,27 @@ from utils import (
     mask_bilibili_raw_data,
 )
 from message_parser import parse_onebot_message
-from message_builder import seg_to_onebot, contains_reply_segment
+from message_builder import (
+    contains_reply_segment,
+    get_accept_format,
+    seg_to_onebot,
+)
 
 
-ACCEPT_FORMAT = [
-    "text",
-    "image",
-    "emoji",
-    "reply",
-    "voice",
-    "command",
-    "voiceurl",
-    "music",
-    "videourl",
-    "file",
-    "imageurl",
-    "forward",
-    "video",
-]
+ACCEPT_FORMAT = get_accept_format(True)
 
 
 class KoishiOneBotAdapter:
+    _ONEBOT_SEND_TIMEOUT = 5.0
+    _ONEBOT_RESPONSE_TIMEOUT = 5.0
+
     def __init__(self, config: AdapterConfig, logger: Any):
         self.config = config
         self.logger = logger
         self.onebot_ws: Optional[websockets.WebSocketClientProtocol] = None
         self.onebot_send_lock = asyncio.Lock()
+        self._onebot_response_waiters: Dict[str, asyncio.Future] = {}
+        self._onebot_response_lock = asyncio.Lock()
         route_config = RouteConfig(
             route_config={
                 self.config.platform: TargetConfig(
@@ -119,28 +115,67 @@ class KoishiOneBotAdapter:
             raise
 
     async def _receive_onebot(self, ws: websockets.WebSocketClientProtocol) -> None:
-        async for raw in ws:
-            try:
-                data = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            post_type = data.get("post_type")
-            if post_type == "message":
-                await self.handle_onebot_message(data)
-                continue
-            if "status" in data and "retcode" in data:
-                status = data.get("status")
-                retcode = data.get("retcode")
-                message = data.get("message", "")
-                echo = data.get("echo")
-                if status != "ok":
-                    self.logger.warning(
-                        f"OneBot action failed: status={status} retcode={retcode} message={message} echo={echo}"
-                    )
-                else:
-                    self.logger.debug(
-                        f"OneBot action ok: retcode={retcode} echo={echo}"
-                    )
+        try:
+            async for raw in ws:
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                post_type = data.get("post_type")
+                if post_type == "message":
+                    await self.handle_onebot_message(data)
+                    continue
+                if "status" in data and "retcode" in data:
+                    await self._resolve_onebot_response(data)
+                    status = data.get("status")
+                    retcode = data.get("retcode")
+                    echo = data.get("echo")
+                    if status != "ok":
+                        self.logger.warning(
+                            f"OneBot action failed: status={status} retcode={retcode} echo={echo}"
+                        )
+                    else:
+                        self.logger.debug(
+                            f"OneBot action ok: retcode={retcode} echo={echo}"
+                        )
+        finally:
+            # A disconnected receive loop must wake senders and release every
+            # echo waiter; otherwise a Core delivery can linger until timeout.
+            await self._finish_onebot_response_waiters()
+
+    async def _register_onebot_response_waiter(self, echo: str) -> asyncio.Future:
+        loop = asyncio.get_running_loop()
+        waiter = loop.create_future()
+        async with self._onebot_response_lock:
+            self._onebot_response_waiters[echo] = waiter
+        return waiter
+
+    async def _remove_onebot_response_waiter(
+        self, echo: str, waiter: asyncio.Future
+    ) -> None:
+        async with self._onebot_response_lock:
+            if self._onebot_response_waiters.get(echo) is waiter:
+                self._onebot_response_waiters.pop(echo, None)
+
+    async def _resolve_onebot_response(self, response: Mapping[str, Any]) -> None:
+        raw_echo = response.get("echo")
+        if raw_echo in (None, ""):
+            return
+        echo = str(raw_echo)
+        async with self._onebot_response_lock:
+            waiter = self._onebot_response_waiters.pop(echo, None)
+        if waiter is not None and not waiter.done():
+            waiter.set_result(dict(response))
+
+    async def _finish_onebot_response_waiters(self) -> None:
+        async with self._onebot_response_lock:
+            waiters = list(self._onebot_response_waiters.values())
+            self._onebot_response_waiters.clear()
+        for waiter in waiters:
+            if not waiter.done():
+                # A None result represents a disconnected transport, rather
+                # than cancelling the sender task that owns the waiter.
+                waiter.set_result(None)
 
     async def handle_onebot_message(self, data: Dict[str, Any]) -> None:
         message_type = data.get("message_type")
@@ -210,7 +245,7 @@ class KoishiOneBotAdapter:
             group_info=group_info,
             format_info=FormatInfo(
                 content_format=content_format,
-                accept_format=ACCEPT_FORMAT,
+                accept_format=get_accept_format(self.config.use_tts),
             ),
             additional_config=additional_config or None,
         )
@@ -294,15 +329,48 @@ class KoishiOneBotAdapter:
         )
         try:
             self.logger.info("OneBot send start")
-            await self._onebot_send("send_msg", params)
+            response = await self._onebot_send("send_msg", params)
             self.logger.info("OneBot send done")
+            actual_id = self._extract_message_id(response)
+            source_id = message_info.message_id
+            if actual_id is not None and source_id not in (None, ""):
+                try:
+                    await self.router.send_custom_message(
+                        platform=self.config.platform,
+                        message_type_name="message_id_echo",
+                        message={
+                            "type": "echo",
+                            "echo": source_id,
+                            "actual_id": actual_id,
+                        },
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    self.logger.warning(
+                        f"OneBot message_id_echo handoff failed: {type(exc).__name__}"
+                    )
         except asyncio.CancelledError:
             self.logger.warning("OneBot send cancelled")
             raise
         except Exception as exc:
-            self.logger.error(f"OneBot send raised: {exc}")
+            self.logger.error(f"OneBot send raised: {type(exc).__name__}")
 
-    async def _onebot_send(self, action: str, params: Dict[str, Any]) -> None:
+    @staticmethod
+    def _extract_message_id(response: Any) -> Optional[str]:
+        if not isinstance(response, Mapping):
+            return None
+        data = response.get("data")
+        if not isinstance(data, Mapping):
+            return None
+        actual_id = data.get("message_id")
+        if actual_id in (None, ""):
+            return None
+        return str(actual_id)
+
+    async def _onebot_send(
+        self, action: str, params: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
         ws = self.onebot_ws
         if ws_is_closed(ws):
             self.logger.warning(
@@ -310,31 +378,53 @@ class KoishiOneBotAdapter:
                 bool(ws),
                 getattr(ws, "closed", None),
             )
-            return
+            return None
         echo = str(uuid.uuid4())
         payload = {
             "action": action,
             "params": params,
             "echo": echo,
         }
+        waiter = await self._register_onebot_response_waiter(echo)
         self.logger.info(f"OneBot action sending: {action} echo={echo}")
         try:
-            async with self.onebot_send_lock:
-                await asyncio.wait_for(
-                    ws.send(json.dumps(payload, ensure_ascii=True)),
-                    timeout=5,
-                )
-        except asyncio.TimeoutError:
-            self.logger.error(f"OneBot action send timeout: {action} echo={echo}")
             try:
-                await ws.close()
-            except Exception as close_exc:
-                self.logger.warning(
-                    f"OneBot ws close failed after timeout: {close_exc}"
+                async with self.onebot_send_lock:
+                    await asyncio.wait_for(
+                        ws.send(json.dumps(payload, ensure_ascii=True)),
+                        timeout=self._ONEBOT_SEND_TIMEOUT,
+                    )
+            except asyncio.TimeoutError:
+                self.logger.error(f"OneBot action send timeout: {action} echo={echo}")
+                try:
+                    await ws.close()
+                except Exception as close_exc:
+                    self.logger.warning(
+                        f"OneBot ws close failed after timeout: {type(close_exc).__name__}"
+                    )
+                return None
+            except Exception as exc:
+                self.logger.error(
+                    f"OneBot action send failed: {action} echo={echo} err={type(exc).__name__}"
                 )
-        except Exception as exc:
-            self.logger.error(
-                f"OneBot action send failed: {action} echo={echo} err={exc}"
-            )
-            return
-        self.logger.info(f"OneBot action sent: {action} echo={echo}")
+                return None
+
+            self.logger.info(f"OneBot action sent: {action} echo={echo}")
+            try:
+                response = await asyncio.wait_for(
+                    waiter, timeout=self._ONEBOT_RESPONSE_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                self.logger.warning(
+                    f"OneBot action response timeout: {action} echo={echo}"
+                )
+                return None
+            if not isinstance(response, Mapping):
+                return None
+            status = response.get("status")
+            retcode = response.get("retcode")
+            if status != "ok" or retcode not in (None, 0, "0"):
+                return None
+            return dict(response)
+        finally:
+            await self._remove_onebot_response_waiter(echo, waiter)

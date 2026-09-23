@@ -616,9 +616,11 @@ def load_config(path: Path) -> AdapterConfig:
         if marker:
             response_filter_blocked_markers = [marker.lower()]
 
+    nachobot_port = int(nachobot.get("port", 8000))
+
     return AdapterConfig(
         nachobot_host=str(nachobot.get("host", "127.0.0.1")),
-        nachobot_port=int(nachobot.get("port", 8070)),
+        nachobot_port=nachobot_port,
         platform=str(nachobot.get("platform", "bilibili")),
         sessdata=str(bilibili.get("sessdata", "") or ""),
         bili_jct=str(bilibili.get("bili_jct", "") or ""),

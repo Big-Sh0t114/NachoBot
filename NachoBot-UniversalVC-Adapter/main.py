@@ -7,11 +7,7 @@ from loguru import logger
 
 sys.path.append(str(Path(__file__).resolve().parent))
 
-from multimodal_bridge import ensure_multimodal_import
-
-ensure_multimodal_import()
-
-from nachobot_multimodal.asr.onnxruntime_compat import preload_onnxruntime  # noqa: E402
+from runtime_compat import preload_onnxruntime
 
 # Prevent Windows' older System32 onnxruntime.dll from shadowing the venv copy.
 preload_onnxruntime()
@@ -106,14 +102,13 @@ async def main():
     logger.info(f"NachoBot Core: ws://{config.nachobot.host}:{config.nachobot.port}/ws")
     logger.info(f"Denoise: {'ON' if config.denoise.enabled else 'OFF'}")
     logger.info(f"Speaker Tracking: {'ON' if config.speaker.enabled else 'OFF'}")
-    logger.info("ASR: shared Multimodal streaming engine")
-    logger.info(f"STT Remote API: {'ON' if config.stt.enabled else 'OFF (fallback)'}")
+    logger.info("Speech perception: Core multimodal API")
     logger.info(f"Microphone Capture: {'ON' if config.microphone.enabled else 'OFF'}")
     if config.microphone.enabled and config.microphone.push_to_talk:
         logger.info(f"  Push-to-Talk: ON (key: {config.microphone.ptt_key})")
     elif config.microphone.enabled:
         logger.info(f"  Push-to-Talk: OFF (continuous capture)")
-    logger.info("TTS Handler: GPT-SoVITS (from NachoBot-Multimodal-Adapter)")
+    logger.info("Speech output: Core-produced voice segments")
 
     adapter = UniversalVCAdapter(config, logger)
 

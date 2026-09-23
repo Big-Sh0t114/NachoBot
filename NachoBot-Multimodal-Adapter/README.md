@@ -1,70 +1,39 @@
-# NachoBot 多模态适配器
+# NachoBot 本地多模态运行时
 
-NachoBot 的 TTS、情感预设、流式 ASR 与 VLM 服务。自 v1.0.0-pre-C 起，GPT-SoVITS 与 VoxCPM 推理运行时由本目录统一托管，不再依赖用户预先安装的外部客户端。
+本目录维护本地 ASR、VLM 与 TTS 的具体模型路由。平台适配器直接连接 NachoBot Core 的 `8000/ws`；TTS 对 Core 暴露一个统一的 `9880` HTTP 运行时，运行时进程在内部托管所选 GPT-SoVITS 或 VoxCPM 后端。
 
-## 组件与端口
+## 边界与端口
 
-| 组件 | 默认端口 | 说明 |
+| 组件 | 默认端口 | 职责 |
 | --- | ---: | --- |
-| Multimodal Adapter | `8070` | 平台消息中继、TTS 路由、`/api/tts`、`/api/emotion_preset`、`/api/health` |
-| 托管 TTS Runtime | `9880` | GPT-SoVITS 或 VoxCPM，二选一 |
-| Perception API | `9874` | Florence-2 VLM 与共享 Sherpa-ONNX 流式 ASR |
+| NachoBot Core | `8000` | 平台消息总线、`/api/multimodal` 与运行档位降级 |
+| 统一 TTS Runtime | `9880` | 公开 TTS 健康检查与合成入口；内部托管一个选定后端 |
+| 本地多模态运行时 | `9874` | FULL 的 ASR、VLM 与兼容 API |
 
-主要能力：
+Core 调用的运行时接口包括：
 
-- GPT-SoVITS：角色权重、参考音频、语言与生成参数。
-- VoxCPM：参考音频/Voice Design、LoRA、切句与情感预设。
-- 情感分类：使用多语言 NLI 模型把文本映射到声音预设，低置信度回退默认音色。
-- VLM：OpenAI 兼容的 `/v1/chat/completions`；Florence-2 固定执行详细描述任务。
-- ASR：OpenAI 兼容的 `/v1/audio/transcriptions`，并向 Bilibili、DiscordVC、UniversalVC 提供共享的逐块流式识别实现。
+- `GET /v1/capabilities`
+- `POST /v1/perception`
+- 统一 TTS Runtime 的 TTS 接口（`9880`）
 
-## 快速开始
+9874 仅负责 ASR/VLM 感知，不承载 TTS。平台适配器的消息链路始终是 Adapter → Core `8000/ws`。
 
-推荐直接在仓库根目录选择启动档位：
+## 运行档位
 
-| 脚本 | 启动内容 |
-| --- | --- |
-| `launchbot.bat` | TTS + Adapter + VLM/ASR |
-| `launchbot_lite.bat` | TTS + Adapter，不启动 VLM/ASR |
-| `launchbot_potato.bat` | 仅 8070 消息中继，不加载本地模型 |
+| 档位 | Core 感知路由 | 启动服务 | 回复语音 |
+| --- | --- | --- | --- |
+| FULL | local 失败后 remote，最终文本降级 | 9880 统一 TTS Runtime、9874 perception | 仅显式 `tts_text` 字段合成 |
+| LITE | remote，最终文本降级 | 9880 统一 TTS Runtime | 仅显式 `tts_text` 字段合成 |
+| POTATO | remote，最终文本降级 | NachoBot Core + 所选 QQ 适配器；本目录不启动服务 | 预建平台媒体行为保持不变 |
 
-脚本会优先复用 `models/` 与 `models/hf_cache/` 中的本地内容，缺失时再下载。默认可通过 `NACHOBOT_HF_ENDPOINT` 指定 Hugging Face 端点；根启动脚本默认使用 `https://hf-mirror.com`。
+Compose 只提供 FULL/LITE 的多模态服务；POTATO 是 Core 文本档位，根启动脚本仍会启动所选 QQ 适配器，但不会从本 compose 文件启动本地模型服务：
 
-### 中国大陆模型下载
-
-本项目对首次模型下载采用“本地缓存优先 + 多端点回退”策略。Hugging Face 模型的端点顺序为：
-
-```text
-NACHOBOT_HF_ENDPOINT / HF_ENDPOINT（用户显式设置）
-        ↓
-hf-mirror.com
-        ↓
-huggingface.co
+```powershell
+docker compose --profile full up -d
+docker compose --profile lite up -d
 ```
 
-`NACHOBOT_HF_ENDPOINT` 的优先级高于标准 `HF_ENDPOINT`。如需使用自己的 Hugging Face 反向代理、企业镜像或其他兼容端点，可在启动前设置：
-
-```bat
-set NACHOBOT_HF_ENDPOINT=https://your-huggingface-mirror.example.com
-```
-
-也可以使用标准变量：
-
-```bat
-set HF_ENDPOINT=https://your-huggingface-mirror.example.com
-```
-
-模型下载行为如下：
-
-- **Florence-2 VLM**：先下载完整 snapshot 并校验关键 processor/tokenizer 文件及 `model.safetensors`，随后只从本地 snapshot 加载，避免镜像元数据不完整触发 Transformers 的远程 safetensors 转换探测。
-- **情感分类模型**：本地缓存不可用时依次尝试自定义端点、`hf-mirror.com` 与 Hugging Face 官方站；下载完成后从本地 snapshot 加载。
-- **VoxCPM2**：托管 Runtime 在启动模型服务前完成整个 Hugging Face snapshot 下载和端点故障转移，再把本地模型目录交给 VoxCPM。
-- **Sherpa-ONNX ASR**：优先从 Hugging Face 上游镜像逐文件获取所需 ONNX/token 文件；所有 Hugging Face 端点失败后才回退到 sherpa-onnx GitHub Releases 压缩包。
-- **GPT-SoVITS 基础权重**：使用 `hf-mirror.com` 时继续采用已有的 `resolve` 直链 GET 下载逻辑，绕过不稳定的 Hub HEAD 元数据请求。
-
-默认关闭 Hugging Face Xet 下载路径，并把 Hub 元数据/文件下载超时调整为更适合大模型下载的值，以减少部分中国大陆网络访问 CAS/Xet 节点失败导致的首次启动问题。
-
-要求 Python 3.11 或 3.12。首次运行需要下载较大的模型和运行时，请观察 `logs/boot_setup.log` 与对应终端。
+托管引擎默认跟随当前 `configs/base.toml` 的唯一启用项；仅在需要临时覆盖时设置 `NACHOBOT_TTS_ENGINE=gpt-sovits` 或 `voxcpm`。
 
 ## 配置
 
@@ -77,100 +46,47 @@ vox_template.toml          -> configs/vox.toml
 perception_template.toml   -> configs/perception.toml
 ```
 
-### `base.toml`
+`base.toml` 的 `[enabled_tts]` 选择 GPT-SoVITS 或 Vox；具体参数分别维护在 `gpt-sovits.toml` 与 `vox.toml`。`perception.toml` 维护 9874 监听地址、Florence-2 与 Sherpa-ONNX 配置。Core 不包含这些本地模型名。
 
-```toml
-[server]
-host = "127.0.0.1"
-port = 8070
+TTS Runtime 在进程启动时固定读取一次活动配置并选择唯一后端。切换 GPT-SoVITS/Vox 或修改模型配置后需要重启 TTS Runtime；请求期间不会重载或切换本地模型。
 
-[enabled_tts]
-enabled = ["Vox"] # "GPT_Sovits" 或 "Vox"，只启用一个
+所有本地模型都在各自服务公开就绪前加载：FULL 的 9874 会完成 ASR 与 VLM 预加载；9880 会先启动并验证所选 TTS 后端，Vox 启用情感分类时还会在公开端口监听前加载分类器。任一必需模型加载失败，所属服务启动失败并由 Core 执行既定降级。
 
-[tts_base_config]
-stream_mode = false
-post_process = false
-```
+## 启动
 
-`[routes]` 指向 Core 的 WebSocket 路由；默认 Core 为 `127.0.0.1:8000`。
+推荐从仓库根目录启动：
 
-### TTS 引擎配置
+- `launchbot.bat`：FULL
+- `launchbot_lite.bat`：LITE
+- `launchbot_potato.bat`：POTATO（Core 文本 profile + 所选 QQ 适配器；不启动本目录服务）
 
-- `gpt-sovits.toml`：模型权重、参考音频、提示文本、语言和采样参数。
-- `vox.toml`：`model_dir` 留空时托管运行时下载 `openbmb/VoxCPM2`；可选 LoRA、声音描述、参考音频与情感映射。
-- 两份配置中的 `host` / `port` 是托管 TTS API 地址，通常保持 `127.0.0.1:9880`。
-- VoxCPM 已移除旧的 `denoise` 字段。
+手动启动统一 TTS Runtime 与 FULL perception：
 
-### `perception.toml`
-
-```toml
-[perception]
-host = "127.0.0.1"
-port = 9874
-
-[perception.device]
-vlm = "cuda:0"
-
-[asr]
-provider = "cpu"
-num_threads = 4
-models_dir = "models"
-auto_download = true
-```
-
-ASR 模型和配置只在这里维护；其他适配器不再保存重复副本。
-
-## 手动启动
-
-先同步依赖：
-
-```bash
+```powershell
 uv sync --locked
+uv run python scripts/container_tts_entrypoint.py --host 127.0.0.1 --port 9880
+uv run python -m nachobot_multimodal.api_server
 ```
 
-根据 `base.toml` 选择一个 TTS Runtime：
+`container_tts_entrypoint.py` 按活动配置选择后端并把公开监听固定在 9880；FULL 另启动 9874 perception API。Core 通过 `NACHOBOT_TTS_ENDPOINT=http://127.0.0.1:9880` 与 `NACHOBOT_MULTIMODAL_ENDPOINT=http://127.0.0.1:9874` 访问它们。POTATO 不设置或访问这些本地模型服务。
 
-```bash
+也可直接使用内部托管管理器：
+
+```powershell
 uv run python scripts/tts_runtime_manager.py serve --engine gpt-sovits --port 9880
 # 或
 uv run python scripts/tts_runtime_manager.py serve --engine voxcpm --port 9880
 ```
 
-另开终端启动 Adapter 与感知服务：
-
-```bash
-uv run python main.py
-uv run python -m nachobot_multimodal.api_server
-```
-
-纯中继模式：
-
-```bash
-uv run python main.py --no-local-models
-```
-
-该模式的 `/api/health` 返回 `relay_only`，不会启动 TTS、VLM 或 ASR。
-
-## 目录要点
-
-```text
-scripts/tts_runtime_manager.py   托管并修补 TTS 运行时
-src/tts/                         TTS 后端与统一路由
-src/asr/                         共享流式 ASR 与模型管理
-src/vlm/                         Florence-2 VLM
-src/api_server.py                Perception API
-nachobot_multimodal/             对外稳定导入命名空间
-template_configs/                可复制的默认配置
-models/                          模型、托管运行时与缓存
-```
-
 ## Docker
 
 ```bash
-docker network create nacho_bot
-docker compose up -d
+docker compose --profile full up -d
+# 或：--profile lite
 ```
 
-当前 Compose 默认只启动 `8070` Multimodal Adapter，并挂载 `configs`、`models` 与 `logs`；不会替你额外启动 `9880` 托管 TTS Runtime 或 `9874` Perception API。需要完整本地模型链路时，建议在宿主机使用根启动脚本，或自行把另外两个进程编排进部署环境。
+Compose 不设隐式默认档位，具体服务拓扑见上方“运行档位”。Core 与各平台适配器使用 `8000/ws`；FULL/LITE 的 Core 通过 `multimodal-tts-runtime:9880` 和（仅 FULL）`multimodal-perception:9874` 访问本地模型服务。
 
-构建使用 Python 3.12，并通过 `additional_contexts` 读取相邻的 `NachoBot/ncnk_message`。容器连接 Core 或外部推理进程时应使用容器可达的服务名/宿主机地址，而不是指向容器自身的 `127.0.0.1`。
+## 模型下载
+
+模型优先复用 `models/` 与 `models/hf_cache/`。可用 `NACHOBOT_HF_ENDPOINT` 或标准 `HF_ENDPOINT` 指定 Hugging Face 镜像；默认禁用 Xet，并保留 Florence-2、VoxCPM、Sherpa-ONNX 与 GPT-SoVITS 现有的本地缓存和回退下载策略。

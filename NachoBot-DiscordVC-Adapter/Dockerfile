@@ -21,9 +21,6 @@ RUN uv sync --locked --no-dev --no-install-project
 COPY . .
 
 COPY --from=nachobot /ncnk_message /workspace/NachoBot/ncnk_message
-COPY --from=multimodal /src /workspace/NachoBot-Multimodal-Adapter/src
-COPY --from=multimodal /nachobot_multimodal /workspace/NachoBot-Multimodal-Adapter/nachobot_multimodal
-COPY --from=multimodal /configs /workspace/NachoBot-Multimodal-Adapter/configs
 
 ENV PATH="/workspace/NachoBot-DiscordVC-Adapter/.venv/bin:${PATH}" \
     PYTHONUNBUFFERED=1

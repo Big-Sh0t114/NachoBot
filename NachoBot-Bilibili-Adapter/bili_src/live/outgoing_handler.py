@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import time
 from typing import Any, Dict, Optional
 
@@ -6,6 +7,7 @@ from ncnk_message import MessageBase
 from bili_src.core.utils import (
     _extract_image_base64,
     _extract_plain_text,
+    _extract_voice_base64,
     _find_reply_id,
     _strip_emoji,
     _split_bilibili_text,
@@ -36,6 +38,7 @@ class OutgoingHandler:
             await self._handle_command(message)
             return
 
+        voice_data = _extract_voice_base64(seg)
         image_data = _extract_image_base64(seg)
         if image_data:
             private_target = self.adapter.private_handler.resolve_private_target(
@@ -55,22 +58,33 @@ class OutgoingHandler:
             return
 
         text = _extract_plain_text(seg).strip()
-        if not text:
+        if not text and not voice_data:
             return
 
         original_text = text
-        prepared = await self.adapter.live2d_manager.prepare_reply(original_text)
+        prepared = (
+            await self.adapter.live2d_manager.prepare_reply(original_text)
+            if original_text
+            else PreparedReplyResult("", False, "", None)
+        )
         text = prepared.reply
-        if not text:
+        if not text and not voice_data:
             self.logger.warning("Outgoing reply suppressed after Live2D preparation")
             return
 
         comment_target = self.adapter.comment_handler.resolve_comment_target(message)
         if comment_target:
             await self.adapter.live2d_manager.apply_control(prepared.control_id)
-            await self.adapter.comment_handler.send_comment_reply_from_context(
-                comment_target, text
-            )
+            if voice_data:
+                await self._play_core_voice(
+                    voice_data,
+                    idle=False,
+                    control_id=prepared.control_id,
+                )
+            if text:
+                await self.adapter.comment_handler.send_comment_reply_from_context(
+                    comment_target, text
+                )
             return
 
         room_id = self._resolve_room_id(message)
@@ -85,6 +99,7 @@ class OutgoingHandler:
                     "room_id": room_id,
                     "reply_mid": reply_mid or "",
                     "reply_dmid": reply_dmid or "",
+                    "voice": voice_data,
                 },
                 prepared=prepared,
             )
@@ -93,9 +108,12 @@ class OutgoingHandler:
         private_target = self.adapter.private_handler.resolve_private_target(message)
         if private_target:
             await self.adapter.live2d_manager.apply_control(prepared.control_id)
-            await self.adapter.private_handler.send_private_message(
-                private_target, text
-            )
+            if voice_data:
+                await self._play_core_voice(voice_data, idle=False)
+            if text:
+                await self.adapter.private_handler.send_private_message(
+                    private_target, text
+                )
             return
 
         self.logger.warning("Missing room_id for outgoing danmu")
@@ -178,6 +196,20 @@ class OutgoingHandler:
         if prepared is None:
             prepared = await self.adapter.live2d_manager.prepare_reply(raw_message)
 
+        voice_data = str(args.get("voice") or "").strip()
+
+        # A Core-produced voice segment is already the final reply artifact;
+        # do not let the text-only live-search orchestrator discard it.
+        if voice_data:
+            await self._deliver_live_reply(
+                prepared,
+                room_id,
+                reply_mid,
+                reply_dmid,
+                voice_data=voice_data,
+            )
+            return
+
         handled = await self.live_search.handle(
             prepared,
             room_id=room_id,
@@ -188,7 +220,13 @@ class OutgoingHandler:
         if handled:
             return
 
-        await self._deliver_live_reply(prepared, room_id, reply_mid, reply_dmid)
+        await self._deliver_live_reply(
+            prepared,
+            room_id,
+            reply_mid,
+            reply_dmid,
+            voice_data=voice_data,
+        )
 
     async def _deliver_live_reply(
         self,
@@ -196,11 +234,42 @@ class OutgoingHandler:
         room_id: int,
         reply_mid: str,
         reply_dmid: str,
+        voice_data: str = "",
     ) -> None:
         """Deliver one already-orchestrated live reply through TTS/Live2D/danmu."""
 
         text = prepared.reply
         text = _strip_emoji(text).strip()
+
+        # Prebuilt audio (for example a requested song or another platform
+        # media result) is independently deliverable.  It must not be gated
+        # on an adjacent text/tts_text field, especially in potato mode where
+        # Core deliberately preserves existing media without synthesizing.
+        if voice_data:
+            if text:
+                room_prompts = getattr(
+                    getattr(self, "config", None),
+                    "live_room_prompts",
+                    {},
+                )
+                room_config = room_prompts.get(room_id, {})
+                tts_config = room_config.get("tts", {})
+                subtitle_path = str(
+                    tts_config.get("subtitle_path") or "subtitles.txt"
+                )
+                tts_manager = getattr(self.adapter, "tts_manager", None)
+                if tts_manager is not None:
+                    tts_manager.update_subtitle(
+                        text,
+                        subtitle_path=subtitle_path,
+                    )
+            if await self._play_core_voice(
+                voice_data,
+                idle=False,
+                control_id=prepared.control_id,
+            ):
+                return
+            self.logger.warning("Core voice payload was invalid; falling back to text")
 
         if text:
             text = (
@@ -213,22 +282,6 @@ class OutgoingHandler:
 
         text = self.adapter._filter_outgoing_text(text)
         if not text:
-            return
-
-        tts_enable = self.adapter.tts_manager.is_tts_enabled(room_id)
-
-        self.logger.info(
-            f"TTS Debug: room_id={room_id}, tts_enable={tts_enable}, tts_manager_active=True"
-        )
-
-        if tts_enable:
-            self.adapter.tts_manager.buffer_tts_reply(
-                room_id=room_id,
-                text=text,
-                reply_mid=reply_mid,
-                reply_dmid=reply_dmid,
-                control_id=prepared.control_id,
-            )
             return
 
         if self.adapter.live2d_manager.controller:
@@ -252,6 +305,40 @@ class OutgoingHandler:
                     type(exc).__name__,
                 )
 
+    async def _play_core_voice(
+        self,
+        voice_data: str,
+        *,
+        idle: bool,
+        control_id: str | None = None,
+    ) -> bool:
+        """Decode Core audio and hand final playback to the platform layer."""
+        raw = str(voice_data or "").strip()
+        if raw.startswith("data:") and "," in raw:
+            raw = raw.split(",", 1)[1]
+        try:
+            audio_data = base64.b64decode(raw, validate=True)
+        except Exception:
+            return False
+        if not audio_data or len(audio_data) > 16 * 1024 * 1024:
+            return False
+        self.adapter.audio_player.interrupt_idle()
+        controller = self.adapter.live2d_manager.controller
+        if controller:
+            try:
+                await controller.on_start_replying()
+                await self.adapter.live2d_manager.apply_control(control_id)
+            except Exception as exc:
+                self.logger.error(
+                    "Live2D reply hook error: error_type={}",
+                    type(exc).__name__,
+                )
+        if idle:
+            await asyncio.to_thread(self.adapter.audio_player.play_idle, audio_data)
+        else:
+            self.adapter.audio_player.play(audio_data)
+        return True
+
     async def _send_danmu(
         self,
         room_id: int,
@@ -261,11 +348,13 @@ class OutgoingHandler:
     ) -> None:
         text = self.adapter._filter_outgoing_text(text)
 
-        max_len = BILIBILI_DANMU_MAX_LENGTH
-        if self.adapter.tts_manager.is_tts_enabled(room_id):
-            max_len = 9999
-
-        segments = _split_bilibili_text(text, max_length=max_len)
+        # An adapter-side TTS toggle no longer changes the delivery type.
+        # Ordinary Core text must always obey Bilibili's danmu limit; only an
+        # actual returned voice field is played as audio.
+        segments = _split_bilibili_text(
+            text,
+            max_length=BILIBILI_DANMU_MAX_LENGTH,
+        )
         if not segments:
             self.logger.warning("Empty danmu after splitting")
             return

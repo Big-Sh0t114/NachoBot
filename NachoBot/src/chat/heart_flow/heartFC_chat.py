@@ -1,6 +1,7 @@
 import asyncio
 from collections import deque
 import json
+import re
 import time
 import traceback
 import random
@@ -96,6 +97,84 @@ install(extra_lines=3)
 # 注释：原来的动作修改超时常量已移除，因为改为顺序执行
 
 logger = get_logger("hfc")  # Logger Name Changed
+
+
+def _prepare_json_envelope_delivery(
+    full_text: str,
+    *,
+    tts_language: str = "",
+) -> tuple[str, dict[str, str] | None]:
+    """Project an adapter JSON envelope into display text and explicit TTS.
+
+    ``reply`` remains the platform-owned transport envelope so adapters such as
+    Bilibili can still apply Live2D controls. Speech is materialized only when
+    the model emitted an explicit ``tts_text`` field. The legacy bilingual
+    ``<JP>/<ZH>`` form is accepted only for streams that explicitly enable a
+    TTS language, and is converted into that same field-driven representation.
+    """
+
+    display_text = full_text
+    candidate = str(full_text or "").strip()
+    start = candidate.find("{")
+    end = candidate.rfind("}")
+    if start < 0 or end <= start:
+        return display_text, None
+
+    try:
+        envelope = json.loads(candidate[start : end + 1], strict=False)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return display_text, None
+    if not isinstance(envelope, dict) or not isinstance(envelope.get("reply"), str):
+        return display_text, None
+
+    reply_text = envelope["reply"].strip()
+    display_text = reply_text or full_text
+    language = str(tts_language or "").strip().lower()
+    if language not in {"ja", "zh"}:
+        language = ""
+
+    raw_tts = envelope.get("tts_text")
+    segment_language = language
+    if isinstance(raw_tts, dict):
+        tts_text = str(raw_tts.get("text") or "").strip()
+        requested_language = str(raw_tts.get("lang") or "").strip().lower()
+        if requested_language in {"ja", "zh"}:
+            segment_language = requested_language
+    elif isinstance(raw_tts, str):
+        tts_text = raw_tts.strip()
+    else:
+        tts_text = ""
+
+    transport_text = full_text
+    if not tts_text and language:
+        normalized = (
+            reply_text.replace("＜", "<")
+            .replace("＞", ">")
+            .replace("／", "/")
+        )
+        jp_parts = re.findall(r"<JP>(.*?)</JP>", normalized, flags=re.IGNORECASE | re.DOTALL)
+        zh_parts = re.findall(r"<ZH>(.*?)</ZH>", normalized, flags=re.IGNORECASE | re.DOTALL)
+        japanese = "".join(part.strip() for part in jp_parts if part.strip())
+        chinese = "".join(part.strip() for part in zh_parts if part.strip())
+        if japanese or chinese:
+            display_text = chinese or japanese
+            tts_text = (japanese or chinese) if language == "ja" else (chinese or japanese)
+            normalized_envelope = dict(envelope)
+            normalized_envelope["reply"] = display_text
+            transport_text = json.dumps(normalized_envelope, ensure_ascii=False)
+
+    if not tts_text:
+        return display_text, None
+
+    payload = {
+        "text": tts_text,
+        # The adapter still receives its structured reply/control envelope,
+        # while Core stores the clean ``display_message`` supplied by caller.
+        "display_text": transport_text,
+    }
+    if segment_language:
+        payload["lang"] = segment_language
+    return display_text, payload
 
 
 class HeartFChatting:
@@ -1827,27 +1906,33 @@ class HeartFChatting:
             if not full_text:
                 return "", receipts
 
-            display_text = full_text
-            try:
-                candidate = full_text.strip()
-                start = candidate.find("{")
-                end = candidate.rfind("}")
-                if start >= 0 and end > start:
-                    envelope = json.loads(candidate[start : end + 1], strict=False)
-                    if isinstance(envelope, dict) and isinstance(envelope.get("reply"), str):
-                        display_text = envelope["reply"].strip() or full_text
-            except (TypeError, ValueError, json.JSONDecodeError):
-                logger.debug(f"{self.log_prefix} 适配器 JSON envelope 解析失败，按原文记录")
-
-            receipt = await send_api.text_to_stream_receipt(
-                text=full_text,
-                stream_id=self.chat_stream.stream_id,
-                reply_message=message_data,
-                set_reply=need_reply,
-                typing=False,
-                selected_expressions=selected_expressions,
-                display_message=display_text,
+            capabilities = runtime_capabilities_from_stream(self.chat_stream)
+            display_text, tts_payload = _prepare_json_envelope_delivery(
+                full_text,
+                tts_language=capabilities.tts_language,
             )
+            if tts_payload is not None:
+                receipt = await send_api.tts_text_to_stream_receipt(
+                    text=tts_payload["text"],
+                    stream_id=self.chat_stream.stream_id,
+                    reply_message=message_data,
+                    set_reply=need_reply,
+                    typing=False,
+                    selected_expressions=selected_expressions,
+                    display_message=display_text,
+                    transport_text=tts_payload["display_text"],
+                    text_lang=tts_payload.get("lang", ""),
+                )
+            else:
+                receipt = await send_api.text_to_stream_receipt(
+                    text=full_text,
+                    stream_id=self.chat_stream.stream_id,
+                    reply_message=message_data,
+                    set_reply=need_reply,
+                    typing=False,
+                    selected_expressions=selected_expressions,
+                    display_message=display_text,
+                )
             receipts.append(receipt)
             return (display_text if receipt.delivered else ""), receipts
 

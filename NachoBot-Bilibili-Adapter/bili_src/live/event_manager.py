@@ -16,7 +16,7 @@ from ncnk_message import (
     build_system_event,
 )
 
-ACCEPT_FORMAT = ["text", "voice", "reply", "command"]
+ACCEPT_FORMAT = ["text", "voice", "tts_text", "reply", "command"]
 
 class EventManager:
     def __init__(self, config: Any, logger, adapter_ref: Any):

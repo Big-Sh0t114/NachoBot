@@ -5,21 +5,11 @@ import uuid
 import time
 import re
 from pathlib import Path
-from typing import Optional
 
 from config import AdapterConfig
 from discord_client import NachoDiscordBot
 from voice_handler import VoiceHandler
-
-_multimodal_adapter_path = Path(__file__).resolve().parents[1] / "NachoBot-Multimodal-Adapter"
-if _multimodal_adapter_path.exists() and str(_multimodal_adapter_path) not in sys.path:
-    sys.path.insert(0, str(_multimodal_adapter_path))
-
-# 独立的情感预设解析器（不依赖 TTS 模型实例）
-try:
-    from nachobot_multimodal.utils.emotion_resolver import resolve_emotion_preset_remote
-except ImportError:
-    resolve_emotion_preset_remote = None
+from voice_codec import write_wav_base64
 
 # Add NachoBot path for ncnk_message module (Standard NachoBot Architecture)
 # Assuming directory structure:
@@ -54,39 +44,6 @@ except ImportError:
         Seg
     ) = TargetConfig = TemplateInfo = UserInfo = None
 
-_URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
-
-
-def _mask_urls(text: str) -> str:
-    if not text:
-        return ""
-    return _URL_RE.sub("[link]", text)
-
-
-# Regex to match kaomoji and special emoticons (Ported from Bilibili Adapter)
-_KAOMOJI_RE = re.compile(
-    r"[\(\（]"  # Opening bracket
-    r"[^\(\)\（\）]{1,15}"  # Content (1-15 chars, no nested brackets)
-    r"[\)\）]"  # Closing bracket
-    r"|"
-    r"[｡ﾟ✧♪♡☆★●○◎◇◆□■△▲▽▼※→←↑↓]+"  # Special symbols
-)
-
-
-def _clean_text_for_tts(text: str) -> str:
-    """Clean text for TTS: remove kaomoji, emoticons, and special characters."""
-    if not text:
-        return ""
-    # Remove kaomoji like (๑•́ ₃ •̀๑), (=^･ω･^=), etc.
-    cleaned = _KAOMOJI_RE.sub("", text)
-    # Remove standalone special chars that might cause issues
-    cleaned = re.sub(r"[～〜♪♡☆★]", "", cleaned)
-    # Normalize multiple spaces/punctuation
-    cleaned = re.sub(r"\s+", " ", cleaned)
-    cleaned = re.sub(r"[。、！？]{2,}", "。", cleaned)
-    return cleaned.strip()
-
-
 class DiscordAdapter:
     def __init__(self, config: AdapterConfig, logger: logging.Logger):
         self.config = config
@@ -94,11 +51,6 @@ class DiscordAdapter:
 
         # Initialize Voice & Bot
         self.voice_handler = VoiceHandler(config, logger)
-
-        # Initialize TTS
-        from tts_handler import TTSHandler
-
-        self.tts_handler = TTSHandler(logger)
 
         self.bot = NachoDiscordBot(config, self.voice_handler, logger)
         self.bot.set_speech_callback(self.handle_speech_recognized)
@@ -183,18 +135,18 @@ class DiscordAdapter:
         return re.sub(r"\{(\w+)\}", replace, template)
 
     async def handle_speech_recognized(
-        self, guild_id: int, user_id: int, text: str, user_name: str = None
+        self, guild_id: int, user_id: int, voice_data: str, user_name: str = None
     ):
-        """Called when audio is recognized as text."""
-        self.logger.info(f"Speech from {user_name or user_id} in {guild_id}: {text}")
+        """Send one finalized WAV voice segment to Core for perception."""
+        self.logger.info(
+            "Voice segment from %s in %s (base64 chars=%d)",
+            user_name or user_id,
+            guild_id,
+            len(voice_data or ""),
+        )
 
-        if not self.router:
+        if not self.router or not voice_data:
             return
-
-        # Disable network search if configured
-        processed_text = text
-        if self.config.disable_network_search:
-            processed_text = _mask_urls(processed_text)
 
         # Construct Message for NachoBot
         # Platform: 'discord_vc'
@@ -210,13 +162,18 @@ class DiscordAdapter:
                 "knowledge_retrieval": False,
                 "tool_mode": "disabled",
                 "web_search_mode": "disabled",
+                # VC replies stay one structured transport message so Core can
+                # project ``reply`` for display and synthesize only the
+                # explicitly requested ``tts_text`` field.
+                "reply_delivery": "json_envelope",
+                "tts_language": "zh",
+            },
+            "voice_format": {
+                "mime_type": "audio/wav",
+                "sample_rate": self.config.voice.sample_rate,
+                "channels": 2,
             },
         }
-
-        if self.config.disable_network_search:
-            # We also mask URLs if specifically requested, though disable_tools usually covers search actions
-            # Keeping mask logic for text sanitization if needed
-            pass
 
         # Custom Prompts
         template_info = None
@@ -267,8 +224,8 @@ class DiscordAdapter:
                 group_name=str(guild_id),
             ),
             format_info=FormatInfo(
-                content_format=["text"],
-                accept_format=["text", "voice"],  # We accept voice reply
+                content_format=["voice"],
+                accept_format=["text", "voice", "tts_text"],
             ),
             template_info=template_info,
             additional_config=additional_config,
@@ -276,21 +233,20 @@ class DiscordAdapter:
 
         message = MessageBase(
             message_info=message_info,
-            message_segment=Seg(type="text", data=processed_text),
+            message_segment=Seg(type="voice", data=voice_data),
         )
 
         await self.router.send_message(message)
 
     async def handle_from_nachobot(self, message: MessageBase) -> None:
-        """Handle outgoing messages from NachoBot (Core -> Adapter -> Discord)."""
-        # This implementation depends on how Router calls this callback.
-        # Assuming it calls this for messages directed TO this adapter.
+        """Queue Core-produced voice segments for Discord playback.
+
+        Text and ``tts_text`` remain Core-owned response fields.  The adapter
+        never turns either field into audio; only a returned ``voice`` segment
+        is eligible for playback.
+        """
 
         try:
-            # We only care about text or voice segments
-            text_to_speak = ""
-
-            # Helper to extract seg
             segment = None
             if isinstance(message, dict):
                 segment = message.get("message_segment")
@@ -313,87 +269,44 @@ class DiscordAdapter:
                 except Exception:
                     return
 
-            # Flatten segments to text
-            if segment:
-                if isinstance(segment, dict):  # Dict segment
-                    if segment.get("type") == "text":
-                        text_to_speak = segment.get("data", "")
-                elif isinstance(segment, list):  # List of segments
-                    for seg in segment:
-                        if isinstance(seg, dict):
-                            if seg.get("type") == "text":
-                                text_to_speak += seg.get("data", "")
-                        elif hasattr(seg, "type") and hasattr(seg, "data"):
-                            if seg.type == "text":
-                                text_to_speak += seg.data
-                elif hasattr(segment, "type") and hasattr(
-                    segment, "data"
-                ):  # Object segment
-                    if segment.type == "text":
-                        text_to_speak = segment.data
-
-            if not text_to_speak:
-                return
-
-            # Strip invisible characters like zero-width space (\u200b) and literal escape sequences
-            # This prevents generating TTS for "silent" replies
-            if text_to_speak:
-                text_to_speak = (
-                    text_to_speak.replace("\u200b", "")
-                    .replace("\\u200b", "")
-                    .replace("\\u200B", "")
-                    .replace("\ufeff", "")
-                    .strip()
-                )
-
-            if not text_to_speak:
-                return
-
-            self.logger.info(f"Received from Core: {text_to_speak}")
-
-            # Filtering typo correction messages (Same as Bilibili Adapter)
-            # Typically these are short messages containing only Chinese characters
-            if len(text_to_speak) <= 2 and all(
-                "\u4e00" <= c <= "\u9fff" for c in text_to_speak
-            ):
-                self.logger.info(f"Skipping typo correction message: {text_to_speak}")
-                return
-
-            # Target Guild extracted earlier
-
-            # 1. Clean text for TTS
-            cleaned_text = _clean_text_for_tts(text_to_speak)
-            self.logger.info(f"Cleaned text for TTS: {cleaned_text}")
-
-            if not cleaned_text:
-                self.logger.warning("Text became empty after cleaning, skipping TTS.")
-                return
-
-            # 分段流式：按句切分，逐句生成并立即送入语音频道
-            try:
-                from nachobot_multimodal.utils.text_splitter import split_text_for_streaming
-                segments = split_text_for_streaming(cleaned_text)
-            except ImportError:
-                segments = [cleaned_text]
-
-            self.logger.info(f"TTS segment stream: {len(segments)} segments")
-
-            preset_name = None
-            if resolve_emotion_preset_remote is not None:
+            voice_segments = self._voice_segments(segment)
+            for voice_segment in voice_segments:
                 try:
-                    preset_name = await resolve_emotion_preset_remote(cleaned_text)
-                except Exception as e:
-                    self.logger.error(f"Failed to resolve emotion preset: {e}")
-
-            for idx, seg_text in enumerate(segments):
-                self.logger.info(f"Generating segment {idx+1}/{len(segments)}: {seg_text}")
-                audio_path = await self._generate_tts(seg_text, preset_name=preset_name, split_method="cut0")
-                if audio_path:
-                    await self.bot.speak(guild_id, audio_path)
+                    audio_path = write_wav_base64(voice_segment)
+                except (ValueError, TypeError) as exc:
+                    self.logger.warning("Dropping invalid Core voice segment: %s", type(exc).__name__)
+                    continue
+                await self.bot.speak(guild_id, audio_path)
 
         except Exception as e:
             self.logger.error(f"Error handling message from NachoBot: {e}")
 
-    async def _generate_tts(self, text: str, preset_name: Optional[str] = None, split_method: Optional[str] = None) -> Optional[str]:
-        """Convert text to speech audio file."""
-        return await self.tts_handler.generate_speech(text, preset_name=preset_name, split_method=split_method)
+    @staticmethod
+    def _voice_segments(segment):
+        """Yield only Core-produced audio, including nested seglists."""
+        if isinstance(segment, dict):
+            seg_type = segment.get("type")
+            data = segment.get("data")
+            if seg_type == "seglist" and isinstance(data, list):
+                for child in data:
+                    yield from DiscordAdapter._voice_segments(child)
+            elif seg_type in {"voice", "voice_stream"} and data:
+                if isinstance(data, dict):
+                    data = data.get("audio_base64") or data.get("audio")
+                if data:
+                    yield data
+            return
+        if isinstance(segment, list):
+            for child in segment:
+                yield from DiscordAdapter._voice_segments(child)
+            return
+        if hasattr(segment, "type") and hasattr(segment, "data"):
+            if segment.type == "seglist" and isinstance(segment.data, list):
+                for child in segment.data:
+                    yield from DiscordAdapter._voice_segments(child)
+            elif segment.type in {"voice", "voice_stream"} and segment.data:
+                data = segment.data
+                if isinstance(data, dict):
+                    data = data.get("audio_base64") or data.get("audio")
+                if data:
+                    yield data

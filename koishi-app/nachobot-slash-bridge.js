@@ -9,6 +9,7 @@ const ACCEPT_FORMAT = [
   'emoji',
   'reply',
   'voice',
+  'tts_text',
   'command',
   'voiceurl',
   'music',
@@ -177,7 +178,7 @@ module.exports = {
   inject: ['database', 'http'],
   Config: Schema.object({
     host: Schema.string().default('127.0.0.1'),
-    port: Schema.number().default(8070),
+    port: Schema.number().default(8000),
     platform: Schema.string().default('discord'),
     logPayload: Schema.boolean().default(false),
     ackOnSuccess: Schema.boolean().default(true),

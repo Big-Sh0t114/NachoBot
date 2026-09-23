@@ -41,10 +41,22 @@ _DOMAIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
 _TID_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,256}$")
 _QQ_RE = re.compile(r"^[1-9][0-9]{0,19}$")
 
-ACCEPT_FORMAT = [
-    "text", "image", "emoji", "reply", "voice", "tts_text", "command", "voiceurl",
+_BASE_ACCEPT_FORMAT = [
+    "text", "image", "emoji", "reply", "voice", "voice_stream", "command", "voiceurl",
     "voicefile", "music", "videourl", "videofile", "file", "imageurl", "forward", "video", "face",
 ]
+
+
+def get_accept_format(use_tts: bool) -> list[str]:
+    """Return Core capabilities for the current SnowLuma TTS setting."""
+
+    formats = list(_BASE_ACCEPT_FORMAT)
+    if use_tts:
+        formats.insert(formats.index("command"), "tts_text")
+    return formats
+
+
+ACCEPT_FORMAT = get_accept_format(bool(global_config.voice.use_tts))
 VISUAL_TYPES = {"image", "emoji", "video"}
 
 
@@ -346,8 +358,6 @@ class SnowLumaBridge:
             logger.warning("SnowLuma inbound message dropped reason=no_convertible_segments")
             return
 
-        if global_config.voice.use_tts:
-            additional_config["allow_tts"] = True
         if self._contains_visual(segments):
             additional_config["visual_policy"] = global_config.visual.to_message_policy()
 
@@ -358,7 +368,10 @@ class SnowLumaBridge:
             user_info=user_info,
             group_info=group_info,
             template_info=None,
-            format_info=FormatInfo(content_format=["text", "image", "emoji", "voice"], accept_format=ACCEPT_FORMAT),
+            format_info=FormatInfo(
+                content_format=["text", "image", "emoji", "voice"],
+                accept_format=get_accept_format(bool(global_config.voice.use_tts)),
+            ),
             additional_config=additional_config,
         )
         message_base = MessageBase(
@@ -596,7 +609,10 @@ class SnowLumaBridge:
             user_info=None,
             group_info=group_info,
             template_info=None,
-            format_info=FormatInfo(content_format=["text", "notify"], accept_format=ACCEPT_FORMAT),
+            format_info=FormatInfo(
+                content_format=["text", "notify"],
+                accept_format=get_accept_format(bool(global_config.voice.use_tts)),
+            ),
             additional_config=additional_config,
         )
 
@@ -1155,10 +1171,8 @@ class SnowLumaBridge:
                 out.append({"type": "image", "data": {"file": self._file_ref(data), "subType": 1, "summary": "[动画表情]"}})
             elif kind == "imageurl" and data:
                 out.append({"type": "image", "data": {"file": self._mapping_ref(data)}})
-            elif kind == "voice" and data and global_config.voice.use_tts:
+            elif kind in {"voice", "voice_stream"} and data:
                 out.append({"type": "record", "data": {"file": self._file_ref(data)}})
-            elif kind == "voice" and data:
-                logger.warning("SnowLuma outbound segment degraded kind=voice reason=tts_disabled")
             elif kind == "voiceurl" and data:
                 out.append({"type": "record", "data": {"file": self._mapping_ref(data)}})
             elif kind == "voicefile" and data:
@@ -1444,10 +1458,24 @@ class SnowLumaBridge:
     @staticmethod
     def _file_ref(data: Any) -> str:
         if isinstance(data, Mapping):
-            b64 = str(data.get("binary_data_base64") or "").strip()
+            b64 = str(data.get("binary_data_base64") or data.get("audio_base64") or "").strip()
             if b64:
                 return "base64://" + b64
-            ref = str(data.get("file") or data.get("path") or data.get("url") or "").strip()
+            audio = str(data.get("audio") or "").strip()
+            if audio and not audio.startswith(("base64://", "file://", "http://", "https://")):
+                try:
+                    base64.b64decode(audio, validate=True)
+                except Exception:
+                    pass
+                else:
+                    return "base64://" + audio
+            ref = str(
+                data.get("file")
+                or data.get("path")
+                or data.get("url")
+                or audio
+                or ""
+            ).strip()
             return SnowLumaBridge._normalize_ref(ref)
         value = str(data or "").strip()
         if not value:

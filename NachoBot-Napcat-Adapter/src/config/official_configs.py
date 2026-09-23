@@ -89,11 +89,11 @@ class NachobotServerConfig(ConfigBase):
     platform_name: str = field(default=ADAPTER_PLATFORM, init=False)
     """平台名称，“qq”"""
 
-    host: str = "localhost"
-    """Multimodal Adapter 消息中继的主机地址"""
+    host: str = "127.0.0.1"
+    """NachoBot Core 的主机地址"""
 
-    port: int = 8070
-    """消息中继端口，默认 8070，可按部署需要修改"""
+    port: int = 8000
+    """NachoBot Core HTTP/WebSocket 端口"""
 
 
 @dataclass

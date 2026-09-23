@@ -1,4 +1,4 @@
-"""Discord voice capture, VAD, and incremental speech recognition."""
+"""Discord voice capture, VAD, and bounded Core voice-segment creation."""
 
 import asyncio
 import logging
@@ -11,26 +11,20 @@ from typing import Callable, Optional
 import numpy as np
 from config import AdapterConfig, VoiceConfig
 from discord.sinks import Filters, Sink
-from multimodal_bridge import ensure_multimodal_import
-from scipy.signal import resample_poly
-
-
-ensure_multimodal_import()
-
-from nachobot_multimodal.asr.streaming import StreamingASR  # noqa: E402
+from voice_codec import pcm16_to_wav_base64
 
 
 # Discord sends stereo 48 kHz, signed 16-bit PCM.
 DISCORD_SAMPLE_RATE = 48000
 DISCORD_CHANNELS = 2
 DISCORD_WIDTH = 2
-ASR_SAMPLE_RATE = 16000
+MAX_UTTERANCE_SECONDS = 60.0
 
 
 class SilenceDetectingSink(Sink):
-    """Turn Discord PCM packets into ordered streaming-ASR lifecycle events."""
+    """Turn Discord PCM packets into ordered Core voice lifecycle events."""
 
-    ASR_PREROLL_SECONDS = 0.3
+    PREROLL_SECONDS = 0.3
 
     def __init__(
         self,
@@ -46,8 +40,8 @@ class SilenceDetectingSink(Sink):
         super().__init__(filters=filters)
 
         # All callbacks are async and run on the Discord event loop. The audio
-        # callback only queues events, so sherpa decoding never blocks py-cord's
-        # DecodeManager thread.
+        # callback only queues events, so encoding and Core transport never
+        # block py-cord's DecodeManager thread.
         self.callback = callback
         self.on_speech_start_callback = on_speech_start_callback
         self.on_stream_start_callback = on_stream_start_callback
@@ -77,7 +71,7 @@ class SilenceDetectingSink(Sink):
             DISCORD_SAMPLE_RATE * DISCORD_CHANNELS * DISCORD_WIDTH
         )
         self._max_preroll_bytes = int(
-            self._bytes_per_second * self.ASR_PREROLL_SECONDS
+            self._bytes_per_second * self.PREROLL_SECONDS
         )
 
         self._state_lock = threading.RLock()
@@ -89,7 +83,7 @@ class SilenceDetectingSink(Sink):
         self._shutdown_queued = False
 
         logging.getLogger("VoiceHandler").info(
-            "SilenceDetectingSink initialized with incremental ASR"
+            "SilenceDetectingSink initialized with Core voice segments"
         )
 
     def init(self, vc):
@@ -293,7 +287,7 @@ class SilenceDetectingSink(Sink):
                 await asyncio.sleep(0.2)
 
     async def _stream_event_worker(self) -> None:
-        """Run ordered ASR operations without blocking the capture thread."""
+        """Run ordered voice-segment operations without blocking capture."""
         while True:
             event_name, user, pcm_data = await self._event_queue.get()
             try:
@@ -315,22 +309,22 @@ class SilenceDetectingSink(Sink):
                     ):
                         await self.on_stream_audio_callback(user, pcm_data)
                 elif event_name == "finish":
-                    text = None
+                    voice_data = None
                     try:
                         if (
                             user in self._started_streams
                             and self.on_stream_finish_callback
                         ):
-                            text = await self.on_stream_finish_callback(user)
+                            voice_data = await self.on_stream_finish_callback(user)
                     except Exception:
                         logging.getLogger("VoiceHandler").exception(
-                            "Failed to finalize streaming ASR for user %s",
+                            "Failed to finalize Core voice segment for user %s",
                             user,
                         )
                     finally:
                         self._started_streams.discard(user)
                         if self.callback:
-                            await self.callback(user, text)
+                            await self.callback(user, voice_data)
                 elif event_name == "discard":
                     try:
                         if (
@@ -353,7 +347,7 @@ class SilenceDetectingSink(Sink):
                 raise
             except Exception:
                 logging.getLogger("VoiceHandler").exception(
-                    "Streaming ASR event failed: event=%s user=%s",
+                    "Voice segment event failed: event=%s user=%s",
                     event_name,
                     user,
                 )
@@ -371,84 +365,74 @@ class SilenceDetectingSink(Sink):
 
 
 class VoiceHandler:
-    """Convert Discord PCM chunks and drive Multimodal's shared ASR engine."""
+    """Collect finalized Discord PCM and encode it for Core perception.
+
+    This class deliberately has no speech-recognition dependency.  Core receives the WAV
+    segment and selects local/remote perception according to its runtime
+    profile.
+    """
 
     def __init__(self, config: AdapterConfig, logger: logging.Logger):
         self.config = config
         self.logger = logger
-        self.asr: Optional[StreamingASR] = None
-
-        if not config.voice.enabled:
-            self.logger.info("Discord streaming ASR disabled by configuration")
-            return
-
-        try:
-            self.asr = StreamingASR(logger=logger)
-            if not self.asr.supports_streaming:
-                self.logger.error(
-                    "Discord streaming ASR unavailable; check Multimodal ASR "
-                    "model and CPU runtime"
-                )
-        except Exception:
-            self.logger.exception("Failed to initialize Discord streaming ASR")
-            self.asr = None
+        self.enabled = bool(config.voice.enabled)
+        self.sample_rate = int(config.voice.sample_rate or DISCORD_SAMPLE_RATE)
+        self._max_pcm_bytes = int(
+            self.sample_rate
+            * DISCORD_CHANNELS
+            * DISCORD_WIDTH
+            * MAX_UTTERANCE_SECONDS
+        )
+        self._streams: dict[str, bytearray] = {}
+        self._stream_lock = threading.RLock()
+        if not self.enabled:
+            self.logger.info("Discord voice capture disabled by configuration")
 
     @property
     def supports_streaming(self) -> bool:
-        return self.asr is not None and self.asr.supports_streaming
+        # Kept for the existing Sink callback contract; it now means that the
+        # adapter can collect voice, not that it owns a streaming recognizer.
+        return self.enabled
 
     def start_stream(self, stream_id: str) -> bool:
         if not self.supports_streaming:
             return False
-        return self.asr.start_stream(stream_id)
+        with self._stream_lock:
+            self._streams[stream_id] = bytearray()
+        return True
 
-    @staticmethod
-    def _pcm_to_16k(pcm_data: bytes) -> np.ndarray:
-        frame_width = DISCORD_CHANNELS * DISCORD_WIDTH
-        usable = len(pcm_data) - (len(pcm_data) % frame_width)
-        if usable <= 0:
-            return np.empty(0, dtype=np.float32)
-
-        samples = np.frombuffer(pcm_data[:usable], dtype=np.int16)
-        stereo = samples.reshape(-1, DISCORD_CHANNELS).astype(np.float32)
-        mono = stereo.mean(axis=1) / 32768.0
-        mono_16k = resample_poly(
-            mono,
-            ASR_SAMPLE_RATE,
-            DISCORD_SAMPLE_RATE,
-        )
-        return np.ascontiguousarray(mono_16k, dtype=np.float32)
-
-    def accept_pcm(self, stream_id: str, pcm_data: bytes) -> Optional[str]:
+    def accept_pcm(self, stream_id: str, pcm_data: bytes) -> None:
         if not self.supports_streaming:
-            return None
-        try:
-            samples_16k = self._pcm_to_16k(pcm_data)
-            return self.asr.accept_stream_audio(stream_id, samples_16k)
-        except Exception:
-            self.logger.exception(
-                "Failed to feed Discord PCM into streaming ASR: {}",
-                stream_id,
-            )
-            self.abort_stream(stream_id)
-            return None
+            return
+        if not pcm_data:
+            return
+        with self._stream_lock:
+            stream = self._streams.setdefault(stream_id, bytearray())
+            remaining = self._max_pcm_bytes - len(stream)
+            if remaining <= 0:
+                return
+            # Keep the beginning of the utterance when a sender exceeds the
+            # bound; this avoids unbounded memory while preserving context.
+            stream.extend(bytes(pcm_data[:remaining]))
 
     def finish_stream(self, stream_id: str) -> Optional[str]:
         if not self.supports_streaming:
             return None
-        text = self.asr.finish_stream(stream_id)
-        if not text:
+        with self._stream_lock:
+            pcm_data = bytes(self._streams.pop(stream_id, bytearray()))
+        if not pcm_data:
             return None
-        text = "".join(
-            character
-            for character in text.strip()
-            if character.isprintable() or character in "\n\r\t"
-        )
-        if text:
-            self.logger.info("Discord ASR recognized: {}", text)
-            return text
-        return None
+        try:
+            return pcm16_to_wav_base64(
+                pcm_data,
+                sample_rate=self.sample_rate,
+                channels=DISCORD_CHANNELS,
+                max_duration_seconds=MAX_UTTERANCE_SECONDS,
+            ) or None
+        except Exception:
+            self.logger.exception("Failed to encode Discord voice segment")
+            return None
 
     def abort_stream(self, stream_id: str) -> None:
-        if self.asr is not None:
-            self.asr.abort_stream(stream_id)
+        with self._stream_lock:
+            self._streams.pop(stream_id, None)

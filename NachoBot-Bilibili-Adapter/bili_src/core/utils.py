@@ -131,8 +131,28 @@ def _extract_plain_text(seg) -> str:
     if seg.type == "seglist" and isinstance(seg.data, list):
         parts = [_extract_plain_text(child) for child in seg.data]
         return "".join(parts)
-    if seg.type == "text" or seg.type == "tts_text":
+    if seg.type == "text":
         return _strip_emoji(str(seg.data or ""))
+    if seg.type == "tts_text":
+        data = seg.data
+        if isinstance(data, dict):
+            data = data.get("display_text") if data.get("display_text") is not None else data.get("text")
+        return _strip_emoji(str(data or ""))
+    return ""
+
+
+def _extract_voice_base64(seg) -> str:
+    """Return the first Core-produced voice payload from a segment tree."""
+    if seg.type in {"voice", "voice_stream"}:
+        data = seg.data
+        if isinstance(data, dict):
+            data = data.get("audio_base64") or data.get("audio")
+        return str(data or "").strip()
+    if seg.type == "seglist" and isinstance(seg.data, list):
+        for child in seg.data:
+            voice_data = _extract_voice_base64(child)
+            if voice_data:
+                return voice_data
     return ""
 
 

@@ -10,7 +10,7 @@ discord = "default"  # Discord平台使用default预设
 [tts]
 # VoxCPM Gradio WebUI 配置
 host = "127.0.0.1"
-port = 9880
+port = 9881
 
 # VoxCPM 基础模型。留空时由托管运行时自动下载 openbmb/VoxCPM2
 model_dir = ""

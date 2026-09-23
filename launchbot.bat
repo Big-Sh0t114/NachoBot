@@ -7,6 +7,9 @@ title Launch TTS + NachoBot
 set "FINAL_RC=0"
 set "ROOT=%~dp0"
 set "NACHOBOT_FFMPEG_DIR=%ROOT%.runtime\ffmpeg"
+set "NACHOBOT_RUNTIME_PROFILE=full"
+set "DISABLE_VLM_ASR="
+set "NACHOBOT_NO_LOCAL_MODELS="
 
 call :READ_QQ_ADAPTER
 if errorlevel 1 (
@@ -149,13 +152,18 @@ set "NACHOBOT_TTS_RUNTIME_PROFILE=!BAT_RUNTIME!"
 set "NACHOBOT_TTS_TORCH_INDEX=!TTS_TORCH_INDEX!"
 echo [INFO] FULL .bat runtime: !BAT_RUNTIME! ^(!ADAPTER_ENV_DIR!^)
 
-set "PORT_SOVITS=9880"
-for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$p='%ADAPTER_DIR%\configs\gpt-sovits.toml'; if (Test-Path $p) { $c=Get-Content -Raw $p; if ($c -match '(?ms)^\[tts\]\s*.*?^port\s*=\s*(\d+)') { $Matches[1] } else { '9880' } } else { '9880' }"`) do set "PORT_SOVITS=%%P"
-set "PORT_VOX=9880"
-for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$p='%ADAPTER_DIR%\configs\vox.toml'; if (Test-Path $p) { $c=Get-Content -Raw $p; if ($c -match '(?ms)^\[tts\]\s*.*?^port\s*=\s*(\d+)') { $Matches[1] } else { '9880' } } else { '9880' }"`) do set "PORT_VOX=%%P"
-set "PORT_ADAPTER=8070"
-for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$c = Get-Content -Raw '%BASE_TOML%'; if ($c -match '(?ms)^\[server\]\s*.*?^port\s*=\s*(\d+)') { $Matches[1] } else { '8070' }"`) do set "PORT_ADAPTER=%%P"
+set "PORT_TTS=9880"
+set "HOST_ADAPTER=127.0.0.1"
+for /f "usebackq delims=" %%H in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$c = Get-Content -Raw '%BASE_TOML%'; if ($c -match '(?ms)^\[server\]\s*.*?^host\s*=\s*\x22([^\x22]+)\x22') { $Matches[1] } else { '127.0.0.1' }"`) do set "HOST_ADAPTER=%%H"
+set "CONNECT_HOST_ADAPTER=%HOST_ADAPTER%"
+if /i "%CONNECT_HOST_ADAPTER%"=="0.0.0.0" set "CONNECT_HOST_ADAPTER=127.0.0.1"
+if "%CONNECT_HOST_ADAPTER%"=="::" set "CONNECT_HOST_ADAPTER=127.0.0.1"
 set "PORT_PERCEPTION=9874"
+set "HOST_PERCEPTION=127.0.0.1"
+for /f "usebackq delims=" %%H in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$p='%ADAPTER_DIR%\configs\perception.toml'; if (Test-Path $p) { $c=Get-Content -Raw $p; if ($c -match '(?ms)^\[perception\]\s*.*?^host\s*=\s*\x22([^\x22]+)\x22') { $Matches[1] } else { '127.0.0.1' } } else { '127.0.0.1' }"`) do set "HOST_PERCEPTION=%%H"
+set "CONNECT_HOST_PERCEPTION=%HOST_PERCEPTION%"
+if /i "%CONNECT_HOST_PERCEPTION%"=="0.0.0.0" set "CONNECT_HOST_PERCEPTION=127.0.0.1"
+if "%CONNECT_HOST_PERCEPTION%"=="::" set "CONNECT_HOST_PERCEPTION=127.0.0.1"
 for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$p='%ADAPTER_DIR%\configs\perception.toml'; if (Test-Path $p) { $c=Get-Content -Raw $p; if ($c -match '(?ms)^\[perception\]\s*.*?^port\s*=\s*(\d+)') { $Matches[1] } else { '9874' } } else { '9874' }"`) do set "PORT_PERCEPTION=%%P"
 
 set "PYTHONNOUSERSITE=1"
@@ -210,116 +218,45 @@ if not exist "!ADAPTER_PYTHON!" (
   goto :TTS_FAIL
 )
 
-REM -- Read base.toml enabled_tts to decide which TTS engine to start --
-set "TTS_ENGINE=GPT_Sovits"
-for /f "usebackq tokens=*" %%L in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "(Get-Content '%BASE_TOML%' | Select-String 'enabled\s*=').Line"`) do (
-  echo %%L | findstr /i "Vox" >nul
-  if not errorlevel 1 (
-    echo %%L | findstr /r /c:"\"Vox\".*\"GPT_Sovits\"" >nul
-    if not errorlevel 1 (
-      set "TTS_ENGINE=Vox"
-    ) else (
-      echo %%L | findstr /r /c:"\"Vox\"" >nul
-      if not errorlevel 1 (
-        echo %%L | findstr /i "GPT_Sovits" >nul
-        if errorlevel 1 (
-          set "TTS_ENGINE=Vox"
-        )
-      )
-    )
-  )
-)
-echo [INFO] Detected TTS engine: %TTS_ENGINE%
-
 echo.
-echo ========== Start TTS Backend ==========
+echo ========== Start Unified TTS Runtime ==========
 echo.
 
-if "%TTS_ENGINE%"=="Vox" goto :START_VOX
-
-REM ---- GPT-SoVITS managed runtime ----
-if not exist "%TTS_RUNTIME_MANAGER%" (
-  echo [ERROR] TTS runtime manager not found: %TTS_RUNTIME_MANAGER%
+set "TTS_RUNTIME_ENTRYPOINT=%ADAPTER_DIR%\scripts\container_tts_entrypoint.py"
+if not exist "!TTS_RUNTIME_ENTRYPOINT!" (
+  echo [ERROR] Unified TTS Runtime entrypoint not found: !TTS_RUNTIME_ENTRYPOINT!
   set "TTS_RC=1"
   goto :TTS_FAIL
 )
 
-echo [INFO] Starting managed GPT-SoVITS runtime...
-start "SoVITS API (%PORT_SOVITS%)" /D "%ADAPTER_DIR%" cmd /k ""!ADAPTER_PYTHON!" scripts\tts_runtime_manager.py serve --engine gpt-sovits --port %PORT_SOVITS%"
+echo [INFO] Starting unified TTS Runtime on :!PORT_TTS!...
+start "TTS Runtime (!PORT_TTS!)" /D "%ADAPTER_DIR%" cmd /k ""!ADAPTER_PYTHON!" scripts\container_tts_entrypoint.py --host !HOST_ADAPTER! --port !PORT_TTS! --backend-port 9881"
 
 set "READY="
-for /l %%I in (1,1,180) do (
-  netstat -ano | findstr /r /c:":%PORT_SOVITS% " | findstr /i LISTENING >nul
+for /l %%I in (1,1,900) do (
+  netstat -ano | findstr /r /c:":!PORT_TTS! " | findstr /i LISTENING >nul
   if not errorlevel 1 (
     set "READY=1"
-    goto :TTS_SOVITS_READY
+    goto :TTS_RUNTIME_READY
   )
   timeout /t 1 /nobreak >nul
 )
-echo [ERROR] SoVITS timeout. If this is your first startup, wait for the model download to finish, then restart this service.
+echo [ERROR] Unified TTS Runtime timeout. If this is the first startup, wait for model loading to finish, then restart this service.
 set "TTS_RC=1"
 goto :TTS_FAIL
 
-:TTS_SOVITS_READY
-echo [OK] SoVITS ready.
-goto :START_ADAPTER_SOVITS
+:TTS_RUNTIME_READY
+echo [OK] Unified TTS Runtime :!PORT_TTS! is ready.
 
-REM ---- VoxCPM managed runtime ----
-:START_VOX
-if not exist "%TTS_RUNTIME_MANAGER%" (
-  echo [ERROR] TTS runtime manager not found: %TTS_RUNTIME_MANAGER%
-  set "TTS_RC=1"
-  goto :TTS_FAIL
-)
-
-echo [INFO] Starting managed VoxCPM runtime...
-start "VoxCPM API (%PORT_VOX%)" /D "%ADAPTER_DIR%" cmd /k ""!ADAPTER_PYTHON!" scripts\tts_runtime_manager.py serve --engine voxcpm --port %PORT_VOX%"
-
-set "READY="
-for /l %%I in (1,1,180) do (
-  netstat -ano | findstr /r /c:":%PORT_VOX% " | findstr /i LISTENING >nul
-  if not errorlevel 1 (
-    set "READY=1"
-    goto :TTS_VOX_READY
-  )
-  timeout /t 1 /nobreak >nul
-)
-echo [ERROR] VoxCPM timeout. If this is your first startup, wait for the model download to finish, then restart this service.
-set "TTS_RC=1"
-goto :TTS_FAIL
-
-:TTS_VOX_READY
-echo [OK] VoxCPM API ready.
-goto :START_ADAPTER_VOX
-
-REM ---- Adapter for GPT-SoVITS ----
-:START_ADAPTER_SOVITS
-start "Multimodal Adapter (%PORT_ADAPTER%)" /D "%ADAPTER_DIR%" cmd /k ""!ADAPTER_PYTHON!" main.py"
-call :WAIT_ADAPTER_READY
+echo [OK] Starting Perception API (VLM + ASR)...
+set "HOST=%HOST_PERCEPTION%"
+set "PORT=%PORT_PERCEPTION%"
+start "Perception API (%PORT_PERCEPTION%)" /D "%ADAPTER_DIR%" cmd /k ""!ADAPTER_PYTHON!" -m nachobot_multimodal.api_server"
+call :WAIT_MULTIMODAL_READY
 if errorlevel 1 (
   set "TTS_RC=1"
   goto :TTS_FAIL
 )
-
-echo [OK] Starting Perception API (VLM + ASR)...
-start "Perception API (%PORT_PERCEPTION%)" /D "%ADAPTER_DIR%" cmd /k ""!ADAPTER_PYTHON!" -m nachobot_multimodal.api_server"
-
-echo.
-echo All modules started.
-echo.
-goto :TTS_END
-
-REM ---- Adapter for VoxCPM ----
-:START_ADAPTER_VOX
-start "Multimodal Adapter (%PORT_ADAPTER%)" /D "%ADAPTER_DIR%" cmd /k ""!ADAPTER_PYTHON!" main.py"
-call :WAIT_ADAPTER_READY
-if errorlevel 1 (
-  set "TTS_RC=1"
-  goto :TTS_FAIL
-)
-
-echo [OK] Starting Perception API (VLM + ASR)...
-start "Perception API (%PORT_PERCEPTION%)" /D "%ADAPTER_DIR%" cmd /k ""!ADAPTER_PYTHON!" -m nachobot_multimodal.api_server"
 
 echo.
 echo All modules started.
@@ -332,23 +269,23 @@ pause
 set "TTS_RC=1"
 
 :TTS_END
-endlocal & exit /b %TTS_RC%
+endlocal & set "NACHOBOT_TTS_ENDPOINT=http://%CONNECT_HOST_ADAPTER%:9880" & set "NACHOBOT_MULTIMODAL_ENDPOINT=http://%CONNECT_HOST_PERCEPTION%:%PORT_PERCEPTION%" & exit /b %TTS_RC%
 
-:WAIT_ADAPTER_READY
+:WAIT_MULTIMODAL_READY
 set "ADAPTER_READY="
 for /l %%I in (1,1,60) do (
   if not defined ADAPTER_READY (
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $r = Invoke-RestMethod -UseBasicParsing -TimeoutSec 1 'http://127.0.0.1:%PORT_ADAPTER%/api/health'; if ($r.status -eq 'ok' -and $r.mode -eq 'tts') { exit 0 } else { exit 1 } } catch { exit 1 }" >nul 2>&1
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $r = Invoke-RestMethod -UseBasicParsing -TimeoutSec 1 'http://127.0.0.1:%PORT_PERCEPTION%/health'; if ($r.status -eq 'ok' -or $r.status -eq 'degraded') { exit 0 } else { exit 1 } } catch { exit 1 }" >nul 2>&1
     if not errorlevel 1 (
       set "ADAPTER_READY=1"
-      echo [OK] Multimodal relay :%PORT_ADAPTER% is ready in TTS mode.
+      echo [OK] Perception runtime :%PORT_PERCEPTION% is ready.
     ) else (
       timeout /t 1 /nobreak >nul
     )
   )
 )
 if not defined ADAPTER_READY (
-  echo [ERROR] Multimodal relay :%PORT_ADAPTER% did not become ready in TTS mode within 60 seconds.
+  echo [ERROR] Perception runtime :%PORT_PERCEPTION% did not become ready within 60 seconds.
   exit /b 1
 )
 exit /b 0
@@ -415,7 +352,7 @@ if errorlevel 1 (
 
 if exist "%NACHOBOT_DIR%\%NACHOBOT_MAIN%" (
   echo --- Start NachoBot...
-  start "NachoBot" /D "%NACHOBOT_DIR%" cmd /k "set HOST=127.0.0.1 && set PORT=%NACHOBOT_PORT% && %PYTHON_CMD% %NACHOBOT_MAIN%"
+  start "NachoBot" /D "%NACHOBOT_DIR%" cmd /k "set HOST=127.0.0.1 && set PORT=%NACHOBOT_PORT% && set NACHOBOT_RUNTIME_PROFILE=%NACHOBOT_RUNTIME_PROFILE% && set NACHOBOT_TTS_ENDPOINT=%NACHOBOT_TTS_ENDPOINT% && set NACHOBOT_MULTIMODAL_ENDPOINT=%NACHOBOT_MULTIMODAL_ENDPOINT% && %PYTHON_CMD% %NACHOBOT_MAIN%"
   timeout /t 5 /nobreak >nul
 )
 

@@ -67,6 +67,8 @@ def load_config(path: Path) -> AdapterConfig:
     if not isinstance(visual_extra_params, dict):
         visual_extra_params = {}
 
+    nachobot_port = int(nachobot.get("port", 8000))
+
     ws_url = onebot.get("ws_url", "")
     if not ws_url:
         host = onebot.get("host", "127.0.0.1")
@@ -79,7 +81,7 @@ def load_config(path: Path) -> AdapterConfig:
         onebot_token=str(onebot.get("token", "") or ""),
         onebot_reconnect_seconds=int(onebot.get("reconnect_seconds", 5)),
         nachobot_host=str(nachobot.get("host", "127.0.0.1")),
-        nachobot_port=int(nachobot.get("port", 8070)),
+        nachobot_port=nachobot_port,
         platform=str(nachobot.get("platform", "discord")),
         group_list_type=str(chat.get("group_list_type", "whitelist")),
         group_list=[str(x) for x in chat.get("group_list", [])],

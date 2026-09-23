@@ -7,7 +7,7 @@
 1. 在 `koishi-app` 中配置平台账号，并启用 OneBot Server。
 2. 编辑本目录的 `config.toml`：
    - `[onebot_server].ws_url` 与 Koishi 的监听地址一致，默认 `ws://127.0.0.1:5140/onebot/v11/ws`。
-   - `[nachobot_server]` 指向 Multimodal Adapter，默认 `127.0.0.1:8070`。
+   - `[nachobot_server]` 直连 NachoBot Core，默认 `127.0.0.1:8000`。
    - 在 `[chat]` 中配置群聊、私聊与用户过滤。
 3. 启动：
 

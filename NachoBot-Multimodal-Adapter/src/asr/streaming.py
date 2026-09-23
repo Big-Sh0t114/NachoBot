@@ -2,7 +2,9 @@
 
 The engine owns the sherpa-onnx online recognizer and the Chinese xlarge INT8
 model. UniversalVC feeds live PCM chunks directly, while the Perception API
-uses the same engine for uploaded audio compatibility.
+uses the same engine for uploaded audio compatibility. The perception process
+calls ``load_model`` during startup; request handlers never perform a lazy
+model load.
 """
 
 import asyncio
@@ -495,11 +497,14 @@ def load_model() -> StreamingASR:
 
 
 def transcribe(audio_bytes: bytes) -> str:
-    """OpenAI upload-endpoint compatibility using the shared online model."""
+    """Transcribe an upload using the already-started shared online model."""
     samples = decode_audio_bytes(audio_bytes)
     if samples.size == 0:
         return ""
-    return load_model().recognize_segment(samples) or ""
+    recognizer = _DEFAULT_ASR
+    if recognizer is None or not recognizer.supports_streaming:
+        raise RuntimeError("Shared local streaming ASR is not preloaded")
+    return recognizer.recognize_segment(samples) or ""
 
 
 def is_loaded() -> bool:

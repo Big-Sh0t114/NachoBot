@@ -112,13 +112,11 @@ Bilibili 私信图片 prompt 固定在 `bili_src/visual_policy.py` 的 `BILIBILI
 `[live.screen_monitor.vlm]` 与它相互独立：前者服务直播活动窗口截图，
 后者只服务用户私信图片，各自在适配器代码中维护场景 prompt。
 
-## 麦克风流式 ASR
+## 麦克风语音输入
 
-开启麦克风 ASR 后，采集到的 PCM 会按 100ms 音频块持续送入
-Multimodal-Adapter 的共享 `StreamingASR`。连续模式由 VAD 控制流的开始与
-结束，PTT 模式在按键释放时结束流；句末只读取最终结果，不会再生成整段 WAV
-或请求 `/audio/transcriptions`。ASR 模型、CPU provider 和线程数统一由
-`NachoBot-Multimodal-Adapter/configs/perception.toml` 管理。
+开启麦克风后，适配器只负责采集、PTT/VAD 分段和有界 WAV 编码，并把
+`voice` 字段直接送入 NachoBot Core。ASR 的本地/远程选择由 Core 决定，
+具体本地模型路由只存在于 Multimodal runtime。
 
 ## 私信（Private messages）
 - `private_message.sessions`：用于固定（pin）指定的会话（talker ID）。
@@ -155,10 +153,10 @@ docker compose up -d
 ```
 
 ### Docker 注意事项
-- **共享 ASR**：构建时会从相邻的 `NachoBot-Multimodal-Adapter` 复制共享 ASR 源码与配置；首次运行时若模型不存在，会按 `auto_download` 配置下载 CPU INT8 模型。
+- **语音感知**：容器只向 Core 发送 WAV `voice` 字段，不复制或加载 ASR/TTS/VLM 模型。
 - **屏幕监控**：本适配器的 Docker 镜像使用 `Xvfb` 支持无显示设备环境下的 `mss` 截屏。
 - **Live2D**：渲染不再由本容器负责。请单独部署 `NachoBot-Live2D-Adapter`，并将 `live.live2d_url` 指向其可访问的 WebSocket 地址；容器内不能使用 `127.0.0.1` 访问宿主机上的独立适配器。
 - **配置文件**：容器挂载使用宿主机的 `config.toml` 和日志目录，修改配置后重启容器即可生效。
-- **构建上下文**：Compose 通过 `additional_contexts` 注入相邻的 `NachoBot/ncnk_message`、多模态源码、配置和模型目录；核心配置目录以只读卷挂载。
+- **构建上下文**：Compose 仅通过 `additional_contexts` 注入相邻的 `NachoBot/ncnk_message`；Core 与 Multimodal runtime 作为独立服务部署。
 - **Linux 音频**：Linux 容器不提供 Windows `winsound`，因此本地播放回退会跳过；请配置远程 Live2D 播放，或在宿主机运行本适配器以使用本地音频设备。
 - **核心连接**：确保 `NachoBot` 核心服务已启动在 `nacho_bot` 网络中，且 `config.toml` 里的 `nachobot_server.host` 设置为 `core`（或宿主机 IP）。

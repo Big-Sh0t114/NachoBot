@@ -926,7 +926,7 @@ class ConfigInitializer:
         errors = []
 
         # Determine whether platform adapters should advertise/use TTS.
-        # Relay host/port are independent persistent adapter settings.
+        # Core host/port remain adapter-owned connection settings.
         tts_enabled = "tts" in components
 
         qq_adapter, qq_selection_error = ConfigInitializer._resolve_qq_adapter_selection(
@@ -1090,7 +1090,7 @@ class ConfigInitializer:
                     shutil.copy2(tmpl_path, target_path)
 
                 # Restore the existing NapCat inbound connection/authentication
-                # contract and the independently configurable upstream relay endpoint.
+                # contract and its independently configured Core endpoint.
                 # Template defaults must not erase a working local deployment.
                 if preserved_napcat_server or preserved_nachobot_server:
                     generated_doc = tomlkit.parse(target_path.read_text(encoding="utf-8"))
@@ -1146,7 +1146,7 @@ class ConfigInitializer:
                 errors.append(f"{target_rel}: {e}")
 
         # Post-generation: synchronize adapter TTS flags in existing configs.
-        # Relay host/port are not rewritten here; adapter configs retain their values.
+        # Core host/port are not rewritten here; adapter configs retain their values.
         patch_results = ConfigInitializer._patch_tts_chain(
             tts_enabled,
             components,
@@ -1163,7 +1163,7 @@ class ConfigInitializer:
         }
 
     # Adapter configs whose voice.use_tts flag follows the wizard TTS selection.
-    # Platform relay routing remains independently configurable.
+    # Platform-to-Core routing remains independently configurable.
     _TTS_CHAIN_ADAPTERS: list[tuple[str, str, bool]] = [
         ("NachoBot-Napcat-Adapter/config.toml", "qq", True),
         ("NachoBot-SnowLuma-Adapter/config.toml", "qq", True),
@@ -1181,7 +1181,7 @@ class ConfigInitializer:
         """
         Synchronize voice.use_tts for selected adapters.
 
-        Platform adapters connect to their configured relay endpoint.
+        Platform adapters connect to their configured Core endpoint.
         This setup step must never rewrite nachobot_server.host/port.
         """
         patched = []
@@ -1434,9 +1434,9 @@ class ConfigInitializer:
         if component_id == "NachoBot":
             return True
 
-        # The Multimodal relay base config is a baseline WebUI dependency:
-        # POTATO needs server/routing settings even when the user does not
-        # select local TTS/VLM/ASR. Model-specific configs remain TTS-only.
+        # Keep the HTTP facade base config available whenever the setup wizard
+        # materializes Multimodal configuration. Model-specific configs remain
+        # TTS-only.
         if target_rel == "NachoBot-Multimodal-Adapter/configs/base.toml":
             return True
 
@@ -1592,7 +1592,7 @@ class ConfigInitializer:
                 changed = True
 
         # -- Napcat adapter config.toml --
-        # Upstream relay routing remains whatever is configured in nachobot_server.
+        # Upstream Core routing remains whatever is configured in nachobot_server.
         if "NachoBot-Napcat-Adapter" in target_rel and filename == "config.toml":
             if "voice" in doc:
                 if doc["voice"].get("use_tts") != tts_enabled:
@@ -1607,7 +1607,7 @@ class ConfigInitializer:
                     changed = True
 
         # -- Koishi adapter config.toml --
-        # Upstream relay routing remains whatever is configured in nachobot_server.
+        # Upstream Core routing remains whatever is configured in nachobot_server.
         if "NachoBot-Koishi-Adapter" in target_rel and filename == "config.toml":
             if "voice" in doc:
                 if doc["voice"].get("use_tts") != tts_enabled:
@@ -1967,7 +1967,6 @@ class DependencyInstaller:
         "qq": "NachoBot-Napcat-Adapter",
         "qq_snowluma": "NachoBot-SnowLuma-Adapter",
         "tts": "NachoBot-Multimodal-Adapter",
-        "tts_relay": "NachoBot-Multimodal-Adapter",
         "bilibili": "NachoBot-Bilibili-Adapter",
         "discord_koishi": "NachoBot-Koishi-Adapter",
         "discord_vc": "NachoBot-DiscordVC-Adapter",
@@ -2159,27 +2158,6 @@ class DependencyInstaller:
                 }
             )
 
-        # POTATO/Relay is only a fallback environment. Reconcile historical
-        # installs while preparing the deployment plan: if a completed GPU/CPU
-        # runtime already exists, remove any stale .venv-potato immediately.
-        installing_local_runtime = "tts" in component_set and runtime in {"gpu", "cpu"}
-        reconciliation = MultimodalRuntimeManager.reconcile_relay_fallback()
-        has_local_runtime = bool(reconciliation["local_profiles"])
-        if (
-            not installing_local_runtime
-            and not has_local_runtime
-            and not ("tts" in component_set and runtime == "relay")
-        ):
-            tasks.append(
-                {
-                    "id": "tts_relay",
-                    "type": "uv",
-                    "name": "Multimodal Adapter (Relay / POTATO)",
-                    "dir": "NachoBot-Multimodal-Adapter",
-                    "runtime": "relay",
-                }
-            )
-
         if "bilibili" in component_set:
             tasks.append(
                 {
@@ -2264,7 +2242,7 @@ class DependencyInstaller:
             return {"status": "error", "message": f"目录不存在: {project_dir}"}
 
         if task["type"] == "uv":
-            if str(task.get("id", "")).strip() in {"tts", "tts_relay"}:
+            if str(task.get("id", "")).strip() == "tts":
                 try:
                     runtime = MultimodalRuntimeManager.normalize_profile(task.get("runtime"))
                 except ValueError as e:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from pathlib import Path
 import sys
@@ -14,6 +15,7 @@ if str(PROJECT_ROOT / "NachoBot") not in sys.path:
 
 import bili_src.live2d.remote_controller as remote_controller_module  # noqa: E402
 from bili_src.audio.tts_manager import TTSManager  # noqa: E402
+from bili_src.core.utils import _extract_plain_text, _extract_voice_base64  # noqa: E402
 from bili_src.live.outgoing_handler import OutgoingHandler  # noqa: E402
 from bili_src.live.two_phase_search import (  # noqa: E402
     BilibiliLiveSearchOrchestrator,
@@ -104,6 +106,24 @@ class RemoteLive2DControlTests(unittest.IsolatedAsyncioTestCase):
                     RemoteLive2DController._fallback_prepare_reply(raw_reply).reply,
                     "",
                 )
+
+    def test_tts_text_transport_envelope_is_used_for_live2d_preparation(self) -> None:
+        from ncnk_message import Seg
+
+        envelope = '{"reply":"展示文本","emotion":"normal"}'
+        segment = Seg(
+            type="seglist",
+            data=[
+                Seg(
+                    type="tts_text",
+                    data={"text": "音声です", "display_text": envelope, "lang": "ja"},
+                ),
+                Seg(type="voice", data="YQ=="),
+            ],
+        )
+
+        self.assertEqual(_extract_plain_text(segment), envelope)
+        self.assertEqual(_extract_voice_base64(segment), "YQ==")
 
     async def test_correlated_response_resolves_only_matching_future(self) -> None:
         controller = self._controller()
@@ -341,54 +361,66 @@ class TTSControlTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(prepared, "旧版待机文本")
 
-    async def test_buffered_tts_activates_once_before_late_failure_fallback(self) -> None:
-        room_id = 100
-        manager = TTSManager.__new__(TTSManager)
-        manager.config = SimpleNamespace(
-            live_room_prompts={room_id: {"tts": {"enable": True}}},
-            platform="bilibili.live",
-        )
-        manager.logger = SimpleNamespace(info=Mock(), warning=Mock(), error=Mock())
-        manager.audio_player = SimpleNamespace(
+    async def test_live_reply_plays_only_core_returned_voice(self) -> None:
+        audio_player = SimpleNamespace(
             interrupt_idle=Mock(),
             play=Mock(),
         )
-        manager.tts_model = object()
-        manager._lang_overrides = {}
-        manager._tts_buffer = {room_id: ["<JP>第一句。</JP><ZH>第一句。</ZH>"]}
-        manager._tts_timer = {}
-        manager._tts_metadata = {
-            room_id: {
-                "reply_mid": "mid",
-                "reply_dmid": "dmid",
-                "start_time": 0.0,
-                "control_id": "opaque-control-id",
-            }
-        }
-        manager.update_subtitle = Mock()
-        manager.send_danmu = AsyncMock()
-        manager.on_start_replying = AsyncMock()
-        manager.on_reply_finished = AsyncMock()
-        manager.apply_live2d_control = AsyncMock(return_value=True)
-        manager._synthesize_tts_segment = AsyncMock(
-            side_effect=[b"audio-1", b"audio-2", RuntimeError("later synthesis failed")]
+        adapter = SimpleNamespace(
+            audio_player=audio_player,
+            live2d_manager=SimpleNamespace(controller=None),
+            _filter_outgoing_text=lambda text: text,
+        )
+        handler = OutgoingHandler.__new__(OutgoingHandler)
+        handler.adapter = adapter
+        handler.logger = _Logger()
+        handler._send_danmu = AsyncMock()
+        voice = base64.b64encode(b"core-audio").decode("ascii")
+
+        await handler._deliver_live_reply(
+            PreparedReplyResult("第一句。", False, "", None),
+            100,
+            "mid",
+            "dmid",
+            voice_data=voice,
         )
 
-        with (
-            patch("bili_src.audio.tts_manager._clean_text_for_tts", side_effect=lambda text: text),
-            patch("bili_src.audio.tts_manager.resolve_emotion_preset_remote", None),
-            patch(
-                "nachobot_multimodal.utils.text_splitter.split_text_for_streaming",
-                return_value=["segment-1", "segment-2", "segment-3"],
-            ),
-        ):
-            await manager.process_buffered_live_reply(room_id)
+        audio_player.interrupt_idle.assert_called_once_with()
+        audio_player.play.assert_called_once_with(b"core-audio")
+        handler._send_danmu.assert_not_awaited()
 
-        manager.on_start_replying.assert_awaited_once_with()
-        manager.apply_live2d_control.assert_awaited_once_with("opaque-control-id")
-        self.assertEqual(manager.audio_player.play.call_count, 2)
-        manager.send_danmu.assert_awaited_once_with(room_id, "第一句。", "mid", "dmid")
-        manager.on_reply_finished.assert_awaited_once_with()
+    async def test_pure_prebuilt_voice_is_not_gated_on_text(self) -> None:
+        audio_player = SimpleNamespace(
+            interrupt_idle=Mock(),
+            play=Mock(),
+        )
+        adapter = SimpleNamespace(
+            audio_player=audio_player,
+            live2d_manager=SimpleNamespace(controller=None),
+            _filter_outgoing_text=lambda text: text,
+        )
+        handler = OutgoingHandler.__new__(OutgoingHandler)
+        handler.adapter = adapter
+        handler.logger = _Logger()
+        handler._send_danmu = AsyncMock()
+        voice = base64.b64encode(b"requested-song-audio").decode("ascii")
+
+        await handler._deliver_live_reply(
+            PreparedReplyResult("", False, "", None),
+            100,
+            "",
+            "",
+            voice_data=voice,
+        )
+
+        audio_player.play.assert_called_once_with(b"requested-song-audio")
+        handler._send_danmu.assert_not_awaited()
+
+    async def test_pure_voice_stream_is_selected_for_platform_playback(self) -> None:
+        voice = base64.b64encode(b"streamed-song-audio").decode("ascii")
+        segment = SimpleNamespace(type="voice_stream", data=voice)
+
+        self.assertEqual(_extract_voice_base64(segment), voice)
 
 
 if __name__ == "__main__":

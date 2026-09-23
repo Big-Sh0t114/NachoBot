@@ -12,6 +12,7 @@ from .log_safety import safe_endpoint
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "config.toml"
 TEMPLATE_PATH = ROOT / "template_config.toml"
+CORE_PORT = 8000
 
 
 def _load_raw() -> dict[str, Any]:
@@ -63,7 +64,7 @@ class SnowLumaConfig:
 @dataclass(slots=True)
 class NachoBotConfig:
     host: str = "127.0.0.1"
-    port: int = 8070
+    port: int = CORE_PORT
     platform_name: str = "qq"
 
 
@@ -169,7 +170,7 @@ def load_config() -> Config:
         ),
         nachobot=NachoBotConfig(
             host=str(n.get("host", "127.0.0.1")),
-            port=int(n.get("port", 8070)),
+            port=int(n.get("port", CORE_PORT)),
             platform_name=str(n.get("platform_name", "qq")),
         ),
         chat=ChatConfig(

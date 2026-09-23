@@ -1,8 +1,10 @@
+import base64
+from collections.abc import Mapping
+from typing import Any, Dict, List
+
 from ncnk_message import Seg, MessageBase
-from typing import List, Dict
 
 from src.logger import logger
-from src.config import global_config
 from src.utils import get_image_format, convert_image_to_gif
 
 
@@ -47,7 +49,7 @@ class SendMessageHandleClass:
         elif seg.type == "emoji":
             emoji = seg.data
             new_payload = cls.build_payload(payload, cls.handle_emoji_message(emoji), False)
-        elif seg.type == "voice":
+        elif seg.type in ("voice", "voice_stream"):
             voice = seg.data
             new_payload = cls.build_payload(payload, cls.handle_voice_message(voice), False)
         elif seg.type == "voiceurl":
@@ -98,6 +100,8 @@ class SendMessageHandleClass:
     @staticmethod
     def build_payload(payload: List, addon: dict, is_reply: bool = False) -> List:
         # sourcery skip: for-append-to-extend, merge-list-append, simplify-generator
+        if not addon:
+            return payload
         if is_reply:
             temp_list = []
             temp_list.append(addon)
@@ -130,6 +134,8 @@ class SendMessageHandleClass:
     @staticmethod
     def handle_image_message(encoded_image: str) -> dict:
         """处理图片消息"""
+        if not encoded_image:
+            return {}
         return {
             "type": "image",
             "data": {
@@ -141,6 +147,8 @@ class SendMessageHandleClass:
     @staticmethod
     def handle_emoji_message(encoded_emoji: str) -> dict:
         """处理表情消息"""
+        if not encoded_emoji:
+            return {}
         encoded_image = encoded_emoji
         image_format = get_image_format(encoded_emoji)
         if image_format != "gif":
@@ -155,11 +163,12 @@ class SendMessageHandleClass:
         }
 
     @staticmethod
-    def handle_voice_message(encoded_voice: str) -> dict:
-        """处理语音消息"""
-        if not global_config.voice.use_tts:
-            logger.warning("未启用语音消息处理")
-            return {}
+    def handle_voice_message(encoded_voice: Any) -> dict:
+        """处理预制语音；映射数据必须包含有效的非空 base64 字符串。"""
+        if isinstance(encoded_voice, Mapping):
+            encoded_voice = SendMessageHandleClass._extract_voice_base64(encoded_voice)
+        elif not isinstance(encoded_voice, str):
+            encoded_voice = ""
         if not encoded_voice:
             return {}
         return {
@@ -168,8 +177,28 @@ class SendMessageHandleClass:
         }
 
     @staticmethod
+    def _extract_voice_base64(data: Mapping[str, Any]) -> str:
+        """Extract one valid base64 audio field from Core's voice mapping."""
+
+        for key in ("audio_base64", "binary_data_base64", "audio"):
+            candidate = data.get(key)
+            if not isinstance(candidate, str):
+                continue
+            candidate = candidate.strip()
+            if not candidate:
+                continue
+            try:
+                base64.b64decode(candidate, validate=True)
+            except (ValueError, base64.binascii.Error):
+                continue
+            return candidate
+        return ""
+
+    @staticmethod
     def handle_voiceurl_message(voice_url: str) -> dict:
         """处理语音链接消息"""
+        if not voice_url:
+            return {}
         return {
             "type": "record",
             "data": {"file": voice_url},
@@ -178,6 +207,8 @@ class SendMessageHandleClass:
     @staticmethod
     def handle_music_message(song_id: str) -> dict:
         """处理音乐消息"""
+        if song_id in (None, ""):
+            return {}
         return {
             "type": "music",
             "data": {"type": "163", "id": song_id},
@@ -186,6 +217,8 @@ class SendMessageHandleClass:
     @staticmethod
     def handle_videourl_message(video_url: str) -> dict:
         """处理视频链接消息"""
+        if not video_url:
+            return {}
         return {
             "type": "video",
             "data": {"file": video_url},
@@ -194,6 +227,8 @@ class SendMessageHandleClass:
     @staticmethod
     def handle_file_message(file_path: str) -> dict:
         """处理文件消息"""
+        if not file_path:
+            return {}
         return {
             "type": "file",
             "data": {"file": f"file://{file_path}"},
@@ -202,6 +237,8 @@ class SendMessageHandleClass:
     @staticmethod
     def handle_imageurl_message(image_url: str) -> dict:
         """处理图片链接消息"""
+        if not image_url:
+            return {}
         return {
             "type": "image",
             "data": {"file": image_url},

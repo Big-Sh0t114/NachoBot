@@ -56,6 +56,15 @@ class MainSystem:
         """初始化其他组件"""
         init_start_time = time.time()
 
+        # Core owns the public multimodal boundary.  The facade is registered
+        # before chat/plugin initialization so non-chat callers (for example
+        # Bilibili idle speech and WebUI debug synthesis) can use the same
+        # authenticated /api surface without manufacturing a chat turn.
+        from src.multimodal.api import register_multimodal_api
+
+        self._multimodal_router = register_multimodal_api(self.server)
+        logger.info("Core multimodal API registered under /api/multimodal")
+
         # 初始化 A_Memorix 长期记忆子系统
         try:
             import src.A_memorix  # noqa: F401  # 注册兼容垫片

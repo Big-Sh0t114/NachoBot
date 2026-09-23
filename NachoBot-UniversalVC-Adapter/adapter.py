@@ -7,7 +7,7 @@ NachoBot Core via ncnk_message Router/WebSocket.
 Features:
   - Real-time denoising (DeepFilterNet)
   - Speaker diarization (WeSpeaker + online clustering)
-  - Streaming ASR (sherpa-onnx)
+  - Core-owned multimodal perception
 """
 
 import asyncio
@@ -17,23 +17,12 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Optional
 
 from config import AdapterConfig
 from audio_capture import AudioCapture, MicrophoneCapture
 from audio_output import AudioOutput
 from audio_pipeline import AudioPipeline
-from tts_handler import TTSHandler
-
-_multimodal_adapter_path = Path(__file__).resolve().parents[1] / "NachoBot-Multimodal-Adapter"
-if _multimodal_adapter_path.exists() and str(_multimodal_adapter_path) not in sys.path:
-    sys.path.insert(0, str(_multimodal_adapter_path))
-
-# 独立的情感预设解析器（不依赖 TTS 模型实例）
-try:
-    from nachobot_multimodal.utils.emotion_resolver import resolve_emotion_preset_remote
-except ImportError:
-    resolve_emotion_preset_remote = None
+from voice_codec import write_wav_base64
 
 # Add NachoBot path for ncnk_message module
 _root_dir = Path(__file__).resolve().parents[1]
@@ -64,41 +53,11 @@ except ImportError as exc:
         Seg
     ) = TargetConfig = TemplateInfo = UserInfo = None
 
-_URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
-
-
-def _mask_urls(text: str) -> str:
-    if not text:
-        return ""
-    return _URL_RE.sub("[link]", text)
-
-
-# Regex to match kaomoji and special emoticons
-_KAOMOJI_RE = re.compile(
-    r"[\(\（]"
-    r"[^\(\)\（\）]{1,15}"
-    r"[\)\）]"
-    r"|"
-    r"[｡ﾟ✧♪♡☆★●○◎◇◆□■△▲▽▼※→←↑↓]+"
-)
-
-
-def _clean_text_for_tts(text: str) -> str:
-    """Clean text for TTS: remove kaomoji, emoticons, and special characters."""
-    if not text:
-        return ""
-    cleaned = _KAOMOJI_RE.sub("", text)
-    cleaned = re.sub(r"[～〜♪♡☆★]", "", cleaned)
-    cleaned = re.sub(r"\s+", " ", cleaned)
-    cleaned = re.sub(r"[。、！？]{2,}", "。", cleaned)
-    return cleaned.strip()
-
-
 class UniversalVCAdapter:
     """
     Core adapter that connects:
-    - AudioCapture (ProcTap) → AudioPipeline → speaker text → NachoBot Core
-    - NachoBot Core → reply text → TTS → AudioOutput (virtual cable)
+    - AudioCapture (ProcTap) → AudioPipeline → voice segment → Core
+    - NachoBot Core → Core-produced voice → AudioOutput (virtual cable)
     """
 
     def __init__(self, config: AdapterConfig, logger: logging.Logger):
@@ -108,7 +67,7 @@ class UniversalVCAdapter:
         # Session identifier for this adapter instance
         self._session_id = f"uvc_{int(time.time())}"
 
-        # Initialize Audio Pipeline (Denoise → VAD → Speaker → ASR)
+        # Initialize Audio Pipeline (Denoise → VAD → Speaker → Core voice)
         self.pipeline = AudioPipeline(
             config=config,
             logger=logger,
@@ -139,9 +98,6 @@ class UniversalVCAdapter:
             config=config.output,
             logger=logger,
         )
-
-        # Initialize TTS
-        self.tts_handler = TTSHandler(logger)
 
         # Initialize Router (Connection to NachoBot Core)
         self.router = None
@@ -214,16 +170,17 @@ class UniversalVCAdapter:
 
         return re.sub(r"\{(\w+)\}", replace, template)
 
-    async def _on_speech_result(self, speaker_id: str, speaker_name: str, text: str):
-        """Called when pipeline produces a recognized speech result with speaker info."""
-        self.logger.info(f"[{speaker_name}] ({speaker_id}): {text}")
+    async def _on_speech_result(self, speaker_id: str, speaker_name: str, voice_data: str):
+        """Send one finalized voice segment to Core for perception."""
+        self.logger.info(
+            "[%s] (%s): finalized voice segment (%d base64 chars)",
+            speaker_name,
+            speaker_id,
+            len(voice_data or ""),
+        )
 
-        if not self.router:
+        if not self.router or not voice_data:
             return
-
-        processed_text = text
-        if self.config.disable_network_search:
-            processed_text = _mask_urls(processed_text)
 
         additional_config = {
             "disable_tools": True,
@@ -236,6 +193,16 @@ class UniversalVCAdapter:
                 "knowledge_retrieval": False,
                 "tool_mode": "disabled",
                 "web_search_mode": "disabled",
+                # VC replies stay one structured transport message so Core can
+                # project ``reply`` for display and synthesize only the
+                # explicitly requested ``tts_text`` field.
+                "reply_delivery": "json_envelope",
+                "tts_language": "zh",
+            },
+            "voice_format": {
+                "mime_type": "audio/wav",
+                "sample_rate": self.pipeline.TARGET_SR,
+                "channels": 1,
             },
         }
 
@@ -281,8 +248,8 @@ class UniversalVCAdapter:
                 group_name=f"Universal VC Session",
             ),
             format_info=FormatInfo(
-                content_format=["text"],
-                accept_format=["text", "voice"],
+                content_format=["voice"],
+                accept_format=["text", "voice", "tts_text"],
             ),
             template_info=template_info,
             additional_config=additional_config,
@@ -290,31 +257,29 @@ class UniversalVCAdapter:
 
         message = MessageBase(
             message_info=message_info,
-            message_segment=Seg(type="text", data=processed_text),
+            message_segment=Seg(type="voice", data=voice_data),
         )
 
         await self.router.send_message(message)
 
     async def _on_speech_start(self):
-        """Called when user starts speaking - interrupt current TTS playback."""
+        """Interrupt current Core-produced audio when a user speaks."""
         self.logger.debug("User speech start detected, interrupting playback")
         await self.audio_output.stop_current()
 
     async def _on_mic_speech_start(self):
-        """Called when mic user starts speaking - stop and pause TTS playback."""
+        """Pause Core-produced audio while the owner microphone speaks."""
         self.logger.debug("Mic user speech start detected, pausing playback")
         await self.audio_output.stop_and_pause()
 
     async def _on_mic_speech_end(self):
-        """Called when mic user stops speaking - resume TTS playback."""
+        """Resume queued Core-produced audio after microphone speech."""
         self.logger.debug("Mic user speech end detected, resuming playback")
         self.audio_output.resume()
 
     async def _handle_from_nachobot(self, message: MessageBase) -> None:
-        """Handle outgoing messages from NachoBot Core → TTS → Virtual Cable."""
+        """Play only Core-produced voice segments on the virtual cable."""
         try:
-            text_to_speak = ""
-
             # Extract segment
             segment = None
             if isinstance(message, dict):
@@ -322,76 +287,45 @@ class UniversalVCAdapter:
             else:
                 segment = message.message_segment
 
-            # Flatten segments to text
-            if segment:
-                if isinstance(segment, dict):
-                    if segment.get("type") == "text":
-                        text_to_speak = segment.get("data", "")
-                elif isinstance(segment, list):
-                    for seg in segment:
-                        if isinstance(seg, dict):
-                            if seg.get("type") == "text":
-                                text_to_speak += seg.get("data", "")
-                        elif hasattr(seg, "type") and hasattr(seg, "data"):
-                            if seg.type == "text":
-                                text_to_speak += seg.data
-                elif hasattr(segment, "type") and hasattr(segment, "data"):
-                    if segment.type == "text":
-                        text_to_speak = segment.data
-
-            if not text_to_speak:
-                return
-
-            # Strip invisible characters
-            text_to_speak = (
-                text_to_speak.replace("\u200b", "")
-                .replace("\\u200b", "")
-                .replace("\\u200B", "")
-                .replace("\ufeff", "")
-                .strip()
-            )
-
-            if not text_to_speak:
-                return
-
-            self.logger.info(f"Received from Core: {text_to_speak}")
-
-            # Filter typo correction messages
-            if len(text_to_speak) <= 2 and all(
-                "\u4e00" <= c <= "\u9fff" for c in text_to_speak
-            ):
-                self.logger.info(f"Skipping typo correction message: {text_to_speak}")
-                return
-
-            # Clean text for TTS
-            cleaned_text = _clean_text_for_tts(text_to_speak)
-            self.logger.info(f"Cleaned text for TTS: {cleaned_text}")
-
-            if not cleaned_text:
-                self.logger.warning("Text became empty after cleaning, skipping TTS.")
-                return
-
-            # 分段流式：按句切分，逐句生成并立即送入播放队列
-            try:
-                from nachobot_multimodal.utils.text_splitter import split_text_for_streaming
-                segments = split_text_for_streaming(cleaned_text)
-            except ImportError:
-                segments = [cleaned_text]
-
-            self.logger.info(f"TTS segment stream: {len(segments)} segments")
-
-            preset_name = None
-            if resolve_emotion_preset_remote is not None:
+            for voice_segment in self._voice_segments(segment):
                 try:
-                    preset_name = await resolve_emotion_preset_remote(cleaned_text)
-                except Exception as e:
-                    self.logger.error(f"Failed to resolve emotion preset: {e}")
-
-            for idx, seg_text in enumerate(segments):
-                self.logger.info(f"Generating segment {idx+1}/{len(segments)}: {seg_text}")
-                audio_path = await self.tts_handler.generate_speech(seg_text, preset_name=preset_name, split_method="cut0")
-                if audio_path:
-                    await self.audio_output.play(audio_path)
+                    audio_path = write_wav_base64(voice_segment)
+                except (ValueError, TypeError) as exc:
+                    self.logger.warning(
+                        "Dropping invalid Core voice segment: %s", type(exc).__name__
+                    )
+                    continue
+                await self.audio_output.play(audio_path)
 
         except Exception as e:
             self.logger.exception(f"Error handling message from NachoBot: {e}")
+
+    @staticmethod
+    def _voice_segments(segment):
+        """Yield only Core-produced audio, including nested seglists."""
+        if isinstance(segment, dict):
+            seg_type = segment.get("type")
+            data = segment.get("data")
+            if seg_type == "seglist" and isinstance(data, list):
+                for child in data:
+                    yield from UniversalVCAdapter._voice_segments(child)
+            elif seg_type in {"voice", "voice_stream"} and data:
+                if isinstance(data, dict):
+                    data = data.get("audio_base64") or data.get("audio")
+                if data:
+                    yield data
+            return
+        if isinstance(segment, list):
+            for child in segment:
+                yield from UniversalVCAdapter._voice_segments(child)
+            return
+        if hasattr(segment, "type") and hasattr(segment, "data"):
+            if segment.type == "seglist" and isinstance(segment.data, list):
+                for child in segment.data:
+                    yield from UniversalVCAdapter._voice_segments(child)
+            elif segment.type in {"voice", "voice_stream"} and segment.data:
+                data = segment.data
+                if isinstance(data, dict):
+                    data = data.get("audio_base64") or data.get("audio")
+                if data:
+                    yield data

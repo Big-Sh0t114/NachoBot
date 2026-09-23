@@ -463,10 +463,25 @@ class MessageProcessBase(Message):
                 if isinstance(segment.data, str):
                     return await get_image_manager().get_emoji_tag(segment.data)
                 return "[表情，网卡了加载不出来]"
-            elif segment.type == "voice":
-                if isinstance(segment.data, str):
-                    return await get_voice_text(segment.data)
-                return "[发了一段语音，网卡了加载不出来]"
+            elif segment.type in {"voice", "voice_stream"}:
+                # MessageProcessBase only handles outbound bot replies.  These
+                # audio segments were already synthesized by Core from the
+                # adjacent ``tts_text`` field, so feeding them back through ASR
+                # would duplicate the stored reply and waste a perception call.
+                # Inbound user voice is handled separately by MessageRecv.
+                return ""
+            elif segment.type == "tts_text":
+                # ``tts_text`` is an explicit outbound synthesis field.  Core
+                # materializes audio before this pass; this branch keeps the
+                # original text visible for storage and fallback without
+                # synthesizing ordinary text.
+                if isinstance(segment.data, dict):
+                    return str(
+                        segment.data.get("display_text")
+                        if segment.data.get("display_text") is not None
+                        else segment.data.get("text") or ""
+                    )
+                return str(segment.data or "")
             elif segment.type == "video":
                 return "[引用了一段视频]"
             elif segment.type == "at":
@@ -562,6 +577,28 @@ class MessageSending(MessageProcessBase):
     async def process(self) -> None:
         """处理消息内容，生成纯文本和详细文本"""
         if self.message_segment:
+            # TTS is field-driven: only an explicit, nonempty tts_text field
+            # may result in a voice segment.  System events stay senderless and
+            # bypass all multimodal processing.
+            if get_system_event(self) is None:
+                from src.multimodal import get_multimodal_router
+
+                router = get_multimodal_router()
+                should_materialize = getattr(router, "should_materialize_reply", None)
+                if should_materialize is None:
+                    should_materialize = router.has_explicit_tts_text
+                if should_materialize(self.message_segment):
+                    additional_config = getattr(self.message_info, "additional_config", None)
+                    text_lang = (
+                        additional_config.get("tts_language")
+                        if isinstance(additional_config, dict)
+                        else None
+                    )
+                    self.message_segment = await router.materialize_reply(
+                        self.message_segment,
+                        platform=str(getattr(self.message_info, "platform", "core") or "core"),
+                        text_lang=text_lang,
+                    )
             self.processed_plain_text = await self._process_message_segments(self.message_segment)
 
     def to_dict(self):

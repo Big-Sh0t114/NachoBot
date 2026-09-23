@@ -1,6 +1,6 @@
 import asyncio
-import logging
 import os
+import logging
 from collections import deque
 from functools import lru_cache
 from pathlib import Path
@@ -150,11 +150,11 @@ class NachoDiscordBot(discord.Bot):
     async def _on_sink_callback(
         self,
         user_id: int,
-        text: Optional[str],
+        voice_data: Optional[str],
         guild_id: int,
     ):
-        """Publish the final text of an already-decoded streaming utterance."""
-        if text and self.speech_callback:
+        """Publish the final Core-bound voice segment for an utterance."""
+        if voice_data and self.speech_callback:
             # Resolve user name
             user_name = f"User{user_id}"
             try:
@@ -178,7 +178,7 @@ class NachoDiscordBot(discord.Bot):
                 self.logger.warning(f"Failed to resolve user name for {user_id}: {e}")
 
             # Notify adapter with resolved user name
-            await self.speech_callback(guild_id, user_id, text, user_name)
+            await self.speech_callback(guild_id, user_id, voice_data, user_name)
 
         # Logic for resuming AFTER speech ends
         if guild_id in self.guild_states:
@@ -288,6 +288,13 @@ class NachoDiscordBot(discord.Bot):
 
     def _play_next(self, guild_id: int, error=None):
         """Play the next audio in the queue for the given guild."""
+        state = self.guild_states.get(guild_id)
+        if state:
+            finished_audio = state.get("current_audio")
+            interrupted_audio = state.get("interrupted_audio")
+            if finished_audio and finished_audio != interrupted_audio:
+                self._cleanup_audio_file(finished_audio)
+            state["current_audio"] = None
         if error:
             self.logger.error(f"Error in playback for guild {guild_id}: {error}")
 
@@ -296,11 +303,14 @@ class NachoDiscordBot(discord.Bot):
 
         guild = self.get_guild(guild_id)
         if not guild:
+            while self.audio_queues[guild_id]:
+                self._cleanup_audio_file(self.audio_queues[guild_id].popleft())
             return
 
         vc: discord.VoiceClient = guild.voice_client
         if not vc or not vc.is_connected():
-            self.audio_queues[guild_id].clear()
+            while self.audio_queues[guild_id]:
+                self._cleanup_audio_file(self.audio_queues[guild_id].popleft())
             return
 
         if vc.is_playing():
@@ -336,20 +346,35 @@ class NachoDiscordBot(discord.Bot):
             self.logger.error(f"Failed to play audio: {e}")
             if guild_id in self.guild_states:
                 self.guild_states[guild_id]["current_audio"] = None
+            self._cleanup_audio_file(audio_source)
             self.loop.call_soon_threadsafe(
                 self._play_next, guild_id, e
             )  # Try next one safely
+
+    def _cleanup_audio_file(self, audio_source: str) -> None:
+        """Remove only adapter-created temporary Core audio files."""
+        try:
+            if (
+                audio_source
+                and os.path.basename(audio_source).startswith("nachobot-discord-")
+                and os.path.isfile(audio_source)
+            ):
+                os.remove(audio_source)
+        except OSError as exc:
+            self.logger.warning("Failed to clean temporary Core audio: %s", type(exc).__name__)
 
     async def speak(self, guild_id: int, audio_source: str):
         """Play audio in the voice channel of the given guild."""
         guild = self.get_guild(guild_id)
         if not guild:
             self.logger.warning(f"Could not find guild {guild_id} to speak in")
+            self._cleanup_audio_file(audio_source)
             return
 
         vc: discord.VoiceClient = guild.voice_client
         if not vc or not vc.is_connected():
             self.logger.warning(f"Not connected to voice in guild {guild_id}")
+            self._cleanup_audio_file(audio_source)
             return
 
         if guild_id not in self.audio_queues:
@@ -359,6 +384,7 @@ class NachoDiscordBot(discord.Bot):
         if len(self.audio_queues[guild_id]) >= 5:
             dropped = self.audio_queues[guild_id].popleft()
             self.logger.info(f"Queue limit reached, dropped oldest audio: {dropped}")
+            self._cleanup_audio_file(dropped)
 
         self.audio_queues[guild_id].append(audio_source)
 

@@ -12,7 +12,7 @@ reconnect_seconds = 5
 
 [nachobot_server]
 host = "127.0.0.1"
-port = 8070
+port = 8000
 platform = "discord"
 
 [chat]

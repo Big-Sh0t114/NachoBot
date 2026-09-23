@@ -6,10 +6,11 @@ services:
       context: .
       additional_contexts:
         nachobot: ../NachoBot
-        multimodal: ../NachoBot-Multimodal-Adapter
     environment:
       - TZ=Asia/Shanghai
       - NACHOBOT_CORE_TOKEN=${NACHOBOT_CORE_TOKEN:-}
+      - NACHOBOT_CORE_HOST=core
+      - NACHOBOT_CORE_PORT=8000
     volumes:
       - type: bind
         source: ./config.toml
@@ -24,13 +25,6 @@ services:
         source: ../NachoBot/config
         target: C:/workspace/NachoBot/config
         read_only: true
-      - type: bind
-        source: ../NachoBot-Multimodal-Adapter/configs
-        target: C:/workspace/NachoBot-Multimodal-Adapter/configs
-        read_only: true
-      - type: bind
-        source: ../NachoBot-Multimodal-Adapter/models
-        target: C:/workspace/NachoBot-Multimodal-Adapter/models
     restart: always
     networks:
       - nacho_bot

@@ -1,14 +1,6 @@
 [server]
 host = "127.0.0.1"
-port = 8070
-
-[routes]
-qq = "http://127.0.0.1:8000/ws" 
-discord = "http://127.0.0.1:8000/ws"
-# nonebot-qq = "default"
-
-[probability]
-voice_probability = 1.0 # 使用语音的概率
+port = 9880
 
 [enabled_tts] # 启用的TTS模块，请与各插件的目录名称一致
 # 可选值: "GPT_Sovits" 或 "Vox"（二选一，不可同时启用）

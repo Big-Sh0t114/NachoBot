@@ -127,9 +127,9 @@ uv run python main.py
 
 | 脚本 | 本地模型策略 |
 | --- | --- |
-| `launchbot.bat` | 托管 TTS + Florence-2 VLM + 共享流式 ASR |
-| `launchbot_lite.bat` | 仅托管 TTS；设置 `DISABLE_VLM_ASR=1` |
-| `launchbot_potato.bat` | 不启动 TTS/VLM/ASR；8070 仅做消息中继 |
+| `launchbot.bat` | Core 选择本地多模态运行时；本地失败后回退远端 API；使用 9880 TTS 引擎 |
+| `launchbot_lite.bat` | Core 的感知走远端 API；使用 9880 TTS 引擎 |
+| `launchbot_potato.bat` | Core 固定输出纯文本，不请求本地感知或 TTS |
 
 TTS 已由 [Multimodal Adapter](../NachoBot-Multimodal-Adapter/README.md) 的托管运行时负责，不再要求用户准备独立 GPT-SoVITS 或 VoxCPM 客户端目录。首次启动会优先复用本地缓存，缺少的运行时和模型再按配置下载。
 
@@ -137,13 +137,14 @@ TTS 已由 [Multimodal Adapter](../NachoBot-Multimodal-Adapter/README.md) 的托
 
 - `launch_bilibili.bat`：Bilibili，按需联动独立 Live2D。
 - `launch_discord.bat`：Koishi 文字接入与 DiscordVC。
-- `launch_universal_vc.bat`：Windows 进程音频、ASR 和虚拟声卡。
+- `launch_universal_vc.bat`：Windows 进程音频采集与虚拟声卡；ASR 由 Core 统一调度。
 
 ## 多模态与平台边界
 
 | 能力 | 所属组件 |
 | --- | --- |
-| TTS、情感预设、ASR、VLM | `NachoBot-Multimodal-Adapter` |
+| Core 多模态 facade | `NachoBot/src/multimodal` |
+| TTS、情感预设、ASR、VLM | `NachoBot-Multimodal-Adapter`（9880 TTS；9874 perception） |
 | QQ / OneBot | `NachoBot-Napcat-Adapter` + NapCat |
 | Bilibili 直播、评论、私信与二阶段搜索 | `NachoBot-Bilibili-Adapter` |
 | Live2D 渲染与交互 | `NachoBot-Live2D-Adapter` |
@@ -161,7 +162,7 @@ docker compose build core
 docker compose up -d
 ```
 
-Bootstrap 命令只创建缺失的 bind source，不覆盖已有配置，并会从已跟踪模板初始化 Core 与 Multimodal 配置；请在启动前填写 `docker-config/mmc/` 中的模型和账号配置。仓库自带插件保留在 Core 镜像内，避免空 bind mount 将其隐藏。Core 宿主机端口默认仅绑定 `127.0.0.1`，Compose 自动创建名为 `nacho_bot` 的受信容器网络。同一 Docker daemon 上加入该网络的容器应视为具有 Core 访问权限。需要令牌隔离时，在 Core 与所有适配器的进程环境中设置同一个 `NACHOBOT_CORE_TOKEN`；Compose 会转发该变量。浏览器若需直接连接 Core WebSocket，还必须用逗号分隔的 `NACHOBOT_WS_ALLOWED_ORIGINS` 明确列出完整 Origin（协议、主机和端口）。
+Bootstrap 命令只创建缺失的 bind source，不覆盖已有配置，并会从已跟踪模板初始化 Core 与 Multimodal 配置；请在启动前填写 `docker-config/mmc/` 中的模型和账号配置。仓库自带插件保留在 Core 镜像内，避免空 bind mount 将其隐藏。Core 宿主机端口默认仅绑定 `127.0.0.1`，Compose 自动创建名为 `nacho_bot` 的受信容器网络。同一 Docker daemon 上加入该网络的容器应视为具有 Core 访问权限。Core Compose 默认通过该网络访问 `multimodal-tts-emotion:9880` 与 `multimodal-perception:9874`，可用 `NACHOBOT_TTS_ENDPOINT`、`NACHOBOT_MULTIMODAL_ENDPOINT` 和 `NACHOBOT_RUNTIME_PROFILE` 覆盖。需要令牌隔离时，在 Core 与所有适配器的进程环境中设置同一个 `NACHOBOT_CORE_TOKEN`；Compose 会转发该变量。浏览器若需直接连接 Core WebSocket，还必须用逗号分隔的 `NACHOBOT_WS_ALLOWED_ORIGINS` 明确列出完整 Origin（协议、主机和端口）。
 
 Core 镜像使用 Python 3.12、现有 `pyproject.toml` 与 `uv.lock` 构建，并包含 FFmpeg；启用网页搜索时使用 Playwright Chromium。SQLite Web 默认不启动；仅在本机调试时使用 `docker compose --profile debug up -d sqlite-web`。历史聚合 Adapter 镜像也不默认启动；使用前需手动提供 `docker-config/adapters/config.toml`，运行 `python scripts/bootstrap_compose.py --check --legacy-adapters`，然后启用 `legacy-adapters` profile。
 
