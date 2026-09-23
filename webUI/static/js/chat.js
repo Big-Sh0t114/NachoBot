@@ -28,10 +28,10 @@ const ChatModule = (() => {
             detail: '保留语音合成，关闭 VLM / ASR',
         },
         potato: {
-            name: '无模型模式',
+            name: '文本模式',
             code: 'POTATO',
-            summary: 'Relay only',
-            detail: '仅消息中继，不加载本地模型',
+            summary: 'Core text + QQ',
+            detail: 'Core 文本档位 + 所选 QQ 适配器，生成纯文本回复；不启动本地 Multimodal 服务',
         },
     });
     const WELCOME_SUBTITLES = [
@@ -67,14 +67,14 @@ const ChatModule = (() => {
     let liveSocket = null;
     let liveConversationId = null;
     let liveReconnectTimer = null;
-    let ttsStatusTimer = null;
     let profile = null;
     let ttsController = null;
     let modalOpen = false;
     let coreRunning = false;
     let coreToggleBusy = false;
-    let coreStatusTimer = null;
     let coreStatusRequestSerial = 0;
+    let coreStatusRequestPromise = null;
+    let coreStatusRefreshPending = false;
     let els = {};
 
     function init() {
@@ -130,19 +130,53 @@ const ChatModule = (() => {
         bindEvents();
         renderAll();
         connectLiveStream(activeSessionId);
-        updateBackendStatus();
+        updateBackendStatus(true);
         ttsController.updateStatus();
-        coreStatusTimer = window.setInterval(updateBackendStatus, 2_000);
-        ttsStatusTimer = window.setInterval(() => ttsController.updateStatus(), 15_000);
         initialized = true;
         profile.scheduleFirstUseNamePrompt();
     }
 
+    function launchCoreIsExternal(state) {
+        const core = state?.core;
+        return Boolean(core && core.origin === 'external' && core.managed === false);
+    }
+
+    function launchHasOwnedDependents(state) {
+        return (state?.profiles || []).some(profile =>
+            (profile?.services || []).some(service =>
+                service?.managed === true
+                && service?.origin === 'webui'
+                && service.status !== 'stopped',
+            ),
+        );
+    }
+
+    function launchExternalProfileIsReady(state) {
+        if (!launchCoreIsExternal(state) || state?.core?.status !== 'running') return false;
+        const profileId = state?.active_profile || state?.core?.observed_profile;
+        const profile = (state?.profiles || []).find(item => item?.id === profileId);
+        if (profile?.status === 'running') return true;
+        const requiredIds = profileId === 'full'
+            ? ['tts_runtime_full', 'perception']
+            : profileId === 'lite'
+                ? ['tts_runtime_lite']
+                : [];
+        return requiredIds.length > 0
+            && requiredIds.every(id => profile?.services?.some(
+                service => service?.id === id && service.status === 'running',
+            ));
+    }
+
+    const EXTERNAL_LAUNCHER_NOTICE = '由外部启动器管理，请在原启动窗口停止';
+
     function refresh() {
-        if (!initialized) init();
+        if (!initialized) {
+            init();
+            return;
+        }
         renderAll();
-        updateBackendStatus();
-        ttsController.updateStatus();
+        updateBackendStatus(true);
+        ttsController.updateStatus(true);
     }
 
     function loadSessions() {
@@ -869,11 +903,22 @@ const ChatModule = (() => {
         if (!els.status || coreToggleBusy) return;
 
         let currentLaunchStatus = 'stopped';
+        let currentLaunch = null;
         try {
-            const current = await apiGet('/api/launch');
-            currentLaunchStatus = String(current.status || 'stopped');
+            currentLaunch = await apiGet('/api/launch');
+            currentLaunchStatus = String(currentLaunch.status || 'stopped');
         } catch (error) {
             console.warn('Failed to read NachoBot launch state before toggle:', error);
+        }
+
+        if (
+            currentLaunch
+            && launchExternalProfileIsReady(currentLaunch)
+            && !launchHasOwnedDependents(currentLaunch)
+        ) {
+            toast(EXTERNAL_LAUNCHER_NOTICE, 'info');
+            await updateBackendStatus(true);
+            return;
         }
 
         if (currentLaunchStatus === 'stopping') {
@@ -881,7 +926,14 @@ const ChatModule = (() => {
             return;
         }
 
-        const shouldStart = currentLaunchStatus === 'stopped' || currentLaunchStatus === 'error';
+        const externalCoreWithoutOwnedDependents = Boolean(
+            currentLaunch
+            && launchCoreIsExternal(currentLaunch)
+            && !launchHasOwnedDependents(currentLaunch),
+        );
+        const shouldStart = externalCoreWithoutOwnedDependents
+            ? currentLaunchStatus !== 'running'
+            : currentLaunchStatus === 'stopped' || currentLaunchStatus === 'error';
         let selectedProfile = null;
         if (shouldStart) {
             selectedProfile = await chooseLaunchProfile();
@@ -905,6 +957,7 @@ const ChatModule = (() => {
             } else {
                 await apiPost('/api/launch/stop');
             }
+            ttsController?.updateStatus(true);
 
             let reachedTarget = false;
             for (let attempt = 0; attempt < 360; attempt += 1) {
@@ -930,6 +983,7 @@ const ChatModule = (() => {
                 const startCompleted = shouldStart && launchStatus === 'running';
                 const stopCompleted = !shouldStart && launchStatus === 'stopped';
                 if (startCompleted || stopCompleted) {
+                    if (startCompleted) await ttsController?.updateStatus(true);
                     reachedTarget = true;
                     break;
                 }
@@ -952,13 +1006,35 @@ const ChatModule = (() => {
         } finally {
             coreToggleBusy = false;
             els.status.disabled = false;
-            await updateBackendStatus();
+            await Promise.all([
+                updateBackendStatus(true),
+                ttsController?.updateStatus(true),
+            ]);
         }
     }
 
-    async function updateBackendStatus() {
+    async function updateBackendStatus(forceRefresh = false) {
         if (!els.status || coreToggleBusy) return;
-        const requestSerial = ++coreStatusRequestSerial;
+        if (coreStatusRequestPromise) {
+            if (forceRefresh) coreStatusRefreshPending = true;
+            return coreStatusRequestPromise;
+        }
+        const requestSerial = coreStatusRequestSerial;
+        coreStatusRefreshPending = false;
+        const request = refreshBackendStatus(requestSerial);
+        coreStatusRequestPromise = request;
+        try {
+            return await request;
+        } finally {
+            if (coreStatusRequestPromise === request) coreStatusRequestPromise = null;
+            if (coreStatusRefreshPending && !coreToggleBusy) {
+                coreStatusRefreshPending = false;
+                window.setTimeout(updateBackendStatus, 0);
+            }
+        }
+    }
+
+    async function refreshBackendStatus(requestSerial) {
 
         try {
             const data = await apiGet('/api/launch');
@@ -967,39 +1043,58 @@ const ChatModule = (() => {
             const launchStatus = String(data.status || 'stopped');
             const activeProfile = String(data.active_profile || '');
             const profileCode = CHAT_LAUNCH_PROFILES[activeProfile]?.code || '';
+            const externalCore = launchCoreIsExternal(data);
+            const ownedDependents = launchHasOwnedDependents(data);
+            const externalProfileReady = launchExternalProfileIsReady(data);
             coreRunning = data.core?.status === 'running';
             els.status.setAttribute('aria-pressed', String(launchStatus === 'running'));
 
-            if (launchStatus === 'starting') {
+            if (externalCore && externalProfileReady && !ownedDependents) {
+                els.status.className = 'chat-status-chip is-online';
+                els.status.textContent = profileCode
+                    ? `NachoBot · ${profileCode}（外部）`
+                    : 'NachoBot 外部运行中';
+                els.status.title = EXTERNAL_LAUNCHER_NOTICE;
+                els.status.setAttribute('aria-disabled', 'true');
+            } else if (launchStatus === 'starting') {
                 els.status.className = 'chat-status-chip is-checking';
                 els.status.textContent = `${profileCode || 'NachoBot'} 启动中`;
                 els.status.title = '点击可取消当前启动';
+                els.status.removeAttribute('aria-disabled');
             } else if (launchStatus === 'stopping') {
                 els.status.className = 'chat-status-chip is-checking';
                 els.status.textContent = 'NachoBot 关闭中';
                 els.status.title = '正在关闭 Core 与当前运行模式';
+                els.status.removeAttribute('aria-disabled');
             } else if (launchStatus === 'running') {
                 els.status.className = 'chat-status-chip is-online';
                 els.status.textContent = profileCode ? `NachoBot · ${profileCode}` : 'NachoBot 运行中';
                 els.status.title = '点击停止 NachoBot Core 与当前运行模式';
+                els.status.removeAttribute('aria-disabled');
             } else if (launchStatus === 'error') {
                 els.status.className = 'chat-status-chip is-offline';
                 els.status.textContent = profileCode ? `${profileCode} 启动失败` : 'NachoBot 启动失败';
                 els.status.title = '点击重新选择运行模式并启动';
+                els.status.removeAttribute('aria-disabled');
             } else if (launchStatus === 'partial') {
                 els.status.className = 'chat-status-chip is-checking';
                 els.status.textContent = profileCode ? `NachoBot · ${profileCode} 部分运行` : 'NachoBot 部分运行';
-                els.status.title = '点击停止当前启动单元';
+                els.status.title = externalCore && !ownedDependents
+                    ? '点击启动 WebUI 托管服务'
+                    : '点击停止当前启动单元';
+                els.status.removeAttribute('aria-disabled');
             } else {
                 coreRunning = false;
                 els.status.className = 'chat-status-chip is-offline';
                 els.status.textContent = 'NachoBot 未运行';
                 els.status.title = '点击选择 FULL / LITE / POTATO 并启动';
+                els.status.removeAttribute('aria-disabled');
             }
         } catch (error) {
             if (coreToggleBusy || requestSerial !== coreStatusRequestSerial) return;
             coreRunning = false;
             els.status.setAttribute('aria-pressed', 'false');
+            els.status.removeAttribute('aria-disabled');
             els.status.className = 'chat-status-chip is-offline';
             els.status.textContent = '无法读取服务状态';
             els.status.title = '点击尝试启动 NachoBot';
@@ -1010,5 +1105,17 @@ const ChatModule = (() => {
         }
     }
 
-    return { init, refresh };
+    return {
+        init,
+        refresh,
+        __test: {
+            launchCoreIsExternal,
+            launchHasOwnedDependents,
+            launchExternalProfileIsReady,
+            externalLauncherNotice: EXTERNAL_LAUNCHER_NOTICE,
+            toggleCoreService,
+            updateBackendStatus,
+            setStatusElement(element) { els.status = element; },
+        },
+    };
 })();

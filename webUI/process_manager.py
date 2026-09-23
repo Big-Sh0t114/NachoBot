@@ -9,6 +9,7 @@ import errno
 import json
 import locale
 import logging
+import ntpath
 import os
 import re
 import secrets
@@ -16,6 +17,7 @@ import signal
 import subprocess
 import time
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -53,6 +55,8 @@ _PROCESS_GROUP_KILL_TIMEOUT = 2.0
 _PROCESS_REAP_TIMEOUT = 2.0
 _PROCESS_GROUP_POLL_INTERVAL = 0.05
 _WINDOWS_JOB_POLL_INTERVAL = 0.05
+_CORE_DISPLAY_GRACE_SECONDS = 6.0
+_CORE_LAST_VERIFIED_MAX_AGE_SECONDS = 15.0
 
 
 class _WindowsJobBasicLimitInformation(ctypes.Structure):
@@ -100,12 +104,6 @@ _WINDOWS_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-
-_TTS_ENGINE_CONFIG_FILES = {
-    "GPT_Sovits": "gpt-sovits.toml",
-    "Vox": "vox.toml",
-}
-
 
 @dataclass
 class _WindowsJobCapability:
@@ -312,20 +310,44 @@ class _WindowsJobFacade:
         capability.closed = True
 
 
-def _read_tts_engine_port(root_dir: Path, engine: str) -> int:
-    """Read the selected engine port from its dedicated TOML config."""
-    config_name = _TTS_ENGINE_CONFIG_FILES.get(engine)
-    if not config_name:
-        return 9880
+def _read_tts_service_endpoint(root_dir: Path) -> str:
+    """Resolve the public unified TTS Runtime endpoint on port 9880."""
 
-    config_path = root_dir / "NachoBot-Multimodal-Adapter" / "configs" / config_name
+    host = "127.0.0.1"
+    config_path = root_dir / "NachoBot-Multimodal-Adapter" / "configs" / "base.toml"
     try:
         import tomlkit
 
         document = tomlkit.parse(config_path.read_text(encoding="utf-8"))
-        return int(document.get("tts", {}).get("port", 9880))
+        server = document.get("server", {})
+        host = str(server.get("host", host)).strip() or host
     except Exception:
-        return 9880
+        pass
+    if host in {"0.0.0.0", "::"}:
+        host = "127.0.0.1"
+    return f"http://{host}:9880"
+
+
+def _read_perception_service_endpoint(root_dir: Path) -> str:
+    """Resolve the configured Core-facing 9874 perception endpoint."""
+
+    host = "127.0.0.1"
+    port = 9874
+    config_path = root_dir / "NachoBot-Multimodal-Adapter" / "configs" / "perception.toml"
+    try:
+        import tomlkit
+
+        document = tomlkit.parse(config_path.read_text(encoding="utf-8"))
+        perception = document.get("perception", {})
+        host = str(perception.get("host", host)).strip() or host
+        port = int(perception.get("port", port))
+    except Exception:
+        pass
+    if host in {"0.0.0.0", "::"}:
+        host = "127.0.0.1"
+    if not 1 <= port <= 65535:
+        port = 9874
+    return f"http://{host}:{port}"
 
 
 class ServiceStatus(str, Enum):
@@ -334,6 +356,111 @@ class ServiceStatus(str, Enum):
     RUNNING = "running"
     STOPPING = "stopping"
     ERROR = "error"
+
+
+@dataclass(frozen=True)
+class CoreObservation:
+    """Ephemeral, non-owning evidence that an external Core is ready.
+
+    This deliberately contains no PID, process handle, process-group ID, or
+    Windows Job capability.  It is therefore safe to use for readiness while
+    remaining useless for termination/adoption.
+    """
+
+    status: str
+    observed_profile: str
+    observed_at: float
+    # ``None`` keeps the historical three-positional-argument construction
+    # useful without treating an old observation as proof that any dependent
+    # service is externally ready.
+    observed_local_ready: bool | None = None
+    perception_required: bool | None = None
+    perception_ready: bool | None = None
+    tts_required: bool | None = None
+    tts_ready: bool | None = None
+
+    @property
+    def profile(self) -> str:
+        """Compatibility alias for callers that refer to the profile plainly."""
+        return self.observed_profile
+
+    @property
+    def local_ready(self) -> bool | None:
+        """Compatibility alias for the retained Core ``observed_local`` state."""
+        return self.observed_local_ready
+
+    @property
+    def readiness_known(self) -> bool:
+        """Whether this observation contains the strict component contract."""
+        return all(
+            value is not None
+            for value in (
+                self.observed_local_ready,
+                self.perception_required,
+                self.perception_ready,
+                self.tts_required,
+                self.tts_ready,
+            )
+        )
+
+
+@dataclass(frozen=True)
+class _CoreProbeResult:
+    observation: CoreObservation | None
+    failure_kind: str | None = None
+
+
+# Adapter process discovery is deliberately a separate, non-owning plane from
+# ``ServiceState``.  The latter contains process handles and shutdown
+# capabilities; these values are only a short-lived classification of what a
+# BAT/manual launcher appears to have started.
+EXTERNAL_ADAPTER_OUTCOMES = frozenset({
+    "absent",
+    "external_ready",
+    "external_present_unready",
+    "indeterminate",
+})
+
+
+@dataclass(frozen=True)
+class AdapterObservation:
+    service_id: str
+    outcome: str
+    observed_at: float
+    detail: str = ""
+
+    def __post_init__(self) -> None:
+        if self.outcome not in EXTERNAL_ADAPTER_OUTCOMES:
+            raise ValueError(f"invalid external adapter outcome: {self.outcome}")
+
+    @property
+    def external_state(self) -> str | None:
+        return {
+            "external_ready": "ready",
+            "external_present_unready": "present_unready",
+            "indeterminate": "indeterminate",
+        }.get(self.outcome)
+
+    @property
+    def present(self) -> bool:
+        return self.outcome != "absent"
+
+
+@dataclass(frozen=True)
+class _ProcessRecord:
+    pid: int
+    ppid: int | None
+    cwd: str | None
+    argv: tuple[str, ...]
+    executable: str | None
+    name: str | None
+
+
+@dataclass(frozen=True)
+class _ProcessSnapshot:
+    processes: tuple[_ProcessRecord, ...]
+    listeners: Mapping[int, frozenset[int]]
+    failed: bool = False
 
 
 @dataclass
@@ -383,9 +510,42 @@ QQ_SERVICE_IDS = (
     "snowluma_adapter",
     "napcat_shell",
 )
+EXTERNAL_ADAPTER_SERVICE_IDS = (
+    "napcat_adapter",
+    "napcat_shell",
+    "snowluma_adapter",
+    "snowluma_runtime",
+    "bilibili",
+    "live2d",
+    "koishi",
+    "koishi_adapter",
+    "discordvc",
+    "universalvc",
+)
+_EXTERNAL_PRESENCE_OUTCOMES = frozenset({
+    "external_ready",
+    "external_present_unready",
+    "indeterminate",
+})
+_EXTERNAL_BLOCKING_OUTCOMES = frozenset({
+    "external_present_unready",
+    "indeterminate",
+})
+_EXTERNAL_READY_DETAIL = "由外部启动器运行"
+_EXTERNAL_PRESENT_UNREADY_DETAIL = "检测到外部进程，但尚未通过就绪检查"
+_EXTERNAL_INDETERMINATE_DETAIL = "无法确认外部进程归属或状态，请在原启动器中检查"
 QQ_BUSY_STATUSES = frozenset(
     {ServiceStatus.STARTING, ServiceStatus.RUNNING, ServiceStatus.STOPPING}
 )
+_QQ_BACKEND_SERVICES = {
+    "napcat": frozenset({"napcat_adapter", "napcat_shell"}),
+    "snowluma": frozenset({"snowluma_runtime", "snowluma_adapter"}),
+}
+_QQ_SERVICE_BACKEND = {
+    service_id: backend
+    for backend, service_ids in _QQ_BACKEND_SERVICES.items()
+    for service_id in service_ids
+}
 # Keep the start-boundary error independent from parser exception text.  The
 # selector parser currently emits sanitized diagnostics, but a fixed message
 # also keeps a future parser change from echoing .env content through the API.
@@ -426,7 +586,7 @@ def qq_backend_process_states(manager: "ProcessManager | None" = None) -> dict[s
 
 
 def assert_qq_adapter_switch_allowed(manager: "ProcessManager | None" = None) -> None:
-    """Reject backend switches while any managed QQ service/operation is active."""
+    """Reject backend switches while managed or externally-present QQ is active."""
     manager = manager or _qq_process_manager_instance()
     states = qq_backend_process_states(manager)
     busy = [service_id for service_id, status in states.items() if status in QQ_BUSY_STATUSES]
@@ -438,6 +598,14 @@ def assert_qq_adapter_switch_allowed(manager: "ProcessManager | None" = None) ->
     ]
     if busy or retained:
         raise ValueError("QQ 适配器正在运行或切换中，请先停止当前 QQ 服务")
+    if manager is not None:
+        external = getattr(manager, "adapter_observation_cache", {})
+        if any(
+            service_id in external
+            and external[service_id].outcome in _EXTERNAL_PRESENCE_OUTCOMES
+            for service_id in QQ_SERVICE_IDS
+        ):
+            raise ValueError("QQ 适配器检测到外部进程，请先在原启动窗口停止当前 QQ 服务")
     if manager is not None:
         operation_tasks = getattr(manager, "_operation_tasks", {})
         pending_keys = {f"service:{service_id}" for service_id in QQ_SERVICE_IDS}
@@ -552,39 +720,16 @@ def _register_services(root_dir: Path | str | None = None):
         except Exception:
             pass
 
-    snowluma_relay_port = 8070
+    snowluma_core_port = 8000
     if snowluma_config_path.exists():
         try:
             snow_doc = tomlkit.parse(snowluma_config_path.read_text(encoding="utf-8"))
-            snowluma_relay_port = int(
-                snow_doc.get("nachobot_server", {}).get("port", snowluma_relay_port)
+            snowluma_core_port = int(
+                snow_doc.get("nachobot_server", {}).get("port", snowluma_core_port)
             )
         except Exception:
             pass
-
-    # 3. Parse multimodal adapter base.toml & enabled engine port
-    tts_adapter_host = "127.0.0.1"
-    tts_adapter_port = 8070
-    tts_engine_port = 9880
-    tts_base_path = base_root / "NachoBot-Multimodal-Adapter" / "configs" / "base.toml"
-    if tts_base_path.exists():
-        try:
-            doc = tomlkit.parse(tts_base_path.read_text(encoding="utf-8"))
-            server_sec = doc.get("server", {})
-            tts_adapter_host = server_sec.get("host", tts_adapter_host)
-            tts_adapter_port = int(server_sec.get("port", tts_adapter_port))
-            
-            # Determine enabled engine
-            enabled = doc.get("enabled_tts", {}).get("enabled", ["GPT_Sovits"])
-            engine = "GPT_Sovits"
-            if isinstance(enabled, list) and "Vox" in enabled:
-                engine = "Vox"
-
-            tts_engine_port = _read_tts_engine_port(base_root, engine)
-        except Exception:
-            pass
-
-    # 4. Parse Perception configs/perception.toml
+    # 3. Parse Perception configs/perception.toml
     perception_host = "127.0.0.1"
     perception_port = 9874
     perception_config_path = base_root / "NachoBot-Multimodal-Adapter" / "configs" / "perception.toml"
@@ -597,7 +742,7 @@ def _register_services(root_dir: Path | str | None = None):
         except Exception:
             pass
 
-    # 5. Parse standalone Live2D adapter config
+    # 4. Parse standalone Live2D adapter config
     live2d_host = "127.0.0.1"
     live2d_port = 8766
     live2d_config_path = base_root / "NachoBot-Live2D-Adapter" / "config.toml"
@@ -610,7 +755,7 @@ def _register_services(root_dir: Path | str | None = None):
         except Exception:
             pass
 
-    # 6. Parse Koishi configs/koishi.yml
+    # 5. Parse Koishi configs/koishi.yml
     koishi_port = 5140
     koishi_yml_path = base_root / "koishi-app" / "koishi.yml"
     if koishi_yml_path.exists():
@@ -666,51 +811,30 @@ def _register_services(root_dir: Path | str | None = None):
         ),
         ServiceDef("snowluma_adapter", "SnowLuma 适配器", "qq_adapter",
                    "NachoBot-SnowLuma-Adapter", ["uv", "run", "python", "main.py"],
-                    order=1, detail=(
-                       f"SnowLuma Runtime WebSocket · ws://{snowluma_host}:{snowluma_port}"
-                       f"{snowluma_path} · port {snowluma_relay_port}"
-                   )),
+                     order=1, detail=(
+                        f"SnowLuma Runtime WebSocket · ws://{snowluma_host}:{snowluma_port}"
+                        f"{snowluma_path} · Core :{snowluma_core_port}"
+                    )),
 
         # ── Multimodal FULL ──
-        ServiceDef("tts_engine_full", "TTS 推理运行时", "tts_full", "", [],
-                   port=tts_engine_port, wait_port=True, order=1,
-                   detail=f"GPT-SoVITS / VoxCPM · :{tts_engine_port}"),  # dynamic
-        ServiceDef("tts_adapter_full", "多模态适配器（TTS）", "tts_full",
-                   "NachoBot-Multimodal-Adapter", ["uv", "run", "python", "main.py"],
-                   port=tts_adapter_port, wait_port=True, order=2,
-                   env_extra={"NACHOBOT_MULTIMODAL_HOST": tts_adapter_host,
-                              "NACHOBOT_MULTIMODAL_PORT": str(tts_adapter_port)},
-                   detail=f"TTS 中继 · :{tts_adapter_port}",
-                   health_mode="tts"),
-        ServiceDef("perception", "感知 API（VLM / ASR）", "tts_full",
+        ServiceDef("tts_runtime_full", "统一 TTS Runtime", "tts_full",
+                   "NachoBot-Multimodal-Adapter", [],
+                   port=9880, wait_port=True, order=1,
+                   detail="GPT-SoVITS / VoxCPM supervised runtime · :9880"),
+        ServiceDef("perception", "多模态感知运行时（FULL）", "tts_full",
                    "NachoBot-Multimodal-Adapter",
                    ["uv", "run", "python", "-m", "nachobot_multimodal.api_server"],
-                   port=perception_port, order=3,
+                   port=perception_port, wait_port=True, order=2,
                    env_extra={"HOST": perception_host, "PORT": str(perception_port)},
-                   detail=f"共享视觉与语音识别 · :{perception_port}"),
+                   detail=f"Core typed multimodal API · :{perception_port}"),
 
         # ── Multimodal LITE ──
-        ServiceDef("tts_engine_lite", "TTS 推理运行时", "tts_lite", "", [],
-                   port=tts_engine_port, wait_port=True, order=1,
-                   detail=f"GPT-SoVITS / VoxCPM · :{tts_engine_port}"),
-        ServiceDef("tts_adapter_lite", "多模态适配器（Lite）", "tts_lite",
-                   "NachoBot-Multimodal-Adapter", ["uv", "run", "python", "main.py"],
-                   port=tts_adapter_port, wait_port=True, order=2,
-                   env_extra={"DISABLE_VLM_ASR": "1",
-                              "NACHOBOT_MULTIMODAL_HOST": tts_adapter_host,
-                              "NACHOBOT_MULTIMODAL_PORT": str(tts_adapter_port)},
-                   detail=f"TTS 中继（不启动 VLM / ASR） · :{tts_adapter_port}",
-                   health_mode="tts"),
+        ServiceDef("tts_runtime_lite", "统一 TTS Runtime", "tts_lite",
+                   "NachoBot-Multimodal-Adapter", [],
+                   port=9880, wait_port=True, order=1,
+                   detail="GPT-SoVITS / VoxCPM supervised runtime · :9880"),
 
-        # ── Potato ──
-        ServiceDef("potato_relay", "无模型中继（POTATO）", "potato", "NachoBot-Multimodal-Adapter",
-                   ["uv", "run", "python", "main.py", "--no-local-models"],
-                   port=tts_adapter_port, wait_port=True, order=1,
-                   env_extra={"NACHOBOT_NO_LOCAL_MODELS": "1", "DISABLE_VLM_ASR": "1",
-                              "NACHOBOT_MULTIMODAL_HOST": tts_adapter_host,
-                              "NACHOBOT_MULTIMODAL_PORT": str(tts_adapter_port)},
-                   detail=f"仅消息转发，不加载 TTS / VLM / ASR · :{tts_adapter_port}",
-                   health_mode="relay_only"),
+        # POTATO intentionally has no Multimodal service definition.
 
         # ── Live2D ──
         ServiceDef("live2d", "Live2D 渲染适配器", "live2d", "NachoBot-Live2D-Adapter",
@@ -748,7 +872,7 @@ def _register_services(root_dir: Path | str | None = None):
                    detail=f"Discord / OneBot 平台网关 · :{koishi_port}"),
         ServiceDef("koishi_adapter", "Koishi 适配器", "discord", "NachoBot-Koishi-Adapter",
                    ["uv", "run", "python", "main.py"], order=2,
-                   detail="Koishi 消息桥接 → Multimodal 中继"),
+                   detail="Koishi 消息桥接 → NachoBot Core"),
         ServiceDef("discordvc", "DiscordVC 语音适配器", "discord",
                    "NachoBot-DiscordVC-Adapter", ["uv", "run", "python", "main.py"], order=3,
                    detail="Discord 语音频道 → Core"),
@@ -773,13 +897,13 @@ def _register_services(root_dir: Path | str | None = None):
             ),
         ),
         GroupDef("tts_full", "多模态服务（FULL）", "🎙️",
-                   ["tts_engine_full", "tts_adapter_full", "perception"],
-                   f"TTS 推理 + :{tts_adapter_port} 多模态中继 + VLM / ASR 感知服务"),
+                   ["tts_runtime_full", "perception"],
+                   f"统一 TTS Runtime :9880 + :{perception_port} 本地感知"),
         GroupDef("tts_lite", "多模态服务（LITE）", "🎙️",
-                   ["tts_engine_lite", "tts_adapter_lite"],
-                   f"TTS 推理 + :{tts_adapter_port} 中继，不启动 VLM / ASR"),
-        GroupDef("potato", "无模型中继（POTATO）", "🥔", ["potato_relay"],
-                   f"保留 :{tts_adapter_port} 兼容通信，仅转发消息，不加载任何本地模型"),
+                   ["tts_runtime_lite"],
+                   "统一 TTS Runtime :9880（感知走远程 API）"),
+        GroupDef("potato", "核心模式（POTATO）", "🥔", [],
+                   "仅启动 NachoBot Core；不启动本地 Multimodal 服务"),
         GroupDef("bilibili", "Bilibili 直播", "📺", ["bilibili"],
                   "直播弹幕、评论、私信与可选 Live2D 联动"),
         GroupDef("live2d", "Live2D 渲染", "🖼️", ["live2d"],
@@ -820,6 +944,31 @@ class ServiceState:
     started_port: int | None = None
     log_buffer: deque = field(default_factory=lambda: deque(maxlen=10000))
     _read_task: asyncio.Task | None = None
+    # Synchronous request boundary reservation.  This marker carries no
+    # process or termination capability and is cleared before a real start.
+    start_reservation: bool = False
+
+
+def service_state_has_runtime_capability(state: ServiceState | None) -> bool:
+    """Whether a state carries process identity or manager cleanup authority."""
+    if state is None:
+        return False
+    return bool(
+        state.process is not None
+        or state.pid is not None
+        or state.process_group_id is not None
+        or state.windows_owned_processes
+        or state.windows_job is not None
+    )
+
+
+def service_state_is_pure_start_reservation(state: ServiceState | None) -> bool:
+    """Whether a queued request is still only a non-owning reservation."""
+    return bool(
+        state is not None
+        and state.start_reservation
+        and not service_state_has_runtime_capability(state)
+    )
 
 
 def service_state_retains_runtime(state: ServiceState | None) -> bool:
@@ -861,8 +1010,41 @@ class ProcessManager:
         self._operation_kinds: dict[str, str] = {}
         self._service_locks: dict[str, asyncio.Lock] = {}
         # Runtime selected for the current/next NachoBot launch transaction.
-        # FULL/LITE use gpu|cpu; POTATO is always forced to relay.
+        # FULL/LITE use gpu|cpu; POTATO does not select a Multimodal runtime.
         self._launch_runtime: str = "gpu"
+        # Product profile carried by the manager-owned Core process. ``None``
+        # means the process was started outside a profile transaction (or its
+        # profile is unknown); launch requests fail closed by restarting it.
+        self._core_runtime_profile: str | None = None
+        # Verified health evidence for a Core started outside this manager.
+        # This is intentionally separate from ``states`` and ``ServiceState``
+        # so it can never acquire manager-owned termination authority.
+        self.core_observation: CoreObservation | None = None
+        self._core_probe_task: asyncio.Task[_CoreProbeResult] | None = None
+        self._core_probe_generation = 0
+        self._core_probe_task_generation = 0
+        # UI evidence is deliberately kept out of ``core_observation``. A
+        # short transport outage may preserve the last displayed state, but
+        # start/stop preflights continue to use only the strict observation.
+        self._last_verified_external_core: CoreObservation | None = None
+        self._last_verified_external_core_at: float | None = None
+        self._core_display_grace_until: float | None = None
+        self._core_last_probe_failure_kind: str | None = None
+        # External adapter observations never carry process handles or PIDs.
+        # They are refreshed as one psutil snapshot and discarded/replaced as
+        # a unit so a stale partial scan cannot authorize a later start.
+        self.adapter_observation_cache: dict[str, AdapterObservation] = {}
+        # Compatibility aliases make the cache discoverable to existing
+        # diagnostics without exposing a second mutable source of truth.
+        self.external_adapter_observations = self.adapter_observation_cache
+        self._adapter_probe_task: asyncio.Task[dict[str, AdapterObservation]] | None = None
+        self._adapter_observation_generation = 0
+        self._adapter_probe_task_generation = 0
+        self._adapter_start_preflight: dict[str, AdapterObservation] = {}
+        # ``start_launch`` performs its own race-closing external probe.  The
+        # marker lets the nested group start reuse that verified result while
+        # direct group/service entrypoints still perform their own fresh probe.
+        self._external_profile_start_verified: str | None = None
         # Lazy so importing/testing on non-Windows never loads Win32 DLLs.
         self._windows_job_facade: _WindowsJobFacade | Any | None = None
         _LATEST_PROCESS_MANAGER = self
@@ -872,6 +1054,1221 @@ class ProcessManager:
             self._windows_job_facade = _WindowsJobFacade()
         return self._windows_job_facade
 
+    # ---- external Core observation ---------------------------------
+
+    def _manager_core_takes_precedence(self) -> bool:
+        """Whether a manager-owned Core state masks external evidence."""
+        state = self.states.get("nachobot")
+        if state is None:
+            return False
+        if service_state_is_pure_start_reservation(state):
+            return False
+        return state.status in {
+            ServiceStatus.STARTING,
+            ServiceStatus.RUNNING,
+            ServiceStatus.STOPPING,
+            ServiceStatus.ERROR,
+        } or service_state_retains_runtime(state)
+
+    def _external_core_observation(self) -> CoreObservation | None:
+        """Return external evidence only when no manager state owns Core."""
+        if self._manager_core_takes_precedence():
+            return None
+        return self.core_observation
+
+    def _external_core_display_observation(self) -> CoreObservation | None:
+        """Return strict external health or a still-bounded UI-only grace value."""
+        if self._manager_core_takes_precedence():
+            return None
+        if self.core_observation is not None:
+            return self.core_observation
+        observation = self._last_verified_external_core
+        deadline = self._core_display_grace_until
+        if (
+            observation is not None
+            and self._core_last_probe_failure_kind == "transport"
+            and deadline is not None
+            and time.monotonic() < deadline
+        ):
+            return observation
+        return None
+
+    def _external_core_transport_uncertain(self) -> bool:
+        """Whether a recent external Core's transport failure needs a process check."""
+        observed_at = self._last_verified_external_core_at
+        return bool(
+            not self._manager_core_takes_precedence()
+            and self.core_observation is None
+            and self._last_verified_external_core is not None
+            and self._core_last_probe_failure_kind == "transport"
+            and observed_at is not None
+        )
+
+    def _external_core_process_presence(self, snapshot: _ProcessSnapshot) -> str:
+        """Classify a previously verified Core during a transport outage.
+
+        This process check runs only at mutation preflight, not for UI polling.
+        Exact project cwd and entry-point checks avoid treating another Python
+        process as Core; any listener on the configured Core port is still a
+        conflict even when its owner cannot be identified.
+        """
+        if snapshot.failed:
+            return "indeterminate"
+        service = SERVICE_DEFS.get("nachobot")
+        expected_cwd = self._external_service_cwd("nachobot")
+        if service is None or expected_cwd is None:
+            return "indeterminate"
+
+        targets = {
+            self._normalize_external_path(entrypoint, expected_cwd)
+            for entrypoint in ("bot.py", "main.py")
+        }
+        for record in snapshot.processes:
+            if self._normalize_external_path(record.cwd) != expected_cwd:
+                continue
+            if not self._record_has_python(record):
+                continue
+            if any(self._argv_path_matches(token, target, record.cwd)
+                   for target in targets for token in record.argv):
+                return "present"
+
+        if service.port and int(service.port) in snapshot.listeners:
+            return "present"
+        return "absent"
+
+    async def _resolve_uncertain_external_core_before_start(self) -> None:
+        """Block replacement while a prior external Core may still be alive."""
+        if not self._external_core_transport_uncertain():
+            return
+        snapshot = await asyncio.to_thread(self._build_external_process_snapshot)
+        presence = self._external_core_process_presence(snapshot)
+        if presence != "absent":
+            raise RuntimeError(
+                "外部 NachoBot Core 的健康连接暂不可用，且进程或端口仍存在/无法确认，拒绝启动替代服务"
+            )
+        # The full process/port snapshot confirmed disappearance, so the old
+        # evidence must not block a later, legitimate WebUI start.
+        self._last_verified_external_core = None
+        self._last_verified_external_core_at = None
+        self._core_display_grace_until = None
+        self._core_last_probe_failure_kind = None
+
+    @staticmethod
+    def _profile_component_service_ids(profile_id: str) -> dict[str, str]:
+        if profile_id == "full":
+            return {
+                "tts": "tts_runtime_full",
+                "perception": "perception",
+            }
+        if profile_id == "lite":
+            return {"tts": "tts_runtime_lite"}
+        return {}
+
+    def _external_ready_service_ids(
+        self,
+        profile_id: str,
+        observation: CoreObservation | None = None,
+    ) -> frozenset[str]:
+        """Return only dependency IDs proven ready by external Core health."""
+        observation = observation or self._external_core_observation()
+        if (
+            observation is None
+            or observation.observed_profile != profile_id
+            or not observation.readiness_known
+        ):
+            return frozenset()
+        readiness = {
+            "tts": observation.tts_required is True and observation.tts_ready is True,
+            "perception": (
+                observation.perception_required is True
+                and observation.perception_ready is True
+            ),
+        }
+        ready_ids = {
+            service_id
+            for component, service_id in self._profile_component_service_ids(profile_id).items()
+            if readiness.get(component, False)
+        }
+        # A manager-owned dependent remains authoritative even if an external
+        # Core reports a matching local component at the same time.
+        return frozenset(
+            service_id
+            for service_id in ready_ids
+            if not (
+                (state := self.states.get(service_id)) is not None
+                and not service_state_is_pure_start_reservation(state)
+                and (
+                    state.status != ServiceStatus.STOPPED
+                    or service_state_retains_runtime(state)
+                )
+            )
+        )
+
+    def _external_profile_is_ready(
+        self,
+        profile_id: str,
+        observation: CoreObservation | None = None,
+    ) -> bool:
+        """Whether the strict external contract proves every profile dependency."""
+        observation = observation or self._external_core_observation()
+        if observation is None or observation.observed_profile != profile_id:
+            return False
+        expected = set(self._profile_component_service_ids(profile_id).values())
+        if not observation.readiness_known:
+            return False
+        return (
+            observation.status == "ok"
+            and observation.observed_local_ready is True
+            and self._external_ready_service_ids(profile_id, observation) == expected
+        )
+
+    @staticmethod
+    def _core_probe_failure_kind(error: BaseException) -> str:
+        """Return transport only for socket/timeouts, never HTTP/auth/schema errors."""
+        from urllib.error import HTTPError, URLError
+
+        if isinstance(error, HTTPError):
+            return "invalid"
+        if isinstance(error, URLError):
+            return "transport" if isinstance(error.reason, (OSError, TimeoutError)) else "invalid"
+        if isinstance(error, (OSError, TimeoutError)):
+            return "transport"
+        return "invalid"
+
+    async def _probe_core_observation(self) -> _CoreProbeResult:
+        """Probe the configured Core health contract without blocking asyncio."""
+        # Keep resolution in tts_manager so Core host/port and bearer-token
+        # precedence cannot drift between chat/TTS and process readiness.
+        try:
+            try:
+                from .tts_manager import (
+                    CORE_HEALTH_TIMEOUT_SECONDS,
+                    TTSManager,
+                    _get_core_auth_token,
+                    _get_core_base_url,
+                )
+            except ImportError:  # pragma: no cover - direct module context
+                from tts_manager import (
+                    CORE_HEALTH_TIMEOUT_SECONDS,
+                    TTSManager,
+                    _get_core_auth_token,
+                    _get_core_base_url,
+                )
+
+            base_url = _get_core_base_url()
+            token = _get_core_auth_token()
+            if not isinstance(base_url, str) or not base_url.strip():
+                return _CoreProbeResult(None, "invalid")
+            if not isinstance(token, str):
+                return _CoreProbeResult(None, "invalid")
+            payload = await asyncio.to_thread(
+                TTSManager._request_json,
+                f"{base_url.rstrip('/')}/api/multimodal/health",
+                CORE_HEALTH_TIMEOUT_SECONDS,
+                token,
+            )
+        except Exception as exc:
+            # Probe failures are expected while an external Core is starting or
+            # stopping.  Do not log exception text: URL/config errors can
+            # accidentally carry credential-bearing details.
+            return _CoreProbeResult(None, self._core_probe_failure_kind(exc))
+
+        if not isinstance(payload, Mapping):
+            return _CoreProbeResult(None, "invalid")
+        status = payload.get("status")
+        profile = payload.get("desired_profile")
+        capabilities = payload.get("capabilities")
+        observed_local = payload.get("observed_local")
+        if not isinstance(status, str) or status not in {"ok", "degraded"}:
+            return _CoreProbeResult(None, "invalid")
+        if not isinstance(profile, str) or profile not in {"full", "lite", "potato"}:
+            return _CoreProbeResult(None, "invalid")
+        if not isinstance(capabilities, Mapping):
+            return _CoreProbeResult(None, "invalid")
+        # The Core contract always publishes the TTS capability.  Do not
+        # coerce strings/numbers here: a spoof-like health response must fail
+        # closed rather than accidentally authorize a local launch decision.
+        tts_capability = capabilities.get("tts")
+        if type(tts_capability) is not bool:
+            return _CoreProbeResult(None, "invalid")
+        if tts_capability is not (profile != "potato"):
+            return _CoreProbeResult(None, "invalid")
+
+        if not isinstance(observed_local, Mapping):
+            return _CoreProbeResult(None, "invalid")
+        if observed_local.get("profile") != profile:
+            return _CoreProbeResult(None, "invalid")
+        observed_ready = observed_local.get("ready")
+        perception = observed_local.get("perception")
+        tts = observed_local.get("tts")
+        if type(observed_ready) is not bool:
+            return _CoreProbeResult(None, "invalid")
+        if not isinstance(perception, Mapping) or not isinstance(tts, Mapping):
+            return _CoreProbeResult(None, "invalid")
+        perception_required = perception.get("required")
+        perception_ready = perception.get("ready")
+        tts_required = tts.get("required")
+        tts_ready = tts.get("ready")
+        if any(
+            type(value) is not bool
+            for value in (
+                perception_required,
+                perception_ready,
+                tts_required,
+                tts_ready,
+            )
+        ):
+            return _CoreProbeResult(None, "invalid")
+
+        required_flags = {
+            "full": (True, True),
+            "lite": (False, True),
+            "potato": (False, False),
+        }[profile]
+        if (perception_required, tts_required) != required_flags:
+            return _CoreProbeResult(None, "invalid")
+        expected_ready = (
+            (not perception_required or perception_ready)
+            and (not tts_required or tts_ready)
+        )
+        if observed_ready != expected_ready:
+            return _CoreProbeResult(None, "invalid")
+        if status != ("ok" if expected_ready else "degraded"):
+            return _CoreProbeResult(None, "invalid")
+        return _CoreProbeResult(
+            CoreObservation(
+                status=status,
+                observed_profile=profile,
+                observed_at=time.time(),
+                observed_local_ready=observed_ready,
+                perception_required=perception_required,
+                perception_ready=perception_ready,
+                tts_required=tts_required,
+                tts_ready=tts_ready,
+            )
+        )
+
+    async def refresh_core_observation(
+        self,
+        *,
+        force: bool = True,
+    ) -> CoreObservation | None:
+        """Refresh verified external-Core evidence asynchronously.
+
+        Concurrent status polls share one in-flight probe. A failed probe
+        always clears the strict observation; only a recent transport failure
+        can preserve a separate, short-lived display snapshot.
+        """
+        if not force and self.core_observation is not None:
+            return self.core_observation
+        previous_external = self._external_core_observation()
+        if (
+            previous_external is not None
+            and self._last_verified_external_core is None
+        ):
+            self._last_verified_external_core = previous_external
+            self._last_verified_external_core_at = time.monotonic()
+        task = self._core_probe_task
+        if task is None or task.done():
+            self._core_probe_generation += 1
+            self._core_probe_task_generation = self._core_probe_generation
+            task = asyncio.create_task(
+                self._probe_core_observation(),
+                name="webui:probe-external-core",
+            )
+            self._core_probe_task = task
+        generation = self._core_probe_task_generation
+        try:
+            result = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            result = _CoreProbeResult(None, "invalid")
+        if generation != self._core_probe_generation:
+            return self.core_observation
+        if self._core_probe_task is task and task.done():
+            self._core_probe_task = None
+        observation = result.observation
+        if self._manager_core_takes_precedence():
+            # Health from a manager-owned Core is never cached as external
+            # evidence; once the managed process stops it must not reappear.
+            self.core_observation = None
+            self._last_verified_external_core = None
+            self._last_verified_external_core_at = None
+            self._core_display_grace_until = None
+            self._core_last_probe_failure_kind = None
+            return observation
+
+        self.core_observation = observation
+        if observation is not None:
+            self._last_verified_external_core = observation
+            self._last_verified_external_core_at = time.monotonic()
+            self._core_display_grace_until = None
+            self._core_last_probe_failure_kind = None
+        elif result.failure_kind == "transport":
+            self._core_last_probe_failure_kind = "transport"
+            verified_at = self._last_verified_external_core_at
+            if (
+                verified_at is not None
+                and time.monotonic() - verified_at <= _CORE_LAST_VERIFIED_MAX_AGE_SECONDS
+                and self._core_display_grace_until is None
+            ):
+                self._core_display_grace_until = time.monotonic() + _CORE_DISPLAY_GRACE_SECONDS
+        else:
+            self._last_verified_external_core = None
+            self._last_verified_external_core_at = None
+            self._core_display_grace_until = None
+            self._core_last_probe_failure_kind = "invalid"
+        return observation
+
+    async def _fresh_external_core_observation(self) -> CoreObservation | None:
+        """Return a fresh external-Core observation for a Core start boundary.
+
+        The health probe itself may also see a manager-owned Core.  In that
+        case the manager-owned state remains authoritative and this helper
+        deliberately returns no external ownership evidence.
+        """
+        observation = await self.refresh_core_observation(force=True)
+        if self._manager_core_takes_precedence():
+            return None
+        if observation is None:
+            await self._resolve_uncertain_external_core_before_start()
+        return observation
+
+    # ---- external adapter observation ------------------------------
+
+    @staticmethod
+    def _normalize_external_path(value: object, base: object | None = None) -> str | None:
+        """Normalize a process path for exact, case-insensitive comparison.
+
+        ``Path`` follows the host OS.  External process records can still
+        contain Windows-style paths in tests or in a copied process snapshot,
+        so drive/UNC paths use ``ntpath`` explicitly.  No substring matching
+        is performed by the classifier.
+        """
+        if value is None:
+            return None
+        raw = str(value).strip().strip('"')
+        if not raw:
+            return None
+        windows_style = bool(re.match(r"^(?:[A-Za-z]:[\\/]|\\\\)", raw)) or os.name == "nt"
+        if windows_style:
+            if base is not None and not ntpath.isabs(raw):
+                raw = ntpath.join(str(base), raw)
+            return ntpath.normcase(ntpath.normpath(raw)).replace("\\", "/").rstrip("/")
+        path = Path(raw)
+        if base is not None and not path.is_absolute():
+            path = Path(str(base)) / path
+        try:
+            path = path.resolve(strict=False)
+        except Exception:
+            path = Path(os.path.abspath(str(path)))
+        return os.path.normcase(os.path.normpath(str(path))).replace("\\", "/").rstrip("/")
+
+    @staticmethod
+    def _token_basename(token: object) -> str:
+        raw = str(token or "").strip().strip('"').replace("\\", "/")
+        return raw.rsplit("/", 1)[-1].casefold()
+
+    @classmethod
+    def _argv_path_matches(cls, token: object, target: str | None, cwd: str | None) -> bool:
+        if target is None:
+            return False
+        raw = str(token or "").strip().strip('"')
+        if not raw or raw.startswith("-"):
+            return False
+        return cls._normalize_external_path(raw, cwd) == target
+
+    def _build_external_process_snapshot(self) -> _ProcessSnapshot:
+        """Collect one bounded psutil snapshot for the adapter classifier.
+
+        Only identity fields and TCP listener ownership are retained.  The
+        returned object is ephemeral and never enters a service status/API
+        payload; in particular, PIDs and command lines are discarded after
+        classification.
+        """
+        records: list[_ProcessRecord] = []
+        failed = False
+        attrs = ["pid", "ppid", "cwd", "cmdline", "exe", "name"]
+        try:
+            iterator = psutil.process_iter(attrs=attrs)
+            try:
+                for process in iterator:
+                    try:
+                        info = getattr(process, "info", None)
+                        if not isinstance(info, Mapping):
+                            info = process.as_dict(attrs=attrs, ad_value=None)
+                        pid_raw = info.get("pid", getattr(process, "pid", None))
+                        if pid_raw is None:
+                            continue
+                        pid = int(pid_raw)
+                        ppid_raw = info.get("ppid")
+                        ppid = int(ppid_raw) if ppid_raw is not None else None
+                        cmdline = info.get("cmdline")
+                        if cmdline is None:
+                            cmdline = []
+                        if isinstance(cmdline, str):
+                            cmdline = [cmdline]
+                        argv = tuple(str(item) for item in cmdline if item is not None)
+                        records.append(
+                            _ProcessRecord(
+                                pid=pid,
+                                ppid=ppid,
+                                cwd=str(info.get("cwd")) if info.get("cwd") else None,
+                                argv=argv,
+                                executable=str(info.get("exe")) if info.get("exe") else None,
+                                name=str(info.get("name")) if info.get("name") else None,
+                            )
+                        )
+                    except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                        continue
+                    except Exception:
+                        # A single process may disappear or deny access while
+                        # the table remains enumerable.  It is not evidence
+                        # that the complete process snapshot failed: unrelated
+                        # inaccessible records must not make every adapter
+                        # indeterminate.  A matching candidate that cannot be
+                        # read simply cannot contribute identity evidence.
+                        continue
+            except Exception:
+                failed = True
+        except Exception:
+            failed = True
+
+        listeners: dict[int, set[int]] = {}
+        try:
+            connections = psutil.net_connections(kind="tcp")
+            for connection in connections:
+                try:
+                    status = str(getattr(connection, "status", "")).upper()
+                    if status not in {"LISTEN", getattr(psutil, "CONN_LISTEN", "LISTEN")}:
+                        continue
+                    pid_raw = getattr(connection, "pid", None)
+                    local = getattr(connection, "laddr", None)
+                    port = getattr(local, "port", None)
+                    if port is None and isinstance(local, (tuple, list)) and len(local) >= 2:
+                        port = local[1]
+                    if pid_raw is None or port is None:
+                        continue
+                    listeners.setdefault(int(port), set()).add(int(pid_raw))
+                except Exception:
+                    # Ignore one malformed/inaccessible connection record;
+                    # only failure to enumerate the listener table globally
+                    # makes the snapshot indeterminate.
+                    continue
+        except Exception:
+            failed = True
+
+        frozen_listeners = {port: frozenset(pids) for port, pids in listeners.items()}
+        return _ProcessSnapshot(tuple(records), frozen_listeners, failed)
+
+    def _external_service_cwd(self, service_id: str) -> str | None:
+        sdef = SERVICE_DEFS.get(service_id)
+        if sdef is None:
+            return None
+        if service_id == "snowluma_runtime":
+            try:
+                try:
+                    from .snowluma_locator import resolve_snowluma_runtime
+                except ImportError:  # pragma: no cover - direct module context
+                    from snowluma_locator import resolve_snowluma_runtime
+                return self._normalize_external_path(resolve_snowluma_runtime(self.root).path)
+            except Exception:
+                # A missing discovered runtime is an absent candidate unless
+                # its configured listener is occupied, which is classified as
+                # indeterminate below.
+                return None
+        cwd = sdef.cwd
+        if not cwd:
+            return None
+        return self._normalize_external_path(cwd, self.root)
+
+    def _external_service_port(self, service_id: str) -> int | None:
+        sdef = SERVICE_DEFS.get(service_id)
+        return int(sdef.port) if sdef and sdef.port else None
+
+    def _record_has_python(self, record: _ProcessRecord) -> bool:
+        candidates = [record.executable, record.name, *record.argv[:2]]
+        for candidate in candidates:
+            base = self._token_basename(candidate)
+            if base in {"uv", "uv.exe", "cmd", "cmd.exe", "powershell", "powershell.exe"}:
+                continue
+            if base.startswith("python") or base in {"py", "py.exe"}:
+                return True
+        return False
+
+    def _record_has_node(self, record: _ProcessRecord) -> bool:
+        candidates = [record.executable, record.name, *record.argv[:2]]
+        return any(self._token_basename(candidate) in {"node", "node.exe"} for candidate in candidates)
+
+    def _record_matches_runtime(self, service_id: str, record: _ProcessRecord) -> bool:
+        expected_cwd = self._external_service_cwd(service_id)
+        if expected_cwd is None or self._normalize_external_path(record.cwd) != expected_cwd:
+            return False
+        if service_id in {
+            "napcat_adapter",
+            "snowluma_adapter",
+            "bilibili",
+            "koishi_adapter",
+            "discordvc",
+            "universalvc",
+        }:
+            if not self._record_has_python(record):
+                return False
+            target = self._normalize_external_path("main.py", expected_cwd)
+            return any(self._argv_path_matches(token, target, record.cwd) for token in record.argv)
+        if service_id == "live2d":
+            if not self._record_has_python(record):
+                return False
+            tokens = [str(token).strip().strip('"') for token in record.argv]
+            lowered = [token.casefold() for token in tokens]
+            if "-m" not in lowered:
+                return False
+            try:
+                module_index = lowered.index("-m")
+            except ValueError:
+                return False
+            if module_index + 1 >= len(lowered) or lowered[module_index + 1] != "live2d_adapter":
+                return False
+            if "--config" not in lowered:
+                return False
+            config_index = lowered.index("--config")
+            if config_index + 1 >= len(tokens):
+                return False
+            target = self._normalize_external_path("config.toml", expected_cwd)
+            return self._argv_path_matches(tokens[config_index + 1], target, record.cwd)
+        if service_id == "snowluma_runtime":
+            if not self._record_has_node(record):
+                return False
+            target = self._normalize_external_path("index.mjs", expected_cwd)
+            return any(self._argv_path_matches(token, target, record.cwd) for token in record.argv)
+        if service_id == "koishi":
+            if not self._record_has_node(record):
+                return False
+            tokens = [str(token).strip().strip('"') for token in record.argv]
+            lowered = [token.casefold() for token in tokens]
+            koishi_index = next(
+                (
+                    index
+                    for index, token in enumerate(lowered)
+                    if self._token_basename(token) in {"koishi", "koishi.js", "koishi.cjs", "koishi.mjs"}
+                    or "koishijs" in token
+                ),
+                None,
+            )
+            if koishi_index is None:
+                return False
+            trailing = [token for token in lowered[koishi_index + 1:] if token]
+            return bool(trailing) and trailing[-1] == "start"
+        return False
+
+    def _record_matches_napcat_shell_anchor(self, record: _ProcessRecord) -> bool:
+        """Match only the explicit NapCat launcher or runtime executable.
+
+        A shell opened in ``NapCat.Shell`` inherits the same cwd as the real
+        launcher, so cwd alone is not process identity.  Descendant QQ evidence
+        is considered only after one of these exact anchors has been found.
+        """
+        expected_cwd = self._external_service_cwd("napcat_shell")
+        if expected_cwd is None or self._normalize_external_path(record.cwd) != expected_cwd:
+            return False
+        if any(
+            self._token_basename(candidate) == "napcatwinbootmain.exe"
+            for candidate in (record.name, record.executable)
+        ):
+            return True
+        launcher = self._normalize_external_path("launcher-user.bat", expected_cwd)
+        return any(
+            self._argv_path_matches(token, launcher, record.cwd)
+            for token in record.argv
+        )
+
+    def _external_candidate_pids(
+        self,
+        service_id: str,
+        records: tuple[_ProcessRecord, ...],
+    ) -> set[int]:
+        return {
+            record.pid
+            for record in records
+            if self._record_matches_runtime(service_id, record)
+        }
+
+    @staticmethod
+    def _process_descendants(
+        root_pid: int,
+        records_by_pid: Mapping[int, _ProcessRecord],
+    ) -> set[int]:
+        descendants = {root_pid}
+        changed = True
+        while changed:
+            changed = False
+            for record in records_by_pid.values():
+                if record.pid not in descendants and record.ppid in descendants:
+                    descendants.add(record.pid)
+                    changed = True
+        return descendants
+
+    @classmethod
+    def _collapse_external_candidates(
+        cls,
+        candidate_pids: set[int],
+        records_by_pid: Mapping[int, _ProcessRecord],
+    ) -> set[int] | None:
+        if not candidate_pids:
+            return set()
+        roots = []
+        for pid in candidate_pids:
+            current = records_by_pid.get(pid)
+            ancestor = current.ppid if current else None
+            seen: set[int] = set()
+            related = False
+            while ancestor is not None and ancestor not in seen:
+                if ancestor in candidate_pids:
+                    related = True
+                    break
+                seen.add(ancestor)
+                parent = records_by_pid.get(ancestor)
+                ancestor = parent.ppid if parent else None
+            if not related:
+                roots.append(pid)
+        if len(roots) != 1:
+            return None
+        return cls._process_descendants(roots[0], records_by_pid)
+
+    def _classify_external_adapters(
+        self,
+        snapshot: _ProcessSnapshot,
+        *,
+        exclude_pids: frozenset[int] = frozenset(),
+    ) -> dict[str, AdapterObservation]:
+        now = time.time()
+        services = tuple(EXTERNAL_ADAPTER_SERVICE_IDS)
+        if snapshot.failed:
+            return {
+                service_id: AdapterObservation(
+                    service_id, "indeterminate", now, _EXTERNAL_INDETERMINATE_DETAIL
+                )
+                for service_id in services
+            }
+
+        records = tuple(record for record in snapshot.processes if record.pid not in exclude_pids)
+        listeners = {
+            port: frozenset(pid for pid in owners if pid not in exclude_pids)
+            for port, owners in snapshot.listeners.items()
+        }
+        records_by_pid = {record.pid: record for record in records}
+        matches: dict[str, set[int]] = {
+            service_id: self._external_candidate_pids(service_id, records)
+            for service_id in services
+        }
+        matched_by_pid: dict[int, set[str]] = {}
+        for service_id, pids in matches.items():
+            for pid in pids:
+                matched_by_pid.setdefault(pid, set()).add(service_id)
+        cross_service_pids = {
+            pid for pid, service_ids in matched_by_pid.items() if len(service_ids) > 1
+        }
+
+        results: dict[str, AdapterObservation] = {}
+        for service_id in services:
+            candidate_pids = matches[service_id]
+            if any(pid in cross_service_pids for pid in candidate_pids):
+                results[service_id] = AdapterObservation(
+                    service_id, "indeterminate", now, _EXTERNAL_INDETERMINATE_DETAIL
+                )
+                continue
+
+            if service_id == "napcat_shell":
+                anchors = {
+                    record.pid
+                    for record in records
+                    if self._record_matches_napcat_shell_anchor(record)
+                }
+                tree = self._collapse_external_candidates(anchors, records_by_pid)
+                if tree is None:
+                    results[service_id] = AdapterObservation(
+                        service_id, "indeterminate", now, _EXTERNAL_INDETERMINATE_DETAIL
+                    )
+                    continue
+                if not tree:
+                    results[service_id] = AdapterObservation(service_id, "absent", now)
+                    continue
+                live_names = {
+                    self._token_basename(record.name or record.executable)
+                    for pid, record in records_by_pid.items()
+                    if pid in tree
+                }
+                live_qq = {
+                    name for name in live_names
+                    if name in {
+                        "napcatwinbootmain.exe",
+                        "qq.exe",
+                        "qqnt.exe",
+                        "qqnt.exe",
+                    }
+                    or name.startswith("qq")
+                }
+                outcome = "external_ready" if live_qq else "external_present_unready"
+                results[service_id] = AdapterObservation(
+                    service_id,
+                    outcome,
+                    now,
+                    _EXTERNAL_READY_DETAIL if outcome == "external_ready" else _EXTERNAL_PRESENT_UNREADY_DETAIL,
+                )
+                continue
+
+            tree = self._collapse_external_candidates(candidate_pids, records_by_pid)
+            if tree is None:
+                results[service_id] = AdapterObservation(
+                    service_id, "indeterminate", now, _EXTERNAL_INDETERMINATE_DETAIL
+                )
+                continue
+            if not tree:
+                port = self._external_service_port(service_id)
+                owners = listeners.get(port, frozenset()) if port else frozenset()
+                if owners:
+                    results[service_id] = AdapterObservation(
+                        service_id, "indeterminate", now, _EXTERNAL_INDETERMINATE_DETAIL
+                    )
+                else:
+                    results[service_id] = AdapterObservation(service_id, "absent", now)
+                continue
+
+            port = self._external_service_port(service_id)
+            if port is None:
+                results[service_id] = AdapterObservation(
+                    service_id, "external_ready", now, _EXTERNAL_READY_DETAIL
+                )
+                continue
+            owners = listeners.get(port, frozenset())
+            if not owners:
+                results[service_id] = AdapterObservation(
+                    service_id,
+                    "external_present_unready",
+                    now,
+                    _EXTERNAL_PRESENT_UNREADY_DETAIL,
+                )
+            elif not owners.issubset(tree):
+                results[service_id] = AdapterObservation(
+                    service_id, "indeterminate", now, _EXTERNAL_INDETERMINATE_DETAIL
+                )
+            else:
+                results[service_id] = AdapterObservation(
+                    service_id, "external_ready", now, _EXTERNAL_READY_DETAIL
+                )
+        return results
+
+    def _scan_external_adapters(
+        self,
+        *,
+        exclude_pids: frozenset[int] = frozenset(),
+    ) -> dict[str, AdapterObservation]:
+        snapshot = self._build_external_process_snapshot()
+        return self._classify_external_adapters(snapshot, exclude_pids=exclude_pids)
+
+    async def refresh_adapter_observation(
+        self,
+        *,
+        force: bool = True,
+    ) -> dict[str, AdapterObservation]:
+        """Refresh all adapter identities from one off-loop process snapshot."""
+        if not force and self.adapter_observation_cache:
+            return dict(self.adapter_observation_cache)
+        task = self._adapter_probe_task
+        if task is None or task.done():
+            self._adapter_observation_generation += 1
+            self._adapter_probe_task_generation = self._adapter_observation_generation
+            task = asyncio.create_task(
+                asyncio.to_thread(self._scan_external_adapters),
+                name="webui:probe-external-adapters",
+            )
+            self._adapter_probe_task = task
+        generation = self._adapter_probe_task_generation
+        try:
+            observations = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            now = time.time()
+            observations = {
+                service_id: AdapterObservation(
+                    service_id, "indeterminate", now, _EXTERNAL_INDETERMINATE_DETAIL
+                )
+                for service_id in EXTERNAL_ADAPTER_SERVICE_IDS
+            }
+        if self._adapter_probe_task is task and task.done():
+            self._adapter_probe_task = None
+        if generation != self._adapter_observation_generation:
+            return dict(self.adapter_observation_cache)
+        self.adapter_observation_cache = dict(observations)
+        self.external_adapter_observations = self.adapter_observation_cache
+        return dict(observations)
+
+    async def refresh_external_observation(
+        self,
+        *,
+        force: bool = True,
+    ) -> dict[str, Any]:
+        """Refresh Core health and adapter identities for status/mutation APIs."""
+        core, adapters = await asyncio.gather(
+            self.refresh_core_observation(force=force),
+            self.refresh_adapter_observation(force=force),
+        )
+        return {"core": core, "adapters": adapters}
+
+    # Plural spelling is kept as a small compatibility convenience for callers
+    # that describe this as an observation set rather than a single cache.
+    refresh_external_observations = refresh_external_observation
+
+    async def _fresh_external_adapter_observations(
+        self,
+        service_ids: tuple[str, ...],
+        *,
+        exclude_pids: frozenset[int] = frozenset(),
+    ) -> dict[str, AdapterObservation]:
+        # A mutation-fresh scan must not be overwritten by an older ordinary
+        # UI poll that happens to finish after this boundary check.
+        self._adapter_observation_generation += 1
+        generation = self._adapter_observation_generation
+        try:
+            observations = await asyncio.to_thread(
+                self._scan_external_adapters,
+                exclude_pids=exclude_pids,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            now = time.time()
+            observations = {
+                service_id: AdapterObservation(
+                    service_id, "indeterminate", now, _EXTERNAL_INDETERMINATE_DETAIL
+                )
+                for service_id in EXTERNAL_ADAPTER_SERVICE_IDS
+            }
+        normalized = {
+            service_id: observations.get(
+                service_id,
+                AdapterObservation(service_id, "indeterminate", time.time(), _EXTERNAL_INDETERMINATE_DETAIL),
+            )
+            for service_id in service_ids
+        }
+        if generation == self._adapter_observation_generation:
+            self.adapter_observation_cache.update(normalized)
+        return normalized
+
+    async def refresh_adapter_observation_for_mutation(
+        self,
+    ) -> dict[str, AdapterObservation]:
+        """Take a boundary-fresh adapter snapshot for a state-changing request.
+
+        Unlike status polling, this deliberately never joins
+        ``_adapter_probe_task``: that task may have started before the request
+        reached its mutation boundary.
+        """
+        return await self._fresh_external_adapter_observations(
+            EXTERNAL_ADAPTER_SERVICE_IDS
+        )
+
+    def _manager_service_takes_precedence(self, service_id: str) -> bool:
+        state = self.states.get(service_id)
+        if state is None or service_state_is_pure_start_reservation(state):
+            return False
+        return (
+            state.status in {
+                ServiceStatus.STARTING,
+                ServiceStatus.RUNNING,
+                ServiceStatus.STOPPING,
+                ServiceStatus.ERROR,
+            }
+            or service_state_retains_runtime(state)
+        )
+
+    def _external_adapter_observation(self, service_id: str) -> AdapterObservation | None:
+        return self.adapter_observation_cache.get(service_id)
+
+    def _external_start_blocked(self, service_id: str) -> bool:
+        observation = self._external_adapter_observation(service_id)
+        return (
+            not self._manager_service_takes_precedence(service_id)
+            and observation is not None
+            and observation.outcome in _EXTERNAL_BLOCKING_OUTCOMES
+        )
+
+    @staticmethod
+    def _external_presence_detail(observation: AdapterObservation) -> str:
+        return observation.detail or {
+            "external_present_unready": _EXTERNAL_PRESENT_UNREADY_DETAIL,
+            "indeterminate": _EXTERNAL_INDETERMINATE_DETAIL,
+        }.get(observation.outcome, "")
+
+    def _remember_adapter_start_preflight(
+        self,
+        service_ids: tuple[str, ...],
+        observations: Mapping[str, AdapterObservation],
+    ) -> None:
+        for service_id in service_ids:
+            if service_id in EXTERNAL_ADAPTER_SERVICE_IDS and service_id in observations:
+                self._adapter_start_preflight[service_id] = observations[service_id]
+
+    def _check_cached_adapter_start_allowed(self, service_ids: tuple[str, ...]) -> frozenset[str]:
+        """Validate cached adapter evidence and return externally-ready IDs."""
+        ready: set[str] = set()
+        for service_id in service_ids:
+            if service_id not in EXTERNAL_ADAPTER_SERVICE_IDS:
+                continue
+            if self._manager_service_takes_precedence(service_id):
+                continue
+            observation = self._external_adapter_observation(service_id)
+            if observation is None:
+                continue
+            if observation.outcome == "external_ready":
+                ready.add(service_id)
+            elif observation.outcome in _EXTERNAL_BLOCKING_OUTCOMES:
+                raise RuntimeError(
+                    f"Cannot start {SERVICE_DEFS[service_id].name}: "
+                    f"{self._external_presence_detail(observation)}"
+                )
+        return frozenset(ready)
+
+    @staticmethod
+    def _qq_conflicting_service_ids(service_ids: tuple[str, ...]) -> tuple[str, ...]:
+        """Return the non-selected QQ backend services for a start request."""
+        selected_backends = {
+            _QQ_SERVICE_BACKEND[service_id]
+            for service_id in service_ids
+            if service_id in _QQ_SERVICE_BACKEND
+        }
+        if not selected_backends:
+            return ()
+        return tuple(
+            service_id
+            for service_id in QQ_SERVICE_IDS
+            if _QQ_SERVICE_BACKEND.get(service_id) not in selected_backends
+        )
+
+    def _validate_qq_conflicts(
+        self,
+        service_ids: tuple[str, ...],
+        *,
+        observations: Mapping[str, AdapterObservation] | None = None,
+    ) -> None:
+        """Reject managed or externally-present services from the other QQ backend."""
+        conflict_ids = self._qq_conflicting_service_ids(service_ids)
+        if not conflict_ids:
+            return
+        observations = observations or self.adapter_observation_cache
+        for other_id in conflict_ids:
+            operation = self._operation_tasks.get(f"service:{other_id}")
+            if operation and not operation.done():
+                raise RuntimeError(
+                    f"Cannot start QQ services: {SERVICE_DEFS[other_id].name} is already changing state."
+                )
+            state = self.states.get(other_id)
+            if state and (
+                state.status in QQ_BUSY_STATUSES
+                or service_state_retains_runtime(state)
+            ):
+                raise RuntimeError(
+                    f"Cannot start QQ services: {SERVICE_DEFS[other_id].name} is already active. Stop it first."
+                )
+            observation = observations.get(other_id)
+            if observation and observation.outcome in _EXTERNAL_PRESENCE_OUTCOMES:
+                raise RuntimeError(
+                    f"Cannot start QQ services: external {SERVICE_DEFS[other_id].name} is present. "
+                    "Stop it in the original launcher first."
+                )
+
+    async def _fresh_qq_start_guard(
+        self,
+        service_ids: tuple[str, ...],
+    ) -> dict[str, AdapterObservation]:
+        """Refresh/cache all four QQ IDs, then enforce cross-backend exclusion."""
+        selected = tuple(service_id for service_id in service_ids if service_id in QQ_SERVICE_IDS)
+        if not selected:
+            return {}
+        observations = await self._fresh_external_adapter_observations(QQ_SERVICE_IDS)
+        self._validate_qq_conflicts(selected, observations=observations)
+        return observations
+
+    async def _fresh_adapter_start_guard(
+        self,
+        service_id: str,
+    ) -> bool:
+        """Close the preflight/spawn race; return True when external is ready."""
+        if service_id not in EXTERNAL_ADAPTER_SERVICE_IDS:
+            return False
+        if self._manager_service_takes_precedence(service_id):
+            return False
+        if service_id in QQ_SERVICE_IDS:
+            observations = await self._fresh_qq_start_guard((service_id,))
+        else:
+            observations = await self._fresh_external_adapter_observations((service_id,))
+        observation = observations[service_id]
+        previous = self._adapter_start_preflight.pop(service_id, None)
+        if previous is not None and previous.outcome in _EXTERNAL_PRESENCE_OUTCOMES:
+            if observation.outcome in {"absent", "indeterminate"}:
+                raise RuntimeError(
+                    f"外部 {SERVICE_DEFS[service_id].name} 状态发生变化，拒绝替换或接管"
+                )
+        if observation.outcome == "external_ready":
+            return True
+        if observation.outcome in _EXTERNAL_BLOCKING_OUTCOMES:
+            raise RuntimeError(
+                f"Cannot start {SERVICE_DEFS[service_id].name}: "
+                f"{self._external_presence_detail(observation)}"
+            )
+        return False
+
+    def core_readiness_status(self) -> str:
+        """Return Core status from manager state or bounded display evidence."""
+        state = self.states.get("nachobot")
+        if state is not None and self._manager_core_takes_precedence():
+            return state.status.value
+        if self._external_core_display_observation() is not None:
+            return ServiceStatus.RUNNING.value
+        if state is not None:
+            return state.status.value
+        return ServiceStatus.STOPPED.value
+
+    def core_chat_delivery_allowed(self) -> bool:
+        """Allow Chat only with current or recent verified Core evidence."""
+        state = self.states.get("nachobot")
+        if state is not None and self._manager_core_takes_precedence():
+            return state.status == ServiceStatus.RUNNING
+        return self._external_core_display_observation() is not None
+
+    def core_is_ready(self) -> bool:
+        """Whether Core is manager-running or externally verified and ready."""
+        state = self.states.get("nachobot")
+        if state is not None and self._manager_core_takes_precedence():
+            return state.status == ServiceStatus.RUNNING
+        return self.core_observation is not None
+
+    async def prepare_start_launch(self, profile_id: str, runtime: str | None = None) -> None:
+        """Force a fresh Core probe before a launch request is scheduled."""
+        _register_services(self.root)
+        profile_id = str(profile_id or "").strip().lower()
+        group_id = LAUNCH_PROFILE_GROUPS.get(profile_id)
+        if group_id is None:
+            raise ValueError(f"Unknown launch profile: {profile_id}")
+        if profile_id != "potato":
+            resolved = MultimodalRuntimeManager.normalize_profile(runtime or self._launch_runtime)
+            MultimodalRuntimeManager.require_python(resolved)
+        previous = self._external_core_observation()
+        observation = await self._fresh_external_core_observation()
+        if previous is not None and observation is None and not self._manager_core_takes_precedence():
+            raise RuntimeError("外部 NachoBot Core 已消失，拒绝启动以避免接管或替换它")
+        if observation is not None and not self._manager_core_takes_precedence():
+            if observation.observed_profile != profile_id:
+                raise RuntimeError(
+                    f"外部 NachoBot Core 当前为 {observation.observed_profile.upper()} 模式，"
+                    f"无法切换为 {profile_id.upper()}；请在外部启动器中切换"
+                )
+        self._validate_group_start(group_id)
+
+    async def prepare_start_group(self, group_id: str) -> None:
+        """Force Core readiness for QQ group starts before scheduling work."""
+        _register_services(self.root)
+        if group_id not in GROUP_DEFS:
+            raise ValueError(f"Unknown group: {group_id}")
+        gdef = GROUP_DEFS[group_id]
+        adapter_observations: dict[str, AdapterObservation] = {}
+        adapter_skip = frozenset()
+        if group_id == "qq_adapter":
+            adapter_observations = await self._fresh_qq_start_guard(tuple(gdef.services))
+            adapter_skip = self._check_cached_adapter_start_allowed(tuple(gdef.services))
+            self._remember_adapter_start_preflight(tuple(gdef.services), adapter_observations)
+        elif any(service_id in EXTERNAL_ADAPTER_SERVICE_IDS for service_id in gdef.services):
+            adapter_observations = await self.refresh_adapter_observation_for_mutation()
+            adapter_skip = self._check_cached_adapter_start_allowed(tuple(gdef.services))
+            self._remember_adapter_start_preflight(tuple(gdef.services), adapter_observations)
+        if group_id == "core":
+            # Starting Core directly must recognize an already-running
+            # external Core before any port/spawn decision is scheduled.
+            if await self._fresh_external_core_observation() is not None:
+                return
+        elif group_id == "qq_adapter":
+            await self.refresh_core_observation(force=True)
+        elif group_id in LAUNCH_PROFILE_GROUPS.values():
+            profile_id = next(
+                profile
+                for profile, candidate_group in LAUNCH_PROFILE_GROUPS.items()
+                if candidate_group == group_id
+            )
+            previous_external = self._external_core_observation()
+            observation = await self._fresh_external_core_observation()
+            if (
+                previous_external is not None
+                and observation is None
+                and not self._manager_core_takes_precedence()
+            ):
+                raise RuntimeError("外部 NachoBot Core 已消失，拒绝启动 WebUI 服务")
+            if observation is not None and observation.observed_profile != profile_id:
+                raise RuntimeError(
+                    f"外部 NachoBot Core 当前为 {observation.observed_profile.upper()} 模式，"
+                    f"无法启动 {profile_id.upper()}；请在外部启动器中切换"
+                )
+        self._validate_group_start(group_id, skip_service_ids=adapter_skip)
+
+    async def prepare_start_service(self, service_id: str) -> None:
+        """Force Core readiness for direct QQ-adapter starts."""
+        _register_services(self.root)
+        if service_id not in SERVICE_DEFS:
+            raise ValueError(f"Unknown service: {service_id}")
+        if service_id in QQ_SERVICE_IDS:
+            observations = await self._fresh_qq_start_guard((service_id,))
+            self._check_cached_adapter_start_allowed((service_id,))
+            self._remember_adapter_start_preflight((service_id,), observations)
+        elif service_id in EXTERNAL_ADAPTER_SERVICE_IDS:
+            observations = await self.refresh_adapter_observation_for_mutation()
+            self._check_cached_adapter_start_allowed((service_id,))
+            self._remember_adapter_start_preflight((service_id,), observations)
+        if service_id == "nachobot":
+            # A Core-only request is a safe no-op when an external Core is
+            # already verified; do not let validation reach its occupied port.
+            if await self._fresh_external_core_observation() is not None:
+                return
+        elif service_id in {
+            "tts_runtime_full",
+            "tts_runtime_lite",
+            "perception",
+        }:
+            profile_id = next(
+                (
+                    profile
+                    for profile, group_id in LAUNCH_PROFILE_GROUPS.items()
+                    if service_id in GROUP_DEFS[group_id].services
+                ),
+                None,
+            )
+            previous_external = self._external_core_observation()
+            observation = await self._fresh_external_core_observation()
+            if (
+                previous_external is not None
+                and observation is None
+                and not self._manager_core_takes_precedence()
+            ):
+                raise RuntimeError("外部 NachoBot Core 已消失，拒绝启动 WebUI 服务")
+            if (
+                observation is not None
+                and profile_id is not None
+                and observation.observed_profile != profile_id
+            ):
+                raise RuntimeError(
+                    f"外部 NachoBot Core 当前为 {observation.observed_profile.upper()} 模式，"
+                    f"无法启动 {service_id}；请在外部启动器中切换"
+                )
+            if (
+                observation is not None
+                and service_id in self._external_ready_service_ids(profile_id or "", observation)
+            ):
+                return
+        elif service_id in {"napcat_adapter", "snowluma_adapter", "koishi_adapter"}:
+            await self.refresh_core_observation(force=True)
+        self._ensure_required_components((service_id,))
+        self._validate_service_start(service_id)
+
     # ---- public API ----
 
     def get_service_status(self, service_id: str) -> dict[str, Any]:
@@ -879,16 +2276,103 @@ class ProcessManager:
         sdef = SERVICE_DEFS.get(service_id)
         if not sdef:
             raise ValueError(f"Unknown service: {service_id}")
-        state = self.states.get(service_id, ServiceState())
+        state = self.states.get(service_id)
+        manager_owned = bool(
+            state
+            and not service_state_is_pure_start_reservation(state)
+            and (
+                state.status != ServiceStatus.STOPPED
+                or service_state_retains_runtime(state)
+            )
+        )
+        status = state.status.value if state else ServiceStatus.STOPPED.value
+        origin: str | None = "webui" if manager_owned else None
+        observed_profile: str | None = None
+        started_port = state.started_port if state else None
+        pid = state.pid if state else None
+        started_at = state.started_at if state else None
+        external_state: str | None = None
+
+        if service_id == "nachobot" and manager_owned:
+            observed_profile = self._core_runtime_profile
+
+        if service_id == "nachobot" and not manager_owned:
+            observation = self._external_core_display_observation()
+            if observation is not None:
+                status = ServiceStatus.RUNNING.value
+                origin = "external"
+                observed_profile = observation.observed_profile
+                # External health evidence never carries process identity or
+                # manager-owned cleanup capability.
+                started_port = sdef.port
+                pid = None
+                started_at = None
+
+        adapter_observation = self._external_adapter_observation(service_id)
+        if (
+            service_id in EXTERNAL_ADAPTER_SERVICE_IDS
+            and not manager_owned
+            and adapter_observation is not None
+        ):
+            external_state = adapter_observation.external_state
+            if adapter_observation.outcome == "external_ready":
+                status = ServiceStatus.RUNNING.value
+                origin = "external"
+                started_port = sdef.port
+                pid = None
+                started_at = None
+            elif adapter_observation.outcome == "external_present_unready":
+                status = ServiceStatus.ERROR.value
+                origin = "external"
+                started_port = sdef.port
+                pid = None
+                started_at = None
+            elif adapter_observation.outcome == "indeterminate":
+                status = ServiceStatus.ERROR.value
+                origin = None
+                started_port = sdef.port
+                pid = None
+                started_at = None
+
+        if not manager_owned:
+            observation = self._external_core_display_observation()
+            if (
+                observation is not None
+                and service_id in self._external_ready_service_ids(
+                    observation.observed_profile,
+                    observation,
+                )
+            ):
+                status = ServiceStatus.RUNNING.value
+                origin = "external"
+                observed_profile = observation.observed_profile
+                # External health evidence never carries process identity or
+                # manager-owned cleanup capability.
+                started_port = sdef.port
+                pid = None
+                started_at = None
+
         return {
             "id": service_id,
             "name": sdef.name,
             "group_id": sdef.group_id,
-            "port": state.started_port if state.status == ServiceStatus.RUNNING and state.started_port is not None else sdef.port,
-            "detail": sdef.detail,
-            "status": state.status.value,
-            "pid": state.pid,
-            "started_at": state.started_at,
+            "port": started_port if status == ServiceStatus.RUNNING and started_port is not None else sdef.port,
+            "detail": (
+                self._external_presence_detail(adapter_observation)
+                if (
+                    adapter_observation is not None
+                    and not manager_owned
+                    and adapter_observation.outcome in _EXTERNAL_BLOCKING_OUTCOMES
+                )
+                else sdef.detail
+            ),
+            "status": status,
+            "pid": pid,
+            "started_at": started_at,
+            "managed": manager_owned,
+            "origin": origin,
+            "observed_profile": observed_profile,
+            "external_state": external_state,
         }
 
     def get_all_statuses(self) -> list[dict[str, Any]]:
@@ -913,6 +2397,7 @@ class ProcessManager:
         """Return the user-facing Core + mutually-exclusive runtime profile state."""
         _register_services(self.root)
         core = self.get_service_status("nachobot")
+        external_observation = self._external_core_display_observation()
         profiles: list[dict[str, Any]] = []
         active_profile: str | None = None
         error_profile: str | None = None
@@ -921,7 +2406,23 @@ class ProcessManager:
             gdef = GROUP_DEFS[group_id]
             services = [self.get_service_status(sid) for sid in gdef.services]
             statuses = [service["status"] for service in services]
-            if any(status == ServiceStatus.ERROR.value for status in statuses):
+            if (
+                profile_id == "potato"
+                and (
+                    self._core_runtime_profile == "potato"
+                    or (
+                        core.get("origin") == "external"
+                        and core.get("observed_profile") == "potato"
+                    )
+                )
+                and core["status"] == ServiceStatus.RUNNING.value
+            ):
+                # POTATO is deliberately represented by the manager-owned Core
+                # only. Its group has no child services, so an ordinary
+                # ``all([])`` check would incorrectly report it as stopped.
+                status = ServiceStatus.RUNNING.value
+                active_profile = active_profile or profile_id
+            elif any(status == ServiceStatus.ERROR.value for status in statuses):
                 status = ServiceStatus.ERROR.value
                 error_profile = error_profile or profile_id
             elif any(status == ServiceStatus.STOPPING.value for status in statuses):
@@ -936,6 +2437,16 @@ class ProcessManager:
             elif any(status == ServiceStatus.RUNNING.value for status in statuses):
                 status = "partial"
                 active_profile = active_profile or profile_id
+            elif (
+                external_observation is not None
+                and external_observation.observed_profile == profile_id
+                and external_observation.status == "degraded"
+            ):
+                # Preserve an authenticated but degraded external profile as
+                # partial even when none of its required local components is
+                # ready enough to synthesize a running service row.
+                status = "partial"
+                active_profile = active_profile or profile_id
             else:
                 status = ServiceStatus.STOPPED.value
 
@@ -945,6 +2456,13 @@ class ProcessManager:
                 "status": status,
                 "services": services,
             })
+
+        # A verified external Core carries the active product profile even
+        # when WebUI has not started that profile's dependent services yet.
+        if active_profile is None and core.get("origin") == "external":
+            observed_profile = core.get("observed_profile")
+            if observed_profile in LAUNCH_PROFILE_GROUPS:
+                active_profile = observed_profile
 
         launch_task = self._operation_tasks.get("launch")
         launch_kind = self._operation_kinds.get("launch") if launch_task and not launch_task.done() else None
@@ -976,6 +2494,7 @@ class ProcessManager:
             "runtime": self._launch_runtime,
             "operation": launch_kind,
             "core": core,
+            "external_core": core.get("origin") == "external",
             "profiles": profiles,
         }
 
@@ -987,6 +2506,16 @@ class ProcessManager:
         return []
 
     # ---- start / stop ----
+
+    def _clear_start_reservation(self, service_id: str, *, remove: bool = False) -> None:
+        """Clear a queued request marker without touching external processes."""
+        state = self.states.get(service_id)
+        if state is None or not state.start_reservation:
+            return
+        pure_reservation = service_state_is_pure_start_reservation(state)
+        state.start_reservation = False
+        if remove and pure_reservation and self.states.get(service_id) is state:
+            self.states.pop(service_id, None)
 
     def _schedule_operation(
         self,
@@ -1034,6 +2563,36 @@ class ProcessManager:
         sdef = SERVICE_DEFS.get(service_id)
         if sdef is None:
             raise ValueError(f"Unknown service: {service_id}")
+        adapter_ready = self._check_cached_adapter_start_allowed((service_id,))
+        if service_id in adapter_ready:
+            self._validate_qq_conflicts((service_id,))
+            self._clear_start_reservation(service_id, remove=True)
+            return
+        # A verified external Core is already the requested resource.  A
+        # direct Core start must never adopt, replace, or terminate it.
+        if service_id == "nachobot" and self._external_core_observation() is not None:
+            return
+        if service_id in {"tts_runtime_full", "tts_runtime_lite", "perception"}:
+            observation = self._external_core_observation()
+            if observation is not None:
+                expected_profile = next(
+                    (
+                        profile
+                        for profile, group_id in LAUNCH_PROFILE_GROUPS.items()
+                        if service_id in GROUP_DEFS[group_id].services
+                    ),
+                    None,
+                )
+                if expected_profile is not None and observation.observed_profile != expected_profile:
+                    raise RuntimeError(
+                        f"外部 NachoBot Core 当前为 {observation.observed_profile.upper()} 模式，"
+                        f"无法启动 {service_id}；请在外部启动器中切换"
+                    )
+                if service_id in self._external_ready_service_ids(
+                    observation.observed_profile,
+                    observation,
+                ):
+                    return
         # Perform component discovery synchronously, before creating the
         # operation task.  This keeps a missing selected backend from ever
         # entering the scheduler.
@@ -1049,6 +2608,9 @@ class ProcessManager:
         if state is None:
             state = ServiceState()
             self.states[service_id] = state
+        # Reserve the requested slot without claiming manager ownership or
+        # masking a Core/dependency observation that may arrive before start.
+        state.start_reservation = not service_state_has_runtime_capability(state)
         state.status = ServiceStatus.STARTING
         self._schedule_operation(
             f"service:{service_id}",
@@ -1076,6 +2638,7 @@ class ProcessManager:
             and state.windows_job is None
             and state.process is None
         ):
+            self._clear_start_reservation(service_id, remove=True)
             return
         if state.status == ServiceStatus.STOPPING:
             operation = self._operation_tasks.get(f"service:{service_id}")
@@ -1099,7 +2662,36 @@ class ProcessManager:
         existing = self._operation_tasks.get(f"group:{group_id}")
         if existing and not existing.done():
             raise RuntimeError(f"Group {group_id} is already changing state")
-        self._validate_group_start(group_id)
+        self._validate_qq_conflicts(tuple(gdef.services))
+        profile_id = next(
+            (
+                profile
+                for profile, candidate_group in LAUNCH_PROFILE_GROUPS.items()
+                if candidate_group == group_id
+            ),
+            None,
+        )
+        skip_service_ids = (
+            self._external_ready_service_ids(profile_id or "")
+            if profile_id is not None
+            else frozenset()
+        )
+        adapter_skip = self._check_cached_adapter_start_allowed(tuple(gdef.services))
+        skip_service_ids = frozenset(set(skip_service_ids) | set(adapter_skip))
+        observation = self._external_core_observation()
+        if (
+            profile_id is not None
+            and observation is not None
+            and observation.observed_profile != profile_id
+        ):
+            raise RuntimeError(
+                f"外部 NachoBot Core 当前为 {observation.observed_profile.upper()} 模式，"
+                f"无法启动 {profile_id.upper()}；请在外部启动器中切换"
+            )
+        if profile_id is None:
+            self._validate_group_start(group_id)
+        else:
+            self._validate_group_start(group_id, skip_service_ids=skip_service_ids)
         self._schedule_operation(
             f"group:{group_id}",
             lambda: self.start_group(group_id),
@@ -1128,47 +2720,26 @@ class ProcessManager:
             replace=True,
         )
 
-    def _resolve_potato_runtime(self, preferred: str | None = None) -> str:
-        """Reuse GPU/CPU for POTATO whenever possible; Relay is fallback-only."""
-        reconciliation = MultimodalRuntimeManager.reconcile_relay_fallback()
-        installed_local = set(reconciliation["local_profiles"])
-
-        candidates: list[str] = []
-        for candidate in (preferred, self._launch_runtime, "gpu", "cpu"):
-            try:
-                normalized = MultimodalRuntimeManager.normalize_profile(candidate)
-            except ValueError:
-                continue
-            if normalized in {"gpu", "cpu"} and normalized not in candidates:
-                candidates.append(normalized)
-
-        for candidate in candidates:
-            if candidate in installed_local:
-                return candidate
-
-        if MultimodalRuntimeManager.get_status("relay")["installed"]:
-            return "relay"
-
-        raise RuntimeError(
-            "POTATO Relay 环境不可用，且没有已安装的 GPU/CPU Multimodal 环境"
-        )
-
     def request_start_launch(self, profile_id: str, runtime: str | None = None) -> None:
-        """Start Core and exactly one functionality profile with an explicit runtime."""
+        """Start Core and exactly one functionality profile."""
         _register_services(self.root)
         profile_id = str(profile_id or "").strip().lower()
         group_id = LAUNCH_PROFILE_GROUPS.get(profile_id)
         if group_id is None:
             raise ValueError(f"Unknown launch profile: {profile_id}")
 
-        if profile_id == "potato":
-            resolved_runtime = self._resolve_potato_runtime(runtime)
-        else:
+        resolved_runtime: str | None = None
+        if profile_id != "potato":
             resolved_runtime = MultimodalRuntimeManager.normalize_profile(runtime or "gpu")
-            if resolved_runtime == "relay":
-                raise ValueError("FULL/LITE 模式只能使用 GPU 或 CPU 环境")
-        MultimodalRuntimeManager.require_python(resolved_runtime)
-        self._launch_runtime = resolved_runtime
+            MultimodalRuntimeManager.require_python(resolved_runtime)
+            self._launch_runtime = resolved_runtime
+
+        observation = self._external_core_observation()
+        if observation is not None and observation.observed_profile != profile_id:
+            raise RuntimeError(
+                f"外部 NachoBot Core 当前为 {observation.observed_profile.upper()} 模式，"
+                f"无法切换为 {profile_id.upper()}；请在外部启动器中切换"
+            )
 
         existing = self._operation_tasks.get("launch")
         if existing and not existing.done():
@@ -1178,10 +2749,16 @@ class ProcessManager:
             if operation and not operation.done():
                 raise RuntimeError(f"Group {group} is already changing state")
 
-        self._validate_group_start(group_id)
+        skip_service_ids = self._external_ready_service_ids(
+            profile_id,
+            observation,
+        ) if observation is not None else frozenset()
+        self._validate_group_start(group_id, skip_service_ids=skip_service_ids)
         affected = tuple(GROUP_DEFS["core"].services + GROUP_DEFS[group_id].services)
         self._schedule_operation(
             "launch",
+            # start_launch owns its fresh probe and race-closing recheck;
+            # do not request a duplicate preflight from the scheduler.
             lambda: self.start_launch(profile_id, resolved_runtime),
             affected,
             operation_kind="start",
@@ -1204,56 +2781,119 @@ class ProcessManager:
             replace=True,
         )
 
-    async def start_launch(self, profile_id: str, runtime: str | None = None) -> None:
+    async def start_launch(
+        self,
+        profile_id: str,
+        runtime: str | None = None,
+        *,
+        _force_external_probe: bool = False,
+    ) -> None:
         """Run Core + selected profile transactionally, rolling back this launch on failure."""
         _register_services(self.root)
         group_id = LAUNCH_PROFILE_GROUPS.get(profile_id)
         if group_id is None:
             raise ValueError(f"Unknown launch profile: {profile_id}")
 
-        resolved_runtime = (
-            self._resolve_potato_runtime(runtime)
-            if profile_id == "potato"
-            else MultimodalRuntimeManager.normalize_profile(runtime or self._launch_runtime)
-        )
-        if profile_id != "potato" and resolved_runtime == "relay":
-            raise ValueError("FULL/LITE 模式只能使用 GPU 或 CPU 环境")
-        MultimodalRuntimeManager.require_python(resolved_runtime)
-        self._launch_runtime = resolved_runtime
+        resolved_runtime: str | None = None
+        if profile_id != "potato":
+            resolved_runtime = MultimodalRuntimeManager.normalize_profile(runtime or self._launch_runtime)
+            MultimodalRuntimeManager.require_python(resolved_runtime)
+            self._launch_runtime = resolved_runtime
 
         core_state = self.states.get("nachobot")
-        core_was_running = bool(core_state and core_state.status == ServiceStatus.RUNNING)
+        manager_core_running = bool(
+            core_state
+            and core_state.status == ServiceStatus.RUNNING
+            and self._manager_core_takes_precedence()
+        )
+        # Preserve the prior verified observation so a disappearance between
+        # the HTTP preflight and this transaction cannot silently turn into a
+        # replacement Core launch.
+        previous_external = self._external_core_observation()
+        # This method is also a valid internal entrypoint, so it must not rely
+        # on the HTTP preflight or a prior UI poll for external-Core safety.
+        # ``_force_external_probe`` remains accepted for older callers, but
+        # the fresh probe is now unconditional.
+        observation = await self.refresh_core_observation(force=True)
+        external_core = False
+
+        if not manager_core_running and not self._manager_core_takes_precedence():
+            if observation is None:
+                await self._resolve_uncertain_external_core_before_start()
+            if previous_external is not None and observation is None:
+                raise RuntimeError(
+                    "外部 NachoBot Core 已消失，拒绝启动以避免接管或替换它"
+                )
+            if observation is not None:
+                if observation.observed_profile != profile_id:
+                    raise RuntimeError(
+                        f"外部 NachoBot Core 当前为 {observation.observed_profile.upper()} 模式，"
+                        f"无法切换为 {profile_id.upper()}；请在外部启动器中切换"
+                    )
+                external_core = True
+
+        # Never silently reuse a manager-owned Core with a different or
+        # unknown product profile. Stop it in this transaction and recreate it
+        # with the requested environment before starting the profile group.
+        core_started_by_transaction = False
+        core_was_running = manager_core_running
+        if not external_core and core_was_running and self._core_runtime_profile != profile_id:
+            await self.stop_group("core")
+            core_was_running = False
+        if not external_core:
+            core_env = {"NACHOBOT_RUNTIME_PROFILE": profile_id}
+            if profile_id != "potato":
+                core_env["NACHOBOT_TTS_ENDPOINT"] = _read_tts_service_endpoint(self.root)
+                if profile_id == "full":
+                    core_env["NACHOBOT_MULTIMODAL_ENDPOINT"] = _read_perception_service_endpoint(self.root)
+            self._active_group_env["core"] = core_env
+        self._external_profile_start_verified = profile_id if external_core else None
         try:
-            await self.start_group("core")
-            core_state = self.states.get("nachobot")
-            if not core_state or core_state.status != ServiceStatus.RUNNING:
-                return
+            if not external_core:
+                await self.start_group("core")
+                core_state = self.states.get("nachobot")
+                if not core_state or core_state.status != ServiceStatus.RUNNING:
+                    return
+                core_started_by_transaction = not core_was_running
+                self._core_runtime_profile = profile_id
+
+            if external_core:
+                # Close the preflight-to-dependent-start race.  A vanished or
+                # changed external Core is never replaced; only dependents
+                # already owned by WebUI may be rolled back below.
+                rechecked = await self.refresh_core_observation(force=True)
+                if rechecked is None or rechecked.observed_profile != profile_id:
+                    raise RuntimeError(
+                        "外部 NachoBot Core 已消失或模式不匹配，拒绝启动 WebUI 服务"
+                    )
 
             await self.start_group(group_id)
             profile_ready = all(
-                self.states.get(service_id)
-                and self.states[service_id].status == ServiceStatus.RUNNING
+                self.get_service_status(service_id)["status"] == ServiceStatus.RUNNING.value
                 for service_id in GROUP_DEFS[group_id].services
             )
             if profile_ready:
                 return
 
             await self.stop_group(group_id)
-            if not core_was_running:
+            if core_started_by_transaction:
                 await self.stop_group("core")
         except asyncio.CancelledError:
             await self.stop_group(group_id)
-            if not core_was_running:
+            if core_started_by_transaction:
                 await self.stop_group("core")
             raise
         except Exception:
             try:
                 await self.stop_group(group_id)
-                if not core_was_running:
+                if core_started_by_transaction:
                     await self.stop_group("core")
             except Exception:
                 logger.exception("Failed to roll back launch profile %s", profile_id)
             raise
+        finally:
+            if self._external_profile_start_verified == profile_id:
+                self._external_profile_start_verified = None
 
     async def stop_launch(self) -> None:
         """Stop all mutually-exclusive runtime profiles, then stop Core."""
@@ -1261,65 +2901,27 @@ class ProcessManager:
         for group_id in LAUNCH_PROFILE_GROUPS.values():
             await self.stop_group(group_id)
         await self.stop_group("core")
+        self._core_runtime_profile = None
 
-    def _active_relay_port(self) -> int | None:
-        """Return the port actually used when the current relay owner started."""
-        for service_id in ("tts_adapter_full", "tts_adapter_lite", "potato_relay"):
-            state = self.states.get(service_id)
-            if state and state.status == ServiceStatus.RUNNING:
-                if state.started_port is not None:
-                    return state.started_port
-                return SERVICE_DEFS[service_id].port
-        return None
-
-    def _configured_consumer_relay_port(self, service_id: str) -> int:
-        """Read the platform adapter's configured upstream relay port."""
-        relay_port = SERVICE_DEFS["potato_relay"].port
-        config_paths = {
-            "napcat_adapter": self.root / "NachoBot-Napcat-Adapter" / "config.toml",
-            "snowluma_adapter": self.root / "NachoBot-SnowLuma-Adapter" / "config.toml",
-            "koishi_adapter": self.root / "NachoBot-Koishi-Adapter" / "config.toml",
-        }
-        config_path = config_paths.get(service_id)
-        if config_path is None:
-            return relay_port
-        try:
-            import tomlkit
-
-            document = tomlkit.parse(config_path.read_text(encoding="utf-8"))
-            return int(document.get("nachobot_server", {}).get("port", relay_port))
-        except Exception as exc:
-            raise RuntimeError(
-                f"Cannot read relay endpoint from {config_path}: {exc}"
-            ) from exc
-
-    def _require_core_owner(self, consumer_service_id: str) -> None:
-        """Require the NachoBot Core bus before starting a platform adapter."""
+    def _require_core_ready(self, consumer_service_id: str) -> None:
+        """Require a manager-owned or verified external Core bus."""
 
         consumer_name = SERVICE_DEFS[consumer_service_id].name
         core_state = self.states.get("nachobot")
-        if core_state is None or core_state.status != ServiceStatus.RUNNING:
-            raise RuntimeError(
-                f"Cannot start {consumer_name}: NachoBot Core is not ready. "
-                "Start NachoBot Core first."
-            )
+        if core_state is not None and self._manager_core_takes_precedence():
+            if core_state.status == ServiceStatus.RUNNING:
+                return
+        elif self.core_observation is not None:
+            return
+        raise RuntimeError(
+            f"Cannot start {consumer_name}: NachoBot Core is not ready. "
+            "Start NachoBot Core first."
+        )
 
-    def _require_relay_owner(self, consumer_service_id: str) -> None:
-        consumer_name = SERVICE_DEFS[consumer_service_id].name
-        configured_relay_port = SERVICE_DEFS["potato_relay"].port
-        relay_port = self._active_relay_port()
-        if relay_port is None:
-            raise RuntimeError(
-                f"Cannot start {consumer_name}: port {configured_relay_port} is not ready. "
-                "Start one of FULL, LITE, or POTATO first."
-            )
-
-        consumer_port = self._configured_consumer_relay_port(consumer_service_id)
-        if consumer_port != relay_port:
-            raise RuntimeError(
-                f"Cannot start {consumer_name}: configured upstream port {consumer_port} "
-                f"does not match the active Multimodal port {relay_port}."
-            )
+    # Kept as a narrow compatibility alias for existing internal/test callers;
+    # readiness, rather than ownership, is now the actual contract.
+    def _require_core_owner(self, consumer_service_id: str) -> None:
+        self._require_core_ready(consumer_service_id)
 
     def _ensure_required_components(self, service_ids: tuple[str, ...]):
         """Reject selected QQ starts before any process/task is scheduled."""
@@ -1385,6 +2987,13 @@ class ProcessManager:
         if service_id in QQ_SERVICE_IDS and _QQ_ADAPTER_SELECTOR_ERROR is not None:
             raise RuntimeError(_QQ_ADAPTER_SELECTOR_ERROR)
 
+        if service_id in QQ_SERVICE_IDS:
+            self._validate_qq_conflicts((service_id,))
+
+        if service_id in EXTERNAL_ADAPTER_SERVICE_IDS:
+            if service_id in self._check_cached_adapter_start_allowed((service_id,)):
+                return
+
         # A direct adapter start may reuse an already-running SnowLuma
         # runtime. Otherwise validate webuiHost and both listeners before the
         # scheduler accepts the launch.
@@ -1392,8 +3001,17 @@ class ProcessManager:
             self._ensure_snowluma_launch_boundary()
         elif service_id == "snowluma_adapter":
             runtime_status = self.states.get("snowluma_runtime", ServiceState()).status
+            runtime_external_ready = (
+                not self._manager_service_takes_precedence("snowluma_runtime")
+                and (
+                    runtime_observation := self._external_adapter_observation("snowluma_runtime")
+                ) is not None
+                and runtime_observation.outcome == "external_ready"
+            )
             self._ensure_snowluma_launch_boundary(
-                require_free_ports=runtime_status != ServiceStatus.RUNNING,
+                require_free_ports=(
+                    runtime_status != ServiceStatus.RUNNING and not runtime_external_ready
+                ),
             )
 
         if service_id in QQ_SERVICE_IDS:
@@ -1404,46 +3022,14 @@ class ProcessManager:
                     f"Cannot start {SERVICE_DEFS[service_id].name}: "
                     "this QQ adapter is not selected in qq_adapter."
                 )
-
-        # QQ/Koishi text adapters target the configured Multimodal relay endpoint.
+        # Platform adapters connect directly to the Core WebSocket.
         if service_id in ("napcat_adapter", "snowluma_adapter", "koishi_adapter"):
-            self._require_core_owner(service_id)
-            self._require_relay_owner(service_id)
-
-        # Keep both QQ adapter definitions available for stale stop handles,
-        # but never allow the selected backend to start beside an old one (or
-        # beside a still-stopping NapCat shell) after .env changes externally.
-        qq_conflicts = {
-            "napcat_adapter": ("snowluma_runtime", "snowluma_adapter"),
-            "snowluma_runtime": ("napcat_adapter", "napcat_shell"),
-            "snowluma_adapter": ("napcat_adapter", "napcat_shell"),
-            "napcat_shell": ("snowluma_runtime", "snowluma_adapter"),
-        }
-        if service_id in qq_conflicts:
-            for other_id in qq_conflicts[service_id]:
-                if other_id == service_id:
-                    continue
-                operation = self._operation_tasks.get(f"service:{other_id}")
-                if operation and not operation.done():
-                    raise RuntimeError(
-                        f"Cannot start {SERVICE_DEFS[service_id].name}: "
-                        f"{SERVICE_DEFS[other_id].name} is already changing state."
-                    )
-                state = self.states.get(other_id)
-                if state and (
-                    state.status in QQ_BUSY_STATUSES
-                    or service_state_retains_runtime(state)
-                ):
-                    raise RuntimeError(
-                        f"Cannot start {SERVICE_DEFS[service_id].name}: "
-                        f"{SERVICE_DEFS[other_id].name} is already active. Stop it first."
-                    )
+            self._require_core_ready(service_id)
 
         # Direct service starts must preserve the same mutual exclusion that
-        # group starts enforce for the configured relay and shared TTS engine resources.
-        relay_services = ("tts_adapter_full", "tts_adapter_lite", "potato_relay")
-        engine_services = ("tts_engine_full", "tts_engine_lite")
-        conflict_set = relay_services if service_id in relay_services else engine_services if service_id in engine_services else ()
+        # group starts enforce for the shared public TTS endpoint.
+        runtime_services = ("tts_runtime_full", "tts_runtime_lite")
+        conflict_set = runtime_services if service_id in runtime_services else ()
         for other_id in conflict_set:
             if other_id == service_id:
                 continue
@@ -1460,9 +3046,22 @@ class ProcessManager:
                     f"{SERVICE_DEFS[other_id].name} already owns the shared endpoint."
                 )
 
-    def _validate_group_start(self, group_id: str) -> None:
+    def _validate_group_start(
+        self,
+        group_id: str,
+        *,
+        skip_service_ids: frozenset[str] = frozenset(),
+    ) -> None:
         gdef = GROUP_DEFS[group_id]
-        self._ensure_required_components(tuple(gdef.services))
+        self._validate_qq_conflicts(tuple(gdef.services))
+        cached_adapter_skip = self._check_cached_adapter_start_allowed(tuple(gdef.services))
+        skip_service_ids = frozenset(set(skip_service_ids) | set(cached_adapter_skip))
+        services_to_start = tuple(
+            service_id
+            for service_id in gdef.services
+            if service_id not in skip_service_ids
+        )
+        self._ensure_required_components(services_to_start)
         if "snowluma_runtime" in gdef.services or "snowluma_adapter" in gdef.services:
             # A QQ group can be recovered after its adapter task failed while
             # the manager-owned Runtime stayed healthy. In that case its
@@ -1473,8 +3072,15 @@ class ProcessManager:
                 self.states.get("snowluma_runtime", ServiceState()).status
                 == ServiceStatus.RUNNING
             )
+            runtime_running = runtime_running or (
+                not self._manager_service_takes_precedence("snowluma_runtime")
+                and (
+                    runtime_observation := self._external_adapter_observation("snowluma_runtime")
+                ) is not None
+                and runtime_observation.outcome == "external_ready"
+            )
             self._ensure_snowluma_launch_boundary(require_free_ports=not runtime_running)
-        for service_id in gdef.services:
+        for service_id in services_to_start:
             state = self.states.get(service_id)
             if not state or state.status not in (ServiceStatus.RUNNING, ServiceStatus.STARTING):
                 self._validate_service_start(service_id)
@@ -1506,8 +3112,59 @@ class ProcessManager:
         sdef = SERVICE_DEFS.get(service_id)
         if not sdef:
             raise ValueError(f"Unknown service: {service_id}")
+        if service_id in EXTERNAL_ADAPTER_SERVICE_IDS:
+            state_before_probe = self.states.get(service_id)
+            try:
+                if await self._fresh_adapter_start_guard(service_id):
+                    self._clear_start_reservation(service_id, remove=True)
+                    return
+            except Exception:
+                if service_state_is_pure_start_reservation(state_before_probe):
+                    self._clear_start_reservation(service_id, remove=True)
+                raise
         self._ensure_required_components((service_id,))
+        if service_id == "nachobot":
+            # Direct/internal Core starts must independently establish fresh
+            # external evidence before creating a ServiceState or spawning.
+            if await self._fresh_external_core_observation() is not None:
+                self._clear_start_reservation(service_id, remove=True)
+                return
+        elif service_id in {"tts_runtime_full", "tts_runtime_lite", "perception"}:
+            profile_id = next(
+                (
+                    profile
+                    for profile, group_id in LAUNCH_PROFILE_GROUPS.items()
+                    if service_id in GROUP_DEFS[group_id].services
+                ),
+                None,
+            )
+            previous_external = self._external_core_observation()
+            observation = await self._fresh_external_core_observation()
+            if (
+                previous_external is not None
+                and observation is None
+                and not self._manager_core_takes_precedence()
+            ):
+                raise RuntimeError("外部 NachoBot Core 已消失，拒绝启动 WebUI 服务")
+            if observation is not None:
+                if profile_id is not None and observation.observed_profile != profile_id:
+                    raise RuntimeError(
+                        f"外部 NachoBot Core 当前为 {observation.observed_profile.upper()} 模式，"
+                        f"无法启动 {service_id}；请在外部启动器中切换"
+                    )
+                if service_id in self._external_ready_service_ids(profile_id or "", observation):
+                    self._clear_start_reservation(service_id, remove=True)
+                    return
+        elif service_id in {"napcat_adapter", "snowluma_adapter", "koishi_adapter"}:
+            # Direct/internal callers must not rely on a prior UI poll for
+            # Core readiness.  This probe is non-blocking to the event loop.
+            await self.refresh_core_observation(force=True)
+            self._require_core_ready(service_id)
 
+        # The fresh probe above won the race only when it returned from the
+        # external branches.  Reaching this point converts the reservation
+        # into ordinary manager-owned startup immediately before the lock.
+        self._clear_start_reservation(service_id)
         lock = self._service_locks.setdefault(service_id, asyncio.Lock())
         async with lock:
             await self._start_service_locked(service_id, sdef, _prepared=_prepared)
@@ -1543,17 +3200,29 @@ class ProcessManager:
         # start must not mistake the runtime's own listeners for a conflict.
         if service_id == "snowluma_runtime" or service_id == "snowluma_adapter":
             runtime_status = self.states.get("snowluma_runtime", ServiceState()).status
+            runtime_external_ready = (
+                service_id == "snowluma_adapter"
+                and not self._manager_service_takes_precedence("snowluma_runtime")
+                and (
+                    runtime_observation := self._external_adapter_observation("snowluma_runtime")
+                ) is not None
+                and runtime_observation.outcome == "external_ready"
+            )
             try:
                 self._ensure_snowluma_launch_boundary(
                     require_free_ports=(
                         service_id == "snowluma_runtime"
-                        or runtime_status != ServiceStatus.RUNNING
+                        or (
+                            runtime_status != ServiceStatus.RUNNING
+                            and not runtime_external_ready
+                        )
                     ),
                 )
             except RuntimeError as exc:
                 state.status = ServiceStatus.ERROR
                 await self._broadcast(service_id, f"[WebUI] ERROR: {exc}\n")
                 return
+        state.start_reservation = False
         state.status = ServiceStatus.STARTING
         state.process = None
         state.pid = None
@@ -1594,6 +3263,18 @@ class ProcessManager:
         env["PYTHONUTF8"] = "1"
         env.update(sdef.env_extra)
         env.update(env_extra)
+        core_profile = self._active_group_env.get("core", {}).get("NACHOBOT_RUNTIME_PROFILE")
+        if service_id == "nachobot" and core_profile != "potato":
+            # FULL/LITE Core calls the public TTS Runtime. Only FULL also
+            # receives the local perception endpoint; POTATO receives neither.
+            env["NACHOBOT_TTS_ENDPOINT"] = _read_tts_service_endpoint(self.root)
+            if core_profile == "full":
+                env["NACHOBOT_MULTIMODAL_ENDPOINT"] = _read_perception_service_endpoint(self.root)
+            else:
+                env.pop("NACHOBOT_MULTIMODAL_ENDPOINT", None)
+        elif service_id == "nachobot":
+            env.pop("NACHOBOT_TTS_ENDPOINT", None)
+            env.pop("NACHOBOT_MULTIMODAL_ENDPOINT", None)
         env.update(self._active_group_env.get(sdef.group_id, {}))
         # The WebUI control-plane token is never a child-service credential,
         # including when a service/group override attempts to inject it.
@@ -1681,7 +3362,7 @@ class ProcessManager:
                 # TTS engines may spend an arbitrary amount of time downloading
                 # model assets on first launch. Do not treat a fixed readiness
                 # deadline as a startup failure while the managed process is alive.
-                readiness_timeout = None if service_id in ("tts_engine_full", "tts_engine_lite") else 180
+                readiness_timeout = None if service_id in ("tts_runtime_full", "tts_runtime_lite") else 180
                 ready = await self._wait_for_port(service_id, sdef.port, timeout=readiness_timeout)
                 if not ready:
                     await self._terminate_state_process(state)
@@ -1693,6 +3374,8 @@ class ProcessManager:
                         f"[WebUI] ERROR: {sdef.name} 未通过就绪检查，进程已终止\n",
                     )
                     return
+            if service_id in EXTERNAL_ADAPTER_SERVICE_IDS:
+                await self._external_duplicate_after_spawn(service_id, state)
             # The output reader may observe EOF (or another failure) while
             # this readiness/broadcast await is yielding.  Never overwrite
             # that state with RUNNING, and retain the live process handle so
@@ -1729,6 +3412,36 @@ class ProcessManager:
             state.pid = None
             state.started_port = None
             await self._broadcast(service_id, f"[WebUI] ERROR starting {sdef.name}: {e}\n")
+
+    async def _external_duplicate_after_spawn(
+        self,
+        service_id: str,
+        state: ServiceState,
+    ) -> dict[str, AdapterObservation]:
+        """Reject external duplicates after spawn, excluding only our process tree."""
+        snapshot = await asyncio.to_thread(self._build_external_process_snapshot)
+        records_by_pid = {record.pid: record for record in snapshot.processes}
+        owned: set[int] = set()
+        if state.pid is not None:
+            owned.update(self._process_descendants(int(state.pid), records_by_pid))
+        for process in state.windows_owned_processes:
+            pid = getattr(process, "pid", None)
+            if pid is not None:
+                owned.add(int(pid))
+        observations = self._classify_external_adapters(
+            snapshot,
+            exclude_pids=frozenset(owned),
+        )
+        self._adapter_observation_generation += 1
+        self.adapter_observation_cache.update(observations)
+        duplicate = observations.get(service_id)
+        if duplicate is None or duplicate.outcome != "absent":
+            raise RuntimeError(
+                f"检测到并发外部 {SERVICE_DEFS[service_id].name}，已停止本次 WebUI 启动"
+            )
+        if service_id in QQ_SERVICE_IDS:
+            self._validate_qq_conflicts((service_id,), observations=observations)
+        return observations
 
     async def _reap_leader_after_start_failure(self, process: asyncio.subprocess.Process) -> bool:
         """Bounded terminate/kill/reap for a process that never became RUNNING."""
@@ -1768,9 +3481,11 @@ class ProcessManager:
             and state.windows_job is None
             and state.process is None
         ):
+            self._clear_start_reservation(service_id, remove=True)
             return
 
         sdef = SERVICE_DEFS[service_id]
+        reservation_only = service_state_is_pure_start_reservation(state)
         if state.status == ServiceStatus.STOPPING and not _prepared:
             return
         state.status = ServiceStatus.STOPPING
@@ -1790,6 +3505,8 @@ class ProcessManager:
         state.pid = None
         state.started_port = None
         await self._broadcast(service_id, f"[WebUI] {sdef.name} stopped.\n")
+        if reservation_only:
+            self._clear_start_reservation(service_id, remove=True)
 
     async def start_group(self, group_id: str) -> None:
         _register_services(self.root)
@@ -1797,11 +3514,72 @@ class ProcessManager:
         if not gdef:
             raise ValueError(f"Unknown group: {group_id}")
 
-        self._ensure_required_components(tuple(gdef.services))
+        if group_id == "qq_adapter":
+            # Internal callers can bypass the HTTP preflight. Refresh all
+            # four QQ IDs here as well so a stale cache cannot let one backend
+            # start beside an externally-present conflicting backend.
+            await self._fresh_qq_start_guard(tuple(gdef.services))
 
-        # FULL, LITE, and POTATO all own the configured relay endpoint;
-        # only one of them can be active at a time.
-        self._validate_group_start(group_id)
+        if group_id == "core":
+            # Core group starts are valid internal entrypoints.  Reuse a
+            # verified external Core instead of reaching the occupied port.
+            if await self._fresh_external_core_observation() is not None:
+                return
+
+        external_observation: CoreObservation | None = None
+        profile_id = next(
+            (
+                profile
+                for profile, candidate_group in LAUNCH_PROFILE_GROUPS.items()
+                if candidate_group == group_id
+            ),
+            None,
+        )
+        if profile_id is not None:
+            previous_external = self._external_core_observation()
+            if self._external_profile_start_verified == profile_id:
+                external_observation = self._external_core_observation()
+            else:
+                external_observation = await self._fresh_external_core_observation()
+            if (
+                previous_external is not None
+                and external_observation is None
+                and not self._manager_core_takes_precedence()
+            ):
+                raise RuntimeError("外部 NachoBot Core 已消失，拒绝启动 WebUI 服务")
+            if (
+                external_observation is not None
+                and external_observation.observed_profile != profile_id
+            ):
+                raise RuntimeError(
+                    f"外部 NachoBot Core 当前为 {external_observation.observed_profile.upper()} 模式，"
+                    f"无法启动 {profile_id.upper()}；请在外部启动器中切换"
+                )
+
+        skip_service_ids = (
+            self._external_ready_service_ids(profile_id, external_observation)
+            if profile_id is not None and external_observation is not None
+            else frozenset()
+        )
+        if group_id == "qq_adapter":
+            skip_service_ids = frozenset(
+                set(skip_service_ids)
+                | set(self._check_cached_adapter_start_allowed(tuple(gdef.services)))
+            )
+        self._ensure_required_components(
+            tuple(service_id for service_id in gdef.services if service_id not in skip_service_ids)
+        )
+        if group_id == "qq_adapter":
+            # Group starts can be requested without the HTTP preflight (for
+            # example by an internal caller), so force readiness here too.
+            await self.refresh_core_observation(force=True)
+
+        # FULL and LITE own mutually-exclusive local TTS stacks. POTATO has no
+        # child service and is represented by Core profile state only.
+        if profile_id is None:
+            self._validate_group_start(group_id)
+        else:
+            self._validate_group_start(group_id, skip_service_ids=skip_service_ids)
 
         started_here: list[str] = []
         try:
@@ -1811,6 +3589,8 @@ class ProcessManager:
                 }
 
             for sid in gdef.services:
+                if sid in skip_service_ids:
+                    continue
                 prior = self.states.get(sid)
                 was_running = bool(prior and prior.status == ServiceStatus.RUNNING)
                 await self.start_service(sid)
@@ -1826,6 +3606,13 @@ class ProcessManager:
                     return
                 if not was_running and state and state.status == ServiceStatus.RUNNING:
                     started_here.append(sid)
+                observed_status = self.get_service_status(sid)
+                externally_ready = (
+                    observed_status.get("status") == ServiceStatus.RUNNING.value
+                    and observed_status.get("origin") == "external"
+                )
+                if externally_ready:
+                    continue
                 # start_service does not return until its readiness check succeeds.
                 sdef = SERVICE_DEFS[sid]
                 if not (sdef.wait_port and sdef.port):
@@ -1841,6 +3628,18 @@ class ProcessManager:
                 await self.stop_service(started_id)
             self._active_group_env.pop(group_id, None)
             raise
+        except Exception:
+            for started_id in reversed(started_here):
+                try:
+                    await self.stop_service(started_id)
+                except Exception:
+                    logger.exception(
+                        "Failed to roll back %s after group %s start error",
+                        started_id,
+                        group_id,
+                    )
+            self._active_group_env.pop(group_id, None)
+            raise
 
     async def stop_group(self, group_id: str) -> None:
         _register_services(self.root)
@@ -1852,6 +3651,8 @@ class ProcessManager:
         for sid in reversed(gdef.services):
             await self.stop_service(sid)
         self._active_group_env.pop(group_id, None)
+        if group_id == "core":
+            self._core_runtime_profile = None
 
     async def shutdown(self) -> None:
         """Cancel managed operations, then stop every owned subprocess."""
@@ -2384,27 +4185,22 @@ class ProcessManager:
         cmd: list[str],
         env_extra: dict[str, str],
     ) -> tuple[list[str], dict[str, str]]:
-        """Replace Multimodal `uv run` commands with the selected venv Python."""
+        """Replace local multimodal `uv run` commands with selected Python."""
         adapter_services = {
-            "tts_adapter_full": ["main.py"],
-            "tts_adapter_lite": ["main.py"],
             "perception": ["-m", "nachobot_multimodal.api_server"],
-            "potato_relay": ["main.py", "--no-local-models"],
         }
         args = adapter_services.get(service_id)
         if args is None:
             return cmd, env_extra
 
         runtime = self._launch_runtime
-        if runtime == "relay" and service_id != "potato_relay":
-            raise ValueError("FULL/LITE Multimodal 服务不能使用 Relay 环境")
         python = MultimodalRuntimeManager.require_python(runtime)
         return [str(python), *args], dict(env_extra)
 
     def _resolve_cmd(self, sdef: ServiceDef) -> tuple[list[str], str, dict[str, str]]:
         """Resolve dynamic commands (e.g., TTS engine based on config)."""
-        if sdef.id in ("tts_engine_full", "tts_engine_lite"):
-            return self._resolve_tts_engine_cmd()
+        if sdef.id in ("tts_runtime_full", "tts_runtime_lite"):
+            return self._resolve_tts_runtime_cmd()
         if sdef.id == "bilibili":
             nachobot_dir = self.root / "NachoBot"
             bili_dir = self.root / "NachoBot-Bilibili-Adapter"
@@ -2430,44 +4226,27 @@ class ProcessManager:
             return ["cmd", "/d", "/s", "/c", "launcher.bat"], str(runtime.path), {}
         return sdef.cmd, sdef.cwd, {}
 
-    def _resolve_tts_engine_cmd(self) -> tuple[list[str], str, dict[str, str]]:
-        """Determine which TTS engine to start based on base.toml."""
-        base_toml = self.root / "NachoBot-Multimodal-Adapter" / "configs" / "base.toml"
-        engine = "GPT_Sovits"  # default
-        tts_engine_port = 9880
-
-        if base_toml.exists():
-            try:
-                import tomlkit
-
-                doc = tomlkit.parse(base_toml.read_text(encoding="utf-8"))
-                enabled = doc.get("enabled_tts", {}).get("enabled", ["GPT_Sovits"])
-                if isinstance(enabled, list) and "Vox" in enabled:
-                    engine = "Vox"
-
-                tts_engine_port = _read_tts_engine_port(self.root, engine)
-            except Exception:
-                pass
-
+    def _resolve_tts_runtime_cmd(self) -> tuple[list[str], str, dict[str, str]]:
+        """Start one public 9880 runtime that supervises its private backend."""
         adapter_dir = self.root / "NachoBot-Multimodal-Adapter"
-        manager = adapter_dir / "scripts" / "tts_runtime_manager.py"
-        if not manager.is_file():
-            raise FileNotFoundError(f"TTS runtime manager 不存在: {manager}")
+        entrypoint = adapter_dir / "scripts" / "container_tts_entrypoint.py"
+        if not entrypoint.is_file():
+            raise FileNotFoundError(f"统一 TTS Runtime entrypoint 不存在: {entrypoint}")
 
-        managed_engine = "voxcpm" if engine == "Vox" else "gpt-sovits"
         runtime = MultimodalRuntimeManager.normalize_profile(self._launch_runtime)
-        if runtime == "relay":
-            raise ValueError("Relay/POTATO 模式不启动本地 TTS 推理运行时")
         python = MultimodalRuntimeManager.require_python(runtime)
         cmd = [
-            str(python), str(manager),
-            "serve",
-            "--engine", managed_engine,
-            "--port", str(tts_engine_port),
+            str(python), str(entrypoint),
+            "--host", "0.0.0.0",
+            "--port", "9880",
+            "--backend-port", "9881",
         ]
         torch_index = (
             "https://download.pytorch.org/whl/cpu"
             if runtime == "cpu"
             else "https://download.pytorch.org/whl/cu128"
         )
-        return cmd, str(adapter_dir), {"NACHOBOT_TTS_TORCH_INDEX": torch_index}
+        return cmd, str(adapter_dir), {
+            "NACHOBOT_TTS_TORCH_INDEX": torch_index,
+            "NACHOBOT_TTS_RUNTIME_PROFILE": runtime,
+        }

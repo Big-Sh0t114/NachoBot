@@ -6,6 +6,9 @@
 const App = (() => {
     let currentTab = 'chat';
     let statusInterval = null;
+    let statusPollingGeneration = 0;
+    let statusRequestGeneration = null;
+    let statusRequestPromise = null;
 
     // ---- Tab Routing ----
     async function init() {
@@ -32,9 +35,6 @@ const App = (() => {
         MemoryModule.init();
         SetupModule.init();
 
-        // Start polling status
-        statusInterval = setInterval(pollStatus, 3000);
-        pollStatus();
     }
 
     async function loadWebUIInfo() {
@@ -77,6 +77,13 @@ const App = (() => {
     }
 
     function switchTab(tab) {
+        const targetPanel = document.getElementById(`tab-${tab}`);
+        if (!targetPanel) {
+            console.warn(`Unknown tab: ${tab}`);
+            return;
+        }
+
+        const previousTab = currentTab;
         currentTab = tab;
 
         // Update nav. Chat intentionally has no WebUI menu item.
@@ -85,16 +92,17 @@ const App = (() => {
         navItem?.classList.add('active');
 
         // Update panels
-        const targetPanel = document.getElementById(`tab-${tab}`);
-        if (!targetPanel) {
-            console.warn(`Unknown tab: ${tab}`);
-            return;
-        }
         document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
         targetPanel.classList.add('active');
 
+        if (tab === 'launcher') {
+            startStatusPolling();
+        } else {
+            stopStatusPolling();
+        }
+
         // Trigger module refresh
-        if (tab === 'chat') ChatModule.refresh();
+        if (tab === 'chat' && previousTab !== 'chat') ChatModule.refresh();
         if (tab === 'config') ConfigModule.refresh();
         if (tab === 'launcher') LauncherModule.refresh();
         if (tab === 'terminal') TerminalModule.refresh();
@@ -106,13 +114,48 @@ const App = (() => {
     }
 
     // ---- Status Polling ----
-    async function pollStatus() {
+    function pollStatus() {
+        if (currentTab !== 'launcher') return;
+
+        const requestGeneration = statusPollingGeneration;
+        if (statusRequestPromise && statusRequestGeneration === requestGeneration) {
+            return statusRequestPromise;
+        }
+
+        const request = refreshStatus(requestGeneration);
+        statusRequestPromise = request;
+        statusRequestGeneration = requestGeneration;
+        return request.finally(() => {
+            if (statusRequestPromise === request) {
+                statusRequestPromise = null;
+                statusRequestGeneration = null;
+            }
+        });
+    }
+
+    async function refreshStatus(requestGeneration) {
         try {
             const res = await fetch('/api/status');
             const data = await res.json();
-            updateStatusBar(data);
+            if (currentTab === 'launcher' && requestGeneration === statusPollingGeneration) {
+                updateStatusBar(data);
+            }
         } catch (e) {
             // Server might not be ready
+        }
+    }
+
+    function startStatusPolling() {
+        stopStatusPolling();
+        pollStatus();
+        statusInterval = setInterval(pollStatus, 3000);
+    }
+
+    function stopStatusPolling() {
+        statusPollingGeneration += 1;
+        if (statusInterval !== null) {
+            clearInterval(statusInterval);
+            statusInterval = null;
         }
     }
 
