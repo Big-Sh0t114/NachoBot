@@ -366,7 +366,7 @@ urllib3==2.7.0
     #   nachobot
     #   requests
     #   twine
-uvicorn==0.51.0
+uvicorn==0.53.0
     # via
     #   mcp
     #   nachobot
