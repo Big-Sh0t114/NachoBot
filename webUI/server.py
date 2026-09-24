@@ -10,6 +10,7 @@ import logging
 import uvicorn
 from pathlib import Path
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
@@ -752,6 +753,27 @@ async def db_get_row(table_name: str, row_id: int):
         return await asyncio.to_thread(db_mgr.get_row, table_name, row_id)
     except ValueError as e:
         raise HTTPException(404, str(e))
+
+
+class RowDetailRequest(BaseModel):
+    primary_key: dict[str, Any]
+
+    class Config:
+        extra = "forbid"
+
+
+@app.post("/api/db/tables/{table_name}/detail")
+async def db_detail_row(table_name: str, body: RowDetailRequest):
+    try:
+        return await asyncio.to_thread(
+            db_mgr.get_row_by_primary_key,
+            table_name,
+            body.primary_key,
+        )
+    except ValueError as e:
+        message = str(e)
+        status_code = 404 if message.startswith(("Table not found:", "Row not found:")) else 400
+        raise HTTPException(status_code, message)
 
 
 class RowUpdate(BaseModel):

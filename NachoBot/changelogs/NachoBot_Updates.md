@@ -1,3 +1,5 @@
+9/24
+    WebUI数据管理菜单新增详情页
 9/21
     修复sandbox envelope错误解析所有reply_to_user字段的问题
 9/20

@@ -285,51 +285,10 @@ const DatabaseModule = (() => {
 
     function renderTable(result) {
         const container = document.getElementById('db-table-container');
-        if (result.data.length === 0) {
-            container.innerHTML = '<div class="editor-placeholder"><p>无数据</p></div>';
-            return;
-        }
+        container.innerHTML = buildTableMarkup(result);
+        if (result.data.length === 0) return;
 
         const cols = result.columns;
-        let html = '<div class="db-table-scroll"><table class="db-table"><thead><tr>';
-
-        // Headers with filter icon
-        for (const col of cols) {
-            const isSort = col.name === currentSortBy;
-            const arrow = isSort ? (currentSortOrder === 'asc' ? ' ▲' : ' ▼') : '';
-            const hasFilter = activeFilters[col.name] !== undefined;
-            html += `<th class="db-th ${isSort ? 'sorted' : ''} ${hasFilter ? 'filtered' : ''}" data-col="${col.name}">
-                <span class="db-th-content">
-                    <span class="db-th-label">${escapeHtml(col.name)}${arrow}</span>
-                    <button class="db-th-filter-btn ${hasFilter ? 'active' : ''}" data-col="${col.name}" title="筛选 ${col.name}">
-                        <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M1.5 1.5h13l-5 6v5l-3 2v-7z"/></svg>
-                    </button>
-                </span>
-            </th>`;
-        }
-        if (result.editable) {
-            html += '<th class="db-th db-th-actions">操作</th>';
-        }
-        html += '</tr></thead><tbody>';
-
-        // Rows
-        for (const row of result.data) {
-            html += '<tr>';
-            for (const col of cols) {
-                const val = row[col.name];
-                const display = val === null ? '<span class="db-null">NULL</span>' : escapeHtml(String(val));
-                html += `<td class="db-td">${display}</td>`;
-            }
-            if (result.editable) {
-                html += `<td class="db-td db-td-actions">
-                    <button class="btn-sm btn-edit-row" data-id="${row.id}">✏️</button>
-                    <button class="btn-sm btn-delete-row" data-id="${row.id}">🗑️</button>
-                </td>`;
-            }
-            html += '</tr>';
-        }
-        html += '</tbody></table></div>';
-        container.innerHTML = html;
 
         // Bind sort handlers (click on label area)
         container.querySelectorAll('.db-th-label').forEach(label => {
@@ -364,6 +323,131 @@ const DatabaseModule = (() => {
         container.querySelectorAll('.btn-delete-row').forEach(btn => {
             btn.addEventListener('click', () => confirmDelete(parseInt(btn.dataset.id)));
         });
+
+        container.querySelectorAll('.btn-row-detail').forEach(btn => {
+            btn.addEventListener('click', () => openDetailModal(result, Number(btn.dataset.rowIndex)));
+        });
+
+        container.querySelectorAll('.db-row-detail-available').forEach(row => {
+            const rowIndex = Number(row.dataset.rowIndex);
+            row.addEventListener('dblclick', createRowDetailDoubleClickHandler(result, rowIndex));
+        });
+    }
+
+    function buildTableMarkup(result) {
+        if (result.data.length === 0) {
+            return '<div class="editor-placeholder"><p>无数据</p></div>';
+        }
+
+        const cols = result.columns;
+        let html = '<div class="db-table-scroll"><table class="db-table"><thead><tr>';
+
+        // Headers with filter icon
+        for (const col of cols) {
+            const isSort = col.name === currentSortBy;
+            const arrow = isSort ? (currentSortOrder === 'asc' ? ' ▲' : ' ▼') : '';
+            const hasFilter = activeFilters[col.name] !== undefined;
+            html += `<th class="db-th ${isSort ? 'sorted' : ''} ${hasFilter ? 'filtered' : ''}" data-col="${col.name}">
+                <span class="db-th-content">
+                    <span class="db-th-label">${escapeHtml(col.name)}${arrow}</span>
+                    <button class="db-th-filter-btn ${hasFilter ? 'active' : ''}" data-col="${col.name}" title="筛选 ${col.name}">
+                        <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M1.5 1.5h13l-5 6v5l-3 2v-7z"/></svg>
+                    </button>
+                </span>
+            </th>`;
+        }
+        html += '<th class="db-th db-th-actions">操作</th>';
+        html += '</tr></thead><tbody>';
+
+        // Rows
+        result.data.forEach((row, rowIndex) => {
+            const detailAvailable = hasUsableRowLocator(result, row);
+            html += `<tr${detailAvailable ? ` class="db-row-detail-available" data-row-index="${rowIndex}" title="双击查看详情"` : ''}>`;
+            for (const col of cols) {
+                const val = row[col.name];
+                const display = val === null ? '<span class="db-null">NULL</span>' : escapeHtml(String(val));
+                html += `<td class="db-td">${display}</td>`;
+            }
+            html += buildRowActionCellHtml(result, row, rowIndex);
+            html += '</tr>';
+        });
+        html += '</tbody></table></div>';
+        return html;
+    }
+
+    function buildRowActionCellHtml(result, row, rowIndex) {
+        const hasLocator = hasUsableRowLocator(result, row);
+        let html = '<td class="db-td db-td-actions">';
+        html += `<button class="btn-sm btn-row-detail" data-row-index="${rowIndex}"${hasLocator ? '' : ' disabled'} title="${hasLocator ? '查看完整记录' : '此表没有可用的主键'}">详情</button>`;
+        if (result.editable) {
+            html += `
+                <button class="btn-sm btn-edit-row" data-id="${row.id}">✏️</button>
+                <button class="btn-sm btn-delete-row" data-id="${row.id}">🗑️</button>`;
+        }
+        html += '</td>';
+        return html;
+    }
+
+    function hasUsableRowLocator(result, row) {
+        const locator = result.row_locator_field && row ? row[result.row_locator_field] : null;
+        return locator !== null
+            && typeof locator === 'object'
+            && !Array.isArray(locator)
+            && Object.keys(locator).length > 0;
+    }
+
+    function shouldOpenRowDetailsOnDoubleClick(event) {
+        const target = event && event.target;
+        if (!target || typeof target.closest !== 'function') return true;
+        return !target.closest(
+            '.db-td-actions, button, a, input, select, textarea, [contenteditable]:not([contenteditable="false"]), [role="button"]',
+        );
+    }
+
+    function createRowDetailDoubleClickHandler(result, rowIndex, openDetail = openDetailModal) {
+        return (event) => {
+            const row = result.data[rowIndex];
+            if (!hasUsableRowLocator(result, row) || !shouldOpenRowDetailsOnDoubleClick(event)) return;
+            return openDetail(result, rowIndex);
+        };
+    }
+
+    function renderDetailFieldsHtml(columns, row) {
+        let html = '<div class="db-detail-form">';
+        for (const col of columns) {
+            const value = row[col.name];
+            const display = value === null || value === undefined
+                ? '<span class="db-null">NULL</span>'
+                : escapeHtml(String(value));
+            html += `
+                <div class="db-detail-field">
+                    <div class="db-detail-label">${escapeHtml(col.name)} <span class="db-field-type">${escapeHtml(String(col.type ?? ''))}</span></div>
+                    <pre class="db-detail-value">${display}</pre>
+                </div>`;
+        }
+        html += '</div>';
+        return html;
+    }
+
+    async function requestRowDetail(table, primaryKey) {
+        return apiPost(`/api/db/tables/${encodeURIComponent(table)}/detail`, { primary_key: primaryKey });
+    }
+
+    async function openDetailModal(result, rowIndex) {
+        const row = result.data[rowIndex];
+        const locator = row && result.row_locator_field ? row[result.row_locator_field] : null;
+        if (!locator || typeof locator !== 'object' || Array.isArray(locator) || Object.keys(locator).length === 0) return;
+
+        try {
+            const detail = await requestRowDetail(result.table, locator);
+            showModal(
+                `${result.table} 详情`,
+                renderDetailFieldsHtml(detail.columns, detail.data),
+                [{ label: '关闭', class: 'btn btn-ghost', action: hideModal }],
+            );
+        } catch (e) {
+            toast('加载记录详情失败: ' + e.message, 'error');
+        }
     }
 
     function renderPagination(result) {
@@ -488,5 +572,15 @@ const DatabaseModule = (() => {
         document.getElementById('modal-overlay').classList.add('hidden');
     }
 
-    return { init, refresh };
+    return {
+        init,
+        refresh,
+        __test: {
+            buildTableMarkup,
+            renderDetailFieldsHtml,
+            requestRowDetail,
+            createRowDetailDoubleClickHandler,
+            shouldOpenRowDetailsOnDoubleClick,
+        },
+    };
 })();
