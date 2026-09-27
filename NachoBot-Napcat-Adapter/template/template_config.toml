@@ -10,6 +10,7 @@ host = "localhost"      # Napcat设定的主机地址
 port = 8095             # Napcat设定的端口 
 token = ""              # Napcat设定的访问令牌，若无则留空
 heartbeat_interval = 30 # 与Napcat设置的心跳相同（按秒计）
+media_action_timeout_sec = 240.0 # 视频等媒体发送等待 action 响应的超时时间（秒）
 
 [nachobot_server] # 连接 NachoBot Core 的 ws 服务设置
 host = "127.0.0.1"

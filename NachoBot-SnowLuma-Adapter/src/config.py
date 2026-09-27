@@ -43,6 +43,7 @@ class SnowLumaConfig:
     token: str = ""
     reconnect_delay_sec: float = 5.0
     action_timeout_sec: float = 10.0
+    media_action_timeout_sec: float = 240.0
     heartbeat_sec: float = 30.0
 
     def ws_url(self) -> str:
@@ -166,6 +167,7 @@ def load_config() -> Config:
             token=str(s.get("token", "")),
             reconnect_delay_sec=float(s.get("reconnect_delay_sec", 5.0)),
             action_timeout_sec=float(s.get("action_timeout_sec", 10.0)),
+            media_action_timeout_sec=float(s.get("media_action_timeout_sec", 240.0)),
             heartbeat_sec=float(s.get("heartbeat_sec", 30.0)),
         ),
         nachobot=NachoBotConfig(

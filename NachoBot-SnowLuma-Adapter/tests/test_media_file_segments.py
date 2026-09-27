@@ -14,6 +14,7 @@ if str(_ROOT / "NachoBot") not in sys.path:
 
 from ncnk_message import BaseMessageInfo, FormatInfo, GroupInfo, MessageBase, Seg, UserInfo  # noqa: E402
 from src.bridge import ACCEPT_FORMAT, SnowLumaBridge, get_accept_format  # noqa: E402
+from src.config import global_config  # noqa: E402
 
 
 def test_local_media_paths_translate_to_onebot_segments() -> None:
@@ -72,6 +73,7 @@ def test_videofile_is_sent_as_group_video_and_echoed() -> None:
             "group_id": 722852338,
             "message": [{"type": "video", "data": {"file": "file://C:/tmp/example.mp4"}}],
         },
+        timeout_sec=global_config.snowluma.media_action_timeout_sec,
     )
     bridge.router.send_custom_message.assert_awaited_once_with(
         platform="qq",

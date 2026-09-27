@@ -83,6 +83,9 @@ class NapcatServerConfig(ConfigBase):
     heartbeat_interval: int = 30
     """Napcat心跳间隔时间，单位为秒"""
 
+    media_action_timeout_sec: float = 240.0
+    """视频等媒体发送等待 NapCat action 响应的超时时间，单位为秒"""
+
 
 @dataclass
 class NachobotServerConfig(ConfigBase):

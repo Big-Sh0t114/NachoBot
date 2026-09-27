@@ -1100,7 +1100,18 @@ class SnowLumaBridge:
                     logger.debug("SnowLuma outbound send throttle delay_sec={:.3f} action={}", delay, action)
                     await asyncio.sleep(delay)
                 logger.debug("SnowLuma outbound action start action={} target_id={} segment_count={}", action, target_id or "-", len(segments))
-                response = await self.client.call_action(action, params)
+                contains_video = any(
+                    isinstance(segment, Mapping) and segment.get("type") == "video"
+                    for segment in segments
+                )
+                if contains_video:
+                    response = await self.client.call_action(
+                        action,
+                        params,
+                        timeout_sec=global_config.snowluma.media_action_timeout_sec,
+                    )
+                else:
+                    response = await self.client.call_action(action, params)
                 self._last_send_at = time.monotonic()
             error = self.client.action_error(response)
             if error:

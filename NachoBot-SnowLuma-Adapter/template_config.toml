@@ -9,6 +9,8 @@ path = ""
 token = ""
 reconnect_delay_sec = 5.0
 action_timeout_sec = 10.0
+# 视频等媒体发送可能包含上传/转存过程，需允许更长的 OneBot action 响应时间。
+media_action_timeout_sec = 240.0
 heartbeat_sec = 30.0
 
 [nachobot_server]

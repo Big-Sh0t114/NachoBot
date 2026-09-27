@@ -1039,6 +1039,48 @@ class NoticeSystemEventTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_send_normal_message_uses_media_timeout_for_video(self) -> None:
+        async def scenario():
+            handler = main_send_handler_module.SendHandler()
+            raw_message_base = SimpleNamespace(
+                message_info=SimpleNamespace(
+                    group_info=SimpleNamespace(group_id=100),
+                    user_info=None,
+                ),
+                message_segment=SimpleNamespace(type="videofile", data="C:/tmp/example.mp4"),
+            )
+
+            processed_message = [
+                {"type": "video", "data": {"file": "file://C:/tmp/example.mp4"}}
+            ]
+            with (
+                mock.patch.object(
+                    main_send_handler_module.SendMessageHandleClass,
+                    "process_seg_recursive",
+                    return_value=processed_message,
+                ),
+                mock.patch.object(
+                    main_send_handler_module.nc_message_sender,
+                    "send_message_to_napcat",
+                    new=AsyncMock(return_value={"status": "ok", "data": {"message_id": 322}}),
+                ) as send_mock,
+                mock.patch.object(
+                    main_send_handler_module.nc_message_sender,
+                    "message_sent_back",
+                    new=AsyncMock(),
+                ) as sent_back_mock,
+            ):
+                await handler.send_normal_message(raw_message_base)
+
+            send_mock.assert_awaited_once_with(
+                "send_group_msg",
+                {"group_id": 100, "message": processed_message},
+                timeout_sec=main_send_handler_module.global_config.napcat_server.media_action_timeout_sec,
+            )
+            sent_back_mock.assert_awaited_once_with(raw_message_base, 322)
+
+        asyncio.run(scenario())
+
 
 if __name__ == "__main__":
     unittest.main()
