@@ -1,0 +1,74 @@
+[server]
+host = "127.0.0.1"
+port = 8766
+token = ""
+
+[runtime]
+# 这个配置只服务桌宠；Live2D 只是桌宠当前使用的渲染后端。
+mode = "desktop_pet"
+
+[renderer]
+# 桌宠目录不保存模型资源，默认复用同级 Live2D 适配器中的模型。
+model_path = "../NachoBot-Live2D-Adapter/resources/hiyori_test/runtime/hiyori_pro_t11.model3.json"
+transparent = true
+antialiasing = true
+width = 520
+height = 760
+scale = 0.9
+track_mouse = true
+poke_cooldown_seconds = 4.0
+
+[desktop_pet]
+title = "桃濑日和 · NachoBot 桌宠"
+character_name = "日和"
+chat_header = "桃濑日和 · NachoBot"
+always_on_top = true
+hide_from_taskbar = true
+click_through = false
+remember_position = true
+state_path = "state/desktop_pet_state.json"
+start_position = "bottom_right"
+margin = 24
+min_scale = 0.45
+max_scale = 1.8
+# 固定透明视口内安全缩放，避免放大后人物被裁切。
+fit_to_window = true
+tray_icon = true
+left_click_motion = "Tap"
+double_click_motion = "FlickUp"
+right_click_motion = "Flick"
+idle_motion_groups = ["Flick", "FlickDown", "FlickUp", "Tap", "Tap@Body", "Flick@Body"]
+idle_motion_min_seconds = 18.0
+idle_motion_max_seconds = 40.0
+
+[desktop_pet.chat]
+enabled = true
+backend_url = "http://127.0.0.1:8789"
+# 默认独立窗口；只有明确需要时才改成跟随人物。
+follow_pet = false
+remember_position = true
+window_state_path = "state/desktop_pet_chat_state.json"
+request_timeout_seconds = 8.0
+reply_timeout_seconds = 60.0
+poll_interval_seconds = 0.5
+play_audio = true
+tts_language = "auto"
+max_input_chars = 500
+history_path = "state/desktop_pet_chat_history.json"
+max_history_messages = 100
+
+[adaptation]
+enabled = true
+
+[actions]
+NOD = "FlickDown"
+SHAKE_HEAD = "Flick"
+TURN_LEFT = "Tap@Body"
+TURN_RIGHT = "Flick@Body"
+WINK = "Tap"
+HAPPY = "FlickUp"
+TILT_HEAD = "Tap"
+LOOK_AWAY = "Tap@Body"
+
+[logging]
+level = "INFO"

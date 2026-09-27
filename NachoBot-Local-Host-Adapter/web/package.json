@@ -1,0 +1,13 @@
+{
+  "name": "nachobot-local-vrm-stage",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "@pixiv/three-vrm": "3.5.3",
+    "@pixiv/three-vrm-animation": "3.5.3",
+    "three": "0.180.0"
+  }
+}

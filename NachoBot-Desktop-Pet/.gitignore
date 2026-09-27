@@ -1,0 +1,9 @@
+.venv/
+logs/
+state/
+*.log
+*.out.log
+*.err.log
+desktop_pet_state.json
+desktop_pet_chat_state.json
+desktop_pet_chat_history.json

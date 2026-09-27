@@ -7,6 +7,16 @@ set "PYTHONNOUSERSITE=1"
 set "ROOT=%~dp0"
 set "LIVE2D_DIR=%ROOT%"
 
+if /I "%~1"=="desktop_pet" (
+    if not exist "%ROOT%..\NachoBot-Desktop-Pet\launch_desktop_pet.bat" (
+        echo [ERROR] Independent Desktop Pet launcher not found.
+        pause
+        exit /b 1
+    )
+    call "%ROOT%..\NachoBot-Desktop-Pet\launch_desktop_pet.bat"
+    exit /b %ERRORLEVEL%
+)
+
 if not exist "%LIVE2D_DIR%\" (
     echo [ERROR] Live2D Adapter directory not found: %LIVE2D_DIR%
     pause
@@ -43,8 +53,12 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [NachoBot Live2D Adapter] Starting...
-uv run python -m live2d_adapter --config "config.toml"
+echo [NachoBot Live2D Adapter] Reading runtime mode from config.toml...
+if "%~1"=="" (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%LIVE2D_DIR%launch_live2d.ps1" -ConfigPath "%LIVE2D_DIR%config.toml"
+) else (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%LIVE2D_DIR%launch_live2d.ps1" -ConfigPath "%LIVE2D_DIR%config.toml" -ModeOverride "%~1"
+)
 set "EXIT_CODE=%ERRORLEVEL%"
 
 if not "%EXIT_CODE%"=="0" (

@@ -287,7 +287,12 @@ class TTSModel(BaseTTSModel):
             return
 
         self._current_preset = preset_name
-        params = self.build_parameters(cleaned_text, preset, text_lang=text_lang)
+        params = self.build_parameters(
+            cleaned_text,
+            preset,
+            text_lang=text_lang,
+            split_method=kwargs.get("split_method"),
+        )
 
         timeout = aiohttp.ClientTimeout(total=120, connect=10)
         async with aiohttp.ClientSession(timeout=timeout) as session:

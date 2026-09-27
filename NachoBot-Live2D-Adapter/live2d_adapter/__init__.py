@@ -1,6 +1,19 @@
 """Standalone Live2D rendering adapter for NachoBot."""
 
-from .config import AdapterConfig, ConfigError, ModelAdaptationConfig, load_config
+import os
+
+# Keep machine-readable CLI output (for example --print-launch-config) free of
+# pygame's import-time greeting while leaving normal logging unchanged.
+os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
+
+from .config import (
+    AdapterConfig,
+    ConfigError,
+    ModelAdaptationConfig,
+    RuntimeConfig,
+    load_config,
+)
+from .action_adapter import ActionAdapter, ActionDecision
 from .control_pipeline import (
     ACTION_TO_CANONICAL_ID,
     ALLOWED_EMOTIONS,
@@ -30,6 +43,8 @@ __version__ = "0.1.0"
 __all__ = [
     "PROTOCOL_VERSION",
     "AdapterConfig",
+    "ActionAdapter",
+    "ActionDecision",
     "AvatarCommand",
     "AvatarEvent",
     "AvatarInteraction",
@@ -45,6 +60,7 @@ __all__ = [
     "ModelAdaptationError",
     "ModelMetadata",
     "ProtocolError",
+    "RuntimeConfig",
     "ControlPipeline",
     "PreparedReply",
     "inspect_model",

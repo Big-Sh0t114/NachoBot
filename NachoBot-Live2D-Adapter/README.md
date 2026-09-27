@@ -14,7 +14,8 @@ NachoBot / 平台适配器
 NachoBot-Live2D-Adapter
         │
         ├─ protocol.py   版本化协议
-        ├─ control_pipeline.py  回复解析、校验与一次性控制暂存
+        ├─ control_pipeline.py  回复解析、校验、行为决策与一次性控制暂存
+        ├─ action_adapter.py 平台无关的情绪/问题动作策略
         ├─ server.py     WebSocket 服务
         ├─ runtime.py    协议到渲染命令的转换
         └─ renderer.py   PyGame/OpenGL/Live2D 渲染
@@ -120,7 +121,65 @@ LOOK_AWAY = "LookAway"
 
 ## 启动
 
-双击：
+### Hiyori 桌面宠物
+
+桌宠现在位于同级的 `NachoBot-Desktop-Pet`，模型默认复用本适配器的 `resources\hiyori_test`。
+请双击 `NachoBot-Desktop-Pet\launch_desktop_pet.bat`。旧入口 `launch_desktop_pet.bat`
+仍保留为兼容转发。独立桌宠启动器会同步依赖、
+在后台启动透明窗口并确认 WebSocket 端口实际监听，同时强制打开一个可见的实时日志窗口，按来源汇总
+Core、VoxCPM、TTS、聊天桥和 Live2D 日志。关闭日志窗口不会退出桌宠，重复启动不会堆叠多个日志窗口。
+配置使用相对路径，因此移动整个仓库后
+无需改盘符；使用模型时仍须遵守模型目录中的 Live2D 示例模型许可。
+
+桌宠操作：
+
+- 聊天窗是独立的米白、藏蓝、樱粉配色无边框窗口，默认不与桌宠绑定；可单独拖动、记住位置，桌宠隐藏或鼠标穿透时聊天仍可继续。
+  双方消息按 QQ 式左右气泡排列，输入后按 Enter 发送。
+- 输入条内可直接切换“声音：开 / 闭嘴中”和 TTS 语言（自动、中文、日语、英语）；“说明”会展开命令帮助。
+- 可在 `[desktop_pet.chat].follow_pet = true` 时切换为跟随人物的旧式停靠布局；默认 `false`，点右上角 `—` 可暂时收起，双击人物会重新显示并聚焦。
+- 左键拖动桌宠窗口；双击会聚焦输入条，右键触发动作。
+- `Shift + 左键` 拖动可调整人物在窗口内的位置，滚轮缩放人物；默认 `fit_to_window = true`，会在人物即将被固定透明视口裁剪前停止缩放。
+  如确实使用自定义大画布，可关闭该限制，但需要自行保证模型不超出窗口。
+- 系统托盘菜单可以显示/隐藏、切换鼠标穿透、切换置顶、复位位置或退出。
+- 窗口位置、缩放和开关状态会写入 `NachoBot-Desktop-Pet\state`，不会改动模型资源。
+- 最近 100 条双方消息保存在本地 `desktop_pet_chat_history.json`，重启桌宠后仍可向上翻看；Core 使用固定本机会话身份维持连续问答上下文。
+- Local Host 和 Bilibili 只提供问题/回复元数据，`control_pipeline.py` 会调用 `action_adapter.py` 统一选择 canonical 动作：确认问题按回答点头/摇头、方向问题转向、普通疑问歪头、夸奖/开心身体晃动、害羞移开视线；模型实际动作组仍由本适配器的 `[actions]` 映射解析。
+- NachoBot 后端可继续通过 `ws://127.0.0.1:8766` 发送动作、情绪、视线、说话和音频命令。
+
+桌宠启动器写入 `NachoBot-Desktop-Pet\logs\live2d.log`，日志窗口会持续读取这个结构化日志。
+Live2D 目录只保留渲染后端；也可以直接运行后端的 `live` 模式。
+日志中会明确记录模型适配、窗口边界、双击聚焦、缩放封顶、TTS 音频大小与时长等验收信息。
+
+Live2D 适配器的 `config.toml` 现在默认服务 `live` 模式；桌宠自己的
+`NachoBot-Desktop-Pet\config.toml` 固定使用 `desktop_pet`。如果模型移动了，只需修改桌宠配置的
+`model_path`；更换角色后可同步修改 `character_name`、`chat_header` 和 `title`，无需改 Python 代码。
+
+脚边输入框支持：
+
+- 普通文字：经 `NachoBot-Local-Host-Adapter` 发送给 NachoBot Core，回答后自动播放本地语音。
+- `/说 内容`：不经过 AI，直接生成并朗读指定内容。
+- `/闭嘴`：继续显示 Core 的文字回答，但立即停止且不再生成 TTS 或口型；`/开口` 恢复。
+- `/语言 自动|中文|日语|英语`：设置后续 TTS 的语言提示；默认“自动”会让 VoxCPM2 自行识别。
+- `/动作 开心|点头|摇头|挥手|害羞` 和 `/表情 开心|害羞|生气|惊讶|悲伤|正常`。
+- `/置顶`、`/穿透`、`/隐藏`、`/复位`。
+- `/打开 记事本|计算器|文件管理器`；只执行这三个白名单程序，不接受任意 Shell 命令。
+- `/帮助`：在输入框内显示完整命令说明。
+
+输入框中按 `Ctrl + Enter` 会把当前文字直接朗读，不经过 AI；闭嘴模式下会提示先恢复声音。
+
+桌宠模式下，`NachoBot-Desktop-Pet\launch_desktop_pet.bat` 会一并检查并启动 NachoBot Core、本机问答桥和 VoxCPM2 TTS；地址由
+`[desktop_pet.chat].backend_url` 配置。服务不可用时输入框会显示明确错误，不会静默执行。
+
+### Docker 边界
+
+Docker 只负责 Core、Local Host、TTS 等后台服务；透明 Live2D 桌面窗口和 Tk 聊天窗必须运行在 Windows 宿主机，
+不能把 `desktop_pet` 模式放进普通 Linux 容器。项目已有 Live2D WebSocket 容器配置，适合无 GUI 的 `live` 模式；
+桌宠采用混合部署：宿主机执行 `launch_desktop_pet.bat`，后台服务可使用仓库根目录的 Core Compose，并将宿主机端口
+映射到 `8000`/`8789`。当前机器未检测到 Docker 引擎，因此本次只保留可审计的 Compose/文档边界，不把“容器启动成功”冒充为桌宠验收。
+
+### 通用适配器
+
+将 `config.toml` 中的 `mode` 改为 `live` 后，仍双击同一个入口：
 
 ```text
 launch_live2d.bat

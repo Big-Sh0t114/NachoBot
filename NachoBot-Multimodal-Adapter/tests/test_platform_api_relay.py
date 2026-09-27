@@ -1,6 +1,7 @@
 import asyncio
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 
 from fastapi import FastAPI
@@ -11,6 +12,21 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import main  # noqa: E402
+
+
+def _write_test_config() -> Path:
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        suffix=".toml",
+        encoding="utf-8",
+        delete=False,
+    ) as config_file:
+        config_file.write(
+            "[server]\nhost = '127.0.0.1'\nport = 9880\n"
+            "[enabled_tts]\nenabled = []\n"
+            "[tts_base_config]\nstream_mode = false\npost_process = false\n"
+        )
+        return Path(config_file.name)
 
 
 class HttpFacadeBoundaryTests(unittest.TestCase):
@@ -35,11 +51,11 @@ class HttpFacadeBoundaryTests(unittest.TestCase):
             _initialized = True
             emotion_ready = True
 
-        pipeline = main.TTSPipeline(
-            main.ADAPTER_ROOT / "configs" / "base.toml",
-            backend="Vox",
-            model=FakeModel(),
-        )
+        config_path = _write_test_config()
+        try:
+            pipeline = main.TTSPipeline(config_path, backend="Vox", model=FakeModel())
+        finally:
+            config_path.unlink(missing_ok=True)
 
         routes = {
             (route.path, tuple(sorted(route.methods or ())))
@@ -56,11 +72,11 @@ class HttpFacadeBoundaryTests(unittest.TestCase):
             _initialized = True
             emotion_ready = True
 
-        pipeline = main.TTSPipeline(
-            main.ADAPTER_ROOT / "configs" / "base.toml",
-            backend="Vox",
-            model=FakeModel(),
-        )
+        config_path = _write_test_config()
+        try:
+            pipeline = main.TTSPipeline(config_path, backend="Vox", model=FakeModel())
+        finally:
+            config_path.unlink(missing_ok=True)
         health = next(route.endpoint for route in pipeline.app.routes if route.path == "/api/health")
 
         async def scenario() -> None:

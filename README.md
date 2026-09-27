@@ -139,6 +139,8 @@ Bilibili、Discord 和 UniversalVC 按需另行启动
 
 🎵 <b><a href="./NachoBot-Multimodal-Adapter">多模态适配器</a></b>：文本转语音、视觉理解与语音识别的本地服务启动
 
+🧸 <b><a href="./NachoBot-Desktop-Pet">Desktop Pet 桌宠</a></b>：独立桌宠前端、独立聊天窗、日志窗口与 Live2D 渲染后端连接
+
 </td>
 </tr>
 </table>

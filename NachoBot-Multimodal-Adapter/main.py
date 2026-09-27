@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 
@@ -72,6 +73,8 @@ class WebUITTSRequest(BaseModel):
     text: str = Field(min_length=1, max_length=10_000)
     platform: str = Field(default="webui", max_length=64)
     text_lang: str | None = Field(default=None, max_length=32)
+    split_method: str | None = Field(default=None, pattern=r"^cut[0-5]$")
+    voice_preset: str | None = Field(default=None, max_length=64)
 
 
 class TTSPipeline:
@@ -231,6 +234,47 @@ class TTSPipeline:
             except Exception as exc:
                 logger.exception("TTS synthesis failed")
                 raise HTTPException(status_code=502, detail=f"TTS generation failed: {exc}") from exc
+
+        @self.app.post("/api/tts-stream")
+        async def tts_stream_endpoint(body: WebUITTSRequest) -> StreamingResponse:
+            """Expose VoxCPM's raw PCM stream for low-latency desktop playback."""
+
+            if not self.ready:
+                raise HTTPException(status_code=503, detail="TTS runtime is not ready")
+            text = body.text.strip()
+            if not text:
+                raise HTTPException(status_code=400, detail="TTS text cannot be empty")
+            stream_method = getattr(self.model, "tts_stream", None)
+            if not callable(stream_method):
+                raise HTTPException(status_code=501, detail="当前 TTS 引擎不支持流式输出")
+
+            async def audio_stream():
+                try:
+                    async with self._webui_tts_lock:
+                        if not self.ready:
+                            return
+                        async for chunk in stream_method(
+                            text=text,
+                            platform=body.platform,
+                            text_lang=body.text_lang,
+                            preset_name=body.voice_preset,
+                            split_method=body.split_method,
+                        ):
+                            if chunk:
+                                yield chunk
+                except Exception:
+                    logger.exception("Streaming TTS synthesis failed")
+
+            return StreamingResponse(
+                audio_stream(),
+                media_type="application/octet-stream",
+                headers={
+                    "Cache-Control": "no-store",
+                    "X-Sample-Rate": "48000",
+                    "X-Sample-Width": "2",
+                    "X-Channels": "1",
+                },
+            )
 
     def _health_payload(self) -> dict[str, Any]:
         ready = self.ready
