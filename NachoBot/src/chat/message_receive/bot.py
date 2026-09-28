@@ -118,6 +118,41 @@ def _check_ban_regex(text: str, chat: ChatStream, userinfo: Optional[UserInfo]) 
     return False
 
 
+def _sanitize_message_data_for_log(message_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a shallow log-only copy with large Base64 segment payloads redacted."""
+    sanitized = dict(message_data)
+    message_segment = message_data.get("message_segment")
+    if not isinstance(message_segment, dict):
+        return sanitized
+
+    sanitized_segment = dict(message_segment)
+    segments = message_segment.get("data")
+    if not isinstance(segments, list):
+        sanitized["message_segment"] = sanitized_segment
+        return sanitized
+
+    sanitized_segments = []
+    for segment in segments:
+        if not isinstance(segment, dict):
+            sanitized_segments.append(segment)
+            continue
+
+        sanitized_item = dict(segment)
+        payload = segment.get("data")
+        segment_type = str(segment.get("type", "")).lower()
+        if segment_type in {"image", "emoji", "voice", "audio", "video"} and isinstance(payload, str) and len(payload) >= 1024:
+            sample = payload[:256]
+            base64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\r\n"
+            if all(char in base64_chars for char in sample):
+                sanitized_item["data"] = f"<base64 omitted: {len(payload)} chars>"
+
+        sanitized_segments.append(sanitized_item)
+
+    sanitized_segment["data"] = sanitized_segments
+    sanitized["message_segment"] = sanitized_segment
+    return sanitized
+
+
 class ChatBot:
     def __init__(self):
         self.bot = None  # bot 实例引用
@@ -630,7 +665,7 @@ class ChatBot:
 
             # Debug Log: Trace incoming platform
             logger.debug(f"Incoming Message Platform: {platform}, Message Type: {message_data.get('type')}")
-            logger.debug(f"Full message data: {message_data}")
+            logger.debug(f"Full message data: {_sanitize_message_data_for_log(message_data)}")
 
             if message_data["message_info"].get("group_info") is not None:
                 message_data["message_info"]["group_info"]["group_id"] = str(

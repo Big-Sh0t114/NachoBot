@@ -21,6 +21,36 @@ from ncnk_message import (
 
 
 class SystemEventContractTests(unittest.TestCase):
+    def test_message_log_sanitizer_redacts_media_base64_without_mutating_input(self):
+        import src.chat.message_receive.bot as bot_module
+
+        image_payload = "A" * 2048
+        long_text = "A" * 2048
+        video_metadata = {"url": "https://example.invalid/video.mp4", "file_size": 1234}
+        message_data = {
+            "message_info": {"platform": "qq"},
+            "message_segment": {
+                "type": "seglist",
+                "data": [
+                    {"type": "image", "data": image_payload},
+                    {"type": "text", "data": long_text},
+                    {"type": "video", "data": video_metadata},
+                ],
+            },
+        }
+
+        sanitized = bot_module._sanitize_message_data_for_log(message_data)
+
+        self.assertEqual(
+            sanitized["message_segment"]["data"][0]["data"],
+            "<base64 omitted: 2048 chars>",
+        )
+        self.assertEqual(sanitized["message_segment"]["data"][1]["data"], long_text)
+        self.assertEqual(sanitized["message_segment"]["data"][2]["data"], video_metadata)
+        self.assertEqual(message_data["message_segment"]["data"][0]["data"], image_payload)
+        self.assertIsNot(sanitized["message_segment"], message_data["message_segment"])
+        self.assertIsNot(sanitized["message_segment"]["data"], message_data["message_segment"]["data"])
+
     def test_fast_poke_is_registered_as_idempotent_bot_action_for_context(self):
         from src.chat.message_receive.bot import ChatBot
         from src.chat.utils.chat_message_builder import build_readable_actions, build_readable_messages
