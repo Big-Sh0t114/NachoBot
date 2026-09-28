@@ -310,22 +310,57 @@ class _WindowsJobFacade:
         capability.closed = True
 
 
-def _read_tts_service_endpoint(root_dir: Path) -> str:
-    """Resolve the public unified TTS Runtime endpoint on port 9880."""
+def _read_tts_runtime_settings(root_dir: Path) -> tuple[str, int, int]:
+    """Resolve public TTS host/port and the selected backend's private port."""
 
+    adapter_dir = root_dir / "NachoBot-Multimodal-Adapter"
+    config_dir = adapter_dir / "configs"
     host = "127.0.0.1"
-    config_path = root_dir / "NachoBot-Multimodal-Adapter" / "configs" / "base.toml"
+    public_port = 9880
+    private_port = 9881
+    backend_name = ""
+
     try:
         import tomlkit
 
-        document = tomlkit.parse(config_path.read_text(encoding="utf-8"))
-        server = document.get("server", {})
+        base_document = tomlkit.parse((config_dir / "base.toml").read_text(encoding="utf-8"))
+        server = base_document.get("server", {})
         host = str(server.get("host", host)).strip() or host
+        public_port = int(server.get("port", public_port))
+
+        enabled = base_document.get("enabled_tts", {}).get("enabled", [])
+        if isinstance(enabled, (list, tuple)) and enabled:
+            backend_name = str(enabled[0]).strip().lower()
+
+        backend_config_name = {
+            "vox": "vox.toml",
+            "voxcpm": "vox.toml",
+            "gpt_sovits": "gpt-sovits.toml",
+            "gpt-sovits": "gpt-sovits.toml",
+            "gptsovits": "gpt-sovits.toml",
+        }.get(backend_name)
+        if backend_config_name:
+            backend_document = tomlkit.parse(
+                (config_dir / backend_config_name).read_text(encoding="utf-8")
+            )
+            private_port = int(backend_document.get("tts", {}).get("port", private_port))
     except Exception:
         pass
+
+    if not 1 <= public_port <= 65535:
+        public_port = 9880
+    if not 1 <= private_port <= 65535:
+        private_port = 9881
+    return host, public_port, private_port
+
+
+def _read_tts_service_endpoint(root_dir: Path) -> str:
+    """Resolve the configured public unified TTS Runtime endpoint."""
+
+    host, port, _ = _read_tts_runtime_settings(root_dir)
     if host in {"0.0.0.0", "::"}:
         host = "127.0.0.1"
-    return f"http://{host}:9880"
+    return f"http://{host}:{port}"
 
 
 def _read_perception_service_endpoint(root_dir: Path) -> str:
@@ -729,7 +764,9 @@ def _register_services(root_dir: Path | str | None = None):
             )
         except Exception:
             pass
-    # 3. Parse Perception configs/perception.toml
+    # 3. Parse Multimodal runtime configs
+    _, tts_port, _ = _read_tts_runtime_settings(base_root)
+
     perception_host = "127.0.0.1"
     perception_port = 9874
     perception_config_path = base_root / "NachoBot-Multimodal-Adapter" / "configs" / "perception.toml"
@@ -819,8 +856,8 @@ def _register_services(root_dir: Path | str | None = None):
         # ── Multimodal FULL ──
         ServiceDef("tts_runtime_full", "统一 TTS Runtime", "tts_full",
                    "NachoBot-Multimodal-Adapter", [],
-                   port=9880, wait_port=True, order=1,
-                   detail="GPT-SoVITS / VoxCPM supervised runtime · :9880"),
+                   port=tts_port, wait_port=True, order=1,
+                   detail=f"GPT-SoVITS / VoxCPM supervised runtime · :{tts_port}"),
         ServiceDef("perception", "多模态感知运行时（FULL）", "tts_full",
                    "NachoBot-Multimodal-Adapter",
                    ["uv", "run", "python", "-m", "nachobot_multimodal.api_server"],
@@ -831,8 +868,8 @@ def _register_services(root_dir: Path | str | None = None):
         # ── Multimodal LITE ──
         ServiceDef("tts_runtime_lite", "统一 TTS Runtime", "tts_lite",
                    "NachoBot-Multimodal-Adapter", [],
-                   port=9880, wait_port=True, order=1,
-                   detail="GPT-SoVITS / VoxCPM supervised runtime · :9880"),
+                   port=tts_port, wait_port=True, order=1,
+                   detail=f"GPT-SoVITS / VoxCPM supervised runtime · :{tts_port}"),
 
         # POTATO intentionally has no Multimodal service definition.
 
@@ -898,10 +935,10 @@ def _register_services(root_dir: Path | str | None = None):
         ),
         GroupDef("tts_full", "多模态服务（FULL）", "🎙️",
                    ["tts_runtime_full", "perception"],
-                   f"统一 TTS Runtime :9880 + :{perception_port} 本地感知"),
+                   f"统一 TTS Runtime :{tts_port} + :{perception_port} 本地感知"),
         GroupDef("tts_lite", "多模态服务（LITE）", "🎙️",
                    ["tts_runtime_lite"],
-                   "统一 TTS Runtime :9880（感知走远程 API）"),
+                   f"统一 TTS Runtime :{tts_port}（感知走远程 API）"),
         GroupDef("potato", "核心模式（POTATO）", "🥔", [],
                    "仅启动 NachoBot Core；不启动本地 Multimodal 服务"),
         GroupDef("bilibili", "Bilibili 直播", "📺", ["bilibili"],
@@ -4227,7 +4264,7 @@ class ProcessManager:
         return sdef.cmd, sdef.cwd, {}
 
     def _resolve_tts_runtime_cmd(self) -> tuple[list[str], str, dict[str, str]]:
-        """Start one public 9880 runtime that supervises its private backend."""
+        """Start the configured public TTS runtime and selected private backend."""
         adapter_dir = self.root / "NachoBot-Multimodal-Adapter"
         entrypoint = adapter_dir / "scripts" / "container_tts_entrypoint.py"
         if not entrypoint.is_file():
@@ -4235,11 +4272,12 @@ class ProcessManager:
 
         runtime = MultimodalRuntimeManager.normalize_profile(self._launch_runtime)
         python = MultimodalRuntimeManager.require_python(runtime)
+        public_host, public_port, private_port = _read_tts_runtime_settings(self.root)
         cmd = [
             str(python), str(entrypoint),
-            "--host", "0.0.0.0",
-            "--port", "9880",
-            "--backend-port", "9881",
+            "--host", public_host,
+            "--port", str(public_port),
+            "--backend-port", str(private_port),
         ]
         torch_index = (
             "https://download.pytorch.org/whl/cpu"
