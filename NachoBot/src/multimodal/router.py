@@ -6,6 +6,7 @@ import asyncio
 import logging
 from dataclasses import replace
 from typing import Any, Iterable, Mapping, Optional
+from urllib.parse import urlsplit
 
 from ncnk_message import Seg
 
@@ -21,7 +22,6 @@ from .contracts import (
     normalize_operation_payload,
 )
 from .profile import RuntimeProfile, get_runtime_profile, normalize_runtime_profile
-from .remote import RemotePerceptionProvider
 
 logger = logging.getLogger("core.multimodal")
 
@@ -61,6 +61,7 @@ class CoreMultimodalRouter:
         profile: RuntimeProfile | str | None = None,
         local: Any = None,
         remote: Any = None,
+        model_config: Any = None,
         local_endpoint: str | None = None,
         tts_endpoint: str | None = None,
         local_timeout: float = 30.0,
@@ -75,7 +76,12 @@ class CoreMultimodalRouter:
                 timeout=local_timeout,
             )
         )
-        self.remote = remote if remote is not None else RemotePerceptionProvider()
+        # The legacy remote injection remains accepted for callers that only
+        # construct this facade. Perception dispatch is owned by the model
+        # group, not by a local/remote provider chain.
+        self.remote = remote
+        self._model_config = model_config
+        self._model_requests: dict[str, tuple[Any, tuple[str, ...], Any]] = {}
         self._observed_health: Mapping[str, Any] | None = None
 
     @property
@@ -147,38 +153,162 @@ class CoreMultimodalRouter:
         return self._observed_health
 
     async def perceive(self, request: MediaInput) -> PerceptionResult:
-        # Canonicalize and bound the payload before either local or remote
-        # provider sees it.  This keeps the fallback path from bypassing the
-        # transport limits enforced by LocalMultimodalClient.
+        # Keep the semantic task before format conversion or transport.
         encoded, _ = normalize_operation_payload(request.operation, request.data)
         request = replace(request, data=encoded)
+        task_name = request.task or {
+            AUDIO_TRANSCRIBE_V1: "voice",
+            IMAGE_DESCRIBE_V1: "vlm",
+            VIDEO_UNDERSTAND_V1: "video",
+        }[request.operation]
         attempts: list[str] = []
-        providers = ([("local", self.local), ("remote", self.remote)] if self.profile.allows_local_perception else [("remote", self.remote)])
-        for provider_name, provider in providers:
-            attempts.append(provider_name)
+        if self.profile is not RuntimeProfile.POTATO:
             try:
-                result = await provider.perceive(request)
-                if result.text.strip():
-                    return replace(result, attempted=tuple(attempts), degraded=False)
+                from src.llm_models.exceptions import ModelAttemptFailed
+                from src.llm_models.model_client.base_client import APIResponse
+                from src.llm_models.utils_model import ModelCandidateUnavailable
+
+                config, llm = self._request_for_task(task_name)
+
+                async def execute_candidate(model: Any, provider: Any, default_attempt: Any) -> Any:
+                    attempts.append(model.name)
+                    if not self._is_local_perception_provider(provider):
+                        response = await default_attempt()
+                        if not str(response.content or "").strip():
+                            raise ModelAttemptFailed(f"model '{model.name}' returned empty perception text")
+                        return response
+                    if not self.profile.allows_local_perception:
+                        raise ModelCandidateUnavailable("local perception disabled by runtime profile")
+                    try:
+                        capabilities = await self.local.health()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        raise ModelAttemptFailed("local runtime unavailable", exc) from exc
+                    if not isinstance(capabilities, Mapping) or not self._component_ready(capabilities):
+                        raise ModelCandidateUnavailable("local runtime is not ready")
+                    operations = capabilities.get("operations")
+                    if not isinstance(operations, (list, tuple, set)) or request.operation not in operations:
+                        raise ModelCandidateUnavailable("local runtime does not provide the operation")
+                    loaded_models = capabilities.get("models")
+                    loaded_identifier = loaded_models.get(request.operation) if isinstance(loaded_models, Mapping) else None
+                    selected_identifier = getattr(model, "model_identifier", model.name)
+                    if str(loaded_identifier or "").casefold() != str(selected_identifier).casefold():
+                        raise ModelCandidateUnavailable("local runtime does not serve the selected model")
+                    try:
+                        result = await self.local.perceive(request)
+                        if not result.text.strip():
+                            raise RuntimeError("empty local perception text")
+                        return APIResponse(content=result.text)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        reason = getattr(exc, "reason", "inference_failure")
+                        raise ModelAttemptFailed(f"local perception {reason}", exc) from exc
+
+                if request.operation == AUDIO_TRANSCRIBE_V1:
+                    text, winner = await llm.generate_response_for_voice_with_model(
+                        request.data, candidate_executor=execute_candidate
+                    )
+                elif request.operation == IMAGE_DESCRIBE_V1:
+                    text, (_, winner, _) = await llm.generate_response_for_image(
+                        request.prompt,
+                        request.data,
+                        request.media_format or "png",
+                        temperature=self._metadata_number(request.metadata, "temperature"),
+                        max_tokens=self._metadata_int(request.metadata, "max_tokens"),
+                        extra_params=self._extra_params(request.metadata),
+                        candidate_executor=execute_candidate,
+                    )
+                else:
+                    text, (_, winner, _) = await llm.generate_response_for_video(
+                        request.prompt,
+                        request.data,
+                        request.media_format or "mp4",
+                        temperature=self._metadata_number(request.metadata, "temperature"),
+                        max_tokens=self._metadata_int(request.metadata, "max_tokens"),
+                        extra_params=self._extra_params(request.metadata),
+                        candidate_executor=execute_candidate,
+                    )
+                provider = config.get_provider(config.get_model_info(winner).api_provider)
+                backend = "local" if self._is_local_perception_provider(provider) else "remote"
+                return PerceptionResult(
+                    operation=request.operation,
+                    text=str(text or "").strip()[:MAX_TEXT_CHARS],
+                    provider=backend,
+                    attempted=tuple(attempts),
+                    metadata={"model": winner, "task": task_name},
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                # Keep errors bounded and never include media payloads/tokens.
-                logger.warning("%s perception provider %s failed: %s", request.operation, provider_name, type(exc).__name__)
+                logger.warning("%s model group %s exhausted: %s", request.operation, task_name, type(exc).__name__)
         return PerceptionResult(
             operation=request.operation,
             text=_failure_text(request.operation),
             provider="degraded",
             degraded=True,
             attempted=tuple(attempts),
-            error="perception providers unavailable",
+            error="perception model group unavailable",
         )
+
+    def _request_for_task(self, task_name: str) -> tuple[Any, Any]:
+        if self._model_config is None:
+            from src.config.config import model_config
+
+            self._model_config = model_config
+        config = self._model_config
+        task = getattr(config.model_task_config, task_name, None)
+        if task is None or not getattr(task, "model_list", None):
+            raise ValueError(f"perception model group {task_name} is empty")
+        model_names = tuple(task.model_list)
+        cached = self._model_requests.get(task_name)
+        if cached is None or cached[0] is not task or cached[1] != model_names:
+            from src.llm_models.utils_model import LLMRequest
+
+            cached = (task, model_names, LLMRequest(model_set=task, request_type=task_name, config=config))
+            self._model_requests[task_name] = cached
+        return config, cached[2]
+
+    @staticmethod
+    def _is_local_perception_provider(provider: Any) -> bool:
+        try:
+            url = urlsplit(str(getattr(provider, "base_url", "") or ""))
+            return url.port == 9874 and url.hostname in {"127.0.0.1", "localhost", "::1"}
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _metadata_number(metadata: Mapping[str, Any], key: str) -> float | None:
+        try:
+            return float(metadata.get(key))
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _metadata_int(metadata: Mapping[str, Any], key: str) -> int | None:
+        try:
+            value = int(metadata.get(key))
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
+
+    @staticmethod
+    def _extra_params(metadata: Mapping[str, Any]) -> dict[str, Any] | None:
+        value = metadata.get("extra_params") if isinstance(metadata, Mapping) else None
+        return dict(value) if isinstance(value, Mapping) else None
 
     async def transcribe(self, audio_base64: str, **kwargs: Any) -> PerceptionResult:
         return await self.perceive(MediaInput(operation=AUDIO_TRANSCRIBE_V1, data=audio_base64, **kwargs))
 
     async def describe_image(self, image_base64: str, **kwargs: Any) -> PerceptionResult:
-        return await self.perceive(MediaInput(operation=IMAGE_DESCRIBE_V1, data=image_base64, **kwargs))
+        return await self.perceive(MediaInput(operation=IMAGE_DESCRIBE_V1, data=image_base64, task="vlm", **kwargs))
+
+    async def describe_emoji(self, image_base64: str, **kwargs: Any) -> PerceptionResult:
+        return await self.perceive(MediaInput(operation=IMAGE_DESCRIBE_V1, data=image_base64, task="vlm", **kwargs))
+
+    async def describe_image_fast(self, image_base64: str, **kwargs: Any) -> PerceptionResult:
+        return await self.perceive(MediaInput(operation=IMAGE_DESCRIBE_V1, data=image_base64, task="vlm_fast", **kwargs))
 
     async def understand_video(self, video_base64: str, **kwargs: Any) -> PerceptionResult:
         return await self.perceive(MediaInput(operation=VIDEO_UNDERSTAND_V1, data=video_base64, **kwargs))

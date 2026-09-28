@@ -11,14 +11,22 @@ import asyncio
 import base64
 import inspect
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import import_module
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional
 
 
 class UnsupportedOperation(RuntimeError):
     """The local perception runtime cannot serve a typed operation."""
+
+
+class RuntimeUnavailable(UnsupportedOperation):
+    """The local model process is disabled or not ready."""
+
+
+class LocalBusy(RuntimeError):
+    """The Florence worker cannot accept another bounded request."""
 
 
 @dataclass(frozen=True)
@@ -27,6 +35,7 @@ class LocalCapabilities:
 
     operations: tuple[str, ...]
     ready: bool
+    models: Mapping[str, str] = field(default_factory=dict)
     profile: str = "local"
     error: Optional[str] = None
     perception_enabled: bool = True
@@ -37,6 +46,7 @@ class LocalCapabilities:
     def to_dict(self) -> dict[str, Any]:
         return {
             "operations": list(self.operations),
+            "models": dict(self.models),
             "ready": self.ready,
             "profile": self.profile,
             "error": self.error,
@@ -104,6 +114,13 @@ class LocalMultimodalRuntime:
         self._asr_loader = asr_loader
         self._vlm_loader = vlm_loader
         self._preload_lock = asyncio.Lock()
+        # The semaphore follows the worker, not the HTTP request. A cancelled
+        # request cannot release Florence while its to_thread call still runs.
+        self._vlm_slot = asyncio.Semaphore(1)
+        self._vlm_admission = asyncio.Lock()
+        self._vlm_pending = 0
+        self._vlm_max_pending = 2  # one running and at most one waiting
+        self._vlm_queue_timeout = 0.5
         self._preload_started = False
         self._ready = False
         self._preload_error: str | None = (
@@ -197,6 +214,10 @@ class LocalMultimodalRuntime:
         return LocalCapabilities(
             operations=operations,
             ready=self._ready,
+            models={
+                self.AUDIO: "zh-xlarge-int8-2025-06-30",
+                self.IMAGE: "Florence-2",
+            } if self.perception_enabled else {},
             error=self._preload_error,
             perception_enabled=self.perception_enabled,
             perception_disabled=not self.perception_enabled,
@@ -218,13 +239,13 @@ class LocalMultimodalRuntime:
         del media_format, prompt
         if not self.perception_enabled:
             if self.no_local_models:
-                raise UnsupportedOperation("local multimodal models are disabled")
-            raise UnsupportedOperation("local perception is disabled")
+                raise RuntimeUnavailable("local multimodal models are disabled")
+            raise RuntimeUnavailable("local perception is disabled")
         if not self._ready:
             # Do not call preload here: request-time lazy loading is expressly
             # forbidden, and a failed startup must remain latched.
             detail = self._preload_error or "local perception is not ready"
-            raise UnsupportedOperation(detail)
+            raise RuntimeUnavailable(detail)
         if not isinstance(data, str) or not data.strip():
             raise ValueError("media payload is empty")
 
@@ -238,13 +259,52 @@ class LocalMultimodalRuntime:
             # Validate the encoded payload before passing it to Florence's
             # service-owned caption policy.
             _decode_bounded(data, 16 * 1024 * 1024)
-            value = await asyncio.to_thread(self._image_captioner, data)
-            if inspect.isawaitable(value):
-                value = await value
+            value = await self._run_florence(data)
             return str(value or "").strip()
         if operation == self.VIDEO:
             raise UnsupportedOperation("local video understanding is unsupported")
         raise UnsupportedOperation(f"unsupported local operation: {operation}")
+
+    async def _run_florence(self, data: str) -> Any:
+        async with self._vlm_admission:
+            if self._vlm_pending >= self._vlm_max_pending:
+                raise LocalBusy("Florence worker is busy")
+            self._vlm_pending += 1
+        try:
+            await asyncio.wait_for(self._vlm_slot.acquire(), timeout=self._vlm_queue_timeout)
+        except asyncio.TimeoutError as exc:
+            self._vlm_pending -= 1
+            raise LocalBusy("Florence queue wait exceeded") from exc
+        except BaseException:
+            self._vlm_pending -= 1
+            raise
+
+        async def infer() -> Any:
+            value = await asyncio.to_thread(self._image_captioner, data)
+            if inspect.isawaitable(value):
+                value = await value
+            return value
+
+        try:
+            worker = asyncio.create_task(infer())
+        except BaseException:
+            self._vlm_slot.release()
+            self._vlm_pending -= 1
+            raise
+
+        def release_capacity(completed: asyncio.Task[Any]) -> None:
+            self._vlm_slot.release()
+            self._vlm_pending -= 1
+            if not completed.cancelled():
+                completed.exception()  # consume errors after client cancellation
+
+        try:
+            return await asyncio.shield(worker)
+        finally:
+            if worker.done():
+                release_capacity(worker)
+            else:
+                worker.add_done_callback(release_capacity)
 
 
 def _decode_bounded(data: str, limit: int) -> bytes:

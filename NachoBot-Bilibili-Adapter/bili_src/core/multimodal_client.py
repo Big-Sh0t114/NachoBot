@@ -111,11 +111,13 @@ class CoreMultimodalClient:
         *,
         prompt: str = "",
         metadata: Optional[Mapping[str, Any]] = None,
+        task: str = "vlm",
     ) -> Mapping[str, Any]:
         return await self._post(
             "/api/multimodal/perception",
             {
                 "operation": "image.describe.v1",
+                "task": task,
                 "data": _encode_bytes(image_bytes, max_bytes=MAX_IMAGE_BYTES),
                 "media_format": "jpeg",
                 "mime_type": "image/jpeg",
@@ -123,6 +125,15 @@ class CoreMultimodalClient:
                 "metadata": dict(metadata or {}),
             },
         )
+
+    async def describe_image_fast(
+        self,
+        image_bytes: bytes,
+        *,
+        prompt: str = "",
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> Mapping[str, Any]:
+        return await self.describe_image(image_bytes, prompt=prompt, metadata=metadata, task="vlm_fast")
 
     async def synthesize_tts(
         self,

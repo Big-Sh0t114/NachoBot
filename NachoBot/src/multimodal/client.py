@@ -26,6 +26,14 @@ def _clean_endpoint(value: str | None, default: str) -> str:
     return endpoint
 
 
+class LocalPerceptionError(RuntimeError):
+    """Bounded failure category returned by the local execution backend."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
 class LocalMultimodalClient:
     """Call typed 9874 endpoints without importing local model code."""
 
@@ -70,12 +78,26 @@ class LocalMultimodalClient:
         path: str,
         **kwargs: Any,
     ) -> Mapping[str, Any]:
-        if self._client is not None:
-            response = await self._client.request(method, f"{endpoint}{path}", **kwargs)
-        else:
-            async with httpx.AsyncClient(timeout=self.timeout, trust_env=False) as client:
-                response = await client.request(method, f"{endpoint}{path}", **kwargs)
-        response.raise_for_status()
+        try:
+            if self._client is not None:
+                response = await self._client.request(method, f"{endpoint}{path}", **kwargs)
+            else:
+                async with httpx.AsyncClient(timeout=self.timeout, trust_env=False) as client:
+                    response = await client.request(method, f"{endpoint}{path}", **kwargs)
+            response.raise_for_status()
+        except httpx.TimeoutException as exc:
+            raise LocalPerceptionError("timeout") from exc
+        except httpx.HTTPStatusError as exc:
+            reason = "inference_failure"
+            try:
+                payload = exc.response.json()
+                if isinstance(payload, Mapping) and isinstance(payload.get("error"), Mapping):
+                    code = payload["error"].get("code")
+                    if code in {"busy", "unsupported", "runtime_unavailable", "inference_failure"}:
+                        reason = code
+            except (ValueError, TypeError):
+                pass
+            raise LocalPerceptionError(reason) from exc
         payload = response.json()
         if not isinstance(payload, Mapping):
             raise RuntimeError("local multimodal runtime returned a non-object response")

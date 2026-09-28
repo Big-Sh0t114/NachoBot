@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import asyncio
 import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
+
+import httpx
 
 from ncnk_message import Seg
 
@@ -18,8 +19,7 @@ from src.multimodal.contracts import (
     decode_bounded_base64,
     max_base64_chars,
 )
-from src.multimodal.client import LocalMultimodalClient
-from src.multimodal.remote import remote_task_config
+from src.multimodal.client import LocalMultimodalClient, LocalPerceptionError
 from src.multimodal.profile import RuntimeProfile, get_runtime_profile
 from src.multimodal.router import CoreMultimodalRouter
 from src.chat.message_receive.message import MessageProcessBase
@@ -47,7 +47,11 @@ class FakePerception:
         return self.tts_result or TTSResult(text=text, provider="fake")
 
     async def health(self):
-        return {"ready": True}
+        return {
+            "ready": True,
+            "operations": [AUDIO_TRANSCRIBE_V1, IMAGE_DESCRIBE_V1],
+            "models": {AUDIO_TRANSCRIBE_V1: "zh-xlarge-int8-2025-06-30", IMAGE_DESCRIBE_V1: "Florence-2"},
+        }
 
     async def tts_health(self):
         return {"status": "ok", "ready": True, "model_loaded": True}
@@ -94,6 +98,27 @@ class _JsonHttpClient(_RecordingHttpClient):
         return _JsonResponse(self.payload)
 
 
+def _mixed_config(group: str):
+    task = SimpleNamespace(model_list=["remote-first", "local-middle", "remote-last"], max_tokens=20, temperature=0.3, timeout=None)
+    providers = {
+        "remote": SimpleNamespace(name="Remote", base_url="https://example.invalid/v1", max_retry=1),
+        "local": SimpleNamespace(name="LocalModel", base_url="http://127.0.0.1:9874/v1", max_retry=1),
+    }
+    models = {
+        name: SimpleNamespace(
+            name=name,
+            api_provider="local" if name == "local-middle" else "remote",
+            model_identifier=("zh-xlarge-int8-2025-06-30" if group == "voice" else "Florence-2")
+            if name == "local-middle" else name,
+        )
+        for name in task.model_list
+    }
+    config = SimpleNamespace(model_task_config=SimpleNamespace(**{group: task}))
+    config.get_model_info = models.__getitem__
+    config.get_provider = providers.__getitem__
+    return config
+
+
 class MultimodalCoreTests(unittest.IsolatedAsyncioTestCase):
     async def test_outbound_materialized_voice_is_not_transcribed_again(self):
         voice_text = await MessageProcessBase._process_single_segment(
@@ -108,29 +133,74 @@ class MultimodalCoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(voice_text, "")
         self.assertEqual(stream_text, "")
 
-    async def test_full_uses_local_then_remote_only_after_local_failure(self):
-        local = FakePerception(error=RuntimeError("offline"))
-        remote = FakePerception(PerceptionResult(AUDIO_TRANSCRIBE_V1, "remote", "remote"))
-        router = CoreMultimodalRouter(profile="full", local=local, remote=remote)
+    async def test_full_uses_one_mixed_model_group_for_remote_local_remote(self):
+        from src.llm_models.exceptions import ModelAttemptFailed
+        from src.llm_models.model_client.base_client import APIResponse, client_registry
+        from src.llm_models.utils_model import LLMRequest
 
-        result = await router.transcribe("YQ==")
+        config = _mixed_config("voice")
+        local = FakePerception(error=RuntimeError("busy"))
+        remote_calls = []
 
-        self.assertEqual(result.text, "remote")
+        async def remote_attempt(_llm, model, *_args, **_kwargs):
+            remote_calls.append(model.name)
+            if model.name == "remote-first":
+                raise ModelAttemptFailed("remote failed")
+            return APIResponse(content="remote last")
+
+        with patch.object(client_registry, "get_client_class_instance", return_value=object()), patch.object(
+            LLMRequest, "_attempt_request_on_model", remote_attempt
+        ):
+            result = await CoreMultimodalRouter(profile="full", local=local, model_config=config).transcribe("YQ==")
+
+        self.assertEqual(result.text, "remote last")
+        self.assertEqual(result.attempted, ("remote-first", "local-middle", "remote-last"))
         self.assertEqual(local.calls, [AUDIO_TRANSCRIBE_V1])
-        self.assertEqual(remote.calls, [AUDIO_TRANSCRIBE_V1])
-        self.assertEqual(result.attempted, ("local", "remote"))
+        self.assertEqual(remote_calls, ["remote-first", "remote-last"])
 
-    async def test_lite_skips_local_and_remote_failure_degrades_once(self):
+    async def test_lite_skips_local_candidate_in_same_model_group(self):
+        from src.llm_models.exceptions import ModelAttemptFailed
+        from src.llm_models.model_client.base_client import APIResponse, client_registry
+        from src.llm_models.utils_model import LLMRequest
+
+        config = _mixed_config("voice")
         local = FakePerception()
-        remote = FakePerception(error=RuntimeError("offline"))
-        router = CoreMultimodalRouter(profile="lite", local=local, remote=remote)
 
-        result = await router.describe_image("YQ==", media_format="png")
+        async def remote_attempt(_llm, model, *_args, **_kwargs):
+            if model.name == "remote-first":
+                raise ModelAttemptFailed("remote failed")
+            return APIResponse(content="remote last")
 
-        self.assertTrue(result.degraded)
+        with patch.object(client_registry, "get_client_class_instance", return_value=object()), patch.object(
+            LLMRequest, "_attempt_request_on_model", remote_attempt
+        ):
+            result = await CoreMultimodalRouter(profile="lite", local=local, model_config=config).transcribe("YQ==")
+
+        self.assertEqual(result.text, "remote last")
+        self.assertEqual(result.attempted, ("remote-first", "local-middle", "remote-last"))
         self.assertEqual(local.calls, [])
-        self.assertEqual(remote.calls, [IMAGE_DESCRIBE_V1])
-        self.assertIn("图片", result.text)
+
+    async def test_video_capability_skips_local_before_post(self):
+        from src.llm_models.model_client.base_client import APIResponse, client_registry
+        from src.llm_models.utils_model import LLMRequest
+
+        config = _mixed_config("video")
+        config.model_task_config.video.model_list = ["local-middle", "remote-last"]
+        local = FakePerception()
+
+        async def remote_attempt(_llm, _model, *_args, **_kwargs):
+            return APIResponse(content="remote video")
+
+        with patch.object(client_registry, "get_client_class_instance", return_value=object()), patch.object(
+            LLMRequest, "_attempt_request_on_model", remote_attempt
+        ):
+            result = await CoreMultimodalRouter(profile="full", local=local, model_config=config).understand_video(
+                "YQ==", media_format="mp4"
+            )
+
+        self.assertEqual(result.text, "remote video")
+        self.assertEqual(result.attempted, ("local-middle", "remote-last"))
+        self.assertEqual(local.calls, [])
 
     async def test_no_media_does_not_trigger_tts_or_perception(self):
         local = FakePerception()
@@ -313,6 +383,20 @@ class MultimodalCoreTests(unittest.IsolatedAsyncioTestCase):
         relay = LocalMultimodalClient(client=relay_http)
         self.assertFalse((await relay.tts_health())["ready"])
 
+    async def test_local_busy_response_has_failover_category(self):
+        class BusyHttp:
+            async def request(self, method, url, **kwargs):
+                return httpx.Response(
+                    503,
+                    json={"error": {"code": "busy", "message": "worker busy"}},
+                    request=httpx.Request(method, url),
+                )
+
+        client = LocalMultimodalClient(client=BusyHttp())
+        with self.assertRaises(LocalPerceptionError) as caught:
+            await client.perceive(MediaInput(IMAGE_DESCRIBE_V1, "YQ=="))
+        self.assertEqual(caught.exception.reason, "busy")
+
     async def test_potato_converts_tts_to_plain_text_without_calling_tts(self):
         local = FakePerception()
         router = CoreMultimodalRouter(profile="potato", local=local, remote=FakePerception())
@@ -360,55 +444,25 @@ class MultimodalCoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(router.local.tts_calls, [])
 
 
-class RemoteTaskFilteringTests(unittest.TestCase):
-    def test_excludes_local_9874_provider_from_mixed_task(self):
-        local = SimpleNamespace(name="LocalModel", base_url="http://127.0.0.1:9874/v1")
-        remote = SimpleNamespace(name="Remote", base_url="https://example.invalid/v1")
-        model_config = SimpleNamespace(
-            api_providers=[local, remote],
-            models=[
-                SimpleNamespace(name="local", api_provider="LocalModel"),
-                SimpleNamespace(name="remote", api_provider="Remote"),
-            ],
-        )
-        model_config.get_model_info = lambda name: next(model for model in model_config.models if model.name == name)
-        task = SimpleNamespace(model_list=["local", "remote"], max_tokens=10)
+class MultimodalTaskTests(unittest.TestCase):
+    def test_fast_group_migration_preserves_existing_vlm_models(self):
+        from src.config.config import _migrate_renamed_model_task_groups
 
-        filtered = remote_task_config(task, model_config)
+        target = {"model_task_config": {"vlm_fast": {"model_list": ["template"]}}}
+        source = {"model_task_config": {"vlm": {"model_list": ["live-visual"]}}}
 
-        self.assertEqual(filtered.model_list, ["remote"])
+        self.assertTrue(_migrate_renamed_model_task_groups(target, source))
+        self.assertEqual(target["model_task_config"]["vlm_fast"]["model_list"], ["live-visual"])
 
-    def test_unknown_model_names_are_not_classified_by_core(self):
-        task = SimpleNamespace(model_list=["adapter-owned-model"])
-        model_config = SimpleNamespace(api_providers=[], models=[])
-        model_config.get_model_info = lambda name: (_ for _ in ()).throw(KeyError(name))
+    def test_visual_group_contract(self):
+        self.assertEqual(MediaInput(IMAGE_DESCRIBE_V1, "YQ==", task="vlm").task, "vlm")
+        self.assertEqual(MediaInput(IMAGE_DESCRIBE_V1, "YQ==", task="vlm_fast").task, "vlm_fast")
+        with self.assertRaises(ValueError):
+            MediaInput(AUDIO_TRANSCRIBE_V1, "YQ==", task="vlm_fast")
 
-        filtered = remote_task_config(task, model_config)
-
-        self.assertEqual(filtered.model_list, ["adapter-owned-model"])
-
-    def test_video_uses_vlm_task_when_dedicated_video_task_is_absent(self):
-        from src.multimodal.remote import RemotePerceptionProvider
-
-        task = SimpleNamespace(model_list=["remote"])
-        remote = SimpleNamespace(name="Remote", base_url="https://example.invalid/v1")
-        model = SimpleNamespace(name="remote", api_provider="Remote")
-        model_config = SimpleNamespace(
-            api_providers=[remote],
-            models=[model],
-            model_task_config=SimpleNamespace(vlm=task),
-        )
-        model_config.get_model_info = lambda name: model
-
-        class FakeVideoLLM:
-            async def generate_response_for_video(self, *args, **kwargs):
-                return "remote video", ()
-
-        provider = RemotePerceptionProvider(model_config=model_config, request_factory=lambda **kwargs: FakeVideoLLM())
-
-        result = asyncio.run(provider.perceive(MediaInput("video.understand.v1", "YQ==", media_format="mp4")))
-
-        self.assertEqual(result.text, "remote video")
+    def test_only_9874_is_local_perception_backend(self):
+        self.assertTrue(CoreMultimodalRouter._is_local_perception_provider(SimpleNamespace(base_url="http://127.0.0.1:9874/v1")))
+        self.assertFalse(CoreMultimodalRouter._is_local_perception_provider(SimpleNamespace(base_url="http://127.0.0.1:11433/v1")))
 
 
 class RuntimeProfileTests(unittest.TestCase):

@@ -25,6 +25,7 @@ from .router import CoreMultimodalRouter, get_multimodal_router
 
 class PerceptionBody(BaseModel):
     operation: str = Field(min_length=1, max_length=64)
+    task: str = Field(default="", max_length=16)
     data: str = Field(min_length=1, max_length=MAX_MEDIA_REQUEST_CHARS)
     media_format: str = Field(default="", max_length=32)
     mime_type: str = Field(default="", max_length=96)
@@ -88,6 +89,7 @@ def create_multimodal_router(service: CoreMultimodalRouter | None = None) -> API
                 MediaInput(
                     operation=body.operation,
                     data=body.data,
+                    task=body.task,
                     media_format=body.media_format,
                     mime_type=body.mime_type,
                     prompt=body.prompt,
@@ -102,18 +104,34 @@ def create_multimodal_router(service: CoreMultimodalRouter | None = None) -> API
     @router.post("/audio/transcribe.v1")
     async def transcribe(body: PerceptionBody) -> dict[str, Any]:
         body.operation = AUDIO_TRANSCRIBE_V1
+        body.task = "voice"
         return await perception(body)
 
     @router.post("/image/describe/v1")
     @router.post("/image/describe.v1")
     async def describe_image(body: PerceptionBody) -> dict[str, Any]:
         body.operation = IMAGE_DESCRIBE_V1
+        body.task = "vlm"
+        return await perception(body)
+
+    @router.post("/image/emoji/v1")
+    @router.post("/image/emoji.v1")
+    async def describe_emoji(body: PerceptionBody) -> dict[str, Any]:
+        body.operation = IMAGE_DESCRIBE_V1
+        body.task = "vlm"
+        return await perception(body)
+
+    @router.post("/image/describe/fast")
+    async def describe_image_fast(body: PerceptionBody) -> dict[str, Any]:
+        body.operation = IMAGE_DESCRIBE_V1
+        body.task = "vlm_fast"
         return await perception(body)
 
     @router.post("/video/understand/v1")
     @router.post("/video/understand.v1")
     async def understand_video(body: PerceptionBody) -> dict[str, Any]:
         body.operation = VIDEO_UNDERSTAND_V1
+        body.task = "video"
         return await perception(body)
 
     @router.post("/tts")

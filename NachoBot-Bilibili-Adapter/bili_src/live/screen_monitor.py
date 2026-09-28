@@ -186,7 +186,7 @@ class ScreenMonitor:
             "window_class": str(window_info.window_class if window_info else "未知")[:128],
         }
         try:
-            response = await self.multimodal_client.describe_image(
+            response = await self.multimodal_client.describe_image_fast(
                 image_bytes,
                 prompt=prompt_text,
                 metadata=metadata,

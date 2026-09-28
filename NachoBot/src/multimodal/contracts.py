@@ -80,6 +80,7 @@ class MediaInput:
     mime_type: str = ""
     prompt: str = ""
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    task: str = ""
 
     def __post_init__(self) -> None:
         if self.operation not in {
@@ -88,6 +89,13 @@ class MediaInput:
             VIDEO_UNDERSTAND_V1,
         }:
             raise ValueError(f"unsupported perception operation: {self.operation}")
+        allowed_tasks = {
+            AUDIO_TRANSCRIBE_V1: {"", "voice"},
+            IMAGE_DESCRIBE_V1: {"", "vlm", "vlm_fast"},
+            VIDEO_UNDERSTAND_V1: {"", "video"},
+        }
+        if self.task not in allowed_tasks[self.operation]:
+            raise ValueError(f"invalid task {self.task!r} for {self.operation}")
         if not isinstance(self.data, str) or not self.data.strip():
             raise ValueError("media data is required")
         limits = {

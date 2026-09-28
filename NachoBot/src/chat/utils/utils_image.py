@@ -173,7 +173,7 @@ class ImageManager:
                 vlm_prompt = policy.gif_prompt or policy.prompt
                 from src.multimodal import get_multimodal_router
 
-                perception = await get_multimodal_router().describe_image(
+                perception = await get_multimodal_router().describe_emoji(
                     image_base64_processed,
                     media_format="jpg",
                     prompt=vlm_prompt,
@@ -189,7 +189,7 @@ class ImageManager:
             else:
                 from src.multimodal import get_multimodal_router
 
-                perception = await get_multimodal_router().describe_image(
+                perception = await get_multimodal_router().describe_emoji(
                     image_base64,
                     media_format=image_format,
                     prompt=policy.prompt,

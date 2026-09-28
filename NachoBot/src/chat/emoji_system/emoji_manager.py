@@ -382,7 +382,6 @@ class EmojiManager:
 
         self._scan_task = None
 
-        self.vlm = LLMRequest(model_set=model_config.model_task_config.vlm, request_type="emoji")
         self.llm_emotion_judge = LLMRequest(
             model_set=model_config.model_task_config.utils_small, request_type="emoji"
         )  # 更高的温度，更少的token（后续可以根据情绪来调整温度）
@@ -953,27 +952,37 @@ class EmojiManager:
             except Exception as e:
                 logger.debug(f"查询已有描述时出错: {e}")
 
+            perception_base64 = image_base64
+            perception_format = image_format
+            if image_format == "gif" and (not existing_description or global_config.emoji.content_filtration):
+                perception_base64 = get_image_manager().transform_gif(image_base64)  # type: ignore
+                if not perception_base64:
+                    raise RuntimeError("GIF表情包转换失败")
+                perception_format = "jpg"
+
             # 第一步：VLM视觉分析（如果没有已有描述才调用）
             if existing_description:
                 description = existing_description
                 logger.info("[优化] 复用已有的详细描述，跳过VLM调用")
             else:
                 logger.info("[VLM分析] 生成新的详细描述")
+                from src.multimodal import get_multimodal_router
+
                 if image_format in ["gif", "GIF"]:
-                    image_base64 = get_image_manager().transform_gif(image_base64)  # type: ignore
-                    if not image_base64:
-                        raise RuntimeError("GIF表情包转换失败")
                     prompt = "这是一个动态图表情包，每一张图代表了动态图的某一帧，黑色背景代表透明，描述一下表情包表达的情感和内容，描述细节，从互联网梗,meme的角度去分析"
-                    description, _ = await self.vlm.generate_response_for_image(
-                        prompt, image_base64, "jpg", temperature=0.3, max_tokens=1000
-                    )
                 else:
                     prompt = (
                         "这是一个表情包，请详细描述一下表情包所表达的情感和内容，描述细节，从互联网梗,meme的角度去分析"
                     )
-                    description, _ = await self.vlm.generate_response_for_image(
-                        prompt, image_base64, image_format, temperature=0.3, max_tokens=1000
-                    )
+                perceived = await get_multimodal_router().describe_emoji(
+                    perception_base64,
+                    media_format=perception_format,
+                    prompt=prompt,
+                    metadata={"temperature": 0.3, "max_tokens": 1000},
+                )
+                if perceived.degraded:
+                    raise RuntimeError("表情包视觉理解不可用")
+                description = perceived.text
 
             # 审核表情包
             if global_config.emoji.content_filtration:
@@ -985,9 +994,17 @@ class EmojiManager:
                     4. 不要出现5个以上文字
                     请回答这个表情包是否满足上述要求，是则回答是，否则回答否，不要出现任何其他内容
                 '''
-                content, _ = await self.vlm.generate_response_for_image(
-                    prompt, image_base64, image_format, temperature=0.3, max_tokens=1000
+                from src.multimodal import get_multimodal_router
+
+                perceived = await get_multimodal_router().describe_emoji(
+                    perception_base64,
+                    media_format=perception_format,
+                    prompt=prompt,
+                    metadata={"temperature": 0.3, "max_tokens": 1000},
                 )
+                if perceived.degraded:
+                    raise RuntimeError("表情包审核视觉理解不可用")
+                content = perceived.text
                 if content == "否":
                     return "", []
 

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 import os
+import threading
 import unittest
 from unittest.mock import patch
 
-from nachobot_multimodal.local_runtime import LocalMultimodalRuntime, UnsupportedOperation
+from nachobot_multimodal.local_runtime import LocalBusy, LocalMultimodalRuntime, UnsupportedOperation
 
 class LocalRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_api_is_perception_only(self):
@@ -42,6 +44,7 @@ class LocalRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("audio.transcribe.v1", capabilities["operations"])
         self.assertIn("image.describe.v1", capabilities["operations"])
+        self.assertEqual(capabilities["models"]["image.describe.v1"], "Florence-2")
         self.assertNotIn("video.understand.v1", capabilities["operations"])
         self.assertNotIn("tts", capabilities)
         self.assertTrue(capabilities["ready"])
@@ -164,6 +167,40 @@ class LocalRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 await runtime.perceive("audio.transcribe.v1", oversized)
 
         decoder.assert_not_called()
+
+    async def test_cancelled_request_keeps_florence_capacity_until_worker_finishes(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        def caption(_data):
+            started.set()
+            release.wait(2)
+            return "caption"
+
+        runtime = LocalMultimodalRuntime(
+            no_local_models=False,
+            asr_transcriber=lambda data: "recognized",
+            image_captioner=caption,
+        )
+        runtime._vlm_queue_timeout = 0.02
+        await runtime.preload()
+        encoded = base64.b64encode(b"image").decode()
+        first = asyncio.create_task(runtime.perceive("image.describe.v1", encoded))
+        try:
+            self.assertTrue(await asyncio.to_thread(started.wait, 1))
+            first.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await first
+            with self.assertRaises(LocalBusy):
+                await runtime.perceive("image.describe.v1", encoded)
+        finally:
+            release.set()
+        for _ in range(100):
+            if runtime._vlm_pending == 0:
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(runtime._vlm_pending, 0)
+        self.assertEqual(await runtime.perceive("image.describe.v1", encoded), "caption")
 
 
 if __name__ == "__main__":

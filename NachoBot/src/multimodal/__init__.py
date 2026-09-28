@@ -1,8 +1,7 @@
 """Core-owned multimodal perception and TTS facade.
 
-The Core process owns this public boundary.  Concrete local model selection
-stays in ``NachoBot-Multimodal-Adapter`` and is reached only through its
-versioned HTTP API.
+The Core process owns this public boundary and selects from each configured
+model group. Local candidates execute through the adapter's versioned API.
 """
 
 from .contracts import (

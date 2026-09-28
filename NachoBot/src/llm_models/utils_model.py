@@ -7,7 +7,7 @@ import time
 from collections.abc import Mapping
 from enum import Enum
 from rich.traceback import install
-from typing import Tuple, List, Dict, Optional, Callable, Any, Set
+from typing import Tuple, List, Dict, Optional, Callable, Awaitable, Any, Set
 import traceback
 
 from src.common.logger import get_logger
@@ -29,6 +29,16 @@ from .exceptions import (
 install(extra_lines=3)
 
 logger = get_logger("model_utils")
+
+
+class ModelCandidateUnavailable(Exception):
+    """A selected model cannot serve this request; skip without penalizing it."""
+
+
+CandidateExecutor = Callable[
+    [ModelInfo, APIProvider, Callable[[], Awaitable[APIResponse]]],
+    Awaitable[APIResponse],
+]
 
 
 class _ObservedAsyncIterator:
@@ -224,10 +234,11 @@ class RequestType(Enum):
 class LLMRequest:
     """LLM请求类"""
 
-    def __init__(self, model_set: TaskConfig, request_type: str = "") -> None:
+    def __init__(self, model_set: TaskConfig, request_type: str = "", config: Any = None) -> None:
         self.task_name = request_type
         self.model_for_task = model_set
         self.request_type = request_type
+        self._model_config = config if config is not None else model_config
         self.model_usage: Dict[str, Tuple[int, int, int, float]] = {
             model: (0, 0, 0, 0.0) for model in self.model_for_task.model_list
         }
@@ -265,6 +276,7 @@ class LLMRequest:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         extra_params: Optional[Dict[str, Any]] = None,
+        candidate_executor: CandidateExecutor | None = None,
     ) -> Tuple[str, Tuple[str, str, Optional[List[ToolCall]]]]:
         """
         为图像生成响应
@@ -291,6 +303,7 @@ class LLMRequest:
             temperature=temperature,
             max_tokens=max_tokens,
             extra_params=extra_params,
+            candidate_executor=candidate_executor,
         )
         content = response.content or ""
         reasoning_content = response.reasoning_content or ""
@@ -317,6 +330,7 @@ class LLMRequest:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         extra_params: Optional[Dict[str, Any]] = None,
+        candidate_executor: CandidateExecutor | None = None,
     ) -> Tuple[str, Tuple[str, str, Optional[List[ToolCall]]]]:
         """
         为视频生成响应
@@ -341,6 +355,7 @@ class LLMRequest:
             temperature=temperature,
             max_tokens=max_tokens,
             extra_params=extra_params,
+            candidate_executor=candidate_executor,
         )
         content = response.content or ""
         reasoning_content = response.reasoning_content or ""
@@ -367,11 +382,22 @@ class LLMRequest:
         Returns:
             (Optional[str]): 生成的文本描述或None
         """
-        response, _ = await self._execute_request(
+        content, _ = await self.generate_response_for_voice_with_model(voice_base64)
+        return content
+
+    async def generate_response_for_voice_with_model(
+        self,
+        voice_base64: str,
+        *,
+        candidate_executor: CandidateExecutor | None = None,
+    ) -> tuple[Optional[str], str]:
+        """Return ASR text and the winning model for mixed backend dispatch."""
+        response, model_info = await self._execute_request(
             request_type=RequestType.AUDIO,
             audio_base64=voice_base64,
+            candidate_executor=candidate_executor,
         )
-        return response.content or None
+        return response.content or None, model_info.name
 
     async def generate_response_async(
         self,
@@ -531,8 +557,8 @@ class LLMRequest:
         )
         import copy
 
-        model_info = model_config.get_model_info(least_used_model_name)
-        api_provider = model_config.get_provider(model_info.api_provider)
+        model_info = self._model_config.get_model_info(least_used_model_name)
+        api_provider = self._model_config.get_provider(model_info.api_provider)
 
         force_new_client = self.request_type == "embedding"
         task_timeout = getattr(self.model_for_task, "timeout", None)
@@ -713,6 +739,7 @@ class LLMRequest:
         interrupt_flag: Optional[asyncio.Event] = None,
         stream_delta_callback: Optional[Callable[[Any], None]] = None,
         force_stream: bool = False,
+        candidate_executor: CandidateExecutor | None = None,
     ) -> Tuple[APIResponse, ModelInfo]:
         """
         调度器函数，负责模型选择、故障切换。
@@ -724,34 +751,45 @@ class LLMRequest:
         for _ in range(max_attempts):
             model_info, api_provider, client = self._select_model(exclude_models=failed_models_this_request)
 
-            message_list = []
-            if message_factory:
-                message_list = message_factory(client)
-
             try:
-                response = await self._attempt_request_on_model(
-                    model_info,
-                    api_provider,
-                    client,
-                    request_type,
-                    message_list=message_list,
-                    tool_options=tool_options,
-                    response_format=response_format,
-                    stream_response_handler=stream_response_handler,
-                    async_response_parser=async_response_parser,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    embedding_input=embedding_input,
-                    audio_base64=audio_base64,
-                    extra_params=extra_params,
-                    interrupt_flag=interrupt_flag,
-                    stream_delta_callback=stream_delta_callback,
-                    force_stream=force_stream,
+                async def default_attempt(
+                    selected_model: ModelInfo = model_info,
+                    selected_provider: APIProvider = api_provider,
+                    selected_client: BaseClient = client,
+                ) -> APIResponse:
+                    message_list = message_factory(selected_client) if message_factory else []
+                    return await self._attempt_request_on_model(
+                        selected_model,
+                        selected_provider,
+                        selected_client,
+                        request_type,
+                        message_list=message_list,
+                        tool_options=tool_options,
+                        response_format=response_format,
+                        stream_response_handler=stream_response_handler,
+                        async_response_parser=async_response_parser,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        embedding_input=embedding_input,
+                        audio_base64=audio_base64,
+                        extra_params=extra_params,
+                        interrupt_flag=interrupt_flag,
+                        stream_delta_callback=stream_delta_callback,
+                        force_stream=force_stream,
+                    )
+
+                response = (
+                    await candidate_executor(model_info, api_provider, default_attempt)
+                    if candidate_executor is not None
+                    else await default_attempt()
                 )
                 return response, model_info
 
             except ReqAbortException:
                 raise
+            except ModelCandidateUnavailable as e:
+                logger.info(f"{self.log_context} 模型 '{model_info.name}' 当前不可用，跳过: {e}")
+                failed_models_this_request.add(model_info.name)
             except ModelAttemptFailed as e:
                 last_exception = e.original_exception or e
                 logger.warning(f"{self.log_context} 模型 '{model_info.name}' 尝试失败，切换到下一个模型。原因: {e}")

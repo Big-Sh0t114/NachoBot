@@ -17,8 +17,7 @@ from src.chat.utils.utils_image import image_path_to_base64
 from src.plugin_system.apis import emoji_api, llm_api, message_api
 
 # NoReplyAction已集成到heartFC_chat.py中，不再需要导入
-from src.config.config import global_config, model_config
-from src.llm_models.utils_model import LLMRequest
+from src.config.config import global_config
 
 
 logger = get_logger("emoji")
@@ -178,14 +177,17 @@ class EmojiAction(BaseAction):
                     logger.debug(f"{self.log_prefix} 生成的 VLM 选图 Prompt: {visual_prompt}")
                 selected_index = None
                 try:
-                    vlm = LLMRequest(model_set=model_config.model_task_config.vlm, request_type="emoji.select")
-                    response, _ = await vlm.generate_response_for_image(
+                    from src.multimodal import get_multimodal_router
+
+                    perceived = await get_multimodal_router().describe_emoji(
+                        collage.image_base64,
                         prompt=visual_prompt,
-                        image_base64=collage.image_base64,
-                        image_format=collage.image_format,
-                        temperature=0,
-                        max_tokens=50,
+                        media_format=collage.image_format,
+                        metadata={"temperature": 0, "max_tokens": 50},
                     )
+                    if perceived.degraded:
+                        raise RuntimeError("表情包选图视觉理解不可用")
+                    response = perceived.text
                     selected_index = _parse_selected_index(response, len(collage.candidates))
                     if selected_index is None:
                         logger.warning(f"{self.log_prefix} VLM返回无效选择: {response[:200]}")

@@ -1,8 +1,8 @@
 """Typed local multimodal runtime API served on the Core-only 9874 port.
 
-Core selects LOCAL_MULTIMODAL versus REMOTE_API. This service owns concrete
-Florence/Sherpa perception models and never receives ordinary platform chat
-messages or creates chat turns.
+Core selects each configured model candidate and invokes this service only
+for Florence/Sherpa local execution. This service never receives ordinary
+platform chat messages or creates chat turns.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from fastapi import FastAPI, Request, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from .local_runtime import LocalMultimodalRuntime, UnsupportedOperation
+from .local_runtime import LocalBusy, LocalMultimodalRuntime, RuntimeUnavailable, UnsupportedOperation
 from nachobot_multimodal.utils.uvicorn_logging import install_quiet_access_logging
 
 
@@ -52,9 +52,9 @@ def _load_config() -> dict[str, Any]:
         return {}
 
 
-def _error_response(status: int, message: str) -> JSONResponse:
+def _error_response(status: int, message: str, code: str = "inference_failure") -> JSONResponse:
     # Never echo media payloads, auth material, or backend configuration.
-    return JSONResponse(status_code=status, content={"error": {"message": message}})
+    return JSONResponse(status_code=status, content={"error": {"code": code, "message": message}})
 
 
 @asynccontextmanager
@@ -107,14 +107,18 @@ async def perception(body: PerceptionBody) -> dict[str, Any] | JSONResponse:
             prompt=body.prompt,
         )
     except ValueError as exc:
-        return _error_response(400, str(exc))
+        return _error_response(400, str(exc), "invalid_request")
+    except LocalBusy:
+        return _error_response(503, "local Florence worker is busy", "busy")
+    except RuntimeUnavailable:
+        return _error_response(503, "local perception runtime unavailable", "runtime_unavailable")
     except UnsupportedOperation as exc:
-        return _error_response(501, str(exc))
+        return _error_response(501, str(exc), "unsupported")
     except Exception:
         logger.exception("Local perception operation failed: %s", body.operation)
-        return _error_response(502, "local perception operation failed")
+        return _error_response(502, "local perception operation failed", "inference_failure")
     if not text:
-        return _error_response(502, "local perception returned empty text")
+        return _error_response(502, "local perception returned empty text", "inference_failure")
     return {
         "operation": body.operation,
         "text": text[:_MAX_TEXT_CHARS],
@@ -173,8 +177,12 @@ async def vlm_chat_completions(request: Request) -> dict[str, Any] | JSONRespons
         return _error_response(400, "No image_url found in messages")
     try:
         caption = await _runtime.perceive(_runtime.IMAGE, image_b64, media_format="png")
+    except LocalBusy:
+        return _error_response(503, "local Florence worker is busy", "busy")
+    except RuntimeUnavailable:
+        return _error_response(503, "local perception runtime unavailable", "runtime_unavailable")
     except UnsupportedOperation as exc:
-        return _error_response(501, str(exc))
+        return _error_response(501, str(exc), "unsupported")
     except Exception:
         logger.exception("Legacy VLM inference failed")
         return _error_response(502, "local VLM inference failed")
@@ -204,8 +212,10 @@ async def audio_transcriptions(
             _runtime.AUDIO,
             base64.b64encode(audio_bytes).decode("ascii"),
         )
+    except RuntimeUnavailable:
+        return _error_response(503, "local perception runtime unavailable", "runtime_unavailable")
     except UnsupportedOperation as exc:
-        return _error_response(501, str(exc))
+        return _error_response(501, str(exc), "unsupported")
     except Exception:
         logger.exception("Legacy ASR inference failed")
         return _error_response(502, "local ASR inference failed")
