@@ -664,12 +664,6 @@ class PathVerifier:
             "download_url": "https://nodejs.org/en/download/",
             "default_rel": None,
         },
-        "bilibili_dll": {
-            "name": "Live2D Cubism Core",
-            "hint": "NachoBot-Bilibili-Adapter 目录下的 Live2DCubismCore.dll",
-            "download_url": "https://www.live2d.com/sdk/download/native/",
-            "default_rel": None,
-        },
         "vb_cable": {
             "name": "VB-Audio Virtual Cable",
             "hint": "VB-Audio Virtual Cable 安装目录（包含 VBCABLE_Setup_x64.exe）",
@@ -738,10 +732,6 @@ class PathVerifier:
         # -- Node.js: check via PATH, no user path needed --
         if check_type == "nodejs":
             return PathVerifier._check_nodejs(download_url)
-
-        # -- Bilibili DLL: fixed path under project root --
-        if check_type == "bilibili_dll":
-            return PathVerifier._check_bilibili_dll(download_url)
 
         # -- Managed TTS runtimes: no user-supplied external path required --
         if check_type in ("sovits", "voxcpm"):
@@ -873,16 +863,6 @@ class PathVerifier:
             "download_url": download_url,
         }
 
-    @staticmethod
-    def _check_bilibili_dll(download_url: str) -> dict:
-        dll_path = ROOT_DIR / "NachoBot-Bilibili-Adapter" / "Live2DCubismCore.dll"
-        if dll_path.exists():
-            return {"valid": True, "message": "✅ Live2DCubismCore.dll 已找到"}
-        return {
-            "valid": False,
-            "message": "❌ 未找到 NachoBot-Bilibili-Adapter/Live2DCubismCore.dll",
-            "download_url": download_url,
-        }
 
     @staticmethod
     def _check_vb_cable(p: Path, download_url: str) -> dict:

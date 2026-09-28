@@ -1,6 +1,7 @@
 9/28
     重构多模态模型路由规则
     日志不再写入原生整段base64
+    移除过时的Live2DCubismCore检测
 9/27
     增加napcat/snowluma适配器对多媒体文件的响应时限
 9/24
