@@ -302,6 +302,49 @@ class BrainChatting:
         )
         return context
 
+    async def _route_forced_ingress_preemption(self, focus_turn: FocusTurn) -> bool | None:
+        """Execute the first coordinator-authorized forced ingress switch, if any."""
+
+        event = next(
+            (
+                candidate
+                for candidate in focus_turn.events
+                if focus_coordinator.is_forced_ingress_preemption(
+                    focus_turn.lease.chat_id,
+                    candidate.target_chat_id,
+                )
+            ),
+            None,
+        )
+        if event is None:
+            return None
+
+        logger.info(
+            f"{self.log_prefix} [Focus ingress] forced switch candidate "
+            f"event_id={event.event_id} target={event.target_chat_id}; "
+            "executing before Focus Gate, Planner, or Advanced Mode"
+        )
+        switch_result = await execute_switch_chat(
+            focus_coordinator,
+            lease=focus_turn.lease,
+            action_data={"event_id": event.event_id},
+            reasoning="Forced Focus ingress preemption for a newly received message",
+        )
+        disposition = classify_switch_result(switch_result)
+        if switch_result.success:
+            logger.info(
+                f"{self.log_prefix} [Focus ingress] forced switch succeeded; "
+                "source turn is terminal"
+            )
+            return True
+
+        logger.warning(
+            f"{self.log_prefix} [Focus ingress] forced switch failed; "
+            f"{'retrying' if disposition is SwitchDisposition.RETRY else 'dropping event'}: "
+            f"{switch_result.reason}"
+        )
+        return disposition is not SwitchDisposition.RETRY
+
     async def _route_focus_event_only_turn(self, focus_turn: FocusTurn) -> bool:
         """Resolve an event-only wake without exposing historical actions to Planner."""
 
@@ -411,6 +454,11 @@ class BrainChatting:
                 or focus_turn.wake_reason & (WakeReason.FOCUS_EVENT | WakeReason.SWITCH_TARGET)
             )
         )
+
+        if focus_turn is not None:
+            forced_preemption_result = await self._route_forced_ingress_preemption(focus_turn)
+            if forced_preemption_result is not None:
+                return forced_preemption_result
 
         if focus_turn is not None and self._is_focus_event_only_turn(focus_turn, recent_messages_list):
             return await self._route_focus_event_only_turn(focus_turn)

@@ -18,6 +18,7 @@ from src.chat.focus.models import (
     FocusGroupDefinition,
     FocusMember,
     FocusStoppedError,
+    HandoffKind,
     StoredMessageRef,
     SwitchChatRequest,
     TurnOutcome,
@@ -31,6 +32,7 @@ from src.common.data_models.database_data_model import DatabaseMessages
 import src.chat.brain_chat.brain_chat as brain_chat_module
 import src.chat.brain_chat.brain_planner as brain_planner_module
 import src.chat.heart_flow.heartFC_chat as heart_chat_module
+import src.chat.heart_flow.heartflow_message_processor as message_processor_module
 import src.chat.planner_actions.planner as action_planner_module
 import src.plugin_system.apis.send_api as send_api_module
 import src.plugin_system.apis.message_api as message_api_module
@@ -109,6 +111,207 @@ class FocusSwitchPlannerRegressionTests(_PlannerTestMixin, unittest.TestCase):
             self.assertTrue(system_dispatch.woke_active)
             self.assertIsNotNone(system_dispatch.event)
             self.assertFalse(system_dispatch.interrupt_active)
+
+        asyncio.run(exercise())
+
+    def test_private_ingress_forces_preemption_above_unread_threshold(self):
+        async def exercise():
+            coordinator = FocusCoordinator(unread_event_threshold=99)
+            coordinator.register_group(
+                FocusGroupDefinition(
+                    group_id="private-ingress",
+                    members=(
+                        FocusMember("private-a", ChatKind.PRIVATE, display_name="Private A"),
+                        FocusMember("private-b", ChatKind.PRIVATE, display_name="Private B"),
+                    ),
+                    initial_chat_id="private-a",
+                )
+            )
+
+            dispatch = await coordinator.route_message(
+                _Message(text="ordinary private message"),
+                StoredMessageRef(
+                    row_id=1,
+                    chat_id="private-b",
+                    message_id="private-b-1",
+                    message_time=1.0,
+                ),
+            )
+
+            self.assertTrue(coordinator.is_forced_ingress_preemption("private-a", "private-b"))
+            self.assertTrue(dispatch.managed)
+            self.assertTrue(dispatch.woke_active)
+            self.assertTrue(dispatch.interrupt_active)
+            self.assertIsNotNone(dispatch.event)
+            turn = await coordinator.wait_for_turn("private-a")
+            self.assertEqual([event.target_chat_id for event in turn.events], ["private-b"])
+
+        asyncio.run(exercise())
+
+    def test_equal_priority_group_ingress_is_not_forced(self):
+        async def exercise():
+            coordinator = FocusCoordinator(unread_event_threshold=99)
+            coordinator.register_group(
+                FocusGroupDefinition(
+                    group_id="group-ingress",
+                    members=(
+                        FocusMember("group-a", ChatKind.GROUP),
+                        FocusMember("group-b", ChatKind.GROUP),
+                    ),
+                    initial_chat_id="group-a",
+                )
+            )
+
+            dispatch = await coordinator.route_message(
+                _Message(text="ordinary group message"),
+                StoredMessageRef(
+                    row_id=1,
+                    chat_id="group-b",
+                    message_id="group-b-1",
+                    message_time=1.0,
+                ),
+            )
+
+            self.assertFalse(coordinator.is_forced_ingress_preemption("group-a", "group-b"))
+            self.assertFalse(dispatch.woke_active)
+            self.assertFalse(dispatch.interrupt_active)
+            self.assertIsNone(dispatch.event)
+
+        asyncio.run(exercise())
+
+    def test_brain_forces_private_ingress_switch_before_gate_or_planner(self):
+        async def exercise():
+            coordinator = FocusCoordinator(unread_event_threshold=99)
+            coordinator.register_group(
+                FocusGroupDefinition(
+                    group_id="brain-private-ingress",
+                    members=(
+                        FocusMember("private-source", ChatKind.PRIVATE, display_name="Source"),
+                        FocusMember("private-target", ChatKind.PRIVATE, display_name="Target"),
+                    ),
+                    initial_chat_id="private-source",
+                )
+            )
+            source_message = _Message(text="local source message")
+            await coordinator.route_message(
+                source_message,
+                StoredMessageRef(
+                    row_id=1,
+                    chat_id="private-source",
+                    message_id="source-1",
+                    message_time=1.0,
+                ),
+            )
+            await coordinator.route_message(
+                _Message(text="new target private message"),
+                StoredMessageRef(
+                    row_id=1,
+                    chat_id="private-target",
+                    message_id="target-1",
+                    message_time=2.0,
+                ),
+            )
+            turn = await coordinator.wait_for_turn("private-source")
+            self.assertEqual(turn.read_through_row_id, 1)
+            self.assertEqual([event.target_chat_id for event in turn.events], ["private-target"])
+
+            batch = SimpleNamespace(messages=(source_message,), consumed_through_row_id=1)
+            runtime = object.__new__(BrainChatting)
+            runtime.stream_id = "private-source"
+            runtime.log_prefix = "[private-source]"
+            runtime._focus_consumed_through_row_id = 0
+            runtime._route_focus_event_only_turn = AsyncMock(
+                side_effect=AssertionError("forced route must precede Focus Gate handling")
+            )
+            runtime._observe = AsyncMock(
+                side_effect=AssertionError("forced route must precede Planner and Advanced Mode")
+            )
+            runtime._get_focus_bypass_gate = Mock(
+                side_effect=AssertionError("forced route must not invoke the Focus Gate")
+            )
+
+            with (
+                patch.object(brain_chat_module, "focus_coordinator", coordinator),
+                patch.object(brain_chat_module, "load_message_batch", return_value=batch),
+                patch.object(brain_chat_module.global_config.focus, "mode", "active"),
+                patch.object(brain_chat_module.advanced_manager, "is_on", return_value=True) as advanced_mock,
+            ):
+                result = await runtime._loopbody(turn)
+
+            self.assertTrue(result)
+            runtime._route_focus_event_only_turn.assert_not_awaited()
+            runtime._observe.assert_not_awaited()
+            runtime._get_focus_bypass_gate.assert_not_called()
+            advanced_mock.assert_not_called()
+            target_lease = coordinator.current_lease("private-target")
+            self.assertIsNotNone(target_lease)
+            handoffs = await coordinator.handoff_store.get_active(
+                "brain-private-ingress",
+                "private-target",
+                target_lease.epoch,
+            )
+            self.assertEqual(len(handoffs), 1)
+            self.assertIs(handoffs[0].kind, HandoffKind.TRANSITION_IDENTITY_V1)
+            self.assertTrue(handoffs[0].payload.is_identity_only())
+
+        asyncio.run(exercise())
+
+    def test_forced_background_interrupt_ignores_mentions_but_active_chat_does_not(self):
+        async def run_case(active_chat_id):
+            message = SimpleNamespace(
+                processed_plain_text="private ingress",
+                is_picid=False,
+                is_emoji=False,
+                is_voice=False,
+                is_mentioned=True,
+                is_at=True,
+                message_info=SimpleNamespace(
+                    user_info=SimpleNamespace(
+                        user_id="user-1",
+                        platform="qq",
+                        user_nickname="Tester",
+                        user_cardname=None,
+                    ),
+                    platform="qq",
+                    group_info=None,
+                ),
+                additional_config={},
+                chat_stream=SimpleNamespace(stream_id="private-target", group_info=None),
+            )
+            stored_ref = StoredMessageRef(
+                row_id=1,
+                chat_id="private-target",
+                message_id="ingress-1",
+                message_time=1.0,
+            )
+            dispatch = SimpleNamespace(
+                managed=True,
+                active_chat_id=active_chat_id,
+                woke_active=True,
+                interrupt_active=True,
+            )
+            runtime = SimpleNamespace(signal_new_message=Mock())
+            receiver = message_processor_module.HeartFCMessageReceiver()
+
+            with (
+                patch.object(message_processor_module, "_calculate_interest", new=AsyncMock(return_value=(0.0, []))),
+                patch.object(receiver.storage, "store_message", new=AsyncMock(return_value=stored_ref)),
+                patch.object(message_processor_module.focus_coordinator, "route_message", new=AsyncMock(return_value=dispatch)),
+                patch.object(message_processor_module.heartflow, "get_or_create_heartflow_chat", new=AsyncMock(return_value=runtime)),
+                patch.object(message_processor_module.Person, "register_person", return_value=None),
+                patch.object(message_processor_module, "replace_user_references", side_effect=lambda text, *_args, **_kwargs: text),
+                patch.object(message_processor_module.global_config.mood, "enable_mood", False),
+            ):
+                await receiver.process_message(message)
+
+            return runtime.signal_new_message
+
+        async def exercise():
+            background_signal = await run_case("private-source")
+            background_signal.assert_called_once_with(skip_interrupt=False)
+
+            active_signal = await run_case("private-target")
+            active_signal.assert_called_once_with(skip_interrupt=True)
 
         asyncio.run(exercise())
 

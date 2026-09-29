@@ -483,6 +483,48 @@ class FocusCoordinator:
         state = self._state_for_chat(chat_id)
         return state.definition if state is not None else None
 
+    def is_forced_ingress_preemption(self, source_chat_id: str, target_chat_id: str) -> bool:
+        """Whether authorized ingress from target must preempt the active source.
+
+        Priority promotion remains the normal rule. Distinct private sessions are
+        additionally switched deterministically so equal PRIVATE priority cannot
+        leave a newly active private chat waiting on a Gate or Planner decision.
+        """
+
+        state = self._state_for_chat(source_chat_id)
+        if (
+            state is None
+            or state.phase is not FocusGroupPhase.RUNNING
+            or state.active_chat_id != source_chat_id
+            or source_chat_id == target_chat_id
+            or not self._policy.can_emit_event(state.definition, source_chat_id, target_chat_id)
+        ):
+            return False
+
+        source_member = self._policy.member(state.definition, source_chat_id)
+        target_member = self._policy.member(state.definition, target_chat_id)
+        if source_member is None or target_member is None:
+            return False
+
+        metadata_only = self._policy.can_switch_without_handoff(
+            state.definition,
+            source_chat_id,
+            target_chat_id,
+        )
+        if not self._policy.decide_switch(
+            state.definition,
+            source_chat_id,
+            target_chat_id,
+            has_handoff=not metadata_only,
+        ).allowed:
+            return False
+
+        higher_priority = focus_session_priority(target_member) > focus_session_priority(source_member)
+        private_to_private = (
+            source_member.kind is ChatKind.PRIVATE and target_member.kind is ChatKind.PRIVATE
+        )
+        return higher_priority or private_to_private
+
     async def is_current(self, lease: FocusLease) -> bool:
         state = self._groups.get(lease.group_id)
         if state is None:
@@ -549,29 +591,15 @@ class FocusCoordinator:
                 state.active_chat_id,
                 stored_ref.chat_id,
             )
-            source_member = self._policy.member(state.definition, state.active_chat_id)
-            target_member = self._policy.member(state.definition, stored_ref.chat_id)
-            metadata_only = self._policy.can_switch_without_handoff(
-                state.definition,
+            force_ingress_preemption = self.is_forced_ingress_preemption(
                 state.active_chat_id,
                 stored_ref.chat_id,
-            )
-            force_priority_switch = bool(
-                source_member is not None
-                and target_member is not None
-                and focus_session_priority(target_member) > focus_session_priority(source_member)
-                and self._policy.decide_switch(
-                    state.definition,
-                    state.active_chat_id,
-                    stored_ref.chat_id,
-                    has_handoff=not metadata_only,
-                ).allowed
             )
             is_system_event = get_system_event(message) is not None
 
             should_surface = may_emit and (
                 is_system_event
-                or force_priority_switch
+                or force_ingress_preemption
                 or attention.visible
                 or attention.is_mentioned
                 or attention.is_at
@@ -605,7 +633,7 @@ class FocusCoordinator:
                 event=self._attention_snapshot(state, attention) if attention.visible else None,
                 # Ordinary background activity is a Gate wake, not a local message in the active chat.
                 # Let the in-flight turn commit before the Gate observes it so replied rows cannot replay.
-                interrupt_active=force_priority_switch,
+                interrupt_active=force_ingress_preemption,
             )
 
     async def wait_for_turn(self, chat_id: str) -> FocusTurn:
