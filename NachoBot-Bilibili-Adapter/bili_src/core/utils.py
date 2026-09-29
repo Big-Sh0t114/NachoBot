@@ -143,7 +143,7 @@ def _extract_plain_text(seg) -> str:
 
 def _extract_voice_base64(seg) -> str:
     """Return the first Core-produced voice payload from a segment tree."""
-    if seg.type in {"voice", "voice_stream"}:
+    if seg.type == "voice":
         data = seg.data
         if isinstance(data, dict):
             data = data.get("audio_base64") or data.get("audio")
@@ -154,6 +154,26 @@ def _extract_voice_base64(seg) -> str:
             if voice_data:
                 return voice_data
     return ""
+
+
+def _extract_voice_stream_payload(seg) -> Any:
+    """Return a lifecycle segment without treating PCM chunks as complete audio."""
+    if seg.type == "voice_stream":
+        return seg.data
+    if seg.type == "seglist" and isinstance(seg.data, list):
+        for child in seg.data:
+            payload = _extract_voice_stream_payload(child)
+            if payload is not None:
+                return payload
+    return None
+
+
+def _has_voice_stream_segment(seg) -> bool:
+    if seg.type == "voice_stream":
+        return True
+    if seg.type == "seglist" and isinstance(seg.data, list):
+        return any(_has_voice_stream_segment(child) for child in seg.data)
+    return False
 
 
 def _extract_image_base64(seg) -> str:

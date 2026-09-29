@@ -36,6 +36,7 @@ class AvatarEvent(StrEnum):
     PARAM_TWEEN = "param_tween"
     PLAY_AUDIO = "play_audio"
     STOP_AUDIO = "stop_audio"
+    VOICE_STREAM = "voice_stream"
     PREPARE_REPLY = "prepare_reply"
     APPLY_CONTROL = "apply_control"
     SHUTDOWN = "shutdown"

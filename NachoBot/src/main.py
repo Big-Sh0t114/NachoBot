@@ -201,6 +201,14 @@ class MainSystem:
             except Exception as e:
                 logger.error(f"A_Memorix 关闭失败: {e}")
 
+        try:
+            from src.multimodal import get_multimodal_router
+
+            await get_multimodal_router().shutdown()
+            logger.info("Core multimodal streams and HTTP client closed")
+        except Exception as e:
+            logger.error(f"Core multimodal 关闭失败: {e}")
+
     async def schedule_tasks(self):
         """调度定时任务"""
         from src.chat.sandbox.sandbox_manager import sandbox_manager

@@ -14,6 +14,7 @@ def build_live_additional_config(
     search_enabled: bool,
     person_profile_enabled: bool,
     tts_enabled: bool,
+    voice_stream_playback_ready: bool = False,
     tts_language: str = "",
     base: Optional[Mapping[str, Any]] = None,
     platform_event: Optional[Mapping[str, Any]] = None,
@@ -47,6 +48,10 @@ def build_live_additional_config(
         "person_profile_timeout_seconds": 0.5,
         "typo_enabled": False,
         "tts_language": language if tts_enabled else "",
+        # Core may choose incremental PCM only for a live room that has
+        # advertised an available playback path. Callers for private/comment
+        # contexts keep the default false and retain buffered voice delivery.
+        "voice_stream": bool(tts_enabled and voice_stream_playback_ready),
     }
     if platform_event:
         additional["platform_event"] = dict(platform_event)

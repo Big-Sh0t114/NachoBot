@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import os
+import base64
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -21,8 +24,8 @@ from src.multimodal.contracts import (
 )
 from src.multimodal.client import LocalMultimodalClient, LocalPerceptionError
 from src.multimodal.profile import RuntimeProfile, get_runtime_profile
-from src.multimodal.router import CoreMultimodalRouter
-from src.chat.message_receive.message import MessageProcessBase
+from src.multimodal.router import AudioStreamError, CoreMultimodalRouter, _ASRReceipt
+from src.chat.message_receive.message import MessageProcessBase, MessageRecv
 from src.chat.heart_flow.heartFC_chat import _prepare_json_envelope_delivery
 
 
@@ -55,6 +58,45 @@ class FakePerception:
 
     async def tts_health(self):
         return {"status": "ok", "ready": True, "model_loaded": True}
+
+
+class FakeStreamingPerception(FakePerception):
+    def __init__(self, *, loaded_model="asr-b", finish_text="finished transcript", streaming_asr=True):
+        super().__init__()
+        self.loaded_model = loaded_model
+        self.finish_text = finish_text
+        self.streaming_asr = streaming_asr
+        self.stream_starts: list[str] = []
+        self.stream_chunks: list[tuple[str, int, bytes]] = []
+        self.stream_finishes: list[str] = []
+        self.stream_aborts: list[str] = []
+        self.closed = False
+
+    async def health(self):
+        return {
+            "ready": True,
+            "operations": [AUDIO_TRANSCRIBE_V1, IMAGE_DESCRIBE_V1],
+            "models": {AUDIO_TRANSCRIBE_V1: self.loaded_model, IMAGE_DESCRIBE_V1: "Florence-2"},
+            "streaming_asr": self.streaming_asr,
+        }
+
+    async def start_audio_stream(self, model_identifier):
+        self.stream_starts.append(model_identifier)
+        return "runtime-stream-1"
+
+    async def append_audio_stream_chunk(self, stream_id, seq, pcm):
+        self.stream_chunks.append((stream_id, seq, pcm))
+        return f"partial-{seq}"
+
+    async def finish_audio_stream(self, stream_id):
+        self.stream_finishes.append(stream_id)
+        return {"text": self.finish_text, "result_id": "runtime-result-id"}
+
+    async def abort_audio_stream(self, stream_id):
+        self.stream_aborts.append(stream_id)
+
+    async def aclose(self):
+        self.closed = True
 
 
 class _BinaryResponse:
@@ -98,6 +140,20 @@ class _JsonHttpClient(_RecordingHttpClient):
         return _JsonResponse(self.payload)
 
 
+class _QueuedJsonHttpClient(_RecordingHttpClient):
+    def __init__(self, payloads):
+        super().__init__()
+        self.payloads = list(payloads)
+        self.closed = False
+
+    async def request(self, method: str, url: str, **kwargs):
+        self.calls.append((method, url, kwargs))
+        return _JsonResponse(self.payloads.pop(0))
+
+    async def aclose(self):
+        self.closed = True
+
+
 def _mixed_config(group: str):
     task = SimpleNamespace(model_list=["remote-first", "local-middle", "remote-last"], max_tokens=20, temperature=0.3, timeout=None)
     providers = {
@@ -114,6 +170,28 @@ def _mixed_config(group: str):
         for name in task.model_list
     }
     config = SimpleNamespace(model_task_config=SimpleNamespace(**{group: task}))
+    config.get_model_info = models.__getitem__
+    config.get_provider = providers.__getitem__
+    return config
+
+
+def _stream_config():
+    task = SimpleNamespace(
+        model_list=["remote-first", "local-a", "local-b"],
+        max_tokens=20,
+        temperature=0.3,
+        timeout=None,
+    )
+    providers = {
+        "remote": SimpleNamespace(name="Remote", base_url="https://example.invalid/v1", max_retry=1),
+        "local": SimpleNamespace(name="LocalModel", base_url="http://127.0.0.1:9874/v1", max_retry=1),
+    }
+    models = {
+        "remote-first": SimpleNamespace(name="remote-first", api_provider="remote", model_identifier="remote-asr"),
+        "local-a": SimpleNamespace(name="local-a", api_provider="local", model_identifier="asr-a"),
+        "local-b": SimpleNamespace(name="local-b", api_provider="local", model_identifier="asr-b"),
+    }
+    config = SimpleNamespace(model_task_config=SimpleNamespace(voice=task))
     config.get_model_info = models.__getitem__
     config.get_provider = providers.__getitem__
     return config
@@ -201,6 +279,286 @@ class MultimodalCoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.text, "remote video")
         self.assertEqual(result.attempted, ("local-middle", "remote-last"))
         self.assertEqual(local.calls, [])
+
+    async def test_stream_selects_once_orders_chunks_and_consumes_receipt_once(self):
+        from src.llm_models.model_client.base_client import client_registry
+
+        config = _stream_config()
+        local = FakeStreamingPerception()
+        router = CoreMultimodalRouter(profile="full", local=local, model_config=config)
+        self.addAsyncCleanup(router.shutdown)
+        _, request = router._request_for_task("voice")
+        request.model_usage["local-a"] = (0, 0, 4, 0.0)
+        request.model_usage["local-b"] = (0, 0, 0, 0.0)
+
+        with patch.object(client_registry, "get_client_class_instance", return_value=object()):
+            started = await router.start_audio_stream()
+
+        stream_id = started["stream_id"]
+        session = router._audio_streams[stream_id]
+        self.assertEqual(session.platform, "universal_vc")
+        self.assertEqual(session.model_name, "local-b")
+        self.assertEqual(session.model_identifier, "asr-b")
+        self.assertEqual(local.stream_starts, ["asr-b"])
+        self.assertEqual(request.model_usage["local-b"][2], 1)
+
+        pcm = b"\x00\x01\x02\x03"
+        encoded = base64.b64encode(pcm).decode("ascii")
+        first = await router.append_audio_stream_chunk(stream_id=stream_id, seq=0, pcm_base64=encoded)
+        duplicate = await router.append_audio_stream_chunk(stream_id=stream_id, seq=0, pcm_base64=encoded)
+        self.assertEqual(first, {"seq": 0, "partial_text": "partial-0"})
+        self.assertEqual(duplicate, first)
+        self.assertEqual(len(local.stream_chunks), 1)
+
+        with self.assertRaises(AudioStreamError) as gap:
+            await router.append_audio_stream_chunk(stream_id=stream_id, seq=2, pcm_base64=encoded)
+        self.assertEqual(gap.exception.status_code, 409)
+        with self.assertRaises(AudioStreamError) as changed_duplicate:
+            await router.append_audio_stream_chunk(
+                stream_id=stream_id,
+                seq=0,
+                pcm_base64=base64.b64encode(b"\x09\x09").decode("ascii"),
+            )
+        self.assertEqual(changed_duplicate.exception.status_code, 409)
+
+        finished = await router.finish_audio_stream(stream_id)
+        self.assertEqual(finished["text"], "finished transcript")
+        self.assertNotEqual(finished["result_id"], "runtime-result-id")
+        self.assertEqual(request.model_usage["local-b"][2], 0)
+        self.assertEqual(local.stream_finishes, ["runtime-stream-1"])
+
+        wrong_context = await router.consume_precomputed_asr_result(
+            finished["result_id"], context="discord_vc"
+        )
+        self.assertIsNone(wrong_context)
+        result = await router.transcribe(
+            "YQ==",
+            precomputed_asr_result_id=finished["result_id"],
+            precomputed_asr_context="UniversalVC",
+        )
+        self.assertEqual(result.text, "finished transcript")
+        self.assertTrue(result.metadata["precomputed"])
+        self.assertEqual(local.calls, [])
+        self.assertIsNone(
+            await router.consume_precomputed_asr_result(
+                finished["result_id"], context="UniversalVC"
+            )
+        )
+
+    async def test_stream_receipt_is_bound_to_start_platform(self):
+        from src.llm_models.model_client.base_client import client_registry
+
+        router = CoreMultimodalRouter(
+            profile="full",
+            local=FakeStreamingPerception(loaded_model="asr-a"),
+            model_config=_stream_config(),
+        )
+        self.addAsyncCleanup(router.shutdown)
+        with patch.object(client_registry, "get_client_class_instance", return_value=object()):
+            with self.assertRaises(AudioStreamError) as invalid:
+                await router.start_audio_stream(platform="bilibili.live")
+            self.assertEqual(invalid.exception.status_code, 400)
+            started = await router.start_audio_stream(platform="DiscordVC")
+
+        session = router._audio_streams[started["stream_id"]]
+        self.assertEqual(session.platform, "discord_vc")
+        finished = await router.finish_audio_stream(started["stream_id"])
+        self.assertEqual(router._asr_receipts[finished["result_id"]].context, "discord_vc")
+
+        wav_calls = []
+
+        async def ordinary_asr(request):
+            wav_calls.append(request)
+            return PerceptionResult(request.operation, "ordinary transcript", provider="remote")
+
+        router.perceive = ordinary_asr
+        mismatch = await router.transcribe(
+            "YQ==",
+            precomputed_asr_result_id=finished["result_id"],
+            precomputed_asr_context="universal_vc",
+        )
+        self.assertEqual(mismatch.text, "ordinary transcript")
+        self.assertEqual(len(wav_calls), 1)
+
+        matched = await router.transcribe(
+            "YQ==",
+            precomputed_asr_result_id=finished["result_id"],
+            precomputed_asr_context="discord_vc",
+        )
+        self.assertEqual(matched.text, "finished transcript")
+        self.assertTrue(matched.metadata["precomputed"])
+        self.assertEqual(len(wav_calls), 1)
+
+    async def test_stream_mismatch_fails_without_changing_wav_model_selection(self):
+        from src.llm_models.exceptions import ModelAttemptFailed
+        from src.llm_models.model_client.base_client import APIResponse, client_registry
+        from src.llm_models.utils_model import LLMRequest
+
+        config = _stream_config()
+        local = FakeStreamingPerception(loaded_model="unrecognized-model")
+        router = CoreMultimodalRouter(profile="full", local=local, model_config=config)
+        self.addAsyncCleanup(router.shutdown)
+
+        async def remote_attempt(_llm, model, *_args, **_kwargs):
+            if model.name != "remote-first":
+                raise ModelAttemptFailed("unexpected candidate")
+            return APIResponse(content="ordinary WAV transcript")
+
+        with patch.object(client_registry, "get_client_class_instance", return_value=object()), patch.object(
+            LLMRequest, "_attempt_request_on_model", remote_attempt
+        ):
+            with self.assertRaises(AudioStreamError) as caught:
+                await router.start_audio_stream()
+            result = await router.transcribe("YQ==")
+
+        self.assertEqual(caught.exception.status_code, 501)
+        self.assertEqual(local.stream_starts, [])
+        self.assertEqual(result.text, "ordinary WAV transcript")
+        self.assertEqual(result.attempted, ("remote-first",))
+        self.assertEqual(local.calls, [])
+
+    async def test_stream_expiry_and_shutdown_abort_runtime_and_release_leases(self):
+        from src.llm_models.model_client.base_client import client_registry
+
+        config = _stream_config()
+        local = FakeStreamingPerception()
+        router = CoreMultimodalRouter(profile="full", local=local, model_config=config)
+        _, request = router._request_for_task("voice")
+        request.model_usage["local-a"] = (0, 0, 4, 0.0)
+        request.model_usage["local-b"] = (0, 0, 0, 0.0)
+        with patch.object(client_registry, "get_client_class_instance", return_value=object()):
+            first = await router.start_audio_stream()
+        expired = router._audio_streams[first["stream_id"]]
+        expired.last_activity = time.monotonic() - 16
+        await router.cleanup_expired_audio_streams()
+        self.assertEqual(local.stream_aborts, ["runtime-stream-1"])
+        self.assertEqual(request.model_usage["local-b"][2], 0)
+
+        with patch.object(client_registry, "get_client_class_instance", return_value=object()):
+            second = await router.start_audio_stream()
+        self.assertEqual(request.model_usage["local-b"][2], 1)
+        await router.shutdown()
+        self.assertEqual(local.stream_aborts, ["runtime-stream-1", "runtime-stream-1"])
+        self.assertEqual(request.model_usage["local-b"][2], 0)
+        self.assertTrue(local.closed)
+
+    async def test_expired_busy_stream_does_not_block_another_stream(self):
+        from src.llm_models.model_client.base_client import client_registry
+
+        local = FakeStreamingPerception()
+        router = CoreMultimodalRouter(
+            profile="full", local=local, model_config=_stream_config()
+        )
+        self.addAsyncCleanup(router.shutdown)
+        _, request = router._request_for_task("voice")
+        request.model_usage["local-a"] = (0, 0, 4, 0.0)
+        request.model_usage["local-b"] = (0, 0, 0, 0.0)
+        with patch.object(client_registry, "get_client_class_instance", return_value=object()):
+            first = await router.start_audio_stream()
+            second = await router.start_audio_stream()
+
+        busy = router._audio_streams[first["stream_id"]]
+        busy.last_activity = time.monotonic() - 16
+        await busy.lock.acquire()
+        try:
+            await asyncio.wait_for(router.cleanup_expired_audio_streams(), timeout=0.2)
+            pcm = base64.b64encode(b"\x00\x01").decode("ascii")
+            result = await asyncio.wait_for(
+                router.append_audio_stream_chunk(
+                    stream_id=second["stream_id"], seq=0, pcm_base64=pcm
+                ),
+                timeout=0.2,
+            )
+            self.assertEqual(result["seq"], 0)
+            self.assertIn(first["stream_id"], router._audio_streams)
+        finally:
+            busy.lock.release()
+
+        await router.cleanup_expired_audio_streams()
+        self.assertNotIn(first["stream_id"], router._audio_streams)
+
+    async def test_expired_receipt_uses_full_wav_transcription(self):
+        router = CoreMultimodalRouter(profile="full", local=FakePerception())
+        calls = []
+
+        async def full_wav(data, **kwargs):
+            calls.append((data, kwargs))
+            return PerceptionResult(AUDIO_TRANSCRIBE_V1, "wav fallback", provider="remote")
+
+        router._asr_receipts["expired"] = _ASRReceipt("stale", "UniversalVC", 0)
+        router.perceive = full_wav
+        result = await router.transcribe("YQ==", precomputed_asr_result_id="expired")
+
+        self.assertEqual(result.text, "wav fallback")
+        self.assertEqual(calls, [(MediaInput(operation=AUDIO_TRANSCRIBE_V1, data="YQ=="), {})])
+
+    async def test_voice_message_forwards_only_allowed_platform_receipts(self):
+        receiver = SimpleNamespace(
+            message_info=SimpleNamespace(
+                platform="UniversalVC",
+                additional_config={"precomputed_asr_result_id": "receipt-token"}
+            )
+        )
+        captured = []
+
+        async def get_voice_text(
+            data,
+            *,
+            precomputed_asr_result_id=None,
+            precomputed_asr_context=None,
+        ):
+            captured.append((data, precomputed_asr_result_id, precomputed_asr_context))
+            return "processed"
+
+        with patch("src.chat.message_receive.message.get_voice_text", get_voice_text):
+            for platform in ("UniversalVC", "discord_vc", "bilibili", "webui"):
+                receiver.message_info.platform = platform
+                result = await MessageRecv._process_single_segment(
+                    receiver,
+                    Seg(type="voice", data="YQ=="),
+                )
+
+            receiver.message_info.platform = "qq"
+            await MessageRecv._process_single_segment(receiver, Seg(type="voice", data="YQ=="))
+
+        self.assertEqual(result, "processed")
+        self.assertEqual(
+            captured[:4],
+            [
+                ("YQ==", "receipt-token", "universal_vc"),
+                ("YQ==", "receipt-token", "discord_vc"),
+                ("YQ==", "receipt-token", "bilibili"),
+                ("YQ==", "receipt-token", "webui"),
+            ],
+        )
+        self.assertEqual(captured[-1], ("YQ==", None, None))
+
+    async def test_local_client_reuses_and_closes_its_owned_http_pool(self):
+        transport = _QueuedJsonHttpClient(
+            [
+                {"ready": True, "operations": [AUDIO_TRANSCRIBE_V1]},
+                {"stream_id": "runtime-stream"},
+            ]
+        )
+        with patch("src.multimodal.client.httpx.AsyncClient", return_value=transport) as factory:
+            local = LocalMultimodalClient()
+            await local.health()
+            stream_id = await local.start_audio_stream("asr-b")
+            self.assertEqual(stream_id, "runtime-stream")
+            self.assertEqual(factory.call_count, 1)
+            self.assertEqual(len(transport.calls), 2)
+            self.assertEqual(
+                transport.calls[1][2]["json"],
+                {"sample_rate": 16_000, "channels": 1, "model": "asr-b"},
+            )
+            await local.aclose()
+
+        self.assertTrue(transport.closed)
+
+        injected = _QueuedJsonHttpClient([])
+        injected_client = LocalMultimodalClient(client=injected)
+        await injected_client.aclose()
+        self.assertFalse(injected.closed)
 
     async def test_no_media_does_not_trigger_tts_or_perception(self):
         local = FakePerception()

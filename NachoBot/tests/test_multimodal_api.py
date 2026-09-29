@@ -4,11 +4,13 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import httpx
+from fastapi import FastAPI
 from src.multimodal.api import PerceptionBody, TTSBody, create_multimodal_router, register_multimodal_api
 from pydantic import ValidationError
 
 from src.multimodal.contracts import MAX_MEDIA_REQUEST_CHARS, PerceptionResult, TTSResult
-from src.multimodal.router import CoreMultimodalRouter
+from src.multimodal.router import AudioStreamError, CoreMultimodalRouter
 
 
 class _FakeProvider:
@@ -31,6 +33,30 @@ class _Server:
 
     def register_router(self, router, *, prefix):
         self.registration = (router, prefix)
+
+
+class _StreamService:
+    def __init__(self):
+        self.started_platforms = []
+
+    async def start_audio_stream(self, *, sample_rate, channels, platform="universal_vc"):
+        if sample_rate != 16_000 or channels != 1:
+            raise AudioStreamError(400, "invalid_audio_format")
+        if platform not in {"universal_vc", "discord_vc", "bilibili", "webui"}:
+            raise AudioStreamError(400, "invalid_platform")
+        self.started_platforms.append(platform)
+        return {"stream_id": "core-stream"}
+
+    async def append_audio_stream_chunk(self, *, stream_id, seq, pcm_base64):
+        if seq != 0:
+            raise AudioStreamError(409, "sequence_conflict")
+        return {"seq": seq, "partial_text": "partial"}
+
+    async def finish_audio_stream(self, stream_id):
+        return {"text": "done", "result_id": "receipt"}
+
+    async def abort_audio_stream(self, stream_id):
+        return {"aborted": True}
 
 
 class MultimodalApiTests(unittest.IsolatedAsyncioTestCase):
@@ -100,6 +126,72 @@ class MultimodalApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_request_model_rejects_unbounded_media_strings(self):
         with self.assertRaises(ValidationError):
             PerceptionBody(operation="audio.transcribe.v1", data="A" * (MAX_MEDIA_REQUEST_CHARS + 1))
+
+    async def test_audio_stream_http_contract_and_error_statuses(self):
+        app = FastAPI()
+        service = _StreamService()
+        app.include_router(create_multimodal_router(service), prefix="/api/multimodal")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            started = await client.post(
+                "/api/multimodal/audio/stream/start",
+                json={"sample_rate": 16_000, "channels": 1},
+            )
+            discord_started = await client.post(
+                "/api/multimodal/audio/stream/start",
+                json={"sample_rate": 16_000, "channels": 1, "platform": "discord_vc"},
+            )
+            invalid_platform = await client.post(
+                "/api/multimodal/audio/stream/start",
+                json={"sample_rate": 16_000, "channels": 1, "platform": "untrusted"},
+            )
+            invalid = await client.post(
+                "/api/multimodal/audio/stream/start",
+                json={"sample_rate": 8_000, "channels": 1},
+            )
+            malformed = await client.post(
+                "/api/multimodal/audio/stream/start",
+                content="[",
+                headers={"content-type": "application/json"},
+            )
+            oversized = await client.post(
+                "/api/multimodal/audio/stream/chunk",
+                content=(
+                    b'{"stream_id":"core-stream","seq":0,"pcm_base64":"'
+                    + b"A" * 90_001
+                    + b'"}'
+                ),
+                headers={"content-type": "application/json"},
+            )
+            chunk = await client.post(
+                "/api/multimodal/audio/stream/chunk",
+                json={"stream_id": "core-stream", "seq": 0, "pcm_base64": "AA=="},
+            )
+            gap = await client.post(
+                "/api/multimodal/audio/stream/chunk",
+                json={"stream_id": "core-stream", "seq": 1, "pcm_base64": "AA=="},
+            )
+            finished = await client.post(
+                "/api/multimodal/audio/stream/finish",
+                json={"stream_id": "core-stream"},
+            )
+            aborted = await client.post(
+                "/api/multimodal/audio/stream/abort",
+                json={"stream_id": "core-stream"},
+            )
+
+        self.assertEqual(started.status_code, 200)
+        self.assertEqual(started.json(), {"stream_id": "core-stream"})
+        self.assertEqual(discord_started.status_code, 200)
+        self.assertEqual(service.started_platforms, ["universal_vc", "discord_vc"])
+        self.assertEqual(invalid_platform.status_code, 400)
+        self.assertEqual(invalid.status_code, 400)
+        self.assertEqual(malformed.status_code, 400)
+        self.assertEqual(oversized.status_code, 400)
+        self.assertEqual(chunk.json(), {"seq": 0, "partial_text": "partial"})
+        self.assertEqual(gap.status_code, 409)
+        self.assertEqual(finished.json(), {"text": "done", "result_id": "receipt"})
+        self.assertEqual(aborted.json(), {"aborted": True})
 
 
 if __name__ == "__main__":

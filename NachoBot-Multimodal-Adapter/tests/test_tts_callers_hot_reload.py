@@ -10,7 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from main import TTSPipeline, WebUITTSRequest
+from main import TTSPipeline, WebUITTSRequest  # noqa: E402
 
 
 class _FixedModel:
@@ -41,6 +41,7 @@ class FixedPublicRuntimeTests(unittest.TestCase):
             if hasattr(route, "methods")
         }
         self.assertIn(("/api/tts", ("POST",)), routes)
+        self.assertIn(("/api/tts/stream", ("POST",)), routes)
         self.assertIn(("/api/health", ("GET",)), routes)
         self.assertNotIn(("/api/emotion_preset", ("GET",)), routes)
 

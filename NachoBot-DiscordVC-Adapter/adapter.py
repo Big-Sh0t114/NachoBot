@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import binascii
 import logging
 import sys
 import uuid
@@ -135,7 +137,12 @@ class DiscordAdapter:
         return re.sub(r"\{(\w+)\}", replace, template)
 
     async def handle_speech_recognized(
-        self, guild_id: int, user_id: int, voice_data: str, user_name: str = None
+        self,
+        guild_id: int,
+        user_id: int,
+        voice_data: str,
+        user_name: str = None,
+        precomputed_asr_result_id: str | None = None,
     ):
         """Send one finalized WAV voice segment to Core for perception."""
         self.logger.info(
@@ -167,6 +174,7 @@ class DiscordAdapter:
                 # explicitly requested ``tts_text`` field.
                 "reply_delivery": "json_envelope",
                 "tts_language": "zh",
+                "voice_stream": True,
             },
             "voice_format": {
                 "mime_type": "audio/wav",
@@ -174,6 +182,14 @@ class DiscordAdapter:
                 "channels": 2,
             },
         }
+        if (
+            isinstance(precomputed_asr_result_id, str)
+            and precomputed_asr_result_id.strip()
+            and len(precomputed_asr_result_id) <= 256
+        ):
+            additional_config["precomputed_asr_result_id"] = (
+                precomputed_asr_result_id
+            )
 
         # Custom Prompts
         template_info = None
@@ -278,19 +294,25 @@ class DiscordAdapter:
                     continue
                 await self.bot.speak(guild_id, audio_path)
 
+            for event in self._voice_stream_events(segment):
+                try:
+                    self._handle_voice_stream_event(guild_id, event)
+                except (ValueError, TypeError, binascii.Error) as exc:
+                    self.logger.warning("Dropping invalid Core voice stream event: %s", type(exc).__name__)
+
         except Exception as e:
             self.logger.error(f"Error handling message from NachoBot: {e}")
 
     @staticmethod
     def _voice_segments(segment):
-        """Yield only Core-produced audio, including nested seglists."""
+        """Yield only complete Core WAV audio, including nested seglists."""
         if isinstance(segment, dict):
             seg_type = segment.get("type")
             data = segment.get("data")
             if seg_type == "seglist" and isinstance(data, list):
                 for child in data:
                     yield from DiscordAdapter._voice_segments(child)
-            elif seg_type in {"voice", "voice_stream"} and data:
+            elif seg_type == "voice" and data:
                 if isinstance(data, dict):
                     data = data.get("audio_base64") or data.get("audio")
                 if data:
@@ -304,9 +326,55 @@ class DiscordAdapter:
             if segment.type == "seglist" and isinstance(segment.data, list):
                 for child in segment.data:
                     yield from DiscordAdapter._voice_segments(child)
-            elif segment.type in {"voice", "voice_stream"} and segment.data:
+            elif segment.type == "voice" and segment.data:
                 data = segment.data
                 if isinstance(data, dict):
                     data = data.get("audio_base64") or data.get("audio")
                 if data:
                     yield data
+
+    @staticmethod
+    def _voice_stream_events(segment):
+        if isinstance(segment, list):
+            for child in segment:
+                yield from DiscordAdapter._voice_stream_events(child)
+            return
+        if isinstance(segment, dict):
+            kind, data = segment.get("type"), segment.get("data")
+        else:
+            kind, data = getattr(segment, "type", None), getattr(segment, "data", None)
+        if kind == "seglist" and isinstance(data, list):
+            for child in data:
+                yield from DiscordAdapter._voice_stream_events(child)
+        elif kind == "voice_stream" and isinstance(data, dict):
+            yield data
+
+    def _handle_voice_stream_event(self, guild_id: int, event: dict) -> None:
+        action = event.get("event")
+        stream_id = event.get("stream_id")
+        if action not in {"start", "chunk", "end", "abort"} or not isinstance(stream_id, str) or not 1 <= len(stream_id) <= 128:
+            raise ValueError("invalid voice stream identity")
+        rate, channels, width = (event.get(name) for name in ("sample_rate", "channels", "sample_width"))
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in (rate, channels, width)):
+            raise ValueError("invalid voice stream format")
+        if not 8_000 <= rate <= 192_000 or channels not in (1, 2) or width != 2 or event.get("codec") != "pcm_s16le":
+            raise ValueError("unsupported voice stream format")
+        if action == "start":
+            if not self.bot.start_tts_stream(guild_id, stream_id, rate, channels, width):
+                raise ValueError("Discord voice playback is unavailable")
+            return
+        source = self.bot.tts_streams.get(guild_id)
+        if source is None or source.stream_id != stream_id or (source.sample_rate, source.channels, source.sample_width) != (rate, channels, width):
+            raise ValueError("voice stream is not active or format changed")
+        if action == "chunk":
+            seq, encoded = event.get("seq"), event.get("audio_base64")
+            if isinstance(seq, bool) or not isinstance(seq, int) or seq < 0 or not isinstance(encoded, str) or len(encoded) > 4 * ((64 * 1024 + 2) // 3):
+                raise ValueError("invalid voice stream chunk")
+            pcm = base64.b64decode(encoded, validate=True)
+            if not pcm or len(pcm) > 64 * 1024 or len(pcm) % (channels * width):
+                raise ValueError("invalid PCM frame")
+            self.bot.feed_tts_stream(guild_id, stream_id, seq, pcm)
+        elif action == "end":
+            self.bot.end_tts_stream(guild_id, stream_id)
+        else:
+            self.bot.abort_tts_stream(guild_id, stream_id)

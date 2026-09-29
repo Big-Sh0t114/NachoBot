@@ -539,7 +539,11 @@ class LLMRequest:
             raise RuntimeError("获取embedding失败")
         return embedding, model_info.name
 
-    def _select_model(self, exclude_models: Optional[Set[str]] = None) -> Tuple[ModelInfo, APIProvider, BaseClient]:
+    def _select_model(
+        self,
+        exclude_models: Optional[Set[str]] = None,
+        eligible_models: Optional[Set[str]] = None,
+    ) -> Tuple[ModelInfo, APIProvider, BaseClient]:
         """
         根据总tokens和惩罚值选择的模型
         """
@@ -547,6 +551,7 @@ class LLMRequest:
             model: scores
             for model, scores in self.model_usage.items()
             if not exclude_models or model not in exclude_models
+            if eligible_models is None or model in eligible_models
         }
         if not available_models:
             raise RuntimeError("没有可用的模型可供选择。所有模型均已尝试失败。")
@@ -578,6 +583,37 @@ class LLMRequest:
 
         self.model_usage[model_info.name] = (total_tokens, penalty, usage_penalty + 1, last_penalty_time)
         return model_info, api_provider, client
+
+    def acquire_model_lease(
+        self,
+        eligible_models: Set[str],
+    ) -> Tuple[ModelInfo, APIProvider, BaseClient]:
+        """Select and pin one candidate using the normal usage/penalty score.
+
+        Long-lived operations such as Core-owned ASR streams retain the
+        selected model's usage penalty until ``release_model_lease``. Ordinary
+        requests continue to use ``_select_model`` without an eligibility
+        filter, so their candidate set and failover behavior are unchanged.
+        """
+
+        if not eligible_models:
+            raise RuntimeError("没有可用的模型可供选择。")
+        return self._select_model(eligible_models=eligible_models)
+
+    def release_model_lease(self, model_name: str) -> None:
+        """Release one in-flight selection lease without changing failures."""
+
+        scores = self.model_usage.get(model_name)
+        if scores is None:
+            return
+        total_tokens, penalty, usage_penalty, last_penalty_time = scores
+        if usage_penalty > 0:
+            self.model_usage[model_name] = (
+                total_tokens,
+                penalty,
+                usage_penalty - 1,
+                last_penalty_time,
+            )
 
     async def _attempt_request_on_model(
         self,

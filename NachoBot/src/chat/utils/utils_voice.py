@@ -8,7 +8,20 @@ install(extra_lines=3)
 logger = get_logger("chat_voice")
 
 
-async def get_voice_text(voice_base64: str) -> str:
+def normalize_asr_receipt_platform(platform: object) -> str | None:
+    """Normalize one platform name against Core's ASR receipt allowlist."""
+
+    from src.multimodal.contracts import normalize_asr_stream_platform
+
+    return normalize_asr_stream_platform(platform)
+
+
+async def get_voice_text(
+    voice_base64: str,
+    *,
+    precomputed_asr_result_id: str | None = None,
+    precomputed_asr_context: str | None = "universal_vc",
+) -> str:
     """获取音频文件转录文本"""
     if not global_config.voice.enable_asr:
         logger.warning("语音识别未启用，无法处理语音消息")
@@ -18,7 +31,13 @@ async def get_voice_text(voice_base64: str) -> str:
         # adapters only deliver the voice field and never choose a model.
         from src.multimodal import get_multimodal_router
 
-        result = await get_multimodal_router().transcribe(voice_base64)
+        receipt_context = normalize_asr_receipt_platform(precomputed_asr_context)
+        receipt_id = precomputed_asr_result_id if receipt_context is not None else None
+        result = await get_multimodal_router().transcribe(
+            voice_base64,
+            precomputed_asr_result_id=receipt_id,
+            precomputed_asr_context=receipt_context or "",
+        )
         text = result.text.strip()
         if not text:
             logger.warning("未能生成语音文本")

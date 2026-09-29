@@ -25,7 +25,7 @@ from scipy.signal import resample_poly
 import toml
 from static_ffmpeg import run
 
-from .model_manager import ASRModelManager, DEFAULT_MODELS_DIR
+from .model_manager import ASRModelManager, ASR_MODEL_NAME, DEFAULT_MODELS_DIR
 from .onnxruntime_compat import preload_onnxruntime
 
 
@@ -43,6 +43,21 @@ except (ImportError, OSError) as exc:
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "configs" / "perception.toml"
+ASR_MODEL_IDENTIFIER = ASR_MODEL_NAME.removeprefix(
+    "sherpa-onnx-streaming-zipformer-"
+)
+
+
+class StreamingASRError(RuntimeError):
+    """Base error for strict incremental recognition calls."""
+
+
+class StreamingASRChunkError(StreamingASRError):
+    """The recognizer failed while accepting or decoding a chunk."""
+
+
+class StreamingASRFinalizationError(StreamingASRError):
+    """The recognizer failed while flushing a stream."""
 
 
 @lru_cache(maxsize=1)
@@ -156,6 +171,7 @@ class StreamingASR:
         self._streams: Dict[str, object] = {}
         self._partial_text: Dict[str, str] = {}
         self._lock = threading.RLock()
+        self.model_identifier = ASR_MODEL_IDENTIFIER
 
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
@@ -275,7 +291,7 @@ class StreamingASR:
 
         with self._lock:
             if stream_id in self._streams:
-                self.logger.warning("Replacing unfinished ASR stream: %s", stream_id)
+                raise ValueError(f"ASR stream already exists: {stream_id}")
             self._streams[stream_id] = self._recognizer.create_stream()
             self._partial_text.pop(stream_id, None)
         return True
@@ -287,19 +303,20 @@ class StreamingASR:
     ) -> Optional[str]:
         """Decode one float32 mono 16 kHz chunk and return the latest partial."""
         if not self.supports_streaming:
-            return None
+            raise StreamingASRChunkError("local streaming ASR is unavailable")
 
         samples = np.ascontiguousarray(samples_16k, dtype=np.float32).ravel()
         if samples.size == 0:
-            return self._partial_text.get(stream_id)
-
-        try:
             with self._lock:
-                stream = self._streams.get(stream_id)
-                if stream is None:
-                    stream = self._recognizer.create_stream()
-                    self._streams[stream_id] = stream
+                if stream_id not in self._streams:
+                    raise KeyError(f"unknown ASR stream: {stream_id}")
+                return self._partial_text.get(stream_id)
 
+        with self._lock:
+            stream = self._streams.get(stream_id)
+            if stream is None:
+                raise KeyError(f"unknown ASR stream: {stream_id}")
+            try:
                 stream.accept_waveform(self.SAMPLE_RATE, samples)
                 while self._recognizer.is_ready(stream):
                     self._recognizer.decode_stream(stream)
@@ -310,20 +327,21 @@ class StreamingASR:
                     self._partial_text[stream_id] = text
                     self.logger.debug("ASR partial [%s]: %s", stream_id, text)
                 return text or previous
-        except Exception as exc:
-            self.logger.error("Streaming ASR chunk error [%s]: %s", stream_id, exc)
-            self.abort_stream(stream_id)
-            return None
+            except Exception as exc:
+                self.logger.error("Streaming ASR chunk error [%s]: %s", stream_id, exc)
+                self._streams.pop(stream_id, None)
+                self._partial_text.pop(stream_id, None)
+                raise StreamingASRChunkError("streaming ASR chunk failed") from exc
 
     def finish_stream(self, stream_id: str) -> Optional[str]:
         """Flush one stream and return its final text."""
         if not self.supports_streaming:
-            return None
+            raise StreamingASRFinalizationError("local streaming ASR is unavailable")
 
         with self._lock:
             stream = self._streams.get(stream_id)
             if stream is None:
-                return None
+                raise KeyError(f"unknown ASR stream: {stream_id}")
             try:
                 tail_padding = np.zeros(
                     int(self.SAMPLE_RATE * self.TAIL_PADDING_SECONDS),
@@ -338,14 +356,16 @@ class StreamingASR:
                 if text:
                     self.logger.info("Streaming ASR [%s]: %s", stream_id, text)
                     return text
-                return self._partial_text.get(stream_id)
+                return None
             except Exception as exc:
                 self.logger.error(
                     "Streaming ASR finalization error [%s]: %s",
                     stream_id,
                     exc,
                 )
-                return self._partial_text.get(stream_id)
+                raise StreamingASRFinalizationError(
+                    "streaming ASR finalization failed"
+                ) from exc
             finally:
                 self._streams.pop(stream_id, None)
                 self._partial_text.pop(stream_id, None)
@@ -366,12 +386,19 @@ class StreamingASR:
 
         samples = np.ascontiguousarray(samples_16k, dtype=np.float32).ravel()
         chunk_size = int(self.SAMPLE_RATE * self.FILE_CHUNK_SECONDS)
-        for offset in range(0, samples.size, chunk_size):
-            self.accept_stream_audio(
-                stream_id,
-                samples[offset : offset + chunk_size],
-            )
-        return self.finish_stream(stream_id)
+        try:
+            for offset in range(0, samples.size, chunk_size):
+                self.accept_stream_audio(
+                    stream_id,
+                    samples[offset : offset + chunk_size],
+                )
+            return self.finish_stream(stream_id)
+        except StreamingASRError:
+            # Preserve the legacy complete-buffer API: its caller receives no
+            # transcript on decoder failure, while strict stream callers see
+            # the stage-specific exception above.
+            self.abort_stream(stream_id)
+            return None
 
     async def recognize_segment_async(
         self,

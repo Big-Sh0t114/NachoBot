@@ -1,19 +1,31 @@
 import asyncio
+from io import BytesIO
 from pathlib import Path
 import sys
 import tempfile
 import threading
 import time
 import unittest
+import wave
 from unittest import mock
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from nachobot_multimodal.utils import tts_resolver
-from nachobot_multimodal.utils.tts_resolver import TTSResolution, resolve_tts_model_snapshot
-from nachobot_multimodal.utils.tts_runtime import TTSRuntime
+from nachobot_multimodal.utils import tts_resolver  # noqa: E402
+from nachobot_multimodal.utils.tts_resolver import TTSResolution, resolve_tts_model_snapshot  # noqa: E402
+from nachobot_multimodal.utils.tts_runtime import TTSRuntime  # noqa: E402
+
+
+def _minimal_wav(sample_rate=22050, pcm=b"\x00\x00\x01\x00"):
+    buffer = BytesIO()
+    with wave.open(buffer, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(pcm)
+    return buffer.getvalue()
 
 
 class _FakeModel:
@@ -45,6 +57,11 @@ class _BlockingModel:
 class _HTTPResponse:
     status = 200
 
+    def __init__(self, body=b"", headers=None):
+        self.body = body
+        self.headers = headers or {}
+        self.content = _StreamContent([body])
+
     async def __aenter__(self):
         return self
 
@@ -55,7 +72,7 @@ class _HTTPResponse:
         return None
 
     async def read(self):
-        return b"wav"
+        return self.body
 
 
 class _HTTPClientSession:
@@ -72,7 +89,12 @@ class _HTTPClientSession:
 
     def get(self, url, params=None, **kwargs):
         type(self).calls.append((url, dict(params or {})))
-        return _HTTPResponse()
+        if "vox-host" in url:
+            return _HTTPResponse(
+                b"\x00\x00\x01\x00",
+                headers={"X-Sample-Rate": "24000", "X-Channels": "1", "X-Sample-Width": "2"},
+            )
+        return _HTTPResponse(_minimal_wav())
 
 
 class _RequestsResponse:
@@ -98,6 +120,10 @@ class _StreamContent:
             if self.waiting is not None:
                 self.waiting.set()
             await self.hold.wait()
+
+    async def iter_any(self):
+        for chunk in self.chunks:
+            yield chunk
 
 
 class _StreamResponse:
@@ -406,6 +432,14 @@ class BackendParameterTests(unittest.TestCase):
                     'text_language = "auto"',
                     'prompt_language = "ja"',
                     "speed_factor = 1.0",
+                    "[tts.models.presets.alt]",
+                    'name = "alt"',
+                    'ref_audio_path = "alt-voice.wav"',
+                    "aux_ref_audio_paths = []",
+                    'prompt_text = "alt-prompt"',
+                    'text_language = "ja"',
+                    'prompt_language = "en"',
+                    "speed_factor = 0.8",
                     "[pipeline]",
                     'default_preset = "default"',
                     '[pipeline.platform_presets]\nwebui = "default"',
@@ -431,7 +465,7 @@ class BackendParameterTests(unittest.TestCase):
 
                     self.assertTrue(runtime.ensure_tts_model())
                     vox = runtime.model
-                    await vox.tts(
+                    vox_wav = await vox.tts(
                         text="vox text",
                         platform="webui",
                         text_lang="zh",
@@ -442,17 +476,18 @@ class BackendParameterTests(unittest.TestCase):
                     base_path.write_text('[enabled_tts]\nenabled = ["GPT_Sovits"]\n[server]\nhost = "127.0.0.1"\nport = 9880\n', encoding="utf-8")
                     self.assertTrue(runtime.ensure_tts_model())
                     gpt = runtime.model
-                    await gpt.tts(
+                    gpt_wav = await gpt.tts(
                         text="gpt text",
                         platform="webui",
                         text_lang="zh",
                         prompt_lang="ja",
+                        preset_name="alt",
                     )
 
                     base_path.write_text('[enabled_tts]\nenabled = ["Vox"]\n[server]\nhost = "127.0.0.1"\nport = 9880\n', encoding="utf-8")
                     self.assertTrue(runtime.ensure_tts_model())
                     vox_again = runtime.model
-                    await vox_again.tts(
+                    vox_again_wav = await vox_again.tts(
                         text="vox again",
                         platform="webui",
                         text_lang="zh",
@@ -463,9 +498,9 @@ class BackendParameterTests(unittest.TestCase):
                 self.assertIsNot(vox, gpt)
                 self.assertIsNot(gpt, vox_again)
                 self.assertEqual([call[0] for call in _HTTPClientSession.calls], [
-                    "http://vox-host:9881/tts",
+                    "http://vox-host:9881/tts_stream",
                     "http://gpt-host:9881/tts",
-                    "http://vox-host:9881/tts",
+                    "http://vox-host:9881/tts_stream",
                 ])
                 vox_params, gpt_params, vox_again_params = [call[1] for call in _HTTPClientSession.calls]
                 self.assertIn("reference_wav_path", vox_params)
@@ -473,11 +508,21 @@ class BackendParameterTests(unittest.TestCase):
                 self.assertNotIn("ref_audio_path", vox_params)
                 self.assertNotIn("prompt_lang", vox_params)
                 self.assertIn("ref_audio_path", gpt_params)
+                self.assertTrue(gpt_params["ref_audio_path"].endswith("alt-voice.wav"))
                 self.assertIn("prompt_lang", gpt_params)
+                self.assertEqual(gpt_params["prompt_text"], "alt-prompt")
                 self.assertNotIn("reference_wav_path", gpt_params)
                 self.assertNotIn("cfg_value", gpt_params)
                 self.assertIn("reference_wav_path", vox_again_params)
                 self.assertNotIn("ref_audio_path", vox_again_params)
+                self.assertEqual(gpt_params["streaming_mode"], "True")
+                self.assertEqual(gpt_params["media_type"], "wav")
+
+                for wav_data, expected_rate in ((vox_wav, 24000), (gpt_wav, 22050), (vox_again_wav, 24000)):
+                    with wave.open(BytesIO(wav_data), "rb") as wav_file:
+                        self.assertEqual(wav_file.getframerate(), expected_rate)
+                        self.assertEqual(wav_file.getnchannels(), 1)
+                        self.assertEqual(wav_file.getsampwidth(), 2)
 
         asyncio.run(scenario())
 
@@ -502,6 +547,7 @@ class BackendParameterTests(unittest.TestCase):
                         platform="webui",
                         text_lang="zh",
                         prompt_lang="ja",
+                        preset_name="alt",
                     )
                     chunks = [chunk async for chunk in stream]
 
@@ -516,8 +562,57 @@ class BackendParameterTests(unittest.TestCase):
                 self.assertEqual(params["streaming_mode"], "True")
                 self.assertEqual(params["prompt_lang"], "ja")
                 self.assertIn("ref_audio_path", params)
+                self.assertTrue(params["ref_audio_path"].endswith("alt-voice.wav"))
+                self.assertEqual(params["prompt_text"], "alt-prompt")
                 self.assertNotIn("cfg_value", params)
                 self.assertNotIn("reference_wav_path", params)
+
+        asyncio.run(scenario())
+
+    def test_gpt_pcm_stream_parses_a_wav_header_split_across_network_chunks(self):
+        async def scenario():
+            from nachobot_multimodal.tts.backends.GPT_Sovits import tts_model as gpt_module
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                base_path = self._write_backend_configs(root, "GPT_Sovits")
+                wav_data = _minimal_wav(sample_rate=32000, pcm=b"\x10\x00\x20\x00")
+                split_chunks = [
+                    wav_data[:1],
+                    wav_data[1:7],
+                    wav_data[7:25],
+                    wav_data[25:43],
+                    wav_data[43:45],
+                    wav_data[45:],
+                ]
+                _StreamSession.events = []
+                _StreamSession.calls = []
+                _StreamSession.queue = [_StreamResponse(_StreamSession.events, split_chunks)]
+                with mock.patch.object(gpt_module.aiohttp, "ClientSession", _StreamSession), mock.patch.object(
+                    gpt_module.requests, "get", return_value=_RequestsResponse()
+                ):
+                    runtime = TTSRuntime(config_dir=base_path)
+                    self.assertTrue(runtime.ensure_tts_model())
+                    model = runtime.model
+                    chunks = [
+                        chunk
+                        async for chunk in model.tts_pcm_stream(
+                            text="pcm stream",
+                            platform="webui",
+                            preset_name="alt",
+                        )
+                    ]
+
+                self.assertEqual(b"".join(chunk.data for chunk in chunks), b"\x10\x00\x20\x00")
+                self.assertTrue(chunks)
+                self.assertTrue(all(chunk.sample_rate == 32000 for chunk in chunks))
+                self.assertTrue(all(chunk.channels == 1 and chunk.sample_width == 2 for chunk in chunks))
+                params = _StreamSession.calls[0][1]
+                self.assertEqual(params["streaming_mode"], "True")
+                self.assertEqual(params["media_type"], "wav")
+                self.assertTrue(params["ref_audio_path"].endswith("alt-voice.wav"))
+                self.assertEqual(params["prompt_text"], "alt-prompt")
+                self.assertLess(_StreamSession.events.index("response_exit"), _StreamSession.events.index("session1_exit"))
 
         asyncio.run(scenario())
 
@@ -534,7 +629,7 @@ class BackendParameterTests(unittest.TestCase):
                 _StreamSession.calls = []
                 _StreamSession.queue = [
                     _StreamResponse(_StreamSession.events, [b"first"], close_gate=close_gate),
-                    _StreamResponse(_StreamSession.events, []),
+                    _StreamResponse(_StreamSession.events, [_minimal_wav()]),
                 ]
                 with mock.patch.object(gpt_module.aiohttp, "ClientSession", _StreamSession), mock.patch.object(
                     gpt_module.requests, "get", return_value=_RequestsResponse()
@@ -581,7 +676,7 @@ class BackendParameterTests(unittest.TestCase):
                         close_gate.set()
                         with self.assertRaises(asyncio.CancelledError):
                             await first_task
-                        self.assertEqual(await second_task, b"complete")
+                        self.assertEqual(await second_task, _minimal_wav())
                     finally:
                         close_gate.set()
                         pending = [
@@ -619,7 +714,7 @@ class BackendParameterTests(unittest.TestCase):
                         content_hold=chunk_gate,
                         content_waiting=chunk_waiting,
                     ),
-                    _StreamResponse(_StreamSession.events, []),
+                    _StreamResponse(_StreamSession.events, [_minimal_wav()]),
                 ]
                 with mock.patch.object(gpt_module.aiohttp, "ClientSession", _StreamSession), mock.patch.object(
                     gpt_module.requests, "get", return_value=_RequestsResponse()
@@ -654,7 +749,7 @@ class BackendParameterTests(unittest.TestCase):
                     first_task.cancel()
                     with self.assertRaises(asyncio.CancelledError):
                         await asyncio.wait_for(first_task, timeout=1.0)
-                    self.assertEqual(await second_task, b"complete")
+                    self.assertEqual(await second_task, _minimal_wav())
 
                 events = _StreamSession.events
                 self.assertLess(events.index("response_exit"), events.index("session1_exit"))

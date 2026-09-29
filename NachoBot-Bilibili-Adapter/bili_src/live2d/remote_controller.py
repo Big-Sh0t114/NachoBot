@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections.abc import Mapping
 from dataclasses import dataclass
 import json
 import re
@@ -21,6 +22,7 @@ INTERACTION_MESSAGE_TYPE = "avatar.interaction"
 
 MAX_REMOTE_AUDIO_BYTES = 4 * 1024 * 1024
 MAX_WEBSOCKET_MESSAGE_BYTES = 8 * 1024 * 1024
+MAX_REMOTE_PCM_CHUNK_BYTES = 64 * 1024
 REQUEST_TIMEOUT_SECONDS = 8.0
 
 
@@ -89,6 +91,14 @@ class RemoteLive2DController:
     def capabilities(self) -> frozenset[str]:
         return frozenset(self._capabilities)
 
+    @property
+    def can_stream_pcm(self) -> bool:
+        return bool(
+            self.connected
+            and self._ready.is_set()
+            and "voice_stream_pcm" in self._capabilities
+        )
+
     def has_capability(self, capability: str) -> bool:
         return capability in self._capabilities
 
@@ -104,6 +114,12 @@ class RemoteLive2DController:
         self.logger.info("Remote Live2D controller started")
 
     async def stop(self) -> None:
+        audio_player = getattr(self.adapter, "audio_player", None)
+        if audio_player is not None:
+            try:
+                await audio_player.abort_voice_stream()
+            except Exception:
+                pass
         self.is_running = False
         self._connected.clear()
         self._ready.clear()
@@ -163,6 +179,50 @@ class RemoteLive2DController:
             return False
 
         await self.send_live2d_event("stop_audio", None)
+        return True
+
+    async def send_voice_stream_event(self, content: Mapping[str, Any]) -> bool:
+        """Send one bounded PCM event directly in sequence to the renderer.
+
+        Success confirms WebSocket transport acceptance only; renderer/device
+        playback has no reverse acknowledgement in protocol 1.1.
+        """
+        if not self.can_stream_pcm:
+            return False
+        protocol_event, payload = self._translate_legacy_event(
+            "voice_stream", dict(content)
+        )
+        websocket = self._active_websocket
+        if websocket is None:
+            return False
+        if content.get("event") == "start":
+            try:
+                await asyncio.wait_for(
+                    self._send_queue.join(),
+                    timeout=REQUEST_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                return False
+        raw_message = json.dumps(
+            {
+                "type": COMMAND_MESSAGE_TYPE,
+                "version": PROTOCOL_VERSION,
+                "request_id": uuid4().hex,
+                "event": protocol_event,
+                "payload": payload,
+            },
+            ensure_ascii=False,
+        )
+        try:
+            async with self._send_lock:
+                if websocket is not self._active_websocket or not self.can_stream_pcm:
+                    return False
+                await websocket.send(raw_message)
+        except Exception as exc:
+            self.logger.warning(
+                "Live2D PCM stream transport failed: {}", type(exc).__name__
+            )
+            return False
         return True
 
     async def prepare_reply(self, raw_reply: str) -> PreparedReplyResult:
@@ -342,6 +402,12 @@ class RemoteLive2DController:
                 self._active_websocket = None
                 self._capabilities.clear()
                 self._fail_pending(Live2DRemoteError("Live2D connection closed"))
+                audio_player = getattr(self.adapter, "audio_player", None)
+                if audio_player is not None:
+                    try:
+                        await audio_player.handle_remote_disconnect()
+                    except Exception:
+                        pass
 
             if self.is_running:
                 await asyncio.sleep(self.reconnect_seconds)
@@ -405,14 +471,17 @@ class RemoteLive2DController:
                 self._capabilities = {
                     str(name)
                     for name, enabled in capabilities.items()
-                    if enabled and str(name) in {"prepare_reply", "apply_control"}
+                    if enabled
+                    and str(name)
+                    in {"prepare_reply", "apply_control", "voice_stream_pcm"}
                 }
             else:
                 advertised = payload.get("commands")
                 self._capabilities = {
                     str(name)
                     for name in advertised or []
-                    if str(name) in {"prepare_reply", "apply_control"}
+                    if str(name)
+                    in {"prepare_reply", "apply_control", "voice_stream_pcm"}
                 }
             self._ready.set()
             self.logger.info("Standalone Live2D renderer reported ready")
@@ -581,6 +650,65 @@ class RemoteLive2DController:
             }
         if event_type == "stop_audio":
             return "stop_audio", {}
+        if event_type == "voice_stream":
+            if not isinstance(content, Mapping):
+                raise ValueError("Live2D PCM stream event must be an object")
+            event = content.get("event")
+            if event not in ("start", "chunk", "end", "abort"):
+                raise ValueError("Live2D PCM stream event is invalid")
+            stream_id = content.get("stream_id")
+            parent_message_id = content.get("parent_message_id")
+            sample_rate = content.get("sample_rate")
+            channels = content.get("channels")
+            sample_width = content.get("sample_width")
+            codec = content.get("codec")
+            if (
+                not isinstance(stream_id, str)
+                or not stream_id.strip()
+                or len(stream_id) > 128
+                or not isinstance(parent_message_id, str)
+                or not parent_message_id.strip()
+                or len(parent_message_id) > 256
+            ):
+                raise ValueError("Live2D PCM stream identity is invalid")
+            if (
+                isinstance(sample_rate, bool)
+                or not isinstance(sample_rate, int)
+                or not 8000 <= sample_rate <= 96000
+                or isinstance(channels, bool)
+                or not isinstance(channels, int)
+                or channels not in (1, 2)
+                or isinstance(sample_width, bool)
+                or not isinstance(sample_width, int)
+                or sample_width != 2
+                or codec != "pcm_s16le"
+            ):
+                raise ValueError("Live2D PCM stream format is invalid")
+            payload: dict[str, Any] = {
+                "event": event,
+                "stream_id": stream_id.strip(),
+                "parent_message_id": parent_message_id.strip(),
+                "sample_rate": sample_rate,
+                "channels": channels,
+                "sample_width": sample_width,
+                "codec": codec,
+            }
+            if event == "chunk":
+                seq = content.get("seq")
+                pcm = content.get("pcm")
+                if (
+                    isinstance(seq, bool)
+                    or not isinstance(seq, int)
+                    or seq < 0
+                    or not isinstance(pcm, bytes)
+                    or not pcm
+                    or len(pcm) > MAX_REMOTE_PCM_CHUNK_BYTES
+                    or len(pcm) % (channels * sample_width)
+                ):
+                    raise ValueError("Live2D PCM chunk is invalid")
+                payload["seq"] = seq
+                payload["audio_base64"] = base64.b64encode(pcm).decode("ascii")
+            return "voice_stream", payload
         raise ValueError(f"Unsupported Live2D event type: {event_type}")
 
 

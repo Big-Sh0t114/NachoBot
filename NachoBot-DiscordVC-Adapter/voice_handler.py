@@ -4,6 +4,7 @@ import asyncio
 import logging
 import threading
 import time
+import uuid
 from collections import deque
 from contextlib import suppress
 from typing import Callable, Optional
@@ -19,6 +20,11 @@ DISCORD_SAMPLE_RATE = 48000
 DISCORD_CHANNELS = 2
 DISCORD_WIDTH = 2
 MAX_UTTERANCE_SECONDS = 60.0
+MAX_TRACKED_USERS = 32
+MAX_ACTIVE_UTTERANCES = 16
+MAX_STREAM_AUDIO_EVENTS = 1024
+MAX_STREAM_CONTROL_EVENTS = MAX_ACTIVE_UTTERANCES * 2 + 8
+STREAM_INPUT_CHUNK_SECONDS = 0.16
 
 
 class SilenceDetectingSink(Sink):
@@ -35,19 +41,30 @@ class SilenceDetectingSink(Sink):
         on_stream_audio_callback: Optional[Callable] = None,
         on_stream_finish_callback: Optional[Callable] = None,
         on_stream_abort_callback: Optional[Callable] = None,
+        on_capture_start_callback: Optional[Callable] = None,
+        on_capture_audio_callback: Optional[Callable] = None,
+        on_capture_finish_callback: Optional[Callable] = None,
+        on_capture_abort_callback: Optional[Callable] = None,
         config: Optional[VoiceConfig] = None,
     ):
         super().__init__(filters=filters)
 
-        # All callbacks are async and run on the Discord event loop. The audio
-        # callback only queues events, so encoding and Core transport never
-        # block py-cord's DecodeManager thread.
+        # Core callbacks run on the Discord event loop. Decoder-thread capture
+        # callbacks only append bounded PCM to VoiceHandler's bytearrays; WAV
+        # encoding and Core transport stay off py-cord's DecodeManager thread.
         self.callback = callback
         self.on_speech_start_callback = on_speech_start_callback
         self.on_stream_start_callback = on_stream_start_callback
         self.on_stream_audio_callback = on_stream_audio_callback
         self.on_stream_finish_callback = on_stream_finish_callback
         self.on_stream_abort_callback = on_stream_abort_callback
+        # Full-rate stereo PCM is retained by VoiceHandler synchronously from
+        # the decoder thread. These callbacks only take a bounded bytearray lock;
+        # all Core networking stays on the async stream worker.
+        self.on_capture_start_callback = on_capture_start_callback
+        self.on_capture_audio_callback = on_capture_audio_callback
+        self.on_capture_finish_callback = on_capture_finish_callback
+        self.on_capture_abort_callback = on_capture_abort_callback
         self.config = config
         self.vc = None
         self.audio_data = {}
@@ -63,6 +80,10 @@ class SilenceDetectingSink(Sink):
         self.voiced_bytes: dict[int, int] = {}
         self.pre_roll_buffer: dict[int, deque[bytes]] = {}
         self.pre_roll_bytes: dict[int, int] = {}
+        self.last_user_activity: dict[int, float] = {}
+        self._capture_ids: dict[int, str] = {}
+        self._active_capture_ids: set[str] = set()
+        self._stream_audio_buffers: dict[str, bytearray] = {}
 
         self.vad_threshold = config.vad_threshold if config else 500
         self.silence_threshold = config.silence_threshold if config else 0.5
@@ -73,10 +94,22 @@ class SilenceDetectingSink(Sink):
         self._max_preroll_bytes = int(
             self._bytes_per_second * self.PREROLL_SECONDS
         )
+        self._stream_audio_chunk_bytes = int(
+            self._bytes_per_second * STREAM_INPUT_CHUNK_SECONDS
+        )
 
         self._state_lock = threading.RLock()
-        self._event_queue: asyncio.Queue = asyncio.Queue()
-        self._started_streams: set[int] = set()
+        # The queue only carries downsampled-path lifecycle/audio work. WAV
+        # capture is independent, so a saturated Core stream queue degrades to
+        # the original complete WAV instead of dropping captured audio.
+        self._event_queue: asyncio.Queue = asyncio.Queue(
+            maxsize=MAX_STREAM_AUDIO_EVENTS + MAX_STREAM_CONTROL_EVENTS
+        )
+        self._event_reservation_lock = threading.Lock()
+        self._queued_audio_events = 0
+        self._queued_control_events = 0
+        self._failed_streams: set[str] = set()
+        self._started_streams: set[str] = set()
         self.checker_task: Optional[asyncio.Task] = None
         self.stream_worker_task: Optional[asyncio.Task] = None
         self._stopped = False
@@ -126,19 +159,38 @@ class SilenceDetectingSink(Sink):
             self.checker_task.cancel()
 
         with self._state_lock:
-            active_users = [
-                user
-                for user, speaking in self.is_speaking.items()
-                if speaking
-            ]
-            for user in active_users:
+            active_captures = set(self._active_capture_ids)
+            active_captures.update(
+                capture_id
+                for capture_id in self._capture_ids.values()
+                if capture_id
+            )
+            for user in self.is_speaking:
                 self.is_speaking[user] = False
+            self._capture_ids.clear()
+            self._stream_audio_buffers.clear()
 
-        for user in active_users:
-            self._event_queue.put_nowait(("abort", user, None))
-        self._event_queue.put_nowait(("stop", None, None))
+        # Discard queued stream audio on shutdown, then enqueue bounded aborts.
+        # Capture is already complete in VoiceHandler, and shutdown intentionally
+        # discards unfinished utterances rather than publishing partial WAVs.
+        while True:
+            try:
+                self._event_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            else:
+                self._event_queue.task_done()
+        with self._event_reservation_lock:
+            self._queued_audio_events = 0
+            self._queued_control_events = 0
+            self._failed_streams.update(active_captures)
+        for capture_id in active_captures:
+            self._queue_from_audio_thread(("abort", 0, capture_id, None))
+        self._queue_from_audio_thread(("stop", None, None, None))
 
     def _append_preroll(self, user: int, pcm_data: bytes) -> None:
+        if len(pcm_data) > self._max_preroll_bytes:
+            pcm_data = pcm_data[-self._max_preroll_bytes :]
         buffer = self.pre_roll_buffer.setdefault(user, deque())
         buffer.append(pcm_data)
         total = self.pre_roll_bytes.get(user, 0) + len(pcm_data)
@@ -152,13 +204,148 @@ class SilenceDetectingSink(Sink):
         self.pre_roll_bytes[user] = 0
         return chunks
 
+    def _forget_user(self, user: int) -> None:
+        self.last_speech_time.pop(user, None)
+        self.is_speaking.pop(user, None)
+        self.utterance_bytes.pop(user, None)
+        self.voiced_bytes.pop(user, None)
+        self.pre_roll_buffer.pop(user, None)
+        self.pre_roll_bytes.pop(user, None)
+        self.last_user_activity.pop(user, None)
+        self._capture_ids.pop(user, None)
+
+    def _ensure_user_state(self, user: int, now: float) -> bool:
+        if user not in self.is_speaking:
+            if len(self.is_speaking) >= MAX_TRACKED_USERS:
+                inactive = [
+                    candidate
+                    for candidate, speaking in self.is_speaking.items()
+                    if not speaking
+                ]
+                if not inactive:
+                    return False
+                oldest = min(
+                    inactive,
+                    key=lambda candidate: self.last_user_activity.get(
+                        candidate, 0.0
+                    ),
+                )
+                self._forget_user(oldest)
+            self.is_speaking[user] = False
+        self.last_user_activity[user] = now
+        return True
+
+    def _capture_start(self, capture_id: str) -> bool:
+        if not self.on_capture_start_callback:
+            return False
+        try:
+            started = bool(self.on_capture_start_callback(capture_id))
+        except Exception:
+            logging.getLogger("VoiceHandler").exception(
+                "Failed to start fallback WAV capture"
+            )
+            return False
+        if started:
+            self._active_capture_ids.add(capture_id)
+        return started
+
+    def _capture_audio(self, capture_id: str, pcm_data: bytes) -> None:
+        if not self.on_capture_audio_callback or not pcm_data:
+            return
+        try:
+            self.on_capture_audio_callback(capture_id, pcm_data)
+        except Exception:
+            logging.getLogger("VoiceHandler").exception(
+                "Failed to retain fallback WAV audio"
+            )
+
+    def _add_stream_audio_locked(
+        self, user: int, capture_id: str, pcm_data: bytes
+    ) -> None:
+        if not pcm_data or self._stream_failed(capture_id):
+            return
+        buffer = self._stream_audio_buffers.setdefault(capture_id, bytearray())
+        buffer.extend(pcm_data)
+        while len(buffer) >= self._stream_audio_chunk_bytes:
+            chunk = bytes(buffer[: self._stream_audio_chunk_bytes])
+            del buffer[: self._stream_audio_chunk_bytes]
+            self._queue_from_audio_thread(("audio", user, capture_id, chunk))
+
+    def _flush_stream_audio_locked(self, user: int, capture_id: str) -> None:
+        buffer = self._stream_audio_buffers.pop(capture_id, None)
+        if buffer and not self._stream_failed(capture_id):
+            self._queue_from_audio_thread(
+                ("audio", user, capture_id, bytes(buffer))
+            )
+
+    def _reserve_event(self, event) -> bool:
+        event_name, _, capture_id, _ = event
+        audio_event = event_name == "audio"
+        with self._event_reservation_lock:
+            if self._shutdown_queued and event_name not in {"abort", "stop"}:
+                return False
+            if audio_event:
+                if self._queued_audio_events >= MAX_STREAM_AUDIO_EVENTS:
+                    if capture_id:
+                        self._failed_streams.add(capture_id)
+                    return False
+                self._queued_audio_events += 1
+            else:
+                if self._queued_control_events >= MAX_STREAM_CONTROL_EVENTS:
+                    if capture_id:
+                        self._failed_streams.add(capture_id)
+                    return False
+                self._queued_control_events += 1
+        return True
+
+    def _release_event_reservation(self, event) -> None:
+        event_name = event[0]
+        with self._event_reservation_lock:
+            if event_name == "audio":
+                self._queued_audio_events = max(0, self._queued_audio_events - 1)
+            else:
+                self._queued_control_events = max(
+                    0, self._queued_control_events - 1
+                )
+
+    def _enqueue_reserved_event(self, event) -> None:
+        if self._shutdown_queued and event[0] not in {"abort", "stop"}:
+            self._release_event_reservation(event)
+            return
+        try:
+            self._event_queue.put_nowait(event)
+        except asyncio.QueueFull:
+            self._release_event_reservation(event)
+            capture_id = event[2]
+            if capture_id:
+                with self._event_reservation_lock:
+                    self._failed_streams.add(capture_id)
+            logging.getLogger("VoiceHandler").warning(
+                "Discord Core stream queue is full; retaining the original WAV"
+            )
+
     def _queue_from_audio_thread(
         self,
-        event: tuple[str, int, Optional[bytes]],
-    ) -> None:
-        if self._stopped or not self.loop or not self.loop.is_running():
-            return
-        self.loop.call_soon_threadsafe(self._event_queue.put_nowait, event)
+        event: tuple[str, Optional[int], Optional[str], Optional[bytes]],
+    ) -> bool:
+        if not self.loop or not self.loop.is_running():
+            return False
+        if not self._reserve_event(event):
+            return False
+        try:
+            self.loop.call_soon_threadsafe(self._enqueue_reserved_event, event)
+            return True
+        except RuntimeError:
+            self._release_event_reservation(event)
+            return False
+
+    def _stream_failed(self, capture_id: str) -> bool:
+        with self._event_reservation_lock:
+            return capture_id in self._failed_streams
+
+    def _clear_stream_failure(self, capture_id: str) -> None:
+        with self._event_reservation_lock:
+            self._failed_streams.discard(capture_id)
 
     @Filters.container
     def write(self, data, user):
@@ -184,25 +371,44 @@ class SilenceDetectingSink(Sink):
 
         is_speech = rms > self.vad_threshold
         now = time.time()
-        events: list[tuple[str, int, Optional[bytes]]] = []
         notify_speech_start = False
 
         with self._state_lock:
-            speaking = self.is_speaking.setdefault(user, False)
+            if not self._ensure_user_state(user, now):
+                return
+            speaking = self.is_speaking[user]
 
-            if not speaking:
+            if not speaking and not is_speech:
                 self._append_preroll(user, pcm_data)
 
             if is_speech:
                 self.last_speech_time[user] = now
                 if not speaking:
+                    active_count = sum(self.is_speaking.values())
+                    if active_count >= MAX_ACTIVE_UTTERANCES:
+                        # Keep only bounded pre-roll for this user. A later
+                        # utterance can be accepted after another user finishes.
+                        return
+
                     self.is_speaking[user] = True
                     notify_speech_start = True
                     preroll = self._take_preroll(user)
-                    self.utterance_bytes[user] = sum(map(len, preroll))
+                    self.utterance_bytes[user] = sum(map(len, preroll)) + len(
+                        pcm_data
+                    )
                     self.voiced_bytes[user] = len(pcm_data)
-                    events.append(("start", user, None))
-                    events.extend(("audio", user, chunk) for chunk in preroll)
+                    capture_id = uuid.uuid4().hex
+                    if self._capture_start(capture_id):
+                        self._capture_ids[user] = capture_id
+                        self._stream_audio_buffers[capture_id] = bytearray()
+                        self._queue_from_audio_thread(
+                            ("start", user, capture_id, None)
+                        )
+                        for chunk in preroll:
+                            self._capture_audio(capture_id, chunk)
+                            self._add_stream_audio_locked(user, capture_id, chunk)
+                        self._capture_audio(capture_id, pcm_data)
+                        self._add_stream_audio_locked(user, capture_id, pcm_data)
                     logging.getLogger("VoiceHandler").debug(
                         "User %s started speaking (RMS: %s)", user, rms
                     )
@@ -213,16 +419,19 @@ class SilenceDetectingSink(Sink):
                     self.voiced_bytes[user] = (
                         self.voiced_bytes.get(user, 0) + len(pcm_data)
                     )
-                    events.append(("audio", user, pcm_data))
+                    capture_id = self._capture_ids.get(user)
+                    if capture_id:
+                        self._capture_audio(capture_id, pcm_data)
+                        self._add_stream_audio_locked(user, capture_id, pcm_data)
             elif speaking:
                 # Keep feeding trailing silence until VAD closes the stream.
                 self.utterance_bytes[user] = (
                     self.utterance_bytes.get(user, 0) + len(pcm_data)
                 )
-                events.append(("audio", user, pcm_data))
-
-        for event in events:
-            self._queue_from_audio_thread(event)
+                capture_id = self._capture_ids.get(user)
+                if capture_id:
+                    self._capture_audio(capture_id, pcm_data)
+                    self._add_stream_audio_locked(user, capture_id, pcm_data)
 
         if (
             notify_speech_start
@@ -241,43 +450,58 @@ class SilenceDetectingSink(Sink):
             try:
                 await asyncio.sleep(0.1)
                 now = time.time()
-                completed: list[tuple[str, int, Optional[bytes]]] = []
+                completed: list[tuple[str, int, Optional[str]]] = []
 
                 with self._state_lock:
                     for user, speaking in list(self.is_speaking.items()):
                         if not speaking:
                             continue
                         silence_duration = now - self.last_speech_time.get(user, 0)
-                        if silence_duration <= self.silence_threshold:
+                        total_bytes = self.utterance_bytes.get(user, 0)
+                        reached_limit = (
+                            total_bytes >= self._bytes_per_second
+                            * MAX_UTTERANCE_SECONDS
+                        )
+                        if (
+                            silence_duration <= self.silence_threshold
+                            and not reached_limit
+                        ):
                             continue
 
                         self.is_speaking[user] = False
-                        total_duration = (
-                            self.utterance_bytes.pop(user, 0)
-                            / self._bytes_per_second
-                        )
+                        total_duration = total_bytes / self._bytes_per_second
+                        self.utterance_bytes.pop(user, None)
                         voiced_duration = (
                             self.voiced_bytes.pop(user, 0)
                             / self._bytes_per_second
                         )
                         self.last_speech_time.pop(user, None)
+                        capture_id = self._capture_ids.pop(user, None)
 
                         event_name = (
                             "finish"
                             if voiced_duration >= self.min_speech_duration
                             else "discard"
                         )
-                        completed.append((event_name, user, None))
+                        if capture_id:
+                            if event_name == "finish":
+                                self._flush_stream_audio_locked(user, capture_id)
+                            else:
+                                self._stream_audio_buffers.pop(capture_id, None)
+                        completed.append((event_name, user, capture_id))
                         logging.getLogger("VoiceHandler").info(
                             "Discord speech ended for %s: %.2fs total, "
-                            "%.2fs voiced",
+                            "%.2fs voiced%s",
                             user,
                             total_duration,
                             voiced_duration,
+                            " (duration limit)" if reached_limit else "",
                         )
 
                 for event in completed:
-                    self._event_queue.put_nowait(event)
+                    self._queue_from_audio_thread(
+                        (event[0], event[1], event[2], None)
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -287,62 +511,88 @@ class SilenceDetectingSink(Sink):
                 await asyncio.sleep(0.2)
 
     async def _stream_event_worker(self) -> None:
-        """Run ordered voice-segment operations without blocking capture."""
+        """Run bounded, ordered Core stream work without blocking capture."""
         while True:
-            event_name, user, pcm_data = await self._event_queue.get()
+            event = await self._event_queue.get()
+            event_name, user, capture_id, pcm_data = event
+            self._release_event_reservation(event)
             try:
                 if event_name == "stop":
                     break
 
                 if event_name == "start":
-                    started = bool(
-                        self.on_stream_start_callback
-                        and await self.on_stream_start_callback(user)
-                    )
+                    started = False
+                    if capture_id and not self._stream_failed(capture_id):
+                        started = bool(
+                            self.on_stream_start_callback
+                            and await self.on_stream_start_callback(capture_id)
+                        )
                     if started:
-                        self._started_streams.add(user)
+                        self._started_streams.add(capture_id)
+                        if self._stream_failed(capture_id):
+                            await self._abort_core_stream(capture_id)
+                    elif capture_id:
+                        self._mark_stream_failed(capture_id)
                 elif event_name == "audio":
-                    if (
-                        user in self._started_streams
-                        and self.on_stream_audio_callback
-                        and pcm_data
-                    ):
-                        await self.on_stream_audio_callback(user, pcm_data)
+                    if capture_id in self._started_streams:
+                        if self._stream_failed(capture_id):
+                            await self._abort_core_stream(capture_id)
+                        elif self.on_stream_audio_callback and pcm_data:
+                            try:
+                                sent = await self.on_stream_audio_callback(
+                                    capture_id, pcm_data
+                                )
+                            except Exception:
+                                self._mark_stream_failed(capture_id)
+                                await self._abort_core_stream(capture_id)
+                                raise
+                            if sent is False:
+                                self._mark_stream_failed(capture_id)
+                            if self._stream_failed(capture_id):
+                                await self._abort_core_stream(capture_id)
                 elif event_name == "finish":
                     voice_data = None
-                    try:
-                        if (
-                            user in self._started_streams
-                            and self.on_stream_finish_callback
-                        ):
-                            voice_data = await self.on_stream_finish_callback(user)
-                    except Exception:
-                        logging.getLogger("VoiceHandler").exception(
-                            "Failed to finalize Core voice segment for user %s",
-                            user,
-                        )
-                    finally:
-                        self._started_streams.discard(user)
-                        if self.callback:
-                            await self.callback(user, voice_data)
+                    result_id = None
+                    if capture_id:
+                        if capture_id in self._started_streams:
+                            if self._stream_failed(capture_id):
+                                await self._abort_core_stream(capture_id)
+                            elif self.on_stream_finish_callback:
+                                try:
+                                    result_id = await self.on_stream_finish_callback(
+                                        capture_id
+                                    )
+                                except Exception:
+                                    logging.getLogger("VoiceHandler").exception(
+                                        "Failed to finalize Core stream for user %s",
+                                        user,
+                                    )
+                            self._started_streams.discard(capture_id)
+                        if self.on_capture_finish_callback:
+                            try:
+                                voice_data = await self.on_capture_finish_callback(
+                                    capture_id
+                                )
+                            except Exception:
+                                logging.getLogger("VoiceHandler").exception(
+                                    "Failed to finalize fallback WAV for user %s",
+                                    user,
+                                )
+                        self._release_capture_id(capture_id)
+                    if self.callback:
+                        await self.callback(user, voice_data, result_id)
                 elif event_name == "discard":
-                    try:
-                        if (
-                            user in self._started_streams
-                            and self.on_stream_abort_callback
-                        ):
-                            await self.on_stream_abort_callback(user)
-                    finally:
-                        self._started_streams.discard(user)
-                        if self.callback:
-                            await self.callback(user, None)
+                    if capture_id:
+                        await self._abort_core_stream(capture_id)
+                        await self._abort_fallback_capture(capture_id)
+                        self._release_capture_id(capture_id)
+                    if self.callback:
+                        await self.callback(user, None, None)
                 elif event_name == "abort":
-                    if (
-                        user in self._started_streams
-                        and self.on_stream_abort_callback
-                    ):
-                        await self.on_stream_abort_callback(user)
-                    self._started_streams.discard(user)
+                    if capture_id:
+                        await self._abort_core_stream(capture_id)
+                        await self._abort_fallback_capture(capture_id)
+                        self._release_capture_id(capture_id)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -351,17 +601,49 @@ class SilenceDetectingSink(Sink):
                     event_name,
                     user,
                 )
-                self._started_streams.discard(user)
+                if capture_id:
+                    await self._abort_core_stream(capture_id)
+                    if event_name in {"finish", "discard", "abort"}:
+                        await self._abort_fallback_capture(capture_id)
+                        self._release_capture_id(capture_id)
+                    elif event_name in {"start", "audio"}:
+                        self._mark_stream_failed(capture_id)
+                if event_name in {"finish", "discard"} and self.callback:
+                    with suppress(Exception):
+                        await self.callback(user, None, None)
             finally:
                 self._event_queue.task_done()
 
-        # The stop marker is queued after per-user aborts, but guard against a
-        # partially initialized stream if a callback raised.
-        if self.on_stream_abort_callback:
-            for user in list(self._started_streams):
-                with suppress(Exception):
-                    await self.on_stream_abort_callback(user)
+        for capture_id in list(self._started_streams):
+            await self._abort_core_stream(capture_id)
         self._started_streams.clear()
+        with self._state_lock:
+            active_captures = list(self._active_capture_ids)
+        for capture_id in active_captures:
+            await self._abort_fallback_capture(capture_id)
+            self._release_capture_id(capture_id)
+
+    async def _abort_core_stream(self, capture_id: str) -> None:
+        if capture_id in self._started_streams and self.on_stream_abort_callback:
+            with suppress(Exception):
+                await self.on_stream_abort_callback(capture_id)
+        self._started_streams.discard(capture_id)
+        self._clear_stream_failure(capture_id)
+
+    def _mark_stream_failed(self, capture_id: str) -> None:
+        with self._event_reservation_lock:
+            self._failed_streams.add(capture_id)
+
+    async def _abort_fallback_capture(self, capture_id: str) -> None:
+        if self.on_capture_abort_callback:
+            with suppress(Exception):
+                await self.on_capture_abort_callback(capture_id)
+
+    def _release_capture_id(self, capture_id: str) -> None:
+        with self._state_lock:
+            self._active_capture_ids.discard(capture_id)
+            self._stream_audio_buffers.pop(capture_id, None)
+        self._clear_stream_failure(capture_id)
 
 
 class VoiceHandler:
@@ -398,6 +680,11 @@ class VoiceHandler:
         if not self.supports_streaming:
             return False
         with self._stream_lock:
+            if (
+                stream_id not in self._streams
+                and len(self._streams) >= MAX_ACTIVE_UTTERANCES
+            ):
+                return False
             self._streams[stream_id] = bytearray()
         return True
 

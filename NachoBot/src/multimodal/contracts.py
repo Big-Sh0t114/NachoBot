@@ -18,6 +18,36 @@ MAX_AUDIO_BYTES = 16 * 1024 * 1024
 MAX_IMAGE_BYTES = 16 * 1024 * 1024
 MAX_VIDEO_BYTES = 64 * 1024 * 1024
 MAX_TEXT_CHARS = 10_000
+TTS_STREAM_CODEC = "pcm_s16le"
+TTS_STREAM_VERSION = "1"
+TTS_STREAM_CHUNK_BYTES = 64 * 1024
+TTS_STREAM_MAX_BYTES = MAX_AUDIO_BYTES
+TTS_STREAM_MAX_DURATION_SECONDS = 300
+ASR_STREAM_SAMPLE_RATE = 16_000
+ASR_STREAM_CHANNELS = 1
+ASR_STREAM_CHUNK_MAX_BYTES = 64 * 1024
+ASR_STREAM_MAX_DURATION_SECONDS = 60
+ASR_STREAM_MAX_PCM_BYTES = (
+    ASR_STREAM_SAMPLE_RATE * ASR_STREAM_CHANNELS * 2 * ASR_STREAM_MAX_DURATION_SECONDS
+)
+ASR_STREAM_MAX_CHUNKS = 4096
+ASR_STREAM_MAX_CONCURRENCY = 8
+ASR_STREAM_IDLE_TIMEOUT_SECONDS = 15
+ASR_RESULT_TTL_SECONDS = 30
+ASR_STREAM_PLATFORMS = frozenset({"universal_vc", "discord_vc", "bilibili", "webui"})
+
+
+def normalize_asr_stream_platform(platform: Any) -> Optional[str]:
+    """Return a canonical allowed voice platform, or ``None`` if untrusted."""
+
+    if not isinstance(platform, str) or len(platform) > 64:
+        return None
+    candidate = platform.strip().casefold()
+    compact = candidate.replace("_", "").replace("-", "")
+    for allowed in ASR_STREAM_PLATFORMS:
+        if candidate == allowed or compact == allowed.replace("_", "").replace("-", ""):
+            return allowed
+    return None
 
 
 def max_base64_chars(max_bytes: int) -> int:
@@ -138,6 +168,56 @@ class TTSResult:
     @property
     def ok(self) -> bool:
         return bool(self.audio_base64)
+
+
+@dataclass(frozen=True)
+class TTSStreamSpec:
+    """Format metadata shared by every chunk in one PCM TTS response."""
+
+    sample_rate: int
+    channels: int
+    sample_width: int
+    codec: str = TTS_STREAM_CODEC
+
+    @property
+    def frame_bytes(self) -> int:
+        return self.channels * self.sample_width
+
+
+@dataclass(frozen=True)
+class TTSStreamChunk:
+    """One frame-aligned PCM chunk and its response format."""
+
+    pcm_s16le: bytes
+    spec: TTSStreamSpec
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.pcm_s16le, bytes) or not self.pcm_s16le:
+            raise ValueError("TTS stream chunks must contain nonempty bytes")
+        if self.spec.frame_bytes <= 0 or len(self.pcm_s16le) % self.spec.frame_bytes:
+            raise ValueError("TTS stream chunks must end on a complete PCM frame")
+
+
+class TTSStreamError(RuntimeError):
+    """A bounded stream failure annotated with whether audio already began."""
+
+    def __init__(
+        self,
+        code: str,
+        *,
+        audio_started: bool = False,
+        status_code: Optional[int] = None,
+    ):
+        self.code = str(code)
+        self.audio_started = bool(audio_started)
+        self.status_code = status_code
+        super().__init__(self.code)
+
+    @property
+    def fallback_allowed(self) -> bool:
+        """A sender may use its non-stream path only before any audio chunk."""
+
+        return not self.audio_started
 
 
 def normalize_operation_payload(operation: str, data: Any) -> tuple[str, int]:

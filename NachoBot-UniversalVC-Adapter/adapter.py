@@ -11,12 +11,17 @@ Features:
 """
 
 import asyncio
+import base64
+import json
 import logging
+import os
 import re
 import sys
 import time
 import uuid
 from pathlib import Path
+
+import aiohttp
 
 from config import AdapterConfig
 from audio_capture import AudioCapture, MicrophoneCapture
@@ -53,6 +58,105 @@ except ImportError as exc:
         Seg
     ) = TargetConfig = TemplateInfo = UserInfo = None
 
+
+class CoreAudioStreamClient:
+    """Persistent HTTP transport for Core-owned real-time audio ASR."""
+
+    MAX_RESPONSE_BYTES = 64 * 1024
+
+    def __init__(self, host: str, port: int, token: str = ""):
+        host = str(host).strip()
+        if host.startswith("[") and host.endswith("]"):
+            authority = host
+        elif ":" in host:
+            authority = f"[{host}]"
+        else:
+            authority = host
+        self.base_url = f"http://{authority}:{int(port)}"
+        self.token = str(token or "").strip()
+        self._session: aiohttp.ClientSession | None = None
+
+    async def _ensure_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            headers = {}
+            if self.token:
+                headers["Authorization"] = f"Bearer {self.token}"
+            self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(
+                    total=15.0, connect=3.0, sock_read=10.0
+                ),
+                headers=headers,
+                trust_env=False,
+                connector=aiohttp.TCPConnector(limit=4),
+            )
+        return self._session
+
+    async def _post(self, operation: str, payload: dict, *, expect_json: bool = True):
+        session = await self._ensure_session()
+        url = f"{self.base_url}/api/multimodal/audio/stream/{operation}"
+        async with session.post(url, json=payload, allow_redirects=False) as response:
+            if 300 <= response.status < 400 or response.status >= 400:
+                raise RuntimeError(f"Core audio stream HTTP status {response.status}")
+            if not expect_json:
+                return None
+            body = await response.content.read(self.MAX_RESPONSE_BYTES + 1)
+            if len(body) > self.MAX_RESPONSE_BYTES:
+                raise ValueError("Core audio stream response exceeded size limit")
+            try:
+                result = json.loads(body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ValueError("Core audio stream response was not valid JSON") from exc
+            if not isinstance(result, dict):
+                raise ValueError("Core audio stream response was not an object")
+            return result
+
+    async def start_stream(self, *, sample_rate: int, channels: int) -> str:
+        result = await self._post(
+            "start", {"sample_rate": sample_rate, "channels": channels}
+        )
+        stream_id = result.get("stream_id")
+        if not isinstance(stream_id, str) or not stream_id.strip() or len(stream_id) > 256:
+            raise ValueError("Core returned an invalid stream ID")
+        return stream_id
+
+    async def send_chunk(self, stream_id: str, seq: int, pcm: bytes) -> None:
+        result = await self._post(
+            "chunk",
+            {
+                "stream_id": stream_id,
+                "seq": seq,
+                "pcm_base64": base64.b64encode(pcm).decode("ascii"),
+            },
+        )
+        response_seq = result.get("seq")
+        if (
+            isinstance(response_seq, bool)
+            or not isinstance(response_seq, int)
+            or response_seq != seq
+        ):
+            raise ValueError("Core audio stream returned a mismatched sequence")
+
+    async def finish_stream(self, stream_id: str) -> dict:
+        result = await self._post("finish", {"stream_id": stream_id})
+        if not isinstance(result.get("text"), str):
+            raise ValueError("Core audio stream finish response omitted text")
+        result_id = result.get("result_id")
+        if result_id is not None and (
+            not isinstance(result_id, str) or len(result_id) > 256
+        ):
+            raise ValueError("Core audio stream returned an invalid result ID")
+        return result
+
+    async def abort_stream(self, stream_id: str) -> None:
+        if self._session is None or self._session.closed:
+            return
+        await self._post("abort", {"stream_id": stream_id}, expect_json=False)
+
+    async def close(self) -> None:
+        session, self._session = self._session, None
+        if session is not None and not session.closed:
+            await session.close()
+
 class UniversalVCAdapter:
     """
     Core adapter that connects:
@@ -63,9 +167,21 @@ class UniversalVCAdapter:
     def __init__(self, config: AdapterConfig, logger: logging.Logger):
         self.config = config
         self.logger = logger
+        self._stop_lock = asyncio.Lock()
+        self._stopped = False
+        self._stop_event = asyncio.Event()
+        self._router_task = None
 
         # Session identifier for this adapter instance
         self._session_id = f"uvc_{int(time.time())}"
+
+        self.core_stream_client = None
+        if Router:
+            self.core_stream_client = CoreAudioStreamClient(
+                host=self.config.nachobot.host,
+                port=self.config.nachobot.port,
+                token=os.environ.get("NACHOBOT_CORE_TOKEN", ""),
+            )
 
         # Initialize Audio Pipeline (Denoise → VAD → Speaker → Core voice)
         self.pipeline = AudioPipeline(
@@ -75,6 +191,7 @@ class UniversalVCAdapter:
             on_speech_start=self._on_speech_start,
             on_mic_speech_start=self._on_mic_speech_start,
             on_mic_speech_end=self._on_mic_speech_end,
+            stream_client=self.core_stream_client,
         )
 
         # Initialize Audio Capture (feeds raw frames to pipeline)
@@ -117,47 +234,88 @@ class UniversalVCAdapter:
 
     async def run(self):
         """Start all components and run the adapter."""
-        tasks = []
-
-        # Initialize audio output device
-        self.audio_output.initialize()
-
-        # Start audio capture + pipeline
-        loop = asyncio.get_running_loop()
-        self.pipeline.set_loop(loop)
-        await self.audio_capture.start(loop)
-        
-        if self.mic_capture:
-            await self.mic_capture.start(loop)
-
-        # Start Router (WebSocket to NachoBot Core)
-        if self.router:
-            tasks.append(asyncio.create_task(self.router.run()))
-
-        self.logger.info("Universal Voice Adapter is running!")
-        self.logger.info(f"Session ID: {self._session_id}")
-        self.logger.info(f"Platform: universal_vc")
-
         try:
-            if tasks:
-                await asyncio.gather(*tasks)
+            if self._stopped:
+                return
+            self.audio_output.initialize()
+
+            # Start capture only after the loop-owned stream sender is ready.
+            loop = asyncio.get_running_loop()
+            self.pipeline.set_loop(loop)
+            await self.audio_capture.start(loop)
+            if self.mic_capture:
+                await self.mic_capture.start(loop)
+
+            if self.router:
+                self._router_task = asyncio.create_task(self.router.run())
+
+            self.logger.info("Universal Voice Adapter is running!")
+            self.logger.info(f"Session ID: {self._session_id}")
+            self.logger.info("Platform: universal_vc")
+
+            if self._router_task:
+                await self._router_task
             else:
-                while True:
-                    await asyncio.sleep(1)
+                await self._stop_event.wait()
         except asyncio.CancelledError:
             self.logger.info("Adapter cancelled, cleaning up...")
         except Exception as e:
             self.logger.exception(f"Adapter error: {e}")
+        finally:
+            await self.stop()
 
     async def stop(self):
         """Stop all components gracefully."""
-        self.logger.info("Stopping Universal Voice Adapter...")
-        await self.audio_capture.stop()
-        if self.mic_capture:
-            await self.mic_capture.stop()
-        if self.audio_output:
-            await self.audio_output.stop()
-        await asyncio.sleep(0.5)
+        async with self._stop_lock:
+            if self._stopped:
+                return
+            self._stopped = True
+            self._stop_event.set()
+            self.logger.info("Stopping Universal Voice Adapter...")
+
+            for component in (self.audio_capture, self.mic_capture):
+                if component is None:
+                    continue
+                try:
+                    await component.stop()
+                except Exception as exc:
+                    self.logger.warning(
+                        "Audio capture shutdown failed (%s)", type(exc).__name__
+                    )
+
+            if self._router_task is not None and not self._router_task.done():
+                self._router_task.cancel()
+                try:
+                    await self._router_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as exc:
+                    self.logger.debug(
+                        "Router shutdown completed with (%s)", type(exc).__name__
+                    )
+
+            try:
+                await self.pipeline.stop_streaming()
+            except Exception as exc:
+                self.logger.warning(
+                    "Core stream shutdown failed (%s)", type(exc).__name__
+                )
+
+            if self.audio_output:
+                try:
+                    await self.audio_output.stop()
+                except Exception as exc:
+                    self.logger.warning(
+                        "Audio output shutdown failed (%s)", type(exc).__name__
+                    )
+
+            if self.core_stream_client is not None:
+                try:
+                    await self.core_stream_client.close()
+                except Exception as exc:
+                    self.logger.warning(
+                        "Core HTTP client shutdown failed (%s)", type(exc).__name__
+                    )
 
     def _inject_variables(self, template: str, variables: dict) -> str:
         """Inject variables into template, preserving undefined placeholders."""
@@ -170,8 +328,20 @@ class UniversalVCAdapter:
 
         return re.sub(r"\{(\w+)\}", replace, template)
 
-    async def _on_speech_result(self, speaker_id: str, speaker_name: str, voice_data: str):
-        """Send one finalized voice segment to Core for perception."""
+    async def _on_speech_result(
+        self,
+        speaker_id: str,
+        speaker_name: str,
+        voice_data: str,
+        precomputed_asr_result_id: str | None = None,
+        precomputed_asr_text: str | None = None,
+    ):
+        """Send one finalized voice segment to Core for perception.
+
+        ``precomputed_asr_text`` accompanies the Core-issued receipt for
+        adapters that can consume the confirmed transcript locally. UniversalVC
+        still sends the original voice payload and receipt to Core.
+        """
         self.logger.info(
             "[%s] (%s): finalized voice segment (%d base64 chars)",
             speaker_name,
@@ -198,6 +368,7 @@ class UniversalVCAdapter:
                 # explicitly requested ``tts_text`` field.
                 "reply_delivery": "json_envelope",
                 "tts_language": "zh",
+                "voice_stream": True,
             },
             "voice_format": {
                 "mime_type": "audio/wav",
@@ -205,6 +376,14 @@ class UniversalVCAdapter:
                 "channels": 1,
             },
         }
+        if (
+            isinstance(precomputed_asr_result_id, str)
+            and precomputed_asr_result_id.strip()
+            and len(precomputed_asr_result_id) <= 256
+        ):
+            additional_config["precomputed_asr_result_id"] = (
+                precomputed_asr_result_id
+            )
 
         # Custom Prompts
         template_info = None
@@ -287,7 +466,16 @@ class UniversalVCAdapter:
             else:
                 segment = message.message_segment
 
-            for voice_segment in self._voice_segments(segment):
+            for segment_type, segment_data in self._audio_segments(segment):
+                if segment_type == "voice_stream":
+                    await self._handle_voice_stream_event(segment_data)
+                    continue
+
+                voice_segment = segment_data
+                if isinstance(voice_segment, dict):
+                    voice_segment = voice_segment.get("audio_base64") or voice_segment.get("audio")
+                if not voice_segment:
+                    continue
                 try:
                     audio_path = write_wav_base64(voice_segment)
                 except (ValueError, TypeError) as exc:
@@ -300,32 +488,57 @@ class UniversalVCAdapter:
         except Exception as e:
             self.logger.exception(f"Error handling message from NachoBot: {e}")
 
+    async def _handle_voice_stream_event(self, data) -> None:
+        """Route Core PCM stream events to the persistent output stream."""
+        if not isinstance(data, dict):
+            self.logger.warning("Dropping invalid Core voice stream event data")
+            return
+
+        event = data.get("event")
+        handler = {
+            "start": self.audio_output.start_voice_stream,
+            "chunk": self.audio_output.write_voice_stream_chunk,
+            "end": self.audio_output.end_voice_stream,
+            "abort": self.audio_output.abort_voice_stream,
+        }.get(event)
+        if handler is None:
+            self.logger.warning("Dropping unknown Core voice stream event")
+            return
+        try:
+            await handler(data)
+        except (ValueError, TypeError, BufferError) as exc:
+            self.logger.warning(
+                "Dropping invalid Core voice stream event %s (%s)",
+                event,
+                type(exc).__name__,
+            )
+
     @staticmethod
     def _voice_segments(segment):
-        """Yield only Core-produced audio, including nested seglists."""
+        """Yield buffered Core voice payloads, including nested seglists."""
+        for segment_type, data in UniversalVCAdapter._audio_segments(segment):
+            if segment_type == "voice":
+                yield data
+
+    @staticmethod
+    def _audio_segments(segment):
+        """Yield buffered voice payloads and explicit stream events in order."""
         if isinstance(segment, dict):
             seg_type = segment.get("type")
             data = segment.get("data")
             if seg_type == "seglist" and isinstance(data, list):
                 for child in data:
-                    yield from UniversalVCAdapter._voice_segments(child)
-            elif seg_type in {"voice", "voice_stream"} and data:
-                if isinstance(data, dict):
-                    data = data.get("audio_base64") or data.get("audio")
-                if data:
-                    yield data
+                    yield from UniversalVCAdapter._audio_segments(child)
+            elif seg_type in {"voice", "voice_stream"}:
+                yield seg_type, data
             return
         if isinstance(segment, list):
             for child in segment:
-                yield from UniversalVCAdapter._voice_segments(child)
+                yield from UniversalVCAdapter._audio_segments(child)
             return
         if hasattr(segment, "type") and hasattr(segment, "data"):
             if segment.type == "seglist" and isinstance(segment.data, list):
                 for child in segment.data:
-                    yield from UniversalVCAdapter._voice_segments(child)
-            elif segment.type in {"voice", "voice_stream"} and segment.data:
-                data = segment.data
-                if isinstance(data, dict):
-                    data = data.get("audio_base64") or data.get("audio")
-                if data:
-                    yield data
+                    yield from UniversalVCAdapter._audio_segments(child)
+            elif segment.type in {"voice", "voice_stream"}:
+                yield segment.type, segment.data

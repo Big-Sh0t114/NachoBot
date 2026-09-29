@@ -8,8 +8,10 @@ inferring behavior from a platform name, group id, or template name.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 
 
 RUNTIME_CAPABILITIES_KEY = "runtime_capabilities"
@@ -22,6 +24,9 @@ _REPLY_DELIVERY_MODES = {"chunked", "aggregate_tagged_text", "json_envelope"}
 _PERSON_PROFILE_MODES = {"standard", "low_latency", "disabled"}
 _TTS_LANGUAGES = {"", "ja", "zh"}
 _IDENTITY_MODES = {"standard", "external"}
+_SCOPED_CAPABILITIES: ContextVar[tuple[str, "RuntimeCapabilities"] | None] = ContextVar(
+    "nachobot_scoped_runtime_capabilities", default=None
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +51,7 @@ class RuntimeCapabilities:
     typo_enabled: bool = True
     tts_language: str = ""
     identity_mode: str = "standard"
+    voice_stream: bool = False
 
     @classmethod
     def from_mapping(cls, value: Any) -> "RuntimeCapabilities":
@@ -85,6 +91,7 @@ class RuntimeCapabilities:
             typo_enabled=_bool(value, "typo_enabled", True),
             tts_language=_choice(value.get("tts_language"), _TTS_LANGUAGES, ""),
             identity_mode=_choice(value.get("identity_mode"), _IDENTITY_MODES, "standard"),
+            voice_stream=_bool(value, "voice_stream", False),
         )
 
 
@@ -160,8 +167,24 @@ def runtime_capabilities_from_message(message: Any) -> RuntimeCapabilities:
 
 
 def runtime_capabilities_from_stream(chat_stream: Any) -> RuntimeCapabilities:
+    scoped = _SCOPED_CAPABILITIES.get()
+    if scoped is not None and str(getattr(chat_stream, "stream_id", "")) == scoped[0]:
+        return scoped[1]
     context = getattr(chat_stream, "context", None)
     return runtime_capabilities_from_message(getattr(context, "message", None))
+
+
+@contextmanager
+def scoped_runtime_capabilities(
+    stream_id: str,
+    capabilities: RuntimeCapabilities,
+) -> Iterator[None]:
+    """Bind an immutable trigger-message snapshot to this async generation task."""
+    token = _SCOPED_CAPABILITIES.set((str(stream_id), capabilities))
+    try:
+        yield
+    finally:
+        _SCOPED_CAPABILITIES.reset(token)
 
 
 def platform_event_from_message(message: Any) -> PlatformEvent | None:

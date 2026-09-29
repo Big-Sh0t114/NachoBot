@@ -8,6 +8,8 @@ from bili_src.core.utils import (
     _extract_image_base64,
     _extract_plain_text,
     _extract_voice_base64,
+    _extract_voice_stream_payload,
+    _has_voice_stream_segment,
     _find_reply_id,
     _strip_emoji,
     _split_bilibili_text,
@@ -36,6 +38,12 @@ class OutgoingHandler:
         seg = message.message_segment
         if seg.type == "command":
             await self._handle_command(message)
+            return
+
+        # Core's PCM lifecycle is a sequence of audio-control messages, not a
+        # complete WAV artifact or a second display-text reply.
+        if _has_voice_stream_segment(seg):
+            await self._handle_voice_stream_event(_extract_voice_stream_payload(seg))
             return
 
         voice_data = _extract_voice_base64(seg)
@@ -117,6 +125,27 @@ class OutgoingHandler:
             return
 
         self.logger.warning("Missing room_id for outgoing danmu")
+
+    async def _handle_voice_stream_event(self, payload: Any) -> None:
+        player = getattr(self.adapter, "audio_player", None)
+        if player is None:
+            self.logger.warning("Core voice_stream has no Bilibili audio player")
+            return
+        event = payload.get("event") if isinstance(payload, dict) else None
+        controller = getattr(
+            getattr(self.adapter, "live2d_manager", None),
+            "controller",
+            None,
+        )
+        accepted = await player.handle_voice_stream_event(payload)
+        if not accepted:
+            self.logger.warning("Bilibili could not play Core voice_stream event")
+        if event == "start":
+            if accepted:
+                if controller is not None:
+                    await controller.on_start_replying()
+            elif controller is not None:
+                await controller.on_reply_finished()
 
     def _resolve_room_id(self, message: MessageBase) -> Optional[int]:
         group_info = message.message_info.group_info

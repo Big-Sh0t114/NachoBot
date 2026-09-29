@@ -32,6 +32,9 @@ InteractionSink = Callable[[InteractionEvent], Awaitable[None]]
 
 MAX_REMOTE_AUDIO_BYTES = 4 * 1024 * 1024
 MAX_REMOTE_AUDIO_BASE64_CHARS = ((MAX_REMOTE_AUDIO_BYTES + 2) // 3) * 4
+MAX_REMOTE_PCM_CHUNK_BYTES = 64 * 1024
+MAX_REMOTE_PCM_TOTAL_BYTES = 32 * 1024 * 1024
+MAX_QUEUED_PCM_EVENTS = 64
 class AvatarRuntime:
     """Own the renderer thread and translate protocol events into commands."""
 
@@ -39,6 +42,9 @@ class AvatarRuntime:
         self.config = config
         self.logger = logger
         self.command_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
+        self.voice_stream_queue: queue.Queue[dict[str, Any]] = queue.Queue(
+            maxsize=MAX_QUEUED_PCM_EVENTS
+        )
         self.renderer: Live2DRenderer | None = None
         self.render_thread: threading.Thread | None = None
         self.model_adapter: Live2DModelAdapter | None = None
@@ -47,6 +53,13 @@ class AvatarRuntime:
         self._last_poke_time = 0.0
         self._started = False
         self.control_pipeline = ControlPipeline()
+        self._voice_stream_id: str | None = None
+        self._voice_stream_parent_id: str | None = None
+        self._voice_stream_client_id: str | None = None
+        self._voice_stream_format: dict[str, Any] | None = None
+        self._voice_stream_expected_seq = 0
+        self._voice_stream_total_bytes = 0
+        self._voice_stream_ended = False
 
     @property
     def is_running(self) -> bool:
@@ -101,6 +114,7 @@ class AvatarRuntime:
             track_mouse=renderer_config.track_mouse,
             on_click=self._on_renderer_click,
             model_adapter=self.model_adapter,
+            voice_stream_queue=self.voice_stream_queue,
         )
         self.render_thread = threading.Thread(
             target=self._run_renderer,
@@ -109,6 +123,10 @@ class AvatarRuntime:
         )
         self._started = True
         self.render_thread.start()
+        audio_ready = await asyncio.to_thread(
+            self.renderer.audio_ready_event.wait,
+            5.0,
+        )
         self.logger.info(
             "Live2D runtime started: model=%s window=%sx%s",
             renderer_config.model_path,
@@ -128,6 +146,9 @@ class AvatarRuntime:
                     "capabilities": {
                         "prepare_reply": True,
                         "apply_control": True,
+                        "voice_stream_pcm": bool(
+                            audio_ready and self.renderer.pcm_audio_ready
+                        ),
                         "commands": ["prepare_reply", "apply_control"],
                         "interactions": ["reply_prepared", "control_applied"],
                     },
@@ -142,6 +163,7 @@ class AvatarRuntime:
 
         self._started = False
         self.control_pipeline.clear()
+        self._reset_voice_stream_state(clear_queue=True)
         renderer = self.renderer
         render_thread = self.render_thread
 
@@ -277,6 +299,9 @@ class AvatarRuntime:
         elif event is AvatarEvent.STOP_AUDIO:
             self._enqueue("stop_audio", None)
 
+        elif event is AvatarEvent.VOICE_STREAM:
+            self._dispatch_voice_stream(payload, client_id)
+
         else:
             raise ProtocolError(f"unsupported runtime event: {event.value}")
 
@@ -286,6 +311,10 @@ class AvatarRuntime:
         """Drop all staged state owned by a disconnected WebSocket client."""
 
         self.control_pipeline.discard_client(client_id)
+        if self._voice_stream_client_id == client_id and self._voice_stream_id:
+            abort = self._voice_stream_event("abort")
+            self._replace_queued_voice_events(abort)
+            self._reset_voice_stream_state(clear_queue=False)
 
     def _apply_staged_control(self, staged: Any) -> None:
         """Resolve and enqueue a validated staged control atomically."""
@@ -312,6 +341,8 @@ class AvatarRuntime:
         try:
             self.renderer.run()
         except Exception:
+            self.renderer.audio_ready_event.set()
+            self.renderer.pcm_audio_ready = False
             self.logger.exception("Live2D renderer thread crashed")
             self._emit_from_renderer_thread(
                 InteractionEvent(
@@ -319,12 +350,197 @@ class AvatarRuntime:
                     payload={"message": "Live2D renderer thread crashed"},
                 )
             )
+        finally:
+            if not self.renderer.audio_ready_event.is_set():
+                self.renderer.pcm_audio_ready = False
+                self.renderer.audio_ready_event.set()
 
     def _enqueue(self, command_type: str, content: Any) -> None:
         try:
             self.command_queue.put_nowait((command_type, content))
         except queue.Full as exc:
             raise RuntimeError("Live2D render command queue is full") from exc
+
+    def _dispatch_voice_stream(
+        self,
+        payload: dict[str, Any],
+        client_id: str,
+    ) -> None:
+        event = self._validate_voice_stream_payload(payload)
+        stream_id = event["stream_id"]
+        parent_id = event["parent_message_id"]
+        stream_format = {
+            key: event[key]
+            for key in (
+                "sample_rate",
+                "channels",
+                "sample_width",
+                "codec",
+            )
+        }
+        operation = event["event"]
+
+        if operation == "start":
+            if self.renderer is None or not self.renderer.pcm_audio_ready:
+                raise ProtocolError("Live2D PCM output is not ready")
+            # A new start is an explicit barge-in. Drop queued stale chunks;
+            # the renderer's start handler stops the currently audible stream.
+            self._reset_voice_stream_state(clear_queue=True)
+            self._replace_queued_voice_events(event)
+            self._voice_stream_id = stream_id
+            self._voice_stream_parent_id = parent_id
+            self._voice_stream_client_id = client_id
+            self._voice_stream_format = stream_format
+            self._voice_stream_expected_seq = 0
+            self._voice_stream_total_bytes = 0
+            self._voice_stream_ended = False
+            return
+
+        if (
+            self._voice_stream_id != stream_id
+            or self._voice_stream_parent_id != parent_id
+            or self._voice_stream_client_id != client_id
+            or self._voice_stream_format != stream_format
+        ):
+            raise ProtocolError("voice_stream event does not match the active stream")
+        if self._voice_stream_ended:
+            raise ProtocolError("voice_stream event arrived after end")
+
+        if operation == "chunk":
+            seq = event["seq"]
+            pcm = event["pcm"]
+            if seq != self._voice_stream_expected_seq:
+                abort = self._voice_stream_event("abort")
+                self._replace_queued_voice_events(abort)
+                self._reset_voice_stream_state(clear_queue=False)
+                raise ProtocolError("voice_stream chunk sequence is out of order")
+            if self._voice_stream_total_bytes + len(pcm) > MAX_REMOTE_PCM_TOTAL_BYTES:
+                abort = self._voice_stream_event("abort")
+                self._replace_queued_voice_events(abort)
+                self._reset_voice_stream_state(clear_queue=False)
+                raise ProtocolError("voice_stream exceeded the utterance size limit")
+            try:
+                self.voice_stream_queue.put_nowait(event)
+            except queue.Full as exc:
+                abort = self._voice_stream_event("abort")
+                self._replace_queued_voice_events(abort)
+                self._reset_voice_stream_state(clear_queue=False)
+                raise ProtocolError("voice_stream renderer queue is full") from exc
+            self._voice_stream_expected_seq += 1
+            self._voice_stream_total_bytes += len(pcm)
+            return
+
+        if operation == "end":
+            # Preserve FIFO ordering so accepted chunks drain before end.
+            try:
+                self.voice_stream_queue.put_nowait(event)
+            except queue.Full as exc:
+                abort = self._voice_stream_event("abort")
+                self._replace_queued_voice_events(abort)
+                self._reset_voice_stream_state(clear_queue=False)
+                raise ProtocolError("voice_stream renderer queue is full") from exc
+            self._voice_stream_ended = True
+            return
+
+        self._replace_queued_voice_events(event)
+        self._reset_voice_stream_state(clear_queue=False)
+
+    @staticmethod
+    def _validate_voice_stream_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        event = payload.get("event")
+        if not isinstance(event, str) or event not in ("start", "chunk", "end", "abort"):
+            raise ProtocolError("voice_stream event must be start, chunk, end, or abort")
+        stream_id = payload.get("stream_id")
+        parent_id = payload.get("parent_message_id")
+        if (
+            not isinstance(stream_id, str)
+            or not stream_id.strip()
+            or len(stream_id) > 128
+            or not isinstance(parent_id, str)
+            or not parent_id.strip()
+            or len(parent_id) > 256
+        ):
+            raise ProtocolError("voice_stream identity is invalid")
+        sample_rate = payload.get("sample_rate")
+        channels = payload.get("channels")
+        sample_width = payload.get("sample_width")
+        codec = payload.get("codec")
+        if (
+            isinstance(sample_rate, bool)
+            or not isinstance(sample_rate, int)
+            or not 8000 <= sample_rate <= 96000
+            or isinstance(channels, bool)
+            or not isinstance(channels, int)
+            or channels not in (1, 2)
+            or isinstance(sample_width, bool)
+            or not isinstance(sample_width, int)
+            or sample_width != 2
+            or codec != "pcm_s16le"
+        ):
+            raise ProtocolError("voice_stream PCM format is unsupported")
+        result: dict[str, Any] = {
+            "event": event,
+            "stream_id": stream_id.strip(),
+            "parent_message_id": parent_id.strip(),
+            "sample_rate": sample_rate,
+            "channels": channels,
+            "sample_width": sample_width,
+            "codec": codec,
+        }
+        if event == "chunk":
+            seq = payload.get("seq")
+            encoded = payload.get("audio_base64")
+            max_chars = ((MAX_REMOTE_PCM_CHUNK_BYTES + 2) // 3) * 4
+            if isinstance(seq, bool) or not isinstance(seq, int) or seq < 0:
+                raise ProtocolError("voice_stream chunk seq is invalid")
+            if not isinstance(encoded, str) or not encoded or len(encoded) > max_chars:
+                raise ProtocolError("voice_stream chunk is empty or exceeds the size limit")
+            try:
+                pcm = base64.b64decode(encoded, validate=True)
+            except (ValueError, TypeError) as exc:
+                raise ProtocolError("voice_stream chunk is not valid base64") from exc
+            if (
+                not pcm
+                or len(pcm) > MAX_REMOTE_PCM_CHUNK_BYTES
+                or len(pcm) % (channels * sample_width)
+            ):
+                raise ProtocolError("voice_stream chunk does not contain PCM frames")
+            result["seq"] = seq
+            result["pcm"] = pcm
+        return result
+
+    def _voice_stream_event(self, event: str) -> dict[str, Any]:
+        if self._voice_stream_id is None or self._voice_stream_format is None:
+            raise ProtocolError("there is no active voice_stream")
+        return {
+            "event": event,
+            "stream_id": self._voice_stream_id,
+            "parent_message_id": self._voice_stream_parent_id,
+            **self._voice_stream_format,
+        }
+
+    def _replace_queued_voice_events(self, event: dict[str, Any]) -> None:
+        while True:
+            try:
+                self.voice_stream_queue.get_nowait()
+            except queue.Empty:
+                break
+        self.voice_stream_queue.put_nowait(event)
+
+    def _reset_voice_stream_state(self, *, clear_queue: bool) -> None:
+        if clear_queue:
+            while True:
+                try:
+                    self.voice_stream_queue.get_nowait()
+                except queue.Empty:
+                    break
+        self._voice_stream_id = None
+        self._voice_stream_parent_id = None
+        self._voice_stream_client_id = None
+        self._voice_stream_format = None
+        self._voice_stream_expected_seq = 0
+        self._voice_stream_total_bytes = 0
+        self._voice_stream_ended = False
 
     @staticmethod
     def _decode_wav_payload(payload: dict[str, Any]) -> bytes:

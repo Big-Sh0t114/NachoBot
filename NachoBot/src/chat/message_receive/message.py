@@ -15,7 +15,7 @@ from pathlib import Path
 from src.common.logger import get_logger
 from src.config.config import global_config
 from src.chat.utils.utils_image import get_image_manager
-from src.chat.utils.utils_voice import get_voice_text
+from src.chat.utils.utils_voice import get_voice_text, normalize_asr_receipt_platform
 from src.chat.sandbox.sandbox_manager import sandbox_manager
 from src.chat.sandbox.sandbox_handoff import sandbox_user_allowed
 from .chat_stream import ChatStream
@@ -360,7 +360,24 @@ class MessageRecv(Message):
                 self.is_voice = True
                 self.is_video = False
                 if isinstance(segment.data, str):
-                    return await get_voice_text(segment.data)
+                    additional_config = getattr(self.message_info, "additional_config", None)
+                    platform = normalize_asr_receipt_platform(
+                        getattr(self.message_info, "platform", None)
+                    )
+                    precomputed_asr_result_id = (
+                        additional_config.get("precomputed_asr_result_id")
+                        if platform is not None and isinstance(additional_config, dict)
+                        else None
+                    )
+                    return await get_voice_text(
+                        segment.data,
+                        precomputed_asr_result_id=(
+                            precomputed_asr_result_id
+                            if isinstance(precomputed_asr_result_id, str)
+                            else None
+                        ),
+                        precomputed_asr_context=platform,
+                    )
                 return "[发了一段语音，网卡了加载不出来]"
             elif segment.type == "video":
                 self.is_picid = False
@@ -581,24 +598,28 @@ class MessageSending(MessageProcessBase):
             # may result in a voice segment.  System events stay senderless and
             # bypass all multimodal processing.
             if get_system_event(self) is None:
-                from src.multimodal import get_multimodal_router
+                from src.chat.runtime_capabilities import runtime_capabilities_from_stream
 
-                router = get_multimodal_router()
-                should_materialize = getattr(router, "should_materialize_reply", None)
-                if should_materialize is None:
-                    should_materialize = router.has_explicit_tts_text
-                if should_materialize(self.message_segment):
-                    additional_config = getattr(self.message_info, "additional_config", None)
-                    text_lang = (
-                        additional_config.get("tts_language")
-                        if isinstance(additional_config, dict)
-                        else None
-                    )
-                    self.message_segment = await router.materialize_reply(
-                        self.message_segment,
-                        platform=str(getattr(self.message_info, "platform", "core") or "core"),
-                        text_lang=text_lang,
-                    )
+                voice_stream = runtime_capabilities_from_stream(self.chat_stream).voice_stream
+                if not voice_stream:
+                    from src.multimodal import get_multimodal_router
+
+                    router = get_multimodal_router()
+                    should_materialize = getattr(router, "should_materialize_reply", None)
+                    if should_materialize is None:
+                        should_materialize = router.has_explicit_tts_text
+                    if should_materialize(self.message_segment):
+                        additional_config = getattr(self.message_info, "additional_config", None)
+                        text_lang = (
+                            additional_config.get("tts_language")
+                            if isinstance(additional_config, dict)
+                            else None
+                        )
+                        self.message_segment = await router.materialize_reply(
+                            self.message_segment,
+                            platform=str(getattr(self.message_info, "platform", "core") or "core"),
+                            text_lang=text_lang,
+                        )
             self.processed_plain_text = await self._process_message_segments(self.message_segment)
 
     def to_dict(self):

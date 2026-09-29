@@ -11,6 +11,8 @@ from static_ffmpeg import run
 from discord.ext import commands
 
 from config import AdapterConfig
+from core_audio_stream import CoreAudioStreamClient, DiscordCoreAudioStreamBridge
+from tts_audio_source import PCMStreamSource
 from voice_handler import SilenceDetectingSink, VoiceHandler
 
 # Define intents
@@ -125,15 +127,25 @@ class NachoDiscordBot(discord.Bot):
         self.adapter_config = config
         self.voice_handler = voice_handler
         self.logger = logger
-        self.speech_callback: Optional[Callable[[int, int, str], None]] = (
+        self.speech_callback: Optional[Callable[..., None]] = (
             None  # guild_id, user_id, text
         )
+        self.core_audio_stream_client = CoreAudioStreamClient(
+            host=config.nachobot.host,
+            port=config.nachobot.port,
+            token=os.environ.get("NACHOBOT_CORE_TOKEN", ""),
+        )
+        self.core_audio_streams = DiscordCoreAudioStreamBridge(
+            self.core_audio_stream_client, logger
+        )
+        self._active_sinks: set[SilenceDetectingSink] = set()
         self.audio_queues: dict[
             int, deque
         ] = {}  # guild_id -> deque of audio_source paths
         self.guild_states: dict[
             int, dict
         ] = {}  # guild_id -> {is_user_speaking: bool, current_audio: str, interrupted_audio: str}
+        self.tts_streams: dict[int, PCMStreamSource] = {}
 
         # Add Cogs
         self.add_cog(VoiceCog(self))
@@ -147,11 +159,34 @@ class NachoDiscordBot(discord.Bot):
     def set_speech_callback(self, callback: Callable):
         self.speech_callback = callback
 
+    async def close(self):
+        """Close voice capture before releasing the shared Core HTTP session."""
+        try:
+            for guild_id, source in list(self.tts_streams.items()):
+                source.abort()
+                self.tts_streams.pop(guild_id, None)
+            for voice_client in list(self.voice_clients):
+                try:
+                    if voice_client.is_recording():
+                        voice_client.stop_recording()
+                except Exception:
+                    self.logger.debug("Discord recording stop failed", exc_info=True)
+            for sink in list(self._active_sinks):
+                await sink.aclose()
+                self._active_sinks.discard(sink)
+            await super().close()
+        finally:
+            try:
+                await self.core_audio_streams.abort_all()
+            finally:
+                await self.core_audio_stream_client.close()
+
     async def _on_sink_callback(
         self,
         user_id: int,
         voice_data: Optional[str],
         guild_id: int,
+        precomputed_asr_result_id: Optional[str] = None,
     ):
         """Publish the final Core-bound voice segment for an utterance."""
         if voice_data and self.speech_callback:
@@ -178,7 +213,13 @@ class NachoDiscordBot(discord.Bot):
                 self.logger.warning(f"Failed to resolve user name for {user_id}: {e}")
 
             # Notify adapter with resolved user name
-            await self.speech_callback(guild_id, user_id, voice_data, user_name)
+            await self.speech_callback(
+                guild_id,
+                user_id,
+                voice_data,
+                user_name,
+                precomputed_asr_result_id,
+            )
 
         # Logic for resuming AFTER speech ends
         if guild_id in self.guild_states:
@@ -211,6 +252,7 @@ class NachoDiscordBot(discord.Bot):
 
         state = self.guild_states[guild_id]
         state["is_user_speaking"] = True
+        self.abort_tts_stream(guild_id)
 
         # Stop current playback if any
         guild = self.get_guild(guild_id)
@@ -231,39 +273,50 @@ class NachoDiscordBot(discord.Bot):
 
         self.logger.info(f"Starting to listen in guild {guild_id}")
 
-        def stream_id(user_id: int) -> str:
-            return f"discord:{guild_id}:{user_id}"
+        def stream_id(capture_id: str) -> str:
+            # The capture token identifies one utterance, so overlapping users
+            # and a fast reconnect cannot cross-pair PCM or ASR receipts.
+            return f"discord:{guild_id}:{capture_id}"
 
-        async def sink_callback(user_id, text):
-            await self._on_sink_callback(user_id, text, guild_id)
+        async def sink_callback(user_id, voice_data, result_id=None):
+            await self._on_sink_callback(
+                user_id, voice_data, guild_id, result_id
+            )
 
         async def speech_start_callback(user_id):
             await self._on_speech_start_callback(user_id, guild_id)
 
-        async def stream_start_callback(user_id):
-            return await asyncio.to_thread(
-                self.voice_handler.start_stream,
-                stream_id(user_id),
-            )
+        def capture_start_callback(capture_id):
+            return self.voice_handler.start_stream(stream_id(capture_id))
 
-        async def stream_audio_callback(user_id, pcm_data):
-            return await asyncio.to_thread(
-                self.voice_handler.accept_pcm,
-                stream_id(user_id),
-                pcm_data,
-            )
+        def capture_audio_callback(capture_id, pcm_data):
+            self.voice_handler.accept_pcm(stream_id(capture_id), pcm_data)
 
-        async def stream_finish_callback(user_id):
+        async def capture_finish_callback(capture_id):
             return await asyncio.to_thread(
                 self.voice_handler.finish_stream,
-                stream_id(user_id),
+                stream_id(capture_id),
             )
 
-        async def stream_abort_callback(user_id):
+        async def capture_abort_callback(capture_id):
             await asyncio.to_thread(
                 self.voice_handler.abort_stream,
-                stream_id(user_id),
+                stream_id(capture_id),
             )
+
+        async def stream_start_callback(capture_id):
+            return await self.core_audio_streams.start(stream_id(capture_id))
+
+        async def stream_audio_callback(capture_id, pcm_data):
+            return await self.core_audio_streams.send_pcm(
+                stream_id(capture_id), pcm_data
+            )
+
+        async def stream_finish_callback(capture_id):
+            return await self.core_audio_streams.finish(stream_id(capture_id))
+
+        async def stream_abort_callback(capture_id):
+            await self.core_audio_streams.abort(stream_id(capture_id))
 
         sink = SilenceDetectingSink(
             callback=sink_callback,
@@ -272,6 +325,10 @@ class NachoDiscordBot(discord.Bot):
             on_stream_audio_callback=stream_audio_callback,
             on_stream_finish_callback=stream_finish_callback,
             on_stream_abort_callback=stream_abort_callback,
+            on_capture_start_callback=capture_start_callback,
+            on_capture_audio_callback=capture_audio_callback,
+            on_capture_finish_callback=capture_finish_callback,
+            on_capture_abort_callback=capture_abort_callback,
             config=self.adapter_config.voice,
         )
 
@@ -281,10 +338,12 @@ class NachoDiscordBot(discord.Bot):
             # Note: start_recording takes a callback for when RECORDING STOPS,
             # but our Sink handles continuous chunks.
         )
+        self._active_sinks.add(sink)
 
     async def _on_recording_stopped(self, sink: SilenceDetectingSink, *args):
         self.logger.info("Recording stopped.")
         await sink.aclose()
+        self._active_sinks.discard(sink)
 
     def _play_next(self, guild_id: int, error=None):
         """Play the next audio in the queue for the given guild."""
@@ -392,3 +451,62 @@ class NachoDiscordBot(discord.Bot):
             self._play_next(guild_id)
         else:
             self.logger.info(f"Audio queued: {audio_source}")
+
+    def start_tts_stream(self, guild_id: int, stream_id: str, sample_rate: int, channels: int, sample_width: int) -> bool:
+        """Start a live Core PCM source in the Discord voice player."""
+        guild = self.get_guild(guild_id)
+        vc = getattr(guild, "voice_client", None) if guild else None
+        if vc is None or not vc.is_connected():
+            return False
+        source = PCMStreamSource(stream_id, sample_rate, channels, sample_width)
+        self.abort_tts_stream(guild_id)
+        if vc.is_playing():
+            vc.stop()
+        self.tts_streams[guild_id] = source
+
+        def after_callback(error):
+            def finished():
+                if self.tts_streams.get(guild_id) is source:
+                    self.tts_streams.pop(guild_id, None)
+                source.cleanup()
+                self._play_next(guild_id, error)
+
+            self.loop.call_soon_threadsafe(finished)
+
+        try:
+            vc.play(source, after=after_callback)
+        except Exception:
+            self.tts_streams.pop(guild_id, None)
+            source.abort()
+            raise
+        return True
+
+    def feed_tts_stream(self, guild_id: int, stream_id: str, seq: int, pcm: bytes) -> bool:
+        source = self.tts_streams.get(guild_id)
+        if source is None or source.stream_id != stream_id:
+            return False
+        try:
+            source.feed(seq, pcm)
+        except ValueError:
+            self.abort_tts_stream(guild_id, stream_id)
+            return False
+        return True
+
+    def end_tts_stream(self, guild_id: int, stream_id: str) -> bool:
+        source = self.tts_streams.get(guild_id)
+        if source is None or source.stream_id != stream_id:
+            return False
+        source.finish()
+        return True
+
+    def abort_tts_stream(self, guild_id: int, stream_id: str | None = None) -> bool:
+        source = self.tts_streams.get(guild_id)
+        if source is None or (stream_id is not None and source.stream_id != stream_id):
+            return False
+        self.tts_streams.pop(guild_id, None)
+        source.abort()
+        guild = self.get_guild(guild_id)
+        vc = getattr(guild, "voice_client", None) if guild else None
+        if vc is not None and getattr(vc, "source", None) is source and vc.is_playing():
+            vc.stop()
+        return True

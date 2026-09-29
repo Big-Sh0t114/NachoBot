@@ -1,9 +1,15 @@
 import requests
 import aiohttp
 import os
-from typing import Dict, Any, List
+import struct
+from typing import AsyncIterable, AsyncIterator, Dict, Any, List
 from pathlib import Path
-from nachobot_multimodal.tts.base import BaseTTSModel
+from nachobot_multimodal.tts.base import (
+    BaseTTSModel,
+    PCMChunk,
+    close_async_iterator,
+    collect_pcm_stream_to_wav,
+)
 try:
     from tts_config import TTSBaseConfig, TTSPreset
 except ImportError:
@@ -12,6 +18,118 @@ except ImportError:
 response_error_status_list = [
     400,  # Bad Request
 ]
+
+
+class _AsyncByteReader:
+    """Read exact RIFF fields from an arbitrarily chunked async byte stream."""
+
+    def __init__(self, source: AsyncIterable[bytes]):
+        self._source = source.__aiter__()
+        self._buffer = bytearray()
+        self._eof = False
+
+    async def _fill(self, size: int) -> None:
+        while len(self._buffer) < size and not self._eof:
+            try:
+                chunk = await anext(self._source)
+            except StopAsyncIteration:
+                self._eof = True
+                break
+            if chunk:
+                self._buffer.extend(chunk)
+
+    async def read_exactly(self, size: int) -> bytes:
+        await self._fill(size)
+        if len(self._buffer) < size:
+            raise ValueError("GPT-SoVITS returned a truncated WAV header")
+        result = bytes(self._buffer[:size])
+        del self._buffer[:size]
+        return result
+
+    async def skip(self, size: int) -> None:
+        remaining = size
+        while remaining:
+            if self._buffer:
+                amount = min(remaining, len(self._buffer))
+                del self._buffer[:amount]
+                remaining -= amount
+                continue
+            await self._fill(1)
+            if not self._buffer:
+                raise ValueError("GPT-SoVITS returned a truncated WAV chunk")
+
+    async def read_some(self, size: int) -> bytes:
+        await self._fill(1)
+        if not self._buffer:
+            return b""
+        amount = min(size, len(self._buffer))
+        result = bytes(self._buffer[:amount])
+        del self._buffer[:amount]
+        return result
+
+    async def aclose(self) -> None:
+        await close_async_iterator(self._source)
+
+
+async def _iter_wav_pcm(source: AsyncIterable[bytes]) -> AsyncIterator[PCMChunk]:
+    """Parse one streaming RIFF/WAVE header and yield only its PCM16 data."""
+
+    reader = _AsyncByteReader(source)
+    try:
+        riff_header = await reader.read_exactly(12)
+        if riff_header[:4] != b"RIFF" or riff_header[8:12] != b"WAVE":
+            raise ValueError("GPT-SoVITS stream did not start with a RIFF/WAVE header")
+
+        format_info: tuple[int, int, int] | None = None
+        data_size: int | None = None
+        while data_size is None:
+            chunk_header = await reader.read_exactly(8)
+            chunk_id, chunk_size = chunk_header[:4], struct.unpack("<I", chunk_header[4:])[0]
+            if chunk_id == b"fmt ":
+                if chunk_size < 16:
+                    raise ValueError("GPT-SoVITS returned an invalid WAV fmt chunk")
+                fmt = await reader.read_exactly(16)
+                audio_format, channels, sample_rate, byte_rate, block_align, bits_per_sample = struct.unpack(
+                    "<HHIIHH", fmt
+                )
+                if audio_format != 1 or bits_per_sample != 16:
+                    raise ValueError("GPT-SoVITS stream must contain uncompressed PCM16 audio")
+                if channels <= 0 or sample_rate <= 0:
+                    raise ValueError("GPT-SoVITS returned invalid WAV sample metadata")
+                if block_align != channels * 2 or byte_rate != sample_rate * block_align:
+                    raise ValueError("GPT-SoVITS returned inconsistent WAV PCM metadata")
+                format_info = (channels, sample_rate, bits_per_sample // 8)
+                await reader.skip(chunk_size - 16 + (chunk_size & 1))
+            elif chunk_id == b"data":
+                if format_info is None:
+                    raise ValueError("GPT-SoVITS WAV data chunk appeared before its fmt chunk")
+                data_size = chunk_size
+            else:
+                await reader.skip(chunk_size + (chunk_size & 1))
+
+        if format_info is None:
+            raise ValueError("GPT-SoVITS WAV stream omitted the fmt chunk")
+        channels, sample_rate, sample_width = format_info
+        # Streaming WAV writers commonly use 0 or 0xffffffff because the
+        # final PCM size is not known when the header is emitted.
+        remaining = None if data_size in (0, 0xFFFFFFFF) else data_size
+        while remaining is None or remaining > 0:
+            read_size = 64 * 1024 if remaining is None else min(64 * 1024, remaining)
+            chunk = await reader.read_some(read_size)
+            if not chunk:
+                if remaining not in (None, 0):
+                    raise ValueError("GPT-SoVITS WAV data ended before its declared length")
+                break
+            if remaining is not None:
+                remaining -= len(chunk)
+            yield PCMChunk(
+                data=chunk,
+                sample_rate=sample_rate,
+                channels=channels,
+                sample_width=sample_width,
+            )
+    finally:
+        await reader.aclose()
 
 
 class TTSModel(BaseTTSModel):
@@ -276,71 +394,61 @@ class TTSModel(BaseTTSModel):
         repetition_penalty: float = None,
         sample_steps: int = None,
         super_sampling: bool = None,
+        preset_name: str = None,
         **kwargs,
-    ):
-        """文本转语音
+    ) -> bytes:
+        """Collect the same streaming PCM inference path into a WAV file."""
 
-        Args:
-            text: 要合成的文本
-            ref_audio_path: 参考音频路径，如果为None则使用上次设置的参考音频
-            aux_ref_audio_paths: 辅助参考音频路径列表(用于多说话人音色融合)
-            prompt_text: 提示文本，如果为None则使用上次设置的提示文本
-            text_lang: 文本语言,默认使用配置文件中的设置
-            prompt_lang: 提示文本语言,默认使用配置文件中的设置
-            top_k: top k采样
-            top_p: top p采样
-            temperature: 温度系数
-            text_split_method: 文本分割方法
-            batch_size: 批处理大小
-            batch_threshold: 批处理阈值
-            speed_factor: 语速控制
-            streaming_mode: 是否启用流式输出
-            media_type: 音频格式(wav/raw/ogg/aac)
-            repetition_penalty: 重复惩罚系数
-            sample_steps: VITS采样步数
-            super_sampling: 是否启用超采样
-        Returns:
-            content (bytes): 合成的wav音频数据
-        """
         platform = kwargs.get("platform")
         if not platform:
             raise RuntimeError("未指定平台，请在kwargs中传入platform参数")
-        preset_name = self.get_platform_preset(platform)
-        if self._current_preset != preset_name:
-            self.load_preset(preset_name)
-        params = self.build_parameters(
-            text=text,
-            ref_audio_path=ref_audio_path,
-            aux_ref_audio_paths=aux_ref_audio_paths,
-            text_lang=text_lang,
-            prompt_text=prompt_text,
-            prompt_lang=prompt_lang,
-            top_k=top_k,
-            top_p=top_p,
-            temperature=temperature,
-            text_split_method=text_split_method,
-            batch_size=batch_size,
-            batch_threshold=batch_threshold,
-            speed_factor=speed_factor,
-            streaming_mode=False,  # 强制使用非流式模式
-            media_type=media_type,
-            repetition_penalty=repetition_penalty,
-            sample_steps=sample_steps,
-            super_sampling=super_sampling,
-            preset_name=preset_name,  # 添加预设名称参数
+
+        return await collect_pcm_stream_to_wav(
+            self.tts_pcm_stream(
+                text,
+                ref_audio_path=ref_audio_path,
+                aux_ref_audio_paths=aux_ref_audio_paths,
+                text_lang=text_lang,
+                prompt_text=prompt_text,
+                prompt_lang=prompt_lang,
+                top_k=top_k,
+                top_p=top_p,
+                temperature=temperature,
+                text_split_method=text_split_method,
+                batch_size=batch_size,
+                batch_threshold=batch_threshold,
+                speed_factor=speed_factor,
+                media_type=media_type,
+                repetition_penalty=repetition_penalty,
+                sample_steps=sample_steps,
+                super_sampling=super_sampling,
+                preset_name=preset_name,
+                **kwargs,
+            )
         )
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"{self.base_url}/tts", params=params, timeout=60) as response:  # noqa
-                if response.status in response_error_status_list:
-                    error_response = await response.json()
-                    error_message = error_response.get("message", "未知错误")
-                    exception_message = error_response.get("Exception", "")
-                    raise aiohttp.ClientError(
-                        f"请求失败: {response.status}, 错误信息: {error_message}"
-                        + (f"，Exception: {exception_message}" if exception_message else "")
-                    )
-                response.raise_for_status()
-                return await response.read()
+
+    async def tts_pcm_stream(self, text: str, **kwargs) -> AsyncIterator[PCMChunk]:
+        """Normalize GPT-SoVITS streaming WAV bytes to typed PCM16 chunks."""
+
+        stream_kwargs = dict(kwargs)
+        stream_kwargs["media_type"] = "wav"
+        wav_stream = _iter_wav_pcm(self.tts_stream(text, **stream_kwargs))
+        try:
+            async for chunk in wav_stream:
+                yield chunk
+        finally:
+            await close_async_iterator(wav_stream)
+
+    def _resolve_preset_name(self, platform: str | None, preset_name: str | None) -> str:
+        if not platform:
+            print("未指定平台,使用默认平台")
+            platform = "default"
+        selected = preset_name or self.get_platform_preset(platform)
+        if not self.get_preset(selected):
+            raise ValueError(f"预设 {selected} 不存在")
+        if self._current_preset != selected:
+            self.load_preset(selected)
+        return selected
 
     async def tts_stream(
         self,
@@ -361,22 +469,12 @@ class TTSModel(BaseTTSModel):
         repetition_penalty=None,
         sample_steps=None,
         super_sampling=None,
+        preset_name=None,
         **kwargs,
-    ):
-        """流式文本转语音,返回音频数据流
+    ) -> AsyncIterator[bytes]:
+        """Compatibility stream retaining the engine's original WAV bytes."""
 
-        Args:
-            与tts()方法相同,但streaming_mode强制为True
-        Returns:
-            response (byte): 流式的wav格式音频数据
-        """
-        platform = kwargs.get("platform")
-        if not platform:
-            print("未指定平台,使用默认平台")
-            platform = "default"
-        preset_name = self.get_platform_preset(platform)
-        if self._current_preset != preset_name:
-            self.load_preset(preset_name)
+        selected_preset = self._resolve_preset_name(kwargs.get("platform"), preset_name)
         params = self.build_parameters(
             text=text,
             ref_audio_path=ref_audio_path,
@@ -391,12 +489,12 @@ class TTSModel(BaseTTSModel):
             batch_size=batch_size,
             batch_threshold=batch_threshold,
             speed_factor=speed_factor,
-            streaming_mode=True,  # 强制使用流式模式
+            streaming_mode=True,
             media_type=media_type,
             repetition_penalty=repetition_penalty,
             sample_steps=sample_steps,
             super_sampling=super_sampling,
-            preset_name=preset_name,
+            preset_name=selected_preset,
         )
 
         # Use an async-generator context so response and session resources are

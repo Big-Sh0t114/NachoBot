@@ -8,6 +8,7 @@ platform chat messages or creates chat turns.
 from __future__ import annotations
 
 import base64
+import binascii
 from contextlib import asynccontextmanager
 import logging
 import os
@@ -17,11 +18,20 @@ from pathlib import Path
 from typing import Any
 
 import toml
+from fastapi.encoders import jsonable_encoder
 from fastapi import FastAPI, Request, UploadFile, File, Form
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from fastapi.exceptions import RequestValidationError
+from pydantic import BaseModel, Field, StrictInt, StrictStr
 
-from .local_runtime import LocalBusy, LocalMultimodalRuntime, RuntimeUnavailable, UnsupportedOperation
+from .local_runtime import (
+    AudioStreamConflict,
+    AudioStreamInferenceError,
+    LocalBusy,
+    LocalMultimodalRuntime,
+    RuntimeUnavailable,
+    UnsupportedOperation,
+)
 from nachobot_multimodal.utils.uvicorn_logging import install_quiet_access_logging
 
 
@@ -32,6 +42,7 @@ _MAX_TEXT_CHARS = 10_000
 _MAX_VIDEO_BYTES = 64 * 1024 * 1024
 _MAX_MEDIA_BASE64_CHARS = 4 * ((_MAX_VIDEO_BYTES + 2) // 3)
 _MAX_MEDIA_REQUEST_CHARS = _MAX_MEDIA_BASE64_CHARS + 256
+_MAX_AUDIO_STREAM_CHUNK_BASE64_CHARS = 4 * ((64 * 1024 + 2) // 3)
 _runtime = LocalMultimodalRuntime(config_dir=_CONFIG_PATH.parent)
 
 
@@ -42,6 +53,22 @@ class PerceptionBody(BaseModel):
     mime_type: str = Field(default="", max_length=96)
     prompt: str = Field(default="", max_length=_MAX_TEXT_CHARS)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AudioStreamStartBody(BaseModel):
+    model: StrictStr = Field(min_length=1, max_length=128)
+    sample_rate: StrictInt
+    channels: StrictInt
+
+
+class AudioStreamChunkBody(BaseModel):
+    stream_id: StrictStr = Field(min_length=1, max_length=64)
+    seq: StrictInt = Field(ge=0)
+    pcm_base64: StrictStr = Field(min_length=1, max_length=_MAX_AUDIO_STREAM_CHUNK_BASE64_CHARS)
+
+
+class AudioStreamBody(BaseModel):
+    stream_id: StrictStr = Field(min_length=1, max_length=64)
 
 
 def _load_config() -> dict[str, Any]:
@@ -66,21 +93,39 @@ async def lifespan(_app: FastAPI):
     of exposing a health listener that would retry model loading per request.
     """
 
-    if not _runtime.perception_enabled:
-        logger.info("Local ASR/VLM disabled; 9874 will report not-ready capabilities")
-        yield
-        return
-
     try:
-        await _runtime.preload()
+        if not _runtime.perception_enabled:
+            logger.info("Local ASR/VLM disabled; 9874 will report not-ready capabilities")
+        else:
+            await _runtime.preload()
+            logger.info("Local ASR/VLM models preloaded before 9874 readiness")
+        start_reaper = getattr(_runtime, "start_audio_stream_reaper", None)
+        if callable(start_reaper):
+            await start_reaper()
+        yield
     except Exception:
         logger.exception("Local ASR/VLM preload failed; refusing 9874 readiness")
         raise
-    logger.info("Local ASR/VLM models preloaded before 9874 readiness")
-    yield
+    finally:
+        close_streams = getattr(_runtime, "close_audio_streams", None)
+        if callable(close_streams):
+            await close_streams()
 
 
 app = FastAPI(title="NachoBot Local Multimodal Runtime", version="2.0", lifespan=lifespan)
+
+
+@app.exception_handler(RequestValidationError)
+async def stream_request_validation_error(
+    request: Request,
+    exc: RequestValidationError,
+) -> JSONResponse:
+    if request.url.path.startswith("/v1/audio/stream/"):
+        return _error_response(400, "invalid audio stream request", "invalid_request")
+    return JSONResponse(
+        status_code=422,
+        content=jsonable_encoder({"detail": exc.errors()}),
+    )
 
 
 @app.get("/health")
@@ -95,6 +140,120 @@ async def health() -> dict[str, Any]:
 @app.get("/v1/capabilities")
 async def capabilities() -> dict[str, Any]:
     return await _runtime.health()
+
+
+def _decode_pcm_base64(value: str) -> bytes:
+    if len(value) > _MAX_AUDIO_STREAM_CHUNK_BASE64_CHARS:
+        raise ValueError("PCM chunk exceeds 64KB")
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("pcm_base64 must be canonical base64") from exc
+    if not decoded:
+        raise ValueError("PCM chunk is empty")
+    if base64.b64encode(decoded).decode("ascii") != value:
+        raise ValueError("pcm_base64 must be canonical base64")
+    if len(decoded) > 64 * 1024:
+        raise ValueError("PCM chunk exceeds 64KB")
+    if len(decoded) % 2:
+        raise ValueError("PCM chunk must contain complete s16le mono frames")
+    return decoded
+
+
+def _audio_stream_error(status: int, message: str, code: str) -> JSONResponse:
+    return _error_response(status, message, code)
+
+
+@app.post("/v1/audio/stream/start", response_model=None)
+async def audio_stream_start(body: AudioStreamStartBody) -> dict[str, str] | JSONResponse:
+    try:
+        stream_id = await _runtime.start_audio_stream(
+            model=body.model,
+            sample_rate=body.sample_rate,
+            channels=body.channels,
+        )
+    except ValueError as exc:
+        return _audio_stream_error(400, str(exc), "invalid_request")
+    except LocalBusy:
+        return _audio_stream_error(503, "streaming ASR is busy", "busy")
+    except RuntimeUnavailable:
+        return _audio_stream_error(503, "local streaming ASR is unavailable", "runtime_unavailable")
+    except UnsupportedOperation as exc:
+        return _audio_stream_error(501, str(exc), "unsupported")
+    except AudioStreamInferenceError:
+        logger.exception("Local ASR stream start failed")
+        return _audio_stream_error(502, "local ASR stream could not start", "inference_failure")
+    except Exception:
+        logger.exception("Local ASR stream start failed")
+        return _audio_stream_error(502, "local ASR stream could not start", "inference_failure")
+    return {"stream_id": stream_id}
+
+
+@app.post("/v1/audio/stream/chunk", response_model=None)
+async def audio_stream_chunk(body: AudioStreamChunkBody) -> dict[str, Any] | JSONResponse:
+    try:
+        pcm_bytes = _decode_pcm_base64(body.pcm_base64)
+        partial_text = await _runtime.accept_audio_stream_chunk(
+            stream_id=body.stream_id,
+            seq=body.seq,
+            pcm_bytes=pcm_bytes,
+        )
+    except ValueError as exc:
+        return _audio_stream_error(400, str(exc), "invalid_request")
+    except KeyError:
+        return _audio_stream_error(404, "audio stream was not found or has expired", "not_found")
+    except AudioStreamConflict as exc:
+        return _audio_stream_error(409, str(exc), "conflict")
+    except AudioStreamInferenceError as exc:
+        logger.exception("Local ASR stream chunk failed")
+        return _audio_stream_error(502, str(exc), "chunk_failure")
+    except RuntimeUnavailable:
+        return _audio_stream_error(503, "local streaming ASR is unavailable", "runtime_unavailable")
+    except UnsupportedOperation as exc:
+        return _audio_stream_error(501, str(exc), "unsupported")
+    except Exception:
+        logger.exception("Local ASR stream chunk failed")
+        return _audio_stream_error(502, "local ASR stream chunk failed", "chunk_failure")
+    return {"seq": body.seq, "partial_text": partial_text}
+
+
+@app.post("/v1/audio/stream/finish", response_model=None)
+async def audio_stream_finish(body: AudioStreamBody) -> dict[str, str] | JSONResponse:
+    try:
+        text = await _runtime.finish_audio_stream(body.stream_id)
+    except KeyError:
+        return _audio_stream_error(404, "audio stream was not found or has expired", "not_found")
+    except AudioStreamConflict as exc:
+        return _audio_stream_error(409, str(exc), "conflict")
+    except AudioStreamInferenceError as exc:
+        logger.exception("Local ASR stream finalization failed")
+        return _audio_stream_error(502, str(exc), "finalization_failure")
+    except RuntimeUnavailable:
+        return _audio_stream_error(503, "local streaming ASR is unavailable", "runtime_unavailable")
+    except UnsupportedOperation as exc:
+        return _audio_stream_error(501, str(exc), "unsupported")
+    except Exception:
+        logger.exception("Local ASR stream finalization failed")
+        return _audio_stream_error(502, "local ASR stream finalization failed", "finalization_failure")
+    return {"text": text}
+
+
+@app.post("/v1/audio/stream/abort", response_model=None)
+async def audio_stream_abort(body: AudioStreamBody) -> dict[str, bool] | JSONResponse:
+    try:
+        await _runtime.abort_audio_stream(body.stream_id)
+    except KeyError:
+        return _audio_stream_error(404, "audio stream was not found or has expired", "not_found")
+    except AudioStreamConflict as exc:
+        return _audio_stream_error(409, str(exc), "conflict")
+    except RuntimeUnavailable:
+        return _audio_stream_error(503, "local streaming ASR is unavailable", "runtime_unavailable")
+    except UnsupportedOperation as exc:
+        return _audio_stream_error(501, str(exc), "unsupported")
+    except Exception:
+        logger.exception("Local ASR stream abort failed")
+        return _audio_stream_error(502, "local ASR stream abort failed", "inference_failure")
+    return {"aborted": True}
 
 
 @app.post("/v1/perception", response_model=None)

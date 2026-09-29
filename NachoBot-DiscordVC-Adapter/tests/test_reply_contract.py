@@ -32,8 +32,52 @@ class DiscordReplyContractTests(TestCase):
         capabilities = message.message_info.additional_config["runtime_capabilities"]
         self.assertEqual(capabilities["reply_delivery"], "json_envelope")
         self.assertEqual(capabilities["tts_language"], "zh")
+        self.assertTrue(capabilities["voice_stream"])
         self.assertEqual(message.message_segment.type, "voice")
         self.assertEqual(message.message_segment.data, "input-audio")
+
+    def test_voice_receipt_is_forwarded_only_when_nonempty(self):
+        adapter = DiscordAdapter.__new__(DiscordAdapter)
+        adapter.config = SimpleNamespace(
+            voice=SimpleNamespace(sample_rate=48_000),
+            prompts=SimpleNamespace(
+                planner_prompt="", replyer_prompt="", variables={}
+            ),
+        )
+        adapter.logger = Mock()
+        adapter.router = SimpleNamespace(send_message=AsyncMock())
+
+        asyncio.run(
+            adapter.handle_speech_recognized(
+                guild_id=7,
+                user_id=11,
+                voice_data="input-audio",
+                precomputed_asr_result_id="receipt-1",
+            )
+        )
+        message = adapter.router.send_message.await_args.args[0]
+        self.assertEqual(message.message_info.platform, "discord_vc")
+        self.assertEqual(
+            message.message_info.additional_config["precomputed_asr_result_id"],
+            "receipt-1",
+        )
+        self.assertEqual(message.message_segment.type, "voice")
+        self.assertEqual(message.message_segment.data, "input-audio")
+
+        for invalid_receipt in (None, "", "  ", "x" * 257):
+            asyncio.run(
+                adapter.handle_speech_recognized(
+                    guild_id=7,
+                    user_id=11,
+                    voice_data="input-audio",
+                    precomputed_asr_result_id=invalid_receipt,
+                )
+            )
+            message = adapter.router.send_message.await_args.args[0]
+            self.assertNotIn(
+                "precomputed_asr_result_id",
+                message.message_info.additional_config,
+            )
 
     def test_live_prompt_requires_reply_and_tts_text_fields(self):
         prompt = Path(__file__).parents[1].joinpath("config.toml").read_text(

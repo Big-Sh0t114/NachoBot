@@ -52,6 +52,7 @@ from bili_src.live.v2_models import (  # noqa: E402
 from bili_src.live.screen_monitor import ScreenMonitor  # noqa: E402
 from bili_src.live.two_phase_search import append_live_search_protocol  # noqa: E402
 from bili_src.audio.mic_capture import MicCaptureWorker, MicConfig  # noqa: E402
+from bili_src.audio.core_audio_stream import CoreAudioStreamClient  # noqa: E402
 from bili_src.audio.audio_player import AudioPlayer  # noqa: E402
 # from live_streamer import LiveStreamerController, PriorityEvent  # noqa: E402
 
@@ -90,6 +91,11 @@ class BilibiliAdapter:
             config.nachobot_host,
             config.nachobot_port,
             token=get_core_token_from_env(),
+        )
+        self._mic_stream_client = CoreAudioStreamClient(
+            self.multimodal_client.base_url,
+            token=self.multimodal_client.token,
+            logger=logger,
         )
         self._screen_host_room_id = config.live_host_room_id
         self._screen_monitor: Optional[ScreenMonitor] = None
@@ -148,6 +154,7 @@ class BilibiliAdapter:
                 silence_threshold=config.mic_asr_silence_threshold,
                 silence_duration=config.mic_asr_silence_duration,
                 sample_rate=config.mic_asr_sample_rate,
+                platform=config.platform,
                 push_to_talk=config.mic_asr_push_to_talk,
                 ptt_key=config.mic_asr_ptt_key,
             )
@@ -157,7 +164,10 @@ class BilibiliAdapter:
             mic_config.on_speech_end = self._on_speech_end
 
             self.mic_worker = MicCaptureWorker(
-                mic_config, self._handle_mic_recognition, logger
+                mic_config,
+                self._handle_mic_recognition,
+                logger,
+                stream_client=self._mic_stream_client,
             )
         self._self_danmu_texts: Dict[int, List[Tuple[str, float]]] = {}
         self._live_status_cache: Dict[int, Tuple[int, float]] = {}
@@ -207,6 +217,12 @@ class BilibiliAdapter:
                 self.live2d_manager.controller.play_audio
             )
             self.audio_player.remote_stop_callback = self.live2d_manager.controller.stop_audio
+            self.audio_player.remote_voice_stream_callback = (
+                self.live2d_manager.controller.send_voice_stream_event
+            )
+            self.audio_player.remote_voice_stream_ready_callback = (
+                lambda: self.live2d_manager.controller.can_stream_pcm
+            )
 
         from bili_src.audio.tts_manager import TTSManager
 
@@ -291,6 +307,7 @@ class BilibiliAdapter:
         try:
             await asyncio.gather(*tasks)
         finally:
+            await self.audio_player.shutdown()
             if self.live2d_manager:
                 await self.live2d_manager.stop()
             await self.api.close()
@@ -617,9 +634,13 @@ class BilibiliAdapter:
         room_id: int,
         base: Optional[Dict[str, Any]] = None,
         platform_event: Optional[Dict[str, Any]] = None,
+        *,
+        voice_stream_playback_ready: Optional[bool] = None,
     ) -> Dict[str, Any]:
         tts_enabled = self.tts_manager.is_tts_enabled(room_id)
         tts_language = self.tts_manager.get_room_language(room_id) if tts_enabled else ""
+        if voice_stream_playback_ready is None:
+            voice_stream_playback_ready = self._voice_stream_playback_ready()
         additional = dict(base or {})
         # Kept during the wire-contract transition for older Core versions.
         additional.setdefault(
@@ -630,10 +651,15 @@ class BilibiliAdapter:
             search_enabled=self.config.live_network_search_enabled,
             person_profile_enabled=self.config.live_person_profile_enabled,
             tts_enabled=tts_enabled,
+            voice_stream_playback_ready=voice_stream_playback_ready,
             tts_language=tts_language,
             base=additional,
             platform_event=platform_event,
         )
+
+    def _voice_stream_playback_ready(self) -> bool:
+        player = getattr(self, "audio_player", None)
+        return bool(player and getattr(player, "can_stream_voice", False))
 
     # ========== Incoming Message Handlers ==========
 
@@ -1178,14 +1204,26 @@ class BilibiliAdapter:
         # Push to Queue (Priority 20 for High Value Gifts)
         self.event_manager.push_to_event_queue(20, message)
 
-    async def _handle_mic_recognition(self, wav_payload: bytes) -> None:
+    async def _handle_mic_recognition(
+        self,
+        wav_payload: bytes,
+        precomputed_asr_result_id: Optional[str] = None,
+    ) -> None:
         """Forward one captured WAV utterance to Core as a voice segment."""
         if not wav_payload:
             return
         if not self.mic_worker or not self.mic_worker.config.room_id:
             return
         room_id = self.mic_worker.config.room_id
-        await self.handle_mic_message(room_id, wav_payload)
+        await self.handle_mic_message(
+            room_id,
+            wav_payload,
+            precomputed_asr_result_id=(
+                precomputed_asr_result_id
+                if self.config.platform == "bilibili"
+                else None
+            ),
+        )
 
     async def handle_incoming_poke(
         self,
@@ -1246,7 +1284,13 @@ class BilibiliAdapter:
 
         self.event_manager.push_to_event_queue(20, message)
 
-    async def handle_mic_message(self, room_id: int, wav_payload: bytes) -> None:
+    async def handle_mic_message(
+        self,
+        room_id: int,
+        wav_payload: bytes,
+        *,
+        precomputed_asr_result_id: Optional[str] = None,
+    ) -> None:
         """Send a captured utterance to Core; ASR never runs in this adapter."""
         self.tts_manager.reset_idle_timer()
         additional_config = self._build_live_additional_config(
@@ -1258,6 +1302,14 @@ class BilibiliAdapter:
                 "media_format": "wav",
             },
         )
+        if (
+            self.config.platform == "bilibili"
+            and isinstance(precomputed_asr_result_id, str)
+            and precomputed_asr_result_id.strip()
+        ):
+            additional_config["precomputed_asr_result_id"] = (
+                precomputed_asr_result_id.strip()
+            )
 
         # 修复：从配置动态读取主人的 ID 和名字，消除硬编码
         master_user_id = str(getattr(self.config, "live_master_user_id", "2146014839"))
@@ -1488,7 +1540,9 @@ class BilibiliAdapter:
         prompt_text = f"以{guard_label}身份进入了直播间"
         template_info = await self._get_template_info(room_id, user_id, prompt_text)
 
-        additional_config = self._build_live_additional_config(room_id)
+        additional_config = self._build_live_additional_config(
+            room_id,
+        )
         additional_config["system_event"] = build_system_event(
             "bilibili.guard_entry",
             actor={"user_id": str(user_id), "name": user_name},

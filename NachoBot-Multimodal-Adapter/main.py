@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 
@@ -40,6 +41,12 @@ if str(SRC_PATH) not in sys.path:
 
 from nachobot_multimodal.config import Config  # noqa: E402
 from nachobot_multimodal.logger import logger  # noqa: E402
+from nachobot_multimodal.tts.base import (  # noqa: E402
+    PCMChunk,
+    PCMStreamError,
+    close_async_iterator,
+    iter_validated_pcm,
+)
 from nachobot_multimodal.utils import post_process  # noqa: E402
 from nachobot_multimodal.utils.tts_resolver import resolve_tts_model_snapshot  # noqa: E402
 
@@ -72,6 +79,60 @@ class WebUITTSRequest(BaseModel):
     text: str = Field(min_length=1, max_length=10_000)
     platform: str = Field(default="webui", max_length=64)
     text_lang: str | None = Field(default=None, max_length=32)
+
+
+class _PrefetchedPCMBody:
+    """Own a prefetched typed stream and its runtime lock until it is closed."""
+
+    def __init__(self, stream, first_chunk: PCMChunk, lock: asyncio.Lock):
+        self._stream = stream
+        self._first_chunk: PCMChunk | None = first_chunk
+        self._lock = lock
+        self._closed = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> bytes:
+        if self._closed:
+            raise StopAsyncIteration
+        if self._first_chunk is not None:
+            chunk = self._first_chunk
+            self._first_chunk = None
+            return chunk.data
+        try:
+            chunk = await anext(self._stream)
+        except StopAsyncIteration:
+            await self.aclose()
+            raise
+        except BaseException:
+            await self.aclose()
+            raise
+        return chunk.data
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            await close_async_iterator(self._stream)
+        finally:
+            if self._lock.locked():
+                self._lock.release()
+
+
+class _ClosingStreamingResponse(StreamingResponse):
+    """Close the source iterator even when ASGI send or disconnect fails."""
+
+    def __init__(self, body: _PrefetchedPCMBody, *, headers: dict[str, str]):
+        self._owned_body = body
+        super().__init__(content=body, media_type="application/octet-stream", headers=headers)
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await self._owned_body.aclose()
 
 
 class TTSPipeline:
@@ -231,6 +292,73 @@ class TTSPipeline:
             except Exception as exc:
                 logger.exception("TTS synthesis failed")
                 raise HTTPException(status_code=502, detail=f"TTS generation failed: {exc}") from exc
+
+        @self.app.post("/api/tts/stream")
+        async def tts_stream_endpoint(body: WebUITTSRequest) -> StreamingResponse:
+            if not self.ready:
+                raise HTTPException(status_code=503, detail="TTS runtime is not ready")
+            text = body.text.strip()
+            if not text:
+                raise HTTPException(status_code=400, detail="TTS text cannot be empty")
+            if getattr(self.config.tts_base_config, "post_process", False):
+                raise HTTPException(
+                    status_code=501,
+                    detail="TTS post-processing is not available for PCM streaming",
+                )
+            stream_method = getattr(self.model, "tts_pcm_stream", None)
+            if not callable(stream_method):
+                raise HTTPException(status_code=501, detail="TTS backend does not expose PCM streaming")
+
+            await self._webui_tts_lock.acquire()
+            stream_iterator = None
+            response_body = None
+            transferred = False
+            try:
+                if not self.ready:
+                    raise HTTPException(status_code=503, detail="TTS runtime is not ready")
+                stream_iterator = iter_validated_pcm(
+                    stream_method(
+                        text=text,
+                        platform=body.platform,
+                        text_lang=body.text_lang,
+                    )
+                )
+                # Surface backend and format errors before response headers are sent.
+                first_chunk = await anext(stream_iterator)
+                response_body = _PrefetchedPCMBody(
+                    stream_iterator,
+                    first_chunk,
+                    self._webui_tts_lock,
+                )
+                headers = {
+                    "X-Audio-Sample-Rate": str(first_chunk.sample_rate),
+                    "X-Audio-Channels": str(first_chunk.channels),
+                    "X-Audio-Sample-Width": str(first_chunk.sample_width),
+                    "X-Audio-Codec": first_chunk.codec,
+                    "X-TTS-Stream-Version": "1",
+                    "Cache-Control": "no-store",
+                }
+                response = _ClosingStreamingResponse(response_body, headers=headers)
+                transferred = True
+                return response
+            except HTTPException:
+                raise
+            except TimeoutError as exc:
+                logger.exception("TTS stream timed out before the first PCM chunk")
+                raise HTTPException(status_code=504, detail="TTS stream timed out") from exc
+            except PCMStreamError as exc:
+                raise HTTPException(status_code=502, detail=str(exc)) from exc
+            except Exception as exc:
+                logger.exception("TTS streaming synthesis failed")
+                raise HTTPException(status_code=502, detail=f"TTS generation failed: {exc}") from exc
+            finally:
+                if not transferred:
+                    try:
+                        if stream_iterator is not None:
+                            await close_async_iterator(stream_iterator)
+                    finally:
+                        if self._webui_tts_lock.locked():
+                            self._webui_tts_lock.release()
 
     def _health_payload(self) -> dict[str, Any]:
         ready = self.ready

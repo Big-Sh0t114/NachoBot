@@ -26,6 +26,7 @@ class UniversalReplyContractTests(TestCase):
                 speaker_id="speaker-1",
                 speaker_name="听众",
                 voice_data="input-audio",
+                precomputed_asr_result_id="receipt-1",
             )
         )
 
@@ -35,6 +36,23 @@ class UniversalReplyContractTests(TestCase):
         self.assertEqual(capabilities["tts_language"], "zh")
         self.assertEqual(message.message_segment.type, "voice")
         self.assertEqual(message.message_segment.data, "input-audio")
+        self.assertEqual(
+            message.message_info.additional_config["precomputed_asr_result_id"],
+            "receipt-1",
+        )
+
+        asyncio.run(
+            adapter._on_speech_result(
+                speaker_id="speaker-1",
+                speaker_name="听众",
+                voice_data="next-input-audio",
+            )
+        )
+        next_message = adapter.router.send_message.await_args.args[0]
+        self.assertNotIn(
+            "precomputed_asr_result_id",
+            next_message.message_info.additional_config,
+        )
 
     def test_live_prompt_requires_reply_and_tts_text_fields(self):
         prompt = Path(__file__).parents[1].joinpath("config.toml").read_text(

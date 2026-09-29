@@ -1,8 +1,13 @@
 import aiohttp
 import os
-from typing import Optional, Dict, Any
+from typing import AsyncIterator, Optional, Dict, Any
 from pathlib import Path
-from nachobot_multimodal.tts.base import BaseTTSModel
+from nachobot_multimodal.tts.base import (
+    BaseTTSModel,
+    PCMChunk,
+    close_async_iterator,
+    collect_pcm_stream_to_wav,
+)
 from nachobot_multimodal.logger import logger
 from nachobot_multimodal.utils.text_cleaner import clean_text_for_tts
 
@@ -187,18 +192,13 @@ class TTSModel(BaseTTSModel):
             return None
 
     async def tts(self, text: str, **kwargs) -> bytes:
-        """非流式方式获取语音内容
+        """Collect the shared streaming inference path into a WAV file."""
 
-        通过 HTTP GET 调用 VoxCPM API Server 的 /tts 端点。
-        预设选择优先级：显式 ``preset_name``、本地情感分类、平台默认预设。
+        return await collect_pcm_stream_to_wav(self.tts_pcm_stream(text, **kwargs))
 
-        Args:
-            text (str): 需要合成的语音内容
-            **kwargs: 其他参数 (platform, text_lang, preset_name 等)
+    def _resolve_stream_request(self, text: str, kwargs: dict[str, Any]) -> tuple[dict[str, Any], str]:
+        """Resolve the existing Vox preset and request parameters once."""
 
-        Returns:
-            data (bytes): bytes格式的wav音频内容
-        """
         platform = kwargs.get("platform")
         if not platform:
             raise RuntimeError("未指定平台，请在kwargs中传入platform参数")
@@ -226,69 +226,21 @@ class TTSModel(BaseTTSModel):
             if not preset:
                 raise ValueError(f"预设 {preset_name} 不存在")
 
-        # 清洗文本：移除颜文字、emoji 等对 TTS 引擎有害的字符
         cleaned_text = clean_text_for_tts(text)
         if cleaned_text != text:
             logger.info(f"文本清洗: '{text[:60]}' -> '{cleaned_text[:60]}'")
         if not cleaned_text:
-            logger.warning("清洗后文本为空，跳过 TTS 生成")
-            return b""
+            raise ValueError("清洗后的 TTS 文本为空")
 
         self._current_preset = preset_name
         split_method = kwargs.get("split_method")
         params = self.build_parameters(cleaned_text, preset, text_lang=text_lang, split_method=split_method)
+        return params, preset_name
 
-        timeout = aiohttp.ClientTimeout(total=120, connect=10)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(
-                f"{self.base_url}/tts",
-                params=params,
-            ) as response:
-                if response.status == 400:
-                    error_response = await response.json()
-                    error_message = error_response.get("message", "未知错误")
-                    raise aiohttp.ClientError(f"请求失败: {response.status}, 错误信息: {error_message}")
-                if response.status == 503:
-                    raise aiohttp.ClientError("VoxCPM 模型未加载，请检查 API 服务器状态")
-                response.raise_for_status()
-                return await response.read()
+    async def tts_pcm_stream(self, text: str, **kwargs) -> AsyncIterator[PCMChunk]:
+        """Yield typed PCM16 chunks from VoxCPM's native streaming endpoint."""
 
-    async def tts_stream(self, text: str, **kwargs):
-        """流式方式获取语音内容 (真流式)
-        
-        调用 API Server 的 /tts_stream 端点，以 async generator 形式逐 chunk 产生 PCM 16-bit 数据。
-        """
-        platform = kwargs.get("platform")
-        if not platform:
-            raise RuntimeError("未指定平台，请在kwargs中传入platform参数")
-
-        text_lang = kwargs.get("text_lang")
-        preset_name = kwargs.get("preset_name")
-
-        if not preset_name:
-            preset_name = self.resolve_emotion_preset(text)
-
-        if not preset_name:
-            preset_name = self.get_platform_preset(platform)
-
-        preset = self.get_preset(preset_name)
-        if not preset:
-            logger.warning(f"预设 '{preset_name}' 不存在，回退到平台默认预设")
-            preset_name = self.get_platform_preset(platform)
-            preset = self.get_preset(preset_name)
-            if not preset:
-                raise ValueError(f"预设 {preset_name} 不存在")
-
-        cleaned_text = clean_text_for_tts(text)
-        if cleaned_text != text:
-            logger.info(f"文本清洗: '{text[:60]}' -> '{cleaned_text[:60]}'")
-        if not cleaned_text:
-            logger.warning("清洗后文本为空，跳过 TTS 生成")
-            return
-
-        self._current_preset = preset_name
-        params = self.build_parameters(cleaned_text, preset, text_lang=text_lang)
-
+        params, _preset_name = self._resolve_stream_request(text, kwargs)
         timeout = aiohttp.ClientTimeout(total=120, connect=10)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(
@@ -303,45 +255,60 @@ class TTSModel(BaseTTSModel):
                     raise aiohttp.ClientError("VoxCPM 模型未加载，请检查 API 服务器状态")
                 response.raise_for_status()
 
-                # 读取流式数据
+                headers = getattr(response, "headers", {}) or {}
+
+                def header_value(name: str, default: str | None = None) -> str | None:
+                    value = headers.get(name)
+                    if value is None:
+                        value = headers.get(name.lower())
+                    return str(value) if value is not None else default
+
+                sample_rate_text = header_value("X-Sample-Rate")
+                if sample_rate_text is None:
+                    raise RuntimeError("VoxCPM streaming response omitted X-Sample-Rate")
+                sample_rate = int(sample_rate_text)
+                channels = int(header_value("X-Channels", "1"))
+                sample_width = int(header_value("X-Sample-Width", "2"))
+                if sample_rate <= 0 or channels <= 0 or sample_width != 2:
+                    raise RuntimeError("VoxCPM returned unsupported PCM metadata")
+
                 async for chunk in response.content.iter_any():
                     if chunk:
-                        yield chunk
+                        yield PCMChunk(
+                            data=bytes(chunk),
+                            sample_rate=sample_rate,
+                            channels=channels,
+                            sample_width=sample_width,
+                        )
+
+    async def tts_stream(self, text: str, **kwargs) -> AsyncIterator[bytes]:
+        """Compatibility byte stream backed by the typed Vox PCM stream."""
+
+        iterator = self.tts_pcm_stream(text, **kwargs).__aiter__()
+        try:
+            async for chunk in iterator:
+                yield chunk.data
+        finally:
+            await close_async_iterator(iterator)
 
     async def tts_stream_to_file(self, text: str, **kwargs) -> Optional[str]:
-        """流式生成并写入 WAV 文件，返回文件路径
-        
-        供 Bilibili/Discord 等需要完整 WAV 文件的适配器使用。
-        边接收 chunk 边写文件，首 chunk 收到即写 WAV header（由于总长度未知，填 0xFFFFFFFF 或在结束后修正）。
-        由于 Python 标准库 wave 不支持未知长度，先缓存 chunk 然后一次性写。
-        这依然避免了在 API server 侧的长时间阻塞拼接。
-        """
+        """Collect the native PCM stream into a WAV file for legacy callers."""
         import os
         import tempfile
-        import wave
 
+        path = None
         try:
             fd, path = tempfile.mkstemp(suffix=".wav")
             os.close(fd)
-            
-            pcm_chunks = []
-            sample_rate = 24000  # VoxCPM 默认 24kHz
-            
-            async for chunk in self.tts_stream(text, **kwargs):
-                pcm_chunks.append(chunk)
-                
-            if not pcm_chunks:
-                return None
-                
-            pcm_data = b"".join(pcm_chunks)
-            
-            with wave.open(path, "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(sample_rate)
-                wf.writeframes(pcm_data)
-                
+            audio_data = await self.tts(text, **kwargs)
+            with open(path, "wb") as output:
+                output.write(audio_data)
             return path
         except Exception as e:
             logger.error(f"tts_stream_to_file error: {e}")
+            if path:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
             return None

@@ -15,7 +15,11 @@ if str(PROJECT_ROOT / "NachoBot") not in sys.path:
 
 import bili_src.live2d.remote_controller as remote_controller_module  # noqa: E402
 from bili_src.audio.tts_manager import TTSManager  # noqa: E402
-from bili_src.core.utils import _extract_plain_text, _extract_voice_base64  # noqa: E402
+from bili_src.core.utils import (  # noqa: E402
+    _extract_plain_text,
+    _extract_voice_base64,
+    _extract_voice_stream_payload,
+)
 from bili_src.live.outgoing_handler import OutgoingHandler  # noqa: E402
 from bili_src.live.two_phase_search import (  # noqa: E402
     BilibiliLiveSearchOrchestrator,
@@ -416,11 +420,31 @@ class TTSControlTests(unittest.IsolatedAsyncioTestCase):
         audio_player.play.assert_called_once_with(b"requested-song-audio")
         handler._send_danmu.assert_not_awaited()
 
-    async def test_pure_voice_stream_is_selected_for_platform_playback(self) -> None:
-        voice = base64.b64encode(b"streamed-song-audio").decode("ascii")
-        segment = SimpleNamespace(type="voice_stream", data=voice)
+    async def test_voice_stream_is_not_treated_as_a_complete_voice_file(self) -> None:
+        payload = {"event": "start", "stream_id": "stream-1"}
+        segment = SimpleNamespace(type="voice_stream", data=payload)
 
-        self.assertEqual(_extract_voice_base64(segment), voice)
+        self.assertEqual(_extract_voice_base64(segment), "")
+        self.assertEqual(_extract_voice_stream_payload(segment), payload)
+
+    async def test_stream_end_does_not_finish_reply_before_playback_drains(self) -> None:
+        player = SimpleNamespace(handle_voice_stream_event=AsyncMock(return_value=True))
+        controller = SimpleNamespace(
+            on_start_replying=AsyncMock(),
+            on_reply_finished=AsyncMock(),
+        )
+        handler = OutgoingHandler.__new__(OutgoingHandler)
+        handler.adapter = SimpleNamespace(
+            audio_player=player,
+            live2d_manager=SimpleNamespace(controller=controller),
+        )
+        handler.logger = _Logger()
+
+        await handler._handle_voice_stream_event({"event": "start"})
+        await handler._handle_voice_stream_event({"event": "end"})
+
+        controller.on_start_replying.assert_awaited_once()
+        controller.on_reply_finished.assert_not_awaited()
 
 
 if __name__ == "__main__":

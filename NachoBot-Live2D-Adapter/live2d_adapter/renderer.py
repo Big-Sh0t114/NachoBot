@@ -1,14 +1,126 @@
 import io
+import math
 import os
 import queue
 import sys
+import threading
 import time
+from array import array
+from collections import deque
 from collections.abc import Callable
 from typing import Any
 
 import pygame
 
 from .model_adapter import Live2DModelAdapter
+
+MAX_PCM_PENDING_BYTES = 512 * 1024
+MAX_PCM_STREAM_TOTAL_BYTES = 32 * 1024 * 1024
+MAX_PCM_CHUNK_BYTES = 64 * 1024
+
+
+class _PCM16Resampler:
+    """Incremental PCM16 sample-rate and mono/stereo converter."""
+
+    def __init__(
+        self,
+        source_rate: int,
+        source_channels: int,
+        output_rate: int,
+        output_channels: int,
+    ) -> None:
+        self.source_rate = source_rate
+        self.source_channels = source_channels
+        self.output_rate = output_rate
+        self.output_channels = output_channels
+        self.step = source_rate / float(output_rate)
+        self.position = 0.0
+        self.pending: list[tuple[int, ...]] = []
+        self.input_frames = 0
+        self.output_frames = 0
+
+    def convert(self, pcm: bytes) -> bytes:
+        samples = array("h")
+        samples.frombytes(pcm)
+        if sys.byteorder != "little":
+            samples.byteswap()
+        frames = [
+            self._map_channels(
+                tuple(samples[offset : offset + self.source_channels])
+            )
+            for offset in range(0, len(samples), self.source_channels)
+        ]
+        self.input_frames += len(frames)
+        combined = self.pending + frames
+        output_frames: list[tuple[int, ...]] = []
+        while self.position < len(combined) - 1:
+            index = int(self.position)
+            fraction = self.position - index
+            left = combined[index]
+            right = combined[index + 1]
+            output_frames.append(
+                tuple(
+                    max(-32768, min(32767, round(a + (b - a) * fraction)))
+                    for a, b in zip(left, right, strict=True)
+                )
+            )
+            self.position += self.step
+        self.output_frames += len(output_frames)
+        consumed = min(int(self.position), max(0, len(combined) - 1))
+        self.pending = combined[consumed:]
+        self.position -= consumed
+        return self._encode(output_frames)
+
+    def estimate_output_bytes(self, input_bytes: int) -> int:
+        input_frames = input_bytes // (self.source_channels * 2)
+        combined_frames = len(self.pending) + input_frames
+        positions_before_last_frame = combined_frames - 1 - self.position
+        output_frames = (
+            max(0, math.ceil(positions_before_last_frame / self.step))
+            if positions_before_last_frame > 0
+            else 0
+        )
+        return output_frames * self.output_channels * 2
+
+    def finish(self) -> bytes:
+        target_frames = round(self.input_frames * self.output_rate / self.source_rate)
+        remaining = max(0, target_frames - self.output_frames)
+        output_frames: list[tuple[int, ...]] = []
+        for _ in range(remaining):
+            if not self.pending:
+                break
+            index = min(int(self.position), len(self.pending) - 1)
+            fraction = self.position - int(self.position)
+            left = self.pending[index]
+            right = self.pending[min(index + 1, len(self.pending) - 1)]
+            output_frames.append(
+                tuple(
+                    max(-32768, min(32767, round(a + (b - a) * fraction)))
+                    for a, b in zip(left, right, strict=True)
+                )
+            )
+            self.position += self.step
+        self._reset()
+        return self._encode(output_frames)
+
+    def _map_channels(self, frame: tuple[int, ...]) -> tuple[int, ...]:
+        if self.source_channels == self.output_channels:
+            return frame
+        if self.source_channels == 1:
+            return (frame[0], frame[0])
+        return ((frame[0] + frame[1]) // 2,)
+
+    def _reset(self) -> None:
+        self.position = 0.0
+        self.pending = []
+        self.input_frames = 0
+        self.output_frames = 0
+
+    def _encode(self, frames: list[tuple[int, ...]]) -> bytes:
+        samples = array("h", (sample for frame in frames for sample in frame))
+        if sys.byteorder != "little":
+            samples.byteswap()
+        return samples.tobytes()
 
 
 def _damped_step(
@@ -52,10 +164,12 @@ class Live2DRenderer:
         track_mouse: bool = False,
         on_click: Callable[[int], None] | None = None,
         model_adapter: Live2DModelAdapter | None = None,
+        voice_stream_queue: queue.Queue[dict[str, Any]] | None = None,
     ):
         self.model_path = model_path
         self.logger = logger
         self.command_queue = command_queue
+        self.voice_stream_queue = voice_stream_queue or queue.Queue(maxsize=64)
         self.transparent = transparent
         self.antialiasing = antialiasing
         self.width = width
@@ -70,6 +184,24 @@ class Live2DRenderer:
         self.live2d = None
         self._audio_channel = None
         self._current_sound = None
+        self._pcm_audio_channel = None
+        self._pcm_current_sound = None
+        self._pcm_queued_sound = None
+        self._pcm_chunks: deque[bytes] = deque()
+        self._pcm_queued_bytes = 0
+        self._pcm_stream_id: str | None = None
+        self._pcm_parent_message_id: str | None = None
+        self._pcm_sample_rate = 0
+        self._pcm_channels = 0
+        self._pcm_expected_seq = 0
+        self._pcm_total_bytes = 0
+        self._pcm_sample_width = 0
+        self._pcm_end_pending = False
+        self._pcm_resampler: _PCM16Resampler | None = None
+        self._pcm_output_rate = 0
+        self._pcm_output_channels = 0
+        self.pcm_audio_ready = False
+        self.audio_ready_event = threading.Event()
         self.available_param_ids: list[str] = []
         self._parameter_indexes: dict[str, int] = {}
         self._lip_sync_param_ids: tuple[str, ...] = ()
@@ -191,6 +323,19 @@ class Live2DRenderer:
 
             pygame.display.set_mode((self.width, self.height), flags)
             pygame.display.set_caption("NachoBot Live2D Renderer")
+
+            try:
+                if not pygame.mixer.get_init():
+                    pygame.mixer.init()
+                self._refresh_pcm_audio_readiness()
+            except pygame.error as audio_exc:
+                self.pcm_audio_ready = False
+                self.logger.warning(
+                    "[Live2D] PCM output device unavailable: {}",
+                    type(audio_exc).__name__,
+                )
+            finally:
+                self.audio_ready_event.set()
 
             if self.transparent:
                 try:
@@ -631,6 +776,21 @@ class Live2DRenderer:
                 )
 
             # Process Command Queue (BEFORE Gaze Logic to ensure active_tweens is up-to-date)
+            while not self.voice_stream_queue.empty():
+                try:
+                    self._handle_voice_stream_event(
+                        self.voice_stream_queue.get_nowait()
+                    )
+                except queue.Empty:
+                    break
+                except Exception as exc:
+                    self.logger.error(
+                        "Live2D PCM stream command failed: {}",
+                        type(exc).__name__,
+                    )
+                    self._abort_pcm_stream()
+            self._pump_pcm_stream()
+
             while not self.command_queue.empty():
                 try:
                     cmd_type, cmd_data = self.command_queue.get_nowait()
@@ -841,6 +1001,7 @@ class Live2DRenderer:
             pygame.display.flip()
 
         # Cleanup
+        self._stop_audio()
         self.live2d.dispose()
         pygame.quit()
         self.logger.info("Live2D Renderer Stopped")
@@ -1095,6 +1256,9 @@ class Live2DRenderer:
         if cmd_type == "stop_audio":
             self._stop_audio()
             return
+        if cmd_type == "voice_stream":
+            self._handle_voice_stream_event(cmd_data)
+            return
 
         if not self.model:
             return
@@ -1254,11 +1418,208 @@ class Live2DRenderer:
             self.logger.error(f"[Live2D] Failed to play TTS audio: {exc}")
 
     def _stop_audio(self) -> None:
+        self._abort_pcm_stream()
         channel = self._audio_channel
         if channel is not None:
             try:
                 channel.stop()
-            except pygame.error:
+            except Exception:
                 pass
         self._audio_channel = None
         self._current_sound = None
+
+    def _handle_voice_stream_event(self, event: Any) -> None:
+        if not isinstance(event, dict):
+            raise ValueError("Live2D PCM event must be an object")
+        operation = event.get("event")
+        if operation == "start":
+            stream_id = event.get("stream_id")
+            parent_id = event.get("parent_message_id")
+            sample_rate = event.get("sample_rate")
+            channels = event.get("channels")
+            sample_width = event.get("sample_width")
+            if (
+                not isinstance(stream_id, str)
+                or not stream_id.strip()
+                or not isinstance(parent_id, str)
+                or not parent_id.strip()
+                or isinstance(sample_rate, bool)
+                or not isinstance(sample_rate, int)
+                or not 8000 <= sample_rate <= 96000
+                or isinstance(channels, bool)
+                or not isinstance(channels, int)
+                or channels not in (1, 2)
+                or sample_width != 2
+                or event.get("codec") != "pcm_s16le"
+            ):
+                raise ValueError("Live2D PCM start metadata is invalid")
+            if not self.pcm_audio_ready:
+                raise RuntimeError("Live2D PCM output was not ready")
+
+            self._stop_audio()
+            try:
+                self._pcm_audio_channel = pygame.mixer.Channel(0)
+            except Exception:
+                self.pcm_audio_ready = False
+                self._abort_pcm_stream()
+                raise RuntimeError(
+                    "Live2D PCM playback channel is unavailable"
+                ) from None
+            self._pcm_stream_id = stream_id.strip()
+            self._pcm_parent_message_id = parent_id.strip()
+            self._pcm_sample_rate = sample_rate
+            self._pcm_channels = channels
+            self._pcm_sample_width = sample_width
+            self._pcm_resampler = _PCM16Resampler(
+                sample_rate,
+                channels,
+                self._pcm_output_rate,
+                self._pcm_output_channels,
+            )
+            self._pcm_expected_seq = 0
+            self._pcm_total_bytes = 0
+            self._pcm_end_pending = False
+            self.is_speaking = True
+            return
+
+        if not self._matches_pcm_stream(event):
+            self.logger.warning("[Live2D] Ignored PCM event for an unknown stream")
+            return
+        if operation == "chunk":
+            seq = event.get("seq")
+            pcm = event.get("pcm")
+            if (
+                isinstance(seq, bool)
+                or not isinstance(seq, int)
+                or seq != self._pcm_expected_seq
+                or not isinstance(pcm, bytes)
+                or not pcm
+                or len(pcm) > MAX_PCM_CHUNK_BYTES
+                or len(pcm) % (self._pcm_channels * self._pcm_sample_width)
+            ):
+                raise ValueError("Live2D PCM chunk is invalid or out of order")
+            if (
+                self._pcm_total_bytes + len(pcm) > MAX_PCM_STREAM_TOTAL_BYTES
+            ):
+                raise BufferError("Live2D PCM stream exceeded its total limit")
+            assert self._pcm_resampler is not None
+            if (
+                self._pcm_queued_bytes
+                + self._pcm_resampler.estimate_output_bytes(len(pcm))
+                > MAX_PCM_PENDING_BYTES
+            ):
+                raise BufferError("Live2D PCM playback queue is full")
+            output_pcm = self._pcm_resampler.convert(pcm)
+            if self._pcm_queued_bytes + len(output_pcm) > MAX_PCM_PENDING_BYTES:
+                raise BufferError("Live2D PCM playback queue is full")
+            if output_pcm:
+                self._pcm_chunks.append(output_pcm)
+                self._pcm_queued_bytes += len(output_pcm)
+            self._pcm_total_bytes += len(pcm)
+            self._pcm_expected_seq += 1
+            return
+
+        if operation == "end":
+            if self._pcm_resampler is not None:
+                tail = self._pcm_resampler.finish()
+                self._pcm_resampler = None
+                if self._pcm_queued_bytes + len(tail) > MAX_PCM_PENDING_BYTES:
+                    raise BufferError("Live2D PCM playback queue is full")
+                if tail:
+                    self._pcm_chunks.append(tail)
+                    self._pcm_queued_bytes += len(tail)
+            self._pcm_end_pending = True
+            return
+        if operation == "abort":
+            self._abort_pcm_stream()
+            return
+        raise ValueError("Live2D PCM event is unsupported")
+
+    def _matches_pcm_stream(self, event: dict[str, Any]) -> bool:
+        return bool(
+            self._pcm_stream_id is not None
+            and event.get("stream_id") == self._pcm_stream_id
+            and event.get("parent_message_id") == self._pcm_parent_message_id
+            and event.get("sample_rate") == self._pcm_sample_rate
+            and event.get("channels") == self._pcm_channels
+            and event.get("sample_width") == self._pcm_sample_width
+            and event.get("codec") == "pcm_s16le"
+        )
+
+    def _pump_pcm_stream(self) -> None:
+        channel = self._pcm_audio_channel
+        if channel is None or self._pcm_stream_id is None:
+            return
+
+        try:
+            if channel.get_busy():
+                current = channel.get_sound()
+                if current is self._pcm_queued_sound:
+                    self._pcm_current_sound = self._pcm_queued_sound
+                    self._pcm_queued_sound = None
+                if self._pcm_queued_sound is None and self._pcm_chunks:
+                    pcm = self._pcm_chunks.popleft()
+                    self._pcm_queued_bytes -= len(pcm)
+                    queued_sound = pygame.mixer.Sound(buffer=pcm)
+                    channel.queue(queued_sound)
+                    self._pcm_queued_sound = queued_sound
+                return
+
+            # An idle channel means its current and any queued sound drained.
+            self._pcm_current_sound = None
+            self._pcm_queued_sound = None
+            if self._pcm_chunks:
+                pcm = self._pcm_chunks.popleft()
+                self._pcm_queued_bytes -= len(pcm)
+                sound = pygame.mixer.Sound(buffer=pcm)
+                channel.play(sound)
+                self._pcm_current_sound = sound
+                return
+            if self._pcm_end_pending:
+                self._clear_pcm_stream()
+        except Exception as exc:
+            self.logger.error("[Live2D] PCM playback failed: {}", type(exc).__name__)
+            self._abort_pcm_stream()
+
+    def _clear_pcm_stream(self) -> None:
+        self._pcm_audio_channel = None
+        self._pcm_current_sound = None
+        self._pcm_queued_sound = None
+        self._pcm_chunks.clear()
+        self._pcm_queued_bytes = 0
+        self._pcm_stream_id = None
+        self._pcm_parent_message_id = None
+        self._pcm_sample_rate = 0
+        self._pcm_channels = 0
+        self._pcm_sample_width = 0
+        self._pcm_expected_seq = 0
+        self._pcm_total_bytes = 0
+        self._pcm_end_pending = False
+        self._pcm_resampler = None
+        self.is_speaking = False
+
+    def _refresh_pcm_audio_readiness(self) -> bool:
+        mixer_format = pygame.mixer.get_init()
+        if not mixer_format:
+            self.pcm_audio_ready = False
+            self._pcm_output_rate = 0
+            self._pcm_output_channels = 0
+            return False
+        sample_rate, sample_format, channels = mixer_format
+        self._pcm_output_rate = int(sample_rate)
+        self._pcm_output_channels = int(channels)
+        self.pcm_audio_ready = bool(
+            self._pcm_output_rate >= 8000
+            and sample_format == -16
+            and self._pcm_output_channels in (1, 2)
+        )
+        return self.pcm_audio_ready
+
+    def _abort_pcm_stream(self) -> None:
+        channel = self._pcm_audio_channel
+        if channel is not None:
+            try:
+                channel.stop()
+            except Exception:
+                pass
+        self._clear_pcm_stream()

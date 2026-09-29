@@ -7,9 +7,11 @@ the same /api bearer-token policy as every other Core control endpoint.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .contracts import (
@@ -20,7 +22,7 @@ from .contracts import (
     TTS_SYNTHESIZE_V1,
     VIDEO_UNDERSTAND_V1,
 )
-from .router import CoreMultimodalRouter, get_multimodal_router
+from .router import AudioStreamError, CoreMultimodalRouter, TTSStreamError, get_multimodal_router
 
 
 class PerceptionBody(BaseModel):
@@ -49,6 +51,28 @@ def _perception_payload(result: Any) -> dict[str, Any]:
         "error": result.error,
         "metadata": dict(result.metadata or {}),
     }
+
+
+async def _stream_json_object(request: Request, *, max_bytes: int = 90_000) -> dict[str, Any]:
+    body_parts = []
+    body_size = 0
+    async for part in request.stream():
+        body_size += len(part)
+        if body_size > max_bytes:
+            raise HTTPException(status_code=400, detail="invalid_request")
+        body_parts.append(part)
+    raw = b"".join(body_parts)
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="invalid_request") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="invalid_request")
+    return payload
+
+
+def _stream_http_error(exc: AudioStreamError) -> HTTPException:
+    return HTTPException(status_code=exc.status_code, detail=exc.code)
 
 
 def create_multimodal_router(service: CoreMultimodalRouter | None = None) -> APIRouter:
@@ -107,6 +131,81 @@ def create_multimodal_router(service: CoreMultimodalRouter | None = None) -> API
         body.task = "voice"
         return await perception(body)
 
+    @router.post("/audio/stream/start")
+    async def start_audio_stream(request: Request) -> dict[str, Any]:
+        body = await _stream_json_object(request, max_bytes=2_048)
+        sample_rate = body.get("sample_rate")
+        channels = body.get("channels")
+        platform = body.get("platform", "universal_vc")
+        if (
+            isinstance(sample_rate, bool)
+            or not isinstance(sample_rate, int)
+            or isinstance(channels, bool)
+            or not isinstance(channels, int)
+        ):
+            raise HTTPException(status_code=400, detail="invalid_audio_format")
+        if not isinstance(platform, str) or len(platform) > 64:
+            raise HTTPException(status_code=400, detail="invalid_platform")
+        try:
+            return dict(
+                await service.start_audio_stream(
+                    sample_rate=sample_rate,
+                    channels=channels,
+                    platform=platform,
+                )
+            )
+        except AudioStreamError as exc:
+            raise _stream_http_error(exc) from exc
+
+    @router.post("/audio/stream/chunk")
+    async def append_audio_stream_chunk(request: Request) -> dict[str, Any]:
+        body = await _stream_json_object(request)
+        stream_id = body.get("stream_id")
+        seq = body.get("seq")
+        pcm_base64 = body.get("pcm_base64")
+        if (
+            not isinstance(stream_id, str)
+            or not stream_id.strip()
+            or len(stream_id) > 128
+            or isinstance(seq, bool)
+            or not isinstance(seq, int)
+            or seq < 0
+            or not isinstance(pcm_base64, str)
+        ):
+            raise HTTPException(status_code=400, detail="invalid_request")
+        try:
+            return dict(
+                await service.append_audio_stream_chunk(
+                    stream_id=stream_id,
+                    seq=seq,
+                    pcm_base64=pcm_base64,
+                )
+            )
+        except AudioStreamError as exc:
+            raise _stream_http_error(exc) from exc
+
+    @router.post("/audio/stream/finish")
+    async def finish_audio_stream(request: Request) -> dict[str, Any]:
+        body = await _stream_json_object(request, max_bytes=2_048)
+        stream_id = body.get("stream_id")
+        if not isinstance(stream_id, str) or not stream_id.strip() or len(stream_id) > 128:
+            raise HTTPException(status_code=400, detail="invalid_request")
+        try:
+            return dict(await service.finish_audio_stream(stream_id))
+        except AudioStreamError as exc:
+            raise _stream_http_error(exc) from exc
+
+    @router.post("/audio/stream/abort")
+    async def abort_audio_stream(request: Request) -> dict[str, Any]:
+        body = await _stream_json_object(request, max_bytes=2_048)
+        stream_id = body.get("stream_id")
+        if not isinstance(stream_id, str) or not stream_id.strip() or len(stream_id) > 128:
+            raise HTTPException(status_code=400, detail="invalid_request")
+        try:
+            return dict(await service.abort_audio_stream(stream_id))
+        except AudioStreamError as exc:
+            raise _stream_http_error(exc) from exc
+
     @router.post("/image/describe/v1")
     @router.post("/image/describe.v1")
     async def describe_image(body: PerceptionBody) -> dict[str, Any]:
@@ -153,6 +252,54 @@ def create_multimodal_router(service: CoreMultimodalRouter | None = None) -> API
             "error": result.error,
             "text_only": not result.audio_base64,
         }
+
+    @router.post("/tts/stream")
+    async def synthesize_stream(body: TTSBody) -> StreamingResponse:
+        """Relay Core-selected TTS as frame-aligned PCM without buffering it."""
+
+        chunks = service.synthesize_tts_stream(
+            body.text,
+            platform=body.platform,
+            text_lang=body.text_lang,
+        )
+        try:
+            first = await anext(chunks)
+        except TTSStreamError as exc:
+            await chunks.aclose()
+            status = exc.status_code or {
+                "invalid_request": 400,
+                "unsupported": 501,
+                "timeout": 504,
+                "invalid_headers": 502,
+                "invalid_stream_chunk": 502,
+                "empty_audio": 502,
+            }.get(exc.code, 503)
+            raise HTTPException(status_code=status, detail=exc.code) from exc
+        except StopAsyncIteration as exc:
+            await chunks.aclose()
+            raise HTTPException(status_code=502, detail="empty_tts_stream") from exc
+
+        async def audio():
+            try:
+                yield first.pcm_s16le
+                async for chunk in chunks:
+                    yield chunk.pcm_s16le
+            finally:
+                await chunks.aclose()
+
+        spec = first.spec
+        return StreamingResponse(
+            audio(),
+            media_type="application/octet-stream",
+            headers={
+                "Cache-Control": "no-store",
+                "X-TTS-Stream-Version": "1",
+                "X-Audio-Sample-Rate": str(spec.sample_rate),
+                "X-Audio-Channels": str(spec.channels),
+                "X-Audio-Sample-Width": str(spec.sample_width),
+                "X-Audio-Codec": spec.codec,
+            },
+        )
 
     return router
 
