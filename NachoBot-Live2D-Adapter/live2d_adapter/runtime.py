@@ -15,6 +15,7 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from .action_adapter import ActionAdapter
 from .config import AdapterConfig
 from .control_pipeline import ControlPipeline
 from .model_adapter import Live2DModelAdapter
@@ -28,6 +29,7 @@ from .protocol import (
 from .renderer import Live2DRenderer
 
 InteractionSink = Callable[[InteractionEvent], Awaitable[None]]
+ShutdownSink = Callable[[], Awaitable[None]]
 
 
 MAX_REMOTE_AUDIO_BYTES = 4 * 1024 * 1024
@@ -35,6 +37,8 @@ MAX_REMOTE_AUDIO_BASE64_CHARS = ((MAX_REMOTE_AUDIO_BYTES + 2) // 3) * 4
 MAX_REMOTE_PCM_CHUNK_BYTES = 64 * 1024
 MAX_REMOTE_PCM_TOTAL_BYTES = 32 * 1024 * 1024
 MAX_QUEUED_PCM_EVENTS = 64
+
+
 class AvatarRuntime:
     """Own the renderer thread and translate protocol events into commands."""
 
@@ -42,36 +46,43 @@ class AvatarRuntime:
         self.config = config
         self.logger = logger
         self.command_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
-        self.voice_stream_queue: queue.Queue[dict[str, Any]] = queue.Queue(
-            maxsize=MAX_QUEUED_PCM_EVENTS
-        )
         self.renderer: Live2DRenderer | None = None
         self.render_thread: threading.Thread | None = None
         self.model_adapter: Live2DModelAdapter | None = None
         self._event_loop: asyncio.AbstractEventLoop | None = None
         self._interaction_sink: InteractionSink | None = None
+        self._shutdown_sink: ShutdownSink | None = None
         self._last_poke_time = 0.0
         self._started = False
-        self.control_pipeline = ControlPipeline()
-        self._voice_stream_id: str | None = None
-        self._voice_stream_parent_id: str | None = None
-        self._voice_stream_client_id: str | None = None
-        self._voice_stream_format: dict[str, Any] | None = None
+        self.voice_stream_queue = queue.Queue(maxsize=MAX_QUEUED_PCM_EVENTS)
+        self._voice_stream_id = None
+        self._voice_stream_parent_id = None
+        self._voice_stream_client_id = None
+        self._voice_stream_format = None
         self._voice_stream_expected_seq = 0
         self._voice_stream_total_bytes = 0
         self._voice_stream_ended = False
+        self._renderer_ready = threading.Event()
+        self._renderer_start_error: Exception | None = None
+        self.control_pipeline = ControlPipeline(
+            action_adapter=ActionAdapter(logger),
+        )
 
     @property
     def is_running(self) -> bool:
         return bool(
             self._started
             and self.renderer is not None
+            and self.renderer.running
             and self.render_thread is not None
             and self.render_thread.is_alive()
         )
 
     def set_interaction_sink(self, sink: InteractionSink | None) -> None:
         self._interaction_sink = sink
+
+    def set_shutdown_sink(self, sink: ShutdownSink | None) -> None:
+        self._shutdown_sink = sink
 
     async def start(self) -> None:
         if self._started:
@@ -102,6 +113,8 @@ class AvatarRuntime:
         self.logger.info("Live2D automatic adaptation: {}", adaptation_report)
 
         self._event_loop = asyncio.get_running_loop()
+        self._renderer_ready.clear()
+        self._renderer_start_error = None
         self.renderer = Live2DRenderer(
             model_path=str(renderer_config.model_path),
             logger=self.logger,
@@ -113,7 +126,10 @@ class AvatarRuntime:
             scale=renderer_config.scale,
             track_mouse=renderer_config.track_mouse,
             on_click=self._on_renderer_click,
+            on_ready=self._on_renderer_ready,
+            on_exit=self._on_renderer_exit,
             model_adapter=self.model_adapter,
+            desktop_pet_config=self.config.desktop_pet,
             voice_stream_queue=self.voice_stream_queue,
         )
         self.render_thread = threading.Thread(
@@ -123,12 +139,20 @@ class AvatarRuntime:
         )
         self._started = True
         self.render_thread.start()
-        audio_ready = await asyncio.to_thread(
-            self.renderer.audio_ready_event.wait,
-            5.0,
-        )
+        renderer_ready = await asyncio.to_thread(self._renderer_ready.wait, 30.0)
+        if not renderer_ready:
+            self._started = False
+            self.renderer.running = False
+            raise RuntimeError("Live2D renderer did not become ready within 30 seconds")
+        if self._renderer_start_error is not None:
+            self._started = False
+            error = self._renderer_start_error
+            self.renderer = None
+            self.render_thread = None
+            raise RuntimeError(f"Live2D renderer failed during startup: {error}") from error
         self.logger.info(
-            "Live2D runtime started: model=%s window=%sx%s",
+            "Live2D runtime started: mode={} model={} window={}x{}",
+            self.config.runtime.mode,
             renderer_config.model_path,
             renderer_config.width,
             renderer_config.height,
@@ -141,15 +165,14 @@ class AvatarRuntime:
                     "model_path": str(renderer_config.model_path),
                     "width": renderer_config.width,
                     "height": renderer_config.height,
+                    "mode": self.config.runtime.mode,
                     "adaptation": adaptation_report,
                     "protocol_version": "1.1",
                     "capabilities": {
                         "prepare_reply": True,
                         "apply_control": True,
-                        "voice_stream_pcm": bool(
-                            audio_ready and self.renderer.pcm_audio_ready
-                        ),
-                        "commands": ["prepare_reply", "apply_control"],
+                        "voice_stream_pcm": bool(self.renderer and self.renderer.pcm_audio_ready),
+                        "commands": ["prepare_reply", "apply_control", "voice_stream"],
                         "interactions": ["reply_prepared", "control_applied"],
                     },
                 },
@@ -162,8 +185,8 @@ class AvatarRuntime:
             return
 
         self._started = False
-        self.control_pipeline.clear()
         self._reset_voice_stream_state(clear_queue=True)
+        self.control_pipeline.clear()
         renderer = self.renderer
         render_thread = self.render_thread
 
@@ -213,6 +236,9 @@ class AvatarRuntime:
                 raw_reply,
                 command.request_id,
                 client_id=client_id,
+                question=str(payload.get("question") or ""),
+                emotion=payload.get("emotion"),
+                requested_action=payload.get("action"),
             )
             return InteractionEvent(
                 event=AvatarInteraction.REPLY_PREPARED,
@@ -296,11 +322,20 @@ class AvatarRuntime:
         elif event is AvatarEvent.PLAY_AUDIO:
             self._enqueue("play_audio", self._decode_wav_payload(payload))
 
-        elif event is AvatarEvent.STOP_AUDIO:
-            self._enqueue("stop_audio", None)
+        elif event is AvatarEvent.QUEUE_AUDIO:
+            self._enqueue(
+                "queue_audio",
+                {
+                    "audio": self._decode_wav_payload(payload),
+                    "reset": bool(payload.get("reset", False)),
+                },
+            )
 
         elif event is AvatarEvent.VOICE_STREAM:
             self._dispatch_voice_stream(payload, client_id)
+
+        elif event is AvatarEvent.STOP_AUDIO:
+            self._enqueue("stop_audio", None)
 
         else:
             raise ProtocolError(f"unsupported runtime event: {event.value}")
@@ -311,9 +346,10 @@ class AvatarRuntime:
         """Drop all staged state owned by a disconnected WebSocket client."""
 
         self.control_pipeline.discard_client(client_id)
-        if self._voice_stream_client_id == client_id and self._voice_stream_id:
-            abort = self._voice_stream_event("abort")
-            self._replace_queued_voice_events(abort)
+        if self._voice_stream_client_id == client_id:
+            if not self._voice_stream_ended:
+                abort = self._voice_stream_event("abort")
+                self._replace_queued_voice_events(abort)
             self._reset_voice_stream_state(clear_queue=False)
 
     def _apply_staged_control(self, staged: Any) -> None:
@@ -340,9 +376,9 @@ class AvatarRuntime:
         assert self.renderer is not None
         try:
             self.renderer.run()
-        except Exception:
-            self.renderer.audio_ready_event.set()
-            self.renderer.pcm_audio_ready = False
+        except Exception as exc:
+            self._renderer_start_error = exc
+            self._renderer_ready.set()
             self.logger.exception("Live2D renderer thread crashed")
             self._emit_from_renderer_thread(
                 InteractionEvent(
@@ -350,16 +386,107 @@ class AvatarRuntime:
                     payload={"message": "Live2D renderer thread crashed"},
                 )
             )
+            self._on_renderer_exit()
         finally:
-            if not self.renderer.audio_ready_event.is_set():
-                self.renderer.pcm_audio_ready = False
-                self.renderer.audio_ready_event.set()
+            if not self._renderer_ready.is_set():
+                self._renderer_start_error = RuntimeError(
+                    "Live2D renderer exited before reporting ready"
+                )
+                self._renderer_ready.set()
+
+    def _on_renderer_ready(self) -> None:
+        self._renderer_ready.set()
 
     def _enqueue(self, command_type: str, content: Any) -> None:
         try:
             self.command_queue.put_nowait((command_type, content))
         except queue.Full as exc:
             raise RuntimeError("Live2D render command queue is full") from exc
+
+    @staticmethod
+    def _decode_wav_payload(payload: dict[str, Any]) -> bytes:
+        if str(payload.get("format") or "").lower() != "wav":
+            raise ProtocolError("play_audio only supports WAV payloads")
+
+        encoded_audio = payload.get("audio_base64")
+        if not isinstance(encoded_audio, str) or not encoded_audio:
+            raise ProtocolError("play_audio requires a non-empty audio_base64 string")
+        if len(encoded_audio) > MAX_REMOTE_AUDIO_BASE64_CHARS:
+            raise ProtocolError("play_audio payload exceeds the 4 MiB limit")
+
+        try:
+            audio_data = base64.b64decode(encoded_audio, validate=True)
+        except (ValueError, TypeError) as exc:
+            raise ProtocolError("play_audio audio_base64 must be valid base64") from exc
+        if not audio_data or len(audio_data) > MAX_REMOTE_AUDIO_BYTES:
+            raise ProtocolError("play_audio payload exceeds the 4 MiB limit")
+        return audio_data
+
+    def _on_renderer_click(self, button: int) -> None:
+        now = time.monotonic()
+        self._emit_from_renderer_thread(
+            InteractionEvent(
+                event=AvatarInteraction.CLICK,
+                payload={"button": int(button)},
+            )
+        )
+
+        poke_buttons = (1, 6, 7) if self.config.desktop_pet.enabled else (6, 7)
+        if button not in poke_buttons:
+            return
+
+        cooldown = self.config.renderer.poke_cooldown_seconds
+        elapsed = now - self._last_poke_time
+        if elapsed < cooldown:
+            self.logger.debug(
+                "Live2D poke ignored during cooldown: remaining=%.2fs",
+                cooldown - elapsed,
+            )
+            return
+
+        self._last_poke_time = now
+        self._emit_from_renderer_thread(
+            InteractionEvent(
+                event=AvatarInteraction.POKE,
+                payload={"button": int(button)},
+            )
+        )
+
+    def _on_renderer_exit(self) -> None:
+        sink = self._shutdown_sink
+        loop = self._event_loop
+        if not self._started or sink is None or loop is None or loop.is_closed():
+            return
+        asyncio.run_coroutine_threadsafe(sink(), loop)
+
+    def _emit_from_renderer_thread(self, event: InteractionEvent) -> None:
+        loop = self._event_loop
+        if loop is None or loop.is_closed():
+            return
+        asyncio.run_coroutine_threadsafe(self._emit(event), loop)
+
+    async def _emit(self, event: InteractionEvent) -> None:
+        sink = self._interaction_sink
+        if sink is None:
+            self.logger.debug(
+                "Live2D interaction dropped because no sink is connected: {}",
+                event.event.value,
+            )
+            return
+        try:
+            await sink(event)
+        except Exception:
+            self.logger.exception(
+                "Failed to emit Live2D interaction: {}", event.event.value
+            )
+
+    @staticmethod
+    def _required_string(payload: dict[str, Any], key: str) -> str:
+        value = str(payload.get(key) or "").strip()
+        if not value:
+            raise ProtocolError(f"payload.{key} is required")
+        return value
+
 
     def _dispatch_voice_stream(
         self,
@@ -445,6 +572,32 @@ class AvatarRuntime:
         self._replace_queued_voice_events(event)
         self._reset_voice_stream_state(clear_queue=False)
 
+
+    def _replace_queued_voice_events(self, event: dict[str, Any]) -> None:
+        while True:
+            try:
+                self.voice_stream_queue.get_nowait()
+            except queue.Empty:
+                break
+        self.voice_stream_queue.put_nowait(event)
+
+
+    def _reset_voice_stream_state(self, *, clear_queue: bool) -> None:
+        if clear_queue:
+            while True:
+                try:
+                    self.voice_stream_queue.get_nowait()
+                except queue.Empty:
+                    break
+        self._voice_stream_id = None
+        self._voice_stream_parent_id = None
+        self._voice_stream_client_id = None
+        self._voice_stream_format = None
+        self._voice_stream_expected_seq = 0
+        self._voice_stream_total_bytes = 0
+        self._voice_stream_ended = False
+
+
     @staticmethod
     def _validate_voice_stream_payload(payload: dict[str, Any]) -> dict[str, Any]:
         event = payload.get("event")
@@ -509,6 +662,7 @@ class AvatarRuntime:
             result["pcm"] = pcm
         return result
 
+
     def _voice_stream_event(self, event: str) -> dict[str, Any]:
         if self._voice_stream_id is None or self._voice_stream_format is None:
             raise ProtocolError("there is no active voice_stream")
@@ -518,102 +672,3 @@ class AvatarRuntime:
             "parent_message_id": self._voice_stream_parent_id,
             **self._voice_stream_format,
         }
-
-    def _replace_queued_voice_events(self, event: dict[str, Any]) -> None:
-        while True:
-            try:
-                self.voice_stream_queue.get_nowait()
-            except queue.Empty:
-                break
-        self.voice_stream_queue.put_nowait(event)
-
-    def _reset_voice_stream_state(self, *, clear_queue: bool) -> None:
-        if clear_queue:
-            while True:
-                try:
-                    self.voice_stream_queue.get_nowait()
-                except queue.Empty:
-                    break
-        self._voice_stream_id = None
-        self._voice_stream_parent_id = None
-        self._voice_stream_client_id = None
-        self._voice_stream_format = None
-        self._voice_stream_expected_seq = 0
-        self._voice_stream_total_bytes = 0
-        self._voice_stream_ended = False
-
-    @staticmethod
-    def _decode_wav_payload(payload: dict[str, Any]) -> bytes:
-        if str(payload.get("format") or "").lower() != "wav":
-            raise ProtocolError("play_audio only supports WAV payloads")
-
-        encoded_audio = payload.get("audio_base64")
-        if not isinstance(encoded_audio, str) or not encoded_audio:
-            raise ProtocolError("play_audio requires a non-empty audio_base64 string")
-        if len(encoded_audio) > MAX_REMOTE_AUDIO_BASE64_CHARS:
-            raise ProtocolError("play_audio payload exceeds the 4 MiB limit")
-
-        try:
-            audio_data = base64.b64decode(encoded_audio, validate=True)
-        except (ValueError, TypeError) as exc:
-            raise ProtocolError("play_audio audio_base64 must be valid base64") from exc
-        if not audio_data or len(audio_data) > MAX_REMOTE_AUDIO_BYTES:
-            raise ProtocolError("play_audio payload exceeds the 4 MiB limit")
-        return audio_data
-
-    def _on_renderer_click(self, button: int) -> None:
-        now = time.monotonic()
-        self._emit_from_renderer_thread(
-            InteractionEvent(
-                event=AvatarInteraction.CLICK,
-                payload={"button": int(button)},
-            )
-        )
-
-        if button not in (6, 7):
-            return
-
-        cooldown = self.config.renderer.poke_cooldown_seconds
-        elapsed = now - self._last_poke_time
-        if elapsed < cooldown:
-            self.logger.debug(
-                "Live2D poke ignored during cooldown: remaining=%.2fs",
-                cooldown - elapsed,
-            )
-            return
-
-        self._last_poke_time = now
-        self._emit_from_renderer_thread(
-            InteractionEvent(
-                event=AvatarInteraction.POKE,
-                payload={"button": int(button)},
-            )
-        )
-
-    def _emit_from_renderer_thread(self, event: InteractionEvent) -> None:
-        loop = self._event_loop
-        if loop is None or loop.is_closed():
-            return
-        asyncio.run_coroutine_threadsafe(self._emit(event), loop)
-
-    async def _emit(self, event: InteractionEvent) -> None:
-        sink = self._interaction_sink
-        if sink is None:
-            self.logger.debug(
-                "Live2D interaction dropped because no sink is connected: %s",
-                event.event.value,
-            )
-            return
-        try:
-            await sink(event)
-        except Exception:
-            self.logger.exception(
-                "Failed to emit Live2D interaction: %s", event.event.value
-            )
-
-    @staticmethod
-    def _required_string(payload: dict[str, Any], key: str) -> str:
-        value = str(payload.get(key) or "").strip()
-        if not value:
-            raise ProtocolError(f"payload.{key} is required")
-        return value

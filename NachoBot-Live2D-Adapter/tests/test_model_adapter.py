@@ -277,6 +277,50 @@ class ModelAdapterTests(unittest.TestCase):
                 [("OpaqueA", 0.75, 1.0), ("OpaqueB", 0.75, 1.0)],
             )
 
+    def test_renderer_queues_streamed_audio_without_interrupting_current_block(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            fixture = ModelFixture(
+                Path(temporary_directory),
+                parameters={"ParamMouthOpenY": "Mouth"},
+            )
+            renderer = Live2DRenderer(
+                str(fixture.model_path),
+                StubLogger(),
+                queue.Queue(),
+            )
+            first_channel = mock.Mock()
+            first_channel.get_busy.return_value = True
+            second_channel = mock.Mock()
+            second_channel.get_busy.return_value = True
+            first_sound = mock.Mock()
+            first_sound.play.return_value = first_channel
+            second_sound = mock.Mock()
+            second_sound.play.return_value = second_channel
+
+            with (
+                mock.patch(
+                    "live2d_adapter.renderer.pygame.mixer.get_init",
+                    return_value=True,
+                ),
+                mock.patch(
+                    "live2d_adapter.renderer.pygame.mixer.Sound",
+                    side_effect=[first_sound, second_sound],
+                ),
+            ):
+                self.assertTrue(
+                    renderer._queue_audio({"audio": b"first", "reset": True})
+                )
+                self.assertTrue(
+                    renderer._queue_audio({"audio": b"second", "reset": False})
+                )
+                self.assertEqual(len(renderer._queued_sounds), 1)
+                first_channel.get_busy.return_value = False
+                renderer._advance_audio_queue()
+
+            first_channel.stop.assert_not_called()
+            self.assertIs(renderer._audio_channel, second_channel)
+            self.assertEqual(len(renderer._queued_sounds), 0)
+
 
 class AdaptationConfigTests(unittest.TestCase):
     def test_loads_optional_parameter_and_expression_overrides(self) -> None:

@@ -1,2 +1,8 @@
 __pycache__/
 resources/
+desktop_pet_state.json
+desktop_pet_chat_state.json
+desktop_pet_chat_history.json
+logs/
+state/
+.pytest_cache/

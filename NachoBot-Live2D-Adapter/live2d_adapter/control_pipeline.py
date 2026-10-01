@@ -16,7 +16,9 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-ALLOWED_EMOTIONS = frozenset({"normal", "shy", "disgust", "angry"})
+from .action_adapter import ActionAdapter, CANONICAL_EMOTIONS
+
+ALLOWED_EMOTIONS = CANONICAL_EMOTIONS
 
 # Keep this table byte-for-byte compatible with the labels historically emitted
 # by the Bilibili prompt.  IDLE and GENERAL are intentionally represented as
@@ -117,6 +119,7 @@ class ControlPipeline:
         ttl_seconds: float = DEFAULT_TTL_SECONDS,
         max_controls: int = DEFAULT_MAX_CONTROLS,
         clock: Callable[[], float] | None = None,
+        action_adapter: ActionAdapter | None = None,
     ) -> None:
         if ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be positive")
@@ -125,6 +128,7 @@ class ControlPipeline:
         self.ttl_seconds = float(ttl_seconds)
         self.max_controls = int(max_controls)
         self._clock = clock or time.monotonic
+        self._action_adapter = action_adapter
         self._pending: dict[str, OrderedDict[str, _StagedControl]] = {}
         self._applied: dict[str, OrderedDict[str, float]] = {}
         self._lock = threading.RLock()
@@ -135,12 +139,28 @@ class ControlPipeline:
         control_id: str,
         *,
         client_id: str = DEFAULT_CLIENT_ID,
+        question: str = "",
+        emotion: Any = None,
+        requested_action: Any = None,
     ) -> PreparedReply:
         """Normalize a reply and stage its private avatar controls."""
 
         normalized_id = self._normalize_id(control_id)
         scope = self._normalize_client_id(client_id)
-        reply, web_search, search_query, emotion, action_id = self._parse(raw_reply)
+        reply, web_search, search_query, parsed_emotion, action_id = self._parse(raw_reply)
+        parsed_emotion = parsed_emotion or ActionAdapter.normalize_emotion(emotion)
+        action_id = action_id or ActionAdapter.normalize_action(requested_action)
+        if action_id in {"IDLE", "GENERAL"}:
+            action_id = None
+        if self._action_adapter is not None:
+            decision = self._action_adapter.decide(
+                question=question,
+                reply=reply,
+                emotion=parsed_emotion,
+                requested_action=action_id,
+            )
+            parsed_emotion = decision.emotion
+            action_id = decision.action_id
         prepared = PreparedReply(
             reply=reply,
             web_search=web_search,
@@ -152,7 +172,7 @@ class ControlPipeline:
             reply=reply,
             web_search=web_search,
             search_query=search_query,
-            emotion=emotion,
+            emotion=parsed_emotion,
             action_id=action_id,
             created_at=self._clock(),
         )
@@ -318,14 +338,11 @@ class ControlPipeline:
         query_value = data.get("search_query", "")
         search_query = str(query_value or "").strip() if web_search else ""
 
-        emotion_value = data.get("emotion")
-        emotion = str(emotion_value).strip().casefold() if emotion_value is not None else None
+        emotion = ActionAdapter.normalize_emotion(data.get("emotion"))
         if emotion not in ALLOWED_EMOTIONS:
             emotion = None
 
-        action_value = data.get("action")
-        action_label = str(action_value).strip() if action_value is not None else ""
-        action_id = ACTION_TO_CANONICAL_ID.get(action_label)
+        action_id = ActionAdapter.normalize_action(data.get("action"))
         if action_id in {"IDLE", "GENERAL"}:
             action_id = None
         return reply, web_search, search_query, emotion, action_id
