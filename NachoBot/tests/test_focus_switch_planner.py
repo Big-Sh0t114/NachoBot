@@ -1423,9 +1423,12 @@ class FocusSwitchPlannerRegressionTests(_PlannerTestMixin, unittest.TestCase):
                     "actor": {"user_id": "user-1", "name": "Tester"},
                     "target": None,
                     "data": {},
-                }
+                },
+                "runtime_capabilities": {
+                    "schema_version": 1,
+                    "planner_bypass": True,
+                },
             }
-            capabilities_mock.return_value = SimpleNamespace(planner_bypass=True, notice_actions=True)
             on_plan_mock.reset_mock()
             build_prompt_mock.reset_mock()
             plan_mock.reset_mock()
@@ -1444,7 +1447,7 @@ class FocusSwitchPlannerRegressionTests(_PlannerTestMixin, unittest.TestCase):
             self.assertEqual(executed_actions[-1], "reply")
             self.assertIs(executed_targets[-1], message)
 
-    def test_system_event_normal_planner_and_bypass_replyer_for_both_batch_orders(self):
+    def test_system_event_capability_is_message_scoped_for_both_batch_orders(self):
         class _PlannerReached(RuntimeError):
             pass
 
@@ -1468,7 +1471,11 @@ class FocusSwitchPlannerRegressionTests(_PlannerTestMixin, unittest.TestCase):
                         "actor": {"user_id": "123", "name": "测试用户"},
                         "target": {"user_id": "999", "name": "NachoBot"},
                         "data": {},
-                    }
+                    },
+                    "runtime_capabilities": {
+                        "schema_version": 1,
+                        "planner_bypass": True,
+                    },
                 },
             )
 
@@ -1484,6 +1491,9 @@ class FocusSwitchPlannerRegressionTests(_PlannerTestMixin, unittest.TestCase):
 
         async def run_case(planner_bypass, ordered_messages):
             event_message = next(message for message in ordered_messages if message.user_info is None)
+            event_message.additional_config.setdefault("runtime_capabilities", {})[
+                "planner_bypass"
+            ] = planner_bypass
             stream = SimpleNamespace(
                 stream_id="test-chat",
                 group_info=SimpleNamespace(group_id="100", group_name="测试群"),
@@ -1548,7 +1558,7 @@ class FocusSwitchPlannerRegressionTests(_PlannerTestMixin, unittest.TestCase):
                     patch.object(
                         heart_chat_module,
                         "runtime_capabilities_from_stream",
-                        return_value=SimpleNamespace(planner_bypass=planner_bypass, notice_actions=True),
+                        return_value=SimpleNamespace(notice_actions=True),
                     )
                 )
                 stack.enter_context(patch.object(runtime, "_execute_action", new=execute_action))
@@ -1599,15 +1609,17 @@ class FocusSwitchPlannerRegressionTests(_PlannerTestMixin, unittest.TestCase):
                 )
 
                 if planner_bypass:
+                    # Only the senderless event declares direct routing. The
+                    # ordinary message still goes through Planner in either
+                    # unread order, while Planner failure must not drop the
+                    # exact event Replyer action.
                     await runtime._observe(recent_messages_list=list(ordered_messages))
                     self.assertEqual(len(executed_actions), 1)
                     self.assertEqual(executed_actions[0].action_type, "reply")
                     self.assertIs(executed_actions[0].action_message, event_message)
-                    self.assertIn("[系统事件]", executed_actions[0].action_data["bypass_extra_info"])
-                    prompt_fetch_mock.assert_not_awaited()
-                    build_prompt_mock.assert_not_awaited()
-                    on_plan_mock.assert_not_awaited()
-                    plan_mock.assert_not_awaited()
+                    build_prompt_mock.assert_awaited_once()
+                    on_plan_mock.assert_awaited_once()
+                    plan_mock.assert_awaited_once()
                 else:
                     with self.assertRaises(_PlannerReached):
                         await runtime._observe(recent_messages_list=list(ordered_messages))
@@ -1825,7 +1837,8 @@ class FocusSwitchPlannerRegressionTests(_PlannerTestMixin, unittest.TestCase):
                 )
 
             self.assertEqual(receipt.status, send_api_module.SendStatus.DELIVERED)
-            self.assertIsNone(captured_message_sending["reply"])
+            self.assertIsNotNone(captured_message_sending["reply"])
+            self.assertEqual(captured_message_sending["reply"].message_info.message_id, "evt-send-api")
             self.assertEqual(captured_message_sending["reply_to"], "")
             sender.send_message.assert_awaited_once()
             self.assertFalse(sender.send_message.await_args.kwargs["set_reply"])

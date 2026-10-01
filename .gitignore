@@ -30,3 +30,4 @@ NachoBot-Multimodal-Adapter/models/tts/
 /NachoBot-VRChat-Adapter/
 /NachoBot/plugins/vrchat_control_plugin/
 launch_vrchat.bat
+/webUI/data/voice_calls.sqlite3*

@@ -7,12 +7,39 @@ from src.common.database.database_model import Messages, Images
 from src.common.logger import get_logger
 from .chat_stream import ChatStream
 from src.chat.focus.models import StoredMessageRef
+from src.chat.json_reply_delivery import prepare_json_envelope_delivery
+from src.chat.runtime_capabilities import runtime_capabilities_from_message
 from .message import MessageSending, MessageRecv
 
 logger = get_logger("message_storage")
 
 
 class MessageStorage:
+    @staticmethod
+    def _outgoing_body_for_projection(message: MessageSending) -> str:
+        """Read transport-facing text segments without adding reply context."""
+        parts: list[str] = []
+
+        def collect(segment) -> None:
+            segment_type = getattr(segment, "type", "")
+            data = getattr(segment, "data", None)
+            if segment_type == "reply":
+                return
+            if segment_type == "seglist":
+                if isinstance(data, (list, tuple)):
+                    for child in data:
+                        collect(child)
+                return
+            if segment_type == "text":
+                parts.append(str(data if data is not None else ""))
+            elif segment_type == "tts_text":
+                if isinstance(data, dict):
+                    data = data.get("display_text") if data.get("display_text") is not None else data.get("text")
+                parts.append(str(data if data is not None else ""))
+
+        collect(message.message_segment)
+        return " ".join(part for part in parts if part)
+
     @staticmethod
     def _serialize_keywords(keywords) -> str:
         """将关键词列表序列化为JSON字符串"""
@@ -42,6 +69,27 @@ class MessageStorage:
             # print(message)
 
             processed_plain_text = message.processed_plain_text
+            delivery_capabilities = (
+                runtime_capabilities_from_message(message.reply)
+                if isinstance(message, MessageSending)
+                else None
+            )
+            display_message = message.display_message if isinstance(message, MessageSending) else ""
+            if delivery_capabilities and delivery_capabilities.reply_delivery == "json_envelope":
+                projection_input = MessageStorage._outgoing_body_for_projection(message)
+                if display_message and display_message != projection_input:
+                    # A differing display value is already the clean body from
+                    # the reply-delivery path. It is also authoritative when
+                    # TTS materialization made processed_plain_text an audio
+                    # placeholder, and must not be parsed again if the reply
+                    # body itself contains ordinary JSON.
+                    processed_plain_text = display_message
+                else:
+                    processed_plain_text, _ = prepare_json_envelope_delivery(
+                        projection_input,
+                        tts_language=delivery_capabilities.tts_language,
+                    )
+                    display_message = processed_plain_text
 
             # print(processed_plain_text)
 
@@ -52,7 +100,6 @@ class MessageStorage:
                 filtered_processed_plain_text = ""
 
             if isinstance(message, MessageSending):
-                display_message = message.display_message
                 if display_message:
                     filtered_display_message = re.sub(pattern, "", display_message, flags=re.DOTALL)
                 else:

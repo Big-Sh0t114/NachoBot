@@ -4,9 +4,12 @@ Main entry point: REST API + WebSocket endpoints + static file serving.
 """
 
 import asyncio
+import base64
+import binascii
 import inspect
 import json
 import logging
+import mimetypes
 import uvicorn
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -15,7 +18,7 @@ from typing import Any
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from config_manager import ConfigManager
 from qq_adapter_selector import (
@@ -31,7 +34,11 @@ from memory_manager import is_available as memory_is_available
 import memory_manager
 from music_library import build_music_playlist
 from chat_backend import ChatBackendError, chat_backend
+from chat_media import ChatMediaError, chat_media_store
 from tts_manager import TTSGenerationError, TTSManager, TTSUnavailableError
+from voice_calls import voice_call_store, VoiceCallError
+from voice_routes import create_voice_router
+from live2d_web import router as live2d_router, live2d_web_manager
 from setup_manager import (
     BilibiliLoginNotReady,
     ConfigInitializer,
@@ -135,9 +142,13 @@ async def lifespan(app: FastAPI):
         )
     webui_security.ensure_safe_bind()
     await tts_mgr.start()
+    voice_call_store.recover_after_restart()
+    await voice_router.audio_stream_proxy.start()
     try:
         yield
     finally:
+        await voice_router.audio_stream_proxy.aclose()
+        voice_call_store.recover_after_restart()
         await bilibili_login_manager.shutdown()
         await tts_mgr.close()
         await chat_backend.close()
@@ -145,6 +156,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="NachoBot WebUI", lifespan=lifespan)
+voice_router = create_voice_router(voice_call_store, chat_backend, tts_mgr)
+app.include_router(voice_router)
+app.include_router(live2d_router)
 
 
 @app.middleware("http")
@@ -420,14 +434,53 @@ async def send_service_input(service_id: str, body: ServiceInput):
 
 class ChatMessageRequest(BaseModel):
     conversation_id: str = ""
-    message: str
+    message: str = ""
     request_message_id: str = ""
     user_id: str = "webui-user"
     user_name: str = "WebUI"
+    attachments: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ChatMediaUploadRequest(BaseModel):
+    type: str
+    name: str = ""
+    mime_type: str = "application/octet-stream"
+    data_base64: str
 
 
 class ChatTTSRequest(BaseModel):
     text: str
+
+
+@app.post("/api/chat/media")
+async def upload_chat_media(body: ChatMediaUploadRequest):
+    try:
+        raw = str(body.data_base64 or "").strip()
+        if raw.startswith("data:") and "," in raw:
+            raw = raw.split(",", 1)[1]
+        data = base64.b64decode(raw, validate=True)
+        return chat_media_store.save_bytes(
+            body.type,
+            data,
+            name=body.name,
+            mime_type=body.mime_type,
+        )
+    except (ValueError, binascii.Error, ChatMediaError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/chat/media/{media_id}")
+async def get_chat_media(media_id: str):
+    try:
+        path = chat_media_store.resolve(media_id)
+    except ChatMediaError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    return FileResponse(
+        path,
+        media_type=media_type,
+        headers={"Cache-Control": "private, max-age=86400"},
+    )
 
 
 @app.get("/api/chat/status")
@@ -479,6 +532,7 @@ async def chat_message(body: ChatMessageRequest):
                 user_id=body.user_id,
                 user_name=body.user_name,
                 request_message_id=body.request_message_id,
+                attachments=body.attachments,
             ),
             timeout=7.5,
         )
@@ -503,6 +557,10 @@ async def delete_chat_conversation(conversation_id: str):
             backend_user_id,
         )
         chat_backend.forget_conversation(conversation_id)
+        for call_id in voice_call_store.call_ids_for_conversation(conversation_id):
+            await voice_router.audio_stream_proxy.abort_call(call_id)
+            live2d_web_manager.discard(call_id)
+        voice_call_store.delete_conversation(conversation_id)
         logger.info(
             "Deleted WebUI conversation %s: backend_user_id=%s, deleted_rows=%s",
             _log_safe(conversation_id),

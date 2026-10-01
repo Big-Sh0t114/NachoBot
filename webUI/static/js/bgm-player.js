@@ -9,9 +9,138 @@
     const START_DELAY_SECONDS = 0.03;
     const JOIN_FADE_SECONDS = 0.012;
     const MAX_CACHED_BUFFERS = 4;
-    const ANALYSER_FFT_SIZE = 512;
-    const ANALYSER_SMOOTHING = 0.7;
+    const ANALYSER_FFT_SIZE = 4096;
+    const ANALYSER_SMOOTHING = 0;
     const BEAT_MIN_INTERVAL_SECONDS = 0.16;
+    const RMS_NORMALIZATION_REFERENCE = 0.20;
+    const RMS_SILENCE_FLOOR = 0.00001;
+    const ENVELOPE_SILENCE_FLOOR = 0.001;
+    const ENVELOPE_ATTACK_SECONDS = 0.020;
+    const ENVELOPE_RELEASE_SECONDS = 0.140;
+    const BASELINE_SECONDS = 0.75;
+    const MAX_ONSET_GAP_SECONDS = 0.35;
+    const MIN_ONSET_LEVEL = 0.045;
+    const MIN_ONSET_SLOPE_PER_SECOND = 0.8;
+    const ONSET_BASELINE_LEVEL_RATIO = 0.45;
+    const ONSET_MIN_EXCURSION = 0.025;
+    const ONSET_BASELINE_EXCURSION_RATIO = 0.12;
+    const ONSET_REARM_SLOPE_RATIO = 0.25;
+    const ONSET_REARM_QUIET_SECONDS = 0.06;
+    const PULSE_SLOPE_WINDOW_SECONDS = 0.04;
+    const PULSE_RISE_REFERENCE = 0.30;
+    const PULSE_RELEASE_SECONDS = 0.22;
+    const PAUSE_GAP_THRESHOLD_SECONDS = 0.08;
+    const MAX_REACTIVE_DELTA_SECONDS = 10;
+
+    function monotonicTimeSeconds() {
+        if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+            return performance.now() / 1000;
+        }
+        return Date.now() / 1000;
+    }
+
+    function createReactiveState() {
+        return {
+            bass: 0,
+            mid: 0,
+            high: 0,
+            intensity: 0,
+            bassBaseline: 0,
+            previousBass: 0,
+            hasOnsetSample: false,
+            onsetArmed: true,
+            onsetQuietSeconds: 0,
+            lastBeatAt: null,
+            pulse: 0,
+            lastAudioTime: null,
+            lastWallTime: monotonicTimeSeconds(),
+            wasRunning: false,
+        };
+    }
+
+    function makeBandRange(sampleRate, fftSize, binCount, lowHz, highHz) {
+        const binHz = sampleRate / fftSize;
+        const nyquist = sampleRate / 2;
+        const start = Math.min(
+            binCount,
+            Math.max(1, Math.ceil(lowHz / binHz))
+        );
+        const end = Math.max(
+            start,
+            Math.min(binCount, Math.ceil(Math.min(highHz, nyquist) / binHz))
+        );
+        return [start, end];
+    }
+
+    function sumBandPower(frequencyData, range) {
+        let total = 0;
+        for (let index = range[0]; index < range[1]; index += 1) {
+            const decibels = frequencyData[index];
+            if (!Number.isFinite(decibels)) continue;
+
+            const power = 10 ** (decibels / 10);
+            if (Number.isFinite(power) && power > 0) total += power;
+        }
+        return total;
+    }
+
+    function normalizeSpectralRms(power) {
+        const rms = Math.sqrt(Math.max(0, power));
+        if (!Number.isFinite(rms) || rms <= RMS_SILENCE_FLOOR) return 0;
+        // This is proportional spectral RMS from the analyser's dB bins, not LUFS.
+        return Math.min(1, rms / RMS_NORMALIZATION_REFERENCE);
+    }
+
+    function approach(current, target, deltaSeconds, timeConstant) {
+        if (deltaSeconds <= 0) return current;
+        const coefficient = 1 - Math.exp(-deltaSeconds / timeConstant);
+        const value = current + (target - current) * coefficient;
+        return Math.abs(value) < ENVELOPE_SILENCE_FLOOR ? 0 : value;
+    }
+
+    function applyReactiveFrame(state, targets, deltaSeconds) {
+        state.bass = approach(
+            state.bass,
+            targets.bass,
+            deltaSeconds,
+            targets.bass > state.bass ? ENVELOPE_ATTACK_SECONDS : ENVELOPE_RELEASE_SECONDS
+        );
+        state.mid = approach(
+            state.mid,
+            targets.mid,
+            deltaSeconds,
+            targets.mid > state.mid ? ENVELOPE_ATTACK_SECONDS : ENVELOPE_RELEASE_SECONDS
+        );
+        state.high = approach(
+            state.high,
+            targets.high,
+            deltaSeconds,
+            targets.high > state.high ? ENVELOPE_ATTACK_SECONDS : ENVELOPE_RELEASE_SECONDS
+        );
+        state.intensity = approach(
+            state.intensity,
+            targets.intensity,
+            deltaSeconds,
+            targets.intensity > state.intensity ? ENVELOPE_ATTACK_SECONDS : ENVELOPE_RELEASE_SECONDS
+        );
+        state.pulse = approach(
+            state.pulse,
+            0,
+            deltaSeconds,
+            PULSE_RELEASE_SECONDS
+        );
+    }
+
+    function reactiveFrame(state, beat = false) {
+        return {
+            bass: state.bass,
+            mid: state.mid,
+            high: state.high,
+            intensity: state.intensity,
+            pulse: state.pulse,
+            beat,
+        };
+    }
 
     class SeamlessBgmPlayer extends EventTarget {
         constructor() {
@@ -25,15 +154,12 @@
             this._generation = 0;
             this._paused = true;
             this._playRequested = false;
+            this._playbackBlocked = false;
             this._volume = 0.2;
             this._analyser = null;
             this._frequencyData = null;
-            this._reactive = {
-                bassBaseline: 0,
-                previousBass: 0,
-                lastBeatAt: -Infinity,
-                pulse: 0,
-            };
+            this._bandRanges = null;
+            this._reactive = createReactiveState();
         }
 
         get paused() {
@@ -50,7 +176,18 @@
 
             const gain = this._masterGain.gain;
             gain.cancelScheduledValues(this._audioContext.currentTime);
-            gain.setTargetAtTime(this._volume, this._audioContext.currentTime, 0.015);
+            if (this._playbackBlocked || this._paused) {
+                gain.setValueAtTime(0, this._audioContext.currentTime);
+            } else {
+                gain.setTargetAtTime(this._volume, this._audioContext.currentTime, 0.015);
+            }
+        }
+
+        setPlaybackBlocked(blocked) {
+            this._playbackBlocked = Boolean(blocked);
+            // Mute immediately as well as suspending: an older resume() may still finish.
+            this.volume = this._volume;
+            if (this._playbackBlocked) this.pause();
         }
 
         /**
@@ -59,6 +196,11 @@
          */
         getReactiveFrame() {
             const state = this._reactive;
+            const wallNow = monotonicTimeSeconds();
+            const wallDelta = state.lastWallTime === null
+                ? 0
+                : Math.max(0, wallNow - state.lastWallTime);
+            state.lastWallTime = wallNow;
 
             if (
                 this._paused ||
@@ -66,74 +208,137 @@
                 !this._frequencyData ||
                 this._audioContext?.state !== 'running'
             ) {
-                state.pulse *= 0.82;
-                return {
-                    bass: 0,
-                    mid: 0,
-                    high: 0,
-                    intensity: 0,
-                    pulse: state.pulse,
-                    beat: false,
-                };
-            }
-
-            this._analyser.getByteFrequencyData(this._frequencyData);
-
-            const binHz = this._audioContext.sampleRate / this._analyser.fftSize;
-            const averageBand = (lowHz, highHz) => {
-                const start = Math.max(0, Math.floor(lowHz / binHz));
-                const end = Math.min(
-                    this._frequencyData.length - 1,
-                    Math.ceil(highHz / binHz)
+                const contextTime = this._audioContext?.currentTime;
+                state.lastAudioTime = Number.isFinite(contextTime) ? contextTime : null;
+                state.hasOnsetSample = false;
+                state.previousBass = 0;
+                state.onsetArmed = true;
+                state.onsetQuietSeconds = 0;
+                state.bassBaseline = approach(
+                    state.bassBaseline,
+                    0,
+                    Math.min(wallDelta, MAX_REACTIVE_DELTA_SECONDS),
+                    BASELINE_SECONDS
                 );
-                if (end < start) return 0;
+                state.wasRunning = false;
+                applyReactiveFrame(state, { bass: 0, mid: 0, high: 0, intensity: 0 },
+                    Math.min(wallDelta, MAX_REACTIVE_DELTA_SECONDS));
+                return reactiveFrame(state);
+            }
 
-                let total = 0;
-                for (let index = start; index <= end; index += 1) {
-                    total += this._frequencyData[index];
+            const audioNow = this._audioContext.currentTime;
+            if (!Number.isFinite(audioNow)) {
+                state.wasRunning = false;
+                state.hasOnsetSample = false;
+                state.onsetArmed = true;
+                state.onsetQuietSeconds = 0;
+                applyReactiveFrame(state, { bass: 0, mid: 0, high: 0, intensity: 0 },
+                    Math.min(wallDelta, MAX_REACTIVE_DELTA_SECONDS));
+                return reactiveFrame(state);
+            }
+
+            this._analyser.getFloatFrequencyData(this._frequencyData);
+
+            const bassPower = sumBandPower(this._frequencyData, this._bandRanges.bass);
+            const midPower = sumBandPower(this._frequencyData, this._bandRanges.mid);
+            const highPower = sumBandPower(this._frequencyData, this._bandRanges.high);
+            const bass = normalizeSpectralRms(bassPower);
+            const mid = normalizeSpectralRms(midPower);
+            const high = normalizeSpectralRms(highPower);
+            const intensity = normalizeSpectralRms(bassPower + midPower + highPower);
+
+            let audioDelta = 0;
+            let clockReset = false;
+            if (state.lastAudioTime !== null) {
+                if (audioNow >= state.lastAudioTime) {
+                    audioDelta = audioNow - state.lastAudioTime;
+                } else {
+                    clockReset = true;
                 }
-                return total / ((end - start + 1) * 255);
-            };
+            }
 
-            const bass = averageBand(45, 180);
-            const mid = averageBand(180, 1800);
-            const high = averageBand(1800, 8000);
+            let pauseGap = 0;
+            if (!state.wasRunning) {
+                pauseGap = wallDelta;
+            } else if (state.lastAudioTime !== null) {
+                pauseGap = Math.max(0, wallDelta - audioDelta);
+            }
+            const pausedBetweenFrames = pauseGap >= PAUSE_GAP_THRESHOLD_SECONDS;
+            if (pausedBetweenFrames || clockReset) {
+                applyReactiveFrame(state, { bass: 0, mid: 0, high: 0, intensity: 0 },
+                    Math.min(pauseGap, MAX_REACTIVE_DELTA_SECONDS));
+                state.hasOnsetSample = false;
+                state.previousBass = 0;
+                state.onsetArmed = true;
+                state.onsetQuietSeconds = 0;
+            }
 
-            if (state.bassBaseline <= 0) {
+            const firstAudioFrame = !state.wasRunning || state.lastAudioTime === null;
+            const envelopeDelta = firstAudioFrame
+                ? Math.min(wallDelta, 0.1)
+                : Math.min(audioDelta, MAX_REACTIVE_DELTA_SECONDS);
+            applyReactiveFrame(state, { bass, mid, high, intensity }, envelopeDelta);
+
+            let beat = false;
+            if (!state.hasOnsetSample || clockReset || pausedBetweenFrames || audioDelta > MAX_ONSET_GAP_SECONDS) {
+                // A first frame or long gap seeds the detector without inventing an onset.
                 state.bassBaseline = bass;
-            } else {
-                const baselineRate = bass > state.bassBaseline ? 0.025 : 0.08;
-                state.bassBaseline += (bass - state.bassBaseline) * baselineRate;
+                state.previousBass = bass;
+                state.hasOnsetSample = true;
+                state.onsetArmed = true;
+                state.onsetQuietSeconds = 0;
+            } else if (audioDelta > 0) {
+                const baselineCoefficient = 1 - Math.exp(-audioDelta / BASELINE_SECONDS);
+                state.bassBaseline += (bass - state.bassBaseline) * baselineCoefficient;
+
+                const rise = Math.max(0, bass - state.previousBass);
+                const positiveSlope = rise / audioDelta;
+                const minimumLevel = Math.max(
+                    MIN_ONSET_LEVEL,
+                    state.bassBaseline * (1 + ONSET_BASELINE_LEVEL_RATIO)
+                );
+                const minimumExcursion = Math.max(
+                    ONSET_MIN_EXCURSION,
+                    state.bassBaseline * ONSET_BASELINE_EXCURSION_RATIO
+                );
+                const risingOnsetCandidate = bass >= minimumLevel &&
+                    bass - state.bassBaseline >= minimumExcursion &&
+                    positiveSlope >= MIN_ONSET_SLOPE_PER_SECOND;
+                const outsideRefractory = state.lastBeatAt === null ||
+                    audioNow - state.lastBeatAt >= BEAT_MIN_INTERVAL_SECONDS;
+
+                if (!state.onsetArmed) {
+                    if (positiveSlope <= MIN_ONSET_SLOPE_PER_SECOND * ONSET_REARM_SLOPE_RATIO) {
+                        state.onsetQuietSeconds += audioDelta;
+                        if (state.onsetQuietSeconds >= ONSET_REARM_QUIET_SECONDS) {
+                            state.onsetArmed = true;
+                            state.onsetQuietSeconds = 0;
+                        }
+                    } else {
+                        state.onsetQuietSeconds = 0;
+                    }
+                }
+
+                if (state.onsetArmed && risingOnsetCandidate) {
+                    // Latch each rise through refractory so one ramp cannot fire again later.
+                    state.onsetArmed = false;
+                    state.onsetQuietSeconds = 0;
+                    if (outsideRefractory) {
+                        beat = true;
+                        state.lastBeatAt = audioNow;
+                        const onsetStrength =
+                            positiveSlope * PULSE_SLOPE_WINDOW_SECONDS;
+                        state.pulse = Math.min(1, onsetStrength / PULSE_RISE_REFERENCE);
+                    }
+                }
+
+                state.previousBass = bass;
             }
 
-            const now = this._audioContext.currentTime;
-            const transient = bass - state.previousBass;
-            const threshold = Math.max(0.06, state.bassBaseline * 1.1 + 0.01);
-            const minTransient = Math.max(0.015, state.bassBaseline * 0.08);
-            const beat =
-                bass > threshold &&
-                transient > minTransient &&
-                now - state.lastBeatAt >= BEAT_MIN_INTERVAL_SECONDS;
-
-            if (beat) {
-                state.lastBeatAt = now;
-                state.pulse = Math.min(1, 0.75 + bass * 1.0);
-            } else {
-                state.pulse *= 0.88;
-            }
-            state.previousBass = bass;
-
-            const weightedEnergy = bass * 0.55 + mid * 0.3 + high * 0.15;
-            const intensity = Math.min(1, Math.sqrt(Math.max(0, weightedEnergy)) * 0.95);
-
-            return {
-                bass,
-                mid,
-                high,
-                intensity,
-                pulse: state.pulse,
-                beat,
-            };
+            state.lastAudioTime = audioNow;
+            state.lastWallTime = wallNow;
+            state.wasRunning = true;
+            return reactiveFrame(state, beat);
         }
 
         setTrack(track) {
@@ -144,6 +349,7 @@
             this._resetReactiveState();
             this._stopSources();
             this._paused = true;
+            this.volume = this._volume;
 
             if (wasPlaying) {
                 this._audioContext?.suspend().catch(error => console.warn('Failed to pause BGM:', error));
@@ -158,7 +364,7 @@
         }
 
         async play({ userInitiated = typeof navigator !== 'undefined' && navigator.userActivation?.isActive === true } = {}) {
-            if (!this._track) return;
+            if (this._playbackBlocked || !this._track) return;
 
             const generation = this._generation;
             const context = this._ensureAudioGraph();
@@ -174,13 +380,14 @@
                 this._playRequested = false;
                 throw error;
             }
+            if (this._playbackBlocked) return;
             if (context.state !== 'running') {
                 this._playRequested = false;
                 throw new Error('Audio playback requires a user interaction.');
             }
 
             const prepared = await this._trackReady;
-            if (!this._playRequested || generation !== this._generation || !prepared) return;
+            if (this._playbackBlocked || !this._playRequested || generation !== this._generation || !prepared) return;
 
             if (this._nodes.length === 0) {
                 this._startPreparedTrack(prepared);
@@ -188,6 +395,7 @@
 
             if (this._paused) {
                 this._paused = false;
+                this.volume = this._volume;
                 this.dispatchEvent(new Event('play'));
             }
         }
@@ -197,6 +405,7 @@
             if (this._paused) return;
 
             this._paused = true;
+            this.volume = this._volume;
             if (this._audioContext?.state === 'running') {
                 this._audioContext.suspend().catch(error => console.warn('Failed to pause BGM:', error));
             }
@@ -204,9 +413,14 @@
         }
 
         async unlock() {
+            if (this._playbackBlocked) return;
             const context = this._ensureAudioGraph();
             if (context.state !== 'running') {
                 await context.resume();
+            }
+            if (this._playbackBlocked) {
+                await context.suspend();
+                return;
             }
             if (context.state !== 'running') {
                 throw new Error('Audio playback requires a user interaction.');
@@ -225,12 +439,21 @@
             this._masterGain = this._audioContext.createGain();
             this._analyser = this._audioContext.createAnalyser();
 
-            this._masterGain.gain.value = this._volume;
+            this._masterGain.gain.value = this._playbackBlocked || this._paused ? 0 : this._volume;
             this._analyser.fftSize = ANALYSER_FFT_SIZE;
             this._analyser.smoothingTimeConstant = ANALYSER_SMOOTHING;
             this._analyser.minDecibels = -90;
             this._analyser.maxDecibels = -10;
-            this._frequencyData = new Uint8Array(this._analyser.frequencyBinCount);
+            // Cache disjoint bin-center ranges once; the upper bin is exclusive.
+            this._frequencyData = new Float32Array(this._analyser.frequencyBinCount);
+            this._bandRanges = {
+                bass: makeBandRange(this._audioContext.sampleRate, this._analyser.fftSize,
+                    this._analyser.frequencyBinCount, 45, 180),
+                mid: makeBandRange(this._audioContext.sampleRate, this._analyser.fftSize,
+                    this._analyser.frequencyBinCount, 180, 1800),
+                high: makeBandRange(this._audioContext.sampleRate, this._analyser.fftSize,
+                    this._analyser.frequencyBinCount, 1800, 8000),
+            };
 
             this._inputNode.connect(this._analyser);
             this._inputNode.connect(this._masterGain);
@@ -309,10 +532,7 @@
         }
 
         _resetReactiveState() {
-            this._reactive.bassBaseline = 0;
-            this._reactive.previousBass = 0;
-            this._reactive.lastBeatAt = -Infinity;
-            this._reactive.pulse = 0;
+            this._reactive = createReactiveState();
             this._frequencyData?.fill(0);
         }
 

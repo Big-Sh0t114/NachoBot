@@ -6,6 +6,7 @@
 .chat-tab-panel {
     height: 100%;
     min-height: 0;
+    position: relative;
 }
 
 .chat-tab-panel.active {
@@ -14,6 +15,24 @@
 
 .chat-tab-panel::before {
     display: none;
+}
+
+.chat-tab-panel.is-file-drag-over::after {
+    content: '释放以上传文件';
+    position: absolute;
+    inset: 12px;
+    z-index: 20;
+    display: grid;
+    place-items: center;
+    border: 2px dashed rgba(13, 148, 136, 0.58);
+    border-radius: 18px;
+    background: rgba(240, 253, 250, 0.82);
+    color: var(--accent-dark);
+    font-size: 1rem;
+    font-weight: 600;
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    pointer-events: none;
 }
 
 .main-content:has(.chat-tab-panel.active) {
@@ -840,8 +859,10 @@ button.chat-status-chip:disabled {
     box-shadow: 0 9px 34px rgba(48, 37, 24, 0.08), 0 1px 2px rgba(48, 37, 24, 0.05);
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
+    position: relative;
     transition: border-color var(--transition), box-shadow var(--transition), background var(--transition);
 }
+
 
 .chat-composer:focus-within {
     border-color: rgba(13, 148, 136, 0.48);
@@ -961,4 +982,233 @@ button.chat-status-chip:disabled {
     color: var(--text-muted);
     font-size: 0.67rem;
     text-align: center;
+}
+
+/* ---- Chat attachments / media ---- */
+.chat-composer-left {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.chat-attachment-picker {
+    position: relative;
+    flex: 0 0 auto;
+}
+
+.chat-attachment-button {
+    width: 30px;
+    height: 30px;
+    display: grid;
+    place-items: center;
+    padding: 0;
+    border: 1px solid var(--border-light);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.56);
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 1.1rem;
+    line-height: 1;
+    cursor: pointer;
+    transition: background var(--transition), border-color var(--transition), color var(--transition), transform var(--transition);
+}
+
+.chat-attachment-button:hover,
+.chat-attachment-button:focus-visible {
+    border-color: rgba(13, 148, 136, 0.32);
+    background: var(--accent-bg);
+    color: var(--accent-dark);
+    outline: none;
+}
+
+.chat-attachment-button:hover {
+    transform: translateY(-1px);
+}
+
+.chat-attachment-preview {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 0 0 8px;
+}
+
+.chat-attachment-preview[hidden] {
+    display: none;
+}
+
+.chat-pending-attachment {
+    max-width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border: 1px solid rgba(207, 194, 177, 0.86);
+    border-radius: 11px;
+    background: rgba(255, 255, 255, 0.62);
+}
+
+.chat-pending-attachment img {
+    width: 42px;
+    height: 42px;
+    flex: 0 0 42px;
+    border-radius: 8px;
+    object-fit: cover;
+    background: rgba(15, 23, 42, 0.05);
+}
+
+.chat-pending-attachment-copy {
+    min-width: 0;
+    display: grid;
+    gap: 2px;
+}
+
+.chat-pending-attachment-copy strong,
+.chat-pending-attachment-copy small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.chat-pending-attachment-copy strong {
+    max-width: 260px;
+    color: var(--text-primary);
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+
+.chat-pending-attachment-copy small {
+    color: var(--text-muted);
+    font-size: 0.66rem;
+}
+
+.chat-pending-attachment-remove {
+    width: 24px;
+    height: 24px;
+    flex: 0 0 24px;
+    display: grid;
+    place-items: center;
+    padding: 0;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+}
+
+.chat-pending-attachment-remove:hover,
+.chat-pending-attachment-remove:focus-visible {
+    background: rgba(239, 68, 68, 0.1);
+    color: var(--error);
+    outline: none;
+}
+
+.chat-message-media {
+    display: grid;
+    gap: 9px;
+    margin-top: 8px;
+}
+
+.chat-message-content > .chat-message-media:first-child {
+    margin-top: 0;
+}
+
+.chat-media-image,
+.chat-media-emoji {
+    display: block;
+    max-width: min(100%, 460px);
+    max-height: 420px;
+    border-radius: 14px;
+    object-fit: contain;
+    background: rgba(15, 23, 42, 0.04);
+}
+
+.chat-media-emoji {
+    max-width: 180px;
+    max-height: 180px;
+}
+
+.chat-media-video {
+    display: block;
+    width: min(100%, 520px);
+    max-height: 420px;
+    border-radius: 14px;
+    background: #000;
+}
+
+.chat-media-file {
+    width: min(100%, 440px);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border: 1px solid var(--border-light);
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.58);
+    color: inherit;
+    text-decoration: none;
+    transition: border-color var(--transition), background var(--transition), transform var(--transition);
+}
+
+.chat-media-file:hover,
+.chat-media-file:focus-visible {
+    border-color: rgba(13, 148, 136, 0.28);
+    background: var(--accent-bg);
+    transform: translateY(-1px);
+    outline: none;
+}
+
+.chat-media-file-icon {
+    width: 34px;
+    height: 34px;
+    flex: 0 0 34px;
+    display: grid;
+    place-items: center;
+    border-radius: 9px;
+    background: rgba(13, 148, 136, 0.1);
+    color: var(--accent-dark);
+    font-size: 0.72rem;
+    font-weight: 700;
+}
+
+.chat-media-file-copy {
+    min-width: 0;
+    display: grid;
+    gap: 2px;
+}
+
+.chat-media-file-copy strong,
+.chat-media-file-copy small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.chat-media-file-copy strong {
+    color: var(--text-primary);
+    font-size: 0.78rem;
+}
+
+.chat-media-file-copy small {
+    color: var(--text-muted);
+    font-size: 0.68rem;
+}
+
+@media (max-width: 640px) {
+    .chat-composer-left {
+        gap: 6px;
+    }
+
+    .chat-composer-hint > span:first-child {
+        display: none;
+    }
+
+    .chat-pending-attachment-copy strong {
+        max-width: 170px;
+    }
+
+    .chat-media-image,
+    .chat-media-video {
+        max-width: 100%;
+    }
 }

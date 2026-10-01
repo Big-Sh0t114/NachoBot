@@ -211,7 +211,10 @@ class EmojiAction(BaseAction):
             )
 
             # 4. 只发送原图，并在发送成功后记录使用
-            success = await self.send_emoji(emoji_base64)
+            success = await self.send_emoji(
+                emoji_base64,
+                reply_message=self.action_message,
+            )
 
             if success:
                 emoji_api.record_usage(selected_candidate.emoji_hash)

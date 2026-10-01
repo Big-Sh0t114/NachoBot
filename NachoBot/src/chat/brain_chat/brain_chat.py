@@ -23,6 +23,12 @@ from src.chat.heart_flow.hfc_utils import CycleDetail
 
 from src.chat.express.expression_learner import expression_learner_manager
 from src.chat.advanced.advanced_manager import advanced_manager
+from src.chat.runtime_capabilities import (
+    classify_runtime_message_batch,
+    planner_target_eligible,
+    runtime_capabilities_from_message,
+)
+from src.chat.json_reply_delivery import prepare_json_envelope_delivery
 from src.chat.keyword_cache import promise_cache_manager
 from src.chat.injection.injection_manager import injection_manager
 from src.person_info.person_info import Person
@@ -606,6 +612,11 @@ class BrainChatting:
     ) -> bool:  # sourcery skip: merge-else-if-into-elif, remove-redundant-if
         if recent_messages_list is None:
             recent_messages_list = []
+        message_batch = classify_runtime_message_batch(
+            recent_messages_list,
+            bot_user_id=str(global_config.bot.qq_account),
+            is_system_event=get_system_event,
+        )
         focus_switch_target_turn = self._is_focus_switch_target_turn(focus_turn, recent_messages_list)
         allow_no_reply = not focus_switch_target_turn
         # 刷新上下文以确保获取最新的模板信息
@@ -614,9 +625,16 @@ class BrainChatting:
         current_template = context.get_template_name() if context is not None else None
         logger.debug(f"{self.log_prefix} Current template name: {current_template}")
         async with global_prompt_manager.async_message_scope(current_template):
-            # Debug check
-            debug_prompt = await global_prompt_manager.get_prompt_async("brain_planner_prompt")
-            logger.debug(f"{self.log_prefix} Resolved brain_planner_prompt preview: {str(debug_prompt)[:50]}...")
+            advanced_direct = (
+                self._should_use_advanced_direct_reply(advanced_manager.is_on(self.chat_stream))
+                and not message_batch.explicit_planner_messages
+            )
+            run_planner = bool(message_batch.planner_messages) or not message_batch.direct_messages
+            if message_batch.direct_messages and not message_batch.planner_messages:
+                run_planner = False
+            if run_planner and not advanced_direct:
+                debug_prompt = await global_prompt_manager.get_prompt_async("brain_planner_prompt")
+                logger.debug(f"{self.log_prefix} Resolved brain_planner_prompt preview: {str(debug_prompt)[:50]}...")
             await self.expression_learner.trigger_learning_for_chat()
 
             cycle_timers, thinking_id = self.start_cycle()
@@ -659,6 +677,11 @@ class BrainChatting:
                 truncate=True,
                 show_actions=True,
             )
+            planner_message_id_list = [
+                (message_id, message)
+                for message_id, message in message_id_list
+                if planner_target_eligible(message)
+            ]
             if promise_snippets:
                 promise_block = "\n".join(["[约定缓存]"] + promise_snippets)
                 chat_content_block = f"{promise_block}\n----\n{chat_content_block}"
@@ -676,41 +699,61 @@ class BrainChatting:
             except Exception as e:
                 logger.debug(f"{self.log_prefix} 人物画像注入跳过: {e}")
 
-            # High-level mode check
-            if self._should_use_advanced_direct_reply(
-                advanced_manager.is_on(self.chat_stream),
-            ):
+            direct_reply_actions: List[ActionPlannerInfo] = [
+                ActionPlannerInfo(
+                    action_type="reply",
+                    reasoning="Adapter capability: direct reply",
+                    action_data={"loop_start_time": self.last_read_time},
+                    action_message=message,
+                    available_actions=available_actions,
+                )
+                for message in message_batch.direct_messages
+            ]
+
+            # High-level mode remains a legacy route only when the incoming
+            # message did not explicitly request Planner handling.
+            if direct_reply_actions and not message_batch.planner_messages:
+                action_to_use_info = direct_reply_actions
+                # This reply is bound to its trigger message and cannot inherit
+                # a stale Planner cancellation event from an earlier turn.
+                self._planner_interrupt_flag = None
+                self._planner_interrupt_requested = False
+                self._planner_interrupt_consecutive_count = 0
+            elif advanced_direct:
                 logger.info(f"{self.log_prefix} 检测到高级模式开启，跳过Planner直接回复")
 
                 # Try to find the latest user message to reply to
                 target_message = None
                 # Use message_id_list from build_readable_messages_with_id which contains (id, msg) tuples
-                if message_id_list:
+                if planner_message_id_list:
                     # Iterate backwards to find last non-bot message
-                    for _, msg in reversed(message_id_list):
+                    for _, msg in reversed(planner_message_id_list):
                         if msg and msg.user_info and str(msg.user_info.user_id) != str(global_config.bot.qq_account):
                             target_message = msg
                             break
                     # If no user message found, fallback to the very last message
-                    if target_message is None and message_id_list:
-                        target_message = message_id_list[-1][1]
+                    if target_message is None and planner_message_id_list:
+                        target_message = planner_message_id_list[-1][1]
 
-                action_to_use_info = [
-                    ActionPlannerInfo(
-                        action_type="reply",
-                        reasoning="Advanced Mode: Direct Reply",
-                        action_data={"loop_start_time": self.last_read_time},
-                        action_message=target_message,
-                        available_actions=available_actions,
+                action_to_use_info = []
+                if target_message is not None:
+                    action_to_use_info.append(
+                        ActionPlannerInfo(
+                            action_type="reply",
+                            reasoning="Advanced Mode: Direct Reply",
+                            action_data={"loop_start_time": self.last_read_time},
+                            action_message=target_message,
+                            available_actions=available_actions,
+                        )
                     )
-                ]
-            else:
+                action_to_use_info.extend(direct_reply_actions)
+            elif run_planner:
                 prompt_info = await self.action_planner.build_planner_prompt(
                     is_group_chat=is_group_chat,
                     chat_target_info=chat_target_info,
                     current_available_actions=available_actions,
                     chat_content_block=chat_content_block,
-                    message_id_list=message_id_list,
+                    message_id_list=planner_message_id_list,
                     interest=global_config.personality.interest,
                     allow_no_reply=allow_no_reply,
                 )
@@ -718,29 +761,52 @@ class BrainChatting:
                     EventType.ON_PLAN, None, prompt_info[0], None, self.chat_stream.stream_id
                 )
                 if not continue_flag:
-                    return False
-                if modified_message and modified_message._modify_flags.modify_llm_prompt:
-                    prompt_info = (modified_message.llm_prompt, prompt_info[1])
+                    if not direct_reply_actions:
+                        return False
+                    logger.info(f"{self.log_prefix} ON_PLAN stopped Planner; preserving direct Replyer actions")
+                    action_to_use_info = []
+                else:
+                    if modified_message and modified_message._modify_flags.modify_llm_prompt:
+                        prompt_info = (modified_message.llm_prompt, prompt_info[1])
 
-                with Timer("规划器", cycle_timers):
-                    # 创建 Planner 打断信号
-                    interrupt_flag = asyncio.Event()
-                    self._planner_interrupt_flag = interrupt_flag
-                    self._planner_interrupt_requested = False
-                    try:
-                        action_to_use_info, _ = await self.action_planner.plan(
-                            loop_start_time=self.last_read_time,
-                            available_actions=available_actions,
-                            interrupt_flag=interrupt_flag,
-                            allow_no_reply=allow_no_reply,
-                        )
-                    except ReqAbortException:
-                        self._planner_interrupt_flag = None
-                        self._focus_turn_interrupted = True
-                        if not self._planner_interrupt_requested:
+                    with Timer("规划器", cycle_timers):
+                        # 创建 Planner 打断信号
+                        interrupt_flag = asyncio.Event()
+                        self._planner_interrupt_flag = interrupt_flag
+                        self._planner_interrupt_requested = False
+                        try:
+                            action_to_use_info, _ = await self.action_planner.plan(
+                                loop_start_time=self.last_read_time,
+                                available_actions=available_actions,
+                                interrupt_flag=interrupt_flag,
+                                allow_no_reply=allow_no_reply,
+                            )
+                        except ReqAbortException:
+                            self._planner_interrupt_flag = None
+                            if not direct_reply_actions:
+                                self._focus_turn_interrupted = True
+                                if not self._planner_interrupt_requested:
+                                    self._planner_interrupt_consecutive_count = 0
+                                logger.info(f"{self.log_prefix} Planner 被新消息打断，中止本轮思考，等待新消息重新触发")
+                                return True
+                            logger.info(f"{self.log_prefix} Planner interrupted; preserving direct Replyer actions")
+                            action_to_use_info = []
+                            self._focus_turn_interrupted = False
+                            self._planner_interrupt_requested = False
                             self._planner_interrupt_consecutive_count = 0
-                        logger.info(f"{self.log_prefix} Planner 被新消息打断，中止本轮思考，等待新消息重新触发")
-                        return True
+                        except Exception:
+                            self._planner_interrupt_flag = None
+                            if not direct_reply_actions:
+                                raise
+                            logger.exception(f"{self.log_prefix} Planner failed; preserving direct Replyer actions")
+                            action_to_use_info = []
+
+                if direct_reply_actions and not any(
+                    action.action_type == SWITCH_CHAT_ACTION for action in action_to_use_info
+                ):
+                    action_to_use_info.extend(direct_reply_actions)
+            else:
+                action_to_use_info = direct_reply_actions
 
             action_to_use_info = self._fence_focus_event_only_actions(
                 focus_turn,
@@ -1140,6 +1206,47 @@ class BrainChatting:
             receipts.append(receipt)
             return ("Filtered" if receipt.delivered else ""), receipts
 
+        delivery_capabilities = runtime_capabilities_from_message(message_data)
+        if delivery_capabilities.reply_delivery == "json_envelope":
+            # Keep adapter controls in the single transport envelope while
+            # returning only its human-facing reply to Core action history.
+            full_text = "".join(
+                str(reply_content.content)
+                for reply_content in reply_set.reply_data
+                if reply_content.content_type == ReplyContentType.TEXT
+            )
+            if not full_text:
+                return "", receipts
+
+            display_text, tts_payload = prepare_json_envelope_delivery(
+                full_text,
+                tts_language=delivery_capabilities.tts_language,
+            )
+            if tts_payload is not None:
+                receipt = await send_api.tts_text_to_stream_receipt(
+                    text=tts_payload["text"],
+                    stream_id=self.chat_stream.stream_id,
+                    reply_message=message_data,
+                    set_reply=need_reply,
+                    typing=False,
+                    selected_expressions=selected_expressions,
+                    display_message=display_text,
+                    transport_text=tts_payload["display_text"],
+                    text_lang=tts_payload.get("lang", ""),
+                )
+            else:
+                receipt = await send_api.text_to_stream_receipt(
+                    text=full_text,
+                    stream_id=self.chat_stream.stream_id,
+                    reply_message=message_data,
+                    set_reply=need_reply,
+                    typing=False,
+                    selected_expressions=selected_expressions,
+                    display_message=display_text,
+                )
+            receipts.append(receipt)
+            return (display_text if receipt.delivered else ""), receipts
+
         reply_text = ""
         first_replied = False
         for reply_content in reply_set.reply_data:
@@ -1350,7 +1457,13 @@ class BrainChatting:
                             request_type=request_type,
                             from_plugin=False,
                             extra_info=injection_text,
-                            interrupt_flag=self._planner_interrupt_flag,
+                            interrupt_flag=(
+                                None
+                                if runtime_capabilities_from_message(
+                                    action_planner_info.action_message
+                                ).planner_bypass
+                                else self._planner_interrupt_flag
+                            ),
                             reply_context=self._focus_reply_context(thinking_id),
                         )
 

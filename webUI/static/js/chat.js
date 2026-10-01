@@ -13,7 +13,15 @@ const ChatModule = (() => {
     const SIDEBAR_STATE_KEY = 'nachobot_sidebar_collapsed_v1';
     const DEFAULT_USER_NAME = 'WebUI';
     const API_ENDPOINT = '/api/chat/message';
+    const MEDIA_ENDPOINT = '/api/chat/media';
     const DELETE_CONVERSATION_ENDPOINT = '/api/chat/conversations';
+    const MAX_ATTACHMENTS = 8;
+    const MEDIA_LIMITS = Object.freeze({
+        image: 16 * 1024 * 1024,
+        emoji: 16 * 1024 * 1024,
+        video: 64 * 1024 * 1024,
+        file: 1 * 1024 * 1024,
+    });
     const CHAT_LAUNCH_PROFILES = Object.freeze({
         full: {
             name: '完整模式',
@@ -69,12 +77,15 @@ const ChatModule = (() => {
     let liveReconnectTimer = null;
     let profile = null;
     let ttsController = null;
+    let callController = null;
     let modalOpen = false;
     let coreRunning = false;
     let coreToggleBusy = false;
     let coreStatusRequestSerial = 0;
     let coreStatusRequestPromise = null;
     let coreStatusRefreshPending = false;
+    let pendingAttachments = [];
+    let attachmentDragDepth = 0;
     let els = {};
 
     function init() {
@@ -90,9 +101,13 @@ const ChatModule = (() => {
             clearChat: document.getElementById('chat-clear-button'),
             messages: document.getElementById('chat-messages'),
             empty: document.getElementById('chat-empty-state'),
+            tab: document.getElementById('tab-chat'),
             form: document.getElementById('chat-composer-form'),
             input: document.getElementById('chat-input'),
             send: document.getElementById('chat-send-button'),
+            attachmentButton: document.getElementById('chat-attachment-button'),
+            fileInput: document.getElementById('chat-file-input'),
+            attachmentPreview: document.getElementById('chat-attachment-preview'),
             status: document.getElementById('chat-backend-status'),
             title: document.getElementById('chat-current-title'),
                 sidebar: document.getElementById('sidebar'),
@@ -125,6 +140,16 @@ const ChatModule = (() => {
 
         loadSessions();
         profile.load();
+        callController = window.ChatCall?.create({
+            getConversation: getActiveSession,
+            getUserName: () => profile.getUserName(),
+            getConversationLabel: id => sessions.find(item => item.id === id)?.title || '当前对话',
+            getFallbackAvatar: () => profile.createBotAvatarMarkup(),
+            stopTextTTS: () => ttsController.stop(),
+            onActivityChange: active => UI.setVoiceCallActive(active),
+            toast,
+        });
+        callController?.init();
         restoreSidebarState();
         setRandomWelcomeSubtitle(els.welcomeSubtitle, WELCOME_SUBTITLES);
         bindEvents();
@@ -222,6 +247,89 @@ const ChatModule = (() => {
         els.status?.addEventListener('click', toggleCoreService);
         els.form.addEventListener('submit', handleSubmit);
 
+        els.attachmentButton?.addEventListener('click', () => {
+            if (!els.fileInput) return;
+            els.fileInput.accept = '';
+            els.fileInput.click();
+        });
+
+        els.fileInput?.addEventListener('change', () => {
+            const files = Array.from(els.fileInput.files || []);
+            addDroppedFiles(files);
+            els.fileInput.value = '';
+        });
+
+        const hasDraggedFiles = event => Array.from(event.dataTransfer?.types || []).includes('Files');
+        const isVisibleElement = element => Boolean(element && !element.hidden);
+        const isFileDropBlockedByCallUi = () => {
+            const workspace = document.getElementById('chat-workspace');
+            const callPanel = document.getElementById('chat-call-panel');
+            const startDialog = document.getElementById('chat-call-start-dialog');
+            return workspace?.dataset.callView === 'active'
+                || isVisibleElement(callPanel)
+                || isVisibleElement(startDialog);
+        };
+        const clearFileDragState = () => {
+            attachmentDragDepth = 0;
+            els.tab?.classList.remove('is-file-drag-over');
+        };
+        const blockCallUiFileDrop = event => {
+            event.preventDefault();
+            if (event.dataTransfer) event.dataTransfer.dropEffect = 'none';
+            clearFileDragState();
+        };
+
+        els.tab?.addEventListener('dragenter', event => {
+            if (!hasDraggedFiles(event)) return;
+            if (isFileDropBlockedByCallUi()) {
+                blockCallUiFileDrop(event);
+                return;
+            }
+            event.preventDefault();
+            attachmentDragDepth += 1;
+            els.tab.classList.add('is-file-drag-over');
+        });
+
+        els.tab?.addEventListener('dragover', event => {
+            if (!hasDraggedFiles(event)) return;
+            if (isFileDropBlockedByCallUi()) {
+                blockCallUiFileDrop(event);
+                return;
+            }
+            event.preventDefault();
+            if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+            els.tab.classList.add('is-file-drag-over');
+        });
+
+        els.tab?.addEventListener('dragleave', event => {
+            if (!hasDraggedFiles(event)) return;
+            if (isFileDropBlockedByCallUi()) {
+                clearFileDragState();
+                return;
+            }
+            attachmentDragDepth = Math.max(0, attachmentDragDepth - 1);
+            if (attachmentDragDepth === 0) {
+                els.tab.classList.remove('is-file-drag-over');
+            }
+        });
+
+        els.tab?.addEventListener('drop', event => {
+            if (!hasDraggedFiles(event)) return;
+            if (isFileDropBlockedByCallUi()) {
+                blockCallUiFileDrop(event);
+                return;
+            }
+            event.preventDefault();
+            clearFileDragState();
+            addDroppedFiles(Array.from(event.dataTransfer?.files || []));
+        });
+
+        els.attachmentPreview?.addEventListener('click', event => {
+            const removeButton = event.target.closest('[data-remove-attachment-id]');
+            if (!removeButton) return;
+            removePendingAttachment(removeButton.dataset.removeAttachmentId || '');
+        });
+
         els.messages.addEventListener('click', event => {
             const speechButton = event.target.closest('.chat-tts-button');
             if (speechButton && els.messages.contains(speechButton)) {
@@ -305,7 +413,168 @@ const ChatModule = (() => {
         });
     }
 
-    function startNewChat() {
+    function mediaTypeLabel(type) {
+        return type === 'image'
+            ? '图片'
+            : type === 'emoji'
+                ? '表情包'
+                : type === 'video'
+                    ? '视频'
+                    : '文件';
+    }
+
+    function formatBytes(size) {
+        const value = Number(size || 0);
+        if (value < 1024) return `${value} B`;
+        if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
+        return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
+    }
+
+    function inferDroppedMediaType(file) {
+        if (!(file instanceof File)) return 'file';
+        if (file.type.startsWith('image/')) return 'image';
+        if (file.type.startsWith('video/')) return 'video';
+        return 'file';
+    }
+
+    function addDroppedFiles(files) {
+        if (!Array.isArray(files) || files.length === 0) return;
+        const available = Math.max(0, MAX_ATTACHMENTS - pendingAttachments.length);
+        if (available <= 0) {
+            toast(`最多同时发送 ${MAX_ATTACHMENTS} 个附件`, 'error');
+            return;
+        }
+        const accepted = files.slice(0, available);
+        if (files.length > available) {
+            toast(`最多同时发送 ${MAX_ATTACHMENTS} 个附件`, 'error');
+        }
+        const grouped = { image: [], video: [], file: [] };
+        accepted.forEach(file => {
+            if (!(file instanceof File)) return;
+            grouped[inferDroppedMediaType(file)].push(file);
+        });
+        Object.entries(grouped).forEach(([type, items]) => {
+            if (items.length) addPendingFiles(items, type);
+        });
+    }
+
+    function addPendingFiles(files, type) {
+        if (!Array.isArray(files) || files.length === 0) return;
+        const mediaType = MEDIA_LIMITS[type] ? type : 'file';
+        for (const file of files) {
+            if (pendingAttachments.length >= MAX_ATTACHMENTS) {
+                toast(`最多同时发送 ${MAX_ATTACHMENTS} 个附件`, 'error');
+                break;
+            }
+            if (!(file instanceof File)) continue;
+            if ((mediaType === 'image' || mediaType === 'emoji') && !file.type.startsWith('image/')) {
+                toast(`${file.name} 不是支持的图片格式`, 'error');
+                continue;
+            }
+            if (mediaType === 'video' && !file.type.startsWith('video/')) {
+                toast(`${file.name} 不是支持的视频格式`, 'error');
+                continue;
+            }
+            const limit = MEDIA_LIMITS[mediaType];
+            if (file.size <= 0) {
+                toast(`${file.name} 内容为空`, 'error');
+                continue;
+            }
+            if (file.size > limit) {
+                toast(`${file.name} 超过 ${formatBytes(limit)} 限制`, 'error');
+                continue;
+            }
+            pendingAttachments.push({
+                id: createId(),
+                type: mediaType,
+                file,
+                name: file.name,
+                size: file.size,
+                mimeType: file.type || 'application/octet-stream',
+                previewUrl: (mediaType === 'image' || mediaType === 'emoji')
+                    ? URL.createObjectURL(file)
+                    : '',
+            });
+        }
+        renderAttachmentPreview();
+        updateSendState();
+    }
+
+    function removePendingAttachment(id) {
+        const index = pendingAttachments.findIndex(item => item.id === id);
+        if (index < 0) return;
+        const [removed] = pendingAttachments.splice(index, 1);
+        if (removed.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+        renderAttachmentPreview();
+        updateSendState();
+    }
+
+    function clearPendingAttachments() {
+        pendingAttachments.forEach(item => {
+            if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
+        });
+        pendingAttachments = [];
+        renderAttachmentPreview();
+        updateSendState();
+    }
+
+    function renderAttachmentPreview() {
+        if (!els.attachmentPreview) return;
+        if (pendingAttachments.length === 0) {
+            els.attachmentPreview.innerHTML = '';
+            els.attachmentPreview.hidden = true;
+            return;
+        }
+        els.attachmentPreview.hidden = false;
+        els.attachmentPreview.innerHTML = pendingAttachments.map(item => `
+            <div class="chat-pending-attachment">
+                ${item.previewUrl ? `<img src="${escapeText(item.previewUrl)}" alt="">` : ''}
+                <span class="chat-pending-attachment-copy">
+                    <strong>${escapeText(item.name)}</strong>
+                    <small>${mediaTypeLabel(item.type)} · ${formatBytes(item.size)}</small>
+                </span>
+                <button type="button" class="chat-pending-attachment-remove"
+                    data-remove-attachment-id="${escapeText(item.id)}" aria-label="移除附件">×</button>
+            </div>
+        `).join('');
+    }
+
+    function fileToBase64(file) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onerror = () => reject(reader.error || new Error('读取附件失败'));
+            reader.onload = () => {
+                const result = typeof reader.result === 'string' ? reader.result : '';
+                const comma = result.indexOf(',');
+                resolve(comma >= 0 ? result.slice(comma + 1) : result);
+            };
+            reader.readAsDataURL(file);
+        });
+    }
+
+    async function uploadPendingAttachment(item) {
+        const dataBase64 = await fileToBase64(item.file);
+        const response = await fetch(MEDIA_ENDPOINT, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                type: item.type,
+                name: item.name,
+                mime_type: item.mimeType,
+                data_base64: dataBase64,
+            }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            const error = new Error(data?.detail || `附件上传失败（HTTP ${response.status}）`);
+            error.status = response.status;
+            throw error;
+        }
+        return data;
+    }
+
+    async function startNewChat() {
+        if (callController && !await callController.guardConversationSwitch(null)) return;
         ttsController.stop();
         const session = createSession();
         sessions.unshift(session);
@@ -335,6 +604,8 @@ const ChatModule = (() => {
     async function deleteSession(id) {
         const session = sessions.find(item => item.id === id);
         if (!session) return;
+        if (callController?.getActiveRecord()?.conversation_id === id
+            && !await callController.guardConversationSwitch(null, 'delete')) return;
 
         const confirmed = await confirmDeleteSession(session);
         if (!confirmed) return;
@@ -463,7 +734,8 @@ const ChatModule = (() => {
         });
     }
 
-    function switchSession(id) {
+    async function switchSession(id) {
+        if (callController && !await callController.guardConversationSwitch(id)) return;
         if (!sessions.some(session => session.id === id)) return;
         ttsController.stop();
         activeSessionId = id;
@@ -476,7 +748,8 @@ const ChatModule = (() => {
     async function handleSubmit(event) {
         event.preventDefault();
         const text = els.input.value.trim();
-        if (!text) return;
+        const attachmentSnapshot = pendingAttachments.slice();
+        if (!text && attachmentSnapshot.length === 0) return;
 
         let session = getActiveSession();
         if (!session) {
@@ -486,23 +759,33 @@ const ChatModule = (() => {
         }
 
         const requestMessageId = createId();
-        addPendingRequest(session.id, requestMessageId);
-        session.messages.push({
-            id: requestMessageId,
-            role: 'user',
-            content: text,
-            createdAt: Date.now(),
-        });
-        if (session.title === '新对话') session.title = makeTitle(text);
-        session.updatedAt = Date.now();
-
-        els.input.value = '';
-        autoResizeInput();
-
         const controller = new AbortController();
-        const requestTimeout = window.setTimeout(() => controller.abort(), 10_000);
+        const requestTimeout = window.setTimeout(() => controller.abort(), 70_000);
         let requestAccepted = false;
+
         try {
+            const uploadedAttachments = [];
+            for (const item of attachmentSnapshot) {
+                uploadedAttachments.push(await uploadPendingAttachment(item));
+            }
+
+            addPendingRequest(session.id, requestMessageId);
+            session.messages.push({
+                id: requestMessageId,
+                role: 'user',
+                content: text,
+                attachments: uploadedAttachments,
+                createdAt: Date.now(),
+            });
+            if (session.title === '新对话') {
+                const titleSource = text || uploadedAttachments[0]?.name || mediaTypeLabel(uploadedAttachments[0]?.type);
+                session.title = makeTitle(titleSource || '附件消息');
+            }
+            session.updatedAt = Date.now();
+
+            els.input.value = '';
+            clearPendingAttachments();
+            autoResizeInput();
             saveSessions();
             renderAll();
             connectLiveStream(session.id);
@@ -514,6 +797,11 @@ const ChatModule = (() => {
                 body: JSON.stringify({
                     conversation_id: session.id,
                     message: text,
+                    attachments: uploadedAttachments.map(item => ({
+                        media_id: item.media_id,
+                        type: item.type,
+                        name: item.name,
+                    })),
                     request_message_id: requestMessageId,
                     user_name: profile.getUserName() || DEFAULT_USER_NAME,
                 }),
@@ -547,7 +835,7 @@ const ChatModule = (() => {
                 content: error.name === 'AbortError'
                     ? '消息发送请求超时，但聊天界面不会被锁定；请检查 WebUI 与 NachoBot Core 的连接状态。'
                     : error.status === 404
-                        ? '聊天界面已经就绪，但 NachoBot 聊天后端尚未接入。后端实现 POST /api/chat/message 后即可返回真实回复。'
+                        ? '聊天界面已经就绪，但 NachoBot 聊天后端尚未接入。'
                         : `消息提交失败：${error.message}`,
                 createdAt: Date.now(),
             });
@@ -555,8 +843,6 @@ const ChatModule = (() => {
             window.clearTimeout(requestTimeout);
             session.updatedAt = Date.now();
             saveSessions();
-            // accepted 后保留当前 DOM 中的 thinking 动画；首条 WebSocket 回复到达时
-            // onmessage -> renderAll() 会自然移除它。发送失败时则立即重绘并清除。
             if (!requestAccepted) renderAll();
             els.input.focus();
         }
@@ -585,6 +871,7 @@ const ChatModule = (() => {
         liveSocket.onmessage = event => {
             try {
                 const data = JSON.parse(event.data);
+                if (callController?.handleVoiceEvent(data) || data?.channel === 'voice') return;
                 if (data?.type !== 'message' || data.conversation_id !== liveConversationId) return;
                 const session = sessions.find(item => item.id === data.conversation_id);
                 if (!session) return;
@@ -614,8 +901,11 @@ const ChatModule = (() => {
     }
 
     function appendAssistantMessage(session, event) {
-        const content = event?.message?.content;
-        if (typeof content !== 'string' || !content.trim()) return false;
+        const content = typeof event?.message?.content === 'string' ? event.message.content : '';
+        const attachments = Array.isArray(event?.message?.attachments)
+            ? event.message.attachments.filter(item => item && typeof item === 'object')
+            : [];
+        if (!content.trim() && attachments.length === 0) return false;
 
         const backendMessageId = typeof event.message_id === 'string' ? event.message_id : '';
         if (backendMessageId && session.messages.some(message => message.backendMessageId === backendMessageId)) {
@@ -631,6 +921,7 @@ const ChatModule = (() => {
             replyToMessageId,
             role: event?.message?.role || 'assistant',
             content,
+            attachments,
             createdAt: Date.now(),
         };
 
@@ -679,7 +970,7 @@ const ChatModule = (() => {
         // 置为 disabled，也在这里持续纠正，避免 Enter 和输入事件失效。
         if (els.input) els.input.disabled = false;
         if (!els.send) return;
-        els.send.disabled = !els.input.value.trim();
+        els.send.disabled = !els.input.value.trim() && pendingAttachments.length === 0;
         els.send.classList.remove('is-busy');
     }
 
@@ -753,6 +1044,44 @@ const ChatModule = (() => {
         scrollToBottom();
     }
 
+    function safeMediaUrl(value) {
+        const url = typeof value === 'string' ? value.trim() : '';
+        if (url.startsWith('/api/chat/media/')) return url;
+        if (url.startsWith('https://') || url.startsWith('http://')) return url;
+        return '';
+    }
+
+    function renderMessageAttachments(attachments) {
+        if (!Array.isArray(attachments) || attachments.length === 0) return '';
+        const items = attachments.map(item => {
+            if (!item || typeof item !== 'object') return '';
+            const type = typeof item.type === 'string' ? item.type : '';
+            const url = safeMediaUrl(item.url);
+            if (!url || !MEDIA_LIMITS[type]) return '';
+            const safeUrl = escapeText(url);
+            const name = escapeText(item.name || mediaTypeLabel(type));
+            const size = item.size ? formatBytes(item.size) : '';
+
+            if (type === 'image' || type === 'emoji') {
+                return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer" aria-label="打开${mediaTypeLabel(type)}">
+                    <img class="${type === 'emoji' ? 'chat-media-emoji' : 'chat-media-image'}"
+                        src="${safeUrl}" alt="${name}" loading="lazy">
+                </a>`;
+            }
+            if (type === 'video') {
+                return `<video class="chat-media-video" controls preload="metadata" src="${safeUrl}"></video>`;
+            }
+            return `<a class="chat-media-file" href="${safeUrl}" target="_blank" rel="noopener noreferrer">
+                <span class="chat-media-file-icon">FILE</span>
+                <span class="chat-media-file-copy">
+                    <strong>${name}</strong>
+                    <small>${size || '打开文件'}</small>
+                </span>
+            </a>`;
+        }).filter(Boolean);
+        return items.length ? `<div class="chat-message-media">${items.join('')}</div>` : '';
+    }
+
     function createMessageElement(message) {
         const article = document.createElement('article');
         article.className = `chat-message chat-message-${message.role}`;
@@ -766,15 +1095,22 @@ const ChatModule = (() => {
         }
 
         const isUser = message.role === 'user';
+        const content = typeof message.content === 'string' ? message.content : '';
+        const contentMarkup = content.trim() ? formatContent(content) : '';
+        const mediaMarkup = renderMessageAttachments(message.attachments);
+        const speakerMarkup = !isUser && content.trim()
+            ? ttsController.createSpeakerMarkup(message)
+            : '';
+
         article.innerHTML = `
             <div class="chat-message-inner">
                 ${isUser ? '' : profile.createBotAvatarMarkup()}
                 ${isUser ? `
-                    <div class="chat-message-content">${formatContent(message.content)}</div>
+                    <div class="chat-message-content">${contentMarkup}${mediaMarkup}</div>
                 ` : `
                     <div class="chat-message-body">
                         <div class="chat-message-content">
-                            ${formatContent(message.content)}${ttsController.createSpeakerMarkup(message)}
+                            ${contentMarkup}${speakerMarkup}${mediaMarkup}
                         </div>
                     </div>
                 `}

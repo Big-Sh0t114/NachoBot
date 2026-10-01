@@ -5,6 +5,7 @@ description = "NachoBot WebUI Control Panel"
 requires-python = ">=3.11,<=3.13"
 dependencies = [
     "fastapi>=0.115.0",
+    "httpx>=0.27.0",
     "uvicorn[standard]>=0.30.0",
     "tomlkit>=0.13.0",
     "psutil>=6.0.0",

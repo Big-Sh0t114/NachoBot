@@ -6,6 +6,15 @@ const UI = (() => {
     let playlist = [];
     let currentTrackIndex = 0;
     const LAST_BGM_TRACK_STORAGE_KEY = 'nacho_last_bgm_track';
+    let voiceCallActive = false;
+    let bgmPausedForCall = false;
+    let applyVoiceCallState = null;
+
+    function setVoiceCallActive(active) {
+        voiceCallActive = Boolean(active);
+        if (voiceCallActive) bgmPausedForCall = true;
+        applyVoiceCallState?.();
+    }
 
     async function init() {
         // Inject DOM Elements
@@ -29,6 +38,8 @@ const UI = (() => {
         const bgmDisc = document.getElementById('bgm-disc');
         const bgmVolumeSlider = document.getElementById('bgm-volume-slider');
         let autoplayRetryHandler = null;
+        const playlistHideDelay = 400;
+        let playlistHideTimer = null;
         const easterEggs = window.EasterEggSystem.createOmegaPlayerController({
             bgm,
             bgmCheckbox,
@@ -38,6 +49,7 @@ const UI = (() => {
             hidePlaylist,
             miniPlayer,
             requestPlayback: () => {
+                if (bgmPausedForCall) return;
                 bgm.play().then(updatePlayBtn).catch(error => {
                     console.log('BGM Play prevented:', error);
                     armAutoplayPlayback();
@@ -57,6 +69,16 @@ const UI = (() => {
         if (bgmCheckbox) bgmCheckbox.checked = settings.bgm;
         if (interactiveCheckbox) interactiveCheckbox.checked = settings.interactive;
         if (settings.bgm) armAutoplayPlayback();
+
+        applyVoiceCallState = () => {
+            miniPlayer.hidden = voiceCallActive;
+            bgm.setPlaybackBlocked(voiceCallActive);
+            if (voiceCallActive) {
+                hidePlaylist();
+                clearAutoplayPlaybackRetry();
+            }
+        };
+        applyVoiceCallState();
 
         // 1. Startup Animation — fail gracefully if loading, decoding, or autoplay fails
         if (settings.startup) {
@@ -120,7 +142,7 @@ const UI = (() => {
         }
 
         // 4. Play BGM if enabled
-        if (settings.bgm && playlist.length > 0) {
+        if (!bgmPausedForCall && settings.bgm && playlist.length > 0) {
             bgm.play().then(() => {
                 updatePlayBtn();
             }).catch(e => {
@@ -139,8 +161,8 @@ const UI = (() => {
         }
 
         function shouldResumeBgmPlayback() {
-            return easterEggs.isActive()
-                || Boolean(settings.bgm && playlist.length > 0 && bgmCheckbox?.checked);
+            return !bgmPausedForCall && (easterEggs.isActive()
+                || Boolean(settings.bgm && playlist.length > 0 && bgmCheckbox?.checked));
         }
 
         function armAutoplayPlayback() {
@@ -177,9 +199,6 @@ const UI = (() => {
             }
         }
 
-        const playlistHideDelay = 400;
-        let playlistHideTimer = null;
-
         function clearPlaylistHideTimer() {
             if (playlistHideTimer) {
                 clearTimeout(playlistHideTimer);
@@ -206,9 +225,16 @@ const UI = (() => {
         }
 
         bgmPlayBtn.addEventListener('click', () => {
+            if (voiceCallActive) return;
+            if (easterEggs.isActive() && bgmPausedForCall) {
+                bgmPausedForCall = false;
+                bgm.play({ userInitiated: true }).catch(error => console.log('BGM Play prevented:', error));
+                return;
+            }
             if (easterEggs.handlePlayerControl()) return;
 
             if (bgm.paused) {
+                bgmPausedForCall = false;
                 bgm.play({ userInitiated: true }).catch(error => console.log('BGM Play prevented:', error));
             } else {
                 bgm.pause();
@@ -316,10 +342,11 @@ const UI = (() => {
                 });
 
                 item.addEventListener('click', () => {
-                    if (easterEggs.isActive()) return;
+                    if (voiceCallActive || easterEggs.isActive()) return;
 
                     loadTrack(idx);
                     if (settings.bgm) {
+                        bgmPausedForCall = false;
                         bgm.play({ userInitiated: true }).catch(error => console.log('BGM Play prevented:', error));
                     }
                     hidePlaylist();
@@ -338,6 +365,7 @@ const UI = (() => {
 
         if (bgmCheckbox) {
             bgmCheckbox.addEventListener('change', (e) => {
+                if (!voiceCallActive) bgmPausedForCall = false;
                 if (easterEggs.handleBgmToggle(e)) return;
 
                 settings.bgm = e.target.checked;
@@ -397,6 +425,9 @@ const UI = (() => {
             }
             #mini-player {
                 transition: all 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+            }
+            #mini-player[hidden] {
+                display: none !important;
             }
             #player-controls {
                 display: flex;
@@ -501,7 +532,7 @@ const UI = (() => {
         localStorage.setItem('nacho_ui_settings', JSON.stringify(settings));
     }
 
-    return { init };
+    return { init, setVoiceCallActive };
 })();
 
 // Initialize when DOM is ready

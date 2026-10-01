@@ -361,15 +361,16 @@ async def _send_to_target_receipt_permitted(
                 return SendReceipt(SendStatus.FAILED, stream_id, detail="cross_stream_reply")
 
             reply_user_info = getattr(reply_message, "user_info", None)
+            anchor_message = db_message_to_message_recv(reply_message)
+            anchor_message.update_chat_stream(target_stream)
             if reply_user_info is None:
-                # structured system_event 没有平台 sender，因此不能构造原生引用回复锚点。
-                # 业务层仍然是在回复该事件；发送层仅降级为普通消息，不能伪造用户。
+                # structured system_event 没有平台 sender，不能构造原生平台引用；
+                # 但仍保留逻辑 anchor，让 MessageSending 写入 reply_to_message_id，
+                # 供 WebUI 等上层正确关联到触发它的消息。
                 effective_set_reply = False
-                logger.debug("[SendAPI] 回复目标为 senderless system_event，跳过平台原生引用锚点")
+                logger.debug("[SendAPI] 回复目标为 senderless system_event，仅保留逻辑回复锚点并跳过平台原生引用")
             else:
-                anchor_message = db_message_to_message_recv(reply_message)
                 logger.info(f"[SendAPI] 找到匹配的回复消息，发送者: {reply_user_info.user_id}")
-                anchor_message.update_chat_stream(target_stream)
                 reply_to_platform_id = f"{anchor_message.message_info.platform}:{reply_user_info.user_id}"
 
         # 构建发送消息对象
@@ -654,6 +655,8 @@ async def local_media_to_stream_receipt(
     local_path: str,
     stream_id: str,
     *,
+    reply_message: Optional["DatabaseMessages"] = None,
+    set_reply: bool = False,
     storage_message: bool = False,
     show_log: bool = True,
     ack_timeout: float = 300.0,
@@ -666,6 +669,8 @@ async def local_media_to_stream_receipt(
         media_type,
         local_path,
         stream_id,
+        reply_message=reply_message,
+        set_reply=set_reply,
         storage_message=storage_message,
         show_log=show_log,
         ack_timeout=ack_timeout,

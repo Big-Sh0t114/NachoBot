@@ -278,7 +278,10 @@ class MessageRecv(Message):
                     file_url = segment.data
                     file_name = Path(file_url).name
 
-                # Check whitelist first
+                # 普通文件附件接收与 sandbox agent 的编辑权限是两件事。
+                # WebUI Chat 上传的文件来自本机受控媒体存储，随后仍会通过
+                # _save_file_to_sandbox() 复制进 sandbox_manager，因此不应要求
+                # WebUI 用户额外加入 sandbox 编辑白名单。其他平台保持原策略。
                 user_id = ""
                 if hasattr(self, "message_info") and self.message_info:
                     if self.message_info.sender_info:
@@ -286,7 +289,14 @@ class MessageRecv(Message):
                     elif self.message_info.user_info:
                         user_id = str(self.message_info.user_info.user_id)
 
-                if not sandbox_user_allowed(user_id):
+                additional_config = getattr(self.message_info, "additional_config", None)
+                is_webui_chat_file = bool(
+                    getattr(self.message_info, "platform", None) == "local"
+                    and isinstance(additional_config, dict)
+                    and additional_config.get("source") == "webui-chat"
+                )
+
+                if not is_webui_chat_file and not sandbox_user_allowed(user_id):
                     logger.warning(f"用户 {user_id} 未通过沙盒名单策略，拒绝自动保存文件: {file_name}")
                     return f"[接收到文件: {file_name}，但发送者未通过沙盒名单策略，已忽略自动保存]"
 

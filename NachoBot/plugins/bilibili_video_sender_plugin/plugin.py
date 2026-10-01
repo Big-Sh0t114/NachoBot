@@ -2087,6 +2087,32 @@ class BilibiliAutoSendHandler(BaseEventHandler):
         self._logger.error("无法获取stream_id")
         return None
 
+    def _resolve_reply_message(self, message: NachoMessages, stream_id: str):
+        """Resolve the exact source database message for logical reply anchoring."""
+        message_id = (message.message_base_info or {}).get("message_id")
+        if not message_id:
+            return None
+        try:
+            from src.common.message_repository import find_messages
+
+            matches = find_messages(
+                {
+                    "chat_id": str(stream_id),
+                    "message_id": str(message_id),
+                },
+                limit=0,
+            )
+        except Exception as e:
+            self._logger.debug(f"无法解析视频回复锚点: {e}")
+            return None
+        if isinstance(matches, (str, bytes, bytearray)) or matches is None:
+            return None
+        try:
+            resolved = list(matches)
+        except TypeError:
+            return None
+        return resolved[0] if len(resolved) == 1 else None
+
     async def _send_text(self, content: str, stream_id: str) -> bool:
         """发送文本消息"""
         try:
@@ -2095,7 +2121,13 @@ class BilibiliAutoSendHandler(BaseEventHandler):
             # 记录错误但不抛出异常，避免影响其他处理器
             return False
 
-    async def _send_video_file(self, original_path: str, converted_path: str, stream_id: str) -> bool:
+    async def _send_video_file(
+        self,
+        original_path: str,
+        converted_path: str,
+        stream_id: str,
+        reply_message=None,
+    ) -> bool:
         """Send a local video through the core media API and wait for its receipt."""
         if not os.path.exists(original_path):
             self._logger.error("视频文件不存在")
@@ -2106,6 +2138,7 @@ class BilibiliAutoSendHandler(BaseEventHandler):
                 "videofile",
                 converted_path,
                 stream_id,
+                reply_message=reply_message,
                 storage_message=False,
                 show_log=False,
             )
@@ -2173,6 +2206,8 @@ class BilibiliAutoSendHandler(BaseEventHandler):
             except Exception as e:
                 self._logger.error(f"备选方案失败：{e}")
                 return self._make_return_value(True, True, "无法获取聊天流ID")
+
+        reply_message = self._resolve_reply_message(message, stream_id)
 
         # 检查FFmpeg可用性
         ffmpeg_info = _ffmpeg_manager.check_ffmpeg_availability()
@@ -2737,7 +2772,14 @@ class BilibiliAutoSendHandler(BaseEventHandler):
                 ):
                     part_caption = f"{caption} - Part {i + 1}"
 
-                    if await self._send_video_part(original_path, converted_path, part_caption, stream_id, message):
+                    if await self._send_video_part(
+                        original_path,
+                        converted_path,
+                        part_caption,
+                        stream_id,
+                        message,
+                        reply_message=reply_message,
+                    ):
                         sent_count += 1
                         self._logger.debug(f"Part {i + 1} sent successfully")
                     else:
@@ -2817,7 +2859,12 @@ class BilibiliAutoSendHandler(BaseEventHandler):
                 self._logger.debug(f"Sending single video - original path: {path}")
                 self._logger.debug(f"Sending single video - converted path: {converted_path}")
 
-                return await self._send_video_file(path, converted_path, stream_id)
+                return await self._send_video_file(
+                    path,
+                    converted_path,
+                    stream_id,
+                    reply_message=reply_message,
+                )
 
             sent_ok = await _try_send(final_video_path)
             if not sent_ok:
@@ -2843,7 +2890,13 @@ class BilibiliAutoSendHandler(BaseEventHandler):
         return self._make_return_value(sent_ok, True, "已发送视频" if sent_ok else "视频发送失败，临时文件已保留")
 
     async def _send_video_part(
-        self, original_path: str, converted_path: str, caption: str, stream_id: str, message: NachoMessages
+        self,
+        original_path: str,
+        converted_path: str,
+        caption: str,
+        stream_id: str,
+        message: NachoMessages,
+        reply_message=None,
     ) -> bool:
         """发送视频分块片段
 
@@ -2870,7 +2923,12 @@ class BilibiliAutoSendHandler(BaseEventHandler):
                 f"Preparing to send video part: {original_path} -> {converted_path}, size: {file_size} bytes"
             )
 
-            return await self._send_video_file(original_path, converted_path, stream_id)
+            return await self._send_video_file(
+                original_path,
+                converted_path,
+                stream_id,
+                reply_message=reply_message,
+            )
 
         except Exception as e:
             self._logger.debug(f"Failed to send video part: {e}")

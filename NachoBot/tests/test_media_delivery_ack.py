@@ -12,6 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.chat.message_receive import bot as bot_module  # noqa: E402
+from src.common.data_models.database_data_model import DatabaseMessages  # noqa: E402
 from src.plugin_system.apis import send_api  # noqa: E402
 
 
@@ -70,7 +71,10 @@ def _setup(monkeypatch, sender):
         stream_id="qq:user:1",
         platform="qq",
         group_info=None,
-        user_info=SimpleNamespace(user_id="1"),
+        user_info=SimpleNamespace(
+            user_id="1",
+            to_dict=lambda: {"user_id": "1"},
+        ),
     )
     monkeypatch.setattr(send_api, "focus_coordinator", _FocusCoordinator())
     monkeypatch.setattr(send_api, "get_chat_manager", lambda: _ChatManager(stream))
@@ -78,6 +82,50 @@ def _setup(monkeypatch, sender):
     monkeypatch.setattr(send_api.MessageStorage, "update_message", staticmethod(lambda *_args: False))
     monkeypatch.setattr(bot_module.MessageStorage, "update_message", staticmethod(lambda *_args: False))
     return stream
+
+
+def test_local_media_receipt_preserves_logical_reply_anchor(monkeypatch):
+    sender = _Sender()
+    stream = _setup(monkeypatch, sender)
+    reply_message = DatabaseMessages(
+        message_id="source-message-1",
+        time=1.0,
+        chat_id=stream.stream_id,
+        processed_plain_text="send this video",
+        display_message="send this video",
+        additional_config="{}",
+        chat_info_stream_id=stream.stream_id,
+        chat_info_platform="qq",
+    )
+
+    async def scenario():
+        task = asyncio.create_task(
+            send_api.local_media_to_stream_receipt(
+                "videofile",
+                "/tmp/video.mp4",
+                stream.stream_id,
+                reply_message=reply_message,
+                show_log=False,
+                ack_timeout=1,
+            )
+        )
+        await sender.sent.wait()
+        assert sender.message.reply_to_message_id == "source-message-1"
+        serialized = sender.message.to_dict()
+        assert serialized["message_info"]["additional_config"]["reply_to_message_id"] == "source-message-1"
+        core_id = sender.message.message_info.message_id
+        await bot_module.ChatBot.echo_message_process(
+            object(),
+            {
+                "platform": "qq",
+                "content": {"type": "echo", "echo": core_id, "actual_id": "anchored"},
+            },
+        )
+        receipt = await task
+        assert receipt.delivered
+        assert receipt.message_id == "anchored"
+
+    _run(scenario())
 
 
 def test_media_receipt_waits_for_platform_echo_and_bot_updates_without_db_warning(monkeypatch):

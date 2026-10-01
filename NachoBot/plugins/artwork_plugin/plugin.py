@@ -80,7 +80,10 @@ class SendArtworkAction(BaseAction):
             return False, f"读取画作失败: {chosen_path}"
 
         # 只发送图片，不附带文字
-        sent = await self.send_image(image_base64)
+        sent = await self.send_image(
+            image_base64,
+            reply_message=self.action_message,
+        )
         if not sent:
             return False, "发送画作失败"
 

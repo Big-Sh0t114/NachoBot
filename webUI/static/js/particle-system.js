@@ -5,6 +5,14 @@ window.ParticleSystem = (() => {
     let particleAnimationId = null;
     let particleCleanup = null;
     let particleAudioSource = null;
+    const NOMINAL_FRAME_RATE = 60;
+    const MAX_FRAME_DELTA_SECONDS = 0.1;
+    const PARTICLE_FADE_PER_SECOND = 0.9;
+    const POPULATION_TRANSITIONS_PER_SECOND = 90;
+    const MAX_POPULATION_CATCH_UP = 3;
+    const SPRING_ACCELERATION_PER_SECOND_SQUARED = 0.155 * NOMINAL_FRAME_RATE * NOMINAL_FRAME_RATE;
+    const SPRING_DAMPING_PER_SECOND = -Math.log(0.79) * NOMINAL_FRAME_RATE;
+    const HEARTBEAT_DECAY_PER_SECOND = -Math.log(0.86) * NOMINAL_FRAME_RATE;
 
     function setAudioSource(source) {
         particleAudioSource = source;
@@ -22,10 +30,8 @@ window.ParticleSystem = (() => {
         let particles = [];
         const BASE_PARTICLE_COUNT = 60;
         const NORMAL_PARTICLE_LIMIT = 120;
-        let visualPulse = 0;
-        let visualIntensity = 0;
-        let currentSpeedMultiplier = 0.5;
-        let pendingHeartEchoes = [];
+        let populationTransitionBudget = 0;
+        let lastFrameTimestamp = null;
         const mouse = { x: null, y: null };
         const chatScrollContainer = document.getElementById('chat-messages');
         const mainScrollContainer = document.getElementById('main-content');
@@ -125,33 +131,39 @@ window.ParticleSystem = (() => {
             }
 
             applyHeartbeatKick(directionX, directionY, strength) {
-                this.pulseVelocityX += directionX * strength;
-                this.pulseVelocityY += directionY * strength;
+                this.pulseVelocityX += directionX * strength * NOMINAL_FRAME_RATE;
+                this.pulseVelocityY += directionY * strength * NOMINAL_FRAME_RATE;
                 this.heartbeatLevel = Math.min(1, this.heartbeatLevel + strength / 11);
             }
 
-            update(reaction, speedMultiplier = 0.5) {
+            update(reaction, speedMultiplier = 0.5, deltaSeconds = 1 / NOMINAL_FRAME_RATE) {
+                const frameScale = deltaSeconds * NOMINAL_FRAME_RATE;
                 if (this.isDying) {
-                    this.lifeAlpha -= 0.015;
+                    this.lifeAlpha -= PARTICLE_FADE_PER_SECOND * deltaSeconds;
                 } else {
-                    this.lifeAlpha += 0.015;
+                    this.lifeAlpha += PARTICLE_FADE_PER_SECOND * deltaSeconds;
                     if (this.lifeAlpha > 1) this.lifeAlpha = 1;
                 }
 
-                this.x += this.speedX * speedMultiplier;
-                this.y += this.speedY * speedMultiplier;
+                this.x += this.speedX * speedMultiplier * frameScale;
+                this.y += this.speedY * speedMultiplier * frameScale;
 
-                // 位移弹簧令整组节点向外张开后同步回到原来的结构。
-                const springStrength = 0.155;
-                const damping = 0.79;
-
-                this.pulseVelocityX += -this.pulseX * springStrength;
-                this.pulseVelocityY += -this.pulseY * springStrength;
-                this.pulseVelocityX *= damping;
-                this.pulseVelocityY *= damping;
-                this.pulseX += this.pulseVelocityX;
-                this.pulseY += this.pulseVelocityY;
-                this.heartbeatLevel *= 0.86;
+                // Substep at or below 60Hz; this keeps the spring stable at low frame rates.
+                const stepCount = Math.max(1, Math.ceil(frameScale));
+                const stepSeconds = deltaSeconds / stepCount;
+                const damping = Math.exp(-SPRING_DAMPING_PER_SECOND * stepSeconds);
+                const heartbeatDecay = Math.exp(-HEARTBEAT_DECAY_PER_SECOND * stepSeconds);
+                for (let step = 0; step < stepCount; step += 1) {
+                    this.pulseVelocityX += -this.pulseX *
+                        SPRING_ACCELERATION_PER_SECOND_SQUARED * stepSeconds;
+                    this.pulseVelocityY += -this.pulseY *
+                        SPRING_ACCELERATION_PER_SECOND_SQUARED * stepSeconds;
+                    this.pulseVelocityX *= damping;
+                    this.pulseVelocityY *= damping;
+                    this.pulseX += this.pulseVelocityX * stepSeconds;
+                    this.pulseY += this.pulseVelocityY * stepSeconds;
+                    this.heartbeatLevel *= heartbeatDecay;
+                }
 
                 if (
                     Math.abs(this.pulseX) < 0.01 &&
@@ -178,7 +190,7 @@ window.ParticleSystem = (() => {
 
                     if (distance > 0 && distance < 120) {
                         const force = (120 - distance) / 120;
-                        const repel = force * 3;
+                        const repel = force * 3 * frameScale;
                         this.x -= (dx / distance) * repel;
                         this.y -= (dy / distance) * repel;
                     }
@@ -192,6 +204,7 @@ window.ParticleSystem = (() => {
                     0.78,
                     0.38 +
                     reaction.intensity * 0.08 +
+                    reaction.high * 0.08 +
                     this.heartbeatLevel * 0.16
                 ) * Math.max(0, this.lifeAlpha);
                 const defaultHue =
@@ -206,7 +219,8 @@ window.ParticleSystem = (() => {
                     ? rainbowHue
                     : defaultHue;
 
-                ctx.fillStyle = `hsla(${hue}, 88%, 60%, ${alpha})`;
+                const lightness = 60 + reaction.high * 8;
+                ctx.fillStyle = `hsla(${hue}, 88%, ${lightness}%, ${alpha})`;
                 ctx.beginPath();
                 ctx.arc(this.drawX, this.drawY, size, 0, Math.PI * 2);
                 ctx.fill();
@@ -318,7 +332,7 @@ window.ParticleSystem = (() => {
             }
         }
 
-        function triggerClusterHeartbeat(reaction, now) {
+        function triggerClusterHeartbeat(reaction) {
             const excludedParticles = new Set();
 
             // 普通鼓点触发一个局部节点群；强低频时同时触发第二个节点群。
@@ -339,41 +353,18 @@ window.ParticleSystem = (() => {
                 reaction.intensity * 3.0;
 
             for (const cluster of clusters) {
-                applyClusterKick(cluster, primaryStrength);
+                applyClusterKick(cluster, primaryStrength * reaction.pulse);
             }
-
-            // 约 120ms 后补一个较弱的第二次搏动，形成“咚—咚”的心跳感。
-            if (clusters.length > 0) {
-                pendingHeartEchoes.push({
-                    dueAt: now + 120,
-                    clusters,
-                    strength: primaryStrength * 0.43,
-                });
-
-                // 防止极密集音乐导致待处理回声无限堆积。
-                if (pendingHeartEchoes.length > 6) {
-                    pendingHeartEchoes = pendingHeartEchoes.slice(-6);
-                }
-            }
-        }
-
-        function processHeartbeatEchoes(now) {
-            if (pendingHeartEchoes.length === 0) return;
-
-            const remaining = [];
-            for (const echo of pendingHeartEchoes) {
-                if (now >= echo.dueAt) {
-                    for (const cluster of echo.clusters) {
-                        applyClusterKick(cluster, echo.strength);
-                    }
-                } else {
-                    remaining.push(echo);
-                }
-            }
-            pendingHeartEchoes = remaining;
         }
 
         function animate(now = performance.now()) {
+            const timestamp = Number.isFinite(now) ? now : performance.now();
+            const elapsed = lastFrameTimestamp === null
+                ? 1 / NOMINAL_FRAME_RATE
+                : Math.max(0, (timestamp - lastFrameTimestamp) / 1000);
+            const deltaSeconds = Math.min(MAX_FRAME_DELTA_SECONDS, elapsed);
+            lastFrameTimestamp = timestamp;
+
             const audioFrame = particleAudioSource?.getReactiveFrame?.() || {
                 bass: 0,
                 mid: 0,
@@ -384,77 +375,78 @@ window.ParticleSystem = (() => {
             };
             const easterEggEffects = window.EasterEggSystem.getParticleEffects();
             const { rainbowActive, reactiveMultiplier } = easterEggEffects;
+            const scaleStrength = value => Number.isFinite(value)
+                ? Math.min(1, Math.max(0, value * reactiveMultiplier))
+                : 0;
             const reactiveFrame = {
                 ...audioFrame,
-                bass: Math.min(1, audioFrame.bass * reactiveMultiplier),
-                mid: Math.min(1, audioFrame.mid * reactiveMultiplier),
-                high: Math.min(1, audioFrame.high * reactiveMultiplier),
-                intensity: Math.min(
-                    1,
-                    audioFrame.intensity * reactiveMultiplier
-                ),
-                pulse: Math.min(1, audioFrame.pulse * reactiveMultiplier),
+                bass: scaleStrength(audioFrame.bass),
+                mid: scaleStrength(audioFrame.mid),
+                high: scaleStrength(audioFrame.high),
+                intensity: scaleStrength(audioFrame.intensity),
+                pulse: scaleStrength(audioFrame.pulse),
+                beat: Boolean(audioFrame.beat),
             };
 
-            if (reactiveFrame.beat) {
-                visualPulse = 1;
-                triggerClusterHeartbeat(reactiveFrame, now);
-            } else {
-                const pulseRate =
-                    reactiveFrame.pulse > visualPulse ? 0.55 : 0.12;
-                visualPulse +=
-                    (reactiveFrame.pulse - visualPulse) * pulseRate;
+            if (reactiveFrame.beat && reactiveFrame.pulse > 0) {
+                triggerClusterHeartbeat(reactiveFrame);
             }
-
-            processHeartbeatEchoes(now);
-
-            visualIntensity +=
-                (reactiveFrame.intensity - visualIntensity) * 0.12;
 
             const reaction = {
                 ...reactiveFrame,
-                pulse: visualPulse,
-                intensity: visualIntensity,
                 particleLimit: easterEggEffects.particleLimit ?? NORMAL_PARTICLE_LIMIT,
                 rainbowActive,
-                rainbowPhase: (now * 0.08) % 360,
+                rainbowPhase: (timestamp * 0.08) % 360,
             };
 
-            // 线性映射：将 0.5~1.0 之间的响度直接线性放大到 0~1.0，比二次方更敏感
-            const activeIntensity = Math.min(1, Math.max(0, reaction.intensity - 0.45) * 2.5);
-            const intensityCurve = activeIntensity; // 取消二次方，使用线性响应
+            // The analyser already provides a time-smoothed normalized intensity.
+            const speedMultiplier = 0.45 + reaction.intensity + reaction.mid * 0.45;
 
-            const targetSpeedMultiplier = 0.5 + intensityCurve * 1.0;
-            currentSpeedMultiplier += (targetSpeedMultiplier - currentSpeedMultiplier) * 0.02;
-
-            const particleLimit = reaction.particleLimit;
-            const targetParticleCount =
-                BASE_PARTICLE_COUNT +
-                Math.floor(
-                    intensityCurve *
-                    (particleLimit - BASE_PARTICLE_COUNT)
-                );
+            const particleLimit = Math.max(BASE_PARTICLE_COUNT, reaction.particleLimit);
+            const targetParticleCount = Math.min(
+                particleLimit,
+                BASE_PARTICLE_COUNT + Math.floor(
+                    reaction.intensity * (particleLimit - BASE_PARTICLE_COUNT) +
+                    reaction.mid * 8
+                )
+            );
 
             let aliveCount = 0;
             for (const p of particles) {
                 if (!p.isDying) aliveCount++;
             }
 
-            if (aliveCount < targetParticleCount) {
-                particles.push(new Particle());
-                if (aliveCount + 1 < targetParticleCount) particles.push(new Particle());
-            } else if (
-                aliveCount > targetParticleCount &&
-                aliveCount > BASE_PARTICLE_COUNT
-            ) {
-                let killed = 0;
-                for (let i = particles.length - 1; i >= 0; i--) {
-                    if (!particles[i].isDying) {
-                        particles[i].isDying = true;
-                        killed++;
-                        if (killed >= 2) break;
+            const populationDifference = targetParticleCount - aliveCount;
+            if (populationDifference !== 0) {
+                populationTransitionBudget = Math.min(
+                    MAX_POPULATION_CATCH_UP,
+                    populationTransitionBudget + deltaSeconds * POPULATION_TRANSITIONS_PER_SECOND
+                );
+                const transitionCount = Math.min(
+                    Math.abs(populationDifference),
+                    Math.floor(populationTransitionBudget)
+                );
+                populationTransitionBudget -= transitionCount;
+
+                if (populationDifference > 0) {
+                    for (let index = 0; index < transitionCount; index += 1) {
+                        particles.push(new Particle());
                     }
+                } else {
+                    let killed = 0;
+                    const killLimit = Math.min(
+                        transitionCount,
+                        Math.max(0, aliveCount - BASE_PARTICLE_COUNT)
+                    );
+                    for (let i = particles.length - 1; i >= 0 && killed < killLimit; i -= 1) {
+                        if (particles[i].isDying) continue;
+                        particles[i].isDying = true;
+                        killed += 1;
+                    }
+                    populationTransitionBudget -= transitionCount - killed;
                 }
+            } else {
+                populationTransitionBudget = 0;
             }
 
             for (let i = particles.length - 1; i >= 0; i--) {
@@ -469,6 +461,7 @@ window.ParticleSystem = (() => {
             const connectionDistance =
                 100 +
                 reaction.intensity * 8 +
+                reaction.bass * 16 +
                 reaction.pulse * 14;
             const lineWidth =
                 0.8 +
@@ -481,7 +474,7 @@ window.ParticleSystem = (() => {
 
             for (let i = 0; i < particles.length; i += 1) {
                 const particle = particles[i];
-                particle.update(reaction, currentSpeedMultiplier);
+                particle.update(reaction, speedMultiplier, deltaSeconds);
                 particle.draw(reaction);
 
                 for (let j = i + 1; j < particles.length; j += 1) {
@@ -541,7 +534,6 @@ window.ParticleSystem = (() => {
             mainScrollContainer?.removeEventListener('scroll', onMainScroll);
             document.removeEventListener('mousemove', onMouseMove);
             document.removeEventListener('mouseleave', onMouseLeave);
-            pendingHeartEchoes = [];
         };
 
         animate();

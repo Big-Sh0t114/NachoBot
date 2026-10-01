@@ -9,6 +9,7 @@
 """
 
 import asyncio
+import json
 import traceback
 from typing import Tuple, Any, Dict, List, Optional, TYPE_CHECKING
 from rich.traceback import install
@@ -25,6 +26,11 @@ from src.chat.focus.reply_context import (
     ReplyContextRequest,
     assemble_reply_context,
     release_reply_context,
+)
+from src.chat.runtime_capabilities import (
+    runtime_capabilities_from_message,
+    runtime_capabilities_from_stream,
+    scoped_runtime_capabilities,
 )
 from src.plugin_system.base.component_types import ActionInfo
 
@@ -155,20 +161,46 @@ async def generate_reply(
         if not reply_reason and action_data:
             reply_reason = action_data.get("reason", "")
 
+        # Bind generation helpers to the exact triggering message. The chat
+        # stream's current context may advance while this asynchronous turn is
+        # in flight.
+        request_capabilities = (runtime_capabilities_from_message(reply_message) if reply_message is not None
+                                else runtime_capabilities_from_stream(replyer.chat_stream))
+        if request_capabilities.reply_controls:
+            schema = {
+                "reply": "user-facing reply text",
+                "emotion": list(request_capabilities.control_emotions),
+                "action": list(request_capabilities.control_actions),
+            }
+            control_instruction = (
+                "Return exactly one JSON object with keys reply, emotion, and action. "
+                "Keep the complete natural response in reply. Choose emotion and action only "
+                "from the supplied values; use an empty string when no listed choice applies. "
+                "Do not add markdown or text outside the JSON object.\n"
+                f"Allowed schema: {json.dumps(schema, ensure_ascii=False)}"
+            )
+            extra_info = f"{extra_info}\n\n{control_instruction}".strip()
+
+        if request_capabilities.interruption_feedback_count >= 3:
+            extra_info = (f"{extra_info}\n\n用户在当前输入中短时间内多次打断了你的回复。"
+                          "请结合人设，在这次回复里简短自然地回应这个行为，并继续回应用户最新内容。"
+                          "避免训斥、重复提醒或声称用户听完了被打断的内容。").strip()
+
         # 调用回复器生成回复
-        success, llm_response = await replyer.generate_reply_with_context(
-            extra_info=extra_info,
-            person_profile_block=person_profile_block,
-            available_actions=available_actions,
-            chosen_actions=chosen_actions,
-            enable_tool=enable_tool,
-            reply_message=reply_message,
-            reply_reason=reply_reason,
-            from_plugin=from_plugin,
-            stream_id=canonical_chat_id,
-            interrupt_flag=interrupt_flag,
-            prompt_context=prompt_context,
-        )
+        with scoped_runtime_capabilities(canonical_chat_id, request_capabilities):
+            success, llm_response = await replyer.generate_reply_with_context(
+                extra_info=extra_info,
+                person_profile_block=person_profile_block,
+                available_actions=available_actions,
+                chosen_actions=chosen_actions,
+                enable_tool=enable_tool,
+                reply_message=reply_message,
+                reply_reason=reply_reason,
+                from_plugin=from_plugin,
+                stream_id=canonical_chat_id,
+                interrupt_flag=interrupt_flag,
+                prompt_context=prompt_context,
+            )
         if llm_response is not None:
             llm_response.context_refs = list(acquired_refs)
         if not success:
@@ -184,8 +216,6 @@ async def generate_reply(
             is_json_envelope = False
             if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
                 try:
-                    import json
-
                     _ = json.loads(text_for_json_check[start_idx : end_idx + 1], strict=False)
                     is_json_envelope = True
                 except Exception:

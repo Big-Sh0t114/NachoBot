@@ -14,7 +14,13 @@ from src.common.logger import get_logger
 from src.common.data_models.info_data_model import ActionPlannerInfo
 from src.common.data_models.message_data_model import ReplyContentType
 from src.chat.message_receive.chat_stream import ChatStream, get_chat_manager
-from src.chat.runtime_capabilities import runtime_capabilities_from_stream
+from src.chat.runtime_capabilities import (
+    classify_runtime_message_batch,
+    planner_target_eligible,
+    runtime_capabilities_from_message,
+    runtime_capabilities_from_stream,
+)
+from src.chat.json_reply_delivery import prepare_json_envelope_delivery as _prepare_json_envelope_delivery
 from src.chat.utils.prompt_builder import global_prompt_manager
 from src.chat.utils.timer_calculator import Timer
 from src.chat.planner_actions.planner import ActionPlanner
@@ -97,84 +103,6 @@ install(extra_lines=3)
 # 注释：原来的动作修改超时常量已移除，因为改为顺序执行
 
 logger = get_logger("hfc")  # Logger Name Changed
-
-
-def _prepare_json_envelope_delivery(
-    full_text: str,
-    *,
-    tts_language: str = "",
-) -> tuple[str, dict[str, str] | None]:
-    """Project an adapter JSON envelope into display text and explicit TTS.
-
-    ``reply`` remains the platform-owned transport envelope so adapters such as
-    Bilibili can still apply Live2D controls. Speech is materialized only when
-    the model emitted an explicit ``tts_text`` field. The legacy bilingual
-    ``<JP>/<ZH>`` form is accepted only for streams that explicitly enable a
-    TTS language, and is converted into that same field-driven representation.
-    """
-
-    display_text = full_text
-    candidate = str(full_text or "").strip()
-    start = candidate.find("{")
-    end = candidate.rfind("}")
-    if start < 0 or end <= start:
-        return display_text, None
-
-    try:
-        envelope = json.loads(candidate[start : end + 1], strict=False)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return display_text, None
-    if not isinstance(envelope, dict) or not isinstance(envelope.get("reply"), str):
-        return display_text, None
-
-    reply_text = envelope["reply"].strip()
-    display_text = reply_text or full_text
-    language = str(tts_language or "").strip().lower()
-    if language not in {"ja", "zh"}:
-        language = ""
-
-    raw_tts = envelope.get("tts_text")
-    segment_language = language
-    if isinstance(raw_tts, dict):
-        tts_text = str(raw_tts.get("text") or "").strip()
-        requested_language = str(raw_tts.get("lang") or "").strip().lower()
-        if requested_language in {"ja", "zh"}:
-            segment_language = requested_language
-    elif isinstance(raw_tts, str):
-        tts_text = raw_tts.strip()
-    else:
-        tts_text = ""
-
-    transport_text = full_text
-    if not tts_text and language:
-        normalized = (
-            reply_text.replace("＜", "<")
-            .replace("＞", ">")
-            .replace("／", "/")
-        )
-        jp_parts = re.findall(r"<JP>(.*?)</JP>", normalized, flags=re.IGNORECASE | re.DOTALL)
-        zh_parts = re.findall(r"<ZH>(.*?)</ZH>", normalized, flags=re.IGNORECASE | re.DOTALL)
-        japanese = "".join(part.strip() for part in jp_parts if part.strip())
-        chinese = "".join(part.strip() for part in zh_parts if part.strip())
-        if japanese or chinese:
-            display_text = chinese or japanese
-            tts_text = (japanese or chinese) if language == "ja" else (chinese or japanese)
-            normalized_envelope = dict(envelope)
-            normalized_envelope["reply"] = display_text
-            transport_text = json.dumps(normalized_envelope, ensure_ascii=False)
-
-    if not tts_text:
-        return display_text, None
-
-    payload = {
-        "text": tts_text,
-        # The adapter still receives its structured reply/control envelope,
-        # while Core stores the clean ``display_message`` supplied by caller.
-        "display_text": transport_text,
-    }
-    if segment_language:
-        payload["lang"] = segment_language
-    return display_text, payload
 
 
 class HeartFChatting:
@@ -562,6 +490,12 @@ class HeartFChatting:
 
             # 再过滤被屏蔽用户的消息
             recent_messages_list = self._filter_blocked_users(recent_messages_list, caller="loopbody")
+            runtime_batch = classify_runtime_message_batch(
+                recent_messages_list,
+                bot_user_id=str(global_config.bot.qq_account),
+                is_system_event=self._get_system_event,
+            )
+            has_direct_reply_input = bool(runtime_batch.direct_messages)
 
             # structured system_event 是环境事件；不能受 no_reply_until_call
             # 或普通消息 talk_threshold 随机节流影响。普通会话交给 Planner，
@@ -600,7 +534,7 @@ class HeartFChatting:
                         )
 
             # !处理no_reply_until_call逻辑
-            if self.no_reply_until_call and not focus_requires_observe:
+            if self.no_reply_until_call and not focus_requires_observe and not has_direct_reply_input:
                 for message in recent_messages_list:
                     if (
                         message.is_mentioned
@@ -619,11 +553,15 @@ class HeartFChatting:
             # !此处使at或者提及必定回复
             mentioned_message = None
             for message in recent_messages_list:
-                if (message.is_mentioned or message.is_at) and global_config.chat.mentioned_bot_reply:
+                if (
+                    planner_target_eligible(message)
+                    and (message.is_mentioned or message.is_at)
+                    and global_config.chat.mentioned_bot_reply
+                ):
                     mentioned_message = message
 
             # *控制频率用
-            if focus_requires_observe:
+            if focus_requires_observe or has_direct_reply_input:
                 await self._observe(recent_messages_list=recent_messages_list, focus_turn=focus_turn)
             elif mentioned_message:
                 await self._observe(
@@ -663,6 +601,23 @@ class HeartFChatting:
     @staticmethod
     def _focus_member_bypasses_planner(member: FocusMember) -> bool:
         return member.planner_bypass
+
+    @staticmethod
+    def _capability_direct_reply_actions(
+        messages: tuple[Any, ...],
+        available_actions: Dict[str, ActionInfo],
+        action_data: Optional[dict] = None,
+    ) -> list[ActionPlannerInfo]:
+        return [
+            ActionPlannerInfo(
+                action_type="reply",
+                reasoning="Adapter capability: direct Replyer response",
+                action_data=dict(action_data or {}),
+                action_message=message,
+                available_actions=available_actions,
+            )
+            for message in messages
+        ]
 
     @staticmethod
     def _is_focus_switch_target_turn(
@@ -1076,6 +1031,7 @@ class HeartFChatting:
     ) -> bool:  # sourcery skip: merge-else-if-into-elif, remove-redundant-if
         if recent_messages_list is None:
             recent_messages_list = []
+        direct_reply_actions: list[ActionPlannerInfo] = []
 
         # 刷新上下文以确保获取最新的模板信息
         get_chat_manager().get_stream(self.stream_id)
@@ -1125,12 +1081,12 @@ class HeartFChatting:
             # Bypass remains an adapter capability.  A system event in that exact
             # unread batch is sent straight to Replyer; it must not be converted
             # into a planner prompt merely because it is senderless.
-            bypass_session = capabilities.planner_bypass
-            # Sender-bearing envelopes are rejected at Bot ingress.  If a
-            # hand-built/recovered malformed row still reaches this layer,
-            # keep it on the ordinary Planner path rather than granting it the
-            # senderless Bilibili direct-reply capability.
-            bypass_planner = bool(bypass_session and not sender_bearing_event)
+            runtime_batch = classify_runtime_message_batch(
+                recent_messages_list,
+                bot_user_id=str(global_config.bot.qq_account),
+                is_system_event=self._get_system_event,
+            )
+            bypass_planner = runtime_batch.planner_bypass and not sender_bearing_event
             focus_switch_target_turn = self._is_focus_switch_target_turn(
                 focus_turn,
                 recent_messages_list,
@@ -1139,7 +1095,7 @@ class HeartFChatting:
 
             # 系统事件属于环境变化而不是强制应答的用户请求，因此始终允许 no_reply。
             allow_no_reply = True if has_system_event else not focus_switch_target_turn
-            if self._should_use_notice_shortcut(
+            if not runtime_batch.direct_messages and self._should_use_notice_shortcut(
                 recent_messages_list,
                 capabilities.notice_actions,
             ):
@@ -1221,6 +1177,11 @@ class HeartFChatting:
                     truncate=True,
                     show_actions=True,
                 )
+                message_id_list = [
+                    (message_id, message)
+                    for message_id, message in message_id_list
+                    if planner_target_eligible(message)
+                ]
                 if promise_snippets:
                     promise_block = "\n".join(["[约定缓存]"] + promise_snippets)
                     chat_content_block = f"{promise_block}\n----\n{chat_content_block}"
@@ -1345,30 +1306,16 @@ class HeartFChatting:
 
                 cycle_timers["Planner前准备"] = time.perf_counter() - pre_planner_started_at
 
+                direct_reply_actions = self._capability_direct_reply_actions(
+                    runtime_batch.direct_messages,
+                    available_actions,
+                )
                 if bypass_planner:
-                    logger.info(f"{self.log_prefix} [HFC] Bypassing Planner for {self.chat_stream.platform}")
-
-                    # An event in the exact unread batch is itself the reply target;
-                    # actor metadata never becomes a user sender.  Ordinary bypass
-                    # messages retain the historical latest non-bot target rule.
+                    logger.info(f"{self.log_prefix} [HFC] Bypassing Planner for declared trigger messages")
                     bot_id = str(global_config.bot.qq_account)
-                    if latest_system_event_message is not None:
-                        target_msg = latest_system_event_message
-                    else:
-                        target_msg = None
-                        for msg in reversed(message_list_before_now):
-                            user_info = getattr(msg, "user_info", None)
-                            user_id = getattr(user_info, "user_id", None) if user_info is not None else None
-                            if not user_id:
-                                continue
-                            if str(user_id) != bot_id:
-                                target_msg = msg
-                                break
-                    if target_msg is None:
-                        logger.info(f"{self.log_prefix} [HFC] No non-bot message found, skipping reply")
-                        return True
 
-                    # Summarize accumulated messages for any direct-reply session.
+                    # Preserve the existing backlog summary while keeping every
+                    # direct action bound to its exact trigger message.
                     bypass_extra_info = ""
                     if recent_messages_list and len(recent_messages_list) > 1:
                         pending_lines = []
@@ -1398,16 +1345,12 @@ class HeartFChatting:
                             logger.info(
                                 f"{self.log_prefix} [HFC] Bypass: {len(pending_lines)} pending messages detected"
                             )
-
-                    action_to_use_info = [
-                        ActionPlannerInfo(
-                            action_type="reply",
-                            reasoning="Adapter capability: direct reply",
-                            action_data={"bypass_extra_info": bypass_extra_info} if bypass_extra_info else {},
-                            action_message=target_msg,
-                            available_actions=available_actions,
-                        )
-                    ]
+                    action_data = {"bypass_extra_info": bypass_extra_info} if bypass_extra_info else {}
+                    action_to_use_info = self._capability_direct_reply_actions(
+                        runtime_batch.direct_messages,
+                        available_actions,
+                        action_data,
+                    )
                 else:
                     async def build_current_planner_prompt():
                         with Timer("Planner Prompt构建", cycle_timers):
@@ -1431,36 +1374,57 @@ class HeartFChatting:
                             EventType.ON_PLAN, None, prompt_info[0], None, self.chat_stream.stream_id
                         )
                     if not continue_flag:
-                        return False
-                    if modified_message and modified_message._modify_flags.modify_llm_prompt:
-                        prompt_info = (modified_message.llm_prompt, prompt_info[1])
+                        if not direct_reply_actions:
+                            return False
+                        logger.info(f"{self.log_prefix} ON_PLAN stopped Planner; preserving direct Replyer actions")
+                        action_to_use_info = []
+                    else:
+                        if modified_message and modified_message._modify_flags.modify_llm_prompt:
+                            prompt_info = (modified_message.llm_prompt, prompt_info[1])
 
-                    with Timer("规划器", cycle_timers):
-                        # 获取当前有效的屏蔽用户ID集合传递给规划器
-                        _active_blocked = (
-                            {uid for uid, exp in self.blocked_users.items() if time.time() <= exp}
-                            if self.blocked_users
-                            else None
-                        )
-                        # 创建打断信号（仅用于 reply 动作，Planner 不受打断）
-                        interrupt_flag = asyncio.Event()
-                        self._planner_interrupt_flag = interrupt_flag
+                        # Keep Planner itself non-interruptible in HeartF, but
+                        # let the eventual ordinary Replyer observe new messages.
+                        self._planner_interrupt_flag = asyncio.Event()
                         self._planner_interrupt_requested = False
-                        if focus_gate_stayed:
-                            with suppress_focus_planner_context():
-                                action_to_use_info, _ = await self.action_planner.plan(
-                                    loop_start_time=self.last_read_time,
-                                    available_actions=available_actions,
-                                    blocked_user_ids=_active_blocked,
-                                    allow_no_reply=allow_no_reply,
-                                )
-                        else:
-                            action_to_use_info, _ = await self.action_planner.plan(
-                                loop_start_time=self.last_read_time,
-                                available_actions=available_actions,
-                                blocked_user_ids=_active_blocked,
-                                allow_no_reply=allow_no_reply,
+                        with Timer("规划器", cycle_timers):
+                            # 获取当前有效的屏蔽用户ID集合传递给规划器
+                            _active_blocked = (
+                                {uid for uid, exp in self.blocked_users.items() if time.time() <= exp}
+                                if self.blocked_users
+                                else None
                             )
+                            try:
+                                if focus_gate_stayed:
+                                    with suppress_focus_planner_context():
+                                        action_to_use_info, _ = await self.action_planner.plan(
+                                            loop_start_time=self.last_read_time,
+                                            available_actions=available_actions,
+                                            blocked_user_ids=_active_blocked,
+                                            allow_no_reply=allow_no_reply,
+                                        )
+                                else:
+                                    action_to_use_info, _ = await self.action_planner.plan(
+                                        loop_start_time=self.last_read_time,
+                                        available_actions=available_actions,
+                                        blocked_user_ids=_active_blocked,
+                                        allow_no_reply=allow_no_reply,
+                                    )
+                            except ReqAbortException:
+                                if not direct_reply_actions:
+                                    raise
+                                logger.info(f"{self.log_prefix} Planner interrupted; preserving direct Replyer actions")
+                                action_to_use_info = []
+                            except Exception:
+                                if not direct_reply_actions:
+                                    raise
+                                logger.exception(f"{self.log_prefix} Planner failed; preserving direct Replyer actions")
+                                action_to_use_info = []
+
+
+            if not bypass_planner and direct_reply_actions and not any(
+                action.action_type == SWITCH_CHAT_ACTION for action in action_to_use_info
+            ):
+                action_to_use_info.extend(direct_reply_actions)
 
             fenced_actions = self._fence_focus_event_only_actions(
                 focus_turn,
@@ -1489,7 +1453,12 @@ class HeartFChatting:
                     has_reply = True
                     break
 
-            if not terminal_switch_selected and not has_reply and force_reply_message:
+            if (
+                not terminal_switch_selected
+                and not has_reply
+                and force_reply_message
+                and planner_target_eligible(force_reply_message)
+            ):
                 action_to_use_info.append(
                     ActionPlannerInfo(
                         action_type="reply",
@@ -1893,7 +1862,8 @@ class HeartFChatting:
             receipts.append(receipt)
             return ("Filtered" if receipt.delivered else ""), receipts
 
-        delivery_mode = runtime_capabilities_from_stream(self.chat_stream).reply_delivery
+        delivery_capabilities = runtime_capabilities_from_message(message_data)
+        delivery_mode = delivery_capabilities.reply_delivery
         if delivery_mode == "json_envelope":
             # The adapter owns the envelope semantics.  Core preserves it as a
             # single transport message and only reads the generic `reply`
@@ -1906,7 +1876,7 @@ class HeartFChatting:
             if not full_text:
                 return "", receipts
 
-            capabilities = runtime_capabilities_from_stream(self.chat_stream)
+            capabilities = delivery_capabilities
             display_text, tts_payload = _prepare_json_envelope_delivery(
                 full_text,
                 tts_language=capabilities.tts_language,
@@ -2142,7 +2112,9 @@ class HeartFChatting:
                             chat_id=self.chat_stream.stream_id, message_text=message_text_for_injection
                         )
 
-                        capabilities = runtime_capabilities_from_stream(self.chat_stream)
+                        capabilities = runtime_capabilities_from_message(
+                            action_planner_info.action_message
+                        )
                         person_profile_block = await self._build_low_latency_person_profile_block(
                             action_planner_info.action_message,
                         )
@@ -2157,6 +2129,9 @@ class HeartFChatting:
                             global_config.chinese_typo.enable if hasattr(global_config, "chinese_typo") else True
                         )
                         current_enable_typo = configured_typo and capabilities.typo_enabled
+                        trigger_capabilities = runtime_capabilities_from_message(
+                            action_planner_info.action_message
+                        )
 
                         success, llm_response = await generator_api.generate_reply(
                             chat_stream=self.chat_stream,
@@ -2170,7 +2145,9 @@ class HeartFChatting:
                             from_plugin=False,
                             extra_info=injection_text,
                             person_profile_block=person_profile_block,
-                            interrupt_flag=self._planner_interrupt_flag,
+                            interrupt_flag=(
+                                None if trigger_capabilities.planner_bypass else self._planner_interrupt_flag
+                            ),
                             reply_context=self._focus_reply_context(thinking_id),
                         )
 
@@ -3048,7 +3025,7 @@ class HeartFChatting:
         action_message,
     ) -> str:
         """Build a bounded-latency profile block when requested by the adapter."""
-        capabilities = runtime_capabilities_from_stream(self.chat_stream)
+        capabilities = runtime_capabilities_from_message(action_message)
         if capabilities.person_profile_mode != "low_latency" or action_message is None:
             return ""
         timeout = capabilities.person_profile_timeout_seconds

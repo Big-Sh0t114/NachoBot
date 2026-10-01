@@ -164,7 +164,7 @@ class TTSManager:
             await self._cleanup_task
         self._cleanup_task = None
 
-    async def status(self) -> dict[str, Any]:
+    async def status(self, *, strict: bool = False) -> dict[str, Any]:
         """Return readiness observed by Core for the public 9880 TTS Runtime."""
         try:
             core_url = _get_core_base_url()
@@ -188,7 +188,7 @@ class TTSManager:
                 core_token,
             )
         except (HTTPError, URLError, OSError, TimeoutError, ValueError) as exc:
-            if self._is_transport_error(exc):
+            if self._is_transport_error(exc) and not strict:
                 cached = self._recent_ready_status_after_transport_failure(
                     core_url,
                     core_token,
@@ -385,7 +385,7 @@ class TTSManager:
         cached["error"] = "Core 健康检查暂时不可用"
         return cached
 
-    async def generate(self, text: str) -> tuple[Path, bool]:
+    async def generate(self, text: str, *, strict: bool = False) -> tuple[Path, bool]:
         """Return a cached/generated WAV path and whether it was a cache hit."""
         normalized_text = str(text or "").strip()
         if not normalized_text:
@@ -401,7 +401,7 @@ class TTSManager:
         lock = self._locks.setdefault(cache_key, asyncio.Lock())
         try:
             async with lock:
-                service_status = await self.status()
+                service_status = await self.status(strict=strict)
                 if not service_status["ready"]:
                     raise TTSUnavailableError(
                         service_status.get("error") or "TTS 服务未就绪"

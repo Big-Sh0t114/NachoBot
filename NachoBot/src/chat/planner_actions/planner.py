@@ -32,6 +32,7 @@ from src.chat.focus.coordinator import focus_coordinator
 from src.chat.focus.switch_action import SWITCH_CHAT_ACTION, normalize_switch_action_data
 from src.chat.focus.switch_eligibility import can_offer_switch_chat
 from src.chat.focus.switch_planner import render_switch_planner_context
+from src.chat.runtime_capabilities import planner_target_eligible
 from src.plugin_system.base.component_types import ActionInfo, ComponentType, ActionActivationType
 from src.plugin_system.core.component_registry import component_registry
 
@@ -398,8 +399,12 @@ class ActionPlanner:
                 or str(getattr(msg.user_info, "user_id", "")) not in blocked_user_ids
             ]
         focus_switch_context = can_offer_switch_chat(focus_coordinator, self.chat_id)
-        if allow_no_reply and message_list_before_now and not focus_switch_context:
-            latest_message = message_list_before_now[-1]
+        target_messages = [
+            message for message in message_list_before_now
+            if planner_target_eligible(message)
+        ]
+        if allow_no_reply and target_messages and not focus_switch_context:
+            latest_message = target_messages[-1]
             if _has_url_message(getattr(latest_message, "processed_plain_text", "") or "") and not _is_bot_message(
                 latest_message
             ):
@@ -444,6 +449,13 @@ class ActionPlanner:
             truncate=True,
             show_actions=True,
         )
+        # Keep complete chat_content_block context, but only allow messages
+        # without an explicit direct-reply capability as action targets.
+        message_id_list = [
+            (message_id, message)
+            for message_id, message in message_id_list
+            if planner_target_eligible(message) and not _is_bot_message(message)
+        ]
 
         message_list_before_now_short = message_list_before_now[-int(context_size * 0.3) :]
         chat_content_block_short, message_id_list_short = build_readable_messages_with_id(
