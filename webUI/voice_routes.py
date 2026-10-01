@@ -901,7 +901,7 @@ def create_voice_router(
             if current is None or current["status"] != "active" or current["generation"] != body.generation:
                 raise VoiceCallError("语音回复已过期", 409)
             pieces = upstream.aiter_bytes()
-            first = await anext(pieces)
+            first = await pieces.__anext__()
             if not first:
                 raise HTTPException(502, "Core TTS stream empty")
         except (httpx.HTTPError, OSError, ValueError, StopAsyncIteration) as exc:
