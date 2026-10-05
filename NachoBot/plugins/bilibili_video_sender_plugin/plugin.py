@@ -6,7 +6,6 @@ import json
 import os
 import platform
 import re
-import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -24,6 +23,7 @@ from static_ffmpeg import run
 from .log_safety import video_link_log_fields
 
 from src.common.logger import get_logger
+from src.common.media_paths import get_shared_media_temp_dir
 from src.plugin_system.base import BaseEventHandler, BasePlugin, ComponentInfo
 from src.plugin_system.base.component_types import EventType, NachoMessages
 from src.plugin_system.base.config_types import ConfigField
@@ -2331,7 +2331,7 @@ class BilibiliAutoSendHandler(BaseEventHandler):
         def _download_to_temp(urls: List[str]) -> Optional[str]:
             try:
                 safe_title = re.sub(r"[\\/:*?\"<>|]+", "_", info.title).strip() or "bilibili_video"
-                tmp_dir = tempfile.gettempdir()
+                tmp_dir = str(get_shared_media_temp_dir())
                 temp_path = os.path.join(tmp_dir, f"{safe_title}.mp4")
 
                 self._logger.debug("Preparing download", title=info.title, temp_path=temp_path)

@@ -61,41 +61,39 @@ uv run python bot.py
 
 ### Discord 手动部署
 
-旧的 `config-save/koishi.yml` 不再使用。首次部署时，在仓库根目录从已跟踪模板创建配置：
+Discord 群聊、私聊、线程、Slash 命令和语音由一个原生适配器进程处理。它建立一个主 Gateway 客户端；加入语音频道后，Discord 的语音 WebSocket/UDP 连接也由该进程管理。这条 Discord 链路不需要 Node.js、Yarn 或 OneBot sidecar。普通服务器文字消息需要在 Discord Developer Portal 的 Bot 设置中启用 <a href="https://support-dev.discord.com/hc/en-us/articles/6207308062871-What-are-Privileged-Intents">Message Content Intent</a>。
+
+首次部署时，在仓库根目录复制模板：
 
 ```powershell
-Copy-Item .\koishi-app\koishi_template.yml .\koishi-app\koishi.yml
-Copy-Item .\NachoBot-DiscordVC-Adapter\config.toml.example .\NachoBot-DiscordVC-Adapter\config.toml
-```
-
-随后完成以下配置：
-
-- 在 `koishi-app/koishi.yml` 的 `adapter-discord:*` 节点填写 Discord Bot Token。
-- 在 `NachoBot-DiscordVC-Adapter/config.toml` 的 `[discord]` 中填写同一个 `token`、`app_id`，并按需设置代理；不使用语音频道时可以不启动 DiscordVC Adapter。
-- 确认 `NachoBot-Koishi-Adapter/config.toml` 的 `onebot_server.ws_url` 与 Koishi OneBot Server 一致，默认是 `ws://127.0.0.1:5140/onebot/v11/ws`。
-
-Core 启动后，分别在三个终端运行：
-
-```powershell
-Set-Location .\koishi-app
-corepack enable
-corepack yarn install --immutable
-corepack yarn start
-```
-
-```powershell
-Set-Location .\NachoBot-Koishi-Adapter
+Copy-Item .\NachoBot-Discord-Adapter\config.toml.example .\NachoBot-Discord-Adapter\config.toml
+Set-Location .\NachoBot-Discord-Adapter
 uv sync --locked
-uv run python main.py
 ```
+
+在 `config.toml` 的 `[discord]` 填写 Bot Token 和 Application ID，并检查 `[nachobot]` 中的 Core 地址。随后在适配器目录运行：
 
 ```powershell
-Set-Location .\NachoBot-DiscordVC-Adapter
-uv sync
 uv run python main.py
 ```
 
-也可以在配置完成后返回仓库根目录运行 `launch_discord.bat`，一次启动完整 Discord 链路。
+#### 从旧 Discord 链路迁移
+
+迁移前停止旧 Discord 进程，并保留 `NachoBot-DiscordVC-Adapter`、`NachoBot-Koishi-Adapter` 和 `koishi-app` 的现有配置与数据，尤其是 `koishi-app/data/koishi.db`。迁移会读取旧 DiscordVC 语音配置、Koishi Adapter 配置、`koishi.yml` 和 SQLite 身份表；SQLite 以只读方式打开。它将旧 Discord Snowflake 用户/频道 ID 映射回 Core 已使用的逻辑 ID，保留已有文字聊天的身份与历史关联，转换聊天过滤配置，并生成私有的 `data/identity_map.json`。没有历史映射的新成员继续使用 Discord 原生 ID。
+
+从仓库根目录运行一次性迁移：
+
+```powershell
+Set-Location .\NachoBot-Discord-Adapter
+uv sync --locked
+uv run python migration.py --root ..
+```
+
+迁移程序会读取已存在的 v1 DiscordVC 配置；若新配置尚不存在，则从旧 DiscordVC 配置读取。已有 v2 配置会被识别为已完成，重复运行不会覆盖它。源文件缺失或配置/身份映射冲突时会失败关闭；先解决错误并保留原文件，不要手动拼接映射。成功后它会生成 `config_version = 2` 配置，并保留旧语音配置副本 `config.toml.legacy-v1.bak`；身份映射文件和备份都应作为本地私有数据保管。
+
+只有迁移成功后再启动 `uv run python main.py`。迁移不会改写 Core 数据库；已有 `discord_vc` 群聊历史继续保留在原平台命名空间，不会静默并入新的 `discord` 会话。旧的 Koishi/DiscordVC 文件应在迁移确认后再归档。
+
+完成配置后，也可以在仓库根目录运行 `launch_discord.bat` 启动这一个 Discord 适配器进程。
 
 ### Bilibili 手动部署
 
@@ -136,7 +134,7 @@ TTS 已由 [Multimodal Adapter](../NachoBot-Multimodal-Adapter/README.md) 的托
 平台侧脚本：
 
 - `launch_bilibili.bat`：Bilibili，按需联动独立 Live2D。
-- `launch_discord.bat`：Koishi 文字接入与 DiscordVC。
+- `launch_discord.bat`：统一的 Discord 文字与语音适配器。
 - `launch_universal_vc.bat`：Windows 进程音频采集与虚拟声卡；ASR 由 Core 统一调度。
 
 ## 多模态与平台边界
@@ -148,7 +146,7 @@ TTS 已由 [Multimodal Adapter](../NachoBot-Multimodal-Adapter/README.md) 的托
 | QQ / OneBot | `NachoBot-Napcat-Adapter` + NapCat |
 | Bilibili 直播、评论、私信与二阶段搜索 | `NachoBot-Bilibili-Adapter` |
 | Live2D 渲染与交互 | `NachoBot-Live2D-Adapter` |
-| Discord 文字 / 语音 | Koishi Adapter / DiscordVC Adapter |
+| Discord 文字 / 私聊 / 线程 / Slash / 语音 | `NachoBot-Discord-Adapter` |
 | 任意进程语音 | UniversalVC Adapter |
 
 这一边界可避免 Core 为某个平台导入专属客户端、模型或原生运行库。

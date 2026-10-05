@@ -19,11 +19,8 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 # These identifiers refer to sanitized templates embedded in the tracked
 # setup-deployment module.  They deliberately are not filesystem paths, so a
 # clean checkout never depends on user-owned untracked template files.
-BUILTIN_KOISHI_TEMPLATE = "__builtin__/koishi.yml"
 BUILTIN_BILIBILI_TEMPLATE = "__builtin__/bilibili.toml"
-BUILTIN_TEMPLATE_KEYS = frozenset(
-    {BUILTIN_KOISHI_TEMPLATE, BUILTIN_BILIBILI_TEMPLATE}
-)
+BUILTIN_TEMPLATE_KEYS = frozenset({BUILTIN_BILIBILI_TEMPLATE})
 
 TEMPLATE_MAP: dict[str, str] = {
     "NachoBot/template/bot_config_template.toml": "NachoBot/config/bot_config.toml",
@@ -38,8 +35,7 @@ TEMPLATE_MAP: dict[str, str] = {
     "NachoBot-Multimodal-Adapter/template_configs/vox_template.toml": "NachoBot-Multimodal-Adapter/configs/vox.toml",
     "NachoBot-UniversalVC-Adapter/template/config_template.toml": "NachoBot-UniversalVC-Adapter/config.toml",
     "NachoBot-Multimodal-Adapter/template_configs/perception_template.toml": "NachoBot-Multimodal-Adapter/configs/perception.toml",
-    BUILTIN_KOISHI_TEMPLATE: "koishi-app/koishi.yml",
-    "NachoBot-DiscordVC-Adapter/config.toml.example": "NachoBot-DiscordVC-Adapter/config.toml",
+    "NachoBot-Discord-Adapter/config.toml.example": "NachoBot-Discord-Adapter/config.toml",
     BUILTIN_BILIBILI_TEMPLATE: "NachoBot-Bilibili-Adapter/config.toml",
 }
 
@@ -49,7 +45,6 @@ DEFAULT_PORTS: dict[str, int] = {
     # One public TTS Runtime; its backend listener is private to that process.
     "TTS Runtime": 9880,
     "VLM / ASR API": 9874,
-    "Koishi": 5140,
     "WebUI": 8088,
     # SnowLuma is a managed QQ backend.  Keep its two endpoints visible in
     # setup checks even when the optional distribution has not been deployed
@@ -100,7 +95,6 @@ class EnvironmentChecker:
         return {
             "python": EnvironmentChecker.check_python(),
             "git": EnvironmentChecker.check_git(),
-            "node": EnvironmentChecker.check_node(),
             "docker": EnvironmentChecker.check_docker(),
             "gpu": EnvironmentChecker.check_gpu(),
             "ports": EnvironmentChecker.check_ports(),
@@ -227,47 +221,6 @@ class EnvironmentChecker:
         return result
 
     @staticmethod
-    def check_node() -> dict[str, Any]:
-        """Check Node.js availability (optional, for Koishi)."""
-        result = {"status": "warning", "node": None, "npm": None, "message": ""}
-
-        try:
-            out = subprocess.run(
-                ["node", "--version"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if out.returncode == 0:
-                result["node"] = out.stdout.strip()
-        except (FileNotFoundError, Exception):
-            pass
-
-        try:
-            out = subprocess.run(
-                ["npm", "--version"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if out.returncode == 0:
-                result["npm"] = f"npm {out.stdout.strip()}"
-        except (FileNotFoundError, Exception):
-            pass
-
-        if result["node"]:
-            result["status"] = "ok"
-            parts = [f"Node.js {result['node']}"]
-            if result["npm"]:
-                parts.append(result["npm"])
-            result["message"] = " · ".join(parts)
-        else:
-            result["status"] = "warning"
-            result["message"] = "Node.js 未安装 (仅 Discord/Koishi 适配器需要)"
-
-        return result
-
-    @staticmethod
     def check_docker() -> dict[str, Any]:
         """Check Docker availability (optional)."""
         result = {"status": "warning", "docker": None, "compose": None, "message": ""}
@@ -360,19 +313,6 @@ class EnvironmentChecker:
                     perception.get("perception", {}).get("port", ports["VLM / ASR API"])
                 )
                 ports["VLM / ASR API"] = runtime_port
-            except Exception:
-                pass
-
-        # Koishi gateway
-        koishi_path = ROOT_DIR / "koishi-app" / "koishi.yml"
-        if koishi_path.exists():
-            try:
-                content = koishi_path.read_text(encoding="utf-8")
-                server_idx = content.find("group:server:")
-                if server_idx != -1:
-                    match = re.search(r"port:\s*(\d+)", content[server_idx:server_idx + 200])
-                    if match:
-                        ports["Koishi"] = int(match.group(1))
             except Exception:
                 pass
 
@@ -658,12 +598,6 @@ class PathVerifier:
             "download_url": "",
             "default_rel": None,
         },
-        "nodejs": {
-            "name": "Node.js",
-            "hint": "系统已安装 Node.js（自动检测 PATH）",
-            "download_url": "https://nodejs.org/en/download/",
-            "default_rel": None,
-        },
         "vb_cable": {
             "name": "VB-Audio Virtual Cable",
             "hint": "VB-Audio Virtual Cable 安装目录（包含 VBCABLE_Setup_x64.exe）",
@@ -728,10 +662,6 @@ class PathVerifier:
                 "download_url": download_url,
                 "status": status,
             }
-
-        # -- Node.js: check via PATH, no user path needed --
-        if check_type == "nodejs":
-            return PathVerifier._check_nodejs(download_url)
 
         # -- Managed TTS runtimes: no user-supplied external path required --
         if check_type in ("sovits", "voxcpm"):
@@ -840,29 +770,6 @@ class PathVerifier:
             "valid": True,
             "message": f"✅ {engine} 将在首次启动时自动下载并创建",
         }
-
-    @staticmethod
-    def _check_nodejs(download_url: str) -> dict:
-        try:
-            result = subprocess.run(
-                ["node", "--version"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if result.returncode == 0:
-                ver = result.stdout.strip()
-                return {"valid": True, "message": f"✅ Node.js 已安装: {ver}"}
-        except FileNotFoundError:
-            pass
-        except Exception:
-            pass
-        return {
-            "valid": False,
-            "message": "❌ 未检测到 Node.js，Discord (Koishi) 适配器需要 Node.js",
-            "download_url": download_url,
-        }
-
 
     @staticmethod
     def _check_vb_cable(p: Path, download_url: str) -> dict:

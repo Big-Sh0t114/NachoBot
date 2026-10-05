@@ -1,6 +1,9 @@
+import base64
+import binascii
+import copy
+import json
 import re
 import time
-import json
 import urllib3
 
 from abc import abstractmethod
@@ -15,10 +18,15 @@ from pathlib import Path
 from src.common.logger import get_logger
 from src.config.config import global_config
 from src.chat.utils.utils_image import get_image_manager
-from src.chat.utils.utils_voice import get_voice_text, normalize_asr_receipt_platform
+from src.chat.utils.utils_voice import (
+    get_voice_text,
+    normalize_asr_receipt_platform,
+    normalize_asr_receipt_scope,
+)
 from src.chat.sandbox.sandbox_manager import sandbox_manager
 from src.chat.sandbox.sandbox_handoff import sandbox_user_allowed
 from .chat_stream import ChatStream
+from .delivery_context import delivery_target_additional_config
 
 install(extra_lines=3)
 
@@ -28,6 +36,31 @@ logger = get_logger("chat_message")
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 _URL_PATTERN = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
+MAX_UPLOAD_BYTES = 1_048_576
+MAX_UPLOAD_BASE64_CHARS = ((MAX_UPLOAD_BYTES + 2) // 3) * 4
+
+
+def _decode_bounded_file_base64(encoded: Any, declared_size: Any) -> bytes:
+    """Decode canonical Base64 file data without allowing unbounded allocation."""
+
+    if not isinstance(encoded, str):
+        raise ValueError("Base64 file data must be a string")
+    if len(encoded) > MAX_UPLOAD_BASE64_CHARS:
+        raise ValueError("Base64 file exceeds 1MB limit")
+    try:
+        encoded_bytes = encoded.encode("ascii")
+        content = base64.b64decode(encoded_bytes, validate=True)
+    except (UnicodeEncodeError, binascii.Error, ValueError) as exc:
+        raise ValueError("Base64 file data is invalid") from exc
+    if base64.b64encode(content) != encoded_bytes:
+        raise ValueError("Base64 file data is not canonical")
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise ValueError("Base64 file exceeds 1MB limit")
+    if isinstance(declared_size, bool) or not isinstance(declared_size, int) or declared_size < 0:
+        raise ValueError("Base64 file size is invalid")
+    if declared_size != len(content):
+        raise ValueError("Base64 file size does not match its content")
+    return content
 
 
 def _extract_urls_from_unknown_data(data: Any) -> str:
@@ -75,6 +108,11 @@ class Message(MessageBase):
     ):
         # 使用传入的时间戳或当前时间
         current_timestamp = timestamp if timestamp is not None else round(time.time(), 3)
+        source_info = getattr(reply, "message_info", None) if reply is not None else None
+        if source_info is None:
+            trigger_message = getattr(getattr(chat_stream, "context", None), "message", None)
+            source_info = getattr(trigger_message, "message_info", None) or trigger_message
+        delivery_config = delivery_target_additional_config(source_info)
         # 构造基础消息信息
         message_info = BaseMessageInfo(
             platform=chat_stream.platform,
@@ -82,6 +120,7 @@ class Message(MessageBase):
             time=current_timestamp,
             group_info=chat_stream.group_info,
             user_info=user_info,
+            additional_config=delivery_config,
         )
 
         # 调用父类初始化
@@ -174,11 +213,10 @@ class MessageRecv(Message):
         """
         self.processed_plain_text = await self._process_message_segments(self.message_segment)
 
-    async def _save_file_to_sandbox(self, file_data: str, filename: str) -> str:
+    async def _save_file_to_sandbox(self, file_data: str | bytes, filename: str) -> str:
         """Save file data to sandbox and return local path
         Args:
-            file_data: Can be a URL, base64 string, or local path (if from adapter).
-                       For now, we assume it might be a URL/Path from the adapter.
+            file_data: URL, local path, or already decoded bounded bytes.
             filename: The name of the file
         """
         if not self.chat_stream:
@@ -198,6 +236,18 @@ class MessageRecv(Message):
             group_id = getattr(group_info, "group_id", None) if group_info else None
             platform = str(getattr(self.chat_stream, "platform", "unknown") or "unknown")
 
+            if isinstance(file_data, bytes):
+                if len(file_data) > MAX_UPLOAD_BYTES:
+                    raise ValueError(f"File exceeds 1MB limit ({len(file_data)} bytes)")
+                return sandbox_manager.save_upload(
+                    file_data,
+                    filename,
+                    stream_id=self.chat_stream.stream_id,
+                    platform=platform,
+                    group_id=str(group_id) if group_id is not None else None,
+                    actor_id=actor_id,
+                )
+
             # Case 1: URL
             if file_data.startswith("http"):
                 async with httpx.AsyncClient() as client:
@@ -205,13 +255,13 @@ class MessageRecv(Message):
                     head_resp = await client.head(file_data)
                     if head_resp.status_code == 200:
                         content_length = int(head_resp.headers.get("Content-Length", 0))
-                        if content_length > 1048576:  # 1MB
+                        if content_length > MAX_UPLOAD_BYTES:
                             raise ValueError(f"File exceeds 1MB limit ({content_length} bytes)")
 
                     resp = await client.get(file_data)
                     if resp.status_code == 200:
                         # Fallback size check just in case HEAD didn't give Content-Length
-                        if len(resp.content) > 1048576:
+                        if len(resp.content) > MAX_UPLOAD_BYTES:
                             raise ValueError(f"File exceeds 1MB limit ({len(resp.content)} bytes)")
                         return sandbox_manager.save_upload(
                             resp.content,
@@ -226,7 +276,7 @@ class MessageRecv(Message):
             # If the adapter saves it somewhere, we might just copy it or leave it.
             # But sandbox implies isolation. Let's copy it.
             elif os.path.exists(file_data):
-                if os.path.getsize(file_data) > 1048576:  # 1MB limit
+                if os.path.getsize(file_data) > MAX_UPLOAD_BYTES:
                     raise ValueError(f"Local file exceeds 1MB limit ({os.path.getsize(file_data)} bytes)")
 
                 with open(file_data, "rb") as f:
@@ -239,8 +289,6 @@ class MessageRecv(Message):
                     group_id=str(group_id) if group_id is not None else None,
                     actor_id=actor_id,
                 )
-
-            # Case 3: Base64 (Legacy/Other) - To be implemented if needed
 
         except ValueError as ve:
             # Re-raise ValueError so _process_single_segment can catch it specifically for size limits
@@ -266,13 +314,27 @@ class MessageRecv(Message):
 
                 file_name = "unknown_file"
                 file_url = ""
+                file_content: bytes | None = None
+                has_base64_file = False
 
                 if isinstance(segment.data, dict):
                     file_name = segment.data.get("name", f"file_{int(time.time())}")
-                    file_url = segment.data.get("url", "")
-                    # Some adapters might use 'path' or 'file'
-                    if not file_url:
-                        file_url = segment.data.get("path") or segment.data.get("file")
+                    if "base64" in segment.data:
+                        has_base64_file = True
+                        try:
+                            file_content = _decode_bounded_file_base64(
+                                segment.data.get("base64"),
+                                segment.data.get("size"),
+                            )
+                        except ValueError as ve:
+                            if "exceeds 1MB limit" in str(ve):
+                                return f"[接收到文件: {file_name}，但文件大小超过1MB限制，已丢弃]"
+                            return f"[接收到文件: {file_name}，但文件数据无效，已丢弃]"
+                    else:
+                        file_url = segment.data.get("url", "")
+                        # Some adapters might use 'path' or 'file'
+                        if not file_url:
+                            file_url = segment.data.get("path") or segment.data.get("file")
                 elif isinstance(segment.data, str):
                     # If it's a string, assume it's url/path
                     file_url = segment.data
@@ -300,6 +362,27 @@ class MessageRecv(Message):
                     logger.warning(f"用户 {user_id} 未通过沙盒名单策略，拒绝自动保存文件: {file_name}")
                     return f"[接收到文件: {file_name}，但发送者未通过沙盒名单策略，已忽略自动保存]"
 
+                if has_base64_file:
+                    try:
+                        saved_path = await self._save_file_to_sandbox(file_content or b"", str(file_name))
+                        if saved_path:
+                            if not hasattr(self, "files"):
+                                self.files = []
+                            self.files.append(saved_path)
+                            preview_text = ""
+                            try:
+                                if os.path.exists(saved_path) and os.path.getsize(saved_path) < 3072:
+                                    with open(saved_path, "r", encoding="utf-8") as file:
+                                        content = file.read()
+                                        if content:
+                                            preview_text = f"\n[自动预览]:\n{content}"
+                            except Exception:
+                                pass
+                            return f"[文件: {file_name} (已保存到沙盒)]{preview_text}"
+                        return f"[文件: {file_name} (保存失败)]"
+                    except ValueError as ve:
+                        logger.warning(f"用户 {user_id} 上传的文件 {file_name} 超过大小限制: {ve}")
+                        return f"[接收到文件: {file_name}，但文件大小超过1MB限制，已丢弃]"
                 if file_url:
                     try:
                         saved_path = await self._save_file_to_sandbox(str(file_url), str(file_name))
@@ -379,15 +462,23 @@ class MessageRecv(Message):
                         if platform is not None and isinstance(additional_config, dict)
                         else None
                     )
-                    return await get_voice_text(
-                        segment.data,
-                        precomputed_asr_result_id=(
+                    raw_scope = (
+                        additional_config.get("precomputed_asr_scope", "")
+                        if isinstance(additional_config, dict)
+                        else ""
+                    )
+                    receipt_scope = normalize_asr_receipt_scope(raw_scope)
+                    voice_kwargs = {
+                        "precomputed_asr_result_id": (
                             precomputed_asr_result_id
                             if isinstance(precomputed_asr_result_id, str)
                             else None
-                        ),
-                        precomputed_asr_context=platform,
-                    )
+                        ) if receipt_scope is not None else None,
+                        "precomputed_asr_context": platform,
+                    }
+                    if receipt_scope:
+                        voice_kwargs["precomputed_asr_scope"] = receipt_scope
+                    return await get_voice_text(segment.data, **voice_kwargs)
                 return "[发了一段语音，网卡了加载不出来]"
             elif segment.type == "video":
                 self.is_picid = False
@@ -557,6 +648,8 @@ class MessageSending(MessageProcessBase):
         apply_set_reply_logic: bool = False,
         reply_to: Optional[str] = None,
         selected_expressions: Optional[List[int]] = None,
+        delivery_target_scope_active: bool = False,
+        delivery_target_config: dict[str, Any] | None = None,
     ):
         # 调用父类初始化
         super().__init__(
@@ -567,6 +660,11 @@ class MessageSending(MessageProcessBase):
             reply=reply,
             thinking_start_time=thinking_start_time,
         )
+
+        if delivery_target_scope_active:
+            self.message_info.additional_config = (
+                copy.deepcopy(delivery_target_config) if isinstance(delivery_target_config, dict) else None
+            )
 
         # 发送状态特有属性
         self.sender_info = sender_info

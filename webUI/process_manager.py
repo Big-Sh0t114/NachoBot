@@ -18,7 +18,7 @@ import subprocess
 import time
 from collections import deque
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -489,6 +489,10 @@ class _ProcessRecord:
     argv: tuple[str, ...]
     executable: str | None
     name: str | None
+    core_env_checked: bool = False
+    core_host: str | None = None
+    core_port: str | None = None
+    core_token_key_present: bool = False
 
 
 @dataclass(frozen=True)
@@ -552,11 +556,14 @@ EXTERNAL_ADAPTER_SERVICE_IDS = (
     "snowluma_runtime",
     "bilibili",
     "live2d",
-    "koishi",
-    "koishi_adapter",
-    "discordvc",
+    "discord_adapter",
     "universalvc",
 )
+LEGACY_DISCORD_PROCESS_PATHS = {
+    "Koishi": "koishi-app",
+    "Koishi Adapter": "NachoBot-Koishi-Adapter",
+    "DiscordVC Adapter": "NachoBot-DiscordVC-Adapter",
+}
 _EXTERNAL_PRESENCE_OUTCOMES = frozenset({
     "external_ready",
     "external_present_unready",
@@ -569,6 +576,7 @@ _EXTERNAL_BLOCKING_OUTCOMES = frozenset({
 _EXTERNAL_READY_DETAIL = "由外部启动器运行"
 _EXTERNAL_PRESENT_UNREADY_DETAIL = "检测到外部进程，但尚未通过就绪检查"
 _EXTERNAL_INDETERMINATE_DETAIL = "无法确认外部进程归属或状态，请在原启动器中检查"
+_DISCORD_CORE_ENV_DETAIL = "检测到 Discord Adapter 进程，但 Core 连接环境无法验证；请手动停止旧实例或检查配置"
 QQ_BUSY_STATUSES = frozenset(
     {ServiceStatus.STARTING, ServiceStatus.RUNNING, ServiceStatus.STOPPING}
 )
@@ -661,7 +669,6 @@ def _register_services(root_dir: Path | str | None = None):
     except ImportError:  # pragma: no cover - direct script/module context
         from webui_config import webui_config
     import tomlkit
-    import re
 
     base_root = Path(root_dir or ROOT_DIR).resolve()
     try:
@@ -792,29 +799,42 @@ def _register_services(root_dir: Path | str | None = None):
         except Exception:
             pass
 
-    # 5. Parse Koishi configs/koishi.yml
-    koishi_port = 5140
-    koishi_yml_path = base_root / "koishi-app" / "koishi.yml"
-    if koishi_yml_path.exists():
-        try:
-            content = koishi_yml_path.read_text(encoding="utf-8")
-            server_idx = content.find("group:server:")
-            if server_idx != -1:
-                port_match = re.search(r'port:\s*(\d+)', content[server_idx:server_idx+200])
-                if port_match:
-                    koishi_port = int(port_match.group(1))
-        except Exception:
-            pass
-
     # Resolve "0.0.0.0" to "127.0.0.1" for env_extra wait_port matching
     nachobot_env_host = nachobot_host
     napcat_env_host = napcat_host
 
-    koishi_command = (
-        ["cmd", "/c", "corepack", "yarn", "start"]
-        if os.name == "nt"
-        else ["corepack", "yarn", "start"]
-    )
+    # The Discord adapter reads Core routing from its TOML, with these existing
+    # environment variables taking precedence. Pass a normalized endpoint to
+    # the child and preserve the caller-provided Core token unchanged.
+    discord_core_host = os.environ.get("NACHOBOT_CORE_HOST", "").strip()
+    discord_core_port = os.environ.get("NACHOBOT_CORE_PORT", "").strip()
+    discord_config_path = base_root / "NachoBot-Discord-Adapter" / "config.toml"
+    if discord_config_path.exists():
+        try:
+            discord_doc = tomlkit.parse(discord_config_path.read_text(encoding="utf-8"))
+            discord_core = discord_doc.get("nachobot", {})
+            if not discord_core_host:
+                discord_core_host = str(discord_core.get("host", "")).strip()
+            if not discord_core_port:
+                discord_core_port = str(discord_core.get("port", "")).strip()
+        except Exception:
+            pass
+    if not discord_core_host:
+        discord_core_host = nachobot_host
+    if discord_core_host in {"0.0.0.0", "::"}:
+        discord_core_host = "127.0.0.1"
+    try:
+        parsed_discord_core_port = int(discord_core_port or nachobot_port)
+        if not 1 <= parsed_discord_core_port <= 65535:
+            raise ValueError
+        discord_core_port = str(parsed_discord_core_port)
+    except (TypeError, ValueError):
+        discord_core_port = str(nachobot_port)
+    discord_core_env = {
+        "NACHOBOT_CORE_TOKEN": os.environ.get("NACHOBOT_CORE_TOKEN", ""),
+        "NACHOBOT_CORE_HOST": discord_core_host,
+        "NACHOBOT_CORE_PORT": discord_core_port,
+    }
 
     defs = [
         # ── Core ──
@@ -902,17 +922,10 @@ def _register_services(root_dir: Path | str | None = None):
                    detail="直播弹幕、评论与私信 → Core"),
 
         # ── Discord ──
-        ServiceDef("koishi", "Koishi 框架", "discord", "koishi-app",
-                   koishi_command, port=koishi_port, wait_port=True, order=1,
-                   env_extra={"HTTPS_PROXY": webui_config.https_proxy,
-                              "HTTP_PROXY": webui_config.http_proxy},
-                   detail=f"Discord / OneBot 平台网关 · :{koishi_port}"),
-        ServiceDef("koishi_adapter", "Koishi 适配器", "discord", "NachoBot-Koishi-Adapter",
-                   ["uv", "run", "python", "main.py"], order=2,
-                   detail="Koishi 消息桥接 → NachoBot Core"),
-        ServiceDef("discordvc", "DiscordVC 语音适配器", "discord",
-                   "NachoBot-DiscordVC-Adapter", ["uv", "run", "python", "main.py"], order=3,
-                   detail="Discord 语音频道 → Core"),
+        ServiceDef("discord_adapter", "Discord 适配器", "discord",
+                   "NachoBot-Discord-Adapter", ["uv", "run", "python", "main.py"], order=1,
+                   env_extra=discord_core_env,
+                   detail="Discord 文字与语音频道 → Core"),
     ]
 
     SERVICE_DEFS = {d.id: d for d in defs}
@@ -945,9 +958,8 @@ def _register_services(root_dir: Path | str | None = None):
                   "直播弹幕、评论、私信与可选 Live2D 联动"),
         GroupDef("live2d", "Live2D 渲染", "🖼️", ["live2d"],
                   "独立 Live2D WebSocket 渲染服务"),
-        GroupDef("discord", "Discord / Koishi", "💬",
-                  ["koishi", "koishi_adapter", "discordvc"],
-                  "Koishi 平台网关、文字适配器与 Discord 语音适配器"),
+        GroupDef("discord", "Discord", "💬", ["discord_adapter"],
+                  "Discord 文字与语音频道适配器"),
         GroupDef("universalvc", "UniversalVC 语音", "🎤", ["universalvc"],
                   "进程音频捕获、实时 ASR 与虚拟声卡输出"),
         # Temporarily hidden from WebUI; restore to expose the VRChat group.
@@ -1519,10 +1531,9 @@ class ProcessManager:
     def _build_external_process_snapshot(self) -> _ProcessSnapshot:
         """Collect one bounded psutil snapshot for the adapter classifier.
 
-        Only identity fields and TCP listener ownership are retained.  The
-        returned object is ephemeral and never enters a service status/API
-        payload; in particular, PIDs and command lines are discarded after
-        classification.
+        Only identity fields, the Discord Core endpoint (never its token), and
+        TCP listener ownership are retained. The snapshot is ephemeral and
+        never enters a service status/API payload.
         """
         records: list[_ProcessRecord] = []
         failed = False
@@ -1547,16 +1558,34 @@ class ProcessManager:
                         if isinstance(cmdline, str):
                             cmdline = [cmdline]
                         argv = tuple(str(item) for item in cmdline if item is not None)
-                        records.append(
-                            _ProcessRecord(
-                                pid=pid,
-                                ppid=ppid,
-                                cwd=str(info.get("cwd")) if info.get("cwd") else None,
-                                argv=argv,
-                                executable=str(info.get("exe")) if info.get("exe") else None,
-                                name=str(info.get("name")) if info.get("name") else None,
-                            )
+                        record = _ProcessRecord(
+                            pid=pid,
+                            ppid=ppid,
+                            cwd=str(info.get("cwd")) if info.get("cwd") else None,
+                            argv=argv,
+                            executable=str(info.get("exe")) if info.get("exe") else None,
+                            name=str(info.get("name")) if info.get("name") else None,
                         )
+                        if self._record_matches_discord_entrypoint(record):
+                            try:
+                                process_env = process.environ()
+                                normalized_env = {
+                                    str(key).casefold(): str(value)
+                                    for key, value in process_env.items()
+                                }
+                                record = replace(
+                                    record,
+                                    core_env_checked=True,
+                                    core_host=normalized_env.get("nachobot_core_host", "").strip() or None,
+                                    core_port=normalized_env.get("nachobot_core_port", "").strip() or None,
+                                    core_token_key_present="nachobot_core_token" in normalized_env,
+                                )
+                            except Exception:
+                                # A likely adapter whose environment cannot be
+                                # read is retained as uncertain and blocks a
+                                # duplicate launch.
+                                record = replace(record, core_env_checked=False)
+                        records.append(record)
                     except (psutil.NoSuchProcess, psutil.ZombieProcess):
                         continue
                     except Exception:
@@ -1638,16 +1667,89 @@ class ProcessManager:
         candidates = [record.executable, record.name, *record.argv[:2]]
         return any(self._token_basename(candidate) in {"node", "node.exe"} for candidate in candidates)
 
+    def _record_matches_discord_entrypoint(self, record: _ProcessRecord) -> bool:
+        """Match the unified adapter's exact cwd, Python executable, and entrypoint."""
+        expected_cwd = self._external_service_cwd("discord_adapter")
+        if expected_cwd is None or self._normalize_external_path(record.cwd) != expected_cwd:
+            return False
+        if not self._record_has_python(record):
+            return False
+        target = self._normalize_external_path("main.py", expected_cwd)
+        return any(self._argv_path_matches(token, target, record.cwd) for token in record.argv)
+
+    def _record_matches_legacy_discord_runtime(
+        self,
+        label: str,
+        relative_path: str,
+        record: _ProcessRecord,
+    ) -> bool:
+        expected_cwd = self._normalize_external_path(relative_path, self.root)
+        if self._normalize_external_path(record.cwd) != expected_cwd:
+            return False
+        if label == "Koishi":
+            if not self._record_has_node(record):
+                return False
+            tokens = [str(token).strip().strip('"') for token in record.argv]
+            lowered = [token.casefold() for token in tokens]
+            koishi_index = next(
+                (
+                    index
+                    for index, token in enumerate(lowered)
+                    if self._token_basename(token) in {
+                        "koishi", "koishi.js", "koishi.cjs", "koishi.mjs"
+                    }
+                    or "koishijs" in token
+                ),
+                None,
+            )
+            if koishi_index is None:
+                return False
+            trailing = [token for token in lowered[koishi_index + 1:] if token]
+            return bool(trailing) and trailing[-1] == "start"
+        if not self._record_has_python(record):
+            return False
+        target = self._normalize_external_path("main.py", expected_cwd)
+        return any(self._argv_path_matches(token, target, record.cwd) for token in record.argv)
+
+    async def _assert_legacy_discord_stopped(self) -> None:
+        """Never take ownership of or start beside a legacy Discord login."""
+        snapshot = await asyncio.to_thread(self._build_external_process_snapshot)
+        if snapshot.failed:
+            raise RuntimeError(
+                "无法确认旧版 Discord/Koishi 实例是否仍在运行；请先手动检查并停止旧实例"
+            )
+        running = [
+            label
+            for label, relative_path in LEGACY_DISCORD_PROCESS_PATHS.items()
+            if any(
+                self._record_matches_legacy_discord_runtime(label, relative_path, record)
+                for record in snapshot.processes
+            )
+        ]
+        if running:
+            names = "、".join(running)
+            raise RuntimeError(
+                f"检测到旧版 {names} 进程。WebUI 不会自动停止它们；请手动停止旧实例后再启动 Discord Adapter"
+            )
+
     def _record_matches_runtime(self, service_id: str, record: _ProcessRecord) -> bool:
         expected_cwd = self._external_service_cwd(service_id)
         if expected_cwd is None or self._normalize_external_path(record.cwd) != expected_cwd:
             return False
+        if service_id == "discord_adapter":
+            if not self._record_matches_discord_entrypoint(record) or not record.core_env_checked:
+                return False
+            service = SERVICE_DEFS.get(service_id)
+            expected_env = service.env_extra if service else {}
+            return (
+                record.core_host == expected_env.get("NACHOBOT_CORE_HOST")
+                and record.core_port == expected_env.get("NACHOBOT_CORE_PORT")
+                and record.core_token_key_present
+            )
         if service_id in {
             "napcat_adapter",
             "snowluma_adapter",
             "bilibili",
-            "koishi_adapter",
-            "discordvc",
             "universalvc",
         }:
             if not self._record_has_python(record):
@@ -1679,24 +1781,6 @@ class ProcessManager:
                 return False
             target = self._normalize_external_path("index.mjs", expected_cwd)
             return any(self._argv_path_matches(token, target, record.cwd) for token in record.argv)
-        if service_id == "koishi":
-            if not self._record_has_node(record):
-                return False
-            tokens = [str(token).strip().strip('"') for token in record.argv]
-            lowered = [token.casefold() for token in tokens]
-            koishi_index = next(
-                (
-                    index
-                    for index, token in enumerate(lowered)
-                    if self._token_basename(token) in {"koishi", "koishi.js", "koishi.cjs", "koishi.mjs"}
-                    or "koishijs" in token
-                ),
-                None,
-            )
-            if koishi_index is None:
-                return False
-            trailing = [token for token in lowered[koishi_index + 1:] if token]
-            return bool(trailing) and trailing[-1] == "start"
         return False
 
     def _record_matches_napcat_shell_anchor(self, record: _ProcessRecord) -> bool:
@@ -1795,6 +1879,12 @@ class ProcessManager:
             for port, owners in snapshot.listeners.items()
         }
         records_by_pid = {record.pid: record for record in records}
+        discord_unverified = tuple(
+            record
+            for record in records
+            if self._record_matches_discord_entrypoint(record)
+            and not self._record_matches_runtime("discord_adapter", record)
+        )
         matches: dict[str, set[int]] = {
             service_id: self._external_candidate_pids(service_id, records)
             for service_id in services
@@ -1810,6 +1900,15 @@ class ProcessManager:
         results: dict[str, AdapterObservation] = {}
         for service_id in services:
             candidate_pids = matches[service_id]
+            if service_id == "discord_adapter" and discord_unverified:
+                uncertain = any(not record.core_env_checked for record in discord_unverified)
+                results[service_id] = AdapterObservation(
+                    service_id,
+                    "indeterminate" if uncertain else "external_present_unready",
+                    now,
+                    _DISCORD_CORE_ENV_DETAIL,
+                )
+                continue
             if any(pid in cross_service_pids for pid in candidate_pids):
                 results[service_id] = AdapterObservation(
                     service_id, "indeterminate", now, _EXTERNAL_INDETERMINATE_DETAIL
@@ -2210,6 +2309,8 @@ class ProcessManager:
         if group_id not in GROUP_DEFS:
             raise ValueError(f"Unknown group: {group_id}")
         gdef = GROUP_DEFS[group_id]
+        if group_id == "discord":
+            await self._assert_legacy_discord_stopped()
         adapter_observations: dict[str, AdapterObservation] = {}
         adapter_skip = frozenset()
         if group_id == "qq_adapter":
@@ -2227,6 +2328,9 @@ class ProcessManager:
                 return
         elif group_id == "qq_adapter":
             await self.refresh_core_observation(force=True)
+        elif group_id == "discord":
+            await self.refresh_core_observation(force=True)
+            self._require_core_ready("discord_adapter")
         elif group_id in LAUNCH_PROFILE_GROUPS.values():
             profile_id = next(
                 profile
@@ -2253,6 +2357,8 @@ class ProcessManager:
         _register_services(self.root)
         if service_id not in SERVICE_DEFS:
             raise ValueError(f"Unknown service: {service_id}")
+        if service_id == "discord_adapter":
+            await self._assert_legacy_discord_stopped()
         if service_id in QQ_SERVICE_IDS:
             observations = await self._fresh_qq_start_guard((service_id,))
             self._check_cached_adapter_start_allowed((service_id,))
@@ -2301,8 +2407,10 @@ class ProcessManager:
                 and service_id in self._external_ready_service_ids(profile_id or "", observation)
             ):
                 return
-        elif service_id in {"napcat_adapter", "snowluma_adapter", "koishi_adapter"}:
+        elif service_id in {"napcat_adapter", "snowluma_adapter", "discord_adapter"}:
             await self.refresh_core_observation(force=True)
+            if service_id == "discord_adapter":
+                self._require_core_ready(service_id)
         self._ensure_required_components((service_id,))
         self._validate_service_start(service_id)
 
@@ -3060,7 +3168,7 @@ class ProcessManager:
                     "this QQ adapter is not selected in qq_adapter."
                 )
         # Platform adapters connect directly to the Core WebSocket.
-        if service_id in ("napcat_adapter", "snowluma_adapter", "koishi_adapter"):
+        if service_id in ("napcat_adapter", "snowluma_adapter", "discord_adapter"):
             self._require_core_ready(service_id)
 
         # Direct service starts must preserve the same mutual exclusion that
@@ -3149,6 +3257,8 @@ class ProcessManager:
         sdef = SERVICE_DEFS.get(service_id)
         if not sdef:
             raise ValueError(f"Unknown service: {service_id}")
+        if service_id == "discord_adapter":
+            await self._assert_legacy_discord_stopped()
         if service_id in EXTERNAL_ADAPTER_SERVICE_IDS:
             state_before_probe = self.states.get(service_id)
             try:
@@ -3192,7 +3302,7 @@ class ProcessManager:
                 if service_id in self._external_ready_service_ids(profile_id or "", observation):
                     self._clear_start_reservation(service_id, remove=True)
                     return
-        elif service_id in {"napcat_adapter", "snowluma_adapter", "koishi_adapter"}:
+        elif service_id in {"napcat_adapter", "snowluma_adapter", "discord_adapter"}:
             # Direct/internal callers must not rely on a prior UI poll for
             # Core readiness.  This probe is non-blocking to the event loop.
             await self.refresh_core_observation(force=True)

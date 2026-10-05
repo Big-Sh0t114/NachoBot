@@ -210,16 +210,6 @@ async def generate_reply(
             return False, None
         reply_set: Optional[ReplySetModel] = None
         if content := llm_response.content:
-            text_for_json_check = content.strip()
-            start_idx = text_for_json_check.find("{")
-            end_idx = text_for_json_check.rfind("}")
-            is_json_envelope = False
-            if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
-                try:
-                    _ = json.loads(text_for_json_check[start_idx : end_idx + 1], strict=False)
-                    is_json_envelope = True
-                except Exception:
-                    pass
             if llm_response.sandbox_edit_handoff is not None:
                 # The server-approved sandbox acknowledgement is already the
                 # exact text bound into the immutable handoff.  Keep it as one
@@ -227,13 +217,29 @@ async def generate_reply(
                 # cannot make the delivered text diverge from that binding.
                 reply_set = ReplySetModel()
                 reply_set.add_text_content(content)
-            elif is_json_envelope:
-                # An adapter-owned JSON envelope is a wire message.  Do not run
-                # human-text cleanup that could mutate its keys or values.
+            elif request_capabilities.reply_delivery == "tts_text":
+                # Explicit TTS text is one utterance. Preserve its punctuation
+                # and avoid JSON probing, splitting, or typo post-processing.
                 reply_set = ReplySetModel()
                 reply_set.add_text_content(content)
             else:
-                reply_set = process_human_text(content, enable_splitter, enable_chinese_typo)
+                text_for_json_check = content.strip()
+                start_idx = text_for_json_check.find("{")
+                end_idx = text_for_json_check.rfind("}")
+                is_json_envelope = False
+                if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
+                    try:
+                        _ = json.loads(text_for_json_check[start_idx : end_idx + 1], strict=False)
+                        is_json_envelope = True
+                    except Exception:
+                        pass
+                if is_json_envelope:
+                    # An adapter-owned JSON envelope is a wire message. Do not
+                    # run human-text cleanup that could mutate its keys/values.
+                    reply_set = ReplySetModel()
+                    reply_set.add_text_content(content)
+                else:
+                    reply_set = process_human_text(content, enable_splitter, enable_chinese_typo)
         llm_response.reply_set = reply_set
         if not content or not content.strip() or not reply_set or len(reply_set) == 0:
             await release_reply_context(acquired_refs, "empty_generation")
@@ -304,6 +310,7 @@ async def rewrite_reply(
             return False, None
 
         logger.info("[GeneratorAPI] 开始重写回复")
+        request_capabilities = runtime_capabilities_from_stream(replyer.chat_stream)
 
         # 如果参数缺失，从reply_data中获取
         if reply_data:
@@ -319,23 +326,27 @@ async def rewrite_reply(
         )
         reply_set: Optional[ReplySetModel] = None
         if success and llm_response and (content := llm_response.content):
-            text_for_json_check = content.strip()
-            start_idx = text_for_json_check.find("{")
-            end_idx = text_for_json_check.rfind("}")
-            is_json_envelope = False
-            if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
-                try:
-                    import json
-
-                    _ = json.loads(text_for_json_check[start_idx : end_idx + 1], strict=False)
-                    is_json_envelope = True
-                except Exception:
-                    pass
-            if is_json_envelope:
+            if request_capabilities.reply_delivery == "tts_text":
+                # Capture capabilities before awaiting the rewrite so this
+                # request keeps the trigger stream's delivery contract.
                 reply_set = ReplySetModel()
                 reply_set.add_text_content(content)
             else:
-                reply_set = process_human_text(content, enable_splitter, enable_chinese_typo)
+                text_for_json_check = content.strip()
+                start_idx = text_for_json_check.find("{")
+                end_idx = text_for_json_check.rfind("}")
+                is_json_envelope = False
+                if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
+                    try:
+                        _ = json.loads(text_for_json_check[start_idx : end_idx + 1], strict=False)
+                        is_json_envelope = True
+                    except Exception:
+                        pass
+                if is_json_envelope:
+                    reply_set = ReplySetModel()
+                    reply_set.add_text_content(content)
+                else:
+                    reply_set = process_human_text(content, enable_splitter, enable_chinese_typo)
         llm_response.reply_set = reply_set
         if success:
             logger.info(f"[GeneratorAPI] 重写回复成功，生成了 {len(reply_set) if reply_set else 0} 个回复项")

@@ -4,10 +4,11 @@ import tomlkit
 ROOT_DIR = Path(__file__).resolve().parent.parent
 WEBUI_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = WEBUI_DIR / "webui_config.toml"
+WEBUI_VERSION = "1.3.1"
 
 DEFAULT_CONFIG = {
     "webui": {
-        "version": "1.0.0"
+        "version": WEBUI_VERSION
     },
     "server": {
         "host": "127.0.0.1",
@@ -75,7 +76,7 @@ class WebUIConfig:
 
             # Proxy section
             proxy_table = tomlkit.table()
-            proxy_table.add(tomlkit.comment("Proxy configuration for adapters like Koishi/Discord"))
+            proxy_table.add(tomlkit.comment("Proxy configuration for HTTP clients and adapters"))
             proxy_table["http_proxy"] = DEFAULT_CONFIG["proxy"]["http_proxy"]
             proxy_table["https_proxy"] = DEFAULT_CONFIG["proxy"]["https_proxy"]
             doc["proxy"] = proxy_table
@@ -86,8 +87,9 @@ class WebUIConfig:
 
     @property
     def version(self) -> str:
-        version = str(self.config["webui"]["version"] or "").strip()
-        return version or DEFAULT_CONFIG["webui"]["version"]
+        # Software version belongs to the checked-out WebUI source. The live
+        # config is user-owned and may retain an older metadata value.
+        return WEBUI_VERSION
 
     @property
     def host(self) -> str:

@@ -389,6 +389,86 @@ class MultimodalCoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(matched.metadata["precomputed"])
         self.assertEqual(len(wav_calls), 1)
 
+    async def test_stream_receipt_requires_exact_scope_without_consuming_on_mismatch(self):
+        from src.llm_models.model_client.base_client import client_registry
+
+        router = CoreMultimodalRouter(
+            profile="full",
+            local=FakeStreamingPerception(loaded_model="asr-a"),
+            model_config=_stream_config(),
+        )
+        self.addAsyncCleanup(router.shutdown)
+        scope = "user:logical-user-8|channel:voice-channel-4|generation:22|capture:51"
+        with patch.object(client_registry, "get_client_class_instance", return_value=object()):
+            started = await router.start_audio_stream(platform="discord", scope=scope)
+        session = router._audio_streams[started["stream_id"]]
+        self.assertEqual(session.scope, scope)
+
+        finished = await router.finish_audio_stream(started["stream_id"])
+        receipt = router._asr_receipts[finished["result_id"]]
+        self.assertEqual(receipt.context, "discord")
+        self.assertEqual(receipt.scope, scope)
+
+        wav_calls = []
+
+        async def ordinary_asr(request):
+            wav_calls.append(request)
+            return PerceptionResult(request.operation, "wav fallback", provider="remote")
+
+        router.perceive = ordinary_asr
+        for wrong_scope in (
+            scope.replace("logical-user-8", "logical-user-9"),
+            scope.replace("voice-channel-4", "voice-channel-5"),
+            scope.replace("generation:22", "generation:23"),
+        ):
+            result = await router.transcribe(
+                "YQ==",
+                precomputed_asr_result_id=finished["result_id"],
+                precomputed_asr_context="discord",
+                precomputed_asr_scope=wrong_scope,
+            )
+            self.assertEqual(result.text, "wav fallback")
+            self.assertIn(finished["result_id"], router._asr_receipts)
+
+        matched = await router.transcribe(
+            "YQ==",
+            precomputed_asr_result_id=finished["result_id"],
+            precomputed_asr_context="discord",
+            precomputed_asr_scope=scope,
+        )
+        self.assertEqual(matched.text, "finished transcript")
+        self.assertTrue(matched.metadata["precomputed"])
+        self.assertEqual(len(wav_calls), 3)
+        replayed = await router.transcribe(
+            "YQ==",
+            precomputed_asr_result_id=finished["result_id"],
+            precomputed_asr_context="discord",
+            precomputed_asr_scope=scope,
+        )
+        self.assertEqual(replayed.text, "wav fallback")
+        self.assertEqual(len(wav_calls), 4)
+
+    async def test_malformed_receipt_scope_uses_wav_fallback(self):
+        router = CoreMultimodalRouter(profile="full", local=FakePerception())
+        router._asr_receipts["scoped"] = _ASRReceipt("stream text", "discord", time.monotonic() + 30, "scope")
+        calls = []
+
+        async def full_wav(data, **kwargs):
+            calls.append((data, kwargs))
+            return PerceptionResult(AUDIO_TRANSCRIBE_V1, "wav fallback", provider="remote")
+
+        router.perceive = full_wav
+        result = await router.transcribe(
+            "YQ==",
+            precomputed_asr_result_id="scoped",
+            precomputed_asr_context="discord",
+            precomputed_asr_scope=["malformed"],
+        )
+
+        self.assertEqual(result.text, "wav fallback")
+        self.assertEqual(calls, [(MediaInput(operation=AUDIO_TRANSCRIBE_V1, data="YQ=="), {})])
+        self.assertIn("scoped", router._asr_receipts)
+
     async def test_stream_mismatch_fails_without_changing_wav_model_selection(self):
         from src.llm_models.exceptions import ModelAttemptFailed
         from src.llm_models.model_client.base_client import APIResponse, client_registry
@@ -506,8 +586,9 @@ class MultimodalCoreTests(unittest.IsolatedAsyncioTestCase):
             *,
             precomputed_asr_result_id=None,
             precomputed_asr_context=None,
+            precomputed_asr_scope=None,
         ):
-            captured.append((data, precomputed_asr_result_id, precomputed_asr_context))
+            captured.append((data, precomputed_asr_result_id, precomputed_asr_context, precomputed_asr_scope))
             return "processed"
 
         with patch("src.chat.message_receive.message.get_voice_text", get_voice_text):
@@ -518,6 +599,12 @@ class MultimodalCoreTests(unittest.IsolatedAsyncioTestCase):
                     Seg(type="voice", data="YQ=="),
                 )
 
+            receiver.message_info.platform = "discord"
+            receiver.message_info.additional_config["precomputed_asr_scope"] = "opaque-scope"
+            await MessageRecv._process_single_segment(receiver, Seg(type="voice", data="YQ=="))
+            receiver.message_info.additional_config["precomputed_asr_scope"] = ["malformed"]
+            await MessageRecv._process_single_segment(receiver, Seg(type="voice", data="YQ=="))
+
             receiver.message_info.platform = "qq"
             await MessageRecv._process_single_segment(receiver, Seg(type="voice", data="YQ=="))
 
@@ -525,13 +612,15 @@ class MultimodalCoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             captured[:4],
             [
-                ("YQ==", "receipt-token", "universal_vc"),
-                ("YQ==", "receipt-token", "discord_vc"),
-                ("YQ==", "receipt-token", "bilibili"),
-                ("YQ==", "receipt-token", "webui"),
+                ("YQ==", "receipt-token", "universal_vc", None),
+                ("YQ==", "receipt-token", "discord_vc", None),
+                ("YQ==", "receipt-token", "bilibili", None),
+                ("YQ==", "receipt-token", "webui", None),
             ],
         )
-        self.assertEqual(captured[-1], ("YQ==", None, None))
+        self.assertEqual(captured[4], ("YQ==", "receipt-token", "discord", "opaque-scope"))
+        self.assertEqual(captured[5], ("YQ==", None, "discord", None))
+        self.assertEqual(captured[-1], ("YQ==", None, None, None))
 
     async def test_local_client_reuses_and_closes_its_owned_http_pool(self):
         transport = _QueuedJsonHttpClient(

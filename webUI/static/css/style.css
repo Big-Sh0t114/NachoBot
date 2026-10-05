@@ -1294,9 +1294,7 @@ body {
 .log-tag.tts_adapter_lite { background: #14b8a6; color: #fff; }
 .log-tag.perception      { background: #ec4899; color: #fff; }
 .log-tag.bilibili        { background: #ef4444; color: #fff; }
-.log-tag.koishi          { background: #22c55e; color: #fff; }
-.log-tag.koishi_adapter  { background: #10b981; color: #fff; }
-.log-tag.discordvc       { background: #6366f1; color: #fff; }
+.log-tag.discord_adapter { background: #6366f1; color: #fff; }
 .log-tag.universalvc     { background: #a855f7; color: #fff; }
 
 /* ===================================================================

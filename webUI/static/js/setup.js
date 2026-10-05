@@ -162,7 +162,6 @@ const SetupModule = (() => {
         if (data.git) {
             list.appendChild(makeCheckItem(data.git));
         }
-        list.appendChild(makeCheckItem(data.node));
         list.appendChild(makeCheckItem(data.docker));
         if (data.gpu) {
             list.appendChild(makeCheckItem(data.gpu));
@@ -858,19 +857,17 @@ const SetupModule = (() => {
         if (selectedComponents.includes('qq')) {
             checks.push(getSelectedQqAdapter() === 'snowluma' ? 'snowluma' : 'napcat');
         }
-        if (selectedComponents.includes('discord')) checks.push('nodejs');
         if (selectedComponents.includes('universalvc')) checks.push('vb_cable');
         return checks;
     }
 
     function updatePathCheckVisibility() {
         const checks = getRequiredChecks();
-        const allTypes = ['napcat', 'snowluma', 'nodejs', 'vb_cable'];
+        const allTypes = ['napcat', 'snowluma', 'vb_cable'];
         // Map type to card ID
         const cardMap = {
             napcat: 'path-check-napcat',
             snowluma: 'path-check-snowluma',
-            nodejs: 'path-check-nodejs',
             vb_cable: 'path-check-vb-cable',
         };
         allTypes.forEach(t => {
@@ -1471,6 +1468,7 @@ const SetupModule = (() => {
         // contracts executable without changing normal browser behavior.
         __test: {
             collectWizardData,
+            renderEnvCheck,
             onComponentToggle,
             runGitBootstrapAttempt,
             runDiscordConfigAttempt,

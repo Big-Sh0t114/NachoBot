@@ -17,7 +17,6 @@ import tomlkit
 try:
     from .setup_checks import (
         BUILTIN_BILIBILI_TEMPLATE,
-        BUILTIN_KOISHI_TEMPLATE,
         EnvironmentChecker,
         ROOT_DIR,
         TEMPLATE_MAP,
@@ -34,7 +33,6 @@ try:
 except ImportError:
     from setup_checks import (
         BUILTIN_BILIBILI_TEMPLATE,
-        BUILTIN_KOISHI_TEMPLATE,
         EnvironmentChecker,
         ROOT_DIR,
         TEMPLATE_MAP,
@@ -52,13 +50,16 @@ except ImportError:
 BACKUP_DIR = ROOT_DIR / "config-save" / "setup_backups"
 MAX_BACKUPS_PER_FILE = 5
 
-# These are deliberately tied to the checked-in fresh templates.  A changed
-# template must fail closed instead of accidentally replacing an unrelated
-# value (or overwriting a live credential with a new one).
-DISCORD_KOISHI_TARGET = "koishi-app/koishi.yml"
-DISCORD_VC_TARGET = "NachoBot-DiscordVC-Adapter/config.toml"
-DISCORD_KOISHI_PLACEHOLDER = "<YOUR_DISCORD_BOT_TOKEN_HERE>"
-DISCORD_VC_PLACEHOLDER = "YOUR_DISCORD_BOT_TOKEN"
+# Discord has one adapter-owned config target. Its live config is preserved and
+# migrated in place when necessary; fresh installs start from this placeholder template.
+DISCORD_TARGET = "NachoBot-Discord-Adapter/config.toml"
+DISCORD_TEMPLATE = "NachoBot-Discord-Adapter/config.toml.example"
+DISCORD_PLACEHOLDER = "YOUR_DISCORD_BOT_TOKEN"
+LEGACY_DISCORDVC_CONFIG = "NachoBot-DiscordVC-Adapter/config.toml"
+LEGACY_KOISHI_ADAPTER_CONFIG = "NachoBot-Koishi-Adapter/config.toml"
+LEGACY_KOISHI_CONFIG = "koishi-app/koishi.yml"
+LEGACY_KOISHI_DATABASE = "koishi-app/data/koishi.db"
+DISCORD_IDENTITY_MAP = "NachoBot-Discord-Adapter/data/identity_map.json"
 BILIBILI_TARGET = "NachoBot-Bilibili-Adapter/config.toml"
 SNOWLUMA_TARGET = "NachoBot-SnowLuma-Adapter/config.toml"
 NAPCAT_TARGET = "NachoBot-Napcat-Adapter/config.toml"
@@ -192,115 +193,6 @@ def select_qq_adapter(
 # Sanitized, tracked fallback templates.  The user-owned template files in
 # the repository may be present for local customization, but deployment must
 # remain usable when they are absent from a clean checkout/package.
-KOISHI_TEMPLATE_TEXT = """plugins:
-  group:server:
-    server:e5r2g6:
-      port: 5140
-      maxPort: 5149
-    ~server-satori:afwp8z: {}
-    ~server-temp:zcji9z: {}
-  group:basic:
-    ~admin:9rsa7e: {}
-    ~bind:28lwd6: {}
-    commands:219zrk: {}
-    help:mw5ufg: {}
-    http:up8zo1: {}
-    ~inspect:uu4df9: {}
-    locales:e1mv6f: {}
-    proxy-agent:n3qo79:
-      proxyAgent: http://127.0.0.1:7897
-    rate-limit:241jid: {}
-    telemetry:nym5b5: {}
-    ./nachobot-slash-bridge:nbcmd:
-      host: 127.0.0.1
-      port: 8000
-      platform: discord
-      enableLocalLangSwitch: false
-      silentCommands:
-        - adv-on
-        - adv-off
-        - mute
-        - mus-rand
-        - help-all
-        - lang-switch
-      localReplies:
-        help-all: ''
-        lang-switch: ''
-  group:console:
-    actions:0w1i5w: {}
-    analytics:19gqdw: {}
-    android:7qa6m8:
-      $if: env.KOISHI_AGENT?.includes('Android')
-    ~auth:zyvwiu: {}
-    config:kjd7fa: {}
-    console:idr73d:
-      open: true
-    dataview:ly3300: {}
-    desktop:5fk3p3:
-      $if: env.KOISHI_AGENT?.includes('Desktop')
-    explorer:zp5pt4: {}
-    logger:u9fhuz: {}
-    insight:ncdyq8: {}
-    market:8zm33h:
-      search:
-        endpoint: https://registry.koishi.chat/index.json
-    notifier:56uyop: {}
-    oobe:s8acau: {}
-    sandbox:u89x0b: {}
-    status:bcr45b: {}
-    theme-vanilla:i268dq: {}
-  group:storage:
-    ~database-mongo:1hb2ow:
-      database: koishi
-    ~database-mysql:4szu05:
-      database: koishi
-    ~database-postgres:7nf60j:
-      database: koishi
-    database-sqlite:4b6xgh:
-      path: data/koishi.db
-    assets-local:79fukq: {}
-  group:adapter:
-    ~adapter-dingtalk:wp560n: {}
-    adapter-discord:97kjzj:
-      token: <YOUR_DISCORD_BOT_TOKEN_HERE>
-      intents:
-        - GUILDS
-        - GUILD_MEMBERS
-        - GUILD_MESSAGES
-        - GUILD_MESSAGE_REACTIONS
-        - GUILD_MESSAGE_TYPING
-        - DIRECT_MESSAGES
-        - DIRECT_MESSAGE_REACTIONS
-        - DIRECT_MESSAGE_TYPING
-        - MESSAGE_CONTENT
-    ~adapter-kook:dfaoua: {}
-    ~adapter-lark:439n9n: {}
-    ~adapter-line:4gklsb: {}
-    ~adapter-mail:jfaioj: {}
-    ~adapter-matrix:sq583x: {}
-    ~adapter-qq:4cl7rd: {}
-    ~adapter-satori:wvr2kj: {}
-    ~adapter-slack:32tf5t: {}
-    ~adapter-telegram:lacka0: {}
-    ~adapter-wechat-official:70m36x: {}
-    ~adapter-wecom:7be9j0: {}
-    ~adapter-whatsapp:miu2cl: {}
-    ~adapter-zulip:47r8qg: {}
-  group:develop:
-    $if: env.NODE_ENV === 'development'
-    hmr:0dnupx:
-      root: .
-  server-onebot:wdndch:
-    platform: discord
-    selfId: ' '
-    enabledWs: true
-    path: /onebot/v11/ws
-    selfname: NachoBot
-    groupname: discord-channel
-    loggerinfo: false
-"""
-
-
 BILIBILI_TEMPLATE_TEXT = r'''[inner]
 version = "0.6.0"
 
@@ -448,7 +340,6 @@ subtitle_path = ""             # 字幕路径，用于obs直播
 
 
 BUILTIN_TEMPLATE_TEXT: dict[str, str] = {
-    BUILTIN_KOISHI_TEMPLATE: KOISHI_TEMPLATE_TEXT,
     BUILTIN_BILIBILI_TEMPLATE: BILIBILI_TEMPLATE_TEXT,
 }
 
@@ -960,9 +851,7 @@ class ConfigInitializer:
                         "patched": [],
                     }
 
-        # Validate both fresh Discord templates before touching any target.  In
-        # particular, do not let a malformed/mutated template cause a later
-        # target to receive a secret while the other target is left unchanged.
+        discord_config_authoritative = False
         if "discord" in components:
             _, token_error = ConfigInitializer._get_discord_token(wizard_data)
             if token_error:
@@ -973,13 +862,15 @@ class ConfigInitializer:
                     "errors": [token_error],
                     "patched": [],
                 }
-            template_errors = ConfigInitializer._validate_discord_templates()
-            if template_errors:
+            discord_config_authoritative, discord_errors = (
+                ConfigInitializer._prepare_discord_config()
+            )
+            if discord_errors:
                 return {
                     "generated": [],
                     "skipped": list(TEMPLATE_MAP.values()),
                     "backups": [],
-                    "errors": template_errors,
+                    "errors": discord_errors,
                     "patched": [],
                 }
 
@@ -1025,6 +916,24 @@ class ConfigInitializer:
                 continue
 
             try:
+                if target_rel == DISCORD_TARGET and discord_config_authoritative:
+                    if target_path.exists():
+                        bak = BackupManager.backup(target_path)
+                        if bak:
+                            backups.append(bak)
+                    override_err = ConfigInitializer._apply_overrides(
+                        target_path,
+                        target_rel,
+                        wizard_data,
+                        tts_enabled,
+                        qq_adapter=qq_adapter,
+                    )
+                    if override_err:
+                        errors.append(f"覆写失败 {target_rel}: {override_err}")
+                    else:
+                        generated.append(target_rel)
+                    continue
+
                 # The setup wizard regenerates selected configs from templates. For
                 # the NapCat adapter, keep the user's existing inbound WS contract:
                 # NapCat's websocketClient must use the same host/port/token.
@@ -1167,9 +1076,9 @@ class ConfigInitializer:
     _TTS_CHAIN_ADAPTERS: list[tuple[str, str, bool]] = [
         ("NachoBot-Napcat-Adapter/config.toml", "qq", True),
         ("NachoBot-SnowLuma-Adapter/config.toml", "qq", True),
-        ("NachoBot-Koishi-Adapter/config.toml", "discord", True),
+        (DISCORD_TARGET, "discord", True),
         # Bilibili connects directly to Core (port 8000), no TTS chain
-        # DiscordVC / UniversalVC also connect directly to Core
+        # UniversalVC also connects directly to Core
     ]
 
     @staticmethod
@@ -1272,105 +1181,188 @@ class ConfigInitializer:
         return []
 
     @staticmethod
-    def _validate_discord_templates() -> list[str]:
-        """Assert both checked-in template placeholders before any writes."""
-        required_targets = {
-            DISCORD_KOISHI_TARGET: DISCORD_KOISHI_PLACEHOLDER,
-            DISCORD_VC_TARGET: DISCORD_VC_PLACEHOLDER,
-        }
-        errors: list[str] = []
-        for target_rel, placeholder in required_targets.items():
-            template_rel = next(
-                (template for template, target in TEMPLATE_MAP.items() if target == target_rel),
-                None,
-            )
-            if not template_rel:
-                errors.append(f"Discord 配置模板映射缺失: {target_rel}")
-                continue
+    def _discord_migration_api() -> tuple[Callable[..., Any], Callable[..., Any]]:
+        """Load the adapter-owned migration API without importing adapter runtime dependencies."""
+        import importlib.util
+        import sys
+
+        adapter_dir = resolve_relative_to_root(ROOT_DIR, "NachoBot-Discord-Adapter")
+        migration_path = adapter_dir / "migration.py"
+        if not migration_path.is_file():
+            raise ValueError("Discord migration helper is unavailable")
+
+        module_name = f"_nachobot_discord_migration_{abs(hash(str(migration_path.resolve())))}"
+        module = sys.modules.get(module_name)
+        if module is None:
+            spec = importlib.util.spec_from_file_location(module_name, migration_path)
+            if spec is None or spec.loader is None:
+                raise ValueError("Discord migration helper is unavailable")
+            module = importlib.util.module_from_spec(spec)
+            previous_identity_map = sys.modules.pop("identity_map", None)
+            adapter_path = str(adapter_dir)
+            sys.path.insert(0, adapter_path)
             try:
-                raw = ConfigInitializer._read_template(template_rel)
-                if raw is None:
-                    errors.append(f"模板不存在: {template_rel}")
-                    continue
-                if target_rel == DISCORD_KOISHI_TARGET:
-                    valid = (
-                        ConfigInitializer._koishi_discord_placeholder_location(raw)
-                        is not None
-                    )
-                else:
-                    document = tomlkit.parse(raw)
-                    discord_section = document.get("discord")
-                    valid = (
-                        discord_section is not None
-                        and discord_section.get("token") == placeholder
-                    )
-                if not valid:
-                    errors.append(f"Discord 配置模板占位符无效: {template_rel}")
-            except Exception:
-                # Keep parse and filesystem details out of the response.  The
-                # user can repair the checked-in template and retry deployment.
-                errors.append(f"Discord 配置模板无法验证: {template_rel}")
-        return errors
+                sys.modules[module_name] = module
+                spec.loader.exec_module(module)
+            except Exception as exc:
+                sys.modules.pop(module_name, None)
+                raise ValueError("Discord migration helper could not be loaded") from exc
+            finally:
+                try:
+                    sys.path.remove(adapter_path)
+                except ValueError:
+                    pass
+                sys.modules.pop("identity_map", None)
+                if previous_identity_map is not None:
+                    sys.modules["identity_map"] = previous_identity_map
+
+        needs_migration = getattr(module, "needs_migration", None)
+        migrate_legacy_config = getattr(module, "migrate_legacy_config", None)
+        if not callable(needs_migration) or not callable(migrate_legacy_config):
+            raise ValueError("Discord migration helper has an unsupported interface")
+        return needs_migration, migrate_legacy_config
 
     @staticmethod
-    def _koishi_discord_placeholder_location(raw: str) -> int | None:
-        """Locate the fresh placeholder only under the Discord adapter plugin.
+    def _discord_config_validation_api() -> Callable[..., Any]:
+        """Load the adapter's pure config validator without importing runtime code."""
+        import importlib.util
+        import sys
 
-        The repository template is intentionally handled with a narrow YAML
-        shape check instead of a generic YAML round-trip: this preserves its
-        comments/formatting while still rejecting a global or misplaced token
-        placeholder.  The adapter plugin key is a generated ``adapter-discord``
-        mapping and its token must be a direct child at the mapping's first
-        indentation level.
+        adapter_dir = resolve_relative_to_root(ROOT_DIR, "NachoBot-Discord-Adapter")
+        validation_path = adapter_dir / "config_validation.py"
+        if not validation_path.is_file():
+            raise ValueError("Discord config validation helper is unavailable")
+
+        module_name = (
+            f"_nachobot_discord_config_validation_"
+            f"{abs(hash(str(validation_path.resolve())))}"
+        )
+        module = sys.modules.get(module_name)
+        if module is None:
+            spec = importlib.util.spec_from_file_location(module_name, validation_path)
+            if spec is None or spec.loader is None:
+                raise ValueError("Discord config validation helper is unavailable")
+            module = importlib.util.module_from_spec(spec)
+            try:
+                sys.modules[module_name] = module
+                spec.loader.exec_module(module)
+            except Exception as exc:
+                sys.modules.pop(module_name, None)
+                raise ValueError("Discord config validation helper could not be loaded") from exc
+
+        validate_config_mapping = getattr(module, "validate_config_mapping", None)
+        if not callable(validate_config_mapping):
+            raise ValueError("Discord config validation helper has an unsupported interface")
+        return validate_config_mapping
+
+    @staticmethod
+    def _validate_discord_live_config(path: Path) -> str | None:
+        """Validate the full live Discord schema using the adapter-owned validator."""
+        try:
+            document = tomlkit.parse(path.read_text(encoding="utf-8"))
+        except Exception:
+            return "现有 Discord Adapter 配置无法解析，已拒绝部署"
+        try:
+            ConfigInitializer._discord_config_validation_api()(
+                document,
+                require_token=False,
+            )
+        except Exception:
+            return "现有 Discord Adapter 配置无效，已拒绝部署"
+        return None
+
+    @staticmethod
+    def _validate_discord_template() -> list[str]:
+        """Validate the single fresh-install template before any target writes."""
+        if TEMPLATE_MAP.get(DISCORD_TEMPLATE) != DISCORD_TARGET:
+            return ["Discord 配置模板映射无效"]
+        try:
+            raw = ConfigInitializer._read_template(DISCORD_TEMPLATE)
+            if raw is None:
+                return [f"Discord 配置模板不存在: {DISCORD_TEMPLATE}"]
+            document = tomlkit.parse(raw)
+            discord = document.get("discord")
+            version = document.get("config_version")
+            if (
+                isinstance(version, bool)
+                or not isinstance(version, int)
+                or version not in {2, 3}
+                or not isinstance(discord, Mapping)
+                or discord.get("token") != DISCORD_PLACEHOLDER
+            ):
+                return ["Discord 配置模板缺少 v2/v3 schema 或 Token 占位符无效"]
+            ConfigInitializer._discord_config_validation_api()(
+                document,
+                require_token=False,
+            )
+        except Exception:
+            return ["Discord 配置模板无法验证"]
+        return []
+
+    @staticmethod
+    def _prepare_discord_config() -> tuple[bool, list[str]]:
+        """Migrate an existing legacy config or validate fresh v2/v3 template use.
+
+        The return flag means a supported v2/v3 live target is authoritative and
+        must not be regenerated from the example template. Legacy sources are
+        consumed only through the adapter-owned, fail-closed migration API.
         """
-        if raw.count(DISCORD_KOISHI_PLACEHOLDER) != 1:
-            return None
+        target_path = resolve_relative_to_root(ROOT_DIR, DISCORD_TARGET)
+        legacy_discordvc_path = resolve_relative_to_root(ROOT_DIR, LEGACY_DISCORDVC_CONFIG)
+        legacy_koishi_adapter_path = resolve_relative_to_root(
+            ROOT_DIR, LEGACY_KOISHI_ADAPTER_CONFIG
+        )
+        koishi_config_path = resolve_relative_to_root(ROOT_DIR, LEGACY_KOISHI_CONFIG)
+        koishi_db_path = resolve_relative_to_root(ROOT_DIR, LEGACY_KOISHI_DATABASE)
+        identity_path = resolve_relative_to_root(ROOT_DIR, DISCORD_IDENTITY_MAP)
 
-        lines = raw.splitlines(keepends=True)
-        adapter_headers: list[tuple[int, int]] = []
-        for index, line in enumerate(lines):
-            content = line.rstrip("\r\n")
-            if not content.strip() or content.lstrip().startswith("#"):
-                continue
-            leading = content[: len(content) - len(content.lstrip(" "))]
-            if "\t" in leading:
-                return None
-            if re.match(r"^ *adapter-discord:[^:\r\n]*:\s*(?:#.*)?$", content):
-                adapter_headers.append((index, len(leading)))
+        migrate_legacy_config = None
+        if target_path.exists():
+            try:
+                needs_migration, migrate_legacy_config = ConfigInitializer._discord_migration_api()
+                migration_required = bool(needs_migration(target_path))
+            except Exception:
+                return False, ["现有 Discord Adapter 配置无效，已拒绝部署"]
+            if not migration_required:
+                validation_error = ConfigInitializer._validate_discord_live_config(target_path)
+                return True, [validation_error] if validation_error else []
+        else:
+            legacy_inputs = (
+                legacy_discordvc_path,
+                legacy_koishi_adapter_path,
+                koishi_config_path,
+                koishi_db_path,
+                identity_path,
+            )
+            if not any(path.exists() for path in legacy_inputs):
+                return False, ConfigInitializer._validate_discord_template()
+            try:
+                _, migrate_legacy_config = ConfigInitializer._discord_migration_api()
+            except Exception:
+                return False, ["发现 Discord 旧配置，但迁移工具不可用；请保留旧文件后重试"]
 
-        if len(adapter_headers) != 1:
-            return None
+        try:
+            if migrate_legacy_config is None:
+                return False, ["Discord 旧配置迁移未完成"]
+            source_discordvc = target_path if target_path.exists() else legacy_discordvc_path
+            result = migrate_legacy_config(
+                target_config_path=target_path,
+                legacy_discordvc_config_path=source_discordvc,
+                legacy_koishi_adapter_config_path=legacy_koishi_adapter_path,
+                koishi_config_path=koishi_config_path,
+                identity_path=identity_path,
+                koishi_db_path=koishi_db_path,
+            )
+        except Exception:
+            return False, ["Discord 旧配置迁移失败；请保留旧配置和 Koishi 数据库并检查迁移日志"]
 
-        header_index, header_indent = adapter_headers[0]
-        body: list[tuple[int, int, str]] = []
-        for index in range(header_index + 1, len(lines)):
-            content = lines[index].rstrip("\r\n")
-            if not content.strip() or content.lstrip().startswith("#"):
-                continue
-            leading = content[: len(content) - len(content.lstrip(" "))]
-            if "\t" in leading:
-                return None
-            indent = len(leading)
-            if indent <= header_indent:
-                break
-            body.append((index, indent, content))
-
-        if not body:
-            return None
-        direct_indent = min(indent for _, indent, _ in body)
-        token_lines = [
-            (index, content)
-            for index, indent, content in body
-            if indent == direct_indent
-            and re.match(r"^ *token:\s*(.*?)\s*$", content)
-        ]
-        if len(token_lines) != 1:
-            return None
-        index, content = token_lines[0]
-        token_match = re.match(r"^ *token:\s*(.*?)\s*$", content)
-        if token_match is None or token_match.group(1) != DISCORD_KOISHI_PLACEHOLDER:
-            return None
-        return index
+        if not bool(getattr(result, "success", False)):
+            error = getattr(result, "error", None)
+            return False, [str(error) if isinstance(error, str) and error else "Discord 旧配置迁移失败"]
+        validation_error = ConfigInitializer._validate_discord_live_config(target_path)
+        if validation_error:
+            return False, [validation_error]
+        return True, []
 
     @staticmethod
     def _apply_discord_token(
@@ -1378,50 +1370,32 @@ class ConfigInitializer:
         target_rel: str,
         token: str,
     ) -> str | None:
-        """Replace exactly one known placeholder in a generated target."""
+        """Update only the Discord token while preserving the adapter-owned TOML."""
+        if target_rel != DISCORD_TARGET:
+            return "未知 Discord 配置目标"
         try:
-            raw = target_path.read_text(encoding="utf-8")
+            document = tomlkit.parse(target_path.read_text(encoding="utf-8"))
         except Exception:
-            return "Discord 配置文件无法读取"
+            return "Discord Adapter 配置无法解析"
 
-        if target_rel == DISCORD_KOISHI_TARGET:
-            line_index = ConfigInitializer._koishi_discord_placeholder_location(raw)
-            if line_index is None:
-                return "Koishi Discord Token 占位符无效，已拒绝写入"
-            # JSON double-quoted strings are valid YAML scalars and escape all
-            # control characters, quotes, and newlines safely.
-            replacement = json.dumps(token, ensure_ascii=False)
-            lines = raw.splitlines(keepends=True)
-            lines[line_index] = lines[line_index].replace(
-                DISCORD_KOISHI_PLACEHOLDER, replacement, 1
+        if not isinstance(token, str) or not token.strip():
+            return "Discord Bot Token 配置无效"
+        discord = document.get("discord")
+        if not isinstance(discord, Mapping):
+            return "Discord Adapter 配置 schema 无效，已拒绝写入"
+        try:
+            discord["token"] = token
+            ConfigInitializer._discord_config_validation_api()(
+                document,
+                require_token=False,
             )
-            updated = "".join(lines)
-            try:
-                target_path.write_text(updated, encoding="utf-8")
-            except Exception:
-                return "Koishi Discord 配置写入失败"
-            return None
-
-        if target_rel == DISCORD_VC_TARGET:
-            try:
-                document = tomlkit.parse(raw)
-            except Exception:
-                return "DiscordVC 配置 TOML 无法解析"
-            discord_section = document.get("discord")
-            if (
-                discord_section is None
-                or discord_section.get("token") != DISCORD_VC_PLACEHOLDER
-            ):
-                return "DiscordVC Token 占位符无效，已拒绝写入"
-            discord_section["token"] = token
-            try:
-                target_path.write_text(tomlkit.dumps(document), encoding="utf-8")
-            except Exception:
-                return "DiscordVC 配置写入失败"
-            return None
-
-        return "未知 Discord 配置目标"
-
+        except Exception:
+            return "Discord Adapter 配置 schema 无效，已拒绝写入"
+        try:
+            target_path.write_text(tomlkit.dumps(document), encoding="utf-8")
+        except Exception:
+            return "Discord Adapter Token 写入失败"
+        return None
     @staticmethod
     def _should_generate(
         component_id: str,
@@ -1454,10 +1428,8 @@ class ConfigInitializer:
             "NachoBot-Napcat-Adapter": "qq",
             "NachoBot-Multimodal-Adapter": "tts",
             "NachoBot-Bilibili-Adapter": "bilibili",
-            "NachoBot-Koishi-Adapter": "discord",
-            "NachoBot-DiscordVC-Adapter": "discord",
+            "NachoBot-Discord-Adapter": "discord",
             "NachoBot-UniversalVC-Adapter": "universalvc",
-            "koishi-app": "discord",
         }
         required = mapping.get(component_id)
         if required:
@@ -1498,15 +1470,7 @@ class ConfigInitializer:
             )
             return None
 
-        # Koishi is a YAML configuration.  Its Discord token is the only
-        # wizard override and is applied against the asserted fresh template.
-        if target_rel == "koishi-app/koishi.yml":
-            token, token_error = ConfigInitializer._get_discord_token(wizard_data)
-            if token_error:
-                return token_error
-            return ConfigInitializer._apply_discord_token(target_path, target_rel, token)
-
-        if target_rel == DISCORD_VC_TARGET:
+        if target_rel == DISCORD_TARGET:
             token, token_error = ConfigInitializer._get_discord_token(wizard_data)
             if token_error:
                 return token_error
@@ -1601,14 +1565,6 @@ class ConfigInitializer:
 
         # -- SnowLuma adapter config.toml --
         if target_rel == SNOWLUMA_TARGET and filename == "config.toml":
-            if "voice" in doc:
-                if doc["voice"].get("use_tts") != tts_enabled:
-                    doc["voice"]["use_tts"] = tts_enabled
-                    changed = True
-
-        # -- Koishi adapter config.toml --
-        # Upstream Core routing remains whatever is configured in nachobot_server.
-        if "NachoBot-Koishi-Adapter" in target_rel and filename == "config.toml":
             if "voice" in doc:
                 if doc["voice"].get("use_tts") != tts_enabled:
                     doc["voice"]["use_tts"] = tts_enabled
@@ -1968,15 +1924,9 @@ class DependencyInstaller:
         "qq_snowluma": "NachoBot-SnowLuma-Adapter",
         "tts": "NachoBot-Multimodal-Adapter",
         "bilibili": "NachoBot-Bilibili-Adapter",
-        "discord_koishi": "NachoBot-Koishi-Adapter",
-        "discord_vc": "NachoBot-DiscordVC-Adapter",
+        "discord_adapter": "NachoBot-Discord-Adapter",
         "universalvc": "NachoBot-UniversalVC-Adapter",
         "webui": "webUI",
-    }
-
-    # Projects that use the repository-pinned Yarn release.
-    YARN_PROJECTS: dict[str, str] = {
-        "discord_koishi_yarn": "koishi-app",
     }
 
     PLAYWRIGHT_PROJECTS: dict[str, str] = {
@@ -2171,26 +2121,10 @@ class DependencyInstaller:
         if "discord" in component_set:
             tasks.append(
                 {
-                    "id": "discord_koishi",
+                    "id": "discord_adapter",
                     "type": "uv",
-                    "name": "Koishi Adapter",
-                    "dir": "NachoBot-Koishi-Adapter",
-                }
-            )
-            tasks.append(
-                {
-                    "id": "discord_vc",
-                    "type": "uv",
-                    "name": "DiscordVC Adapter",
-                    "dir": "NachoBot-DiscordVC-Adapter",
-                }
-            )
-            tasks.append(
-                {
-                    "id": "discord_koishi_yarn",
-                    "type": "yarn",
-                    "name": "Koishi App (Yarn)",
-                    "dir": "koishi-app",
+                    "name": "Discord Adapter",
+                    "dir": "NachoBot-Discord-Adapter",
                 }
             )
 
@@ -2248,9 +2182,11 @@ class DependencyInstaller:
                 except ValueError as e:
                     return {"status": "error", "message": str(e)}
                 return await MultimodalRuntimeManager.install(runtime, callback)
-            return await DependencyInstaller._run_uv_sync(project_dir, callback)
-        elif task["type"] == "yarn":
-            return await DependencyInstaller._run_yarn_install(project_dir, callback)
+            return await DependencyInstaller._run_uv_sync(
+                project_dir,
+                callback,
+                locked=str(task.get("id", "")).strip() == "discord_adapter",
+            )
         elif task["type"] == "playwright":
             return await DependencyInstaller._run_playwright_install(project_dir, callback)
         else:
@@ -2264,8 +2200,6 @@ class DependencyInstaller:
 
         if task_type == "uv":
             expected_dir = DependencyInstaller.UV_PROJECTS.get(task_id)
-        elif task_type == "yarn":
-            expected_dir = DependencyInstaller.YARN_PROJECTS.get(task_id)
         elif task_type == "playwright":
             expected_dir = DependencyInstaller.PLAYWRIGHT_PROJECTS.get(task_id)
         else:
@@ -2280,8 +2214,10 @@ class DependencyInstaller:
     async def _run_uv_sync(
         project_dir: Path,
         callback: Callable[[str], Any] | None,
+        *,
+        locked: bool = False,
     ) -> dict[str, Any]:
-        """Execute `uv sync` in a project directory."""
+        """Execute `uv sync`, optionally requiring the committed lockfile."""
         import locale
 
         env = os.environ.copy()
@@ -2294,11 +2230,13 @@ class DependencyInstaller:
         env["PYTHONUTF8"] = "1"
 
         try:
+            command = ["uv", "sync"]
+            if locked:
+                command.append("--locked")
+            else:
+                command.extend(["--python", ">=3.11,<=3.13"])
             proc = await asyncio.create_subprocess_exec(
-                "uv",
-                "sync",
-                "--python",
-                ">=3.11,<=3.13",
+                *command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=str(project_dir),
@@ -2383,53 +2321,3 @@ class DependencyInstaller:
             return {"status": "error", "message": "uv 未安装，请先安装 uv"}
         except Exception as e:
             return {"status": "error", "message": f"Playwright Chromium 准备出错: {e}"}
-
-    @staticmethod
-    async def _run_yarn_install(
-        project_dir: Path,
-        callback: Callable[[str], Any] | None,
-    ) -> dict[str, Any]:
-        """Execute the repository-pinned immutable Yarn install."""
-        import locale
-
-        env = os.environ.copy()
-
-        try:
-            command = (
-                ["cmd", "/c", "corepack", "yarn", "install", "--immutable"]
-                if os.name == "nt"
-                else ["corepack", "yarn", "install", "--immutable"]
-            )
-            proc = await asyncio.create_subprocess_exec(
-                *command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                cwd=str(project_dir),
-                env=env,
-            )
-
-            fallback_enc = locale.getpreferredencoding(False) or "gbk"
-            while True:
-                line = await proc.stdout.readline()
-                if not line:
-                    break
-                try:
-                    text = line.decode("utf-8")
-                except UnicodeDecodeError:
-                    text = line.decode(fallback_enc, errors="replace")
-                if callback:
-                    await callback(text)
-
-            await proc.wait()
-
-            if proc.returncode == 0:
-                return {"status": "ok", "message": "yarn install --immutable 完成"}
-            else:
-                return {
-                    "status": "error",
-                    "message": f"yarn install --immutable 退出码: {proc.returncode}",
-                }
-        except FileNotFoundError:
-            return {"status": "error", "message": "Corepack/Yarn 未安装"}
-        except Exception as e:
-            return {"status": "error", "message": f"安装出错: {e}"}

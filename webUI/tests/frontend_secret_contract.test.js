@@ -27,9 +27,15 @@ const snowlumaTokenInput = { value: '', classList: tokenInput.classList };
 const snowlumaPasswordInput = { value: '', classList: tokenInput.classList };
 const qqAdapterInput = { value: 'napcat' };
 let checkedComponents = [];
+const envCheckList = {
+    innerHTML: '',
+    children: [],
+    appendChild(child) { this.children.push(child); },
+};
 
 const documentStub = {
     getElementById(id) {
+        if (id === 'setup-check-list') return envCheckList;
         if (id === 'setup-discord-token') return tokenInput;
         if (id === 'setup-bilibili-bot-account') return bilibiliInput;
         if (id === 'setup-snowluma-access-token') return snowlumaTokenInput;
@@ -41,6 +47,9 @@ const documentStub = {
         if (selector === '.setup-component-cb:checked') return checkedComponents;
         return [];
     },
+    createElement() {
+        return { appendChild() {}, className: '', innerHTML: '' };
+    },
 };
 
 const context = {
@@ -49,6 +58,7 @@ const context = {
     window: {},
     Promise,
     Error,
+    escapeHtml: value => String(value),
     setTimeout,
     clearTimeout,
 };
@@ -72,6 +82,13 @@ function assertCleared(wizardData) {
 }
 
 async function main() {
+    contract.renderEnvCheck({
+        python: { status: 'ok', message: 'Python ready' },
+        git: { status: 'ok', message: 'Git ready' },
+        docker: { status: 'warning', message: 'Docker optional' },
+    });
+    assert.strictEqual(envCheckList.children.length, 3, 'environment renderer requires Node.js data');
+
     checkedComponents = [{ value: 'discord' }];
     contract.onComponentToggle();
     tokenInput.value = 'example-value';

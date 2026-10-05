@@ -7,6 +7,11 @@ from typing import Any, Optional
 from src.common.logger import get_logger
 from src.common.database.database import db
 from src.common.database.database_model import ImageDescriptions
+from src.multimodal.contracts import (
+    MAX_VIDEO_BYTES,
+    decode_bounded_base64,
+    max_base64_chars,
+)
 from src.chat.utils.visual_policy import (
     CORE_GENERIC_VIDEO_PROMPT,
     resolve_visual_task_policy,
@@ -40,6 +45,31 @@ class VideoManager:
 
     async def _download_or_read_video(self, video_info: dict) -> Optional[bytes]:
         """下载或读取视频文件到内存字节串"""
+        # Adapters may provide bounded inline media when they already fetched
+        # it through their own authenticated/proxied transport. Keep this
+        # generic: a present inline field is authoritative and is never
+        # replaced by a URL download if it is malformed.
+        if "base64" in video_info:
+            try:
+                encoded = video_info.get("base64")
+                size = video_info.get("size")
+                if not isinstance(encoded, str):
+                    raise ValueError("inline video payload must be a base64 string")
+                if not isinstance(size, int) or isinstance(size, bool):
+                    raise ValueError("inline video size must be an integer")
+                if size <= 0 or size > MAX_VIDEO_BYTES:
+                    raise ValueError(f"inline video size must be between 1 and {MAX_VIDEO_BYTES} bytes")
+                if len(encoded) > max_base64_chars(MAX_VIDEO_BYTES):
+                    raise ValueError(f"inline video exceeds {MAX_VIDEO_BYTES} bytes")
+
+                data = decode_bounded_base64(encoded, max_bytes=MAX_VIDEO_BYTES)
+                if len(data) != size:
+                    raise ValueError("inline video size does not match decoded payload")
+                return data
+            except Exception as e:
+                logger.error(f"读取内联视频失败: {e}")
+                return None
+
         path = video_info.get("path")
         url = video_info.get("url")
 
@@ -47,9 +77,9 @@ class VideoManager:
         if path and os.path.exists(path):
             try:
                 with open(path, "rb") as f:
-                    data = f.read(64 * 1024 * 1024 + 1)
-                if len(data) > 64 * 1024 * 1024:
-                    raise ValueError("video exceeds the 64MB perception bound")
+                    data = f.read(MAX_VIDEO_BYTES + 1)
+                if len(data) > MAX_VIDEO_BYTES:
+                    raise ValueError(f"video exceeds the {MAX_VIDEO_BYTES}-byte perception bound")
                 return data
             except Exception as e:
                 logger.error(f"读取本地视频失败: {e}")
@@ -62,8 +92,8 @@ class VideoManager:
                 async with httpx.AsyncClient() as client:
                     resp = await client.get(url, timeout=60)
                     if resp.status_code == 200:
-                        if len(resp.content) > 64 * 1024 * 1024:
-                            raise ValueError("video exceeds the 64MB perception bound")
+                        if len(resp.content) > MAX_VIDEO_BYTES:
+                            raise ValueError(f"video exceeds the {MAX_VIDEO_BYTES}-byte perception bound")
                         return resp.content
             except Exception as e:
                 logger.error(f"下载视频失败: {e}")

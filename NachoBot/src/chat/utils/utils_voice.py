@@ -16,11 +16,20 @@ def normalize_asr_receipt_platform(platform: object) -> str | None:
     return normalize_asr_stream_platform(platform)
 
 
+def normalize_asr_receipt_scope(scope: object) -> str | None:
+    """Normalize an optional bounded opaque scope used to claim a receipt."""
+
+    from src.multimodal.contracts import normalize_asr_stream_scope
+
+    return normalize_asr_stream_scope(scope)
+
+
 async def get_voice_text(
     voice_base64: str,
     *,
     precomputed_asr_result_id: str | None = None,
     precomputed_asr_context: str | None = "universal_vc",
+    precomputed_asr_scope: str = "",
 ) -> str:
     """获取音频文件转录文本"""
     if not global_config.voice.enable_asr:
@@ -32,12 +41,19 @@ async def get_voice_text(
         from src.multimodal import get_multimodal_router
 
         receipt_context = normalize_asr_receipt_platform(precomputed_asr_context)
-        receipt_id = precomputed_asr_result_id if receipt_context is not None else None
-        result = await get_multimodal_router().transcribe(
-            voice_base64,
-            precomputed_asr_result_id=receipt_id,
-            precomputed_asr_context=receipt_context or "",
+        receipt_scope = normalize_asr_receipt_scope(precomputed_asr_scope)
+        receipt_id = (
+            precomputed_asr_result_id
+            if receipt_context is not None and receipt_scope is not None
+            else None
         )
+        transcribe_kwargs = {
+            "precomputed_asr_result_id": receipt_id,
+            "precomputed_asr_context": receipt_context or "",
+        }
+        if receipt_scope:
+            transcribe_kwargs["precomputed_asr_scope"] = receipt_scope
+        result = await get_multimodal_router().transcribe(voice_base64, **transcribe_kwargs)
         text = result.text.strip()
         if not text:
             logger.warning("未能生成语音文本")

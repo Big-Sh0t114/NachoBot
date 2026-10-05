@@ -20,7 +20,7 @@ SUPPORTED_SCHEMA_VERSION = 1
 
 _TOOL_MODES = {"standard", "mcp_only", "disabled"}
 _WEB_SEARCH_MODES = {"standard", "disabled"}
-_REPLY_DELIVERY_MODES = {"chunked", "aggregate_tagged_text", "json_envelope"}
+_REPLY_DELIVERY_MODES = {"chunked", "aggregate_tagged_text", "json_envelope", "tts_text"}
 _PERSON_PROFILE_MODES = {"standard", "low_latency", "disabled"}
 _TTS_LANGUAGES = {"", "ja", "zh"}
 _IDENTITY_MODES = {"standard", "external"}

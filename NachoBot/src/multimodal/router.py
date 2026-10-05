@@ -36,6 +36,7 @@ from .contracts import (
     TTSStreamError,
     decode_bounded_base64,
     normalize_asr_stream_platform,
+    normalize_asr_stream_scope,
     normalize_operation_payload,
 )
 from .profile import RuntimeProfile, get_runtime_profile, normalize_runtime_profile
@@ -77,6 +78,7 @@ class _AudioStreamSession:
     lease: _ModelLease
     created_at: float
     last_activity: float
+    scope: str = ""
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     next_seq: int = 0
     chunk_digests: dict[int, str] = field(default_factory=dict)
@@ -90,6 +92,7 @@ class _ASRReceipt:
     text: str
     context: str
     expires_at: float
+    scope: str = ""
 
 
 def _failure_text(operation: str) -> str:
@@ -375,6 +378,7 @@ class CoreMultimodalRouter:
         sample_rate: int = ASR_STREAM_SAMPLE_RATE,
         channels: int = ASR_STREAM_CHANNELS,
         platform: str = "universal_vc",
+        scope: str = "",
     ) -> Mapping[str, Any]:
         """Start a stream pinned to one configured local voice candidate."""
 
@@ -383,6 +387,9 @@ class CoreMultimodalRouter:
         normalized_platform = normalize_asr_stream_platform(platform)
         if normalized_platform not in ASR_STREAM_PLATFORMS:
             raise AudioStreamError(400, "invalid_platform")
+        normalized_scope = normalize_asr_stream_scope(scope)
+        if normalized_scope is None:
+            raise AudioStreamError(400, "invalid_scope")
         if not self.profile.allows_local_perception:
             raise AudioStreamError(501, "local_asr_streaming_unavailable")
 
@@ -455,6 +462,7 @@ class CoreMultimodalRouter:
                 lease=lease,
                 created_at=now,
                 last_activity=now,
+                scope=normalized_scope,
             )
             async with self._audio_stream_lock:
                 if self._audio_streams_closing:
@@ -685,6 +693,7 @@ class CoreMultimodalRouter:
                     text=text,
                     context=session.platform,
                     expires_at=time.monotonic() + ASR_RESULT_TTL_SECONDS,
+                    scope=session.scope,
                 )
             return {"text": text, "result_id": result_id}
 
@@ -701,11 +710,15 @@ class CoreMultimodalRouter:
         result_id: str | None,
         *,
         context: str,
+        scope: str = "",
     ) -> str | None:
         if not isinstance(result_id, str) or not result_id.strip() or len(result_id) > 128:
             return None
         normalized_context = normalize_asr_stream_platform(context)
         if normalized_context not in ASR_STREAM_PLATFORMS:
+            return None
+        normalized_scope = normalize_asr_stream_scope(scope)
+        if normalized_scope is None:
             return None
         async with self._audio_stream_lock:
             receipt = self._asr_receipts.get(result_id)
@@ -715,6 +728,8 @@ class CoreMultimodalRouter:
                 self._asr_receipts.pop(result_id, None)
                 return None
             if receipt.context != normalized_context:
+                return None
+            if receipt.scope != normalized_scope:
                 return None
             self._asr_receipts.pop(result_id, None)
             return receipt.text
@@ -770,11 +785,13 @@ class CoreMultimodalRouter:
         *,
         precomputed_asr_result_id: str | None = None,
         precomputed_asr_context: str = "universal_vc",
+        precomputed_asr_scope: str = "",
         **kwargs: Any,
     ) -> PerceptionResult:
         receipt_text = await self.consume_precomputed_asr_result(
             precomputed_asr_result_id,
             context=precomputed_asr_context,
+            scope=precomputed_asr_scope,
         )
         if receipt_text is not None:
             return PerceptionResult(

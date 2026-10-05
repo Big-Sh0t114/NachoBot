@@ -214,22 +214,34 @@ class MessageStorage:
             raise
     # 如果需要其他存储相关的函数，可以在这里添加
     @staticmethod
-    def update_message(mmc_message_id: str | None, qq_message_id: str | None) -> bool:
+    def update_message(
+        mmc_message_id: str | None,
+        qq_message_id: str | None,
+        platform: str | None = None,
+    ) -> bool:
         """实时更新数据库的自身发送消息ID"""
         try:
             if not qq_message_id:
                 logger.info("消息不存在message_id，无法更新")
                 return False
-            if matched_message := (
-                Messages.select().where((Messages.message_id == mmc_message_id)).order_by(Messages.time.desc()).first()
-            ):
+            if platform is not None and (not isinstance(platform, str) or not platform):
+                return False
+
+            conditions = Messages.message_id == mmc_message_id
+            if platform is not None:
+                conditions = conditions & (Messages.chat_info_platform == platform)
+
+            matched_message = (
+                Messages.select().where(conditions).order_by(Messages.time.desc()).first()
+            )
+            if matched_message:
                 # 更新找到的消息记录
                 Messages.update(message_id=qq_message_id).where(Messages.id == matched_message.id).execute()  # type: ignore
                 logger.debug(f"更新消息ID成功: {matched_message.message_id} -> {qq_message_id}")
                 return True
-            else:
-                logger.debug("未找到匹配的消息")
-                return False
+
+            logger.debug("未找到匹配的消息")
+            return False
 
         except Exception as e:
             logger.error(f"更新消息ID失败: {e}")

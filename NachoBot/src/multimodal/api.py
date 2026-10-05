@@ -21,6 +21,7 @@ from .contracts import (
     MAX_TEXT_CHARS,
     TTS_SYNTHESIZE_V1,
     VIDEO_UNDERSTAND_V1,
+    normalize_asr_stream_scope,
 )
 from .router import AudioStreamError, CoreMultimodalRouter, TTSStreamError, get_multimodal_router
 
@@ -137,6 +138,7 @@ def create_multimodal_router(service: CoreMultimodalRouter | None = None) -> API
         sample_rate = body.get("sample_rate")
         channels = body.get("channels")
         platform = body.get("platform", "universal_vc")
+        scope = normalize_asr_stream_scope(body.get("scope", ""))
         if (
             isinstance(sample_rate, bool)
             or not isinstance(sample_rate, int)
@@ -146,13 +148,18 @@ def create_multimodal_router(service: CoreMultimodalRouter | None = None) -> API
             raise HTTPException(status_code=400, detail="invalid_audio_format")
         if not isinstance(platform, str) or len(platform) > 64:
             raise HTTPException(status_code=400, detail="invalid_platform")
+        if scope is None:
+            raise HTTPException(status_code=400, detail="invalid_scope")
         try:
+            start_kwargs = {
+                "sample_rate": sample_rate,
+                "channels": channels,
+                "platform": platform,
+            }
+            if scope:
+                start_kwargs["scope"] = scope
             return dict(
-                await service.start_audio_stream(
-                    sample_rate=sample_rate,
-                    channels=channels,
-                    platform=platform,
-                )
+                await service.start_audio_stream(**start_kwargs)
             )
         except AudioStreamError as exc:
             raise _stream_http_error(exc) from exc

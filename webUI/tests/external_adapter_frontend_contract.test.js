@@ -84,51 +84,45 @@ assert(!externalQqMarkup.includes('id="btn-stop-qq_adapter"'));
 assert(externalQqMarkup.includes('id="launcher-qq-adapter"'));
 assert(externalQqMarkup.includes('id="launcher-qq-adapter" class="form-select" disabled'));
 
-// External + missing keeps a targeted start action and never performs a
-// preliminary group stop.
-const mixedMissing = group('discord', [
-    service('koishi', 'running'),
-    service('koishi_adapter', 'stopped', { managed: false, origin: null, external_state: null }),
+// Discord has exactly one managed adapter. Verify its external, missing,
+// owned, and externally blocked states render the matching controls.
+const discordExternal = group('discord', [service('discord_adapter', 'running')]);
+control = contract.groupControlState(discordExternal);
+assert.strictEqual(control.allExternalReady, true);
+assert(!render(discordExternal).includes('id="btn-start-discord"'));
+assert(!render(discordExternal).includes('id="btn-stop-discord"'));
+
+const discordMissing = group('discord', [
+    service('discord_adapter', 'stopped', { managed: false, origin: null, external_state: null }),
 ]);
-control = contract.groupControlState(mixedMissing);
-assert.strictEqual(control.anyExternal, true);
+control = contract.groupControlState(discordMissing);
 assert.strictEqual(control.hasMissing, true);
 assert.strictEqual(control.showStart, true);
-assert.strictEqual(control.startLabel, '启动缺失服务');
-assert(render(mixedMissing).includes('启动缺失服务'));
-assert(render(mixedMissing).includes('id="btn-start-discord"'));
+assert(render(discordMissing).includes('id="btn-start-discord"'));
 
-// External + WebUI-owned complete groups expose only the owned-service stop;
-// Start is reserved for missing rows or an entirely WebUI-owned restart.
-const mixedComplete = group('discord', [
-    service('koishi', 'running'),
-    service('koishi_adapter', 'running', { managed: true, origin: 'webui', external_state: null }),
+const discordOwned = group('discord', [
+    service('discord_adapter', 'running', { managed: true, origin: 'webui', external_state: null }),
 ]);
-control = contract.groupControlState(mixedComplete);
-assert.strictEqual(control.anyExternal, true);
+control = contract.groupControlState(discordOwned);
 assert.strictEqual(control.owned, true);
-assert.strictEqual(control.showStart, false);
-const mixedCompleteMarkup = render(mixedComplete);
-assert(!mixedCompleteMarkup.includes('id="btn-start-discord"'));
-assert(mixedCompleteMarkup.includes('停止 WebUI 托管服务'));
+assert.strictEqual(control.showStart, true);
+const discordOwnedMarkup = render(discordOwned);
+assert(discordOwnedMarkup.includes('id="btn-start-discord"'));
+assert(discordOwnedMarkup.includes('id="btn-stop-discord"'));
 
-// A blocked external row must not hide the stop action for a different
-// manager-owned row in the same group.
-const ownedWithBlockedExternal = group('discord', [
-    service('koishi', 'running', { managed: true, origin: 'webui', external_state: null }),
-    service('koishi_adapter', 'error', {
+const discordBlocked = group('discord', [
+    service('discord_adapter', 'error', {
         managed: false,
         origin: 'external',
         external_state: 'present_unready',
     }),
 ]);
-control = contract.groupControlState(ownedWithBlockedExternal);
+control = contract.groupControlState(discordBlocked);
 assert.strictEqual(control.blocked, true);
-assert.strictEqual(control.owned, true);
-const ownedWithBlockedMarkup = render(ownedWithBlockedExternal);
-assert(!ownedWithBlockedMarkup.includes('id="btn-start-discord"'));
-assert(ownedWithBlockedMarkup.includes('id="btn-stop-discord"'));
-assert(ownedWithBlockedMarkup.includes('停止 WebUI 托管服务'));
+assert.strictEqual(control.showStart, false);
+const discordBlockedMarkup = render(discordBlocked);
+assert(!discordBlockedMarkup.includes('id="btn-start-discord"'));
+assert(!discordBlockedMarkup.includes('id="btn-stop-discord"'));
 
 const ownedQqWithBlockedExternal = group('qq_adapter', [
     service('napcat_adapter', 'running', { managed: true, origin: 'webui', external_state: null }),
@@ -202,7 +196,7 @@ async function assertNoPreliminaryStop(groupValue, expectedStartUrl) {
 }
 
 (async () => {
-    await assertNoPreliminaryStop(mixedMissing, '/api/groups/discord/start');
+    await assertNoPreliminaryStop(discordMissing, '/api/groups/discord/start');
     const mixedQqMissing = group('qq_adapter', [
         service('napcat_adapter', 'running'),
         service('napcat_shell', 'stopped', { managed: false, origin: null, external_state: null }),

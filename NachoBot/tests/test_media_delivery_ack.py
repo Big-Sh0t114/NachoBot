@@ -79,8 +79,16 @@ def _setup(monkeypatch, sender):
     monkeypatch.setattr(send_api, "focus_coordinator", _FocusCoordinator())
     monkeypatch.setattr(send_api, "get_chat_manager", lambda: _ChatManager(stream))
     monkeypatch.setattr(send_api, "UniversalMessageSender", lambda: sender)
-    monkeypatch.setattr(send_api.MessageStorage, "update_message", staticmethod(lambda *_args: False))
-    monkeypatch.setattr(bot_module.MessageStorage, "update_message", staticmethod(lambda *_args: False))
+    monkeypatch.setattr(
+        send_api.MessageStorage,
+        "update_message",
+        staticmethod(lambda *_args, **_kwargs: False),
+    )
+    monkeypatch.setattr(
+        bot_module.MessageStorage,
+        "update_message",
+        staticmethod(lambda *_args, **_kwargs: False),
+    )
     return stream
 
 
@@ -135,7 +143,12 @@ def test_media_receipt_waits_for_platform_echo_and_bot_updates_without_db_warnin
     monkeypatch.setattr(
         bot_module.MessageStorage,
         "update_message",
-        staticmethod(lambda message_id, actual_id: updates.append((message_id, actual_id)) or False),
+        staticmethod(
+            lambda message_id, actual_id, **kwargs: updates.append(
+                (message_id, actual_id, kwargs.get("platform"))
+            )
+            or False
+        ),
     )
 
     async def scenario():
@@ -157,7 +170,7 @@ def test_media_receipt_waits_for_platform_echo_and_bot_updates_without_db_warnin
         receipt = await task
         assert receipt.delivered
         assert receipt.message_id == "987"
-        assert updates == [(core_id, "987")]
+        assert updates == [(core_id, "987", "qq")]
 
     _run(scenario())
 

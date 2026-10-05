@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+.runtime/
+.ruff_cache/
+.pytest_cache/
+.git/
+.gitignore
+config.toml
+config.toml.example
+data/
+logs/
+log/
+*.log
+*.bak
+config-save/
+setup_backups/
+*.pyc

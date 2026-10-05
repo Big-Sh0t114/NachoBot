@@ -10,7 +10,8 @@ from ncnk_message import BaseMessageInfo, MessageBase, Seg
 
 from src.common.message.api import get_global_api
 from src.common.logger import get_logger
-from src.chat.message_receive.message import MessageSending
+from src.chat.message_receive.message import MessageSending, delivery_target_additional_config
+from src.chat.message_receive.outbound_echo import outbound_echo_registry
 from src.chat.message_receive.storage import MessageStorage
 from src.chat.utils.utils import truncate_message
 from src.chat.utils.utils import calculate_typing_time
@@ -258,6 +259,7 @@ async def _send_direct_segment(message: MessageSending, segment: Seg) -> bool:
             time=info.time,
             group_info=info.group_info,
             user_info=info.user_info,
+            additional_config=delivery_target_additional_config(info),
         ),
         message_segment=segment,
     )
@@ -538,6 +540,7 @@ class UniversalMessageSender:
 
         chat_id = message.chat_stream.stream_id
         message_id = message.message_info.message_id
+        outbound_echo_handle = None
 
         try:
             if set_reply:
@@ -613,11 +616,14 @@ class UniversalMessageSender:
             original_segment = message.message_segment
             if voice_stream:
                 message.message_segment = _tts_fields_as_display_text(original_segment)
+            outbound_echo_handle = outbound_echo_registry.register(message)
             try:
                 sent_msg = await _send_message(message, show_log=show_log)
             finally:
                 message.message_segment = original_segment
             if not sent_msg:
+                outbound_echo_registry.discard(outbound_echo_handle)
+                outbound_echo_handle = None
                 return False
 
             if voice_stream and tts_entries:
@@ -648,9 +654,27 @@ class UniversalMessageSender:
 
             if storage_message:
                 await self.storage.store_message(message, message.chat_stream)
+                actual_message_id = outbound_echo_registry.mark_stored(outbound_echo_handle)
+                if actual_message_id:
+                    MessageStorage.update_message(
+                        message_id,
+                        actual_message_id,
+                        platform=message.message_info.platform,
+                    )
+                # Stored sends remain in the bounded registry for late echoes.
+                outbound_echo_handle = None
+            else:
+                # The optional no-storage path keeps its historical semantics.
+                # Any ACK waiter owns its receipt after this point.
+                outbound_echo_registry.finish_unstored(outbound_echo_handle)
+                outbound_echo_handle = None
 
             return sent_msg
 
         except Exception as e:
             logger.error(f"[{chat_id}] 处理或存储消息 {message_id} 时出错: {e}")
             raise e
+        finally:
+            # Cancellation and exceptions before successful finalization must
+            # not leave a pending identity that a later echo could reuse.
+            outbound_echo_registry.discard(outbound_echo_handle)

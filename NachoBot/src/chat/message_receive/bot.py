@@ -20,7 +20,9 @@ from src.common.logger import get_logger
 from src.config.config import global_config
 from src.mood.mood_manager import mood_manager  # 导入情绪管理器
 from src.chat.message_receive.chat_stream import get_chat_manager, ChatStream
+from src.chat.message_receive.delivery_context import scoped_delivery_target
 from src.chat.message_receive.message import MessageRecv
+from src.chat.message_receive.outbound_echo import outbound_echo_registry
 from src.chat.message_receive.storage import MessageStorage
 from src.chat.replyer.sandbox_callback import consume_sandbox_callback_reply
 from src.chat.heart_flow.heartflow_message_processor import HeartFCMessageReceiver
@@ -168,6 +170,11 @@ class ChatBot:
             self._started = True
 
     async def _process_commands_with_new_system(self, message: MessageRecv):
+        """Process a command with its source delivery target bound throughout."""
+        with scoped_delivery_target(message):
+            return await self._process_commands_with_new_system_scoped(message)
+
+    async def _process_commands_with_new_system_scoped(self, message: MessageRecv):
         # sourcery skip: use-named-expression
         """使用新插件系统处理命令"""
         try:
@@ -456,30 +463,31 @@ class ChatBot:
                 command_instance: BaseCommand = command_class(message, plugin_config)
                 command_instance.set_matched_groups(matched_groups)
 
-                try:
-                    # 执行命令
-                    success, response, intercept_message = await command_instance.execute()
-
-                    # 记录命令执行结果
-                    if success:
-                        logger.info(f"命令执行成功: {command_class.__name__} (拦截: {intercept_message})")
-                    else:
-                        logger.warning(f"命令执行失败: {command_class.__name__} - {response}")
-
-                    # 根据命令的拦截设置决定是否继续处理消息
-                    return True, response, not intercept_message  # 找到命令，根据intercept_message决定是否继续
-
-                except Exception as e:
-                    logger.error(f"执行命令时出错: {command_class.__name__} - {e}")
-                    logger.error(traceback.format_exc())
-
+                with scoped_delivery_target(message):
                     try:
-                        await command_instance.send_text(f"命令执行出错: {str(e)}")
-                    except Exception as send_error:
-                        logger.error(f"发送错误消息失败: {send_error}")
+                        # 执行命令
+                        success, response, intercept_message = await command_instance.execute()
 
-                    # 命令出错时，根据命令的拦截设置决定是否继续处理消息
-                    return True, str(e), False  # 出错时继续处理消息
+                        # 记录命令执行结果
+                        if success:
+                            logger.info(f"命令执行成功: {command_class.__name__} (拦截: {intercept_message})")
+                        else:
+                            logger.warning(f"命令执行失败: {command_class.__name__} - {response}")
+
+                        # 根据命令的拦截设置决定是否继续处理消息
+                        return True, response, not intercept_message  # 找到命令，根据intercept_message决定是否继续
+
+                    except Exception as e:
+                        logger.error(f"执行命令时出错: {command_class.__name__} - {e}")
+                        logger.error(traceback.format_exc())
+
+                        try:
+                            await command_instance.send_text(f"命令执行出错: {str(e)}")
+                        except Exception as send_error:
+                            logger.error(f"发送错误消息失败: {send_error}")
+
+                        # 命令出错时，根据命令的拦截设置决定是否继续处理消息
+                        return True, str(e), False  # 出错时继续处理消息
 
             # 近似匹配提示：以 # 开头但未匹配到命令
             if command_text and command_text.strip().startswith("#"):
@@ -628,14 +636,51 @@ class ChatBot:
         echo_platform = raw_data.get("platform")
         if not isinstance(echo_platform, str) or not echo_platform:
             echo_platform = message_data.get("platform")
+        if isinstance(actual_message_id, int) and not isinstance(actual_message_id, bool):
+            # Several adapters publish native numeric IDs (for example QQ
+            # message IDs) while the database and waiter contracts use text.
+            actual_message_id = str(actual_message_id)
+
+        if (
+            not isinstance(mmc_message_id, str)
+            or not mmc_message_id
+            or not isinstance(actual_message_id, str)
+            or not actual_message_id
+            or not isinstance(echo_platform, str)
+            or not echo_platform
+        ):
+            logger.warning("忽略缺少消息ID或平台标识的平台回执")
+            return
 
         # Resolve the receipt only when both the message id and the platform
         # match a pending send.  A mismatched platform must not satisfy a
         # waiter belonging to another adapter route.
+        echo_match = outbound_echo_registry.observe_echo(
+            mmc_message_id,
+            echo_platform,
+            actual_message_id,
+        )
+        if echo_match.conflict:
+            # A known send already has a different canonical platform ID.
+            # Reject the conflicting echo before it can resolve a waiter or
+            # fall through to the stored-row update path.
+            logger.warning("忽略与已确认平台回执冲突的消息ID: %s", mmc_message_id)
+            return
         ack_resolved = send_api.resolve_message_ack(mmc_message_id, echo_platform, actual_message_id)
-        stored = MessageStorage.update_message(mmc_message_id, actual_message_id)
+        if echo_match.matched and not echo_match.stored:
+            # The sender will reconcile this early ACK after the original row
+            # has been created. Calling storage here would lose that race.
+            stored = False
+        else:
+            stored = MessageStorage.update_message(
+                mmc_message_id,
+                actual_message_id,
+                platform=echo_platform,
+            )
         if stored:
             logger.debug(f"更新消息ID成功: {mmc_message_id} -> {actual_message_id}")
+        elif echo_match.matched:
+            logger.debug(f"已跟踪平台ACK: {mmc_message_id} -> {actual_message_id}")
         elif ack_resolved:
             # Media receipts may deliberately use storage_message=False.  The
             # upstream ACK is still valid even though there is no DB row.

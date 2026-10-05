@@ -73,11 +73,15 @@ class _FakeRouter:
 class _FakeApi:
     def __init__(self, *, reject_event=None):
         self.sent = []
+        self.sent_additional_configs = []
         self.reject_event = reject_event
         self.chunk_sent = asyncio.Event()
 
     async def send_message(self, message):
         segment = message.message_segment
+        self.sent_additional_configs.append(
+            copy.deepcopy(getattr(message.message_info, "additional_config", None))
+        )
         if isinstance(segment.data, list):
             data = [child.to_dict() for child in segment.data]
         else:
@@ -92,7 +96,7 @@ class _FakeApi:
         return True
 
 
-def _message(*, voice_stream=True, segment=None):
+def _message(*, voice_stream=True, segment=None, reply=None, delivery_target=None):
     bot = UserInfo(
         platform="universal_vc",
         user_id="bot",
@@ -104,6 +108,14 @@ def _message(*, voice_stream=True, segment=None):
             additional_config={
                 "tts_language": "zh",
                 "runtime_capabilities": {"voice_stream": voice_stream},
+                "delivery_target": delivery_target
+                or {
+                    "channel_id": "channel-context",
+                    "user_id": "user-context",
+                    "guild_id": "guild-context",
+                    "mode": "voice",
+                    "voice_generation": "generation-context",
+                },
             }
         )
     )
@@ -119,6 +131,7 @@ def _message(*, voice_stream=True, segment=None):
         chat_stream=stream,
         bot_user_info=bot,
         sender_info=bot,
+        reply=reply,
         message_segment=segment or Seg(
             type="tts_text",
             data={"text": "initial speech", "display_text": "initial display"},
@@ -211,6 +224,54 @@ class TTSVoiceStreamRelayTests(unittest.IsolatedAsyncioTestCase):
         self.sender.storage.store_message.assert_awaited_once()
         self.assertEqual(message.message_segment.type, "seglist")
         self.assertEqual(message.message_segment.data[1].type, "tts_text")
+
+    async def test_delivery_target_is_snapshotted_from_original_reply_for_direct_voice_stream(self):
+        original_target = {
+            "channel_id": "channel-original",
+            "user_id": "user-original",
+            "guild_id": "guild-original",
+            "mode": "voice",
+            "voice_generation": "generation-7",
+        }
+        reply = SimpleNamespace(
+            message_info=SimpleNamespace(
+                message_id="trigger-message",
+                additional_config={"delivery_target": original_target},
+            )
+        )
+        context_target = {
+            **original_target,
+            "channel_id": "channel-latest",
+            "voice_generation": "generation-8",
+        }
+        message = _message(reply=reply, delivery_target=context_target)
+
+        # The constructed reply owns a deep copy of its source target. Later
+        # session changes must not retarget an in-flight response.
+        original_target["voice_generation"] = "generation-mutated"
+        message.chat_stream.context.message.message_info.additional_config["delivery_target"][
+            "voice_generation"
+        ] = "generation-latest"
+        expected = {
+            "channel_id": "channel-original",
+            "user_id": "user-original",
+            "guild_id": "guild-original",
+            "mode": "voice",
+            "voice_generation": "generation-7",
+        }
+        info = message.to_dict()["message_info"]
+        self.assertEqual(info["additional_config"]["delivery_target"], expected)
+        self.assertEqual(
+            set(info["additional_config"]) - {"delivery_target"},
+            {"reply_to_message_id"},
+        )
+
+        self.assertTrue(await _relay_tts_text(message, self.router, "speech", None))
+
+        self.assertEqual(
+            self.api.sent_additional_configs,
+            [{"delivery_target": expected}] * 3,
+        )
 
     async def test_fast_synthesis_is_paced_below_playback_buffer_limit(self):
         clock = [100.0]

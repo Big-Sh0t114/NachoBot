@@ -9,9 +9,7 @@ WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
 ADAPTER_ENTRYPOINTS = (
     "NachoBot-Napcat-Adapter/src/mmc_com_layer.py",
     "NachoBot-Bilibili-Adapter/adapter.py",
-    "NachoBot-Multimodal-Adapter/main.py",
-    "NachoBot-Koishi-Adapter/adapter.py",
-    "NachoBot-DiscordVC-Adapter/adapter.py",
+    "NachoBot-Discord-Adapter/adapter.py",
     "NachoBot-UniversalVC-Adapter/adapter.py",
 )
 

@@ -89,8 +89,7 @@ jobs:
         project:
           - NachoBot
           - NachoBot-Bilibili-Adapter
-          - NachoBot-DiscordVC-Adapter
-          - NachoBot-Koishi-Adapter
+          - NachoBot-Discord-Adapter
           - NachoBot-Live2D-Adapter
           - NachoBot-Multimodal-Adapter
           - NachoBot-Napcat-Adapter
@@ -125,6 +124,28 @@ jobs:
           uv export --locked --no-dev --no-hashes --output-file requirements.txt
           git diff --exit-code -- requirements.txt
 
+  discord-adapter-tests:
+    name: Discord Adapter unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          version: "0.9.5"
+
+      - name: Install locked dependencies
+        working-directory: NachoBot-Discord-Adapter
+        run: uv sync --locked
+
+      - name: Run offline unit tests
+        working-directory: NachoBot-Discord-Adapter
+        run: uv run --locked python -m unittest discover -s tests
+
   compose:
     name: Compose configuration
     runs-on: ubuntu-latest
@@ -138,28 +159,6 @@ jobs:
             docker compose --file "$file" config --quiet
           done < <(git ls-files -z '**/docker-compose.yml' 'docker-compose.yml')
 
-
-  koishi:
-    name: Koishi immutable install and build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: "22"
-          package-manager-cache: false
-
-      - name: Enable the repository-pinned Yarn release
-        run: corepack enable
-
-      - name: Install exactly the locked dependency graph
-        working-directory: koishi-app
-        run: corepack yarn install --immutable --mode=skip-build
-
-      - name: Build Koishi
-        working-directory: koishi-app
-        run: corepack yarn build
 
   core-image:
     name: Core container image

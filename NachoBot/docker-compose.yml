@@ -35,7 +35,8 @@ services:
       - NACHOBOT_RUNTIME_PROFILE=${NACHOBOT_RUNTIME_PROFILE:-full}
       - NACHOBOT_TTS_ENDPOINT=${NACHOBOT_TTS_ENDPOINT:-http://multimodal-tts-runtime:9880}
       - NACHOBOT_MULTIMODAL_ENDPOINT=${NACHOBOT_MULTIMODAL_ENDPOINT:-http://multimodal-perception:9874}
-        # Core 仅在本 Compose 管理的网络中为适配器提供无令牌通信。
+      - TMPDIR=/NachoBot/data/media-tmp
+      # Core 仅在本 Compose 管理的网络中为适配器提供无令牌通信。
       # 若将端口暴露到非回环地址，必须删除此开关并配置 auth_token。
       - NACHOBOT_TRUSTED_CONTAINER_NETWORK=1
     ports:
@@ -61,6 +62,16 @@ services:
         target: /NachoBot/data
         bind:
           create_host_path: false
+      - type: bind
+        source: ./data/NachoBot/media-tmp
+        target: /NachoBot/data/media-tmp
+        bind:
+          create_host_path: true
+      - type: bind
+        source: ./music
+        target: /NachoBot/music
+        bind:
+          create_host_path: true
       - type: bind
         source: ./data/NachoBot/logs
         target: /NachoBot/logs

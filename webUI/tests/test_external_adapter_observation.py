@@ -42,6 +42,10 @@ class ExternalAdapterObservationTests(unittest.TestCase):
         argv: tuple[str, ...] | None = None,
         name: str | None = None,
         executable: str | None = None,
+        core_env_checked: bool | None = None,
+        core_host: str | None = None,
+        core_port: str | None = None,
+        core_token_key_present: bool | None = None,
     ) -> process_manager._ProcessRecord:
         expected_cwd = cwd or self.manager._external_service_cwd(service_id)
         if service_id == "snowluma_runtime":
@@ -52,10 +56,6 @@ class ExternalAdapterObservationTests(unittest.TestCase):
             argv = argv or ("python", "-m", "live2d_adapter", "--config", "config.toml")
             name = name or "python.exe"
             executable = executable or "python.exe"
-        elif service_id == "koishi":
-            argv = argv or ("node", "node_modules/@koishijs/cli/lib/index.js", "start")
-            name = name or "node.exe"
-            executable = executable or "node.exe"
         elif service_id == "napcat_shell":
             argv = argv or ("launcher-user.bat",)
             name = name or "NapCat.Shell.exe"
@@ -64,6 +64,16 @@ class ExternalAdapterObservationTests(unittest.TestCase):
             argv = argv or ("python", "main.py")
             name = name or "python.exe"
             executable = executable or "python.exe"
+        if service_id == "discord_adapter":
+            expected_env = process_manager.SERVICE_DEFS[service_id].env_extra
+            if core_env_checked is None:
+                core_env_checked = True
+            if core_host is None:
+                core_host = expected_env["NACHOBOT_CORE_HOST"]
+            if core_port is None:
+                core_port = expected_env["NACHOBOT_CORE_PORT"]
+            if core_token_key_present is None:
+                core_token_key_present = True
         return process_manager._ProcessRecord(
             pid=pid,
             ppid=ppid,
@@ -71,6 +81,10 @@ class ExternalAdapterObservationTests(unittest.TestCase):
             argv=tuple(argv),
             executable=executable,
             name=name,
+            core_env_checked=bool(core_env_checked),
+            core_host=core_host,
+            core_port=core_port,
+            core_token_key_present=bool(core_token_key_present),
         )
 
     @staticmethod
@@ -90,16 +104,14 @@ class ExternalAdapterObservationTests(unittest.TestCase):
             for service_id in process_manager.EXTERNAL_ADAPTER_SERVICE_IDS
         }
 
-    def test_snapshot_classifies_all_ten_services_with_direct_and_descendant_ports(self) -> None:
+    def test_snapshot_classifies_all_eight_services_with_direct_and_descendant_ports(self) -> None:
         records = [
             self._record("napcat_adapter", 101),
             self._record("snowluma_adapter", 102),
             self._record("snowluma_runtime", 103),
             self._record("bilibili", 104),
             self._record("live2d", 105),
-            self._record("koishi", 106),
-            self._record("koishi_adapter", 107),
-            self._record("discordvc", 108),
+            self._record("discord_adapter", 107),
             self._record("universalvc", 109),
             self._record("napcat_shell", 110),
             self._record(
@@ -114,7 +126,6 @@ class ExternalAdapterObservationTests(unittest.TestCase):
             process_manager.SERVICE_DEFS["napcat_adapter"].port: frozenset({101}),
             process_manager.SERVICE_DEFS["snowluma_runtime"].port: frozenset({103}),
             process_manager.SERVICE_DEFS["live2d"].port: frozenset({105}),
-            process_manager.SERVICE_DEFS["koishi"].port: frozenset({106}),
         }
         snapshot = process_manager._ProcessSnapshot(tuple(records), listeners)
 
@@ -122,6 +133,65 @@ class ExternalAdapterObservationTests(unittest.TestCase):
 
         self.assertEqual(set(result), set(process_manager.EXTERNAL_ADAPTER_SERVICE_IDS))
         self.assertTrue(all(item.outcome == "external_ready" for item in result.values()))
+
+    def test_discord_external_identity_requires_exact_entrypoint_and_core_environment(self) -> None:
+        valid = self._record("discord_adapter", 115)
+        result = self.manager._classify_external_adapters(
+            process_manager._ProcessSnapshot((valid,), {})
+        )
+        self.assertEqual(result["discord_adapter"].outcome, "external_ready")
+
+        wrong_cwd = self._record(
+            "discord_adapter", 116, cwd=f"{valid.cwd}-other"
+        )
+        wrong_entrypoint = self._record(
+            "discord_adapter", 117, argv=("python", "worker.py")
+        )
+        wrong_results = self.manager._classify_external_adapters(
+            process_manager._ProcessSnapshot((wrong_cwd, wrong_entrypoint), {})
+        )
+        self.assertEqual(wrong_results["discord_adapter"].outcome, "absent")
+
+        unreadable_environment = self._record(
+            "discord_adapter", 118, core_env_checked=False
+        )
+        unreadable_result = self.manager._classify_external_adapters(
+            process_manager._ProcessSnapshot((unreadable_environment,), {})
+        )
+        self.assertEqual(unreadable_result["discord_adapter"].outcome, "indeterminate")
+
+        wrong_core = self._record("discord_adapter", 119, core_host="192.0.2.8")
+        wrong_core_result = self.manager._classify_external_adapters(
+            process_manager._ProcessSnapshot((wrong_core,), {})
+        )
+        self.assertEqual(
+            wrong_core_result["discord_adapter"].outcome,
+            "external_present_unready",
+        )
+
+    def test_discord_start_guard_reports_legacy_instances_without_stopping_them(self) -> None:
+        legacy = process_manager._ProcessRecord(
+            pid=130,
+            ppid=None,
+            cwd=str(self.manager.root / "NachoBot-Koishi-Adapter"),
+            argv=("python", "main.py"),
+            executable="python.exe",
+            name="python.exe",
+        )
+        termination = AsyncMock()
+        self.manager._terminate_state_process = termination  # type: ignore[method-assign]
+
+        async def scenario() -> None:
+            with patch.object(
+                self.manager,
+                "_build_external_process_snapshot",
+                return_value=process_manager._ProcessSnapshot((legacy,), {}),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "手动停止旧实例"):
+                    await self.manager._assert_legacy_discord_stopped()
+            termination.assert_not_awaited()
+
+        asyncio.run(scenario())
 
     def test_wrong_cwd_is_negative_and_port_owner_accepts_direct_or_descendant(self) -> None:
         wrong = self._record(
@@ -521,9 +591,11 @@ class ExternalAdapterObservationTests(unittest.TestCase):
         self.assertTrue(boundary.call_args.kwargs.get("require_free_ports") is False)
 
     def test_mixed_group_rolls_back_only_webui_owned_services_and_stop_preserves_external(self) -> None:
-        external_id = process_manager.GROUP_DEFS["discord"].services[0]
-        owned_id = process_manager.GROUP_DEFS["discord"].services[1]
-        failed_id = process_manager.GROUP_DEFS["discord"].services[2]
+        group_id = "test_mixed_adapter_group"
+        external_id, owned_id, failed_id = ("bilibili", "universalvc", "live2d")
+        process_manager.GROUP_DEFS[group_id] = process_manager.GroupDef(
+            group_id, "Test mixed adapter group", "test", [external_id, owned_id, failed_id]
+        )
         self.manager.adapter_observation_cache[external_id] = process_manager.AdapterObservation(
             external_id, "external_ready", 0.0, "external evidence"
         )
@@ -544,10 +616,12 @@ class ExternalAdapterObservationTests(unittest.TestCase):
         async def scenario() -> None:
             self.manager.start_service = fake_start  # type: ignore[method-assign]
             self.manager.stop_service = fake_stop  # type: ignore[method-assign]
-            with patch.object(process_manager.asyncio, "sleep", new=AsyncMock()):
-                await self.manager.start_group("discord")
+            with patch.object(process_manager, "_register_services", lambda _root: None), \
+                 patch.object(process_manager.asyncio, "sleep", new=AsyncMock()):
+                await self.manager.start_group(group_id)
 
         asyncio.run(scenario())
+        process_manager.GROUP_DEFS.pop(group_id, None)
         self.assertEqual(stopped, [owned_id])
         self.assertNotIn(external_id, stopped)
 
@@ -559,12 +633,21 @@ class ExternalAdapterObservationTests(unittest.TestCase):
         )
         terminated = AsyncMock()
         self.manager._terminate_state_process = terminated  # type: ignore[method-assign]
-        asyncio.run(self.manager.stop_group("discord"))
+        process_manager.GROUP_DEFS[group_id] = process_manager.GroupDef(
+            group_id, "Test mixed adapter group", "test", [external_id, owned_id, failed_id]
+        )
+        with patch.object(process_manager, "_register_services", lambda _root: None):
+            asyncio.run(self.manager.stop_group(group_id))
+        process_manager.GROUP_DEFS.pop(group_id, None)
         terminated.assert_awaited_once()
         self.assertEqual(self.manager.states[owned_id].status, process_manager.ServiceStatus.STOPPED)
 
     def test_group_start_exception_rolls_back_earlier_owned_service(self) -> None:
-        first_id, second_id, *_ = process_manager.GROUP_DEFS["discord"].services
+        group_id = "test_exception_adapter_group"
+        first_id, second_id = "universalvc", "live2d"
+        process_manager.GROUP_DEFS[group_id] = process_manager.GroupDef(
+            group_id, "Test exception adapter group", "test", [first_id, second_id]
+        )
         self.manager._validate_group_start = MagicMock()  # type: ignore[method-assign]
         self.manager._ensure_required_components = lambda _ids: None  # type: ignore[method-assign]
         stopped: list[str] = []
@@ -583,11 +666,13 @@ class ExternalAdapterObservationTests(unittest.TestCase):
         async def scenario() -> None:
             self.manager.start_service = fake_start  # type: ignore[method-assign]
             self.manager.stop_service = fake_stop  # type: ignore[method-assign]
-            with patch.object(process_manager.asyncio, "sleep", new=AsyncMock()):
+            with patch.object(process_manager, "_register_services", lambda _root: None), \
+                 patch.object(process_manager.asyncio, "sleep", new=AsyncMock()):
                 with self.assertRaisesRegex(RuntimeError, "later fresh guard failed"):
-                    await self.manager.start_group("discord")
+                    await self.manager.start_group(group_id)
 
         asyncio.run(scenario())
+        process_manager.GROUP_DEFS.pop(group_id, None)
         self.assertEqual(stopped, [first_id])
 
 

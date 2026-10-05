@@ -34,7 +34,8 @@ ASR_STREAM_MAX_CHUNKS = 4096
 ASR_STREAM_MAX_CONCURRENCY = 8
 ASR_STREAM_IDLE_TIMEOUT_SECONDS = 15
 ASR_RESULT_TTL_SECONDS = 30
-ASR_STREAM_PLATFORMS = frozenset({"universal_vc", "discord_vc", "bilibili", "webui"})
+ASR_STREAM_SCOPE_MAX_CHARS = 256
+ASR_STREAM_PLATFORMS = frozenset({"universal_vc", "discord", "discord_vc", "bilibili", "webui", "qq"})
 
 
 def normalize_asr_stream_platform(platform: Any) -> Optional[str]:
@@ -48,6 +49,14 @@ def normalize_asr_stream_platform(platform: Any) -> Optional[str]:
         if candidate == allowed or compact == allowed.replace("_", "").replace("-", ""):
             return allowed
     return None
+
+
+def normalize_asr_stream_scope(scope: Any) -> Optional[str]:
+    """Validate and normalize an opaque, bounded stream/receipt scope."""
+
+    if not isinstance(scope, str) or len(scope) > ASR_STREAM_SCOPE_MAX_CHARS:
+        return None
+    return scope.strip()
 
 
 def max_base64_chars(max_bytes: int) -> int:

@@ -38,13 +38,15 @@ class _Server:
 class _StreamService:
     def __init__(self):
         self.started_platforms = []
+        self.started_scopes = []
 
-    async def start_audio_stream(self, *, sample_rate, channels, platform="universal_vc"):
+    async def start_audio_stream(self, *, sample_rate, channels, platform="universal_vc", scope=""):
         if sample_rate != 16_000 or channels != 1:
             raise AudioStreamError(400, "invalid_audio_format")
-        if platform not in {"universal_vc", "discord_vc", "bilibili", "webui"}:
+        if platform not in {"universal_vc", "discord", "discord_vc", "bilibili", "webui"}:
             raise AudioStreamError(400, "invalid_platform")
         self.started_platforms.append(platform)
+        self.started_scopes.append(scope)
         return {"stream_id": "core-stream"}
 
     async def append_audio_stream_chunk(self, *, stream_id, seq, pcm_base64):
@@ -139,11 +141,24 @@ class MultimodalApiTests(unittest.IsolatedAsyncioTestCase):
             )
             discord_started = await client.post(
                 "/api/multimodal/audio/stream/start",
-                json={"sample_rate": 16_000, "channels": 1, "platform": "discord_vc"},
+                json={
+                    "sample_rate": 16_000,
+                    "channels": 1,
+                    "platform": "discord",
+                    "scope": "opaque-user-channel-generation",
+                },
             )
             invalid_platform = await client.post(
                 "/api/multimodal/audio/stream/start",
                 json={"sample_rate": 16_000, "channels": 1, "platform": "untrusted"},
+            )
+            invalid_scope_length = await client.post(
+                "/api/multimodal/audio/stream/start",
+                json={"sample_rate": 16_000, "channels": 1, "scope": "x" * 257},
+            )
+            invalid_scope_type = await client.post(
+                "/api/multimodal/audio/stream/start",
+                json={"sample_rate": 16_000, "channels": 1, "scope": ["bad"]},
             )
             invalid = await client.post(
                 "/api/multimodal/audio/stream/start",
@@ -183,8 +198,11 @@ class MultimodalApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(started.status_code, 200)
         self.assertEqual(started.json(), {"stream_id": "core-stream"})
         self.assertEqual(discord_started.status_code, 200)
-        self.assertEqual(service.started_platforms, ["universal_vc", "discord_vc"])
+        self.assertEqual(service.started_platforms, ["universal_vc", "discord"])
+        self.assertEqual(service.started_scopes, ["", "opaque-user-channel-generation"])
         self.assertEqual(invalid_platform.status_code, 400)
+        self.assertEqual(invalid_scope_length.status_code, 400)
+        self.assertEqual(invalid_scope_type.status_code, 400)
         self.assertEqual(invalid.status_code, 400)
         self.assertEqual(malformed.status_code, 400)
         self.assertEqual(oversized.status_code, 400)

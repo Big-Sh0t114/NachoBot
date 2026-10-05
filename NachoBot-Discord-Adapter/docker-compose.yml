@@ -1,0 +1,47 @@
+services:
+  discord-adapter:
+    container_name: nacho-bot-discord-adapter
+    build:
+      context: .
+      additional_contexts:
+        nachobot: ../NachoBot
+    environment:
+      - TZ=Asia/Shanghai
+      - NACHOBOT_CORE_TOKEN=${NACHOBOT_CORE_TOKEN:-}
+      - NACHOBOT_CORE_HOST=core
+      - NACHOBOT_CORE_PORT=8000
+    volumes:
+      - ./config.toml:/workspace/NachoBot-Discord-Adapter/config.toml:ro
+      - ./data:/workspace/NachoBot-Discord-Adapter/data
+      - type: bind
+        source: ../NachoBot/docker-config/mmc
+        target: /workspace/NachoBot/config
+        read_only: true
+        bind:
+          create_host_path: false
+      - ../NachoBot/music:/workspace/NachoBot/music:ro
+      - type: bind
+        source: ../NachoBot/data/NachoBot/sandbox
+        target: /workspace/NachoBot/data/sandbox
+        read_only: true
+        bind:
+          create_host_path: true
+      - type: bind
+        source: ../NachoBot/data/NachoBot/video
+        target: /workspace/NachoBot/data/video
+        read_only: true
+        bind:
+          create_host_path: true
+      - type: bind
+        source: ../NachoBot/data/NachoBot/media-tmp
+        target: /workspace/NachoBot/data/media-tmp
+        read_only: true
+        bind:
+          create_host_path: true
+    restart: always
+    networks:
+      - nacho_bot
+
+networks:
+  nacho_bot:
+    external: true
