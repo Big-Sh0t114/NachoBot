@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+from live2d_adapter.action_adapter import ActionAdapter
 from live2d_adapter.config import AdapterConfig, RendererConfig, ServerConfig
 from live2d_adapter.control_pipeline import ControlPipeline
 from live2d_adapter.protocol import (
@@ -131,6 +132,27 @@ class ControlPipelineTests(unittest.TestCase):
         self.assertEqual(pipeline.pending_count("client-a"), 0)
         self.assertEqual(pipeline.applied_count(), 0)
         self.assertEqual(pipeline.applied_count("client-a"), 0)
+
+    def test_runtime_policy_infers_private_controls_from_question_and_reply(self) -> None:
+        pipeline = ControlPipeline(action_adapter=ActionAdapter())
+        prepared = pipeline.prepare_reply(
+            '{"reply":"当然可以。","emotion":"happy"}',
+            "req-policy",
+            question="这样可以吗？",
+        )
+        self.assertNotIn("emotion", prepared.to_payload())
+        self.assertNotIn("action", prepared.to_payload())
+
+        controls: list[tuple[str | None, str | None]] = []
+        outcome = pipeline.apply(
+            "req-policy",
+            apply_callback=lambda staged: controls.append(
+                (staged.emotion, staged.action_id)
+            ),
+        )
+
+        self.assertTrue(outcome.applied)
+        self.assertEqual(controls, [("joy", "NOD")])
 
 
 class AvatarRuntimeLifecycleTests(unittest.IsolatedAsyncioTestCase):

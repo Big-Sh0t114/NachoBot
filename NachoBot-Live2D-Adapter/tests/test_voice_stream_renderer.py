@@ -113,6 +113,41 @@ def _event(operation, *, seq=None, pcm=None, rate=48000, channels=2):
 
 
 class VoiceStreamRendererTests(unittest.TestCase):
+    def test_disconnect_after_end_preserves_accepted_audio_for_drain(self):
+        config = AdapterConfig(
+            renderer=RendererConfig(model_path=Path("unused")), server=ServerConfig(),
+        )
+        runtime = AvatarRuntime(config, _Logger())
+        runtime.renderer = SimpleNamespace(pcm_audio_ready=True)
+        common = {
+            "stream_id": "s", "parent_message_id": "m", "sample_rate": 24000,
+            "channels": 1, "sample_width": 2, "codec": "pcm_s16le",
+        }
+        runtime._dispatch_voice_stream(dict(common, event="start"), "owner")
+        runtime._dispatch_voice_stream(dict(common, event="chunk", seq=0,
+            audio_base64=base64.b64encode(b"\0\0").decode()), "owner")
+        runtime._dispatch_voice_stream(dict(common, event="end"), "owner")
+        runtime.discard_client_controls("owner")
+        self.assertEqual([e["event"] for e in runtime.voice_stream_queue.queue],
+                         ["start", "chunk", "end"])
+
+    def test_disconnect_during_generation_aborts_owner_stream(self):
+        config = AdapterConfig(
+            renderer=RendererConfig(model_path=Path("unused")), server=ServerConfig(),
+        )
+        runtime = AvatarRuntime(config, _Logger())
+        runtime.renderer = SimpleNamespace(pcm_audio_ready=True)
+        common = {
+            "stream_id": "s", "parent_message_id": "m", "sample_rate": 24000,
+            "channels": 1, "sample_width": 2, "codec": "pcm_s16le",
+        }
+        runtime._dispatch_voice_stream(dict(common, event="start"), "owner")
+        runtime.discard_client_controls("other")
+        self.assertIsNotNone(runtime._voice_stream_id)
+        runtime.discard_client_controls("owner")
+        self.assertEqual([e["event"] for e in runtime.voice_stream_queue.queue], ["abort"])
+        self.assertIsNone(runtime._voice_stream_id)
+
     def test_end_waits_for_the_queued_final_sound_to_finish(self):
         mixer = _FakeMixer()
         renderer = _renderer()

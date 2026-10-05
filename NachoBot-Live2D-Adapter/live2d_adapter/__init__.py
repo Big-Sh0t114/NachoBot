@@ -6,7 +6,12 @@ demand so importing :mod:`live2d_adapter.control_pipeline` does not import
 pygame or initialize any rendering resources.
 """
 
-from .config import AdapterConfig, ConfigError, ModelAdaptationConfig, load_config
+import os
+
+os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
+
+from .config import AdapterConfig, ConfigError, ModelAdaptationConfig, RuntimeConfig, load_config
+from .action_adapter import ActionAdapter, ActionDecision
 from .control_pipeline import (
     ACTION_TO_CANONICAL_ID,
     ALLOWED_EMOTIONS,
@@ -46,6 +51,9 @@ def __getattr__(name: str):
 __all__ = [
     "PROTOCOL_VERSION",
     "AdapterConfig",
+    "RuntimeConfig",
+    "ActionAdapter",
+    "ActionDecision",
     "AvatarCommand",
     "AvatarEvent",
     "AvatarInteraction",
