@@ -307,6 +307,7 @@ class BilibiliAdapter:
         try:
             await asyncio.gather(*tasks)
         finally:
+            await self.outgoing_handler.shutdown()
             await self.audio_player.shutdown()
             if self.live2d_manager:
                 await self.live2d_manager.stop()
@@ -617,8 +618,12 @@ class BilibiliAdapter:
                 speech_requirement = "`reply`和`tts_text`都使用中文。"
             explicit_tts_contract = (
                 "\n\n【语音输出字段】本直播间已启用语音。最终JSON除现有字段外，"
-                "必须包含非空字符串字段`tts_text`。"
-                f"{speech_requirement}不要在任一字段中输出<JP>/<ZH>标签。"
+                "必须包含`tts_text`字段，使用非空字符串或包含非空`text`的对象。"
+                f"没有明确指定语种时，{speech_requirement}"
+                "用户明确要求使用中文或日文（日语）时，仅本次朗读使用指定语种，"
+                "`reply`仍放给观众阅读的中文正文，`tts_text`使用包含`text`和`lang`的对象："
+                "`text`为对应的指定语种朗读文本，中文`lang`为`zh`，日文`lang`为`ja`。"
+                "临时指定语种不改变字段路由。"
             )
             for key in ("replyer_prompt", "reply_prompt"):
                 template_items[key] = f"{template_items[key]}{explicit_tts_contract}"
@@ -1656,47 +1661,35 @@ class BilibiliAdapter:
             if tts_planner:
                 planner_prompt = tts_planner
 
-            # Determine language mode for this room
+            # Live replies use separate display and speech fields in both modes.
             room_lang = self.tts_manager.get_room_language(room_id)
-
             if room_lang == "zh":
-                # Chinese-only TTS mode: tell model to output plain Chinese, no bilingual tags
-                zh_tts_instruction = (
-                    "\n\n语音模式已切换为中文。请只用中文回复，禁止使用<JP><ZH>标签，不要进行日语翻译。"
-                    "直接输出中文回复内容，语音系统会直接朗读你的中文回复。"
-                )
-                # Strip any pre-existing bilingual instructions from the prompt
-                reply_prompt = re.sub(
-                    r"非常重要：请必须同时输出中文回复和对应的日文翻译.*?(?=\n\n|\Z)",
-                    "",
-                    reply_prompt,
-                    flags=re.DOTALL,
-                )
-                reply_prompt += zh_tts_instruction
-                self.logger.debug(
-                    f"Appending Chinese-only TTS instruction to prompt for room {room_id}"
+                language_instruction = (
+                    "\n\n【当前语种路由】语音已启用，默认中文模式。"
+                    "没有明确指定语种时，JSON的`reply`显示正文和`tts_text`朗读文本都使用中文。"
                 )
             else:
-                # Default: Bilingual JP+ZH mode
-                # Fallback: append generic instructions if no specific reply prompt was found
-                # (Or if the custom one is missing the required XML instructions)
-                if "<JP>" not in reply_prompt and "<ZH>" not in reply_prompt:
-                    tts_instruction = (
-                        "\n\n非常重要：请必须同时输出中文回复和对应的日文翻译（用于语音播放），格式严格如下：\n"
-                        "<JP>日本語翻訳</JP><ZH>中文原本意思</ZH>\n"
-                        "例如：\n"
-                        "<JP>こんにちは、ご飯を食べましたか？</JP><ZH>你好呀，吃过饭了吗？</ZH>\n"
-                    )
-                    self.logger.debug(
-                        f"Appending TTS instruction to prompt for room {room_id}"
-                    )
-                    reply_prompt += tts_instruction
+                language_instruction = (
+                    "\n\n【当前语种路由】语音已启用，默认日语模式。"
+                    "没有明确指定语种时，JSON的`reply`显示正文使用中文，`tts_text`放对应的自然日语朗读文本。"
+                )
+            reply_prompt += language_instruction
         else:
-            # Force disable XML if TTS is off (Circuit Breaker for Context Pollution)
-            anti_tts_instruction = (
-                "\n语音已关闭，禁止使用<JP><ZH>标签，不要进行日语翻译，只输出中文。"
+            language_instruction = (
+                "\n\n【当前语种路由】语音已关闭。JSON的`reply`只放显示正文，不生成`tts_text`。"
+                "没有明确指定语种时使用中文；用户明确要求中文或日文（日语）时，仅本次正文使用指定语种。"
             )
-            reply_prompt += anti_tts_instruction
+            reply_prompt += language_instruction
+
+        if reply_prompt:
+            reply_prompt += (
+                "\n\n【临时语种要求】用户明确要求使用中文或日文（日语）时，允许仅在本次回复中临时使用指定语种。"
+                "没有明确要求时遵循直播间默认语种规则，不因先前的临时要求持续切换。"
+                "临时指定语种且语音启用时，`reply`保留中文显示正文，`tts_text`使用包含`text`和`lang`的对象，"
+                "`text`使用指定的朗读语种，中文`lang`为`zh`，日文`lang`为`ja`。"
+                "准确输出格式以【当前语种路由】和【语音输出字段】为准。"
+                "临时切换语言不改变当前字段结构。"
+            )
 
         if reply_prompt and "{person_profile_block}" not in reply_prompt:
             injection_point = "{extra_info_block}"

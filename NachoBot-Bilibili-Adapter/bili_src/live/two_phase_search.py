@@ -8,10 +8,13 @@ both replies belong to this adapter.
 from __future__ import annotations
 
 import asyncio
+import base64
 import html
+import json
 import re
 import time
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional
@@ -34,8 +37,15 @@ emotion 与 action 是 Live2D 元数据。emotion 只能从 "normal"、"shy"、"
 如果当前问题需要联网实时查询（例如实时新闻、价格、天气、近期事件或需要核实的事实），
 将 web_search 设为 true，reply 填写一段简短的“正在查询”提示，search_query 填写精炼搜索关键词。
 如果不需要联网，web_search 必须为 false，search_query 必须为空字符串，reply 直接填写正常回复。
-五个字段必须始终存在，不要增加其他字段。
+reply、emotion、action、web_search、search_query 五个字段必须始终存在。只有当当前语音路由明确要求语音输出时，才额外提供非空 tts_text；它可以是字符串，也可以是包含 text 与 lang（"zh" 或 "ja"）的对象。没有语音路由要求时不要输出 tts_text。
 [Bilibili直播两阶段联网搜索输出协议结束]"""
+
+
+@dataclass(frozen=True, slots=True)
+class SearchFollowupResult(PreparedReplyResult):
+    """Bilibili-local delivery data; the Live2D wire schema stays unchanged."""
+
+    voice_data: str = ""
 
 
 def append_live_search_protocol(prompt: str, *, enabled: bool) -> str:
@@ -322,6 +332,7 @@ class BilibiliLiveSearchOrchestrator:
         reply_mid: str,
         reply_dmid: str,
         deliver: Delivery,
+        first_pass_tts_language: Optional[str] = None,
     ) -> bool:
         if not getattr(self._adapter.config, "live_network_search_enabled", False):
             return False
@@ -344,6 +355,7 @@ class BilibiliLiveSearchOrchestrator:
                     query=search_query,
                     initial_reply=initial_reply,
                     deliver=deliver,
+                    first_pass_tts_language=first_pass_tts_language,
                 )
             )
             self._tasks.add(task)
@@ -358,6 +370,16 @@ class BilibiliLiveSearchOrchestrator:
         if self._tasks:
             await asyncio.gather(*tuple(self._tasks), return_exceptions=True)
 
+    async def shutdown(self) -> None:
+        """Cancel outstanding search, model, and Core TTS follow-ups."""
+
+        tasks = tuple(self._tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._tasks.clear()
+
     async def _run_followup(
         self,
         *,
@@ -365,6 +387,7 @@ class BilibiliLiveSearchOrchestrator:
         query: str,
         initial_reply: str,
         deliver: Delivery,
+        first_pass_tts_language: Optional[str] = None,
     ) -> None:
         try:
             query_chars = len(query)
@@ -385,11 +408,31 @@ class BilibiliLiveSearchOrchestrator:
                 len(search_results),
                 query_chars,
             )
-            prompt = self._build_followup_prompt(room_id, query, initial_reply, search_results)
+            prompt = self._build_followup_prompt(
+                room_id,
+                query,
+                initial_reply,
+                search_results,
+                first_pass_tts_language=first_pass_tts_language,
+            )
             response = await self._get_model_client().call_replyer(prompt)
-            if response and response.strip():
-                prepared = await self._adapter.live2d_manager.prepare_reply(response.strip())
-                await deliver(prepared, room_id, "", "")
+            if isinstance(response, str) and response.strip():
+                response_text = response.strip()
+                envelope = self._response_envelope(response_text)
+                prepared = await self._adapter.live2d_manager.prepare_reply(response_text)
+                voice_data = await self._synthesize_followup(
+                    room_id,
+                    envelope.get("tts_text") if envelope is not None else None,
+                    first_pass_tts_language=first_pass_tts_language,
+                )
+                result = SearchFollowupResult(
+                    prepared.reply,
+                    prepared.web_search,
+                    prepared.search_query,
+                    prepared.control_id,
+                    voice_data,
+                )
+                await deliver(result, room_id, "", "")
             else:
                 self._logger.warning("[BilibiliSearch] Pass 2 模型返回空内容")
         except asyncio.CancelledError:
@@ -405,6 +448,119 @@ class BilibiliLiveSearchOrchestrator:
                 type(exc).__name__,
             )
 
+    @staticmethod
+    def _response_envelope(response: str) -> Optional[dict[str, Any]]:
+        if len(response) > 65_536:
+            return None
+        candidate = response.strip()
+        fenced = re.fullmatch(
+            r"```(?:json)?\s*(.*?)\s*```", candidate, re.IGNORECASE | re.DOTALL
+        )
+        if fenced:
+            candidate = fenced.group(1).strip()
+        try:
+            value = json.loads(candidate, strict=False)
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if not isinstance(value, dict) or not isinstance(value.get("reply"), str):
+            return None
+        return value
+
+    def _tts_route(self, room_id: int) -> tuple[bool, str]:
+        manager = getattr(self._adapter, "tts_manager", None)
+        enabled = getattr(manager, "is_tts_enabled", None)
+        language = getattr(manager, "get_room_language", None)
+        if not callable(enabled) or not callable(language):
+            return False, "ja"
+        try:
+            is_enabled = bool(enabled(room_id))
+            room_language = str(language(room_id) or "").strip().lower()
+        except Exception as exc:
+            self._logger.warning(
+                "[BilibiliSearch] TTS 路由读取失败: error_type={}",
+                type(exc).__name__,
+            )
+            return False, "ja"
+        return is_enabled, room_language if room_language in {"ja", "zh"} else "ja"
+
+    async def _synthesize_followup(
+        self,
+        room_id: int,
+        value: Any,
+        *,
+        first_pass_tts_language: Optional[str] = None,
+    ) -> str:
+        enabled, room_language = self._tts_route(room_id)
+        if not enabled:
+            return ""
+
+        text: Any = value
+        language = (
+            first_pass_tts_language
+            if isinstance(first_pass_tts_language, str)
+            and first_pass_tts_language in {"ja", "zh"}
+            else room_language
+        )
+        if isinstance(value, dict):
+            text = value.get("text")
+            if "lang" in value:
+                explicit_language = value.get("lang")
+                if (
+                    not isinstance(explicit_language, str)
+                    or explicit_language not in {"ja", "zh"}
+                ):
+                    return ""
+                language = explicit_language
+        if not isinstance(text, str):
+            return ""
+        text = text.strip()
+        if not text or len(text) > 10_000:
+            self._logger.warning("[BilibiliSearch] Pass 2 tts_text 无效: reason=length_or_empty")
+            return ""
+
+        client = getattr(self._adapter, "multimodal_client", None)
+        synthesize = getattr(client, "synthesize_tts", None)
+        if not callable(synthesize):
+            self._logger.warning("[BilibiliSearch] Pass 2 TTS 不可用: reason=client_missing")
+            return ""
+        try:
+            response = await synthesize(
+                text,
+                platform=str(getattr(self._adapter.config, "platform", "bilibili.live")),
+                text_lang=language,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._logger.warning(
+                "[BilibiliSearch] Pass 2 TTS 失败: error_type={}",
+                type(exc).__name__,
+            )
+            return ""
+        if not isinstance(response, Mapping):
+            self._logger.warning("[BilibiliSearch] Pass 2 TTS 返回无效: reason=response_type")
+            return ""
+        audio = response.get("audio_base64") or response.get("audio")
+        if not isinstance(audio, str) or not audio.strip():
+            self._logger.warning("[BilibiliSearch] Pass 2 TTS 返回无效: reason=audio_missing")
+            return ""
+        audio = audio.strip()
+        max_audio_bytes = 16 * 1024 * 1024
+        if len(audio) > ((max_audio_bytes + 2) // 3) * 4:
+            self._logger.warning("[BilibiliSearch] Pass 2 TTS 返回无效: reason=audio_size")
+            return ""
+        try:
+            audio_bytes = base64.b64decode(audio, validate=True)
+        except Exception:
+            self._logger.warning("[BilibiliSearch] Pass 2 TTS 返回无效: reason=audio_encoding")
+            return ""
+        if not audio_bytes or len(audio_bytes) > max_audio_bytes:
+            self._logger.warning("[BilibiliSearch] Pass 2 TTS 返回无效: reason=audio_size")
+            return ""
+        if not self._tts_route(room_id)[0]:
+            return ""
+        return base64.b64encode(audio_bytes).decode("ascii")
+
     def _get_model_client(self):
         if self._model_client is None:
             from bili_src.core.model_client import ModelClient
@@ -418,9 +574,23 @@ class BilibiliLiveSearchOrchestrator:
         return self.FALLBACK_REPLY
 
     def _build_followup_prompt(
-        self, room_id: int, query: str, initial_reply: str, search_results: str
+        self,
+        room_id: int,
+        query: str,
+        initial_reply: str,
+        search_results: str,
+        *,
+        first_pass_tts_language: Optional[str] = None,
     ) -> str:
         room_context = self._room_context(room_id)
+        tts_enabled, room_language = self._tts_route(room_id)
+        first_pass_tts_language = (
+            first_pass_tts_language
+            if isinstance(first_pass_tts_language, str)
+            and first_pass_tts_language in {"ja", "zh"}
+            else None
+        )
+        tts_language = first_pass_tts_language or room_language
         prompt = f"""你正在 Bilibili 直播间与观众互动。你已经告诉观众正在查询，现在请依据搜索结果完成回复。
 当前时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 搜索关键词：{query}
@@ -435,15 +605,36 @@ class BilibiliLiveSearchOrchestrator:
 只依据其中可核实的信息回答；若存在与问题直接相关的明确数值，必须保留数值和单位。
 若没有足够的相关信息，只简短说明未查到可靠答案，不得补充与问题无关的日期、节日或常识。
 表达自然、口语化，单次回复尽量控制在 80 字以内。
-最终必须只输出一个合法 JSON 对象，不得输出 Markdown 代码块、前后缀或解释，固定包含 reply、emotion、action、web_search、search_query 五个字段：
+最终必须只输出一个合法 JSON 对象，不得输出 Markdown 代码块、前后缀或解释，始终包含 reply、emotion、action、web_search、search_query 五个字段：
 {{"reply":"最终回复","emotion":"normal","action":"一般","web_search":false,"search_query":""}}
 emotion 只能从 "normal"、"shy"、"disgust"、"angry" 中四选一。
 action 只能从 "待机/放松"、"点头/同意"、"摇头/否定"、"转身向左/看左边"、"转身向右/看右边"、"眨眼/卖萌/Wink"、"身体晃动/开心/兴奋"、"歪头/疑惑/思考"、"害羞/移开视线/不好意思"、"一般" 中选择一个，大多数情况使用 "一般"。"""
 
-        # Search follow-ups are ordinary text.  Adapter-local TTS preferences
-        # must not silently turn them into speech or into legacy bilingual
-        # markup; only a Core reply field can request synthesis.
-        prompt += "\n只用中文回复，不要使用 <JP><ZH> 标签。"
+        prompt += "\nreply 始终使用中文，便于直接展示给观众。"
+        if tts_enabled:
+            if first_pass_tts_language:
+                language_name = "日语" if tts_language == "ja" else "中文"
+                prompt += (
+                    f"本轮语音输出已明确指定为{language_name}，必须额外提供 tts_text 对象"
+                    f"{{\"text\":\"自然的{language_name}朗读文本\",\"lang\":\"{tts_language}\"}}，"
+                    "保留该指定语种；tts_text 只用于语音，不替代中文 reply。"
+                )
+            elif tts_language == "ja":
+                prompt += (
+                    "本直播间语音已启用且当前语种为日语，必须额外提供非空 tts_text，"
+                    "内容为自然日语朗读文本；reply 保持中文。"
+                )
+            else:
+                prompt += (
+                    "本直播间语音已启用且当前语种为中文，必须额外提供非空 tts_text，"
+                    "内容为自然中文朗读文本；reply 保持中文。"
+                )
+            prompt += (
+                "tts_text 可为非空字符串，或包含非空 text 与 lang（zh/ja）的对象；"
+                "只有对象中的 lang 可明确覆盖本直播间语种。"
+            )
+        else:
+            prompt += "本轮语音路由未启用，只输出上述五个字段，不要添加 tts_text。"
         return prompt
 
     def _room_context(self, room_id: int) -> str:

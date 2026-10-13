@@ -6,9 +6,11 @@ model or local multimodal runtime is imported here.
 """
 
 import asyncio
+import ctypes
 import io
 import queue
 import struct
+import sys
 import threading
 import time
 import wave
@@ -114,14 +116,52 @@ class PTTKeyMonitor:
         "f5": "f5", "f6": "f6", "f7": "f7", "f8": "f8", "f9": "f9",
         "f10": "f10", "f11": "f11", "f12": "f12",
     }
+    _VIRTUAL_KEYS = {
+        "ctrl_l": 0xA2, "ctrl_r": 0xA3,
+        "alt_l": 0xA4, "alt_r": 0xA5,
+        "shift_l": 0xA0, "shift_r": 0xA1,
+        "caps_lock": 0x14, "tab": 0x09, "space": 0x20,
+        "enter": 0x0D, "backspace": 0x08, "delete": 0x2E,
+        "esc": 0x1B,
+        **{f"f{number}": 0x6F + number for number in range(1, 13)},
+    }
 
-    def __init__(self, key_name: str, logger):
+    def __init__(
+        self,
+        key_name: str,
+        logger,
+        *,
+        native_key_state_getter: Optional[Callable[[int], int]] = None,
+        platform_name: Optional[str] = None,
+    ):
         self.logger = logger
         self._key_held = False
         self._listener = None
         self._target_key = None
         self._target_char = None
+        self._native_read_failure_logged = False
+        self._platform_name = platform_name or sys.platform
+        self._is_windows = self._platform_name.startswith("win")
         key_lower = key_name.strip().lower()
+
+        if key_lower in self._SPECIAL_KEYS:
+            normalized_key = self._SPECIAL_KEYS[key_lower]
+            self._target_vk = self._VIRTUAL_KEYS.get(normalized_key)
+            if self._target_vk is None:
+                raise ValueError(f"Unsupported PTT key: {key_name}")
+        elif len(key_lower) == 1 and key_lower.isascii() and key_lower.isalnum():
+            self._target_char = key_lower
+            self._target_vk = ord(key_lower.upper())
+        else:
+            self.logger.error("PTT: Unsupported key '%s'", key_name)
+            raise ValueError(f"Unsupported PTT key: {key_name}")
+
+        if native_key_state_getter is not None:
+            self._native_key_state_getter = native_key_state_getter
+        elif self._is_windows:
+            self._native_key_state_getter = self._load_windows_key_state_getter()
+        else:
+            self._native_key_state_getter = None
 
         try:
             from pynput import keyboard
@@ -132,23 +172,59 @@ class PTTKeyMonitor:
                 )
                 if self._target_key is None:
                     self.logger.error(
-                        "PTT: Unknown special key '%s', falling back to 'v'",
-                        key_name,
+                        "PTT: Keyboard library does not support key '%s'", key_name
                     )
-                    self._target_char = "v"
-            else:
-                self._target_char = key_lower[0] if key_lower else "v"
+                    raise ValueError(f"Unsupported PTT key: {key_name}")
         except ImportError:
             self.logger.error("pynput is required for push-to-talk")
             raise
 
+    @staticmethod
+    def _load_windows_key_state_getter() -> Optional[Callable[[int], int]]:
+        try:
+            return ctypes.windll.user32.GetAsyncKeyState
+        except (AttributeError, OSError):
+            return None
+
+    @property
+    def listener_alive(self) -> bool:
+        listener = self._listener
+        if listener is None:
+            return False
+        is_alive = getattr(listener, "is_alive", None)
+        if not callable(is_alive):
+            return False
+        try:
+            return bool(is_alive())
+        except Exception:
+            return False
+
     @property
     def is_held(self) -> bool:
-        return self._key_held
+        if not self.listener_alive:
+            return False
+        if not self._is_windows:
+            return self._key_held
+        getter = self._native_key_state_getter
+        if getter is None:
+            return False
+        try:
+            return bool(int(getter(self._target_vk)) & 0x8000)
+        except Exception as exc:
+            if not self._native_read_failure_logged:
+                self._native_read_failure_logged = True
+                self.logger.warning(
+                    "PTT physical key state could not be read; closing microphone gate ({})",
+                    type(exc).__name__,
+                )
+            return False
 
     def start(self):
         try:
             from pynput import keyboard
+
+            if self._is_windows and self._native_key_state_getter is None:
+                raise RuntimeError("Windows PTT physical key-state reader is unavailable")
 
             def on_press(key):
                 if self._match_key(key):
@@ -163,6 +239,9 @@ class PTTKeyMonitor:
             )
             self._listener.daemon = True
             self._listener.start()
+            if not self.listener_alive:
+                self.stop()
+                raise RuntimeError("PTT keyboard listener did not remain active")
             key_display = self._target_char or str(self._target_key).replace("Key.", "")
             self.logger.info("PTT keyboard listener started — hold [{}] to talk", key_display)
         except Exception as exc:
@@ -189,7 +268,7 @@ class PTTKeyMonitor:
         except AttributeError:
             pass
         try:
-            return getattr(key, "vk", None) == ord(self._target_char.upper())
+            return getattr(key, "vk", None) == self._target_vk
         except (AttributeError, TypeError):
             return False
 
@@ -283,7 +362,7 @@ class MicCaptureWorker:
                 self._ptt_monitor = PTTKeyMonitor(config.ptt_key, logger)
             except Exception:
                 logger.warning(
-                    "PTT monitor failed to initialize, mic will use continuous capture mode"
+                    "PTT monitor failed to initialize; push-to-talk remains fail closed"
                 )
 
     def _calculate_preroll_chunks(self) -> int:
@@ -330,14 +409,22 @@ class MicCaptureWorker:
         if status:
             self.logger.warning("Audio stream status: {}", status)
 
-        if self._paused and not self._ptt_monitor:
+        if self.config.push_to_talk:
+            try:
+                gate_open = bool(
+                    self._ptt_monitor is not None
+                    and self._ptt_monitor.is_held
+                )
+            except Exception:
+                gate_open = False
+            if not gate_open:
+                with self._state_lock:
+                    self._finish_capture_stream("PTT released")
+                    self._preroll_buffer.clear()
+                return
+        elif self._paused:
             with self._state_lock:
                 self._finish_capture_stream("microphone paused")
-                self._preroll_buffer.clear()
-            return
-        if self._ptt_monitor and not self._ptt_monitor.is_held:
-            with self._state_lock:
-                self._finish_capture_stream("PTT released")
                 self._preroll_buffer.clear()
             return
 
@@ -616,11 +703,16 @@ class MicCaptureWorker:
         self._stream_resampler = None
 
     async def start(self) -> None:
-        if not SOUNDDEVICE_AVAILABLE:
-            self.logger.error("sounddevice not installed. Run: pip install sounddevice")
-            return
         if not self.config.enable:
             self.logger.info("Microphone capture disabled")
+            return
+        if self.config.push_to_talk and self._ptt_monitor is None:
+            self.logger.error(
+                "Push-to-talk is enabled but its keyboard monitor is unavailable; refusing microphone capture"
+            )
+            return
+        if not SOUNDDEVICE_AVAILABLE:
+            self.logger.error("sounddevice not installed. Run: pip install sounddevice")
             return
 
         self._loop = asyncio.get_running_loop()
@@ -664,8 +756,19 @@ class MicCaptureWorker:
                     "Failed to query device native rate, using default 16000: %s", exc
                 )
 
-            if self._ptt_monitor:
-                self._ptt_monitor.start()
+            if self.config.push_to_talk:
+                try:
+                    if self._ptt_monitor is None:
+                        raise RuntimeError("PTT keyboard monitor is missing")
+                    self._ptt_monitor.start()
+                    if not self._ptt_monitor.listener_alive:
+                        raise RuntimeError("PTT keyboard listener is not active")
+                except Exception as exc:
+                    self.logger.error(
+                        "Required PTT keyboard monitor failed to start; microphone capture remains disabled ({})",
+                        type(exc).__name__,
+                    )
+                    return
                 self.logger.info("Microphone in Push-to-Talk mode")
             else:
                 self.logger.info("Microphone in continuous capture mode")
