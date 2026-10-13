@@ -6,6 +6,7 @@ from ncnk_message import (
     BaseMessageInfo,
     MessageBase,
 )
+from ncnk_message.qq_history_identity import resolve_qq_reply_segments
 from src.logger import logger
 from src.config import global_config
 from .send_command_handler import SendCommandHandleClass
@@ -87,6 +88,26 @@ class SendHandler:
         else:
             logger.error("无法识别的消息类型")
             return
+        if not group_info and action == "send_private_msg":
+            # Imported here to avoid the receive/send module cycle during
+            # NapCat startup. This account is populated only after login proof.
+            from src.recv_handler.message_handler import message_handler
+
+            additional_config = message_info.additional_config
+            reply_identity = (
+                additional_config.get("qq_reply_identity")
+                if isinstance(additional_config, dict)
+                else None
+            )
+            processed_message = resolve_qq_reply_segments(
+                processed_message,
+                identity=reply_identity,
+                backend="napcat",
+                account_id=message_handler.verified_account_id,
+                platform=str(message_info.platform or ""),
+                peer_id=target_id,
+                is_private=True,
+            )
         logger.info("尝试发送到napcat")
         contains_video = any(
             isinstance(segment, dict) and segment.get("type") == "video"

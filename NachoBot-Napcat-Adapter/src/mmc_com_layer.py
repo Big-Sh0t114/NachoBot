@@ -3,6 +3,7 @@ from .config import global_config
 from .logger import logger, custom_logger
 from .platform_api_handler import handle_platform_api_request
 from .send_handler.main_send_handler import send_handler
+from .offline_history import get_offline_history_runtime
 
 route_config = RouteConfig(
     route_config={
@@ -19,6 +20,7 @@ async def mmc_start_com():
     logger.info("正在连接Nachobot")
     router.register_class_handler(send_handler.handle_message)
     router.register_custom_message_handler("platform_api_request", handle_platform_api_request)
+    get_offline_history_runtime().register_core_handlers(router)
     await router.run()
 
 

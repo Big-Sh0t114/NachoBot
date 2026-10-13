@@ -25,6 +25,8 @@ from ncnk_message import (
     build_system_event_route,
     get_core_token_from_env,
 )
+from ncnk_message.offline_recovery import normalize_original_timestamp
+from ncnk_message.qq_history_identity import resolve_qq_reply_segments
 
 from .config import global_config
 from .card_handler import parse_json_card, parse_share_card, parse_xml_card
@@ -72,13 +74,18 @@ class SnowLumaBridge:
             }
         )
         self.router = Router(route_config, custom_logger)
-        self.client = SnowLumaClient(self.handle_snowluma_event, self._platform_status)
+        self.client = SnowLumaClient(
+            self.handle_snowluma_event,
+            self._platform_status,
+            self._send_offline_recovery_progress,
+        )
         self._group_name_cache: dict[int, str] = {}
         self._member_cache: dict[tuple[int, int], dict[str, Any]] = {}
         self._http: ClientSession | None = None
         self._last_send_at = 0.0
         self._send_lock = asyncio.Lock()
         self._self_muted_groups: dict[int, float] = {}
+        self.offline_history = None
         self._log_configuration_summary()
 
     def _log_configuration_summary(self) -> None:
@@ -109,18 +116,85 @@ class SnowLumaBridge:
             logger.warning("SnowLuma chat admission fail-closed reason=empty_private_whitelist")
 
     async def run(self) -> None:
+        from .offline_history import get_offline_history_runtime
+
         self.router.register_class_handler(self.handle_core_message)
         self.router.register_custom_message_handler(PLATFORM_API_REQUEST_TYPE, self.handle_platform_api_request)
+        self.offline_history = get_offline_history_runtime(source_instance=self.client.source_instance)
+        self.offline_history.bind(
+            call_action=self._history_action,
+            send_custom=self._send_history_custom,
+            emit_message=self._emit_history_message,
+            admission_check=self._admission_check,
+        )
+        self.offline_history.register_core_handlers(self.router)
         logger.info("SnowLuma bridge starting core_endpoint=ws://{}:{}/ws", global_config.nachobot.host, global_config.nachobot.port)
-        await asyncio.gather(self.router.run(), self.client.run())
+        tasks = [
+            self.router.run(),
+            self.client.run(),
+            self.offline_history.monitor(
+                get_platform_state=self._history_platform_state,
+                router=self.router,
+                on_core_generation=lambda account_id: self._platform_status(True, account_id),
+            ),
+        ]
+        await asyncio.gather(*tasks)
 
     async def stop(self) -> None:
         logger.info("SnowLuma bridge stopping")
+        if self.offline_history is not None:
+            await self.offline_history.stop()
         await self.client.stop()
         await self.router.stop()
         if self._http and not self._http.closed:
             await self._http.close()
         logger.info("SnowLuma bridge stopped")
+
+
+    def _history_platform_state(self) -> dict[str, Any]:
+        snapshot = self.client.connection_snapshot()
+        if snapshot is None:
+            return {"connected": False, "account_id": "", "identity": (), "connection": None}
+        ws, generation, account_id = snapshot
+        return {
+            "connected": True,
+            "account_id": account_id,
+            "identity": (id(ws), generation, account_id),
+            "connection": snapshot,
+            "connection_epoch_started_at": self.client.connection_epoch_started_at,
+        }
+
+    async def _history_action(
+        self,
+        action: str,
+        params: dict[str, Any],
+        *,
+        expected_connection: tuple[Any, ...],
+    ) -> dict[str, Any]:
+        response = await self.client.call_action(
+            action,
+            params,
+            expected_connection=expected_connection,
+        )
+        if not self.client.connection_is_current(expected_connection):
+            raise RuntimeError("SnowLuma history response belongs to a stale socket generation")
+        return response
+
+    async def _send_history_custom(
+        self,
+        *,
+        platform: str,
+        message_type_name: str,
+        message: dict[str, Any],
+    ) -> bool:
+        return await self.router.send_custom_message(
+            platform=platform,
+            message_type_name=message_type_name,
+            message=message,
+        )
+
+    async def _emit_history_message(self, raw: dict[str, Any], context: dict[str, Any]) -> str:
+        return await self._handle_inbound_message(raw, recovery_context=context)
 
     async def _platform_status(self, online: bool, account_id: str) -> None:
         logger.debug("Core platform_status handoff start online={} account_id={}", online, account_id or "unknown")
@@ -133,6 +207,9 @@ class SnowLumaBridge:
                     "online": online,
                     "account_id": account_id,
                     "timestamp": time.time(),
+                    "connection_epoch_started_at": (
+                        self.client.connection_epoch_started_at or self.client.last_connection_epoch_started_at
+                    ),
                     "adapter": "snowluma",
                 },
             )
@@ -140,10 +217,36 @@ class SnowLumaBridge:
         except Exception as exc:
             logger.warning("Core platform_status handoff failed online={} error={}", online, safe_exception(exc))
 
+    async def _send_offline_recovery_progress(self, context: dict[str, Any], active: bool) -> None:
+        metadata = context["metadata"]
+        payload = {
+            **metadata,
+            "platform": context["platform"],
+            "group_id": context["group_id"],
+            "user_id": context["user_id"],
+            "progress_id": metadata["progress_id"],
+            "active": active,
+        }
+        try:
+            await self.router.send_custom_message(
+                platform=context["platform"],
+                message_type_name="offline_recovery_progress",
+                message=payload,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "SnowLuma offline recovery progress send failed progress_id={} active={} error={}",
+                metadata["progress_id"],
+                active,
+                safe_exception(exc),
+            )
+
     # ------------------------------------------------------------------
     # SnowLuma -> NachoBot Core
     # ------------------------------------------------------------------
-    async def handle_snowluma_event(self, payload: dict[str, Any]) -> None:
+    async def handle_snowluma_event(self, payload: dict[str, Any]) -> str | None:
         post_type = str(payload.get("post_type") or "")
         logger.debug(
             "SnowLuma event dispatch post_type={} notice_type={} message_type={} user_id={} group_id={} message_id={}",
@@ -156,13 +259,21 @@ class SnowLumaBridge:
         )
         try:
             if post_type == "message" or (not post_type and "message" in payload):
-                await self._handle_inbound_message(payload)
+                recovery_context = self.client.take_offline_recovery_context(payload)
+                return await self._handle_inbound_message(
+                    payload,
+                    recovery_context=recovery_context,
+                    progress_started=recovery_context is not None,
+                )
             elif post_type == "notice":
                 await self._handle_notice(payload)
             else:
                 logger.debug("SnowLuma event ignored reason=unsupported_post_type post_type={}", post_type or "missing")
         except Exception as exc:
             logger.error("SnowLuma inbound event failed post_type={} error={}", post_type or "missing", safe_exception(exc))
+            if post_type == "message" or (not post_type and "message" in payload):
+                return "failed"
+            return None
 
     async def _allowed(
         self,
@@ -284,7 +395,53 @@ class SnowLumaBridge:
         )
         return True, "allowed"
 
-    async def _handle_inbound_message(self, raw: dict[str, Any]) -> None:
+    async def _handle_inbound_message(
+        self,
+        raw: dict[str, Any],
+        *,
+        recovery_context: dict[str, Any] | None = None,
+        progress_started: bool = False,
+    ) -> str:
+        context = recovery_context or self.client.capture_offline_recovery_context(raw)
+        start_attempted = False
+        try:
+            connection = context.get("connection")
+            if connection is not None:
+                account_id = await self.client.wait_for_verified_connection(connection)
+                if account_id is None:
+                    logger.warning("SnowLuma inbound message rejected reason=stale_or_unverified_socket")
+                    return "failed"
+                event_account = str(raw.get("self_id") or "").strip()
+                if event_account and self._to_int(event_account) != int(account_id):
+                    logger.warning("SnowLuma inbound message rejected reason=account_mismatch")
+                    return "failed"
+                context["verified_account_id"] = account_id
+            delivery = context.get("metadata", {}).get("delivery")
+            is_recovered = isinstance(delivery, Mapping) and delivery.get("recovered") is True
+            if (
+                not is_recovered
+                and self.offline_history is not None
+                and self.offline_history.enabled
+                and context.get("verified_account_id")
+            ):
+                await self.offline_history.decorate_live_message(
+                    raw,
+                    context,
+                    account_id=str(context["verified_account_id"]),
+                )
+            if not progress_started:
+                start_attempted = True
+                await self.client.send_offline_recovery_progress(context, active=True)
+            return await self._handle_inbound_message_with_recovery(raw, context)
+        finally:
+            if start_attempted:
+                await self.client.finish_offline_recovery_progress(context)
+
+    async def _handle_inbound_message_with_recovery(
+        self,
+        raw: dict[str, Any],
+        recovery_context: dict[str, Any],
+    ) -> str:
         message_type = str(raw.get("message_type") or "")
         sender = raw.get("sender") if isinstance(raw.get("sender"), Mapping) else {}
         user_id = self._to_int(sender.get("user_id") or raw.get("user_id"))
@@ -299,9 +456,9 @@ class SnowLumaBridge:
         )
         if not user_id:
             logger.warning("SnowLuma inbound message rejected reason=missing_routing_identity")
-            return
+            return "filtered"
         if not await self._allowed(user_id, group_id):
-            return
+            return "filtered"
 
         if group_id is not None:
             group_name = await self._get_group_name(group_id)
@@ -325,10 +482,15 @@ class SnowLumaBridge:
             raw_segments = [{"type": "text", "data": {"text": raw_segments}}]
         if not isinstance(raw_segments, list):
             logger.warning("SnowLuma inbound message rejected reason=invalid_segment_container")
-            return
+            return "filtered"
 
         segments: list[Seg] = []
-        additional_config: dict[str, Any] = {}
+        delivery = recovery_context.get("metadata", {}).get("delivery")
+        is_recovered = isinstance(delivery, Mapping) and delivery.get("recovered") is True
+        conversion_failed = False
+        additional_config: dict[str, Any] = {
+            "offline_recovery": recovery_context["metadata"],
+        }
         conversion_start = time.monotonic()
         logger.debug("SnowLuma inbound segment conversion start count={}", len(raw_segments))
         for index, item in enumerate(raw_segments):
@@ -343,7 +505,14 @@ class SnowLumaBridge:
                     kind,
                     safe_exception(exc),
                 )
+                conversion_failed = True
+                if is_recovered:
+                    return "failed"
                 continue
+            if additional_config.pop("_offline_history_media_failed", False):
+                conversion_failed = True
+                if is_recovered:
+                    return "failed"
             if converted is None:
                 logger.warning("SnowLuma inbound segment degraded index={} kind={} reason=unsupported_or_empty", index, kind)
                 continue
@@ -356,7 +525,7 @@ class SnowLumaBridge:
             logger.debug("SnowLuma inbound segment result index={} kind={} output_count={}", index, kind, output_count)
         if not segments:
             logger.warning("SnowLuma inbound message dropped reason=no_convertible_segments")
-            return
+            return "failed" if conversion_failed else "filtered"
 
         if self._contains_visual(segments):
             additional_config["visual_policy"] = global_config.visual.to_message_policy()
@@ -364,7 +533,7 @@ class SnowLumaBridge:
         message_info = BaseMessageInfo(
             platform=global_config.nachobot.platform_name,
             message_id=raw.get("message_id"),
-            time=time.time(),
+            time=recovery_context["metadata"]["original_timestamp"],
             user_info=user_info,
             group_info=group_info,
             template_info=None,
@@ -379,6 +548,14 @@ class SnowLumaBridge:
             message_segment=Seg(type="seglist", data=segments),
             raw_message=(raw.get("raw_message") if isinstance(raw.get("raw_message"), str) else json.dumps(raw, ensure_ascii=False, default=str)),
         )
+        expected_connection = recovery_context.get("connection")
+        expected_account = str(recovery_context.get("verified_account_id") or "")
+        if expected_connection is not None and (
+            not self.client.connection_is_current(expected_connection)
+            or (expected_account and self.client.connected_account_id != expected_account)
+        ):
+            logger.warning("SnowLuma Core handoff rejected reason=socket_generation_changed message_id={}", raw.get("message_id") or "-")
+            return "failed"
         logger.debug(
             "SnowLuma Core ordinary-message handoff start message_id={} route={} segment_count={} conversion_ms={}",
             raw.get("message_id") or "-",
@@ -389,6 +566,7 @@ class SnowLumaBridge:
         ok = await self.router.send_message(message_base)
         if not ok:
             logger.error("SnowLuma Core ordinary-message handoff failed message_id={}", raw.get("message_id") or "-")
+            return "failed"
         else:
             logger.info(
                 "SnowLuma Core ordinary-message handoff success message_id={} route={} segment_count={}",
@@ -396,6 +574,7 @@ class SnowLumaBridge:
                 "group" if group_id is not None else "private",
                 len(segments),
             )
+            return "sent"
 
     async def _convert_inbound_segment(
         self, item: Any, raw: dict[str, Any], additional: dict[str, Any]
@@ -429,6 +608,7 @@ class SnowLumaBridge:
             b64 = await self._media_base64(data, action="get_image")
             if not b64:
                 logger.warning("SnowLuma inbound segment degraded kind=image reason=media_lookup_failed")
+                additional["_offline_history_media_failed"] = True
                 return Seg(type="text", data="[图片]")
             subtype = data.get("sub_type", data.get("subType", 0))
             return Seg(type="image" if subtype in {0, "0", None} else "emoji", data=b64)
@@ -436,6 +616,7 @@ class SnowLumaBridge:
             b64 = await self._record_base64(data)
             if not b64:
                 logger.warning("SnowLuma inbound segment degraded kind=record reason=media_lookup_failed")
+                additional["_offline_history_media_failed"] = True
             return Seg(type="voice", data=b64) if b64 else Seg(type="text", data="[语音]")
         if kind == "video":
             file_info = {
@@ -514,6 +695,8 @@ class SnowLumaBridge:
 
     async def _handle_notice(self, raw: dict[str, Any]) -> None:
         """Convert OneBot notices to the dev Core's senderless structured system_event contract."""
+        received_at = time.time()
+        original_timestamp, timestamp_source = normalize_original_timestamp(raw.get("time"), received_at)
         notice_type = str(raw.get("notice_type") or "")
         sub_type = str(raw.get("sub_type") or "").strip()
         group_id = self._to_int(raw.get("group_id"))
@@ -597,6 +780,10 @@ class SnowLumaBridge:
         additional_config: dict[str, Any] = {
             "target_id": raw.get("target_id"),
             "system_event": system_event,
+            "notice_timestamp": {
+                "original_timestamp": original_timestamp,
+                "timestamp_source": timestamp_source,
+            },
         }
         if group_info is None and meta.get("system_event_route") is not None:
             additional_config["system_event_route"] = meta["system_event_route"]
@@ -604,7 +791,7 @@ class SnowLumaBridge:
         message_info = BaseMessageInfo(
             platform=global_config.nachobot.platform_name,
             message_id="notice",
-            time=time.time(),
+            time=received_at,
             # dev Core requires structured system events to be senderless.
             user_info=None,
             group_info=group_info,
@@ -1091,6 +1278,26 @@ class SnowLumaBridge:
         else:
             logger.error("SnowLuma outbound rejected reason=missing_routing_identity")
             return
+
+        if group_info is None and action == "send_private_msg":
+            additional_config = info.additional_config
+            reply_identity = (
+                additional_config.get("qq_reply_identity")
+                if isinstance(additional_config, Mapping)
+                else None
+            )
+            snapshot = self.client.connection_snapshot()
+            verified_account = snapshot[2] if snapshot is not None else None
+            segments = resolve_qq_reply_segments(
+                segments,
+                identity=reply_identity,
+                backend="snowluma",
+                account_id=verified_account,
+                platform=str(info.platform or ""),
+                peer_id=target_id,
+                is_private=True,
+            )
+            params["message"] = segments
 
         actual_id = None
         if segments:

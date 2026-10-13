@@ -13,6 +13,7 @@ from .message_sending import message_send_instance
 from . import RealMessageType, MessageType, get_accept_format
 from .card_handler import parse_json_card
 
+import asyncio
 import time
 import json
 import websockets as Server
@@ -28,12 +29,54 @@ from ncnk_message import (
     TemplateInfo,
     FormatInfo,
 )
+from ncnk_message.offline_recovery import build_recovery_metadata
+from src.offline_history import OFFLINE_HISTORY_SOURCE_INSTANCE, get_offline_history_runtime
 
 
 from src.response_pool import get_response
 
 
 _VISUAL_SEGMENT_TYPES = {"image", "emoji", "video"}
+_OFFLINE_RECOVERY_SOURCE_INSTANCE = OFFLINE_HISTORY_SOURCE_INSTANCE
+_MAX_FORWARD_DEPTH = 3
+_MAX_FORWARD_NODES = 500
+_MAX_FORWARD_SEGMENTS = 2_000
+
+
+def _is_valid_forward_nodes(nodes: Any) -> bool:
+    """Validate a bounded OneBot forward tree before converting its context."""
+    budgets = {"nodes": 0, "segments": 0}
+
+    def visit(candidate: Any, depth: int) -> bool:
+        if not isinstance(candidate, list) or not candidate:
+            return False
+        for node in candidate:
+            budgets["nodes"] += 1
+            if budgets["nodes"] > _MAX_FORWARD_NODES or not isinstance(node, dict):
+                return False
+            if not isinstance(node.get("sender"), dict):
+                return False
+            segments = node.get("message")
+            if not isinstance(segments, list) or not segments:
+                return False
+            for segment in segments:
+                budgets["segments"] += 1
+                if budgets["segments"] > _MAX_FORWARD_SEGMENTS or not isinstance(segment, dict):
+                    return False
+                segment_type = segment.get("type")
+                data = segment.get("data")
+                if not isinstance(segment_type, str) or not isinstance(data, dict):
+                    return False
+                if segment_type == RealMessageType.text and not isinstance(data.get("text"), str):
+                    return False
+                if segment_type == RealMessageType.image and not isinstance(data.get("url"), str):
+                    return False
+                if segment_type == RealMessageType.forward and depth < _MAX_FORWARD_DEPTH:
+                    if not visit(data.get("content"), depth + 1):
+                        return False
+        return True
+
+    return visit(nodes, 0)
 
 
 def _contains_visual_content(value: Any) -> bool:
@@ -55,10 +98,163 @@ class MessageHandler:
     def __init__(self):
         self.server_connection: Server.ServerConnection = None
         self.bot_id_list: Dict[int, bool] = {}
+        self.connection_epoch_started_at: float | None = None
+        self.verified_account_id: str | None = None
+        self.connection_generation = uuid.uuid4().hex
+        self._identity_future: asyncio.Future[str | None] | None = None
+        self._identity_future_generation: str | None = None
 
-    async def set_server_connection(self, server_connection: Server.ServerConnection) -> None:
+    def _resolve_identity_future(self, account_id: str | None) -> None:
+        future = self._identity_future
+        if future is not None and not future.done():
+            future.set_result(account_id)
+
+    def publish_verified_account_id(
+        self,
+        account_id: str,
+        *,
+        connection_generation: str,
+        expected_connection: Any = None,
+    ) -> bool:
+        """Publish login identity only to waiters captured on this connection."""
+        normalized = str(account_id or "").strip()
+        if (
+            not normalized.isdecimal()
+            or int(normalized) <= 0
+            or connection_generation != self.connection_generation
+            or self._identity_future_generation not in (None, connection_generation)
+            or (expected_connection is not None and self.server_connection is not expected_connection)
+        ):
+            return False
+        self.verified_account_id = normalized
+        self._resolve_identity_future(normalized)
+        return True
+
+    def invalidate_server_connection(
+        self,
+        server_connection: Any,
+        *,
+        connection_generation: str,
+    ) -> bool:
+        """Wake transport messages waiting on a closed connection without sending them."""
+        if (
+            server_connection is not self.server_connection
+            or connection_generation != self.connection_generation
+        ):
+            return False
+        self.verified_account_id = None
+        self._resolve_identity_future(None)
+        return True
+
+    async def await_transport_identity(
+        self,
+        recovery_context: dict[str, Any],
+        raw_message: dict[str, Any],
+    ) -> str | None:
+        """Wait for verified account identity only for messages owned by the live transport."""
+        if recovery_context.get("transport_owned") is not True:
+            return self.verified_account_id
+
+        captured_generation = recovery_context.get("metadata", {}).get(
+            "transport_connection_generation"
+        )
+        if not captured_generation or captured_generation != self.connection_generation:
+            return None
+
+        account_id = self.verified_account_id
+        if account_id is None:
+            future = self._identity_future
+            if future is None or self._identity_future_generation != captured_generation:
+                return None
+            # A cancelled conversion must not cancel the shared connection's login future.
+            account_id = await asyncio.shield(future)
+
+        if (
+            not account_id
+            or captured_generation != self.connection_generation
+            or self.verified_account_id != account_id
+        ):
+            return None
+        raw_self_id = raw_message.get("self_id")
+        if raw_self_id is not None and str(raw_self_id).strip() != account_id:
+            return None
+        return account_id
+
+    async def set_server_connection(
+        self,
+        server_connection: Server.ServerConnection,
+        *,
+        epoch_started_at: float | None = None,
+    ) -> None:
         """设置Napcat连接"""
+        self._resolve_identity_future(None)
         self.server_connection = server_connection
+        self.verified_account_id = None
+        self.connection_epoch_started_at = time.time() if epoch_started_at is None else epoch_started_at
+        self.connection_generation = uuid.uuid4().hex
+        self._identity_future_generation = self.connection_generation
+        self._identity_future = asyncio.get_running_loop().create_future()
+
+    def capture_offline_recovery_context(
+        self,
+        raw_message: dict,
+        *,
+        connection_epoch_started_at: float | None = None,
+        received_at: float | None = None,
+        transport_owned: bool = False,
+    ) -> dict[str, Any]:
+        """Capture transport-owned timestamp and route metadata before queueing/conversion."""
+        captured_at = time.time() if received_at is None else received_at
+        epoch = connection_epoch_started_at
+        if epoch is None:
+            epoch = self.connection_epoch_started_at
+        if epoch is None:
+            epoch = captured_at
+        progress_id = uuid.uuid4().hex
+        metadata = build_recovery_metadata(raw_message, epoch, captured_at, progress_id)
+        metadata["source_instance"] = _OFFLINE_RECOVERY_SOURCE_INSTANCE
+        metadata["transport_connection_generation"] = self.connection_generation
+        sender = raw_message.get("sender")
+        sender = sender if isinstance(sender, dict) else {}
+        raw_group_id = raw_message.get("group_id") if raw_message.get("message_type") == MessageType.group else None
+        raw_user_id = sender.get("user_id", raw_message.get("user_id"))
+        return {
+            "metadata": metadata,
+            "transport_owned": transport_owned,
+            "platform": global_config.nachobot_server.platform_name,
+            "group_id": str(raw_group_id) if raw_group_id is not None else None,
+            "user_id": str(raw_user_id) if raw_user_id is not None else None,
+        }
+
+    async def send_offline_recovery_progress(self, context: dict[str, Any], *, active: bool) -> None:
+        metadata = context["metadata"]
+        payload = {
+            **metadata,
+            "platform": context["platform"],
+            "group_id": context["group_id"],
+            "user_id": context["user_id"],
+            "progress_id": metadata["progress_id"],
+            "active": active,
+        }
+        sent = await message_send_instance.send_custom_message(
+            custom_message=payload,
+            platform=context["platform"],
+            message_type="offline_recovery_progress",
+        )
+        if not sent:
+            logger.debug("离线恢复进度标记发送失败 progress_id={}", metadata["progress_id"])
+
+    async def finish_offline_recovery_progress(self, context: dict[str, Any]) -> None:
+        """Try to close a started marker even as the containing message is cancelled."""
+        finish_task = asyncio.create_task(self.send_offline_recovery_progress(context, active=False))
+        try:
+            await asyncio.shield(finish_task)
+        except asyncio.CancelledError:
+            try:
+                await finish_task
+            except Exception:
+                logger.debug("取消时关闭离线恢复进度标记失败 progress_id={}", context["metadata"]["progress_id"])
+            raise
 
     async def check_allow_to_chat(
         self,
@@ -133,7 +329,54 @@ class MessageHandler:
 
         return True
 
-    async def handle_raw_message(self, raw_message: dict) -> None:
+    async def handle_raw_message(
+        self,
+        raw_message: dict,
+        recovery_context: dict[str, Any] | None = None,
+        *,
+        progress_started: bool = False,
+        manage_progress: bool = True,
+    ) -> str:
+        context = recovery_context or self.capture_offline_recovery_context(raw_message)
+        start_attempted = progress_started
+        try:
+            account_id = self.verified_account_id
+            captured_generation = context.get("metadata", {}).get("transport_connection_generation")
+            if (
+                captured_generation is not None
+                and captured_generation != self.connection_generation
+            ):
+                logger.warning("跳过旧NapCat连接排队消息 progress_id={}", context.get("metadata", {}).get("progress_id"))
+                return "filtered"
+            raw_self_id = raw_message.get("self_id")
+            if account_id and raw_self_id is not None and str(raw_self_id).strip() != account_id:
+                logger.warning("跳过与当前NapCat账号不匹配的排队消息")
+                return "filtered"
+            runtime = get_offline_history_runtime()
+            if account_id and "delivery" not in context.get("metadata", {}):
+                try:
+                    await runtime.decorate_live_message(raw_message, context, account_id=account_id)
+                except Exception as exc:
+                    logger.warning("记录NapCat实时消息历史锚点失败 error={}", str(exc)[:240])
+                    # Delivery identity remains useful even if local anchor
+                    # persistence fails; decorate_live_message attached it
+                    # before attempting the SQLite write.
+            if manage_progress and not progress_started:
+                start_attempted = True
+                await self.send_offline_recovery_progress(context, active=True)
+            return await self._handle_raw_message_with_recovery(raw_message, context)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("NapCat消息处理失败: {}", str(exc))
+            return "failed"
+        finally:
+            if manage_progress and start_attempted:
+                await self.finish_offline_recovery_progress(context)
+
+    async def _handle_raw_message_with_recovery(
+        self, raw_message: dict, recovery_context: dict[str, Any]
+    ) -> str:
         # sourcery skip: low-code-quality, remove-unreachable-code
         """
         从Napcat接受的原始消息处理
@@ -143,8 +386,7 @@ class MessageHandler:
         """
         message_type: str = raw_message.get("message_type")
         message_id: int = raw_message.get("message_id")
-        # message_time: int = raw_message.get("time")
-        message_time: float = time.time()  # 应可乐要求，现在是float了
+        message_time = recovery_context["metadata"]["original_timestamp"]
 
         template_info: TemplateInfo = None  # 模板信息，暂时为空，等待启用
         format_info: FormatInfo = FormatInfo(
@@ -157,7 +399,7 @@ class MessageHandler:
                 sender_info: dict = raw_message.get("sender")
 
                 if not await self.check_allow_to_chat(sender_info.get("user_id"), None):
-                    return None
+                    return "filtered"
 
                 # 发送者用户信息
                 user_info: UserInfo = UserInfo(
@@ -174,7 +416,7 @@ class MessageHandler:
                 本部分暂时不做支持，先放着
                 """
                 logger.warning("群临时消息类型不支持")
-                return None
+                return "filtered"
 
                 sender_info: dict = raw_message.get("sender")
 
@@ -209,14 +451,14 @@ class MessageHandler:
 
             else:
                 logger.warning(f"私聊消息类型 {sub_type} 不支持")
-                return None
+                return "filtered"
         elif message_type == MessageType.group:
             sub_type = raw_message.get("sub_type")
             if sub_type == MessageType.Group.normal:
                 sender_info: dict = raw_message.get("sender")
 
                 if not await self.check_allow_to_chat(sender_info.get("user_id"), raw_message.get("group_id")):
-                    return None
+                    return "filtered"
 
                 # 发送者用户信息
                 user_info: UserInfo = UserInfo(
@@ -240,19 +482,66 @@ class MessageHandler:
 
             else:
                 logger.warning(f"群聊消息类型 {sub_type} 不支持")
-                return None
+                return "filtered"
+        else:
+            logger.warning("不支持的NapCat消息路由")
+            return "filtered"
 
         # 处理实际信息
         if not raw_message.get("message"):
             logger.warning("原始消息内容为空")
-            return None
+            return "failed"
 
         # 获取Seg列表
         seg_message, additional_config = await self.handle_real_message(raw_message)
 
         if not seg_message:
             logger.warning("处理后消息内容为空")
-            return None
+            return "failed"
+        recovery_metadata = recovery_context["metadata"]
+        runtime = get_offline_history_runtime()
+        if recovery_context.get("transport_owned") is True and runtime.enabled:
+            # Conversion runs in the message worker, not the websocket reader.
+            # Keep a fast prelogin event out of Core until its connection has a
+            # verified account and therefore a stable live/history identity.
+            current_account = await self.await_transport_identity(recovery_context, raw_message)
+            if current_account is None:
+                logger.warning(
+                    "跳过身份未验证或连接已失效的NapCat排队消息 progress_id={}",
+                    recovery_metadata.get("progress_id"),
+                )
+                return "filtered"
+            if "delivery" not in recovery_metadata:
+                try:
+                    await runtime.decorate_live_message(
+                        raw_message, recovery_context, account_id=current_account
+                    )
+                except Exception as exc:
+                    logger.warning("NapCat实时消息交付身份创建失败 error={}", str(exc)[:240])
+            if "delivery" not in recovery_metadata:
+                # Fail closed while active recovery is enabled; otherwise the
+                # first Core hook could race the history pull without a key.
+                return "failed"
+        else:
+            captured_generation = recovery_metadata.get("transport_connection_generation")
+            current_account = self.verified_account_id
+            current_identity_matches = (
+                captured_generation is None
+                or captured_generation == self.connection_generation
+            )
+            raw_self_id = raw_message.get("self_id")
+            if raw_self_id is not None and current_account and str(raw_self_id).strip() != current_account:
+                current_identity_matches = False
+            if "delivery" not in recovery_metadata and current_account and current_identity_matches:
+                # Keep direct callers compatible; main's live transport path
+                # uses the stricter verified-identity wait above.
+                try:
+                    await runtime.decorate_live_message(
+                        raw_message, recovery_context, account_id=current_account
+                    )
+                except Exception as exc:
+                    logger.warning("NapCat实时消息交付身份创建失败 error={}", str(exc)[:240])
+        additional_config["offline_recovery"] = dict(recovery_context["metadata"])
         submit_seg: Seg = Seg(
             type="seglist",
             data=seg_message,
@@ -278,7 +567,9 @@ class MessageHandler:
         )
 
         logger.info("发送到NachoBot处理信息")
-        await message_send_instance.message_send(message_base)
+        if not await message_send_instance.message_send(message_base):
+            return "failed"
+        return "sent"
 
     async def handle_real_message(
         self, raw_message: dict, in_reply: bool = False
@@ -371,7 +662,11 @@ class MessageHandler:
                     if not messages:
                         logger.warning("转发消息内容为空或获取失败")
                         return None, {}
-                    ret_seg = await self.handle_forward_message(messages)
+                    ret_seg = await self.handle_forward_message(
+                        messages,
+                        self_id=self.verified_account_id or raw_message.get("self_id"),
+                        group_id=raw_message.get("group_id"),
+                    )
                     if ret_seg:
                         seg_message.append(ret_seg)
                     else:
@@ -583,13 +878,24 @@ class MessageHandler:
         seg_message.append(Seg(type="text", data="]，说："))
         return seg_message, additional_config
 
-    async def handle_forward_message(self, message_list: list) -> Seg | None:
+    async def handle_forward_message(
+        self,
+        message_list: list,
+        *,
+        self_id: int | str | None = None,
+        group_id: int | str | None = None,
+    ) -> Seg | None:
         """
         递归处理转发消息，并按照动态方式确定图片处理方式
         Parameters:
             message_list: list: 转发消息列表
         """
-        handled_message, image_count = await self._handle_forward_message(message_list, 0)
+        if not _is_valid_forward_nodes(message_list):
+            logger.warning("转发消息节点结构无效")
+            return None
+        handled_message, image_count = await self._handle_forward_message(
+            message_list, 0, self_id=self_id, group_id=group_id
+        )
         handled_message: Seg
         image_count: int
         if not handled_message:
@@ -650,103 +956,111 @@ class MessageHandler:
                 logger.trace(f"不处理类型: {seg_data.type}")
                 return seg_data
 
-    async def _handle_forward_message(self, message_list: list, layer: int) -> Tuple[Seg, int] | Tuple[None, int]:
-        # sourcery skip: low-code-quality
-        """
-        递归处理实际转发消息
-        Parameters:
-            message_list: list: 转发消息列表，首层对应messages字段，后面对应content字段
-            layer: int: 当前层级
-        Returns:
-            seg_data: Seg: 处理后的消息段
-            image_count: int: 图片数量
-        """
+    async def _handle_forward_message(
+        self,
+        message_list: list,
+        layer: int,
+        *,
+        self_id: int | str | None = None,
+        group_id: int | str | None = None,
+    ) -> Tuple[Seg, int] | Tuple[None, int]:
+        """Convert every supported segment in each bounded forward node."""
         seg_list: List[Seg] = []
         image_count = 0
-        if message_list is None:
+        if not isinstance(message_list, list):
             return None, 0
-        for sub_message in message_list:
-            sub_message: dict
-            sender_info: dict = sub_message.get("sender")
-            user_nickname: str = sender_info.get("nickname", "QQ用户")
-            user_nickname_str = f"【{user_nickname}】:"
-            break_seg = Seg(type="text", data="\n")
-            message_of_sub_message_list: List[Dict[str, Any]] = sub_message.get("message")
-            if not message_of_sub_message_list:
-                logger.warning("转发消息内容为空")
-                continue
-            message_of_sub_message = message_of_sub_message_list[0]
-            if message_of_sub_message.get("type") == RealMessageType.forward:
-                if layer >= 3:
-                    full_seg_data = Seg(
-                        type="text",
-                        data=("--" * layer) + f"【{user_nickname}】:【转发消息】\n",
-                    )
-                else:
-                    sub_message_data = message_of_sub_message.get("data")
-                    if not sub_message_data:
-                        continue
-                    contents = sub_message_data.get("content")
-                    seg_data, count = await self._handle_forward_message(contents, layer + 1)
-                    image_count += count
-                    head_tip = Seg(
-                        type="text",
-                        data=("--" * layer) + f"【{user_nickname}】: 合并转发消息内容：\n",
-                    )
-                    full_seg_data = Seg(type="seglist", data=[head_tip, seg_data])
-                seg_list.append(full_seg_data)
-            elif message_of_sub_message.get("type") == RealMessageType.text:
-                sub_message_data = message_of_sub_message.get("data")
-                if not sub_message_data:
+        for node in message_list:
+            sender_info = node["sender"]
+            node_self_id = self_id if self_id is not None else node.get("self_id")
+            node_group_id = node.get("group_id")
+            if node_group_id is None:
+                node_group_id = group_id
+            user_nickname = sender_info.get("nickname")
+            if not isinstance(user_nickname, str) or not user_nickname:
+                user_nickname = "QQ用户"
+            user_prefix = Seg(type="text", data=("--" * layer) + f"【{user_nickname}】:")
+            node_segments: List[Seg] = []
+            has_regular_prefix = False
+
+            for message_segment in node["message"]:
+                segment_type = message_segment["type"]
+                segment_data = message_segment["data"]
+                if segment_type == RealMessageType.reply:
+                    # Inner reply IDs can expire; preserve the remaining node
+                    # without issuing another NapCat lookup.
                     continue
-                text_message = sub_message_data.get("text")
-                seg_data = Seg(type="text", data=text_message)
-                data_list: List[Any] = []
-                if layer > 0:
-                    data_list = [
-                        Seg(type="text", data=("--" * layer) + user_nickname_str),
-                        seg_data,
-                        break_seg,
-                    ]
+                if segment_type == RealMessageType.forward:
+                    if layer >= _MAX_FORWARD_DEPTH:
+                        node_segments.append(
+                            Seg(
+                                type="text",
+                                data=("--" * layer) + f"【{user_nickname}】:【转发消息】\n",
+                            )
+                        )
+                        has_regular_prefix = False
+                        continue
+                    nested, count = await self._handle_forward_message(
+                        segment_data["content"],
+                        layer + 1,
+                        self_id=self_id,
+                        group_id=group_id,
+                    )
+                    image_count += count
+                    if nested is not None:
+                        node_segments.extend(
+                            [
+                                Seg(
+                                    type="text",
+                                    data=("--" * layer) + f"【{user_nickname}】: 合并转发消息内容：\n",
+                                ),
+                                nested,
+                            ]
+                        )
+                    has_regular_prefix = False
+                    continue
+
+                if segment_type == RealMessageType.image:
+                    image_count += 1
+                    image_type = "image" if segment_data.get("sub_type") == 0 else "emoji"
+                    converted_segments = [Seg(type=image_type, data=segment_data["url"])]
                 else:
-                    data_list = [
-                        Seg(type="text", data=user_nickname_str),
-                        seg_data,
-                        break_seg,
-                    ]
-                seg_list.append(Seg(type="seglist", data=data_list))
-            elif message_of_sub_message.get("type") == RealMessageType.image:
-                image_count += 1
-                image_data = message_of_sub_message.get("data")
-                sub_type = image_data.get("sub_type")
-                image_url = image_data.get("url")
-                data_list: List[Any] = []
-                if sub_type == 0:
-                    seg_data = Seg(type="image", data=image_url)
-                else:
-                    seg_data = Seg(type="emoji", data=image_url)
-                if layer > 0:
-                    data_list = [
-                        Seg(type="text", data=("--" * layer) + user_nickname_str),
-                        seg_data,
-                        break_seg,
-                    ]
-                else:
-                    data_list = [
-                        Seg(type="text", data=user_nickname_str),
-                        seg_data,
-                        break_seg,
-                    ]
-                full_seg_data = Seg(type="seglist", data=data_list)
-                seg_list.append(full_seg_data)
+                    converted_segments, _additional_config = await self.handle_real_message(
+                        {
+                            "message": [message_segment],
+                            "self_id": node_self_id,
+                            "group_id": node_group_id,
+                        },
+                        in_reply=True,
+                    )
+                if not converted_segments:
+                    continue
+                if not has_regular_prefix:
+                    node_segments.append(user_prefix)
+                    has_regular_prefix = True
+                node_segments.extend(converted_segments)
+
+            if node_segments:
+                node_segments.append(Seg(type="text", data="\n"))
+                seg_list.append(Seg(type="seglist", data=node_segments))
+        if not seg_list:
+            return None, image_count
         return Seg(type="seglist", data=seg_list), image_count
 
     async def _get_forward_message(self, raw_message: dict) -> Dict[str, Any] | None:
         forward_message_data: Dict = raw_message.get("data")
-        if not forward_message_data:
+        if not isinstance(forward_message_data, dict):
             logger.warning("转发消息内容为空")
             return None
+        embedded_content = forward_message_data.get("content")
+        if embedded_content and _is_valid_forward_nodes(embedded_content):
+            logger.debug("使用NapCat消息中内嵌的转发内容")
+            return embedded_content
+        if embedded_content:
+            logger.warning("NapCat内嵌转发内容结构无效，尝试读取转发消息")
         forward_message_id = forward_message_data.get("id")
+        if forward_message_id is None:
+            logger.warning("转发消息缺少可用内容和消息ID")
+            return None
         request_uuid = str(uuid.uuid4())
         payload = json.dumps(
             {
@@ -773,7 +1087,11 @@ class MessageHandler:
         if not response_data:
             logger.warning("转发消息内容为空或获取失败")
             return None
-        return response_data.get("messages")
+        messages = response_data.get("messages")
+        if not _is_valid_forward_nodes(messages):
+            logger.warning("获取到的转发消息节点结构无效")
+            return None
+        return messages
 
 
 message_handler = MessageHandler()

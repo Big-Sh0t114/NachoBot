@@ -7,6 +7,7 @@ from urllib.parse import urlencode
 import shutil
 import tomllib
 
+
 from .log_safety import safe_endpoint
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -99,6 +100,17 @@ class SendConfig:
 
 
 @dataclass(slots=True)
+class OfflineRecoveryConfig:
+    enabled: bool = True
+    page_size: int = 50
+    max_pages: int = 200
+    retry_delay_sec: float = 15.0
+    receipt_timeout_sec: float = 8.0
+
+
+
+
+@dataclass(slots=True)
 class VisualTaskConfig:
     temperature: float
     max_tokens: int
@@ -137,6 +149,7 @@ class Config:
     debug: DebugConfig
     send: SendConfig
     visual: VisualConfig
+    offline_recovery: OfflineRecoveryConfig = field(default_factory=OfflineRecoveryConfig)
 
 
 def _visual_task(raw: dict[str, Any], default: VisualTaskConfig) -> VisualTaskConfig:
@@ -156,6 +169,7 @@ def load_config() -> Config:
     v = raw.get("voice", {})
     d = raw.get("debug", {})
     se = raw.get("send", {})
+    oh = raw.get("offline_recovery", {})
     vi = raw.get("visual", {})
     defaults = VisualConfig()
     return Config(
@@ -196,6 +210,13 @@ def load_config() -> Config:
             image=_visual_task(dict(vi.get("image", {}) or {}), defaults.image),
             emoji=_visual_task(dict(vi.get("emoji", {}) or {}), defaults.emoji),
             video=_visual_task(dict(vi.get("video", {}) or {}), defaults.video),
+        ),
+        offline_recovery=OfflineRecoveryConfig(
+            enabled=bool(oh.get("enabled", True)),
+            page_size=max(1, int(oh.get("page_size", 50))),
+            max_pages=max(1, int(oh.get("max_pages", 200))),
+            retry_delay_sec=max(0.1, float(oh.get("retry_delay_sec", 15.0))),
+            receipt_timeout_sec=max(1.0, float(oh.get("receipt_timeout_sec", 8.0))),
         ),
     )
 

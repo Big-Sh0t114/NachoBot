@@ -44,6 +44,39 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..
 logger = get_logger("chat")
 
 
+async def _send_history_delivery_receipt(delivery: dict[str, Any] | None, outcome: str) -> None:
+    """Confirm a pulled row only after Core has durable receipt state."""
+
+    if not delivery or not delivery.get("recovered") or not delivery.get("receipt_token"):
+        return
+    from src.common.message import get_global_api
+
+    payload = {
+        "version": 1,
+        "backend": delivery["backend"],
+        "account_id": delivery["account_id"],
+        "platform": delivery["platform"],
+        "session_kind": delivery["session_kind"],
+        "session_id": delivery["session_id"],
+        "message_id": delivery["message_id"],
+        "delivery_key": delivery["delivery_key"],
+        "receipt_token": delivery["receipt_token"],
+        "outcome": outcome,
+    }
+    try:
+        await get_global_api().send_custom_message(
+            delivery["platform"],
+            "offline_history_receipt",
+            payload,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Offline history receipt handoff failed delivery_key={} error={}",
+            delivery["delivery_key"][:12],
+            exc,
+        )
+
+
 def _routing_user_info_for_system_event(message: MessageRecv, event: dict[str, Any]) -> UserInfo | None:
     """Validate an explicit private route and build a routing-only identity.
 
@@ -702,7 +735,47 @@ class ChatBot:
         - 表情包处理
         - 性能计时
         """
+        from src.chat.offline_recovery import offline_recovery_manager
+        from src.chat.message_receive.history_delivery import (
+            delivery_from_envelope,
+            history_delivery_store,
+        )
+
+        recovery_progress_key = None
+        delivery = delivery_from_envelope(message_data)
+        delivery_claimed = False
         try:
+            if delivery is not None:
+                claim = history_delivery_store.claim(delivery)
+                if claim == "busy":
+                    return
+                if claim in {"pending", "complete", "filtered"}:
+                    if claim == "pending":
+                        root_key = history_delivery_store.root_delivery_key(delivery["delivery_key"])
+                        offline_recovery_manager.restore_pending_deliveries([root_key])
+                    await _send_history_delivery_receipt(delivery, "accepted" if claim == "pending" else claim)
+                    return
+                if claim == "new":
+                    delivery_claimed = True
+                    stored_ref = MessageStorage.find_existing_ingress(delivery)
+                    if stored_ref is not None:
+                        state = history_delivery_store.restore_existing_row(
+                            delivery,
+                            chat_id=stored_ref.chat_id,
+                            row_id=stored_ref.row_id,
+                            original_timestamp=delivery["original_timestamp"],
+                        )
+                        if state == "pending":
+                            root_key = history_delivery_store.root_delivery_key(delivery["delivery_key"])
+                            offline_recovery_manager.restore_pending_deliveries([root_key])
+                        await _send_history_delivery_receipt(
+                            delivery,
+                            "accepted" if state in {"pending", "complete"} else state,
+                        )
+                        return
+            # Track adapter-tagged Core work before the first asynchronous
+            # startup/preprocess hook can outlive the adapter's quiet window.
+            recovery_progress_key = offline_recovery_manager.message_started_from_envelope(message_data)
             # 确保所有任务已启动
             await self._ensure_started()
 
@@ -779,6 +852,9 @@ class ChatBot:
                     EventType.ON_MESSAGE_PRE_PROCESS, message
                 )
                 if not continue_flag:
+                    if delivery_claimed:
+                        history_delivery_store.mark_filtered(delivery["delivery_key"])
+                        await _send_history_delivery_receipt(delivery, "filtered")
                     return
                 if modified_message and modified_message._modify_flags.modify_message_segments:
                     message.message_segment = Seg(type="seglist", data=modified_message.message_segments)
@@ -801,6 +877,8 @@ class ChatBot:
             )
 
             message.update_chat_stream(chat)
+            if recovery_progress_key is None:
+                recovery_progress_key = offline_recovery_manager.message_started(message, chat.stream_id)
 
             if is_system_event:
                 # Adapter-side shortcuts bypass the Core action executor.  Register
@@ -832,10 +910,16 @@ class ChatBot:
                 _check_ban_words(message.processed_plain_text, chat, user_info)
                 or _check_ban_regex(message.raw_message, chat, user_info)
             ):
+                if delivery_claimed:
+                    history_delivery_store.mark_filtered(delivery["delivery_key"])
+                    await _send_history_delivery_receipt(delivery, "filtered")
                 return
 
             if not is_system_event and await consume_sandbox_callback_reply(message, chat):
                 await MessageStorage.store_message(message, chat)
+                if delivery_claimed:
+                    history_delivery_store.mark_complete(delivery["delivery_key"])
+                    await _send_history_delivery_receipt(delivery, "accepted")
                 logger.info("replyer 已将 sandbox CALL_BACK 用户答复回传，跳过普通消息处理")
                 return
 
@@ -848,12 +932,18 @@ class ChatBot:
             # 如果是命令且不需要继续处理，则直接返回
             if is_command and not continue_process:
                 await MessageStorage.store_message(message, chat)
+                if delivery_claimed:
+                    history_delivery_store.mark_complete(delivery["delivery_key"])
+                    await _send_history_delivery_receipt(delivery, "accepted")
                 logger.info(f"命令处理完成，跳过后续消息处理: {cmd_result}")
                 return
 
             if not is_system_event:
                 continue_flag, modified_message = await events_manager.handle_nacho_events(EventType.ON_MESSAGE, message)
                 if not continue_flag:
+                    if delivery_claimed:
+                        history_delivery_store.mark_filtered(delivery["delivery_key"])
+                        await _send_history_delivery_receipt(delivery, "filtered")
                     return
                 if modified_message and modified_message._modify_flags.modify_plain_text:
                     message.processed_plain_text = modified_message.plain_text
@@ -878,9 +968,41 @@ class ChatBot:
             else:
                 await preprocess()
 
+            if delivery_claimed:
+                state = history_delivery_store.state(delivery["delivery_key"])
+                if state == "processing":
+                    # HeartFlow normally records explicit recovery rows in its
+                    # collector immediately after storage. This DB lookup also
+                    # repairs a crash/error between Messages.create and that
+                    # durable pending insert.
+                    stored_ref = MessageStorage.find_existing_ingress(delivery)
+                    if stored_ref is not None:
+                        state = history_delivery_store.restore_existing_row(
+                            delivery,
+                            chat_id=stored_ref.chat_id,
+                            row_id=stored_ref.row_id,
+                            original_timestamp=delivery["original_timestamp"],
+                        )
+                        if state == "pending":
+                            root_key = history_delivery_store.root_delivery_key(delivery["delivery_key"])
+                            offline_recovery_manager.restore_pending_deliveries([root_key])
+                if state in {"pending", "complete", "filtered"}:
+                    await _send_history_delivery_receipt(
+                        delivery,
+                        "accepted" if state in {"pending", "complete"} else state,
+                    )
+
         except Exception as e:
             logger.error(f"预处理消息失败: {e}")
             traceback.print_exc()
+            if delivery_claimed:
+                state = history_delivery_store.state(delivery["delivery_key"])
+                if state == "pending":
+                    await _send_history_delivery_receipt(delivery, "accepted")
+        finally:
+            if delivery_claimed and history_delivery_store.state(delivery["delivery_key"]) == "processing":
+                history_delivery_store.release(delivery["delivery_key"])
+            offline_recovery_manager.message_finished(recovery_progress_key)
 
 
 # 创建全局ChatBot实例

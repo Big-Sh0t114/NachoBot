@@ -40,6 +40,15 @@ from .system_event import (
     system_event_route_result,
     validate_system_event_route,
 )
+from .offline_recovery import (
+    OFFLINE_RECOVERY_KEY,
+    OFFLINE_RECOVERY_VERSION,
+    build_recovery_metadata,
+    get_core_startup_boundary,
+    is_offline_replay,
+    normalize_original_timestamp,
+    set_core_startup_boundary,
+)
 
 # API-Server Version Components 不在根模块导出，需要从子模块导入
 # 消息相关组件 - 使用 from ncnk_message.message import
@@ -86,6 +95,13 @@ __all__ = [
     "get_system_event_route",
     "validate_system_event_route",
     "system_event_fallback_text",
+    "OFFLINE_RECOVERY_KEY",
+    "OFFLINE_RECOVERY_VERSION",
+    "build_recovery_metadata",
+    "get_core_startup_boundary",
+    "is_offline_replay",
+    "normalize_original_timestamp",
+    "set_core_startup_boundary",
     # 注意：API-Server Version 组件需要从子模块导入：
     # - 消息相关: from ncnk_message.message import APIMessageBase, MessageDim, etc.
     # - 服务端: from ncnk_message.server import WebSocketServer, ServerConfig, etc.

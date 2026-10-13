@@ -53,7 +53,14 @@ from src.chat.focus.models import (
 )
 from src.chat.focus.reply_context import acquire_reply_context_request, release_reply_context
 from src.chat.focus.reply_delivery import settle_reply_context_delivery
-from src.chat.focus.message_repository import load_message_batch
+from src.chat.focus.message_repository import load_message_batch, load_message_rows_by_ids
+from src.chat.offline_recovery import (
+    offline_recovery_manager,
+    format_recovery_batch_context,
+    format_recovery_reply_context,
+    merge_recovery_context_rows,
+    recovery_row_id,
+)
 from src.chat.focus.switch_action import (
     SWITCH_CHAT_ACTION,
     SwitchDisposition,
@@ -64,8 +71,11 @@ from src.chat.focus.switch_action import (
 from src.chat.utils.chat_message_builder import (
     build_readable_messages_with_id,
     get_raw_msg_before_timestamp_with_chat,
+    get_stepped_limit,
 )
+from src.chat.utils.planner_context import merge_planner_context_messages
 from src.chat.heart_flow.relation_scanner import RelationScanner
+from src.chat.heart_flow.heartFC_chat import _focus_turn_has_actionable_work
 from src.chat.memory_system.memory_activator import MemoryActivator
 from src.chat.sandbox.sandbox_delivery import schedule_sandbox_after_delivery
 
@@ -147,10 +157,29 @@ class BrainChatting:
         self._planner_interrupt_consecutive_count: int = 0
         self._last_message_received_at: float = time.time()
         self._focus_bypass_gate: FocusBypassDecisionGate | None = None
+        self._offline_recovery_batch = None
+        self._offline_recovery_messages: list[Any] = []
+        self._offline_recovery_prompt = ""
+        self._offline_recovery_delivered = False
+        self._offline_recovery_dropped = False
 
         # 关系扫描器与记忆激活器
         self.relation_scanner = RelationScanner(chat_id=self.stream_id)
         self.memory_activator = MemoryActivator()
+
+    def _ensure_offline_recovery_state(self) -> None:
+        """Provide safe defaults for older/test-created runtime instances."""
+
+        if not hasattr(self, "_offline_recovery_batch"):
+            self._offline_recovery_batch = None
+        if not hasattr(self, "_offline_recovery_messages"):
+            self._offline_recovery_messages = []
+        if not hasattr(self, "_offline_recovery_prompt"):
+            self._offline_recovery_prompt = ""
+        if not hasattr(self, "_offline_recovery_delivered"):
+            self._offline_recovery_delivered = False
+        if not hasattr(self, "_offline_recovery_dropped"):
+            self._offline_recovery_dropped = False
 
     async def start(self):
         """检查是否需要启动主循环，如果未激活则启动。"""
@@ -255,8 +284,6 @@ class BrainChatting:
         return bool(
             focus_turn.events
             and not recent_messages_list
-            and not focus_turn.handoff_ids
-            and focus_turn.read_through_row_id <= focus_turn.read_after_row_id
         )
 
     @staticmethod
@@ -433,12 +460,28 @@ class BrainChatting:
         return disposition is not SwitchDisposition.RETRY
 
     async def _loopbody(self, focus_turn: FocusTurn | None = None):  # sourcery skip: hoist-if-from-if
+        self._ensure_offline_recovery_state()
+        recovery_batch = self._offline_recovery_batch
+        if recovery_batch is not None:
+            recent_messages_list = list(load_message_rows_by_ids(self.stream_id, recovery_batch.row_ids))
+            if focus_turn is not None:
+                self._focus_consumed_through_row_id = focus_turn.read_after_row_id
+            eligible_messages = [message for message in recent_messages_list if planner_target_eligible(message)]
+            if not eligible_messages:
+                self._offline_recovery_dropped = True
+                return True
+            self._offline_recovery_messages = recent_messages_list
+            self._offline_recovery_prompt = format_recovery_reply_context(recent_messages_list)
+            self._last_message_received_at = time.time()
+            return await self._observe(recent_messages_list=recent_messages_list, focus_turn=focus_turn)
+
         if focus_turn is not None:
             batch = load_message_batch(
                 self.stream_id,
                 focus_turn.read_after_row_id,
                 focus_turn.read_through_row_id,
                 limit=getattr(global_config.focus, "max_unread_messages", 20),
+                skip_row_ids=offline_recovery_manager.excluded_row_ids_for_chat(self.stream_id),
             )
             recent_messages_list = list(batch.messages)
             self._focus_consumed_through_row_id = batch.consumed_through_row_id
@@ -452,12 +495,29 @@ class BrainChatting:
                 filter_mai=True,
                 filter_command=True,
             )
+            recent_messages_list = offline_recovery_manager.include_deferred_live_messages(
+                self.stream_id, recent_messages_list
+            )
+            recent_messages_list = offline_recovery_manager.filter_pending_recovery_messages(
+                self.stream_id, recent_messages_list
+            )
+            recent_messages_list = offline_recovery_manager.filter_recovered_nonfocus(
+                self.stream_id, recent_messages_list
+            )
+        focus_has_actionable_work = _focus_turn_has_actionable_work(focus_turn, recent_messages_list)
+        if focus_turn is not None and not focus_has_actionable_work:
+            return True
         focus_requires_observe = bool(
             focus_turn is not None
             and (
                 focus_turn.events
-                or focus_turn.handoff_ids
-                or focus_turn.wake_reason & (WakeReason.FOCUS_EVENT | WakeReason.SWITCH_TARGET)
+                or (
+                    recent_messages_list
+                    and (
+                        focus_turn.handoff_ids
+                        or focus_turn.wake_reason & (WakeReason.FOCUS_EVENT | WakeReason.SWITCH_TARGET)
+                    )
+                )
             )
         )
 
@@ -471,6 +531,9 @@ class BrainChatting:
 
         if len(recent_messages_list) >= 1:
             self.last_read_time = time.time()
+            if focus_turn is None:
+                offline_recovery_manager.commit_nonfocus_read_cursor(self.stream_id)
+                offline_recovery_manager.commit_deferred_live_rows(self.stream_id)
             self._last_message_received_at = time.time()
 
             # Planner 打断：如果 Planner 正在执行且收到新消息，触发打断（@提及除外，总开关关闭时跳过）
@@ -534,6 +597,7 @@ class BrainChatting:
         context_refs: Optional[List["ReplyContextRef"]] = None,
         sandbox_handoff: Any = None,
     ) -> Tuple[Dict[str, Any], str, Dict[str, float]]:
+        self._ensure_offline_recovery_state()
         with Timer("回复发送", cycle_timers):
             reply_text = await self._send_response(
                 reply_set=response_set,
@@ -605,11 +669,13 @@ class BrainChatting:
 
         return [action for action in actions if action.action_type == SWITCH_CHAT_ACTION]
 
+
     async def _observe(
         self,  # interest_value: float = 0.0,
         recent_messages_list: Optional[List["DatabaseMessages"]] = None,
         focus_turn: FocusTurn | None = None,
     ) -> bool:  # sourcery skip: merge-else-if-into-elif, remove-redundant-if
+        self._ensure_offline_recovery_state()
         if recent_messages_list is None:
             recent_messages_list = []
         message_batch = classify_runtime_message_batch(
@@ -618,19 +684,26 @@ class BrainChatting:
             is_system_event=get_system_event,
         )
         focus_switch_target_turn = self._is_focus_switch_target_turn(focus_turn, recent_messages_list)
-        allow_no_reply = not focus_switch_target_turn
+        recovery_active = self._offline_recovery_batch is not None
+        allow_no_reply = not focus_switch_target_turn and not recovery_active
         # 刷新上下文以确保获取最新的模板信息
         get_chat_manager().get_stream(self.stream_id)
         context = getattr(self.chat_stream, "context", None)
         current_template = context.get_template_name() if context is not None else None
         logger.debug(f"{self.log_prefix} Current template name: {current_template}")
         async with global_prompt_manager.async_message_scope(current_template):
+            recovery_planner_required = recovery_active and not message_batch.planner_bypass
             advanced_direct = (
                 self._should_use_advanced_direct_reply(advanced_manager.is_on(self.chat_stream))
                 and not message_batch.explicit_planner_messages
+                and not recovery_planner_required
             )
-            run_planner = bool(message_batch.planner_messages) or not message_batch.direct_messages
-            if message_batch.direct_messages and not message_batch.planner_messages:
+            run_planner = recovery_planner_required or bool(message_batch.planner_messages) or not message_batch.direct_messages
+            if (
+                message_batch.direct_messages
+                and not message_batch.planner_messages
+                and not recovery_planner_required
+            ):
                 run_planner = False
             if run_planner and not advanced_direct:
                 debug_prompt = await global_prompt_manager.get_prompt_async("brain_planner_prompt")
@@ -662,11 +735,39 @@ class BrainChatting:
             is_group_chat, chat_target_info, _ = self.action_planner.get_necessary_info()
             context_size = global_config.chat.get_max_context_size(is_group_chat=is_group_chat)
 
+            history_before = time.time()
+            planner_context_limit = max(1, int(context_size * 0.6))
+            planner_history_limit = get_stepped_limit(
+                self.stream_id,
+                history_before,
+                planner_context_limit,
+            )
             message_list_before_now = get_raw_msg_before_timestamp_with_chat(
                 chat_id=self.stream_id,
-                timestamp=time.time(),
-                limit=int(context_size * 0.6),
+                timestamp=history_before,
+                limit=planner_history_limit,
             )
+            message_list_before_now = offline_recovery_manager.filter_recovery_rows_from_context(
+                self.stream_id,
+                message_list_before_now,
+            )
+            if recovery_active:
+                message_list_before_now = merge_recovery_context_rows(
+                    message_list_before_now,
+                    self._offline_recovery_messages,
+                )
+            else:
+                trigger_context_messages = offline_recovery_manager.filter_pending_recovery_messages(
+                    self.stream_id,
+                    recent_messages_list,
+                )
+                message_list_before_now = merge_planner_context_messages(
+                    message_list_before_now,
+                    trigger_context_messages,
+                    chat_id=self.stream_id,
+                    limit=planner_context_limit,
+                    history_before=history_before,
+                )
             promise_snippets = promise_cache_manager.collect_snippets_for_messages(
                 self.stream_id, message_list_before_now
             )
@@ -674,9 +775,20 @@ class BrainChatting:
                 messages=message_list_before_now,
                 timestamp_mode="normal_no_YMD",
                 read_mark=self.action_planner.last_obs_time_mark,
-                truncate=True,
+                truncate=not recovery_active,
                 show_actions=True,
             )
+            if recovery_active:
+                recovery_row_ids = set(self._offline_recovery_batch.row_ids)
+                recovery_aliases = {}
+                for message_id, message in message_id_list:
+                    row_id = recovery_row_id(message)
+                    if row_id in recovery_row_ids:
+                        recovery_aliases[row_id] = str(message_id)
+                chat_content_block = (
+                    f"{chat_content_block}\n\n"
+                    f"{format_recovery_batch_context(self._offline_recovery_messages, planner_aliases=recovery_aliases)}"
+                )
             planner_message_id_list = [
                 (message_id, message)
                 for message_id, message in message_id_list
@@ -709,10 +821,31 @@ class BrainChatting:
                 )
                 for message in message_batch.direct_messages
             ]
+            if recovery_active and message_batch.planner_bypass:
+                eligible_recovery_messages = [
+                    message for message in recent_messages_list if planner_target_eligible(message)
+                ]
+                direct_reply_actions = (
+                    [
+                        ActionPlannerInfo(
+                            action_type="reply",
+                            reasoning="Adapter capability: direct recovery Replyer response",
+                            action_data={"bypass_extra_info": self._offline_recovery_prompt},
+                            action_message=eligible_recovery_messages[-1],
+                            available_actions=available_actions,
+                        )
+                    ]
+                    if eligible_recovery_messages
+                    else []
+                )
 
             # High-level mode remains a legacy route only when the incoming
             # message did not explicitly request Planner handling.
-            if direct_reply_actions and not message_batch.planner_messages:
+            if (
+                direct_reply_actions
+                and not message_batch.planner_messages
+                and not recovery_planner_required
+            ):
                 action_to_use_info = direct_reply_actions
                 # This reply is bound to its trigger message and cannot inherit
                 # a stale Planner cancellation event from an earlier turn.
@@ -775,12 +908,29 @@ class BrainChatting:
                         self._planner_interrupt_flag = interrupt_flag
                         self._planner_interrupt_requested = False
                         try:
-                            action_to_use_info, _ = await self.action_planner.plan(
-                                loop_start_time=self.last_read_time,
-                                available_actions=available_actions,
-                                interrupt_flag=interrupt_flag,
-                                allow_no_reply=allow_no_reply,
-                            )
+                            if recovery_active:
+                                filtered_actions = self.action_planner._filter_actions_by_activation_type(
+                                    available_actions,
+                                    chat_content_block,
+                                )
+                                action_to_use_info = await self.action_planner._execute_main_planner(
+                                    prompt=prompt_info[0],
+                                    message_id_list=planner_message_id_list,
+                                    filtered_actions=filtered_actions,
+                                    available_actions=available_actions,
+                                    loop_start_time=self.last_read_time,
+                                    interrupt_flag=interrupt_flag,
+                                    allow_no_reply=False,
+                                )
+                                self.action_planner.last_obs_time_mark = time.time()
+                            else:
+                                action_to_use_info, _ = await self.action_planner.plan(
+                                    loop_start_time=self.last_read_time,
+                                    available_actions=available_actions,
+                                    interrupt_flag=interrupt_flag,
+                                    allow_no_reply=allow_no_reply,
+                                    trigger_messages=recent_messages_list,
+                                )
                         except ReqAbortException:
                             self._planner_interrupt_flag = None
                             if not direct_reply_actions:
@@ -813,6 +963,40 @@ class BrainChatting:
                 recent_messages_list,
                 action_to_use_info,
             )
+
+            if recovery_active:
+                latest_recovery_message = next(
+                    (
+                        message
+                        for message in reversed(self._offline_recovery_messages)
+                        if planner_target_eligible(message)
+                    ),
+                    None,
+                )
+                replies = [action for action in action_to_use_info if action.action_type == "reply"]
+                other_actions = [
+                    action
+                    for action in action_to_use_info
+                    if action.action_type not in {"reply", "no_reply", SWITCH_CHAT_ACTION}
+                ]
+                if latest_recovery_message is not None:
+                    selected_reply = replies[-1] if replies else ActionPlannerInfo(
+                        action_type="reply",
+                        reasoning="Reply once to the complete frozen offline-recovery batch",
+                        action_data={},
+                        action_message=latest_recovery_message,
+                        available_actions=available_actions,
+                    )
+                    selected_reply = ActionPlannerInfo(
+                        action_type="reply",
+                        reasoning=selected_reply.reasoning,
+                        action_data=dict(selected_reply.action_data or {}),
+                        action_message=latest_recovery_message,
+                        available_actions=selected_reply.available_actions or available_actions,
+                    )
+                    action_to_use_info = other_actions + [selected_reply]
+                else:
+                    action_to_use_info = other_actions
 
             switch_actions = [action for action in action_to_use_info if action.action_type == SWITCH_CHAT_ACTION]
             terminal_switch_selected = bool(switch_actions)
@@ -935,13 +1119,29 @@ class BrainChatting:
     async def _run_focus_turn(self) -> bool:
         turn = await focus_coordinator.wait_for_turn(self.stream_id)
         self._focus_consumed_through_row_id = turn.read_after_row_id
+        self._offline_recovery_batch = turn.recovery_batch
+        self._offline_recovery_prompt = ""
+        self._offline_recovery_messages = []
+        self._offline_recovery_delivered = False
+        self._offline_recovery_dropped = False
         outcome = None
         self._focus_turn_interrupted = False
         try:
             with bind_lease(turn.lease):
-                success = await self._run_tracked_loopbody(turn)
+                if turn.recovery_target_chat_id is not None and turn.recovery_batch is not None:
+                    switch_result = await focus_coordinator.switch_to_recovery_head(
+                        turn.lease,
+                        turn.recovery_batch,
+                    )
+                    if switch_result.reason.startswith("recovery_policy_dropped:"):
+                        self._offline_recovery_dropped = True
+                    success = switch_result.success or self._offline_recovery_dropped
+                else:
+                    success = await self._run_tracked_loopbody(turn)
             if not await focus_coordinator.is_current(turn.lease):
                 status = TurnStatus.SWITCHED
+            elif self._offline_recovery_dropped:
+                status = TurnStatus.DROPPED_BY_POLICY
             elif self._focus_turn_interrupted or self._planner_interrupt_requested:
                 status = TurnStatus.CANCELLED
             elif success:
@@ -951,11 +1151,15 @@ class BrainChatting:
             outcome = TurnOutcome(
                 status=status,
                 consumed_through_row_id=self._focus_consumed_through_row_id,
+                recovery_delivered=self._offline_recovery_delivered if turn.recovery_batch else None,
+                recovery_dropped=self._offline_recovery_dropped,
             )
         except asyncio.CancelledError:
             outcome = TurnOutcome(
                 status=TurnStatus.CANCELLED,
                 consumed_through_row_id=self._focus_consumed_through_row_id,
+                recovery_delivered=self._offline_recovery_delivered if turn.recovery_batch else None,
+                recovery_dropped=self._offline_recovery_dropped,
             )
             raise
         except StaleFocusLeaseError as exc:
@@ -963,17 +1167,23 @@ class BrainChatting:
             outcome = TurnOutcome(
                 status=TurnStatus.STALE,
                 consumed_through_row_id=self._focus_consumed_through_row_id,
+                recovery_delivered=self._offline_recovery_delivered if turn.recovery_batch else None,
+                recovery_dropped=self._offline_recovery_dropped,
             )
         except ReqAbortException:
             self._focus_turn_interrupted = True
             outcome = TurnOutcome(
                 status=TurnStatus.CANCELLED,
                 consumed_through_row_id=self._focus_consumed_through_row_id,
+                recovery_delivered=self._offline_recovery_delivered if turn.recovery_batch else None,
+                recovery_dropped=self._offline_recovery_dropped,
             )
         except Exception:
             outcome = TurnOutcome(
                 status=TurnStatus.FAILED,
                 consumed_through_row_id=self._focus_consumed_through_row_id,
+                recovery_delivered=self._offline_recovery_delivered if turn.recovery_batch else None,
+                recovery_dropped=self._offline_recovery_dropped,
             )
             raise
         finally:
@@ -982,6 +1192,8 @@ class BrainChatting:
                     await asyncio.shield(focus_coordinator.finish_turn(turn, outcome))
                 except Exception as exc:
                     logger.error(f"{self.log_prefix} Failed to finish Focus turn: {exc}")
+        self._offline_recovery_batch = None
+        self._offline_recovery_prompt = ""
         return True
 
     async def _main_chat_loop(self):
@@ -1008,11 +1220,50 @@ class BrainChatting:
 
     async def _run_tracked_loopbody(self, focus_turn: FocusTurn | None = None) -> bool:
         """记录 Planner/动作执行在途状态，防止运行时被 TTL/LRU 回收。"""
+        nonfocus_batch = None
+        deferred_live_pending = False
+        if focus_turn is None:
+            deferred_live_pending = offline_recovery_manager.has_pending_deferred_live_messages(self.stream_id)
+            if not deferred_live_pending:
+                nonfocus_batch = offline_recovery_manager.peek_nonfocus_batch(self.stream_id)
+                if nonfocus_batch is not None and not offline_recovery_manager.claim_nonfocus_batch(
+                    self.stream_id, nonfocus_batch.batch_id
+                ):
+                    nonfocus_batch = None
+            if (
+                nonfocus_batch is None
+                and offline_recovery_manager.is_held(self.stream_id)
+                and not deferred_live_pending
+            ):
+                await asyncio.sleep(0.2)
+                return True
+        self._offline_recovery_batch = (
+            focus_turn.recovery_batch if focus_turn is not None else nonfocus_batch
+        )
+        self._offline_recovery_messages = []
+        self._offline_recovery_prompt = ""
+        self._offline_recovery_delivered = False
+        self._offline_recovery_dropped = False
         self._in_flight_operations += 1
         try:
-            return await self._loopbody(focus_turn)
+            success = await self._loopbody(focus_turn)
+            if not success and (
+                nonfocus_batch is not None
+                or deferred_live_pending and offline_recovery_manager.is_held(self.stream_id)
+            ):
+                return True
+            return success
         finally:
             self._in_flight_operations = max(0, self._in_flight_operations - 1)
+            if nonfocus_batch is not None:
+                offline_recovery_manager.finish_nonfocus_batch(
+                    self.stream_id,
+                    nonfocus_batch.batch_id,
+                    delivered=self._offline_recovery_delivered,
+                    dropped=self._offline_recovery_dropped,
+                )
+            self._offline_recovery_batch = None
+            self._offline_recovery_prompt = ""
 
     async def _normal_chat_loop(self):
         """主循环，持续进行计划并可能回复消息，直到被外部取消。"""
@@ -1031,7 +1282,7 @@ class BrainChatting:
             print(traceback.format_exc())
             await asyncio.sleep(3)
             self._loop_task = asyncio.create_task(self._main_chat_loop())
-        logger.error(f"{self.log_prefix} 结束了当前聊天循环")
+        logger.info(f"{self.log_prefix} 结束了当前聊天循环")
 
     async def _handle_action(
         self,
@@ -1105,6 +1356,7 @@ class BrainChatting:
         context_refs: Optional[List["ReplyContextRef"]] = None,
         sandbox_handoff: Any = None,
     ) -> str:
+        self._ensure_offline_recovery_state()
         receipts: List[send_api.SendReceipt] = []
         refs = tuple(context_refs or ())
         try:
@@ -1122,15 +1374,32 @@ class BrainChatting:
                     receipts=receipts,
                 )
         except StaleFocusLeaseError as exc:
+            if self._offline_recovery_batch is not None:
+                self._offline_recovery_delivered = self._offline_recovery_delivered or any(
+                    receipt.delivered for receipt in receipts
+                )
             await self._settle_interrupted_reply_context(refs, receipts, "stale_focus_lease")
             logger.info(f"{self.log_prefix} Focus lease became stale; dropping reply send: {exc}")
             return ""
         except asyncio.CancelledError:
+            if self._offline_recovery_batch is not None:
+                self._offline_recovery_delivered = self._offline_recovery_delivered or any(
+                    receipt.delivered for receipt in receipts
+                )
             await self._settle_interrupted_reply_context(refs, receipts, "send_cancelled")
             raise
         except Exception:
+            if self._offline_recovery_batch is not None:
+                self._offline_recovery_delivered = self._offline_recovery_delivered or any(
+                    receipt.delivered for receipt in receipts
+                )
             await self._settle_interrupted_reply_context(refs, receipts, "send_error")
             raise
+
+        if self._offline_recovery_batch is not None:
+            self._offline_recovery_delivered = self._offline_recovery_delivered or any(
+                receipt.delivered for receipt in receipts
+            )
 
         try:
             await settle_reply_context_delivery(refs, receipts)
@@ -1287,6 +1556,7 @@ class BrainChatting:
         cycle_timers: Dict[str, float],
     ):
         """执行单个动作的通用函数"""
+        self._ensure_offline_recovery_state()
         try:
             with Timer(f"动作{action_planner_info.action_type}", cycle_timers):
                 if action_planner_info.action_type == SWITCH_CHAT_ACTION:
@@ -1378,6 +1648,12 @@ class BrainChatting:
                         injection_text = injection_manager.build_injection_text(
                             chat_id=self.chat_stream.stream_id, message_text=message_text_for_injection
                         )
+                        if self._offline_recovery_prompt:
+                            injection_text = (
+                                f"{self._offline_recovery_prompt}\n{injection_text}"
+                                if injection_text
+                                else self._offline_recovery_prompt
+                            )
 
                         # 高级模式路由：禁用工具/联网并移除TTS动作
                         advanced_on = advanced_manager.is_on(self.chat_stream)
@@ -1423,7 +1699,12 @@ class BrainChatting:
                         focus_replyer_required = getattr(
                             global_config.focus, "mode", "off"
                         ) == "active" and focus_coordinator.is_managed(self.stream_id)
-                        if action_planner_info.reply_text and not focus_replyer_required and not global_config.tool.enable_tool:
+                        if (
+                            action_planner_info.reply_text
+                            and not focus_replyer_required
+                            and not global_config.tool.enable_tool
+                            and self._offline_recovery_batch is None
+                        ):
                             logger.info(f"{self.log_prefix} 使用集成生成的回复内容")
                             # 将文本转换为 ReplySetModel
                             from src.plugin_system.apis.generator_api import process_human_text
@@ -1589,16 +1870,16 @@ class BrainChatting:
         extra_info = None
         if remind_datetime is None:
             extra_info = (
-                f'[预约提醒失败] 用户请求设定提醒但时间格式无法解析："{remind_time_raw}"。'
-                f"请告知用户时间格式无法识别，请重新指定。"
+                f'用户请求设置提醒，但无法识别时间“{remind_time_raw}”。'
+                f"请自然地说明时间格式无法识别，并请用户重新提供时间。"
             )
         elif remind_datetime <= now:
             extra_info = (
-                f"[预约提醒失败] 用户请求设定提醒，但指定的时间 {remind_datetime.strftime('%Y-%m-%d %H:%M')} 已经过去了。"
-                "请告知用户指定的时间已过，请重新指定一个未来的时间。"
+                f"用户请求设置提醒，但指定的时间 {remind_datetime.strftime('%Y-%m-%d %H:%M')} 已经过了。"
+                "请自然地说明这一时间已过，并请用户重新指定未来的时间。"
             )
         elif (remind_datetime - now).total_seconds() > 7 * 24 * 3600:
-            extra_info = "[预约提醒失败] 用户请求设定提醒，但指定的时间超过7天后。请告知用户提醒时间不能超过7天。"
+            extra_info = "用户请求设置提醒，但指定时间超过了未来7天范围。请自然地说明提醒时间不能超过7天。"
 
         if extra_info:
             try:
@@ -1631,8 +1912,8 @@ class BrainChatting:
 
         # 生成确认回复
         confirm_extra_info = (
-            f'[预约提醒已设定] 用户要求你在 {formatted_time} 提醒他"{remind_content}"。'
-            f"请确认已记下这个提醒，用自然语气告诉用户你会准时提醒。"
+            f'用户希望你在 {formatted_time} 提醒他"{remind_content}"。'
+            f"请自然地确认已记下这个提醒，并说明会在指定时间提醒。"
         )
         confirm_text = ""
         try:
@@ -1668,8 +1949,8 @@ class BrainChatting:
 
         # --- 预生成提醒消息 ---
         reminder_extra_info = (
-            f'[定时提醒触发] 现在是 {formatted_time}，之前用户要求你在这个时间提醒他"{remind_content}"。'
-            f"请现在发送提醒消息，直接提醒用户该做的事情。语气亲切自然。"
+            f'现在是 {formatted_time}，用户先前希望你在这个时间提醒他"{remind_content}"。'
+            f"请直接、亲切地提醒用户这件事。"
         )
         remind_text = f"提醒你：{remind_content}"
         try:
@@ -1747,20 +2028,20 @@ class BrainChatting:
 
         if not matches:
             extra_info = (
-                f'[取消预约失败] 用户要求取消提醒"{remind_content}"，但没有找到匹配的待执行预约。'
-                f"请告知用户当前没有与此内容匹配的提醒。"
+                f'用户要求取消提醒"{remind_content}"，但没有找到匹配的待执行预约。'
+                f"请自然地告知用户当前没有与此内容匹配的提醒。"
             )
         elif len(matches) == 1:
             cancelled = matches[0]
             appointment_scheduler.cancel_by_id(cancelled["id"])
             extra_info = (
-                f'[预约已取消] 用户的提醒"{cancelled["remind_content"]}"（时间：{cancelled["remind_time_iso"]}）'
-                f"已成功取消。请用自然语气确认取消。"
+                f'用户的提醒"{cancelled["remind_content"]}"（时间：{cancelled["remind_time_iso"]}）'
+                f"已成功取消，请用自然语气确认。"
             )
         else:
             listing = "\n".join(f"- {m['remind_content']}（时间：{m['remind_time_iso']}）" for m in matches)
             extra_info = (
-                f'[取消预约] 用户要求取消"{remind_content}"，但找到多个匹配的待执行预约：\n{listing}\n'
+                f'用户要求取消"{remind_content}"，但找到多个匹配的待执行预约：\n{listing}\n'
                 f"请列出这些预约并请用户指明要取消哪一个。本次不执行取消操作。"
             )
 

@@ -27,24 +27,33 @@ class NCMessageSender:
         """后台任务：不断从队列取出消息发送，强制进行安全间隔休眠"""
         while True:
             try:
-                payload, request_uuid, future = await self._send_queue.get()
-                
-                if self.server_connection is None:
-                    logger.error("尝试发送消息但尚未建立 WebSocket 连接")
-                    future.set_result({"status": "error", "message": "no_connection"})
+                payload, request_uuid, send_future, expected_connection = await self._send_queue.get()
+                try:
+                    if send_future.cancelled():
+                        continue
+                    if expected_connection is None or self.server_connection is not expected_connection:
+                        logger.debug("跳过已过期NapCat请求 UUID={}", request_uuid)
+                        if not send_future.done():
+                            send_future.set_result({"status": "error", "message": "stale_connection"})
+                        continue
+                    logger.debug(f"[Queue] 执行发送任务: {request_uuid}")
+                    await expected_connection.send(payload)
+                    if not send_future.done():
+                        send_future.set_result({"status": "ok"})
+                    delay = 1.5 + random.uniform(0.5, 1.5)
+                    logger.debug(f"[Queue] 发送完毕，休眠 {delay:.2f} 秒以规避风控...")
+                    await asyncio.sleep(delay)
+                except asyncio.CancelledError:
+                    if not send_future.done():
+                        send_future.set_result({"status": "error", "message": "cancelled"})
+                    raise
+                except Exception as e:
+                    if not send_future.done():
+                        send_future.set_result({"status": "error", "message": str(e)})
+                    logger.error(f"[Queue] 发送 Worker 发生异常: {e}")
+                    await asyncio.sleep(1)
+                finally:
                     self._send_queue.task_done()
-                    continue
-
-                logger.debug(f"[Queue] 执行发送任务: {request_uuid}")
-                await self.server_connection.send(payload)
-                
-                # 计算动态延迟：基础 1.5 秒 + 随机 0.5~1.5 秒
-                # 如果上一个版本里有判断文字长度的逻辑，也可以加在这里
-                delay = 1.5 + random.uniform(0.5, 1.5)
-                logger.debug(f"[Queue] 发送完毕，休眠 {delay:.2f} 秒以规避风控...")
-                await asyncio.sleep(delay)
-                
-                self._send_queue.task_done()
             except Exception as e:
                 logger.error(f"[Queue] 发送 Worker 发生异常: {e}")
                 await asyncio.sleep(1) # 出错也稍微等一下，避免死循环爆日志
@@ -55,28 +64,41 @@ class NCMessageSender:
         params: dict,
         *,
         timeout_sec: float | None = None,
+        expected_connection: Server.ServerConnection | None = None,
     ) -> dict:
         request_uuid = str(uuid.uuid4())
         payload = json.dumps({"action": action, "params": params, "echo": request_uuid})
+        connection = expected_connection or self.server_connection
+        if connection is None:
+            return {"status": "error", "message": "no_connection"}
 
         # 创建一个 Future 用于等待 NapCat 的 echo 返回
         loop = asyncio.get_running_loop()
-        future = loop.create_future()
+        send_future = loop.create_future()
 
         # 将任务塞入队列
-        await self._send_queue.put((payload, request_uuid, future))
+        await self._send_queue.put((payload, request_uuid, send_future, connection))
 
         timeout_value = 10.0 if timeout_sec is None else max(1.0, float(timeout_sec))
 
         # 等待 get_response 的返回（由底层的 ws 接收循环触发 response_pool 里的事件）
         try:
+            send_result = await asyncio.wait_for(asyncio.shield(send_future), timeout=timeout_value)
+            if not isinstance(send_result, dict) or send_result.get("status") != "ok":
+                return send_result if isinstance(send_result, dict) else {"status": "error", "message": "send_failed"}
             # Worker 只负责推送并卡住节奏，接收回执仍由 src.response_pool 处理。
             response = await get_response(request_uuid, timeout=timeout_value)
         except TimeoutError:
+            if not send_future.done():
+                send_future.cancel()
             logger.error(
                 f"发送消息超时，未收到响应 UUID: {request_uuid}, timeout_sec={timeout_value}"
             )
             return {"status": "error", "message": "timeout"}
+        except asyncio.CancelledError:
+            if not send_future.done():
+                send_future.cancel()
+            raise
         except Exception as e:
             logger.error(f"等待消息回执失败: {e}")
             return {"status": "error", "message": str(e)}

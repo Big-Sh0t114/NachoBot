@@ -124,6 +124,17 @@ class ChatConfig(ConfigBase):
 
 
 @dataclass
+class OfflineRecoveryConfig(ConfigBase):
+    enabled: bool = True
+    page_size: int = 50
+    max_pages: int = 200
+    retry_delay_sec: float = 15.0
+    receipt_timeout_sec: float = 8.0
+
+
+
+
+@dataclass
 class VoiceConfig(ConfigBase):
     use_tts: bool = False
     """是否启用TTS功能"""

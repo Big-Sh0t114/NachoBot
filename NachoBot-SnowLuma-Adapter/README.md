@@ -68,6 +68,27 @@ group_list_type = "blacklist"
 group_list = []
 ```
 
+### 离线历史恢复
+
+适配器登录并连接 Core 后，会主动通过 SnowLuma OneBot `get_friend_msg_history` 拉取私聊离线消息；SnowLuma 或 Core 重连后也会重试。首次启用只保存恢复基线，不会导入基线之前的旧消息。恢复使用当前私聊准入名单、用户封禁和现有消息过滤，保留 OneBot 原始时间，并等待 Core 的持久化回执后再推进游标。同步状态和待投递消息保存在适配器 `data/offline_history.sqlite3`。对于账号、好友路由、发送者和原始时间均验证通过的入站好友私聊，Core 还会登记 SnowLuma 的原生消息 ID；NapCat 可以用已验证的 QQNT `real_seq` 推导出同一个 ID。切换适配器后，Core 会恢复已有任务或回执完成状态，并保留本次投递使用的适配器 key/token。只按已验证的消息身份共享，不以文本或时间单独去重；两个适配器的分页游标、checkpoint 和 outbox 保持各自独立。群聊仍通过普通实时收发和 SnowLuma 平台自动补投处理，适配器不会主动请求群聊历史。
+
+```toml
+[offline_recovery]
+enabled = true
+page_size = 50
+max_pages = 200
+retry_delay_sec = 15.0
+receipt_timeout_sec = 8.0
+```
+
+私聊恢复从 SnowLuma 服务端最新历史向旧消息分页。群聊不参与适配器主动历史补拉；群聊普通实时收发和平台自动补投保持不变。
+
+共享身份仅适用于入站好友私聊。SnowLuma 不把 `message_seq` 当作 QQNT 原生序号；它使用服务端给出的带符号 32 位消息 ID。若旧 SnowLuma Core 行已有显式账号/路由/消息 ID 元数据，NapCat 仅在推导 ID 和原始时间完全匹配时才能接管；缺少这份证明时沿用适配器各自的历史处理。
+
+NapCat 的已登记历史扫描还会用仅包含消息 ID、私聊路由、原始时间和验证后 QQNT 身份的限长记录，为已有 NapCat Core 回执补登记 SnowLuma 别名。Core 只接受被当前完整 run 准入的私聊目标，以及 key、账号、消息 ID、时间均精确匹配的 pending/complete 回执；它不会新增消息行或改变原回执状态。扫描经过本地 checkpoint 边界时也能为那条已接收记录补证，因此之后切到 SnowLuma 可直接识别；没有覆盖到或缺少 `real_seq` 证明的旧记录仍保持未确认。
+
+该身份迁移不会删除或合并在获得精确证明前已经写入 Core 的重复消息行。
+
 ## 启动
 
 使用 uv：

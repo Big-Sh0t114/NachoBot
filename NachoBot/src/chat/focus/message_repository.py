@@ -8,6 +8,7 @@ far each batch was scanned, including filtered records.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Iterable
 
 from src.common.data_models.database_data_model import DatabaseMessages
 from src.common.database.database_model import Messages
@@ -40,6 +41,7 @@ def load_message_batch(
     limit: int = 20,
     filter_bot: bool = True,
     filter_command: bool = True,
+    skip_row_ids: Iterable[int] = (),
 ) -> FocusMessageBatch:
     """Load the next bounded Focus batch in primary-key order.
 
@@ -70,8 +72,11 @@ def load_message_batch(
         return FocusMessageBatch((), through_row_id, False)
 
     messages: list[DatabaseMessages] = []
+    skipped_ids = {int(row_id) for row_id in skip_row_ids}
     bot_id = str(global_config.bot.qq_account)
     for row in rows:
+        if int(row.id) in skipped_ids:
+            continue
         if row.message_id == "notice":
             continue
         if filter_bot and str(row.user_id or "") == bot_id:
@@ -88,6 +93,49 @@ def load_message_batch(
         consumed_through,
         consumed_through < through_row_id,
     )
+
+
+def load_message_rows_by_ids(
+    chat_id: str,
+    row_ids: Iterable[int],
+    *,
+    filter_bot: bool = True,
+    filter_command: bool = True,
+) -> tuple[DatabaseMessages, ...]:
+    """Load a frozen batch by explicit immutable primary keys, without a row cap."""
+
+    if not chat_id:
+        raise ValueError("chat_id cannot be empty")
+    normalized_ids = tuple(dict.fromkeys(int(row_id) for row_id in row_ids))
+    if not normalized_ids:
+        return ()
+    if any(row_id <= 0 for row_id in normalized_ids):
+        raise ValueError("Focus recovery row IDs must be positive")
+
+    rows_by_id = {}
+    for offset in range(0, len(normalized_ids), 500):
+        chunk = normalized_ids[offset : offset + 500]
+        rows = Messages.select().where(
+            (Messages.chat_id == chat_id) & Messages.id.in_(chunk)
+        )
+        rows_by_id.update((int(row.id), row) for row in rows)
+
+    bot_id = str(global_config.bot.qq_account)
+    messages: list[DatabaseMessages] = []
+    # The frozen recovery ID tuple is already ordered by the original platform
+    # timestamps, which can differ from Core's receive/storage timestamps.
+    for row_id in normalized_ids:
+        row = rows_by_id.get(row_id)
+        if row is None or row.message_id == "notice":
+            continue
+        if filter_bot and str(row.user_id or "") == bot_id:
+            continue
+        if filter_command and bool(row.is_command):
+            continue
+        message = DatabaseMessages(**row.__data__)
+        message.focus_row_id = int(row.id)
+        messages.append(message)
+    return tuple(messages)
 
 
 def load_message_range_summary(

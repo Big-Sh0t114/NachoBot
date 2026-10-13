@@ -1,10 +1,13 @@
 import websockets as Server
+import asyncio
+import atexit
 import json
 import base64
 import uuid
 import urllib3
 import ssl
 import io
+from concurrent.futures import ThreadPoolExecutor
 
 from src.database import BanUser, db_manager
 from .logger import logger
@@ -12,6 +15,20 @@ from .response_pool import get_response
 
 from PIL import Image
 from typing import Union, List, Tuple, Optional
+
+
+_IMAGE_DOWNLOAD_EXECUTOR = ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="napcat-image-download",
+)
+_IMAGE_DOWNLOAD_SLOT = asyncio.Semaphore(1)
+
+
+def _shutdown_image_download_executor() -> None:
+    _IMAGE_DOWNLOAD_EXECUTOR.shutdown(wait=True, cancel_futures=False)
+
+
+atexit.register(_shutdown_image_download_executor)
 
 
 class SSLAdapter(urllib3.PoolManager):
@@ -95,10 +112,9 @@ async def get_member_info(websocket: Server.ServerConnection, group_id: int, use
     return socket_response.get("data")
 
 
-async def get_image_base64(url: str) -> str:
+def _download_image_base64_sync(url: str) -> str:
     # sourcery skip: raise-specific-error
-    """获取图片/表情包的Base64"""
-    logger.debug(f"下载图片: {url}")
+    """Perform the legacy TLS GET and base64 encoding on the owned worker."""
     http = SSLAdapter()
     try:
         response = http.request("GET", url, timeout=10)
@@ -109,6 +125,42 @@ async def get_image_base64(url: str) -> str:
     except Exception as e:
         logger.error(f"图片下载失败: {str(e)}")
         raise
+
+
+def _consume_download_result(future: asyncio.Future) -> None:
+    if future.cancelled():
+        return
+    try:
+        future.exception()
+    except BaseException:
+        pass
+
+
+async def get_image_base64(url: str) -> str:
+    """获取图片/表情包的Base64"""
+    logger.debug(f"下载图片: {url}")
+    loop = asyncio.get_running_loop()
+    await _IMAGE_DOWNLOAD_SLOT.acquire()
+    try:
+        worker_future = _IMAGE_DOWNLOAD_EXECUTOR.submit(_download_image_base64_sync, url)
+    except BaseException:
+        _IMAGE_DOWNLOAD_SLOT.release()
+        raise
+
+    def release_slot(_future: object) -> None:
+        try:
+            loop.call_soon_threadsafe(_IMAGE_DOWNLOAD_SLOT.release)
+        except RuntimeError:
+            # The loop is already closing. The bounded worker is process-owned
+            # and will finish under urllib3's existing timeout.
+            pass
+
+    worker_future.add_done_callback(release_slot)
+    async_future = asyncio.wrap_future(worker_future, loop=loop)
+    async_future.add_done_callback(_consume_download_result)
+    # Cancellation detaches this caller but leaves the semaphore held until
+    # the native request actually exits and its completion callback releases it.
+    return await asyncio.shield(async_future)
 
 
 def convert_image_to_gif(image_base64: str) -> str:

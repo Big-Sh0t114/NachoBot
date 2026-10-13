@@ -35,6 +35,13 @@ use_tts = false
 # Only throttles actual send_group_msg/send_private_msg, not info/action queries.
 min_interval_sec = 0.5
 
+[offline_recovery]
+enabled = true
+page_size = 50
+max_pages = 200
+retry_delay_sec = 15.0
+receipt_timeout_sec = 8.0
+
 [visual.image]
 temperature = 0.1
 max_tokens = 220
