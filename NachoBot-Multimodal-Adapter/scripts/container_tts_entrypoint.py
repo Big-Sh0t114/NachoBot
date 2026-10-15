@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import subprocess
 import sys
 
 import toml
@@ -59,6 +60,9 @@ def main() -> None:
     ]
     if args.backend_port is not None:
         command.extend(["--backend-port", str(args.backend_port)])
+    if os.name == "nt":
+        child = subprocess.run(command, check=False)
+        raise SystemExit(child.returncode)
     os.execv(sys.executable, command)
 
 

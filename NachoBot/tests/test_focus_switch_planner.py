@@ -433,6 +433,115 @@ class FocusSwitchPlannerRegressionTests(_PlannerTestMixin, unittest.TestCase):
 
         asyncio.run(exercise())
 
+    def test_focus_wake_requires_current_events_or_unread_local_rows_in_both_runtimes(self):
+        async def run_case(runtime_type, module, focus_turn, messages):
+            runtime = runtime_type.__new__(runtime_type)
+            runtime.stream_id = "test-chat"
+            runtime.last_read_time = 0.0
+            runtime._last_message_received_at = 0.0
+            runtime._focus_consumed_through_row_id = 0
+            runtime._planner_interrupt_flag = None
+            runtime._planner_interrupt_requested = False
+            runtime._planner_interrupt_consecutive_count = 0
+            runtime._message_debounce_required = False
+            runtime.no_reply_until_call = False
+            runtime.talk_threshold = 0.0
+            runtime._observe = AsyncMock(return_value=True)
+            runtime._route_forced_ingress_preemption = AsyncMock(return_value=None)
+            runtime._route_focus_event_only_turn = AsyncMock(return_value=True)
+            runtime._filter_blocked_users = Mock(return_value=list(messages))
+            batch = SimpleNamespace(
+                messages=tuple(messages),
+                consumed_through_row_id=focus_turn.read_through_row_id,
+            )
+
+            with patch.object(module, "load_message_batch", return_value=batch):
+                result = await runtime._loopbody(focus_turn)
+
+            self.assertTrue(result)
+            return runtime
+
+        async def exercise():
+            runtimes = (
+                (HeartFChatting, heart_chat_module),
+                (BrainChatting, brain_chat_module),
+            )
+            for runtime_type, module in runtimes:
+                with self.subTest(runtime=runtime_type.__name__, case="stale wake"):
+                    stale_turn = SimpleNamespace(
+                        read_after_row_id=1,
+                        read_through_row_id=1,
+                        events=(),
+                        handoff_ids=(),
+                        wake_reason=WakeReason.FOCUS_EVENT,
+                    )
+                    stale_runtime = await run_case(runtime_type, module, stale_turn, ())
+                    stale_runtime._observe.assert_not_awaited()
+                    stale_runtime._route_forced_ingress_preemption.assert_not_awaited()
+                    stale_runtime._route_focus_event_only_turn.assert_not_awaited()
+
+                    for empty_turn in (
+                        SimpleNamespace(
+                            read_after_row_id=1,
+                            read_through_row_id=1,
+                            events=(),
+                            handoff_ids=(),
+                            wake_reason=WakeReason.SWITCH_TARGET,
+                        ),
+                        SimpleNamespace(
+                            read_after_row_id=1,
+                            read_through_row_id=1,
+                            events=(),
+                            handoff_ids=("pending-handoff",),
+                            wake_reason=WakeReason.NONE,
+                        ),
+                    ):
+                        empty_runtime = await run_case(runtime_type, module, empty_turn, ())
+                        empty_runtime._observe.assert_not_awaited()
+                        empty_runtime._route_forced_ingress_preemption.assert_not_awaited()
+                        empty_runtime._route_focus_event_only_turn.assert_not_awaited()
+
+                with self.subTest(runtime=runtime_type.__name__, case="current event snapshot"):
+                    event_turn = SimpleNamespace(
+                        read_after_row_id=1,
+                        read_through_row_id=1,
+                        events=(SimpleNamespace(event_id="pending-event"),),
+                        handoff_ids=("pending-handoff",),
+                        wake_reason=WakeReason.FOCUS_EVENT,
+                    )
+                    event_runtime = await run_case(runtime_type, module, event_turn, ())
+                    if runtime_type is HeartFChatting:
+                        event_runtime._observe.assert_awaited_once_with(
+                            recent_messages_list=[],
+                            focus_turn=event_turn,
+                        )
+                    else:
+                        event_runtime._route_focus_event_only_turn.assert_awaited_once_with(event_turn)
+                        event_runtime._observe.assert_not_awaited()
+
+                with self.subTest(runtime=runtime_type.__name__, case="switch target with local row"):
+                    message = SimpleNamespace(
+                        user_info=SimpleNamespace(user_id="user-1", platform="qq"),
+                        processed_plain_text="新消息",
+                        is_mentioned=False,
+                        is_at=False,
+                        additional_config={},
+                    )
+                    target_turn = SimpleNamespace(
+                        read_after_row_id=1,
+                        read_through_row_id=2,
+                        events=(),
+                        handoff_ids=(),
+                        wake_reason=WakeReason.SWITCH_TARGET,
+                    )
+                    target_runtime = await run_case(runtime_type, module, target_turn, (message,))
+                    target_runtime._observe.assert_awaited_once_with(
+                        recent_messages_list=[message],
+                        focus_turn=target_turn,
+                    )
+
+        self._run_async(exercise())
+
     def test_false_switch_cas_fences_group_and_drops_stale_turn(self):
         class _FalseSwitchStateStore:
             def __init__(self):
@@ -1313,7 +1422,7 @@ class FocusSwitchPlannerRegressionTests(_PlannerTestMixin, unittest.TestCase):
                     new=AsyncMock(return_value="debug prompt"),
                 )
             )
-            capabilities_mock = stack.enter_context(
+            stack.enter_context(
                 patch.object(
                     heart_chat_module,
                     "runtime_capabilities_from_stream",
@@ -1489,11 +1598,30 @@ class FocusSwitchPlannerRegressionTests(_PlannerTestMixin, unittest.TestCase):
             ordinary.is_at = False
             return ordinary
 
-        async def run_case(planner_bypass, ordered_messages):
+        def make_backlog_ordinary(index):
+            ordinary = _Message(user_id=f"ordinary-{index}", text=f"普通消息-{index}")
+            ordinary.message_id = f"ordinary-{index}"
+            ordinary.time = float(index)
+            ordinary.display_message = ordinary.processed_plain_text
+            ordinary.additional_config = {}
+            ordinary.is_mentioned = False
+            ordinary.is_at = False
+            return ordinary
+
+        async def run_case(planner_bypass, ordered_messages, *, direct_backlog=False):
             event_message = next(message for message in ordered_messages if message.user_info is None)
-            event_message.additional_config.setdefault("runtime_capabilities", {})[
-                "planner_bypass"
-            ] = planner_bypass
+            if direct_backlog:
+                for message in ordered_messages:
+                    if not isinstance(message.additional_config, dict):
+                        message.additional_config = {}
+                    message.additional_config["runtime_capabilities"] = {
+                        "schema_version": 1,
+                        "planner_bypass": True,
+                    }
+            else:
+                event_message.additional_config.setdefault("runtime_capabilities", {})[
+                    "planner_bypass"
+                ] = planner_bypass
             stream = SimpleNamespace(
                 stream_id="test-chat",
                 group_info=SimpleNamespace(group_id="100", group_name="测试群"),
@@ -1547,7 +1675,7 @@ class FocusSwitchPlannerRegressionTests(_PlannerTestMixin, unittest.TestCase):
                 stack.enter_context(
                     patch.object(heart_chat_module.global_prompt_manager, "async_message_scope", prompt_scope)
                 )
-                prompt_fetch_mock = stack.enter_context(
+                stack.enter_context(
                     patch.object(
                         heart_chat_module.global_prompt_manager,
                         "get_prompt_async",
@@ -1614,12 +1742,42 @@ class FocusSwitchPlannerRegressionTests(_PlannerTestMixin, unittest.TestCase):
                     # unread order, while Planner failure must not drop the
                     # exact event Replyer action.
                     await runtime._observe(recent_messages_list=list(ordered_messages))
-                    self.assertEqual(len(executed_actions), 1)
-                    self.assertEqual(executed_actions[0].action_type, "reply")
-                    self.assertIs(executed_actions[0].action_message, event_message)
-                    build_prompt_mock.assert_awaited_once()
-                    on_plan_mock.assert_awaited_once()
-                    plan_mock.assert_awaited_once()
+                    if direct_backlog:
+                        self.assertEqual(len(executed_actions), len(ordered_messages))
+                        self.assertTrue(all(action.action_type == "reply" for action in executed_actions))
+                        self.assertEqual(
+                            {id(action.action_message) for action in executed_actions},
+                            {id(message) for message in ordered_messages},
+                        )
+                        extra_info = executed_actions[0].action_data["bypass_extra_info"]
+                        self.assertIn("以下是最近积累的 20 条待处理消息", extra_info)
+                        self.assertIn("请综合考虑这些消息的内容", extra_info)
+                        self.assertNotIn("[消息堆积提示]", extra_info)
+                        self.assertNotIn("[消息堆积提示结束]", extra_info)
+                        self.assertIn("普通消息-25", extra_info)
+                        self.assertTrue(
+                            all(action.action_data["bypass_extra_info"] == extra_info for action in executed_actions)
+                        )
+                        if ordered_messages[0] is event_message:
+                            self.assertNotIn("系统事件：", extra_info)
+                            self.assertIn("普通消息-6", extra_info)
+                            self.assertNotIn("普通消息-5", extra_info)
+                            self.assertEqual(extra_info.count("说：“"), 20)
+                        else:
+                            self.assertIn("系统事件：系统事件内容", extra_info)
+                            self.assertIn("普通消息-7", extra_info)
+                            self.assertNotIn("普通消息-6", extra_info)
+                            self.assertEqual(extra_info.count("说：“"), 19)
+                        build_prompt_mock.assert_not_awaited()
+                        on_plan_mock.assert_not_awaited()
+                        plan_mock.assert_not_awaited()
+                    else:
+                        self.assertEqual(len(executed_actions), 1)
+                        self.assertEqual(executed_actions[0].action_type, "reply")
+                        self.assertIs(executed_actions[0].action_message, event_message)
+                        build_prompt_mock.assert_awaited_once()
+                        on_plan_mock.assert_awaited_once()
+                        plan_mock.assert_awaited_once()
                 else:
                     with self.assertRaises(_PlannerReached):
                         await runtime._observe(recent_messages_list=list(ordered_messages))
@@ -1635,6 +1793,13 @@ class FocusSwitchPlannerRegressionTests(_PlannerTestMixin, unittest.TestCase):
                     await run_case(False, ordered_messages)
                 with self.subTest(planner_bypass=True, order=[m.message_id for m in ordered_messages]):
                     await run_case(True, ordered_messages)
+
+            for ordered_messages in (
+                (make_event(), *(make_backlog_ordinary(index) for index in range(1, 26))),
+                (*(make_backlog_ordinary(index) for index in range(1, 26)), make_event()),
+            ):
+                with self.subTest(direct_backlog=True, order=[m.message_id for m in ordered_messages]):
+                    await run_case(True, ordered_messages, direct_backlog=True)
 
         self._run_async(exercise())
 

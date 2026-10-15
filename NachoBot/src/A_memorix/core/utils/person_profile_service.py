@@ -30,7 +30,7 @@ from .model_routing import (
     ResolvedLLMModel,
     generate_with_resolved_model,
     get_text_generation_model_tasks,
-    pick_text_generation_task,
+    task_has_model_list,
 )
 from .profile_text import build_profile_injection_text, build_structured_profile_text
 
@@ -705,13 +705,10 @@ class PersonProfileService:
     def _resolve_profile_classification_model(self) -> Optional[ResolvedLLMModel]:
         try:
             available_tasks = get_text_generation_model_tasks(llm_api)
-            task_name, task_config = pick_text_generation_task(
-                available_tasks,
-                preferred=("memory", "utils", "planner", "tool_use", "replyer"),
-            )
-            if not task_name or task_config is None:
+            task_config = available_tasks.get("utils_small")
+            if not task_has_model_list(task_config):
                 return None
-            return ResolvedLLMModel(task_name=task_name, task_config=task_config)
+            return ResolvedLLMModel(task_name="utils_small", task_config=task_config)
         except Exception as exc:
             logger.debug(f"解析人物画像分类模型失败: {exc}")
             return None

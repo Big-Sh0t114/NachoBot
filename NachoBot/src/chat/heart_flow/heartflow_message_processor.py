@@ -1,8 +1,10 @@
 import asyncio
+import math
 import re
 import traceback
+from datetime import datetime
 
-from typing import Tuple, TYPE_CHECKING
+from typing import Tuple
 
 from src.config.config import global_config
 from src.chat.message_receive.message import MessageRecv
@@ -10,6 +12,11 @@ from src.chat.message_receive.storage import MessageStorage
 from ncnk_message import get_system_event, system_event_fallback_text
 from src.chat.heart_flow.heartflow import heartflow
 from src.chat.focus.coordinator import focus_coordinator
+from src.chat.offline_recovery import (
+    offline_metadata_from_message,
+    offline_recovery_manager,
+    is_offline_recovery_row,
+)
 from src.chat.utils.utils import is_mentioned_bot_in_message
 from src.chat.utils.chat_message_builder import replace_user_references
 from src.common.logger import get_logger
@@ -17,10 +24,31 @@ from src.mood.mood_manager import mood_manager
 from src.person_info.person_info import Person
 from src.common.database.database_model import Images
 
-if TYPE_CHECKING:
-    from src.chat.heart_flow.heartFC_chat import HeartFChatting
-
 logger = get_logger("chat")
+
+
+def _offline_original_timestamp_label(message: MessageRecv) -> str:
+    """Make a recovered user's platform time visible without changing log time."""
+
+    if not is_offline_recovery_row(message):
+        return ""
+    metadata = offline_metadata_from_message(message)
+    original_timestamp = metadata.get("original_timestamp")
+    if original_timestamp is None:
+        original_timestamp = getattr(getattr(message, "message_info", None), "time", None)
+    if isinstance(original_timestamp, bool):
+        return ""
+    try:
+        timestamp = float(original_timestamp)
+    except (TypeError, ValueError, OverflowError):
+        return ""
+    if not math.isfinite(timestamp) or timestamp <= 0:
+        return ""
+    try:
+        formatted = datetime.fromtimestamp(timestamp).astimezone().isoformat(sep=" ", timespec="seconds")
+    except (OverflowError, OSError, ValueError):
+        return ""
+    return f"[原消息时间 {formatted}]"
 
 
 async def _calculate_interest(message: MessageRecv) -> Tuple[float, list[str]]:
@@ -91,7 +119,15 @@ class HeartFCMessageReceiver:
             _, keywords = await _calculate_interest(message)
 
             stored_ref = await self.storage.store_message(message, chat)
-            dispatch = await focus_coordinator.route_message(message, stored_ref)
+            offline_recovery_row = offline_recovery_manager.record_stored_message(message, stored_ref)
+            deferred_live_row = False
+            if not offline_recovery_row:
+                deferred_live_row = offline_recovery_manager.record_deferred_live_message(message, stored_ref)
+            dispatch = await focus_coordinator.route_message(
+                message,
+                stored_ref,
+                offline_recovery_row=offline_recovery_row,
+            )
 
             heartflow_chat = None
 
@@ -105,13 +141,16 @@ class HeartFCMessageReceiver:
                     if dispatch.interrupt_active:
                         forced_background_interrupt = dispatch.active_chat_id != stored_ref.chat_id
                         heartflow_chat.signal_new_message(
-                            skip_interrupt=is_mentioned and not forced_background_interrupt
+                            skip_interrupt=(
+                                is_mentioned and not forced_background_interrupt
+                            )
                         )
             else:
-                heartflow_chat = await heartflow.get_or_create_heartflow_chat(chat.stream_id)
-                if heartflow_chat is None:
-                    raise RuntimeError(f"Cannot start chat runtime: {chat.stream_id}")
-                heartflow_chat.signal_new_message(skip_interrupt=is_mentioned)
+                if deferred_live_row or not offline_recovery_manager.is_held(chat.stream_id):
+                    heartflow_chat = await heartflow.get_or_create_heartflow_chat(chat.stream_id)
+                    if heartflow_chat is None:
+                        raise RuntimeError(f"Cannot start chat runtime: {chat.stream_id}")
+                    heartflow_chat.signal_new_message(skip_interrupt=is_mentioned)
 
             # system_event 到这里已经完成：数据库持久化 + Focus 路由 + HeartFlow 唤醒。
             # actor/target 仅存在于 additional_config.system_event 元数据中，不是 sender，
@@ -156,7 +195,8 @@ class HeartFCMessageReceiver:
                 replace_bot_name=True,
             )
 
-            logger.info(f"[{mes_name}]{userinfo.user_nickname}:{processed_plain_text}")  # type: ignore
+            original_time_label = _offline_original_timestamp_label(message)
+            logger.info(f"{original_time_label}[{mes_name}]{userinfo.user_nickname}:{processed_plain_text}")  # type: ignore
 
             _ = Person.register_person(
                 platform=message.message_info.platform,  # type: ignore

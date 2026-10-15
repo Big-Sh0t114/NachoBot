@@ -17,6 +17,7 @@ from src.config.official_configs import (
     NachobotServerConfig,
     NapcatServerConfig,
     NicknameConfig,
+    OfflineRecoveryConfig,
     VoiceConfig,
     VisualConfig,
 )
@@ -121,6 +122,7 @@ class Config(ConfigBase):
     voice: VoiceConfig
     debug: DebugConfig
     visual: VisualConfig = field(default_factory=VisualConfig)
+    offline_recovery: OfflineRecoveryConfig = field(default_factory=OfflineRecoveryConfig)
 
 
 def load_config(config_path: str) -> Config:

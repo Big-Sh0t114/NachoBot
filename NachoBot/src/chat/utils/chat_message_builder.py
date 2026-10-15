@@ -455,20 +455,12 @@ def _build_readable_messages_internal(
     if not messages:
         return "", [], pic_id_mapping or {}, pic_counter
 
-    detailed_messages_raw: List[Tuple[float, str, str, bool]] = []
+    detailed_messages_raw: List[Tuple[float, str, str, bool, Optional[str]]] = []
 
     # 使用传入的映射字典，如果没有则创建新的
     if pic_id_mapping is None:
         pic_id_mapping = {}
     current_pic_counter = pic_counter
-
-    # 创建时间戳到消息ID的映射，用于在消息前添加[id]标识符
-    timestamp_to_id_mapping: Dict[float, str] = {}
-    if message_id_list:
-        for msg_id, msg in message_id_list:
-            timestamp = msg.time
-            if timestamp is not None:
-                timestamp_to_id_mapping[timestamp] = msg_id
 
     def process_pic_ids(content: Optional[str]) -> str:
         """处理内容中的图片ID，将其替换为[图片x]格式"""
@@ -493,10 +485,11 @@ def _build_readable_messages_internal(
 
     # 1: 获取发送者信息并提取消息组件
     for message in messages:
+        planner_alias = message.planner_alias
         if message.is_action_record:
             # 对于动作记录，也处理图片ID
             content = process_pic_ids(message.display_message)
-            detailed_messages_raw.append((message.time, message.user_nickname, content, True))
+            detailed_messages_raw.append((message.time, message.user_nickname, content, True, None))
             continue
 
         platform = message.user_platform
@@ -524,7 +517,7 @@ def _build_readable_messages_internal(
             if show_pic:
                 content = process_pic_ids(content)
             if timestamp is not None and content:
-                detailed_messages_raw.append((timestamp, "[系统事件]", content, False))
+                detailed_messages_raw.append((timestamp, "[系统事件]", content, False, planner_alias))
             continue
 
         # 将tts_text标记转换为可读提示，避免模型模仿原始占位格式
@@ -558,21 +551,21 @@ def _build_readable_messages_internal(
 
         # 使用独立函数处理用户引用格式
         if content := replace_user_references(content, platform, replace_bot_name=replace_bot_name):
-            detailed_messages_raw.append((timestamp, person_name, content, False))
+            detailed_messages_raw.append((timestamp, person_name, content, False, planner_alias))
 
     if not detailed_messages_raw:
         return "", [], pic_id_mapping, current_pic_counter
 
     detailed_messages_raw.sort(key=lambda x: x[0])  # 按时间戳(第一个元素)升序排序，越早的消息排在前面
-    detailed_message: List[Tuple[float, str, str, bool]] = []
+    detailed_message: List[Tuple[float, str, str, bool, Optional[str]]] = []
 
     # 2. 应用消息截断逻辑
     messages_count = len(detailed_messages_raw)
     if truncate and messages_count > 0:
-        for i, (timestamp, name, content, is_action) in enumerate(detailed_messages_raw):
+        for i, (timestamp, name, content, is_action, planner_alias) in enumerate(detailed_messages_raw):
             # 对于动作记录，不进行截断
             if is_action:
-                detailed_message.append((timestamp, name, content, is_action))
+                detailed_message.append((timestamp, name, content, is_action, planner_alias))
                 continue
 
             percentile = i / messages_count  # 计算消息在列表中的位置百分比 (0 <= percentile < 1)
@@ -596,7 +589,7 @@ def _build_readable_messages_internal(
             if 0 < limit < original_len:
                 truncated_content = f"{content[:limit]}{replace_content}"  # pyright: ignore[reportPossiblyUnboundVariable]
 
-            detailed_message.append((timestamp, name, truncated_content, is_action))
+            detailed_message.append((timestamp, name, truncated_content, is_action, planner_alias))
     else:
         # 如果不截断，直接使用原始列表
         detailed_message = detailed_messages_raw
@@ -604,11 +597,11 @@ def _build_readable_messages_internal(
     # 3: 格式化为字符串
     output_lines: List[str] = []
 
-    for timestamp, name, content, is_action in detailed_message:
+    for timestamp, name, content, is_action, planner_alias in detailed_message:
         readable_time = translate_timestamp_to_human_readable(timestamp, mode=timestamp_mode)
 
-        # 查找消息id（如果有）并构建id_prefix
-        message_id = timestamp_to_id_mapping.get(timestamp, "")
+        # Aliases travel with their source row so equal timestamps stay distinct.
+        message_id = planner_alias or ""
         id_prefix = f"[{message_id}]" if message_id else ""
 
         if is_action:
@@ -625,7 +618,7 @@ def _build_readable_messages_internal(
     # 返回格式化后的字符串、消息详情列表、图片映射字典和更新后的计数器
     return (
         formatted_string,
-        [(t, n, c) for t, n, c, is_action in detailed_message if not is_action],
+        [(t, n, c) for t, n, c, is_action, _planner_alias in detailed_message if not is_action],
         pic_id_mapping,
         current_pic_counter,
     )
@@ -797,7 +790,16 @@ def build_readable_messages(
     if not messages:
         return ""
 
-    copy_messages: List[MessageAndActionModel] = [MessageAndActionModel.from_DatabaseMessages(msg) for msg in messages]
+    aliases_by_source_identity = {
+        id(message): str(message_id) for message_id, message in (message_id_list or [])
+    }
+    copy_messages: List[MessageAndActionModel] = [
+        MessageAndActionModel.from_DatabaseMessages(
+            message,
+            planner_alias=aliases_by_source_identity.get(id(message)),
+        )
+        for message in messages
+    ]
 
     if show_actions and copy_messages:
         # 获取所有消息的时间范围

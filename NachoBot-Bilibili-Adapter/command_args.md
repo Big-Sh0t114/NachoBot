@@ -59,7 +59,7 @@ These commands are sent as regular danmu in the live room. Only users listed in 
 |---|---|
 | `#tts_on` | Enable TTS for the current room |
 | `#tts_off` | Disable TTS for the current room |
-| `#lang_switch` | Toggle TTS language between Japanese (bilingual `<JP><ZH>` mode) and Chinese-only mode |
+| `#lang_switch` | Toggle TTS speech language between Japanese and Chinese |
 | `#idle_on` | Enable idle TTS (待机语音) |
 | `#idle_off` | Disable idle TTS |
 | `#screen_on` | Enable screen monitor |

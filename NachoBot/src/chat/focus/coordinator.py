@@ -29,6 +29,7 @@ from .models import (
     FocusGroupPhase,
     FocusHandoff,
     FocusLease,
+    FocusRecoveryBatch,
     RestoredFocusEvent,
     FocusStoppedError,
     FocusTurn,
@@ -200,11 +201,16 @@ class _FocusGroupState:
     pending_wakes: dict[str, WakeReason] = field(default_factory=dict)
     committed_cursor: dict[str, int] = field(default_factory=dict)
     latest_message_row: dict[str, int] = field(default_factory=dict)
+    latest_live_message_row: dict[str, int] = field(default_factory=dict)
     last_viewed_at: dict[str, float] = field(default_factory=dict)
     attention: dict[str, _PendingAttention] = field(default_factory=dict)
     in_flight_turn: FocusTurn | None = None
     in_flight_effects: int = 0
     last_switched_at: float = 0.0
+    recovery_collecting: bool = False
+    recovery_queue: list[FocusRecoveryBatch] = field(default_factory=list)
+    recovered_row_ids: dict[str, set[int]] = field(default_factory=dict)
+    recovery_retry_at: float = 0.0
 
 
 class FocusCoordinator:
@@ -366,11 +372,16 @@ class FocusCoordinator:
             epoch=selected_epoch,
             committed_cursor=cursor_values,
             latest_message_row=latest_values,
+            # The caller's initial latest-row snapshot is authoritative
+            # unread work. Core startup supplies its committed cursor as that
+            # snapshot, while tests and integrations may explicitly provide a
+            # later row to preserve an already-known live wake.
+            latest_live_message_row=dict(latest_values),
             last_viewed_at=viewed_values,
             attention=attention,
         )
         if selected is not None:
-            if latest_values[selected] > cursor_values[selected]:
+            if state.latest_live_message_row[selected] > cursor_values[selected]:
                 state.pending_wakes[selected] = WakeReason.LOCAL_MESSAGE
             if any(item.visible and item.revision > item.delivered_revision for item in attention.values()):
                 state.pending_wakes[selected] = (
@@ -435,6 +446,222 @@ class FocusCoordinator:
 
     def is_managed(self, chat_id: str) -> bool:
         return chat_id in self._chat_to_group
+
+    def recovery_group_for_chat(self, chat_id: str) -> str | None:
+        return self._chat_to_group.get(chat_id)
+
+    def recovered_row_ids_for_chat(self, chat_id: str) -> set[int]:
+        state = self._state_for_chat(chat_id)
+        return set(state.recovered_row_ids.get(chat_id, ())) if state is not None else set()
+
+    def pending_recovery_row_ids_for_chat(self, chat_id: str) -> set[int]:
+        state = self._state_for_chat(chat_id)
+        if state is None:
+            return set()
+        return {
+            row_id
+            for batch in state.recovery_queue
+            if batch.chat_id == chat_id
+            for row_id in batch.row_ids
+        }
+
+    def begin_recovery_collection(self, chat_id: str) -> str | None:
+        """Hold ordinary routing while replay candidates drain for a group."""
+
+        group_id = self._chat_to_group.get(chat_id)
+        state = self._groups.get(group_id) if group_id is not None else None
+        if state is None:
+            return None
+        state.recovery_collecting = True
+        return group_id
+
+    def is_recovery_held(self, chat_id: str) -> bool:
+        state = self._state_for_chat(chat_id)
+        return bool(state and (state.recovery_collecting or state.recovery_queue))
+
+    async def finish_recovery_collection(
+        self,
+        group_id: str,
+        batches: tuple[FocusRecoveryBatch, ...] = (),
+    ) -> None:
+        state = self._groups.get(group_id)
+        if state is None:
+            return
+        async with state.condition:
+            state.recovery_collecting = False
+            member_ids = {member.chat_id for member in state.definition.members}
+            for batch in batches:
+                if batch.chat_id not in member_ids:
+                    raise ValueError("Focus recovery batch target is outside the group")
+            in_flight_batch = (
+                state.in_flight_turn.recovery_batch
+                if state.in_flight_turn is not None
+                else None
+            )
+            pinned_head = None
+            pending_batches = state.recovery_queue
+            if in_flight_batch is not None:
+                if not pending_batches or pending_batches[0].batch_id != in_flight_batch.batch_id:
+                    raise RuntimeError("In-flight Focus recovery batch is no longer the queue head")
+                pinned_head = pending_batches[0]
+                pending_batches = pending_batches[1:]
+            pending_batches = self._coalesce_pending_recovery_batches((*pending_batches, *batches))
+            pending_batches.sort(key=lambda item: (-item.min_original_timestamp, item.stable_order))
+            state.recovery_queue = ([pinned_head] if pinned_head is not None else []) + pending_batches
+            state.condition.notify_all()
+            if not state.recovery_queue:
+                self._release_deferred_wakes(state)
+
+    @staticmethod
+    def _coalesce_pending_recovery_batches(
+        batches: tuple[FocusRecoveryBatch, ...],
+    ) -> list[FocusRecoveryBatch]:
+        """Keep one not-yet-started recovery batch per chat, ordered by row time."""
+
+        batches_by_chat: dict[str, list[FocusRecoveryBatch]] = {}
+        for batch in batches:
+            batches_by_chat.setdefault(batch.chat_id, []).append(batch)
+
+        result: list[FocusRecoveryBatch] = []
+        for chat_id, chat_batches in batches_by_chat.items():
+            if len(chat_batches) == 1:
+                result.append(chat_batches[0])
+                continue
+
+            if all(batch.row_timestamps for batch in chat_batches):
+                timestamps_by_row: dict[int, float] = {}
+                for batch in chat_batches:
+                    for row_id, timestamp in zip(batch.row_ids, batch.row_timestamps, strict=True):
+                        timestamps_by_row.setdefault(row_id, timestamp)
+                ordered_rows = sorted(timestamps_by_row.items(), key=lambda item: (item[1], item[0]))
+                row_ids = tuple(row_id for row_id, _timestamp in ordered_rows)
+                row_timestamps = tuple(timestamp for _row_id, timestamp in ordered_rows)
+            else:
+                # Older callers can still construct batches without per-row
+                # metadata. Preserve each batch's own tuple order and use its
+                # minimum timestamp only to order whole batches.
+                ordered_batches = sorted(
+                    chat_batches,
+                    key=lambda batch: (batch.min_original_timestamp, batch.stable_order),
+                )
+                row_ids = tuple(row_id for batch in ordered_batches for row_id in batch.row_ids)
+                row_timestamps = ()
+
+            result.append(
+                FocusRecoveryBatch(
+                    batch_id=uuid.uuid4().hex,
+                    chat_id=chat_id,
+                    row_ids=row_ids,
+                    min_original_timestamp=min(batch.min_original_timestamp for batch in chat_batches),
+                    stable_order=min(batch.stable_order for batch in chat_batches),
+                    row_timestamps=row_timestamps,
+                )
+            )
+        return result
+
+    async def switch_to_recovery_head(self, lease: FocusLease, batch: FocusRecoveryBatch) -> SwitchResult:
+        """Switch to a frozen recovery session through the ordinary Focus CAS."""
+
+        state = self._groups.get(lease.group_id)
+        if state is None:
+            return SwitchResult(False, "unknown Focus group", lease)
+        if batch.chat_id == lease.chat_id:
+            return SwitchResult(False, "recovery batch is already active", lease, target_chat_id=batch.chat_id)
+
+        async with state.condition:
+            if not self._lease_matches(state, lease, require_turn=True):
+                return SwitchResult(False, "stale source lease", lease, target_chat_id=batch.chat_id)
+            if not state.recovery_queue or state.recovery_queue[0].batch_id != batch.batch_id:
+                return SwitchResult(False, "recovery queue head changed", lease, target_chat_id=batch.chat_id)
+            decision = self._policy.decide_switch(
+                state.definition,
+                lease.chat_id,
+                batch.chat_id,
+                has_handoff=False,
+            )
+            if not decision.allowed:
+                return SwitchResult(
+                    False,
+                    f"recovery_policy_dropped: {decision.reason}",
+                    lease,
+                    target_chat_id=batch.chat_id,
+                )
+
+            target_member = self._policy.member(state.definition, batch.chat_id)
+            if target_member is None:
+                return SwitchResult(False, "recovery target is not enrolled", lease, target_chat_id=batch.chat_id)
+            previous_attention = state.attention.get(batch.chat_id)
+            first_ref = StoredMessageRef(
+                row_id=batch.row_ids[0],
+                chat_id=batch.chat_id,
+                message_id=f"offline-recovery-{batch.row_ids[0]}",
+                message_time=batch.min_original_timestamp,
+            )
+            last_ref = StoredMessageRef(
+                row_id=batch.row_ids[-1],
+                chat_id=batch.chat_id,
+                message_id=f"offline-recovery-{batch.row_ids[-1]}",
+                message_time=batch.min_original_timestamp,
+            )
+            attention = _PendingAttention(
+                event_id=f"evt_recovery_{batch.batch_id}",
+                target_chat_id=batch.chat_id,
+                display_name=target_member.display_name or batch.chat_id,
+                first_unread=first_ref,
+                last_unread=last_ref,
+                unread_count=len(batch.row_ids),
+                revision=1,
+                visible=True,
+            )
+            state.attention[batch.chat_id] = attention
+            snapshot = self._attention_snapshot(state, attention)
+            if self._state_store is not None:
+                try:
+                    await self._state_store.upsert_event(
+                        state.definition.group_id,
+                        snapshot,
+                        visible=True,
+                    )
+                except Exception as exc:
+                    state.attention.pop(batch.chat_id, None)
+                    if previous_attention is not None:
+                        state.attention[batch.chat_id] = previous_attention
+                    return SwitchResult(
+                        False,
+                        f"recovery event persistence failed: {exc}",
+                        lease,
+                        target_chat_id=batch.chat_id,
+                    )
+
+        handoff = None
+        if self._policy.can_switch_without_handoff(state.definition, lease.chat_id, batch.chat_id):
+            from .handoff_builder import HandoffBuilder
+
+            handoff = HandoffBuilder().build_transition_identity(
+                definition=state.definition,
+                group_id=lease.group_id,
+                source_chat_id=lease.chat_id,
+                target_chat_id=batch.chat_id,
+                source_epoch=lease.epoch,
+                policy_version=self._policy.version,
+            )
+        request = SwitchChatRequest(
+            lease=lease,
+            event_id=attention.event_id,
+            expected_event_revision=attention.revision,
+            reasoning="Switching to the oldest-first offline recovery queue head.",
+        )
+        result = await self.switch_chat(request, handoff)
+        async with state.condition:
+            if result.success:
+                if previous_attention is not None:
+                    state.attention[batch.chat_id] = previous_attention
+            elif state.attention.get(batch.chat_id) is attention:
+                state.attention.pop(batch.chat_id, None)
+                if previous_attention is not None:
+                    state.attention[batch.chat_id] = previous_attention
+            state.condition.notify_all()
+        return result
 
     def is_active(self, chat_id: str) -> bool:
         state = self._state_for_chat(chat_id)
@@ -532,7 +759,13 @@ class FocusCoordinator:
         async with state.condition:
             return self._lease_matches(state, lease, require_turn=False)
 
-    async def route_message(self, message: Any, stored_ref: StoredMessageRef) -> FocusDispatch:
+    async def route_message(
+        self,
+        message: Any,
+        stored_ref: StoredMessageRef,
+        *,
+        offline_recovery_row: bool = False,
+    ) -> FocusDispatch:
         """Route a stored message without waking a background chat runtime."""
 
         group_id = self._chat_to_group.get(stored_ref.chat_id)
@@ -547,6 +780,14 @@ class FocusCoordinator:
 
             prior_latest = state.latest_message_row.get(stored_ref.chat_id, 0)
             next_latest = max(prior_latest, stored_ref.row_id)
+            if not offline_recovery_row:
+                state.latest_live_message_row[stored_ref.chat_id] = max(
+                    state.latest_live_message_row.get(
+                        stored_ref.chat_id,
+                        state.committed_cursor.get(stored_ref.chat_id, 0),
+                    ),
+                    stored_ref.row_id,
+                )
             if state.active_chat_id is None:
                 next_epoch = max(1, state.epoch + 1)
                 if self._state_store is not None:
@@ -559,6 +800,14 @@ class FocusCoordinator:
                 state.active_chat_id = stored_ref.chat_id
                 state.epoch = next_epoch
                 state.latest_message_row[stored_ref.chat_id] = next_latest
+                if offline_recovery_row:
+                    return FocusDispatch(
+                        managed=True,
+                        group_id=group_id,
+                        active_chat_id=stored_ref.chat_id,
+                        woke_active=False,
+                        interrupt_active=False,
+                    )
                 state.pending_wakes[stored_ref.chat_id] = (
                     state.pending_wakes.get(stored_ref.chat_id, WakeReason.NONE) | WakeReason.LOCAL_MESSAGE
                 )
@@ -573,6 +822,14 @@ class FocusCoordinator:
 
             if stored_ref.chat_id == state.active_chat_id:
                 state.latest_message_row[stored_ref.chat_id] = next_latest
+                if offline_recovery_row:
+                    return FocusDispatch(
+                        managed=True,
+                        group_id=group_id,
+                        active_chat_id=state.active_chat_id,
+                        woke_active=False,
+                        interrupt_active=False,
+                    )
                 state.pending_wakes[stored_ref.chat_id] = (
                     state.pending_wakes.get(stored_ref.chat_id, WakeReason.NONE) | WakeReason.LOCAL_MESSAGE
                 )
@@ -583,6 +840,16 @@ class FocusCoordinator:
                     active_chat_id=state.active_chat_id,
                     woke_active=True,
                     interrupt_active=True,
+                )
+
+            state.latest_message_row[stored_ref.chat_id] = next_latest
+            if offline_recovery_row:
+                return FocusDispatch(
+                    managed=True,
+                    group_id=group_id,
+                    active_chat_id=state.active_chat_id,
+                    woke_active=False,
+                    interrupt_active=False,
                 )
 
             attention = self._next_background_attention(state, message, stored_ref)
@@ -614,7 +881,6 @@ class FocusCoordinator:
                     visible=attention.visible,
                 )
 
-            state.latest_message_row[stored_ref.chat_id] = next_latest
             state.attention[stored_ref.chat_id] = attention
             woke_active = False
             if should_surface:
@@ -636,6 +902,8 @@ class FocusCoordinator:
                 interrupt_active=force_ingress_preemption,
             )
 
+
+
     async def wait_for_turn(self, chat_id: str) -> FocusTurn:
         state = self._state_for_chat(chat_id)
         if state is None:
@@ -647,36 +915,45 @@ class FocusCoordinator:
                 if state.phase in {FocusGroupPhase.STOPPING, FocusGroupPhase.STOPPED}:
                     raise FocusStoppedError(f"Focus group {state.definition.group_id!r} is stopping")
 
-                events = self._undelivered_events(state)
-                wake_reason = state.pending_wakes.pop(chat_id, WakeReason.NONE)
-                cursor = state.committed_cursor.get(chat_id, 0)
-                latest = state.latest_message_row.get(chat_id, cursor)
-                if latest > cursor:
-                    wake_reason |= WakeReason.LOCAL_MESSAGE
-                if events:
-                    wake_reason |= WakeReason.FOCUS_EVENT
-                lease = FocusLease(state.definition.group_id, chat_id, state.epoch, uuid.uuid4().hex)
-                turn = FocusTurn(
-                    lease=lease,
-                    wake_reason=wake_reason,
-                    read_after_row_id=cursor,
-                    read_through_row_id=latest,
-                    events=tuple(events[: self._max_events_per_turn]),
-                )
-                state.in_flight_turn = turn
+                if state.recovery_queue:
+                    if self._has_ordinary_online_work(state, chat_id):
+                        turn, handoffs = self._ordinary_turn(state, chat_id)
+                    else:
+                        if state.recovery_collecting or time.monotonic() < state.recovery_retry_at:
+                            raise RuntimeError("Focus recovery dispatch predicate changed while locked")
+                        batch = state.recovery_queue[0]
+                        target_chat_id = batch.chat_id if batch.chat_id != chat_id else None
+                        cursor = state.committed_cursor.get(chat_id, 0)
+                        latest = state.latest_message_row.get(chat_id, cursor)
+                        lease = FocusLease(state.definition.group_id, chat_id, state.epoch, uuid.uuid4().hex)
+                        turn = FocusTurn(
+                            lease=lease,
+                            wake_reason=WakeReason.SWITCH_TARGET if target_chat_id else WakeReason.LOCAL_MESSAGE,
+                            read_after_row_id=cursor,
+                            read_through_row_id=latest,
+                            recovery_batch=batch,
+                            recovery_target_chat_id=target_chat_id,
+                            recovered_row_ids=tuple(sorted(state.recovered_row_ids.get(chat_id, ()))),
+                        )
+                        state.in_flight_turn = turn
+                        # Recovery remains serial and retains its explicit IDs;
+                        # online work above it can commit without acknowledging it.
+                        handoffs = ()
+                else:
+                    turn, handoffs = self._ordinary_turn(state, chat_id)
 
             try:
                 handoffs = await self._handoff_store.get_active(
-                    lease.group_id,
-                    lease.chat_id,
-                    lease.epoch,
+                    turn.lease.group_id,
+                    turn.lease.chat_id,
+                    turn.lease.epoch,
                 )
             except Exception:
                 handoffs = ()
             if handoffs:
                 turn = replace(turn, handoff_ids=tuple(handoff.handoff_id for handoff in handoffs))
                 async with state.condition:
-                    if state.in_flight_turn is not None and state.in_flight_turn.lease == lease:
+                    if state.in_flight_turn is not None and state.in_flight_turn.lease == turn.lease:
                         state.in_flight_turn = turn
             return turn
 
@@ -688,6 +965,69 @@ class FocusCoordinator:
             current = state.in_flight_turn
             if current is None or current.lease != turn.lease:
                 return False
+
+            if turn.recovery_batch is not None:
+                # The queue head is acknowledged only after a real adapter
+                # receipt (or an explicit all-policy-dropped result). A
+                # failed/cancelled generation keeps the same immutable IDs.
+                batch = turn.recovery_batch
+                if turn.recovery_target_chat_id is not None:
+                    if outcome.recovery_dropped and state.recovery_queue and state.recovery_queue[0].batch_id == batch.batch_id:
+                        state.recovery_queue.pop(0)
+                        state.recovered_row_ids.setdefault(batch.chat_id, set()).update(batch.row_ids)
+                        try:
+                            from src.chat.offline_recovery import offline_recovery_manager
+
+                            offline_recovery_manager.complete_rows(batch.row_ids)
+                        except Exception:
+                            logger.exception("Could not persist completed Focus recovery row IDs")
+                        state.recovery_retry_at = 0.0
+                        if not state.recovery_queue and not state.recovery_collecting:
+                            self._release_deferred_wakes(state)
+                    elif outcome.status in {TurnStatus.FAILED, TurnStatus.CANCELLED, TurnStatus.STALE}:
+                        state.recovery_retry_at = time.monotonic() + 2.0
+                    state.in_flight_turn = None
+                    state.condition.notify_all()
+                    return True
+                head_matches = bool(state.recovery_queue and state.recovery_queue[0].batch_id == batch.batch_id)
+                consumed = head_matches and (
+                    outcome.recovery_delivered is True or outcome.recovery_dropped
+                )
+                if consumed:
+                    state.recovery_queue.pop(0)
+                    state.recovered_row_ids.setdefault(batch.chat_id, set()).update(batch.row_ids)
+                    try:
+                        from src.chat.offline_recovery import offline_recovery_manager
+
+                        offline_recovery_manager.complete_rows(batch.row_ids)
+                    except Exception:
+                        logger.exception("Could not persist completed Focus recovery row IDs")
+                    state.recovery_retry_at = 0.0
+                    # Recovery rows are acknowledged by ID. Keep the monotonic
+                    # cursor unchanged so interleaved live rows remain unread.
+                    if self._state_store is not None:
+                        try:
+                            await self._state_store.commit_turn(
+                                group_id=turn.lease.group_id,
+                                chat_id=turn.lease.chat_id,
+                                processed_row_id=turn.read_after_row_id,
+                                last_viewed_at=time.time(),
+                                delivered_event_revisions={},
+                            )
+                        except Exception as exc:
+                            logger.error(f"Focus recovery cursor persistence failed for {batch.batch_id}: {exc}")
+                            # Cursor did not move; in-memory explicit IDs stay
+                            # acknowledged for this process and live rows retry.
+                    state.in_flight_turn = None
+                    state.condition.notify_all()
+                    if not state.recovery_queue and not state.recovery_collecting:
+                        self._release_deferred_wakes(state)
+                    return True
+
+                state.in_flight_turn = None
+                state.recovery_retry_at = time.monotonic() + 2.0
+                state.condition.notify_all()
+                return True
 
             commit_statuses = {TurnStatus.COMPLETED, TurnStatus.NOOP, TurnStatus.DROPPED_BY_POLICY}
             if outcome.status in commit_statuses and self._lease_matches(state, turn.lease, require_turn=True):
@@ -733,6 +1073,11 @@ class FocusCoordinator:
                 state.committed_cursor[turn.lease.chat_id] = max(
                     state.committed_cursor.get(turn.lease.chat_id, 0), through
                 )
+                recovered_ids = state.recovered_row_ids.get(turn.lease.chat_id)
+                if recovered_ids:
+                    recovered_ids.difference_update({row_id for row_id in recovered_ids if row_id <= through})
+                    if not recovered_ids:
+                        state.recovered_row_ids.pop(turn.lease.chat_id, None)
                 state.last_viewed_at[turn.lease.chat_id] = max(
                     state.last_viewed_at.get(turn.lease.chat_id, 0.0), viewed_at
                 )
@@ -842,7 +1187,11 @@ class FocusCoordinator:
                 state.in_flight_effects = max(0, state.in_flight_effects - 1)
                 state.condition.notify_all()
 
-    async def switch_chat(self, request: SwitchChatRequest, handoff: FocusHandoff | None = None) -> SwitchResult:
+    async def switch_chat(
+        self,
+        request: SwitchChatRequest,
+        handoff: FocusHandoff | None = None,
+    ) -> SwitchResult:
         """Commit a terminal event-directed switch with durable CAS fencing."""
 
         state = self._groups.get(request.lease.group_id)
@@ -983,7 +1332,7 @@ class FocusCoordinator:
             state.attention.pop(target_chat_id, None)
             state.in_flight_turn = None
             wake = WakeReason.SWITCH_TARGET
-            if state.latest_message_row.get(target_chat_id, 0) > state.committed_cursor.get(target_chat_id, 0):
+            if state.latest_live_message_row.get(target_chat_id, 0) > state.committed_cursor.get(target_chat_id, 0):
                 wake |= WakeReason.LOCAL_MESSAGE
             state.pending_wakes[target_chat_id] = state.pending_wakes.get(target_chat_id, WakeReason.NONE) | wake
             if old_active is not None:
@@ -1005,6 +1354,12 @@ class FocusCoordinator:
         for state in self._groups.values():
             group_emitted = 0
             async with state.condition:
+                if (
+                    state.recovery_queue
+                    and not state.recovery_collecting
+                    and time.monotonic() >= state.recovery_retry_at
+                ):
+                    state.condition.notify_all()
                 active = state.active_chat_id
                 if active is None or state.phase is not FocusGroupPhase.RUNNING:
                     continue
@@ -1246,21 +1601,81 @@ class FocusCoordinator:
         return int(focus_session_priority(member)) if member is not None else 0
 
     @staticmethod
-    def _can_dispatch_or_stop(state: _FocusGroupState, chat_id: str) -> bool:
+    def _has_ordinary_online_work(state: _FocusGroupState, chat_id: str) -> bool:
+        cursor = state.committed_cursor.get(chat_id, 0)
+        if state.latest_live_message_row.get(chat_id, cursor) > cursor:
+            return True
+        return any(
+            attention.visible and attention.revision > attention.delivered_revision
+            for attention in state.attention.values()
+        )
+
+    def _ordinary_turn(self, state: _FocusGroupState, chat_id: str) -> tuple[FocusTurn, tuple[Any, ...]]:
+        events = self._undelivered_events(state)
+        wake_reason = state.pending_wakes.pop(chat_id, WakeReason.NONE)
+        cursor = state.committed_cursor.get(chat_id, 0)
+        latest = state.latest_message_row.get(chat_id, cursor)
+        if state.latest_live_message_row.get(chat_id, cursor) > cursor:
+            wake_reason |= WakeReason.LOCAL_MESSAGE
+        if events:
+            wake_reason |= WakeReason.FOCUS_EVENT
+        lease = FocusLease(state.definition.group_id, chat_id, state.epoch, uuid.uuid4().hex)
+        turn = FocusTurn(
+            lease=lease,
+            wake_reason=wake_reason,
+            read_after_row_id=cursor,
+            read_through_row_id=latest,
+            events=tuple(events[: self._max_events_per_turn]),
+            recovered_row_ids=tuple(sorted(state.recovered_row_ids.get(chat_id, ()))),
+        )
+        state.in_flight_turn = turn
+        return turn, ()
+
+    def _can_dispatch_or_stop(self, state: _FocusGroupState, chat_id: str) -> bool:
         if state.phase in {FocusGroupPhase.STOPPING, FocusGroupPhase.STOPPED}:
             return True
         if state.phase is not FocusGroupPhase.RUNNING or state.active_chat_id != chat_id:
             return False
         if state.in_flight_turn is not None:
             return False
+        if state.recovery_collecting or state.recovery_queue:
+            if self._has_ordinary_online_work(state, chat_id):
+                return True
+            if state.recovery_collecting:
+                return False
+            return time.monotonic() >= state.recovery_retry_at
         if state.pending_wakes.get(chat_id, WakeReason.NONE):
             return True
-        if state.latest_message_row.get(chat_id, 0) > state.committed_cursor.get(chat_id, 0):
+        if self._has_ordinary_online_work(state, chat_id):
             return True
-        return any(
+        return False
+
+
+
+
+
+
+    @staticmethod
+    def _release_deferred_wakes(state: _FocusGroupState) -> None:
+        if state.phase in {FocusGroupPhase.STOPPING, FocusGroupPhase.STOPPED}:
+            return
+        active = state.active_chat_id
+        if active is None:
+            return
+        cursor = state.committed_cursor.get(active, 0)
+        latest_live = state.latest_live_message_row.get(active, cursor)
+        if latest_live > cursor:
+            state.pending_wakes[active] = (
+                state.pending_wakes.get(active, WakeReason.NONE) | WakeReason.LOCAL_MESSAGE
+            )
+        if any(
             attention.visible and attention.revision > attention.delivered_revision
             for attention in state.attention.values()
-        )
+        ):
+            state.pending_wakes[active] = (
+                state.pending_wakes.get(active, WakeReason.NONE) | WakeReason.FOCUS_EVENT
+            )
+        state.condition.notify_all()
 
     def _state_for_chat(self, chat_id: str) -> _FocusGroupState | None:
         group_id = self._chat_to_group.get(chat_id)

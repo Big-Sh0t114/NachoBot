@@ -729,7 +729,7 @@ class MidTermMemoryManager:
 关键词："""
 
         try:
-            utils_model_config = model_config.model_task_config.utils
+            utils_model_config = model_config.model_task_config.utils_small
             success, response, _, _ = await llm_api.generate_with_model(
                 prompt=prompt,
                 model_config=utils_model_config,

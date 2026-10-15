@@ -51,7 +51,6 @@ class BiliTTSHotReloadTests(unittest.TestCase):
             prompt = template.template_items["replyer_prompt"]
             self.assertIn("`tts_text`", prompt)
             self.assertIn("`reply`只放给观众阅读的中文", prompt)
-            self.assertNotIn("<JP>/<ZH>标签。\n<JP>", prompt)
 
         asyncio.run(scenario())
 

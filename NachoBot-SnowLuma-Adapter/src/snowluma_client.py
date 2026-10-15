@@ -8,6 +8,7 @@ from typing import Any
 from uuid import uuid4
 
 from aiohttp import ClientSession, ClientTimeout, ClientWebSocketResponse, WSMsgType, WSServerHandshakeError
+from ncnk_message.offline_recovery import build_recovery_metadata
 
 from .config import global_config
 from .log_safety import safe_exception, sanitize_text, short_echo, summarize_payload
@@ -15,6 +16,7 @@ from .logger import logger
 
 EventCallback = Callable[[dict[str, Any]], Awaitable[None]]
 StatusCallback = Callable[[bool, str], Awaitable[None]]
+ProgressCallback = Callable[[dict[str, Any], bool], Awaitable[None]]
 
 
 class SnowLumaClient:
@@ -25,16 +27,31 @@ class SnowLumaClient:
     events are normal OneBot-ish payloads carrying post_type/message/notice.
     """
 
-    def __init__(self, event_callback: EventCallback, status_callback: StatusCallback):
+    def __init__(
+        self,
+        event_callback: EventCallback,
+        status_callback: StatusCallback,
+        progress_callback: ProgressCallback | None = None,
+    ):
         self.event_callback = event_callback
         self.status_callback = status_callback
+        self.progress_callback = progress_callback
         self._session: ClientSession | None = None
         self._ws: ClientWebSocketResponse | None = None
         self._response_pool: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._event_tasks: set[asyncio.Task[None]] = set()
+        self._event_recovery_contexts: dict[asyncio.Task[None], tuple[dict[str, Any], dict[str, Any]]] = {}
+        self._progress_cleanup_tasks: set[asyncio.Task[None]] = set()
         self._stop_event = asyncio.Event()
         self._connected_account_id = ""
+        self._identity_verified = False
+        self._connection_generation = 0
+        self._identity_changed = asyncio.Event()
         self._send_lock = asyncio.Lock()
+        self.connection_epoch_started_at: float | None = None
+        self.last_connection_epoch_started_at: float | None = None
+        self.source_instance = uuid4().hex
+        self._recovery_contexts: dict[int, dict[str, Any]] = {}
 
     @property
     def connected_account_id(self) -> str:
@@ -43,6 +60,51 @@ class SnowLumaClient:
     @property
     def connected(self) -> bool:
         return self._ws is not None and not self._ws.closed
+
+    @property
+    def connection_generation(self) -> int:
+        return self._connection_generation
+
+    def connection_snapshot(self) -> tuple[ClientWebSocketResponse, int, str] | None:
+        """Return an immutable identity for actions tied to the verified socket."""
+        ws = self._ws
+        if ws is None or ws.closed or not self._identity_verified or not self._connected_account_id:
+            return None
+        return ws, self._connection_generation, self._connected_account_id
+
+    def connection_is_current(self, snapshot: tuple[Any, ...]) -> bool:
+        if len(snapshot) < 2:
+            return False
+        ws, generation = snapshot[0], snapshot[1]
+        account_id = str(snapshot[2]) if len(snapshot) > 2 else ""
+        return (
+            self._ws is ws
+            and self._connection_generation == generation
+            and ws is not None
+            and not ws.closed
+            and (not account_id or self._connected_account_id == account_id)
+        )
+
+    async def wait_for_verified_connection(self, snapshot: tuple[Any, ...] | None) -> str | None:
+        """Wait off-reader for login verification, rejecting replaced sockets."""
+        if snapshot is None or len(snapshot) < 2:
+            return None
+        while True:
+            if not self.connection_is_current(snapshot):
+                return None
+            if self._identity_verified and self._connected_account_id:
+                return self._connected_account_id
+            changed = self._identity_changed
+            if not self.connection_is_current(snapshot):
+                return None
+            if self._identity_verified and self._connected_account_id:
+                return self._connected_account_id
+            await changed.wait()
+
+    def _signal_identity_change(self) -> None:
+        previous = self._identity_changed
+        self._identity_changed = asyncio.Event()
+        previous.set()
 
     async def run(self) -> None:
         cfg = global_config.snowluma
@@ -59,8 +121,21 @@ class SnowLumaClient:
             verify_task: asyncio.Task[dict[str, Any]] | None = None
             try:
                 await self._connect()
+                # Establish the replay boundary before the listener can receive
+                # its first packet from SnowLuma.
+                self.connection_epoch_started_at = time.time()
+                self.last_connection_epoch_started_at = self.connection_epoch_started_at
+                captured_ws = self._ws
+                captured_generation = self._connection_generation
                 listen_task = asyncio.create_task(self._listen(), name="snowluma-listen")
-                verify_task = asyncio.create_task(self.call_action("get_login_info", {}), name="snowluma-verify")
+                verify_task = asyncio.create_task(
+                    self.call_action(
+                        "get_login_info",
+                        {},
+                        expected_connection=(captured_ws, captured_generation),
+                    ),
+                    name="snowluma-verify",
+                )
                 done, _ = await asyncio.wait({listen_task, verify_task}, return_when=asyncio.FIRST_COMPLETED)
                 if listen_task in done and not verify_task.done():
                     verify_task.cancel()
@@ -71,8 +146,13 @@ class SnowLumaClient:
                     raise RuntimeError(f"SnowLuma verification failed: {error}")
                 data = response.get("data") if isinstance(response.get("data"), Mapping) else {}
                 account_id = str(data.get("user_id") or data.get("self_id") or "").strip()
-                if account_id:
-                    self._connected_account_id = account_id
+                if not account_id.isdecimal() or int(account_id) <= 0:
+                    raise RuntimeError("SnowLuma login verification returned an invalid account ID")
+                if not self.connection_is_current((captured_ws, captured_generation)):
+                    raise RuntimeError("SnowLuma socket generation changed during login verification")
+                self._connected_account_id = str(int(account_id))
+                self._identity_verified = True
+                self._signal_identity_change()
                 reconnect_attempt = 0
                 logger.info(
                     "SnowLuma WebSocket connected endpoint={} account_id={} verified=true",
@@ -150,6 +230,8 @@ class SnowLumaClient:
         except Exception:
             logger.warning("SnowLuma WebSocket connect failed endpoint={}", cfg.safe_ws_url())
             raise
+        self._connection_generation += 1
+        self._signal_identity_change()
         logger.debug("SnowLuma WebSocket handshake succeeded endpoint={}", cfg.safe_ws_url())
 
     async def _disconnect(self, *, reason: str = "manual") -> None:
@@ -167,6 +249,10 @@ class SnowLumaClient:
         pending_actions = len(self._response_pool)
         self._response_pool.clear()
         self._connected_account_id = ""
+        self._identity_verified = False
+        self._connection_generation += 1
+        self._signal_identity_change()
+        self.connection_epoch_started_at = None
         if pending_actions:
             logger.warning("SnowLuma disconnected with pending_actions={} reason={}", pending_actions, reason)
 
@@ -186,10 +272,18 @@ class SnowLumaClient:
         if ws is None:
             logger.warning("SnowLuma listen skipped reason=websocket_missing")
             return
+        captured_connection = (ws, self._connection_generation)
         async for ws_message in ws:
             if ws_message.type == WSMsgType.TEXT:
+                received_at = time.time()
+                progress_id = uuid4().hex
                 logger.debug("SnowLuma inbound frame type=text bytes={}", len(ws_message.data.encode("utf-8", "replace")))
-                await self._handle_text_payload(ws_message.data)
+                await self._handle_text_payload(
+                    ws_message.data,
+                    received_at=received_at,
+                    progress_id=progress_id,
+                    captured_connection=captured_connection,
+                )
             elif ws_message.type == WSMsgType.BINARY:
                 logger.warning("SnowLuma inbound frame ignored type=binary bytes={}", len(ws_message.data or b""))
             elif ws_message.type in {WSMsgType.CLOSED, WSMsgType.ERROR, WSMsgType.CLOSE}:
@@ -198,7 +292,16 @@ class SnowLumaClient:
             else:
                 logger.debug("SnowLuma inbound frame ignored type={}", ws_message.type.name)
 
-    async def _handle_text_payload(self, raw_payload: str) -> None:
+    async def _handle_text_payload(
+        self,
+        raw_payload: str,
+        *,
+        received_at: float | None = None,
+        progress_id: str | None = None,
+        captured_connection: tuple[Any, ...] | None = None,
+    ) -> None:
+        received_at = time.time() if received_at is None else received_at
+        progress_id = progress_id or uuid4().hex
         if global_config.debug.raw_payload:
             logger.trace("SnowLuma <= {}", summarize_payload(raw_payload))
         try:
@@ -228,8 +331,12 @@ class SnowLumaClient:
             return
 
         self_id = str(payload.get("self_id") or "").strip()
-        if self_id:
-            self._connected_account_id = self_id
+        if self_id and self._identity_verified and self_id != self._connected_account_id:
+            logger.warning(
+                "SnowLuma event rejected reason=account_mismatch verified_account_id={}",
+                self._connected_account_id,
+            )
+            return
         post_type = str(payload.get("post_type") or "").strip()
         message_type = str(payload.get("message_type") or "").strip()
         notice_type = str(payload.get("notice_type") or "").strip()
@@ -248,20 +355,168 @@ class SnowLumaClient:
             len(payload.get("message")) if isinstance(payload.get("message"), list) else (1 if isinstance(payload.get("message"), str) else 0),
         )
         if post_type in {"message", "notice", "request", "meta_event"} or "message" in payload:
-            self._track_event_callback(payload, post_type or "message")
+            ordinary_message = post_type == "message" or (not post_type and "message" in payload)
+            recovery_context = None
+            if ordinary_message and self.progress_callback is not None:
+                recovery_context = self.capture_offline_recovery_context(
+                    payload,
+                    received_at=received_at,
+                    progress_id=progress_id,
+                    captured_connection=captured_connection,
+                )
+                self._recovery_contexts[id(payload)] = recovery_context
+                try:
+                    # The progress start must reach Core before parallel event
+                    # conversion is scheduled, so a slow media lookup cannot
+                    # let the Core batch flush early.
+                    await self.send_offline_recovery_progress(recovery_context, active=True)
+                    self._track_event_callback(payload, post_type or "message", recovery_context)
+                except BaseException:
+                    self._recovery_contexts.pop(id(payload), None)
+                    await self.finish_offline_recovery_progress(recovery_context)
+                    raise
+            else:
+                self._track_event_callback(payload, post_type or "message")
         else:
             logger.debug("SnowLuma inbound event ignored reason=unsupported_post_type post_type={}", post_type or "missing")
 
-    def _track_event_callback(self, payload: dict[str, Any], post_type: str) -> None:
-        task = asyncio.create_task(self.event_callback(payload), name=f"snowluma-event-{post_type}")
+    def capture_offline_recovery_context(
+        self,
+        payload: dict[str, Any],
+        *,
+        received_at: float | None = None,
+        progress_id: str | None = None,
+        captured_connection: tuple[Any, ...] | None = None,
+    ) -> dict[str, Any]:
+        """Capture the transport timestamp and routing identity outside raw event data."""
+        captured_at = time.time() if received_at is None else received_at
+        epoch = self.connection_epoch_started_at or captured_at
+        progress_id = progress_id or uuid4().hex
+        metadata = build_recovery_metadata(payload, epoch, captured_at, progress_id)
+        metadata["source_instance"] = self.source_instance
+        sender = payload.get("sender")
+        sender = sender if isinstance(sender, Mapping) else {}
+        raw_user_id = sender.get("user_id") or payload.get("user_id")
+        user_id = self._canonical_route_id(raw_user_id)
+        raw_group_id = payload.get("group_id") if payload.get("message_type") == "group" else None
+        group_id = self._canonical_route_id(raw_group_id)
+        return {
+            "metadata": metadata,
+            "platform": global_config.nachobot.platform_name,
+            "group_id": group_id,
+            "user_id": user_id,
+            "connection": captured_connection,
+        }
+
+    @staticmethod
+    def _canonical_route_id(value: Any) -> str | None:
+        try:
+            normalized = int(str(value).strip())
+        except (TypeError, ValueError):
+            return None
+        return str(normalized) if normalized != 0 else None
+
+    def take_offline_recovery_context(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        """Read adapter-owned capture data without altering raw event or lifecycle state."""
+        return self._recovery_contexts.get(id(payload))
+
+    async def send_offline_recovery_progress(self, context: dict[str, Any], *, active: bool) -> None:
+        if self.progress_callback is None:
+            return
+        try:
+            await self.progress_callback(context, active)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "SnowLuma offline recovery progress handoff failed progress_id={} active={} error={}",
+                context["metadata"]["progress_id"],
+                active,
+                safe_exception(exc),
+            )
+
+    async def finish_offline_recovery_progress(self, context: dict[str, Any]) -> None:
+        finish_task = asyncio.create_task(self.send_offline_recovery_progress(context, active=False))
+        try:
+            await asyncio.shield(finish_task)
+        except asyncio.CancelledError:
+            try:
+                await finish_task
+            except Exception as exc:
+                logger.warning(
+                    "SnowLuma offline recovery progress cleanup failed progress_id={} error={}",
+                    context["metadata"]["progress_id"],
+                    safe_exception(exc),
+                )
+            raise
+
+    def _track_event_callback(
+        self,
+        payload: dict[str, Any],
+        post_type: str,
+        recovery_context: dict[str, Any] | None = None,
+    ) -> None:
+        task = asyncio.create_task(
+            self._run_event_callback(payload, recovery_context),
+            name=f"snowluma-event-{post_type}",
+        )
         self._event_tasks.add(task)
+        if recovery_context is not None:
+            self._event_recovery_contexts[task] = (payload, recovery_context)
         task.add_done_callback(self._event_task_done)
         logger.debug("SnowLuma event callback scheduled post_type={} pending_callbacks={}", post_type, len(self._event_tasks))
 
+    async def _run_event_callback(
+        self,
+        payload: dict[str, Any],
+        recovery_context: dict[str, Any] | None,
+    ) -> None:
+        try:
+            await self.event_callback(payload)
+        finally:
+            if recovery_context is not None:
+                await self._complete_recovery_callback(payload, recovery_context)
+
+    async def _complete_recovery_callback(
+        self,
+        payload: dict[str, Any],
+        recovery_context: dict[str, Any],
+    ) -> None:
+        # The done callback also handles tasks cancelled before their coroutine
+        # gets its first execution step. Pop synchronously so the two paths can
+        # never emit duplicate inactive markers.
+        if self._recovery_contexts.pop(id(payload), None) is None:
+            return
+        current_task = asyncio.current_task()
+        if current_task is not None:
+            self._event_recovery_contexts.pop(current_task, None)
+        await self.finish_offline_recovery_progress(recovery_context)
+
+    def _schedule_recovery_finish(self, recovery_context: dict[str, Any]) -> None:
+        cleanup_task = asyncio.create_task(self.finish_offline_recovery_progress(recovery_context))
+        self._progress_cleanup_tasks.add(cleanup_task)
+        cleanup_task.add_done_callback(self._progress_cleanup_done)
+
+    def _progress_cleanup_done(self, task: asyncio.Task[None]) -> None:
+        self._progress_cleanup_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            error = task.exception()
+        except asyncio.CancelledError:
+            return
+        if error is not None:
+            logger.warning("SnowLuma cancelled callback progress cleanup failed error={}", safe_exception(error))
+
     def _event_task_done(self, task: asyncio.Task[None]) -> None:
         self._event_tasks.discard(task)
+        recovery = self._event_recovery_contexts.pop(task, None)
         if task.cancelled():
             logger.warning("SnowLuma event callback cancelled pending_callbacks={}", len(self._event_tasks))
+            if recovery is not None:
+                payload, recovery_context = recovery
+                if self._recovery_contexts.pop(id(payload), None) is not None:
+                    self._schedule_recovery_finish(recovery_context)
             return
         try:
             error = task.exception()
@@ -274,16 +529,22 @@ class SnowLumaClient:
 
     async def _drain_event_tasks(self) -> None:
         tasks = tuple(self._event_tasks)
-        if not tasks:
-            return
-        logger.debug("SnowLuma draining event callbacks count={}", len(tasks))
-        try:
-            await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=2.0)
-        except asyncio.TimeoutError:
-            logger.warning("SnowLuma event callback drain timed out count={}", len(tasks))
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
+        if tasks:
+            logger.debug("SnowLuma draining event callbacks count={}", len(tasks))
+            try:
+                await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=2.0)
+            except asyncio.TimeoutError:
+                logger.warning("SnowLuma event callback drain timed out count={}", len(tasks))
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+        # A callback cancelled before its first step is closed by its task's
+        # done callback, which schedules the final inactive marker here.
+        await asyncio.sleep(0)
+        cleanup_tasks = tuple(self._progress_cleanup_tasks)
+        if cleanup_tasks:
+            await asyncio.gather(*cleanup_tasks, return_exceptions=True)
 
     async def call_action(
         self,
@@ -291,11 +552,22 @@ class SnowLumaClient:
         params: dict[str, Any],
         *,
         timeout_sec: float | None = None,
+        expected_connection: tuple[Any, ...] | None = None,
     ) -> dict[str, Any]:
-        ws = self._ws
+        ws = expected_connection[0] if expected_connection else self._ws
+        generation = (
+            expected_connection[1]
+            if expected_connection and len(expected_connection) > 1
+            else self._connection_generation
+        )
+        expected_account = str(expected_connection[2]) if expected_connection and len(expected_connection) > 2 else ""
         if ws is None or ws.closed:
             logger.warning("SnowLuma action rejected action={} reason=websocket_not_connected", action)
             raise RuntimeError("SnowLuma WebSocket 尚未连接")
+        if self._ws is not ws or self._connection_generation != generation:
+            raise RuntimeError("SnowLuma action connection generation is stale")
+        if expected_account and self._connected_account_id != expected_account:
+            raise RuntimeError("SnowLuma action account identity is stale")
         echo = uuid4().hex
         loop = asyncio.get_running_loop()
         future: asyncio.Future[dict[str, Any]] = loop.create_future()
@@ -316,8 +588,16 @@ class SnowLumaClient:
             logger.trace("SnowLuma => {}", summarize_payload(payload))
         try:
             async with self._send_lock:
+                if self._ws is not ws or self._connection_generation != generation or ws.closed:
+                    raise RuntimeError("SnowLuma action connection changed before send")
+                if expected_account and self._connected_account_id != expected_account:
+                    raise RuntimeError("SnowLuma action account identity changed before send")
                 await ws.send_str(json.dumps(payload, ensure_ascii=False))
             response = await asyncio.wait_for(future, timeout=timeout_value)
+            if self._ws is not ws or self._connection_generation != generation or ws.closed:
+                raise RuntimeError("SnowLuma action connection changed before response")
+            if expected_account and self._connected_account_id != expected_account:
+                raise RuntimeError("SnowLuma action account identity changed before response")
             error = self.action_error(response)
             duration_ms = int((time.monotonic() - started) * 1000)
             if error:
@@ -361,6 +641,8 @@ class SnowLumaClient:
             raise
         finally:
             self._response_pool.pop(echo, None)
+            if not future.done():
+                future.cancel()
 
     @staticmethod
     def action_error(response: Mapping[str, Any]) -> str:

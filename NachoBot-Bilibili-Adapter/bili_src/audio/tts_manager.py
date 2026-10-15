@@ -71,7 +71,7 @@ class TTSManager:
 
         self._tts_manual_overrides: Dict[int, bool] = {}
 
-        # Per-room language preference: "ja" (default, bilingual JP+ZH) or "zh" (Chinese-only)
+        # Per-room speech language: "ja" (default) or "zh".
         self._lang_overrides: Dict[int, str] = {}
 
         self._last_active_time = time.time()
@@ -118,15 +118,72 @@ class TTSManager:
         """Normalize idle strings/dicts through the Live2D owner when present."""
 
         if self.prepare_reply is None:
-            if isinstance(idle_item, dict):
-                return idle_item.get("reply", str(idle_item))
-            return str(idle_item)
+            payload = self._idle_item_payload(idle_item)
+            if payload is not None:
+                reply = payload.get("reply")
+                return reply if isinstance(reply, str) else ""
+            return idle_item if isinstance(idle_item, str) else ""
 
         if isinstance(idle_item, dict):
             raw_item = json.dumps(idle_item, ensure_ascii=False)
         else:
             raw_item = str(idle_item)
         return await self.prepare_reply(raw_item)
+
+    @staticmethod
+    def _idle_item_payload(idle_item: Any) -> Optional[Dict[str, Any]]:
+        if isinstance(idle_item, dict):
+            return idle_item
+        if not isinstance(idle_item, str):
+            return None
+        try:
+            payload = json.loads(idle_item)
+        except (TypeError, ValueError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    @classmethod
+    def _explicit_idle_tts(cls, idle_item: Any) -> Tuple[bool, str, Optional[str]]:
+        """Read explicit speech text from the original preset envelope."""
+
+        payload = cls._idle_item_payload(idle_item)
+        if payload is None or "tts_text" not in payload:
+            return False, "", None
+
+        value = payload.get("tts_text")
+        if isinstance(value, str):
+            text = value
+            lang = None
+        elif isinstance(value, dict):
+            text = value.get("text")
+            lang = value.get("lang")
+        else:
+            return True, "", None
+
+        if not isinstance(text, str) or not text.strip():
+            return True, "", None
+        if lang is not None and (
+            not isinstance(lang, str) or lang not in {"zh", "ja"}
+        ):
+            return True, "", None
+        return True, text, lang
+
+    @staticmethod
+    def _prepared_idle_reply_text(value: str) -> str:
+        """Unwrap a serialized reply envelope without exposing its JSON syntax."""
+
+        if not isinstance(value, str):
+            return ""
+        candidate = value
+        if candidate.lstrip().startswith(("{", "[")):
+            try:
+                payload = json.loads(candidate)
+            except (TypeError, ValueError):
+                return ""
+            if not isinstance(payload, dict):
+                return ""
+            candidate = payload.get("reply")
+        return candidate if isinstance(candidate, str) else ""
 
     @staticmethod
     def _prepared_value(prepared: Any, key: str, default: Any = None) -> Any:
@@ -289,12 +346,12 @@ class TTSManager:
         return True
 
     def _handle_lang_switch(self, room_id: int, user_id: str) -> bool:
-        """Toggle TTS language between Japanese (bilingual) and Chinese-only for a room."""
+        """Toggle the speech language between Japanese and Chinese for a room."""
         current = self.get_room_language(room_id)
         new_lang = "zh" if current == "ja" else "ja"
         self._lang_overrides[room_id] = new_lang
 
-        lang_display = {"ja": "日本語 (bilingual)", "zh": "中文 (Chinese-only)"}
+        lang_display = {"ja": "日本語", "zh": "中文"}
         self.logger.info(
             "TTS language switched to {} by user_id={} (Room: {})",
             lang_display.get(new_lang, new_lang), user_id, room_id,
@@ -302,35 +359,8 @@ class TTSManager:
         return True
 
     def get_room_language(self, room_id: int) -> str:
-        """Get the current TTS language for a room. Default is 'ja' (bilingual)."""
+        """Get the current speech language for a room. Default is 'ja'."""
         return self._lang_overrides.get(room_id, "ja")
-
-    def parse_bilingual_response(self, text: str) -> Tuple[str, str]:
-        if not text:
-            return "", ""
-
-        # Normalize full-width symbols and brackets to standard uppercase tags
-        text = text.replace("＜", "<").replace("＞", ">")
-        text = text.replace("／", "/")
-        text = text.replace("Ｚ", "Z").replace("Ｈ", "H").replace("ｚ", "Z").replace("ｈ", "H")
-        text = text.replace("Ｊ", "J").replace("Ｐ", "P").replace("ｊ", "J").replace("ｐ", "P")
-        text = re.sub(r"[<\[【［](/?)(ZH|JP)[>\]】］]", lambda m: f"<{m.group(1)}{m.group(2).upper()}>", text, flags=re.IGNORECASE)
-
-        jp_matches = re.findall(r"<JP>(.*?)</JP>", text, re.DOTALL)
-        zh_matches = re.findall(r"<ZH>(.*?)</ZH>", text, re.DOTALL)
-
-        text_jp = "".join(m.strip() for m in jp_matches if m.strip())
-        text_zh = "".join(m.strip() for m in zh_matches if m.strip())
-
-        if not text_jp and not text_zh:
-            self.logger.warning(
-                "Failed to parse bilingual tags: text_chars={}",
-                len(text),
-            )
-            cleaned = re.sub(r"</?[A-Z]{2}>", "", text).strip()
-            return "", cleaned
-
-        return text_jp, text_zh
 
     def update_subtitle(self, text: str, subtitle_path: str = None) -> None:
         if not text:
@@ -366,16 +396,29 @@ class TTSManager:
                 self.logger.info(f"Idle time ({idle_duration:.1f}s) reached target ({self._next_idle_target:.1f}s). Triggering preset TTS.")
                 self.reset_idle_timer()
                 try:
+                    has_explicit_tts, explicit_tts_text, explicit_tts_lang = (
+                        self._explicit_idle_tts(idle_item)
+                    )
+                    if has_explicit_tts and not explicit_tts_text:
+                        self.logger.warning("Skipping idle preset with invalid tts_text")
+                        continue
+
                     prepared = await self._prepare_idle_reply(idle_item)
                     if isinstance(prepared, str):
                         parsed_text = prepared
                     else:
-                        parsed_text = str(self._prepared_value(prepared, "reply", "") or "")
+                        prepared_reply = self._prepared_value(prepared, "reply", "")
+                        parsed_text = prepared_reply if isinstance(prepared_reply, str) else ""
                     control_id = self._prepared_value(prepared, "control_id")
                     
-                    text_jp, text_zh = self.parse_bilingual_response(parsed_text)
-                    display_text = text_zh if text_zh else parsed_text
-                    tts_text = text_jp if text_jp else parsed_text
+                    parsed_text = self._prepared_idle_reply_text(parsed_text)
+                    display_text = parsed_text
+                    if has_explicit_tts:
+                        tts_text = explicit_tts_text
+                        tts_text_lang = explicit_tts_lang
+                    else:
+                        tts_text = parsed_text
+                        tts_text_lang = None
                     
                     self.update_subtitle(display_text)
                     cleaned_tts_text = _clean_text_for_tts(tts_text)
@@ -397,6 +440,7 @@ class TTSManager:
                         audio_data = await self._synthesize_tts_segment(
                             seg_text,
                             platform=self.config.platform,
+                            text_lang=tts_text_lang,
                             preset_name=preset_name,
                             split_method="cut0",
                         )

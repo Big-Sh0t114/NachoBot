@@ -185,6 +185,175 @@ class RemoteLive2DControlTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(controller.has_capability("prepare_reply"))
         self.assertFalse(controller.has_capability("apply_control"))
 
+    async def test_legacy_ready_signature_enables_pcm_without_explicit_flag(self) -> None:
+        logger = _CaptureLogger()
+        controller = RemoteLive2DController(
+            SimpleNamespace(config=SimpleNamespace()), logger
+        )
+        controller._connected.set()
+
+        await controller._handle_interaction(
+            json.dumps(
+                {
+                    "type": "avatar.interaction",
+                    "version": "1.1",
+                    "event": "ready",
+                    "payload": {
+                        "running": True,
+                        "protocol_version": "1.1",
+                        "capabilities": {
+                            "prepare_reply": True,
+                            "apply_control": True,
+                        },
+                    },
+                }
+            )
+        )
+
+        self.assertTrue(controller.can_stream_pcm)
+        self.assertTrue(
+            any("legacy" in record.casefold() for record in logger.records)
+        )
+
+    async def test_explicit_pcm_false_wins_over_legacy_signature(self) -> None:
+        controller = self._controller()
+        controller._connected.set()
+
+        await controller._handle_interaction(
+            json.dumps(
+                {
+                    "type": "avatar.interaction",
+                    "version": "1.1",
+                    "event": "ready",
+                    "payload": {
+                        "running": True,
+                        "protocol_version": "1.1",
+                        "capabilities": {
+                            "prepare_reply": True,
+                            "apply_control": True,
+                            "voice_stream_pcm": False,
+                        },
+                    },
+                }
+            )
+        )
+
+        self.assertTrue(controller.has_capability("prepare_reply"))
+        self.assertFalse(controller.can_stream_pcm)
+
+    async def test_pcm_compatibility_rejects_unknown_or_incomplete_ready(self) -> None:
+        rejected_payloads = (
+            {
+                "running": True,
+                "protocol_version": "1.0",
+                "capabilities": {"prepare_reply": True, "apply_control": True},
+            },
+            {
+                "running": False,
+                "protocol_version": "1.1",
+                "capabilities": {"prepare_reply": True, "apply_control": True},
+            },
+            {
+                "running": True,
+                "protocol_version": "1.1",
+                "capabilities": {"prepare_reply": True, "apply_control": False},
+            },
+            {
+                "running": True,
+                "protocol_version": "1.1",
+                "commands": ["prepare_reply", "apply_control"],
+            },
+        )
+        for payload in rejected_payloads:
+            with self.subTest(payload=payload):
+                controller = self._controller()
+                controller._connected.set()
+                await controller._handle_interaction(
+                    json.dumps(
+                        {
+                            "type": "avatar.interaction",
+                            "version": "1.1",
+                            "event": "ready",
+                            "payload": payload,
+                        }
+                    )
+                )
+                self.assertFalse(controller.can_stream_pcm)
+
+    async def test_pcm_capability_is_cleared_between_connections(self) -> None:
+        controller = self._controller()
+        controller.is_running = True
+        controller.reconnect_seconds = 0.01
+
+        class FakeWebSocket:
+            def __init__(self, payload: dict[str, object]) -> None:
+                self.ready_payload = payload
+                self.close_event = asyncio.Event()
+                self.entered = asyncio.Event()
+
+            async def __aenter__(self):
+                self.entered.set()
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+            async def send(self, _raw_message: str) -> None:
+                return None
+
+            def __aiter__(self):
+                async def messages():
+                    yield json.dumps(
+                        {
+                            "type": "avatar.interaction",
+                            "version": "1.1",
+                            "event": "ready",
+                            "payload": self.ready_payload,
+                        }
+                    )
+                    await self.close_event.wait()
+
+                return messages()
+
+        first = FakeWebSocket(
+            {
+                "running": True,
+                "protocol_version": "1.1",
+                "capabilities": {"prepare_reply": True, "apply_control": True},
+            }
+        )
+        second = FakeWebSocket(
+            {
+                "running": True,
+                "protocol_version": "1.1",
+                "capabilities": {
+                    "prepare_reply": True,
+                    "apply_control": True,
+                    "voice_stream_pcm": False,
+                },
+            }
+        )
+        sockets = iter((first, second))
+
+        with patch.object(
+            remote_controller_module.websockets,
+            "connect",
+            side_effect=lambda *_args, **_kwargs: next(sockets),
+        ):
+            task = asyncio.create_task(controller._connection_loop())
+            try:
+                await asyncio.wait_for(controller._ready.wait(), timeout=1)
+                self.assertTrue(controller.can_stream_pcm)
+                first.close_event.set()
+                await asyncio.wait_for(second.entered.wait(), timeout=1)
+                await asyncio.wait_for(controller._ready.wait(), timeout=1)
+                self.assertFalse(controller.can_stream_pcm)
+            finally:
+                controller.is_running = False
+                first.close_event.set()
+                second.close_event.set()
+                await asyncio.wait_for(task, timeout=1)
+
     async def test_transport_runtime_exception_degrades_prepare_and_apply(self) -> None:
         controller = self._controller()
         controller._capabilities.update({"prepare_reply", "apply_control"})
@@ -329,9 +498,6 @@ class PrivacyLoggingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_tts_and_danmu_logs_omit_reply_content(self) -> None:
         logger = _CaptureLogger()
-        manager = TTSManager.__new__(TTSManager)
-        manager.logger = logger
-        manager.parse_bilingual_response("SECRET_TTS_REPLY")
 
         adapter = SimpleNamespace(
             _filter_outgoing_text=lambda text: text,
@@ -349,7 +515,7 @@ class PrivacyLoggingTests(unittest.IsolatedAsyncioTestCase):
         secret_danmu = "SECRET_DANMU_REPLY"
         await handler._send_danmu(100, secret_danmu, "mid", "dmid")
 
-        self.assertNotIn("SECRET_TTS_REPLY", logger.text)
+
         self.assertNotIn(secret_danmu, logger.text)
         self.assertIn("chars=18", logger.text)
 
@@ -439,6 +605,7 @@ class TTSControlTests(unittest.IsolatedAsyncioTestCase):
             live2d_manager=SimpleNamespace(controller=controller),
         )
         handler.logger = _Logger()
+        handler._reply_states = {}
 
         await handler._handle_voice_stream_event({"event": "start"})
         await handler._handle_voice_stream_event({"event": "end"})

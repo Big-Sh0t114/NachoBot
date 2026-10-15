@@ -1,9 +1,12 @@
 import base64
 import binascii
 import copy
+import hashlib
 import json
 import re
+import sqlite3
 import time
+import math
 import urllib3
 
 from abc import abstractmethod
@@ -739,14 +742,147 @@ class MessageSending(MessageProcessBase):
         # 保留本条回复所对应的原始平台消息 ID。WebUI Chat 依靠该字段
         # 将异步、多段回复精确关联到触发它的那一轮请求，避免迟到回复
         # 被下一轮请求错误领取。
-        if self.reply_to_message_id:
-            additional_config = ret["message_info"].get("additional_config")
-            if not isinstance(additional_config, dict):
+        additional_config = ret["message_info"].get("additional_config")
+        if isinstance(additional_config, str) and additional_config.strip():
+            try:
+                additional_config = json.loads(additional_config)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                additional_config = None
+        if not isinstance(additional_config, dict):
+            additional_config = None
+
+        qq_reply_identity = self._qq_reply_identity_hint()
+        if self.reply_to_message_id or qq_reply_identity is not None:
+            if additional_config is None:
                 additional_config = {}
-                ret["message_info"]["additional_config"] = additional_config
-            additional_config["reply_to_message_id"] = self.reply_to_message_id
+            ret["message_info"]["additional_config"] = additional_config
+            if self.reply_to_message_id:
+                additional_config["reply_to_message_id"] = self.reply_to_message_id
+            if qq_reply_identity is not None:
+                additional_config["qq_reply_identity"] = qq_reply_identity
 
         return ret
+
+    def _qq_reply_identity_hint(self) -> dict[str, Any] | None:
+        """Attach scoped native aliases for an exact recovered QQ reply target."""
+
+        if self.reply is None or str(getattr(self.chat_stream, "platform", "") or "") != "qq":
+            return None
+        group_info = getattr(self.chat_stream, "group_info", None)
+        if group_info is not None and getattr(group_info, "group_id", None) is not None:
+            return None
+        target_user = getattr(self.chat_stream, "user_info", None)
+        peer_id = getattr(target_user, "user_id", None)
+        if peer_id is None:
+            return None
+
+        source_id = str(getattr(self.reply.message_info, "message_id", "") or "").strip()
+        config = getattr(self.reply.message_info, "additional_config", None)
+        if isinstance(config, str) and config.strip():
+            try:
+                config = json.loads(config)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return None
+        recovery = config.get("offline_recovery") if isinstance(config, dict) else None
+        delivery = recovery.get("delivery") if isinstance(recovery, dict) else None
+        if not isinstance(delivery, dict):
+            return None
+
+        from ncnk_message.qq_history_identity import positive_qq_id, validate_qq_private_identity
+
+        backend = str(delivery.get("backend") or "").strip()
+        account_id = str(delivery.get("account_id") or "").strip()
+        platform = str(delivery.get("platform") or "").strip()
+        session_kind = str(delivery.get("session_kind") or "").strip()
+        session_id = str(delivery.get("session_id") or "").strip()
+        message_id = str(delivery.get("message_id") or "").strip()
+        original_timestamp = recovery.get("original_timestamp")
+        source_sender = getattr(self.reply.message_info, "user_info", None)
+        if (
+            not source_id
+            or message_id != source_id
+            or positive_qq_id(session_id) is None
+            or positive_qq_id(session_id) != positive_qq_id(peer_id)
+            or platform != "qq"
+            or str(getattr(self.reply.message_info, "platform", "") or "") != "qq"
+            or session_kind != "private"
+            or positive_qq_id(account_id) is None
+            or positive_qq_id(getattr(source_sender, "user_id", None)) != positive_qq_id(session_id)
+            or str(getattr(source_sender, "platform", "") or "") != "qq"
+        ):
+            return None
+        try:
+            source_stamp = float(original_timestamp)
+            message_stamp = float(getattr(self.reply.message_info, "time", 0))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if (
+            isinstance(original_timestamp, bool)
+            or not math.isfinite(source_stamp)
+            or source_stamp <= 0
+            or message_stamp != source_stamp
+        ):
+            return None
+        expected_key_fields = (backend, account_id, "qq", "private", session_id, message_id)
+        expected_key_json = json.dumps(expected_key_fields, ensure_ascii=False, separators=(",", ":"))
+        if hashlib.sha256(expected_key_json.encode("utf-8")).hexdigest() != str(delivery.get("delivery_key") or "").strip():
+            return None
+
+        # A pre-alias recovered Messages row may have no qq_identity sidecar.
+        # Query the durable Core family first; its scope/time/native-ID proof
+        # predates this serialization seam and is sufficient for translation.
+        native_ids: dict[str, str] = {}
+        delivery_key = str(delivery.get("delivery_key") or "").strip()
+        if delivery_key:
+            try:
+                from src.chat.message_receive.history_delivery import history_delivery_store
+
+                confirmed = history_delivery_store.qq_reply_identity(
+                    delivery_key,
+                    backend=backend,
+                    account_id=str(int(account_id)),
+                    platform=platform,
+                    peer_id=str(int(session_id)),
+                    original_reply_id=message_id,
+                )
+                if (
+                    isinstance(confirmed, dict)
+                    and confirmed.get("version") == 1
+                    and confirmed.get("scope") == "qq_private_friend"
+                    and confirmed.get("account_id") == str(int(account_id))
+                    and confirmed.get("platform") == "qq"
+                    and confirmed.get("peer_id") == str(int(session_id))
+                    and confirmed.get("original_reply_id") == message_id
+                    and isinstance(confirmed.get("native_ids"), dict)
+                ):
+                    native_ids = confirmed["native_ids"]
+            except (OSError, RuntimeError, ValueError, sqlite3.Error):
+                # Sending the body can continue without an unresolved platform
+                # quote. Adapters will remove this exact reply segment.
+                pass
+        if not native_ids:
+            identity = validate_qq_private_identity(
+                delivery.get("qq_identity"),
+                backend=backend,
+                account_id=account_id,
+                platform=platform,
+                session_kind=session_kind,
+                session_id=session_id,
+                message_id=message_id,
+                original_timestamp=original_timestamp,
+            )
+            if identity is None:
+                return None
+            native_ids = {backend: message_id}
+        return {
+            "version": 1,
+            "scope": "qq_private_friend",
+            "account_id": str(int(account_id)),
+            "platform": "qq",
+            "peer_id": str(int(session_id)),
+            "original_reply_id": message_id,
+            "native_ids": dict(native_ids),
+        }
 
     def is_private_message(self) -> bool:
         """判断是否为私聊消息"""

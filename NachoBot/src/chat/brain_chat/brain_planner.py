@@ -25,6 +25,7 @@ from src.chat.utils.chat_message_builder import (
     replace_user_references,
     get_stepped_limit,
 )
+from src.chat.utils.planner_context import merge_planner_context_messages
 from src.chat.utils.prompt_injection_guard import guard_user_content
 from src.chat.utils.display_name import resolve_sender_name
 from src.chat.utils.context_builder import build_relation_info, build_lpmm_knowledge_info
@@ -409,6 +410,7 @@ class BrainPlanner:
         loop_start_time: float = 0.0,
         interrupt_flag: Optional[asyncio.Event] = None,
         allow_no_reply: bool = True,
+        trigger_messages: Optional[List["DatabaseMessages"]] = None,
     ) -> Tuple[List[ActionPlannerInfo], Optional["DatabaseMessages"]]:
         # sourcery skip: use-named-expression
         """
@@ -424,12 +426,33 @@ class BrainPlanner:
 
         # 获取聊天上下文
         # 如果是私聊，使用完整的120条限制；如果是群聊，使用0.6倍限制以节省token
-        limit = context_size if not is_group_chat else int(context_size * 0.6)
-        _stepped_limit = get_stepped_limit(self.chat_id, time.time(), limit)
+        limit = max(1, context_size if not is_group_chat else int(context_size * 0.6))
+        history_before = time.time()
+        _stepped_limit = get_stepped_limit(self.chat_id, history_before, limit)
         message_list_before_now = get_raw_msg_before_timestamp_with_chat(
             chat_id=self.chat_id,
-            timestamp=time.time(),
+            timestamp=history_before,
             limit=_stepped_limit,
+        )
+        from src.chat.offline_recovery import offline_recovery_manager
+
+        message_list_before_now = offline_recovery_manager.filter_pending_recovery_messages(
+            self.chat_id, message_list_before_now
+        )
+        trigger_messages = offline_recovery_manager.filter_pending_recovery_messages(
+            self.chat_id, trigger_messages or []
+        )
+        latest_context_message = (
+            trigger_messages[-1]
+            if trigger_messages
+            else (message_list_before_now[-1] if message_list_before_now else None)
+        )
+        message_list_before_now = merge_planner_context_messages(
+            message_list_before_now,
+            trigger_messages,
+            chat_id=self.chat_id,
+            limit=limit,
+            history_before=history_before,
         )
         if allow_no_reply and message_list_before_now:
             target_messages = [
@@ -438,8 +461,14 @@ class BrainPlanner:
             ]
         else:
             target_messages = []
-        if allow_no_reply and target_messages:
-            latest_message = target_messages[-1]
+        if (
+            allow_no_reply
+            and target_messages
+            and latest_context_message is not None
+            and planner_target_eligible(latest_context_message)
+            and target_messages[-1] is latest_context_message
+        ):
+            latest_message = latest_context_message
             if _has_url_message(getattr(latest_message, "processed_plain_text", "") or "") and not _is_bot_message(
                 latest_message
             ):
@@ -519,6 +548,7 @@ class BrainPlanner:
                 message_id_list=message_id_list,
                 interest=global_config.personality.interest,
                 allow_no_reply=allow_no_reply,
+                trigger_messages=trigger_messages,
             )
         else:
             prompt, message_id_list = await self.build_planner_prompt(
@@ -647,6 +677,7 @@ class BrainPlanner:
         chat_content_block: str = "",
         interest: str = "",
         allow_no_reply: bool = True,
+        trigger_messages: Optional[List["DatabaseMessages"]] = None,
     ) -> tuple[str, List[Tuple[str, "DatabaseMessages"]]]:
         """构建整合了动作和回复的提示词"""
         try:
@@ -689,12 +720,28 @@ class BrainPlanner:
                 target, _, _ = guard_user_content(target, sender_name)
 
             # 使用更短的上下文来检索工具和记忆，避免由于上下文过长导致的检索噪音
-            short_context_size = int(global_config.chat.get_max_context_size(is_group_chat) * 0.33)
-            _stepped_limit_short = get_stepped_limit(self.chat_id, time.time(), short_context_size)
+            short_context_size = max(1, int(global_config.chat.get_max_context_size(is_group_chat) * 0.33))
+            short_history_before = time.time()
+            _stepped_limit_short = get_stepped_limit(self.chat_id, short_history_before, short_context_size)
             message_list_before_short = get_raw_msg_before_timestamp_with_chat(
                 chat_id=self.chat_id,
-                timestamp=time.time(),
+                timestamp=short_history_before,
                 limit=_stepped_limit_short,
+            )
+            from src.chat.offline_recovery import offline_recovery_manager
+
+            message_list_before_short = offline_recovery_manager.filter_pending_recovery_messages(
+                self.chat_id, message_list_before_short
+            )
+            short_trigger_messages = offline_recovery_manager.filter_pending_recovery_messages(
+                self.chat_id, trigger_messages or []
+            )
+            message_list_before_short = merge_planner_context_messages(
+                message_list_before_short,
+                short_trigger_messages,
+                chat_id=self.chat_id,
+                limit=short_context_size,
+                history_before=short_history_before,
             )
             chat_talking_prompt_short = build_readable_messages(
                 message_list_before_short,

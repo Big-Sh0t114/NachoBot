@@ -24,6 +24,7 @@ from src.chat.utils.chat_message_builder import (
     get_raw_msg_before_timestamp_with_chat,
     get_stepped_limit,
 )
+from src.chat.utils.planner_context import merge_planner_context_messages
 from src.chat.utils.utils import get_chat_type_and_target_info
 from src.chat.planner_actions.action_manager import ActionManager
 from src.chat.message_receive.chat_stream import get_chat_manager
@@ -373,6 +374,7 @@ class ActionPlanner:
         blocked_user_ids: Optional[set] = None,
         interrupt_flag: Optional[asyncio.Event] = None,
         allow_no_reply: bool = True,
+        trigger_messages: Optional[List["DatabaseMessages"]] = None,
     ) -> Tuple[List[ActionPlannerInfo], Optional["DatabaseMessages"]]:
         # sourcery skip: use-named-expression
         """
@@ -384,12 +386,18 @@ class ActionPlanner:
         current_available_actions = self._without_silent_actions(current_available_actions, allow_no_reply)
         context_size = global_config.chat.get_max_context_size(is_group_chat=is_group_chat)
         # 获取聊天上下文
-        _planner_size = int(context_size * 0.6)
-        _stepped_limit = get_stepped_limit(self.chat_id, time.time(), _planner_size)
+        _planner_size = max(1, int(context_size * 0.6))
+        history_before = time.time()
+        _stepped_limit = get_stepped_limit(self.chat_id, history_before, _planner_size)
         message_list_before_now = get_raw_msg_before_timestamp_with_chat(
             chat_id=self.chat_id,
-            timestamp=time.time(),
+            timestamp=history_before,
             limit=_stepped_limit,
+        )
+        from src.chat.offline_recovery import offline_recovery_manager
+
+        message_list_before_now = offline_recovery_manager.filter_pending_recovery_messages(
+            self.chat_id, message_list_before_now
         )
         # 过滤被屏蔽用户的消息
         if blocked_user_ids:
@@ -398,13 +406,40 @@ class ActionPlanner:
                 if getattr(msg, "user_info", None) is None
                 or str(getattr(msg.user_info, "user_id", "")) not in blocked_user_ids
             ]
+            trigger_messages = [
+                msg for msg in (trigger_messages or [])
+                if getattr(msg, "user_info", None) is None
+                or str(getattr(msg.user_info, "user_id", "")) not in blocked_user_ids
+            ]
+        trigger_messages = offline_recovery_manager.filter_pending_recovery_messages(
+            self.chat_id, trigger_messages or []
+        )
+        latest_context_message = (
+            trigger_messages[-1]
+            if trigger_messages
+            else (message_list_before_now[-1] if message_list_before_now else None)
+        )
+        message_list_before_now = merge_planner_context_messages(
+            message_list_before_now,
+            trigger_messages,
+            chat_id=self.chat_id,
+            limit=_planner_size,
+            history_before=history_before,
+        )
         focus_switch_context = can_offer_switch_chat(focus_coordinator, self.chat_id)
         target_messages = [
             message for message in message_list_before_now
             if planner_target_eligible(message)
         ]
-        if allow_no_reply and target_messages and not focus_switch_context:
-            latest_message = target_messages[-1]
+        if (
+            allow_no_reply
+            and target_messages
+            and latest_context_message is not None
+            and planner_target_eligible(latest_context_message)
+            and target_messages[-1] is latest_context_message
+            and not focus_switch_context
+        ):
+            latest_message = latest_context_message
             if _has_url_message(getattr(latest_message, "processed_plain_text", "") or "") and not _is_bot_message(
                 latest_message
             ):

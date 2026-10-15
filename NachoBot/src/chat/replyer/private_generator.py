@@ -3,6 +3,7 @@ import time
 import asyncio
 import random
 import re
+import threading
 
 from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime
@@ -41,6 +42,7 @@ from src.chat.utils.chat_message_builder import (
     replace_user_references,
     get_stepped_limit,
 )
+from src.chat.utils.planner_context import merge_planner_context_messages
 from src.chat.utils.display_name import resolve_sender_name
 from src.chat.express.expression_selector import expression_selector
 
@@ -54,15 +56,40 @@ from src.chat.advanced.advanced_manager import advanced_manager
 from src.chat.replyer.prompt.lpmm_prompt import init_lpmm_prompt
 from src.chat.replyer.prompt.replyer_prompt import init_replyer_prompt
 from src.chat.replyer.prompt.rewrite_prompt import init_rewrite_prompt
-from src.memory_system.memory_retrieval import init_memory_retrieval_prompt, build_memory_retrieval_prompt
 
 init_lpmm_prompt()
 init_replyer_prompt()
 init_rewrite_prompt()
-init_memory_retrieval_prompt()
 
 
 logger = get_logger("replyer")
+
+_memory_retrieval_prompt_initialized = False
+_memory_retrieval_prompt_init_lock = threading.Lock()
+
+
+def _ensure_memory_retrieval_prompt_initialized() -> None:
+    """Load memory prompts after plugin API imports have finished."""
+
+    global _memory_retrieval_prompt_initialized
+    if _memory_retrieval_prompt_initialized:
+        return
+    with _memory_retrieval_prompt_init_lock:
+        if _memory_retrieval_prompt_initialized:
+            return
+        from src.memory_system.memory_retrieval import ensure_memory_retrieval_prompt_initialized
+
+        ensure_memory_retrieval_prompt_initialized()
+        _memory_retrieval_prompt_initialized = True
+
+
+async def build_memory_retrieval_prompt(*args: Any, **kwargs: Any) -> Any:
+    """Keep the existing patch point while importing the builder on demand."""
+
+    _ensure_memory_retrieval_prompt_initialized()
+    from src.memory_system.memory_retrieval import build_memory_retrieval_prompt as build_prompt
+
+    return await build_prompt(*args, **kwargs)
 
 
 class PrivateReplyer:
@@ -88,6 +115,7 @@ class PrivateReplyer:
         chat_stream: ChatStream,
         request_type: str = "replyer",
     ):
+        _ensure_memory_retrieval_prompt_initialized()
         self.request_type = request_type
         self.chat_stream = chat_stream
         
@@ -636,21 +664,19 @@ class PrivateReplyer:
                         tool_results.extend(t_res)
 
             if tool_results or search_info or url_info:
-                tool_info_str = "以下是你获取到的实时信息：\n"
+                tool_info_str = "下面整理了网页和工具查询获得的信息，供你结合当前对话撰写回复时参考：\n"
                 if url_info:
-                    tool_info_str += f"【网页内容】\n{url_info}\n"
+                    tool_info_str += f"网页浏览获取到的页面内容：\n{url_info}\n"
                 if search_info:
-                    tool_info_str += f"【联网搜索】\n{search_info}\n"
+                    tool_info_str += f"联网搜索找到的信息：\n{search_info}\n"
                 if search_url_info:
-                    tool_info_str += f"【搜索结果正文】\n{search_url_info}\n"
+                    tool_info_str += f"从搜索结果页面提取出的正文：\n{search_url_info}\n"
                 for tool_result in tool_results:
-                    tool_name = tool_result.get("tool_name", "unknown")
                     content = tool_result.get("content", "")
-                    result_type = tool_result.get("type", "tool_result")
 
-                    tool_info_str += f"- 【{tool_name}】{result_type}: {content}\n"
+                    tool_info_str += f"工具查询得到的信息如下：\n{content}\n"
 
-                tool_info_str += "以上是你获取到的实时信息，请在回复时参考这些信息。"
+                tool_info_str += "请结合这些实时资料和对话上下文作答。"
                 if tool_results:
                     logger.info(f"获取到 {len(tool_results)} 个工具结果")
                 if search_info:
@@ -662,22 +688,22 @@ class PrivateReplyer:
 
                 if sandbox_candidate is not None:
                     tool_info_str += (
-                        "\n【SANDBOX_EDIT_CONFIRMATION_REQUIRED】\n"
-                        "仅当你确认用户明确要求文件操作时，严格只输出以下 JSON，不能输出 Markdown（decision 必须是布尔值，键不可增删）："
-                        '{"sandbox_edit_decision":true,"reply_to_user":"面向用户的确认语句",'
-                        '"file_edit_query":"简洁的文件操作任务"}\n'
-                        f"待确认任务：{sandbox_candidate.query}"
+                        "\n这项待确认任务可能需要执行文件操作。只有在用户明确要求执行这项文件操作时，才只输出一个 JSON 对象，不添加其他文字或 Markdown。"
+                        "该对象必须且只能包含 sandbox_edit_decision、reply_to_user 和 file_edit_query 三个字段，不得添加其他字段或 Markdown。"
+                        "sandbox_edit_decision 必须是布尔值，只有用户明确要求这项文件操作时才设为 true；"
+                        "reply_to_user 填写面向用户的确认文本，file_edit_query 简洁描述这项文件操作。若用户未明确提出这项操作，应拒绝操作并说明原因。\n"
+                        f"待确认的操作内容：{sandbox_candidate.query}"
                     )
                 return ToolInfoResult(tool_info_str, sandbox_candidate)
             else:
                 logger.debug("未获取到任何工具结果")
                 if sandbox_candidate is not None:
                     return ToolInfoResult(
-                        "【SANDBOX_EDIT_CONFIRMATION_REQUIRED】\n"
-                        "若确认用户明确要求文件操作，请严格只输出以下 JSON（decision 必须是布尔值，键不可增删）："
-                        '{"sandbox_edit_decision":true,"reply_to_user":"面向用户的确认语句",'
-                        '"file_edit_query":"简洁的文件操作任务"}\n'
-                        f"待确认任务：{sandbox_candidate.query}",
+                        "这项待确认任务可能需要执行文件操作。只有在用户明确要求执行这项文件操作时，才只输出一个 JSON 对象，不添加其他文字或 Markdown。"
+                        "该对象必须且只能包含 sandbox_edit_decision、reply_to_user 和 file_edit_query 三个字段，不得添加其他字段或 Markdown。"
+                        "sandbox_edit_decision 必须是布尔值，只有用户明确要求这项文件操作时才设为 true；"
+                        "reply_to_user 填写面向用户的确认文本，file_edit_query 简洁描述这项文件操作。若用户未明确提出这项操作，应拒绝操作并说明原因。\n"
+                        f"待确认的操作内容：{sandbox_candidate.query}",
                         sandbox_candidate,
                     )
                 return ToolInfoResult()
@@ -853,6 +879,7 @@ class PrivateReplyer:
         Returns:
             str: 构建好的上下文
         """
+        _ensure_memory_retrieval_prompt_initialized()
         if available_actions is None:
             available_actions = {}
         chat_stream = self.chat_stream
@@ -923,6 +950,22 @@ class PrivateReplyer:
             timestamp=_now,
             limit=_stepped_limit_long,
         )
+        from src.chat.offline_recovery import offline_recovery_manager
+
+        message_list_before_now_long = offline_recovery_manager.filter_pending_recovery_messages(
+            chat_id, message_list_before_now_long
+        )
+        reply_context_messages = offline_recovery_manager.filter_pending_recovery_messages(
+            chat_id,
+            [reply_message] if reply_message is not None else [],
+        )
+        message_list_before_now_long = merge_planner_context_messages(
+            message_list_before_now_long,
+            reply_context_messages,
+            chat_id=chat_id,
+            limit=context_size,
+            history_before=_now,
+        )
 
         dialogue_prompt = build_readable_messages(
             message_list_before_now_long,
@@ -939,12 +982,22 @@ class PrivateReplyer:
         if advanced_on and global_config.advanced.block_tools_when_on:
             enable_tool = False
 
-        _short_size = int(context_size * 0.33)
+        _short_size = max(1, int(context_size * 0.33))
         _stepped_limit_short = get_stepped_limit(chat_id, _now, _short_size)
         message_list_before_short = get_raw_msg_before_timestamp_with_chat(
             chat_id=chat_id,
             timestamp=_now,
             limit=_stepped_limit_short,
+        )
+        message_list_before_short = offline_recovery_manager.filter_pending_recovery_messages(
+            chat_id, message_list_before_short
+        )
+        message_list_before_short = merge_planner_context_messages(
+            message_list_before_short,
+            reply_context_messages,
+            chat_id=chat_id,
+            limit=_short_size,
+            history_before=_now,
         )
 
         person_list_short: List[Person] = []
@@ -1134,7 +1187,7 @@ class PrivateReplyer:
         if advanced_on and global_config.advanced.prompt:
             # ADVANCED_PROMPT_INJECTION: 破甲提示词注入
             advanced_prompt_block = global_config.advanced.prompt.strip()
-            extra_info_block_parts.append(f"[高级模式提示]\n{advanced_prompt_block}")
+            extra_info_block_parts.append(f"高级模式下的补充要求如下：\n{advanced_prompt_block}")
 
         extra_info_block = "\n".join(extra_info_block_parts)
 
@@ -1250,6 +1303,11 @@ class PrivateReplyer:
             chat_id=chat_id,
             timestamp=time.time(),
             limit=_stepped_limit_half,
+        )
+        from src.chat.offline_recovery import offline_recovery_manager
+
+        message_list_before_now_half = offline_recovery_manager.filter_pending_recovery_messages(
+            chat_id, message_list_before_now_half
         )
         chat_talking_prompt_half = build_readable_messages(
             message_list_before_now_half,

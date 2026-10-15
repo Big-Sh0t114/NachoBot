@@ -23,9 +23,9 @@ class MessageAndActionModel(BaseDataModel):
     action_name: Optional[str] = None
     is_notify: bool = field(default=False)
     additional_config: Optional[str | dict] = None
-
+    planner_alias: Optional[str] = field(default=None, compare=False, repr=False)
     @classmethod
-    def from_DatabaseMessages(cls, message: "DatabaseMessages"):
+    def from_DatabaseMessages(cls, message: "DatabaseMessages", *, planner_alias: Optional[str] = None):
         user_info = getattr(message, "user_info", None)
         return cls(
             chat_id=message.chat_id,
@@ -39,6 +39,7 @@ class MessageAndActionModel(BaseDataModel):
             chat_info_platform=message.chat_info.platform,
             is_notify=bool(getattr(message, "is_notify", False)),
             additional_config=getattr(message, "additional_config", None),
+            planner_alias=planner_alias,
         )
 
 

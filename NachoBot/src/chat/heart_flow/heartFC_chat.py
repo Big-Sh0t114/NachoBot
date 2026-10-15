@@ -1,13 +1,12 @@
 import asyncio
 from collections import deque
 import json
-import re
 import time
 import traceback
 import random
 from typing import List, Optional, Dict, Any, Tuple, TYPE_CHECKING
 from rich.traceback import install
-from ncnk_message import get_system_event
+from ncnk_message import get_system_event, system_event_fallback_text
 
 from src.config.config import global_config
 from src.common.logger import get_logger
@@ -21,6 +20,7 @@ from src.chat.runtime_capabilities import (
     runtime_capabilities_from_stream,
 )
 from src.chat.json_reply_delivery import prepare_json_envelope_delivery as _prepare_json_envelope_delivery
+from src.chat.tts_reply_delivery import clean_tts_reply_text
 from src.chat.utils.prompt_builder import global_prompt_manager
 from src.chat.utils.timer_calculator import Timer
 from src.chat.planner_actions.planner import ActionPlanner
@@ -40,6 +40,7 @@ from src.chat.utils.chat_message_builder import (
     get_raw_msg_before_timestamp_with_chat,
     get_stepped_limit,
 )
+from src.chat.utils.planner_context import merge_planner_context_messages
 from src.memory_system.chat_history_summarizer import ChatHistorySummarizer
 from src.chat.heart_flow.relation_scanner import RelationScanner
 from src.llm_models.exceptions import ReqAbortException
@@ -64,6 +65,14 @@ from src.chat.focus.models import (
 from src.chat.focus.reply_context import acquire_reply_context_request, release_reply_context
 from src.chat.focus.reply_delivery import settle_reply_context_delivery
 from src.chat.focus.message_repository import load_message_batch
+from src.chat.focus.message_repository import load_message_rows_by_ids
+from src.chat.offline_recovery import (
+    offline_recovery_manager,
+    format_recovery_batch_context,
+    format_recovery_reply_context,
+    merge_recovery_context_rows,
+    recovery_row_id,
+)
 from src.chat.focus.switch_action import (
     SWITCH_CHAT_ACTION,
     SwitchDisposition,
@@ -103,6 +112,15 @@ install(extra_lines=3)
 # 注释：原来的动作修改超时常量已移除，因为改为顺序执行
 
 logger = get_logger("hfc")  # Logger Name Changed
+
+
+def _focus_turn_has_actionable_work(
+    focus_turn: FocusTurn | None,
+    recent_messages_list: List["DatabaseMessages"],
+) -> bool:
+    """Only current routing events or loaded unread rows make a Focus wake actionable."""
+
+    return bool(focus_turn is not None and (focus_turn.events or recent_messages_list))
 
 
 class HeartFChatting:
@@ -173,6 +191,25 @@ class HeartFChatting:
         self._message_debounce_seconds: float = 1.0
         self._focus_bypass_gate: FocusBypassDecisionGate | None = None
         self._focus_delivered_event_revisions: Dict[str, int] | None = None
+        self._offline_recovery_batch = None
+        self._offline_recovery_messages: list[Any] = []
+        self._offline_recovery_prompt = ""
+        self._offline_recovery_delivered = False
+        self._offline_recovery_dropped = False
+
+    def _ensure_offline_recovery_state(self) -> None:
+        """Provide safe defaults for older/test-created runtime instances."""
+
+        if not hasattr(self, "_offline_recovery_batch"):
+            self._offline_recovery_batch = None
+        if not hasattr(self, "_offline_recovery_messages"):
+            self._offline_recovery_messages = []
+        if not hasattr(self, "_offline_recovery_prompt"):
+            self._offline_recovery_prompt = ""
+        if not hasattr(self, "_offline_recovery_delivered"):
+            self._offline_recovery_delivered = False
+        if not hasattr(self, "_offline_recovery_dropped"):
+            self._offline_recovery_dropped = False
 
     def _is_user_blocked(self, user_id: str) -> bool:
         """检查用户是否在屏蔽列表中且未过期"""
@@ -455,12 +492,39 @@ class HeartFChatting:
                 )
 
     async def _loopbody(self, focus_turn: FocusTurn | None = None):  # sourcery skip: hoist-if-from-if
+        self._ensure_offline_recovery_state()
+        recovery_batch = self._offline_recovery_batch
+        if recovery_batch is not None:
+            recent_messages_list = list(
+                load_message_rows_by_ids(self.stream_id, recovery_batch.row_ids)
+            )
+            if focus_turn is not None:
+                self._focus_consumed_through_row_id = focus_turn.read_after_row_id
+            recent_messages_list = self._filter_blocked_users(recent_messages_list, caller="offline_recovery")
+            if not recent_messages_list:
+                self._offline_recovery_dropped = True
+                return True
+            eligible_messages = [message for message in recent_messages_list if planner_target_eligible(message)]
+            if not eligible_messages:
+                self._offline_recovery_dropped = True
+                return True
+            self._offline_recovery_messages = recent_messages_list
+            self._offline_recovery_prompt = format_recovery_reply_context(recent_messages_list)
+            self._last_message_received_at = time.time()
+            # Recovery owns this turn: bypass normal priority/Gate routing,
+            # random talk throttles, and no_reply_until_call.
+            return await self._observe(
+                recent_messages_list=recent_messages_list,
+                focus_turn=focus_turn,
+            )
+
         if focus_turn is not None:
             batch = load_message_batch(
                 self.stream_id,
                 focus_turn.read_after_row_id,
                 focus_turn.read_through_row_id,
                 limit=getattr(global_config.focus, "max_unread_messages", 20),
+                skip_row_ids=offline_recovery_manager.excluded_row_ids_for_chat(self.stream_id),
             )
             recent_messages_list = list(batch.messages)
             self._focus_consumed_through_row_id = batch.consumed_through_row_id
@@ -474,18 +538,38 @@ class HeartFChatting:
                 filter_mai=True,
                 filter_command=True,
             )
+            recent_messages_list = offline_recovery_manager.include_deferred_live_messages(
+                self.stream_id, recent_messages_list
+            )
+            recent_messages_list = offline_recovery_manager.filter_pending_recovery_messages(
+                self.stream_id, recent_messages_list
+            )
+            recent_messages_list = offline_recovery_manager.filter_recovered_nonfocus(
+                self.stream_id, recent_messages_list
+            )
+        focus_has_actionable_work = _focus_turn_has_actionable_work(focus_turn, recent_messages_list)
+        if focus_turn is not None and not focus_has_actionable_work:
+            return True
         focus_requires_observe = bool(
             focus_turn is not None
             and (
                 focus_turn.events
-                or focus_turn.handoff_ids
-                or focus_turn.wake_reason & (WakeReason.FOCUS_EVENT | WakeReason.SWITCH_TARGET)
+                or (
+                    recent_messages_list
+                    and (
+                        focus_turn.handoff_ids
+                        or focus_turn.wake_reason & (WakeReason.FOCUS_EVENT | WakeReason.SWITCH_TARGET)
+                    )
+                )
             )
         )
 
         if len(recent_messages_list) >= 1:
             # 先推进读取时间戳，防止被屏蔽用户的消息不断累积占用循环
             self.last_read_time = time.time()
+            if focus_turn is None:
+                offline_recovery_manager.commit_nonfocus_read_cursor(self.stream_id)
+                offline_recovery_manager.commit_deferred_live_rows(self.stream_id)
             self._last_message_received_at = time.time()
 
             # 再过滤被屏蔽用户的消息
@@ -689,12 +773,10 @@ class HeartFChatting:
         # WakeReason records why a runtime was nudged; it is not authoritative
         # evidence that unread local rows still exist.  In particular, a safe
         # return can leave SWITCH_TARGET on the same turn as a new Focus event.
-        # The cursor range is the source of truth for local message work.
+        # The loaded batch is the source of truth for local message work.
         return bool(
             focus_turn.events
             and not recent_messages_list
-            and not focus_turn.handoff_ids
-            and focus_turn.read_through_row_id <= focus_turn.read_after_row_id
         )
 
     @classmethod
@@ -971,6 +1053,7 @@ class HeartFChatting:
         context_refs: Optional[List["ReplyContextRef"]] = None,
         sandbox_handoff: Any = None,
     ) -> Tuple[Dict[str, Any], str, Dict[str, float]]:
+        self._ensure_offline_recovery_state()
         with Timer("回复发送", cycle_timers):
             reply_text = await self._send_response(
                 reply_set=response_set,
@@ -1029,6 +1112,7 @@ class HeartFChatting:
         force_reply_message: Optional["DatabaseMessages"] = None,
         focus_turn: FocusTurn | None = None,
     ) -> bool:  # sourcery skip: merge-else-if-into-elif, remove-redundant-if
+        self._ensure_offline_recovery_state()
         if recent_messages_list is None:
             recent_messages_list = []
         direct_reply_actions: list[ActionPlannerInfo] = []
@@ -1076,8 +1160,6 @@ class HeartFChatting:
             # direct-reply target, but they must not re-enable notice shortcuts
             # when a recovered row bypasses the normal Bot ingress guard.
             has_system_event = bool(event_candidates)
-            latest_system_event_message = valid_system_events[-1][0] if valid_system_events else None
-
             # Bypass remains an adapter capability.  A system event in that exact
             # unread batch is sent straight to Replyer; it must not be converted
             # into a planner prompt merely because it is senderless.
@@ -1094,10 +1176,18 @@ class HeartFChatting:
             )
 
             # 系统事件属于环境变化而不是强制应答的用户请求，因此始终允许 no_reply。
-            allow_no_reply = True if has_system_event else not focus_switch_target_turn
-            if not runtime_batch.direct_messages and self._should_use_notice_shortcut(
+            allow_no_reply = (
+                False
+                if self._offline_recovery_batch is not None
+                else (True if has_system_event else not focus_switch_target_turn)
+            )
+            if (
+                self._offline_recovery_batch is None
+                and not runtime_batch.direct_messages
+                and self._should_use_notice_shortcut(
                 recent_messages_list,
                 capabilities.notice_actions,
+                )
             ):
                 latest_msg = recent_messages_list[-1]
                 if getattr(latest_msg, "is_notify", False) and random.random() < 0.5:
@@ -1156,13 +1246,35 @@ class HeartFChatting:
                 is_group_chat, chat_target_info, _ = self.action_planner.get_necessary_info()
                 context_size = global_config.chat.get_max_context_size(is_group_chat=is_group_chat)
 
-                _hf_size = int(context_size * 0.6)
-                _stepped_limit_hf = get_stepped_limit(self.stream_id, time.time(), _hf_size)
+                _hf_size = max(1, int(context_size * 0.6))
+                history_before = time.time()
+                _stepped_limit_hf = get_stepped_limit(self.stream_id, history_before, _hf_size)
                 message_list_before_now = get_raw_msg_before_timestamp_with_chat(
                     chat_id=self.stream_id,
-                    timestamp=time.time(),
+                    timestamp=history_before,
                     limit=_stepped_limit_hf,
                 )
+                message_list_before_now = offline_recovery_manager.filter_recovery_rows_from_context(
+                    self.stream_id,
+                    message_list_before_now,
+                )
+                if self._offline_recovery_batch is not None:
+                    message_list_before_now = merge_recovery_context_rows(
+                        message_list_before_now,
+                        self._offline_recovery_messages,
+                    )
+                else:
+                    trigger_context_messages = offline_recovery_manager.filter_pending_recovery_messages(
+                        self.stream_id,
+                        recent_messages_list,
+                    )
+                    message_list_before_now = merge_planner_context_messages(
+                        message_list_before_now,
+                        trigger_context_messages,
+                        chat_id=self.stream_id,
+                        limit=_hf_size,
+                        history_before=history_before,
+                    )
                 # 过滤被屏蔽用户的消息
                 message_list_before_now = self._filter_blocked_users(message_list_before_now, caller="observe")
                 promise_snippets = []
@@ -1174,9 +1286,20 @@ class HeartFChatting:
                     messages=message_list_before_now,
                     timestamp_mode="normal_no_YMD",
                     read_mark=self.action_planner.last_obs_time_mark,
-                    truncate=True,
+                    truncate=self._offline_recovery_batch is None,
                     show_actions=True,
                 )
+                if self._offline_recovery_batch is not None:
+                    recovery_row_ids = set(self._offline_recovery_batch.row_ids)
+                    recovery_aliases = {}
+                    for message_id, message in message_id_list:
+                        row_id = recovery_row_id(message)
+                        if row_id in recovery_row_ids:
+                            recovery_aliases[row_id] = str(message_id)
+                    chat_content_block = (
+                        f"{chat_content_block}\n\n"
+                        f"{format_recovery_batch_context(self._offline_recovery_messages, planner_aliases=recovery_aliases)}"
+                    )
                 message_id_list = [
                     (message_id, message)
                     for message_id, message in message_id_list
@@ -1190,6 +1313,8 @@ class HeartFChatting:
                     focus_turn is not None and self._is_focus_event_only_turn(focus_turn, recent_messages_list)
                 )
                 gate_required = bool(
+                    self._offline_recovery_batch is None
+                    and
                     focus_turn is not None
                     and focus_turn.events
                     and not (bypass_planner and has_system_event)
@@ -1207,7 +1332,11 @@ class HeartFChatting:
                         available_actions,
                         message_list_before_now,
                     )
-                    if focus_turn is not None and not (bypass_planner and has_system_event)
+                    if (
+                        self._offline_recovery_batch is None
+                        and focus_turn is not None
+                        and not (bypass_planner and has_system_event)
+                    )
                     else None
                 )
                 if forced_priority_action is not None:
@@ -1310,37 +1439,49 @@ class HeartFChatting:
                     runtime_batch.direct_messages,
                     available_actions,
                 )
+                if self._offline_recovery_batch is not None and not has_system_event:
+                    eligible_recovery_messages = [
+                        message for message in recent_messages_list if planner_target_eligible(message)
+                    ]
+                    if eligible_recovery_messages:
+                        direct_reply_actions = self._capability_direct_reply_actions(
+                            (eligible_recovery_messages[-1],),
+                            available_actions,
+                            {"bypass_extra_info": self._offline_recovery_prompt},
+                        )
                 if bypass_planner:
                     logger.info(f"{self.log_prefix} [HFC] Bypassing Planner for declared trigger messages")
                     bot_id = str(global_config.bot.qq_account)
 
                     # Preserve the existing backlog summary while keeping every
                     # direct action bound to its exact trigger message.
-                    bypass_extra_info = ""
-                    if recent_messages_list and len(recent_messages_list) > 1:
+                    bypass_extra_info = self._offline_recovery_prompt
+                    if self._offline_recovery_batch is None and recent_messages_list and len(recent_messages_list) > 1:
                         pending_lines = []
                         for msg in recent_messages_list:
                             user_info = getattr(msg, "user_info", None)
                             text = getattr(msg, "processed_plain_text", "") or ""
-                            if not text:
-                                continue
                             event = self._get_system_event(msg)
-                            if event is not None or user_info is None:
-                                pending_lines.append(f"[系统事件] {text}")
+                            if event is not None:
+                                event_text = text or system_event_fallback_text(event)
+                                if event_text:
+                                    pending_lines.append(f"系统事件：{event_text}")
+                                continue
+                            if user_info is None or not text:
                                 continue
                             user_id = getattr(user_info, "user_id", None)
                             if user_id is not None and str(user_id) == bot_id:
                                 continue
                             nick = getattr(user_info, "user_nickname", None) or str(user_id or "")
-                            pending_lines.append(f"{nick}: {text}")
+                            pending_lines.append(f"{nick}说：“{text}”")
                         if len(pending_lines) > 1:
                             pending_lines = pending_lines[-20:]
                             summary = "\n".join(pending_lines)
                             bypass_extra_info = (
-                                f"[消息堆积提示] 以下是最近堆积的 {len(pending_lines)} 条消息，"
-                                "请在回复时综合考虑这些消息的内容，尽量涵盖多条消息而不只是最新的一条：\n"
-                                f"{summary}\n"
-                                "[消息堆积提示结束]"
+                                f"以下是最近积累的 {len(pending_lines)} 条待处理消息。"
+                                "请综合考虑这些消息的内容，尽量回应多条，而不只回应最新的一条。"
+                                "引述内容是原始消息或系统事件描述：\n"
+                                f"{summary}"
                             )
                             logger.info(
                                 f"{self.log_prefix} [HFC] Bypass: {len(pending_lines)} pending messages detected"
@@ -1363,6 +1504,32 @@ class HeartFChatting:
                                 interest=global_config.personality.interest,
                                 allow_no_reply=allow_no_reply,
                             )
+
+                    async def run_current_planner():
+                        if self._offline_recovery_batch is not None:
+                            filtered_actions = self.action_planner._filter_actions_by_activation_type(
+                                available_actions,
+                                chat_content_block,
+                            )
+                            actions = await self.action_planner._execute_main_planner(
+                                prompt=prompt_info[0],
+                                message_id_list=message_id_list,
+                                filtered_actions=filtered_actions,
+                                available_actions=available_actions,
+                                loop_start_time=self.last_read_time,
+                                interrupt_flag=None,
+                                allow_no_reply=False,
+                            )
+                            self.action_planner.last_obs_time_mark = time.time()
+                            return actions
+                        actions, _ = await self.action_planner.plan(
+                            loop_start_time=self.last_read_time,
+                            available_actions=available_actions,
+                            blocked_user_ids=_active_blocked,
+                            allow_no_reply=allow_no_reply,
+                            trigger_messages=recent_messages_list,
+                        )
+                        return actions
 
                     if focus_gate_stayed:
                         with suppress_focus_planner_context():
@@ -1396,19 +1563,9 @@ class HeartFChatting:
                             try:
                                 if focus_gate_stayed:
                                     with suppress_focus_planner_context():
-                                        action_to_use_info, _ = await self.action_planner.plan(
-                                            loop_start_time=self.last_read_time,
-                                            available_actions=available_actions,
-                                            blocked_user_ids=_active_blocked,
-                                            allow_no_reply=allow_no_reply,
-                                        )
+                                        action_to_use_info = await run_current_planner()
                                 else:
-                                    action_to_use_info, _ = await self.action_planner.plan(
-                                        loop_start_time=self.last_read_time,
-                                        available_actions=available_actions,
-                                        blocked_user_ids=_active_blocked,
-                                        allow_no_reply=allow_no_reply,
-                                    )
+                                    action_to_use_info = await run_current_planner()
                             except ReqAbortException:
                                 if not direct_reply_actions:
                                     raise
@@ -1434,6 +1591,40 @@ class HeartFChatting:
             if action_to_use_info and not fenced_actions:
                 logger.warning(f"{self.log_prefix} event-only Focus turn 丢弃非 switch_chat 动作")
             action_to_use_info = fenced_actions
+
+            if self._offline_recovery_batch is not None:
+                latest_recovery_message = next(
+                    (
+                        message
+                        for message in reversed(self._offline_recovery_messages)
+                        if planner_target_eligible(message)
+                    ),
+                    None,
+                )
+                reply_actions = [action for action in action_to_use_info if action.action_type == "reply"]
+                other_actions = [
+                    action
+                    for action in action_to_use_info
+                    if action.action_type not in {"reply", "no_reply", SWITCH_CHAT_ACTION}
+                ]
+                if latest_recovery_message is not None:
+                    selected_reply = reply_actions[-1] if reply_actions else ActionPlannerInfo(
+                        action_type="reply",
+                        reasoning="Reply once to the complete frozen offline-recovery batch",
+                        action_data={},
+                        action_message=latest_recovery_message,
+                        available_actions=available_actions,
+                    )
+                    selected_reply = ActionPlannerInfo(
+                        action_type="reply",
+                        reasoning=selected_reply.reasoning,
+                        action_data=dict(selected_reply.action_data or {}),
+                        action_message=latest_recovery_message,
+                        available_actions=selected_reply.available_actions or available_actions,
+                    )
+                    action_to_use_info = other_actions + [selected_reply]
+                else:
+                    action_to_use_info = other_actions
 
             switch_actions = [action for action in action_to_use_info if action.action_type == SWITCH_CHAT_ACTION]
             terminal_switch_selected = bool(switch_actions)
@@ -1586,13 +1777,29 @@ class HeartFChatting:
         turn = await focus_coordinator.wait_for_turn(self.stream_id)
         self._focus_consumed_through_row_id = turn.read_after_row_id
         self._focus_delivered_event_revisions = None
+        self._offline_recovery_batch = turn.recovery_batch
+        self._offline_recovery_prompt = ""
+        self._offline_recovery_messages = []
+        self._offline_recovery_delivered = False
+        self._offline_recovery_dropped = False
         outcome = None
         self._focus_turn_interrupted = False
         try:
             with bind_lease(turn.lease):
-                success = await self._run_tracked_loopbody(turn)
+                if turn.recovery_target_chat_id is not None and turn.recovery_batch is not None:
+                    switch_result = await focus_coordinator.switch_to_recovery_head(
+                        turn.lease,
+                        turn.recovery_batch,
+                    )
+                    if switch_result.reason.startswith("recovery_policy_dropped:"):
+                        self._offline_recovery_dropped = True
+                    success = switch_result.success or self._offline_recovery_dropped
+                else:
+                    success = await self._run_tracked_loopbody(turn)
             if not await focus_coordinator.is_current(turn.lease):
                 status = TurnStatus.SWITCHED
+            elif self._offline_recovery_dropped:
+                status = TurnStatus.DROPPED_BY_POLICY
             elif self._focus_turn_interrupted or self._planner_interrupt_requested:
                 status = TurnStatus.CANCELLED
             elif success:
@@ -1603,11 +1810,15 @@ class HeartFChatting:
                 status=status,
                 consumed_through_row_id=self._focus_consumed_through_row_id,
                 delivered_event_revisions=self._focus_delivered_event_revisions,
+                recovery_delivered=self._offline_recovery_delivered if turn.recovery_batch else None,
+                recovery_dropped=self._offline_recovery_dropped,
             )
         except asyncio.CancelledError:
             outcome = TurnOutcome(
                 status=TurnStatus.CANCELLED,
                 consumed_through_row_id=self._focus_consumed_through_row_id,
+                recovery_delivered=self._offline_recovery_delivered if turn.recovery_batch else None,
+                recovery_dropped=self._offline_recovery_dropped,
             )
             raise
         except StaleFocusLeaseError as exc:
@@ -1615,17 +1826,23 @@ class HeartFChatting:
             outcome = TurnOutcome(
                 status=TurnStatus.STALE,
                 consumed_through_row_id=self._focus_consumed_through_row_id,
+                recovery_delivered=self._offline_recovery_delivered if turn.recovery_batch else None,
+                recovery_dropped=self._offline_recovery_dropped,
             )
         except ReqAbortException:
             self._focus_turn_interrupted = True
             outcome = TurnOutcome(
                 status=TurnStatus.CANCELLED,
                 consumed_through_row_id=self._focus_consumed_through_row_id,
+                recovery_delivered=self._offline_recovery_delivered if turn.recovery_batch else None,
+                recovery_dropped=self._offline_recovery_dropped,
             )
         except Exception:
             outcome = TurnOutcome(
                 status=TurnStatus.FAILED,
                 consumed_through_row_id=self._focus_consumed_through_row_id,
+                recovery_delivered=self._offline_recovery_delivered if turn.recovery_batch else None,
+                recovery_dropped=self._offline_recovery_dropped,
             )
             raise
         finally:
@@ -1634,6 +1851,8 @@ class HeartFChatting:
                     await asyncio.shield(focus_coordinator.finish_turn(turn, outcome))
                 except Exception as exc:
                     logger.error(f"{self.log_prefix} Failed to finish Focus turn: {exc}")
+        self._offline_recovery_batch = None
+        self._offline_recovery_prompt = ""
         return True
 
     async def _main_chat_loop(self):
@@ -1664,11 +1883,50 @@ class HeartFChatting:
 
     async def _run_tracked_loopbody(self, focus_turn: FocusTurn | None = None) -> bool:
         """记录 Planner/动作执行在途状态，防止运行时被 TTL/LRU 回收。"""
+        nonfocus_batch = None
+        deferred_live_pending = False
+        if focus_turn is None:
+            deferred_live_pending = offline_recovery_manager.has_pending_deferred_live_messages(self.stream_id)
+            if not deferred_live_pending:
+                nonfocus_batch = offline_recovery_manager.peek_nonfocus_batch(self.stream_id)
+                if nonfocus_batch is not None and not offline_recovery_manager.claim_nonfocus_batch(
+                    self.stream_id, nonfocus_batch.batch_id
+                ):
+                    nonfocus_batch = None
+            if (
+                nonfocus_batch is None
+                and offline_recovery_manager.is_held(self.stream_id)
+                and not deferred_live_pending
+            ):
+                await asyncio.sleep(0.2)
+                return True
+        self._offline_recovery_batch = (
+            focus_turn.recovery_batch if focus_turn is not None else nonfocus_batch
+        )
+        self._offline_recovery_messages = []
+        self._offline_recovery_prompt = ""
+        self._offline_recovery_delivered = False
+        self._offline_recovery_dropped = False
         self._in_flight_operations += 1
         try:
-            return await self._loopbody(focus_turn)
+            success = await self._loopbody(focus_turn)
+            if not success and (
+                nonfocus_batch is not None
+                or deferred_live_pending and offline_recovery_manager.is_held(self.stream_id)
+            ):
+                return True
+            return success
         finally:
             self._in_flight_operations = max(0, self._in_flight_operations - 1)
+            if nonfocus_batch is not None:
+                offline_recovery_manager.finish_nonfocus_batch(
+                    self.stream_id,
+                    nonfocus_batch.batch_id,
+                    delivered=self._offline_recovery_delivered,
+                    dropped=self._offline_recovery_dropped,
+                )
+            self._offline_recovery_batch = None
+            self._offline_recovery_prompt = ""
 
     async def _normal_chat_loop(self):
         """主循环，持续进行计划并可能回复消息，直到被外部取消。"""
@@ -1687,7 +1945,7 @@ class HeartFChatting:
             print(traceback.format_exc())
             await asyncio.sleep(3)
             self._loop_task = asyncio.create_task(self._main_chat_loop())
-        logger.error(f"{self.log_prefix} 结束了当前聊天循环")
+        logger.info(f"{self.log_prefix} 结束了当前聊天循环")
 
     async def _handle_action(
         self,
@@ -1761,6 +2019,7 @@ class HeartFChatting:
         context_refs: Optional[List["ReplyContextRef"]] = None,
         sandbox_handoff: Any = None,
     ) -> str:
+        self._ensure_offline_recovery_state()
         receipts: List[send_api.SendReceipt] = []
         refs = tuple(context_refs or ())
         try:
@@ -1778,15 +2037,32 @@ class HeartFChatting:
                     receipts=receipts,
                 )
         except StaleFocusLeaseError as exc:
+            if self._offline_recovery_batch is not None:
+                self._offline_recovery_delivered = self._offline_recovery_delivered or any(
+                    receipt.delivered for receipt in receipts
+                )
             await self._settle_interrupted_reply_context(refs, receipts, "stale_focus_lease")
             logger.info(f"{self.log_prefix} Focus lease became stale; dropping reply send: {exc}")
             return ""
         except asyncio.CancelledError:
+            if self._offline_recovery_batch is not None:
+                self._offline_recovery_delivered = self._offline_recovery_delivered or any(
+                    receipt.delivered for receipt in receipts
+                )
             await self._settle_interrupted_reply_context(refs, receipts, "send_cancelled")
             raise
         except Exception:
+            if self._offline_recovery_batch is not None:
+                self._offline_recovery_delivered = self._offline_recovery_delivered or any(
+                    receipt.delivered for receipt in receipts
+                )
             await self._settle_interrupted_reply_context(refs, receipts, "send_error")
             raise
+
+        if self._offline_recovery_batch is not None:
+            self._offline_recovery_delivered = self._offline_recovery_delivered or any(
+                receipt.delivered for receipt in receipts
+            )
 
         try:
             await settle_reply_context_delivery(refs, receipts)
@@ -1864,6 +2140,31 @@ class HeartFChatting:
 
         delivery_capabilities = runtime_capabilities_from_message(message_data)
         delivery_mode = delivery_capabilities.reply_delivery
+        if delivery_mode == "tts_text":
+            utterance = clean_tts_reply_text(
+                "".join(
+                    str(reply_content.content)
+                    for reply_content in reply_set.reply_data
+                    if reply_content.content_type == ReplyContentType.TEXT
+                )
+            )
+            if not utterance:
+                return "", receipts
+
+            receipt = await send_api.tts_text_to_stream_receipt(
+                text=utterance,
+                stream_id=self.chat_stream.stream_id,
+                reply_message=message_data,
+                set_reply=need_reply,
+                typing=False,
+                selected_expressions=selected_expressions,
+                display_message=utterance,
+                transport_text=utterance,
+                text_lang=delivery_capabilities.tts_language,
+            )
+            receipts.append(receipt)
+            return (utterance if receipt.delivered else ""), receipts
+
         if delivery_mode == "json_envelope":
             # The adapter owns the envelope semantics.  Core preserves it as a
             # single transport message and only reads the generic `reply`
@@ -1983,6 +2284,7 @@ class HeartFChatting:
         cycle_timers: Dict[str, float],
     ):
         """执行单个动作的通用函数"""
+        self._ensure_offline_recovery_state()
         try:
             with Timer(f"动作{action_planner_info.action_type}", cycle_timers):
                 if action_planner_info.action_type == SWITCH_CHAT_ACTION:
@@ -2111,6 +2413,12 @@ class HeartFChatting:
                         injection_text = injection_manager.build_injection_text(
                             chat_id=self.chat_stream.stream_id, message_text=message_text_for_injection
                         )
+                        if self._offline_recovery_prompt:
+                            injection_text = (
+                                f"{self._offline_recovery_prompt}\n{injection_text}"
+                                if injection_text
+                                else self._offline_recovery_prompt
+                            )
 
                         capabilities = runtime_capabilities_from_message(
                             action_planner_info.action_message
@@ -2121,7 +2429,7 @@ class HeartFChatting:
 
                         # Inject pending-message summary from direct-reply sessions.
                         bypass_extra = (action_planner_info.action_data or {}).get("bypass_extra_info", "")
-                        if bypass_extra:
+                        if bypass_extra and bypass_extra != self._offline_recovery_prompt:
                             injection_text = f"{bypass_extra}\n{injection_text}" if injection_text else bypass_extra
 
                         current_enable_tool = global_config.tool.enable_tool and capabilities.tool_mode != "disabled"
@@ -2311,7 +2619,7 @@ class HeartFChatting:
             reason = "；".join(parse_result.ambiguities) if parse_result.ambiguities else "提醒信息不够明确"
             logger.info(f"{self.log_prefix} make_appoint 需追问：{reason}")
             clarify_extra_info = (
-                f"[预约提醒待确认] 用户似乎想让你设定提醒，但信息不够明确：{reason}。"
+                f"用户似乎想让你设定提醒，但信息不够明确：{reason}。"
                 f"请自然地向用户追问缺少的信息（例如具体是哪天、几点），不要擅自创建提醒。"
             )
             try:
@@ -2344,16 +2652,16 @@ class HeartFChatting:
         # 校验
         if not remind_datetime:
             extra_info = (
-                f'[预约提醒失败] 用户请求设定提醒但时间格式无法解析："{remind_time_raw}"。'
-                f"请告知用户时间格式无法识别，请重新指定。"
+                f'用户请求设置提醒，但无法识别时间“{remind_time_raw}”。'
+                f"请自然地说明时间格式无法识别，并请用户重新提供时间。"
             )
         elif remind_datetime <= now:
             extra_info = (
-                f"[预约提醒失败] 用户请求设定提醒，但指定的时间 {remind_datetime.strftime('%Y-%m-%d %H:%M')} 已经过去了。"
-                f"请告知用户指定的时间已过，请重新指定一个未来的时间。"
+                f"用户请求设置提醒，但指定的时间 {remind_datetime.strftime('%Y-%m-%d %H:%M')} 已经过了。"
+                f"请自然地说明这一时间已过，并请用户重新指定未来的时间。"
             )
         elif (remind_datetime - now).total_seconds() > 7 * 24 * 3600:
-            extra_info = "[预约提醒失败] 用户请求设定提醒，但指定的时间超过7天后。请告知用户提醒时间不能超过7天。"
+            extra_info = "用户请求设置提醒，但指定时间超过了未来7天范围。请自然地说明提醒时间不能超过7天。"
         else:
             extra_info = None  # 时间有效
 
@@ -2387,8 +2695,8 @@ class HeartFChatting:
         # --- 时间有效，生成确认回复 ---
         formatted_time = remind_datetime.strftime("%Y-%m-%d %H:%M")
         confirm_extra_info = (
-            f'[预约提醒] 用户要求你在 {formatted_time} 提醒他"{remind_content}"。'
-            f"请回复确认你已了解这个预约提醒请求，并在回复中自然地提及你会在指定时间提醒。"
+            f'用户希望你在 {formatted_time} 提醒他"{remind_content}"。'
+            f"请自然地确认已记下这个提醒，并说明会在指定时间提醒。"
         )
 
         try:
@@ -2420,8 +2728,8 @@ class HeartFChatting:
 
         # --- 预生成提醒消息 ---
         reminder_extra_info = (
-            f'[定时提醒触发] 现在是 {formatted_time}，之前用户要求你在这个时间提醒他"{remind_content}"。'
-            f"请现在发送提醒消息，直接提醒用户该做的事情。语气亲切自然。"
+            f'现在是 {formatted_time}，用户先前希望你在这个时间提醒他"{remind_content}"。'
+            f"请直接、亲切地提醒用户这件事。"
         )
 
         remind_text = f"提醒你：{remind_content}"  # 默认兜底文本
@@ -2497,16 +2805,16 @@ class HeartFChatting:
 
         if len(matches) == 0:
             extra_info = (
-                f'[取消预约] 用户要求取消"{remind_content}"的提醒，'
-                f"但没有找到匹配的待执行预约。请告知用户当前没有这个提醒。"
+                f'用户要求取消"{remind_content}"的提醒，'
+                f"但没有找到匹配的待执行预约。请自然地告知用户当前没有这个提醒。"
             )
         elif len(matches) == 1:
             # 直接取消
             appt = matches[0]
             appointment_scheduler.cancel_by_id(appt["id"])
             extra_info = (
-                f'[取消预约成功] 已取消"{appt["remind_content"]}"的提醒'
-                f"（原定时间：{appt['remind_time_iso']}）。请确认告知用户已取消。"
+                f'已取消"{appt["remind_content"]}"的提醒'
+                f"（原定时间：{appt['remind_time_iso']}）。请自然地确认取消。"
             )
         else:
             # 多个匹配，列出让用户选择
@@ -2514,7 +2822,7 @@ class HeartFChatting:
             for appt in matches:
                 appt_list += f"- {appt['remind_content']}（时间：{appt['remind_time_iso']}）\n"
             extra_info = (
-                f'[取消预约] 用户要求取消"{remind_content}"的提醒，'
+                f'用户要求取消"{remind_content}"的提醒，'
                 f"但找到了多个匹配的预约：\n{appt_list}"
                 f"请询问用户具体要取消哪一个。"
             )
@@ -2622,8 +2930,8 @@ class HeartFChatting:
 
         # 生成确认回复
         confirm_extra_info = (
-            f"[用户屏蔽] 你已屏蔽该用户({target_name})的消息，持续15分钟。"
-            f"在此期间你将看不到该用户的任何消息。你需要告知该用户你刚刚屏蔽了他的消息。"
+            f"你已屏蔽用户（{target_name}）的消息 15 分钟，这段时间内不会看到他的消息。"
+            f"请自然地告知该用户你已屏蔽他的消息。"
         )
 
         reply_text = ""
@@ -2750,16 +3058,13 @@ class HeartFChatting:
             )
 
         ban_rules_extra_info = (
-            f"[禁言决策请求]\n"
-            f"Planner 认为应该禁言用户「{target_name}」(ID: {target_user_id})。\n"
-            f"Planner 给出的理由是：{planner_reason}\n\n"
-            f"**禁言规则**：\n{rules_text}\n\n"
-            f"**输出格式**：在你的回复中，必须包含以下JSON来表达你的决策（用```json包裹）：\n"
-            f"如果决定禁言：\n"
-            f'```json\n{{"ban_decision": true, "duration_minutes": <禁言分钟数>, "reply_to_user": "<你要对群里说的话>"}}\n```\n'
-            f"如果拒绝禁言：\n"
-            f'```json\n{{"ban_decision": false, "reply_to_user": "<你要对群里说的话>"}}\n```\n'
-            f"注意：reply_to_user 是你想在群聊中发送的话（可以是告诫、警告，或者解释为什么不禁言等）。"
+            f"请结合群聊上下文，独立判断是否应禁言用户「{target_name}」（ID：{target_user_id}）。\n"
+            f"Planner 建议禁言的理由是：{planner_reason}\n\n"
+            f"请遵循以下禁言规则：\n{rules_text}\n\n"
+            f"请只输出一个 JSON 代码块，不要在代码块外附加文字，也不要增加、删除或改名字段。"
+            f"ban_decision 必须是布尔值，表示是否执行禁言。"
+            f"当 ban_decision 为 true 时，还必须提供 duration_minutes（1 到 1440 的整数）和 reply_to_user（将发送到群里的自然语言内容）；"
+            f"当 ban_decision 为 false 时，提供 reply_to_user，不要提供 duration_minutes。"
         )
 
         # 7. 调用 Replyer 生成决策
@@ -2974,7 +3279,7 @@ class HeartFChatting:
 
         # 生成确认回复
         action_desc = f"清除了{target_name}的头衔" if not title else f"将{target_name}的头衔设置为「{title}」"
-        confirm_extra_info = f"[头衔设置] 你刚刚{action_desc}。请自然地确认这个操作，告知用户头衔已设置成功。"
+        confirm_extra_info = f"你刚刚{action_desc}。请自然地确认这个操作，并告知用户处理结果。"
 
         reply_text = ""
         try:

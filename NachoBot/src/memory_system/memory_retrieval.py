@@ -1,6 +1,7 @@
 import time
 import json
 import asyncio
+import threading
 from typing import List, Dict, Any, Optional, Tuple
 from src.common.logger import get_logger
 from src.config.config import global_config, model_config
@@ -19,6 +20,8 @@ logger = get_logger("memory_retrieval")
 THINKING_BACK_NOT_FOUND_RETENTION_SECONDS = 36000  # 未找到答案记录保留时长
 THINKING_BACK_CLEANUP_INTERVAL_SECONDS = 3000  # 清理频率
 _last_not_found_cleanup_ts: float = 0.0
+_memory_retrieval_prompt_initialized = False
+_memory_retrieval_prompt_init_lock = threading.RLock()
 
 
 def _cleanup_stale_not_found_thinking_back() -> None:
@@ -45,6 +48,16 @@ def _cleanup_stale_not_found_thinking_back() -> None:
 
 def init_memory_retrieval_prompt():
     """初始化记忆检索相关的 prompt 模板和工具"""
+    global _memory_retrieval_prompt_initialized
+
+    # Keep explicit initialization behavior while serializing registration and
+    # recording success only after every tool and prompt is registered.
+    with _memory_retrieval_prompt_init_lock:
+        _register_memory_retrieval_prompts()
+        _memory_retrieval_prompt_initialized = True
+
+
+def _register_memory_retrieval_prompts() -> None:
     # 首先注册所有工具
     init_all_tools()
 
@@ -138,6 +151,22 @@ def init_memory_retrieval_prompt():
 """,
         name="memory_retrieval_react_final_prompt",
     )
+
+
+def ensure_memory_retrieval_prompt_initialized() -> None:
+    """Register memory tools/prompts once, retrying if registration fails."""
+
+    global _memory_retrieval_prompt_initialized
+    if _memory_retrieval_prompt_initialized:
+        return
+
+    with _memory_retrieval_prompt_init_lock:
+        if _memory_retrieval_prompt_initialized:
+            return
+        init_memory_retrieval_prompt()
+        # Also set after the call so a patched initializer or compatible
+        # replacement still records a completed initialization here.
+        _memory_retrieval_prompt_initialized = True
 
 
 def _log_conversation_messages(
@@ -1113,6 +1142,7 @@ async def build_memory_retrieval_prompt(
     Returns:
         str: 记忆检索结果字符串
     """
+    ensure_memory_retrieval_prompt_initialized()
     start_time = time.time()
 
     # 构造日志前缀：[聊天流名称]，用于在日志中标识聊天流（优先群名称/用户昵称）

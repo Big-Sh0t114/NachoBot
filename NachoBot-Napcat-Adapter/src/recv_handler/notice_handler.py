@@ -22,6 +22,7 @@ from ncnk_message import (
     build_system_event,
     build_system_event_route,
 )
+from ncnk_message.offline_recovery import normalize_original_timestamp
 
 from src.utils import (
     get_group_info,
@@ -284,7 +285,8 @@ class NoticeHandler:
     async def handle_notice(self, raw_message: dict) -> None:
         notice_type = raw_message.get("notice_type")
         sub_type = raw_message.get("sub_type")
-        message_time: float = time.time()
+        received_at = time.time()
+        original_timestamp, timestamp_source = normalize_original_timestamp(raw_message.get("time"), received_at)
 
         raw_group_id = raw_message.get("group_id")
         raw_user_id = raw_message.get("user_id")
@@ -415,6 +417,10 @@ class NoticeHandler:
         additional_config = {
             "target_id": target_id,
             "system_event": system_event,
+            "notice_timestamp": {
+                "original_timestamp": original_timestamp,
+                "timestamp_source": timestamp_source,
+            },
         }
         if not group_info and event_meta.get("system_event_route") is not None:
             additional_config["system_event_route"] = event_meta["system_event_route"]
@@ -422,7 +428,7 @@ class NoticeHandler:
         message_info = BaseMessageInfo(
             platform=global_config.nachobot_server.platform_name,
             message_id="notice",
-            time=message_time,
+            time=received_at,
             # 系统事件没有 message sender。真实操作者仅存在于 system_event.actor。
             user_info=None,
             group_info=group_info,

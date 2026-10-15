@@ -81,6 +81,7 @@ class RemoteLive2DController:
         self._send_lock = asyncio.Lock()
         self._pending_requests: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._capabilities: set[str] = set()
+        self._legacy_pcm_compat_logged = False
         self._degradation_logged: set[str] = set()
 
     @property
@@ -134,6 +135,7 @@ class RemoteLive2DController:
                 pass
         self._active_websocket = None
         self._capabilities.clear()
+        self._legacy_pcm_compat_logged = False
         self.logger.info("Remote Live2D controller stopped")
 
     async def on_message_received(self, message: Any = None) -> None:
@@ -371,6 +373,7 @@ class RemoteLive2DController:
                     self._active_websocket = websocket
                     self._capabilities.clear()
                     self._ready.clear()
+                    self._legacy_pcm_compat_logged = False
                     self._connected.set()
                     self.logger.info("Connected to standalone Live2D adapter")
                     sender = asyncio.create_task(self._sender_loop(websocket))
@@ -401,6 +404,7 @@ class RemoteLive2DController:
                 self._ready.clear()
                 self._active_websocket = None
                 self._capabilities.clear()
+                self._legacy_pcm_compat_logged = False
                 self._fail_pending(Live2DRemoteError("Live2D connection closed"))
                 audio_player = getattr(self.adapter, "audio_player", None)
                 if audio_player is not None:
@@ -473,8 +477,25 @@ class RemoteLive2DController:
                     for name, enabled in capabilities.items()
                     if enabled
                     and str(name)
-                    in {"prepare_reply", "apply_control", "voice_stream_pcm"}
+                    in {"prepare_reply", "apply_control"}
                 }
+                pcm_flag_present = "voice_stream_pcm" in capabilities
+                if pcm_flag_present:
+                    if capabilities["voice_stream_pcm"] is True:
+                        self._capabilities.add("voice_stream_pcm")
+                elif (
+                    payload.get("protocol_version") == "1.1"
+                    and payload.get("running") is True
+                    and capabilities.get("prepare_reply") is True
+                    and capabilities.get("apply_control") is True
+                ):
+                    self._capabilities.add("voice_stream_pcm")
+                    if not self._legacy_pcm_compat_logged:
+                        self._legacy_pcm_compat_logged = True
+                        self.logger.info(
+                            "Live2D protocol 1.1 legacy ready omitted "
+                            "voice_stream_pcm; enabling known PCM compatibility"
+                        )
             else:
                 advertised = payload.get("commands")
                 self._capabilities = {

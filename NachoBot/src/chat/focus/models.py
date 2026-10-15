@@ -174,6 +174,30 @@ class StoredMessageRef:
 
 
 @dataclass(frozen=True, slots=True)
+class FocusRecoveryBatch:
+    """Explicit admitted replay rows frozen after adapter conversion drains."""
+
+    batch_id: str
+    chat_id: str
+    row_ids: tuple[int, ...]
+    min_original_timestamp: float
+    stable_order: int = 0
+    row_timestamps: tuple[float, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.batch_id or not self.chat_id:
+            raise ValueError("Focus recovery batch id and chat_id are required")
+        if not self.row_ids or any(isinstance(row_id, bool) or row_id <= 0 for row_id in self.row_ids):
+            raise ValueError("Focus recovery batches require positive row IDs")
+        if len(set(self.row_ids)) != len(self.row_ids):
+            raise ValueError("Focus recovery batch row IDs must be unique")
+        if self.min_original_timestamp <= 0:
+            raise ValueError("Focus recovery batch timestamp must be positive")
+        if self.row_timestamps and len(self.row_timestamps) != len(self.row_ids):
+            raise ValueError("Focus recovery batch row timestamps must match row IDs")
+
+
+@dataclass(frozen=True, slots=True)
 class FocusLease:
     group_id: str
     chat_id: str
@@ -218,6 +242,9 @@ class FocusTurn:
     read_through_row_id: int
     events: tuple[FocusEventSnapshot, ...] = ()
     handoff_ids: tuple[str, ...] = ()
+    recovery_batch: FocusRecoveryBatch | None = None
+    recovery_target_chat_id: str | None = None
+    recovered_row_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,6 +253,8 @@ class TurnOutcome:
     consumed_through_row_id: int | None = None
     delivered_event_revisions: Mapping[str, int] | None = None
     requeue: WakeReason = WakeReason.NONE
+    recovery_delivered: bool | None = None
+    recovery_dropped: bool = False
 
 
 @dataclass(frozen=True, slots=True)

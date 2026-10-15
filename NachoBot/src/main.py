@@ -40,6 +40,9 @@ class MainSystem:
 
     async def initialize(self):
         """初始化系统组件"""
+        from ncnk_message import set_core_startup_boundary
+
+        set_core_startup_boundary(time.time())
         logger.info(f"正在唤醒{global_config.bot.nickname}......")
 
         # 其他初始化任务
@@ -155,6 +158,16 @@ class MainSystem:
             PLATFORM_API_RESPONSE_TYPE,
             handle_platform_api_response,
         )
+        from src.chat.offline_recovery import offline_recovery_manager
+
+        self.app.register_custom_message_handler(
+            "offline_recovery_progress",
+            offline_recovery_manager.handle_progress_message,
+        )
+        self.app.register_custom_message_handler(
+            "offline_history_run",
+            offline_recovery_manager.handle_history_run_message,
+        )
 
         await check_and_run_migrations()
 
@@ -164,6 +177,15 @@ class MainSystem:
 
         await events_manager.handle_nacho_events(event_type=EventType.ON_START)
         # logger.info("已触发 ON_START 事件")
+
+        from src.chat.offline_recovery import offline_recovery_manager
+
+        restored_history_holds = offline_recovery_manager.restore_open_history_runs()
+        if restored_history_holds:
+            logger.info("Restored durable offline history run holds count=%s", restored_history_holds)
+        restored_history_rows = offline_recovery_manager.restore_pending_deliveries()
+        if restored_history_rows:
+            logger.info("Restored durable offline history recovery rows count=%s", restored_history_rows)
 
         # 恢复待执行的预约提醒
         from src.chat.heart_flow.appointment_scheduler import appointment_scheduler
@@ -181,8 +203,10 @@ class MainSystem:
         """关闭系统组件"""
         from src.chat.focus.bootstrap import focus_bootstrap
         from src.chat.heart_flow.heartflow import heartflow
+        from src.chat.offline_recovery import offline_recovery_manager
 
         await focus_bootstrap.begin_shutdown()
+        await offline_recovery_manager.shutdown()
         await heartflow.stop_all()
         await focus_bootstrap.stop()
         logger.info("Focus and Heartflow runtimes stopped")

@@ -1,5 +1,7 @@
 import re
 import json
+import hashlib
+import math
 import traceback
 from typing import Union
 
@@ -9,12 +11,279 @@ from .chat_stream import ChatStream
 from src.chat.focus.models import StoredMessageRef
 from src.chat.json_reply_delivery import prepare_json_envelope_delivery
 from src.chat.runtime_capabilities import runtime_capabilities_from_message
+from ncnk_message.qq_history_identity import positive_qq_id, validate_qq_private_identity
 from .message import MessageSending, MessageRecv
 
 logger = get_logger("message_storage")
 
 
+def _positive_timestamp(value) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) and number > 0 else None
+
+
+def _legacy_qq_alias_row_matches(row, delivery: dict) -> bool:
+    """Prove an old SnowLuma row matches a NapCat QQNT-derived alias exactly."""
+
+    identity = validate_qq_private_identity(
+        delivery.get("qq_identity"),
+        backend=delivery.get("backend"),
+        account_id=delivery.get("account_id"),
+        platform=delivery.get("platform"),
+        session_kind=delivery.get("session_kind"),
+        session_id=delivery.get("session_id"),
+        message_id=delivery.get("message_id"),
+        original_timestamp=delivery.get("original_timestamp"),
+    )
+    if identity is None or delivery.get("backend") != "napcat" or "native_nt_seq" not in identity:
+        return False
+    account_id = identity["account_id"]
+    peer_id = identity["peer_id"]
+    message_id = identity["snow_message_id"]
+    original_timestamp = _positive_timestamp(delivery.get("original_timestamp"))
+    if original_timestamp is None:
+        return False
+    if (
+        str(getattr(row, "chat_info_platform", "") or "") != "qq"
+        or getattr(row, "chat_info_group_id", None) is not None
+        or positive_qq_id(getattr(row, "chat_info_user_id", None)) != peer_id
+        or str(getattr(row, "chat_info_user_platform", "") or "") != "qq"
+        or positive_qq_id(getattr(row, "user_id", None)) != peer_id
+        or str(getattr(row, "user_platform", "") or "") != "qq"
+        or str(getattr(row, "message_id", "")).strip() != message_id
+        or _positive_timestamp(getattr(row, "time", None)) != original_timestamp
+    ):
+        return False
+    config = getattr(row, "additional_config", None)
+    if isinstance(config, str):
+        try:
+            config = json.loads(config)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+    offline = config.get("offline_recovery") if isinstance(config, dict) else None
+    stored_delivery = offline.get("delivery") if isinstance(offline, dict) else None
+    if not isinstance(stored_delivery, dict) or _positive_timestamp(offline.get("original_timestamp")) != original_timestamp:
+        return False
+    expected_scope = (
+        "snowluma",
+        account_id,
+        "qq",
+        "private",
+        peer_id,
+        message_id,
+    )
+    stored_scope = (
+        str(stored_delivery.get("backend") or "").strip(),
+        positive_qq_id(stored_delivery.get("account_id")),
+        str(stored_delivery.get("platform") or "").strip(),
+        str(stored_delivery.get("session_kind") or "").strip(),
+        positive_qq_id(stored_delivery.get("session_id")),
+        str(stored_delivery.get("message_id") or "").strip(),
+    )
+    if stored_scope != expected_scope:
+        return False
+    encoded = json.dumps(expected_scope, ensure_ascii=False, separators=(",", ":"))
+    expected_key = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    return str(stored_delivery.get("delivery_key") or "").strip() == expected_key
+
+
+def _qq_alias_row_matches_scope(row, scope: dict, identity: dict) -> bool:
+    """Require explicit same-account delivery metadata for an alias row."""
+
+    stamp = _positive_timestamp(scope.get("original_timestamp"))
+    peer_id = positive_qq_id(scope.get("session_id"))
+    if (
+        stamp is None
+        or peer_id is None
+        or str(getattr(row, "chat_info_platform", "") or "") != "qq"
+        or getattr(row, "chat_info_group_id", None) is not None
+        or positive_qq_id(getattr(row, "chat_info_user_id", None)) != peer_id
+        or str(getattr(row, "chat_info_user_platform", "") or "") != "qq"
+        or positive_qq_id(getattr(row, "user_id", None)) != identity["sender_id"]
+        or str(getattr(row, "user_platform", "") or "") != "qq"
+        or str(getattr(row, "message_id", "")).strip() != str(scope.get("message_id") or "")
+        or _positive_timestamp(getattr(row, "time", None)) != stamp
+    ):
+        return False
+    raw_config = getattr(row, "additional_config", None)
+    if isinstance(raw_config, str):
+        try:
+            raw_config = json.loads(raw_config)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+    offline = raw_config.get("offline_recovery") if isinstance(raw_config, dict) else None
+    stored_delivery = offline.get("delivery") if isinstance(offline, dict) else None
+    if (
+        not isinstance(stored_delivery, dict)
+        or _positive_timestamp(offline.get("original_timestamp")) != stamp
+    ):
+        return False
+    expected = (
+        str(scope.get("backend") or ""),
+        positive_qq_id(scope.get("account_id")),
+        "qq",
+        "private",
+        peer_id,
+        str(scope.get("message_id") or ""),
+        str(scope.get("delivery_key") or ""),
+    )
+    actual = (
+        str(stored_delivery.get("backend") or "").strip(),
+        positive_qq_id(stored_delivery.get("account_id")),
+        str(stored_delivery.get("platform") or "").strip(),
+        str(stored_delivery.get("session_kind") or "").strip(),
+        positive_qq_id(stored_delivery.get("session_id")),
+        str(stored_delivery.get("message_id") or "").strip(),
+        str(stored_delivery.get("delivery_key") or "").strip(),
+    )
+    return actual == expected
+
+
 class MessageStorage:
+    @staticmethod
+    def find_existing_ingress(delivery: dict) -> StoredMessageRef | None:
+        """Find an exact scoped row, with compatibility for untagged legacy rows."""
+
+        try:
+            message_id = str(delivery.get("message_id") or "").strip()
+            platform = str(delivery.get("platform") or "").strip()
+            session_id = str(delivery.get("session_id") or "").strip()
+            kind = str(delivery.get("session_kind") or "").strip()
+            if not message_id or not platform or not session_id or kind not in {"group", "private"}:
+                return None
+            qq_identity = validate_qq_private_identity(
+                delivery.get("qq_identity"),
+                backend=delivery.get("backend"),
+                account_id=delivery.get("account_id"),
+                platform=platform,
+                session_kind=kind,
+                session_id=session_id,
+                message_id=message_id,
+                original_timestamp=delivery.get("original_timestamp"),
+            )
+            if qq_identity is not None and str(delivery.get("backend") or "").strip() == "napcat":
+                legacy_matches = []
+                alias_conditions = (
+                    (Messages.message_id == qq_identity["snow_message_id"])
+                    & (Messages.chat_info_platform == "qq")
+                    & Messages.chat_info_group_id.is_null(True)
+                    & (Messages.chat_info_user_id == qq_identity["peer_id"])
+                )
+                for legacy_row in Messages.select().where(alias_conditions).order_by(Messages.time.desc(), Messages.id.desc()):
+                    if _legacy_qq_alias_row_matches(legacy_row, delivery):
+                        legacy_matches.append(legacy_row)
+                        if len(legacy_matches) > 1:
+                            return None
+                if legacy_matches:
+                    legacy_row = legacy_matches[0]
+                    return StoredMessageRef(
+                        row_id=int(legacy_row.id),
+                        chat_id=str(legacy_row.chat_id),
+                        message_id=str(legacy_row.message_id),
+                        message_time=float(legacy_row.time),
+                    )
+
+            if qq_identity is not None:
+                from src.chat.message_receive.history_delivery import history_delivery_store
+
+                alias_scopes = history_delivery_store.qq_native_delivery_scopes(delivery)
+                alias_refs: dict[int, StoredMessageRef] = {}
+                for alias_scope in alias_scopes:
+                    alias_conditions = (
+                        (Messages.message_id == alias_scope["message_id"])
+                        & (Messages.chat_info_platform == "qq")
+                        & Messages.chat_info_group_id.is_null(True)
+                        & (Messages.chat_info_user_id == alias_scope["session_id"])
+                    )
+                    for alias_row in Messages.select().where(alias_conditions):
+                        if _qq_alias_row_matches_scope(alias_row, alias_scope, qq_identity):
+                            alias_refs[int(alias_row.id)] = StoredMessageRef(
+                                row_id=int(alias_row.id),
+                                chat_id=str(alias_row.chat_id),
+                                message_id=str(alias_row.message_id),
+                                message_time=float(alias_row.time),
+                            )
+                if len(alias_refs) > 1:
+                    return None
+                if alias_refs:
+                    return next(iter(alias_refs.values()))
+            conditions = (Messages.message_id == message_id) & (Messages.chat_info_platform == platform)
+            if kind == "group":
+                conditions &= Messages.chat_info_group_id == session_id
+            else:
+                conditions &= Messages.chat_info_group_id.is_null(True)
+                conditions &= Messages.chat_info_user_id == session_id
+            expected_scope = (
+                str(delivery.get("backend") or "").strip(),
+                str(delivery.get("account_id") or "").strip(),
+                platform,
+                kind,
+                session_id,
+                message_id,
+                str(delivery.get("delivery_key") or "").strip(),
+            )
+            if not all(expected_scope):
+                return None
+            legacy_match = None
+            explicit_scope_conflict = False
+            rows = Messages.select().where(conditions).order_by(Messages.time.desc(), Messages.id.desc())
+            for row in rows:
+                raw_config = getattr(row, "additional_config", None)
+                if isinstance(raw_config, str) and raw_config.strip():
+                    try:
+                        raw_config = json.loads(raw_config)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        # A malformed explicit metadata column cannot prove
+                        # that this row belongs to the caller's account.
+                        explicit_scope_conflict = True
+                        continue
+                offline = raw_config.get("offline_recovery") if isinstance(raw_config, dict) else None
+                stored_delivery = offline.get("delivery") if isinstance(offline, dict) else None
+                if isinstance(offline, dict) and "delivery" in offline:
+                    if not isinstance(stored_delivery, dict):
+                        explicit_scope_conflict = True
+                        continue
+                    stored_scope = (
+                        str(stored_delivery.get("backend") or "").strip(),
+                        str(stored_delivery.get("account_id") or "").strip(),
+                        str(stored_delivery.get("platform") or "").strip(),
+                        str(stored_delivery.get("session_kind") or "").strip(),
+                        str(stored_delivery.get("session_id") or "").strip(),
+                        str(stored_delivery.get("message_id") or "").strip(),
+                        str(stored_delivery.get("delivery_key") or "").strip(),
+                    )
+                    if stored_scope != expected_scope:
+                        explicit_scope_conflict = True
+                        continue
+                    return StoredMessageRef(
+                        row_id=int(row.id),
+                        chat_id=str(row.chat_id),
+                        message_id=str(row.message_id),
+                        message_time=float(row.time),
+                    )
+                elif qq_identity is None and legacy_match is None:
+                    # Existing rows from before scoped receipts have no
+                    # account metadata. Keep the historical platform/route/
+                    # message-ID dedup behavior for those rows only.
+                    legacy_match = row
+            row = None if explicit_scope_conflict else legacy_match
+            if row is None:
+                return None
+            return StoredMessageRef(
+                row_id=int(row.id),
+                chat_id=str(row.chat_id),
+                message_id=str(row.message_id),
+                message_time=float(row.time),
+            )
+        except Exception:
+            logger.exception("Could not resolve an existing history delivery row")
+            raise
+
     @staticmethod
     def _outgoing_body_for_projection(message: MessageSending) -> str:
         """Read transport-facing text segments without adding reply context."""
