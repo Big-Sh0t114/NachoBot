@@ -4,8 +4,10 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-from src.chat.planner_actions.planner import ActionPlanner as _ActionPlanner
+from src.chat.planner_actions.planner import ActionPlanner as _ActionPlanner  # noqa: F401 - prime Replyer imports
 from src.chat.replyer.private_generator import PrivateReplyer
+from src.chat.runtime_capabilities import RuntimeCapabilities
+from src.plugins.built_in.tts_plugin.plugin import TTSAction
 from src.common.data_models.database_data_model import DatabaseMessages
 from src.plugin_system.base.base_action import BaseAction
 import src.chat.replyer.private_generator as private_generator_module
@@ -69,7 +71,7 @@ class PrivateSystemEventReplyerTests(unittest.TestCase):
         self.assertIsNone(action.user_nickname)
 
     def test_private_system_event_has_environment_prompt_without_peer_personalization(self):
-        async def exercise():
+        async def exercise(forced_voice=False):
             replyer = PrivateReplyer.__new__(PrivateReplyer)
             replyer.request_type = "replyer"
             replyer.chat_stream = SimpleNamespace(
@@ -138,12 +140,22 @@ class PrivateSystemEventReplyerTests(unittest.TestCase):
                 patch.object(private_generator_module, "Person") as person,
                 patch.object(private_generator_module, "build_memory_retrieval_prompt", new=AsyncMock(return_value="peer memory")) as memory_retrieval,
                 patch.object(private_generator_module.global_prompt_manager, "format_prompt", new=fake_format_prompt),
+                patch.object(private_generator_module, "runtime_capabilities_from_stream",
+                             return_value=RuntimeCapabilities(reply_delivery="tts_text" if forced_voice else "chunked")),
+                patch.object(TTSAction, "get_language_prompt_for_chat",
+                             new=AsyncMock(return_value="VOICE_LANGUAGE_FROM_CURRENT_CONFIG")) as language,
             ):
                 advanced_manager.is_on.return_value = False
                 result = await replyer.build_prompt_reply_context(
                     reply_message=reply_message,
                     person_profile_block="私聊路由用户的资料",
                 )
+                if forced_voice:
+                    language.assert_awaited_once_with(chat_id="qq_private_route-peer", target_id="route-peer",
+                                                    direct_reply=True, text_lang=None)
+                    self.assertIn("VOICE_LANGUAGE_FROM_CURRENT_CONFIG", captured_prompt["extra_info_block"])
+                else:
+                    language.assert_not_awaited()
 
             self.assertEqual(result.prompt, "prompt")
             reply_target_block = captured_prompt["reply_target_block"]
@@ -167,6 +179,7 @@ class PrivateSystemEventReplyerTests(unittest.TestCase):
             person.assert_not_called()
 
         asyncio.run(exercise())
+        asyncio.run(exercise(True))
 
     def test_system_event_tool_build_never_uses_private_peer_permissions(self):
         async def exercise():

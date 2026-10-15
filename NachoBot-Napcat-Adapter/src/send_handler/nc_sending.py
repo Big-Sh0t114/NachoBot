@@ -27,7 +27,7 @@ class NCMessageSender:
         """后台任务：不断从队列取出消息发送，强制进行安全间隔休眠"""
         while True:
             try:
-                payload, request_uuid, send_future, expected_connection = await self._send_queue.get()
+                payload, request_uuid, send_future, expected_connection, pre_send_check, identity_check = await self._send_queue.get()
                 try:
                     if send_future.cancelled():
                         continue
@@ -36,6 +36,27 @@ class NCMessageSender:
                         if not send_future.done():
                             send_future.set_result({"status": "error", "message": "stale_connection"})
                         continue
+                    if pre_send_check is not None:
+                        try:
+                            allowed = await asyncio.wait_for(pre_send_check(), timeout=5.0)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:
+                            allowed = False
+                        if allowed is not True:
+                            if not send_future.done():
+                                send_future.set_result({"status": "error", "message": "pre_send_check_failed"})
+                            continue
+                        if send_future.cancelled():
+                            continue
+                        try:
+                            identity_current = identity_check is None or identity_check() is True
+                        except Exception:
+                            identity_current = False
+                        if not identity_current or self.server_connection is not expected_connection:
+                            if not send_future.done():
+                                send_future.set_result({"status": "error", "message": "stale_connection"})
+                            continue
                     logger.debug(f"[Queue] 执行发送任务: {request_uuid}")
                     await expected_connection.send(payload)
                     if not send_future.done():
@@ -65,6 +86,8 @@ class NCMessageSender:
         *,
         timeout_sec: float | None = None,
         expected_connection: Server.ServerConnection | None = None,
+        pre_send_check=None,
+        identity_check=None,
     ) -> dict:
         request_uuid = str(uuid.uuid4())
         payload = json.dumps({"action": action, "params": params, "echo": request_uuid})
@@ -77,7 +100,7 @@ class NCMessageSender:
         send_future = loop.create_future()
 
         # 将任务塞入队列
-        await self._send_queue.put((payload, request_uuid, send_future, connection))
+        await self._send_queue.put((payload, request_uuid, send_future, connection, pre_send_check, identity_check))
 
         timeout_value = 10.0 if timeout_sec is None else max(1.0, float(timeout_sec))
 

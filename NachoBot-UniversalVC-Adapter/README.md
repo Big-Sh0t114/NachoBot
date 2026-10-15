@@ -50,6 +50,21 @@ uv sync
 uv run python main.py
 ```
 
+### 独立本机服务 API（可选）
+
+需要让外部适配器使用 UniversalVC 音频能力时，可单独启动本机 API 服务；现有 `main.py` 仍按旧的独立适配器方式运行。
+
+```powershell
+cd NachoBot-UniversalVC-Adapter
+if (-not (Test-Path service.toml)) { Copy-Item service.example.toml service.toml }
+# 编辑 service.toml，为 server.token 设置随机私密值
+.venv\Scripts\python.exe service_main.py --config service.toml
+```
+
+Windows 也可运行 `launch_universal_vc_service.bat`。该命令只启动 API 服务，不会运行旧适配器或自动安装依赖。默认地址为 `http://127.0.0.1:8016`，必须提供 bearer token。外部调用方每次创建 session 时显式指定目标进程/输入设备、输出设备、降噪、说话人识别和 `speaker_log`；未提供的 `denoise`、`speaker`、`speaker_log` 默认都是 `false`，不会读取旧 `config.toml` 中的这些选项。
+
+轻量客户端位于 `universalvc_service.client`，仅依赖 Python 标准库和 `aiohttp`。适配器可将本目录放进 `PYTHONPATH` 后导入 `UniversalVCClient`，不需要安装本项目的 Sherpa、ProcTap、NumPy 或声卡依赖。服务配置、完整 session 请求示例和 API wire contract 见 [`docs/service-design.md`](docs/service-design.md)。
+
 ## ⚙️ 配置文件 (`config.toml`) 亮点
 
 新版配置支持对流水线各个节点进行独立控制：

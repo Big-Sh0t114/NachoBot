@@ -13,7 +13,7 @@ import traceback
 from src.common.logger import get_logger
 from src.config.config import model_config
 from src.config.api_ada_configs import APIProvider, ModelInfo, TaskConfig
-from .payload_content.message import MessageBuilder, Message
+from .payload_content.message import MessageBuilder, Message, RoleType
 from .payload_content.resp_format import RespFormat
 from .payload_content.tool_option import ToolOption, ToolCall, ToolOptionBuilder, ToolParamType
 from .model_client.base_client import BaseClient, APIResponse, client_registry
@@ -407,6 +407,7 @@ class LLMRequest:
         tools: Optional[List[Dict[str, Any]]] = None,
         raise_when_empty: bool = True,
         interrupt_flag: Optional[asyncio.Event] = None,
+        system_prompt: Optional[str] = None,
     ) -> Tuple[str, Tuple[str, str, Optional[List[ToolCall]]]]:
         """
         异步生成响应
@@ -417,15 +418,22 @@ class LLMRequest:
             tools (Optional[List[Dict[str, Any]]]): 工具列表
             raise_when_empty (bool): 当响应为空时是否抛出异常
             interrupt_flag (asyncio.Event, optional): 外部中断信号，set时抛出ReqAbortException
+            system_prompt: 调用方持有的可信指令；用户内容继续放在prompt中
         Returns:
             (Tuple[str, str, str, Optional[List[ToolCall]]]): 响应内容、推理内容、模型名称、工具调用列表
         """
         start_time = time.time()
 
         def message_factory(client: BaseClient) -> List[Message]:
+            messages = []
+            if system_prompt:
+                messages.append(
+                    MessageBuilder().set_role(RoleType.System).add_text_content(system_prompt).build()
+                )
             message_builder = MessageBuilder()
             message_builder.add_text_content(prompt)
-            return [message_builder.build()]
+            messages.append(message_builder.build())
+            return messages
 
         tool_built = self._build_tool_options(tools)
 

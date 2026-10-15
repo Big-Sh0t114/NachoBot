@@ -8,6 +8,7 @@ weights are available before the public listener is marked ready.
 import logging
 import os
 import threading
+from unittest.mock import patch
 from typing import List, Tuple
 
 # Configure Hugging Face before Transformers is imported. Prefer predictable
@@ -30,6 +31,27 @@ def _hf_endpoints() -> list[str]:
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 from nachobot_multimodal.logger import logger
+
+_MODEL_LOAD_LOCK = threading.RLock()
+
+
+def _load_classifier_model(source, *, device, **kwargs):
+    if os.name != "nt" or device != "cpu":
+        return AutoModelForSequenceClassification.from_pretrained(source, **kwargs)
+    # Transformers 5.14 requests mmap slices. On Windows that reserves the
+    # whole writable checkpoint from system commit. safetensors' pread
+    # backend materializes the same tensor bytes without that reservation.
+    # The hook is scoped to this load and restored even when loading fails.
+    from transformers import modeling_utils
+    with _MODEL_LOAD_LOCK:
+        original = modeling_utils.safe_open
+
+        def read_file(*args, **options):
+            options["backend"] = "pread"
+            return original(*args, **options)
+
+        with patch.object(modeling_utils, "safe_open", read_file):
+            return AutoModelForSequenceClassification.from_pretrained(source, **kwargs)
 
 # 抑制 transformers pipeline 默认在 CPU 时的警告 "Device set to use cpu"
 logging.getLogger("transformers.pipelines.base").setLevel(logging.ERROR)
@@ -86,8 +108,9 @@ class EmotionClassifier:
                     self._model_name,
                     local_files_only=True,
                 )
-                model = AutoModelForSequenceClassification.from_pretrained(
+                model = _load_classifier_model(
                     self._model_name,
+                    device=self._device,
                     local_files_only=True,
                     **model_kwargs,
                 )
@@ -142,8 +165,9 @@ class EmotionClassifier:
                     snapshot_dir,
                     local_files_only=True,
                 )
-                model = AutoModelForSequenceClassification.from_pretrained(
+                model = _load_classifier_model(
                     snapshot_dir,
+                    device=self._device,
                     local_files_only=True,
                     **model_kwargs,
                 )

@@ -25,6 +25,7 @@ from ncnk_message import (
     build_system_event_route,
     get_core_token_from_env,
 )
+from qqcall_client.qqcall_service import QQCallPlatformBindingHeartbeat
 from ncnk_message.offline_recovery import normalize_original_timestamp
 from ncnk_message.qq_history_identity import resolve_qq_reply_segments
 
@@ -33,6 +34,7 @@ from .card_handler import parse_json_card, parse_share_card, parse_xml_card
 from .log_safety import safe_endpoint, safe_exception, segment_summary
 from .logger import custom_logger, logger
 from .snowluma_client import SnowLumaClient
+from .qqcall_runtime import create_snowluma_qqcall_runtime
 
 PLATFORM_API_REQUEST_TYPE = "platform_api_request"
 PLATFORM_API_RESPONSE_TYPE = "platform_api_response"
@@ -79,6 +81,21 @@ class SnowLumaBridge:
             self._platform_status,
             self._send_offline_recovery_progress,
         )
+        self.qqcall_runtime = create_snowluma_qqcall_runtime(
+            global_config.qqcall,
+            router=self.router,
+            client=self.client,
+            admission_check=self._admission_check,
+            platform=cfg.platform_name,
+        )
+        self.qqcall_heartbeat = None
+        if global_config.qqcall.platform_manifest_file:
+            self.qqcall_heartbeat = QQCallPlatformBindingHeartbeat(
+                adapter="snowluma",
+                manifest_file=global_config.qqcall.platform_manifest_file,
+                account_id=global_config.qqcall.account_id,
+            )
+        self._qqcall_heartbeat_task: asyncio.Task[Any] | None = None
         self._group_name_cache: dict[int, str] = {}
         self._member_cache: dict[tuple[int, int], dict[str, Any]] = {}
         self._http: ClientSession | None = None
@@ -120,6 +137,7 @@ class SnowLumaBridge:
 
         self.router.register_class_handler(self.handle_core_message)
         self.router.register_custom_message_handler(PLATFORM_API_REQUEST_TYPE, self.handle_platform_api_request)
+        self.router.register_custom_message_handler("qqcall_request", self.qqcall_runtime.handle_request)
         self.offline_history = get_offline_history_runtime(source_instance=self.client.source_instance)
         self.offline_history.bind(
             call_action=self._history_action,
@@ -132,16 +150,33 @@ class SnowLumaBridge:
         tasks = [
             self.router.run(),
             self.client.run(),
+            self.qqcall_runtime.run(),
             self.offline_history.monitor(
                 get_platform_state=self._history_platform_state,
                 router=self.router,
                 on_core_generation=lambda account_id: self._platform_status(True, account_id),
             ),
         ]
+        if self.qqcall_heartbeat is not None:
+            self._qqcall_heartbeat_task = asyncio.create_task(
+                self.qqcall_heartbeat.run(self._qqcall_platform_state),
+                name="snowluma-qqcall-platform-heartbeat",
+            )
+            tasks.append(self._qqcall_heartbeat_task)
         await asyncio.gather(*tasks)
 
     async def stop(self) -> None:
         logger.info("SnowLuma bridge stopping")
+        if self.qqcall_heartbeat is not None:
+            await self.qqcall_heartbeat.stop()
+            heartbeat_task = self._qqcall_heartbeat_task
+            if heartbeat_task is not None and heartbeat_task is not asyncio.current_task():
+                try:
+                    await asyncio.wait_for(asyncio.shield(heartbeat_task), timeout=3.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    heartbeat_task.cancel()
+                    await asyncio.gather(heartbeat_task, return_exceptions=True)
+        await self.qqcall_runtime.stop()
         if self.offline_history is not None:
             await self.offline_history.stop()
         await self.client.stop()
@@ -150,6 +185,23 @@ class SnowLumaBridge:
             await self._http.close()
         logger.info("SnowLuma bridge stopped")
 
+    def _qqcall_platform_state(self) -> dict[str, Any]:
+        snapshot = self.client.connection_snapshot()
+        generation = self.client.connection_generation
+        if snapshot is None:
+            return {
+                "connected": False,
+                "account_id": "",
+                "identity": (),
+                "connection_generation": generation,
+            }
+        websocket, connection_generation, account_id = snapshot
+        return {
+            "connected": self.client.connection_is_current(snapshot),
+            "account_id": account_id,
+            "identity": (id(websocket), connection_generation, account_id),
+            "connection_generation": connection_generation,
+        }
 
     def _history_platform_state(self) -> dict[str, Any]:
         snapshot = self.client.connection_snapshot()
@@ -1181,6 +1233,8 @@ class SnowLumaBridge:
             )
 
     async def handle_core_message(self, raw_message_base_dict: dict[str, Any]) -> None:
+        if await self.qqcall_runtime.intercept_outbound(raw_message_base_dict):
+            return
         logger.debug("SnowLuma Core outbound dispatch start keys={}", ",".join(sorted(raw_message_base_dict)) or "-")
         try:
             message_base = MessageBase.from_dict(raw_message_base_dict)

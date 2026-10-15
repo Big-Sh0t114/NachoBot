@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nachobot-qqcall-pcm"
+version = "0.1.0"
+description = "QQCall-only bounded PCM transport for verified virtual audio routes"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "nachobot-qqcall-client",
+    "PyAudioWPatch>=0.2.12.8; sys_platform == 'win32'",
+]
+
+[tool.setuptools]
+packages = ["qqcall_pcm"]
+
+[tool.uv.sources]
+nachobot-qqcall-client = { path = "sdk", editable = true }
+nachobot-universalvc-client = { path = "../NachoBot-UniversalVC-Adapter/sdk", editable = true }

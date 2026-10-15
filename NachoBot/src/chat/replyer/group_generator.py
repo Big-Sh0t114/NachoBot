@@ -16,6 +16,7 @@ from src.config.config import global_config, model_config
 from src.llm_models.utils_model import LLMRequest
 from src.llm_models.exceptions import ReqAbortException
 from src.mcp.access import access_context_from_stream
+from src.mcp.types import MCPAccessContext
 from src.chat.message_receive.message import UserInfo, Seg, MessageRecv, MessageSending
 from src.chat.message_receive.chat_stream import ChatStream
 from src.chat.runtime_capabilities import runtime_capabilities_from_stream
@@ -106,7 +107,9 @@ class DefaultReplyer:
                 model_set = declared_model_set
         if getattr(self, "request_type", "replyer") == "file_edit":
             model_set = getattr(model_config.model_task_config, "file_edit", model_set)
-        return LLMRequest(model_set=model_set, request_type=getattr(self, "request_type", "replyer"))
+        from src.llm_models.request_cache import cached_replyer_request
+        return cached_replyer_request(self, model_set=model_set, request_type=getattr(self, "request_type", "replyer"),
+                                      config=model_config, factory=LLMRequest)
 
     def __init__(
         self,
@@ -540,6 +543,7 @@ class DefaultReplyer:
         *,
         sandbox_source_message_id: str = "",
         sandbox_group_id: Optional[str] = None,
+        actorless_anonymous: bool = False,
     ) -> ToolInfoResult:
         """构建工具信息块
 
@@ -583,15 +587,18 @@ class DefaultReplyer:
                     except Exception as e:
                         logger.debug(f"URL解析失败: {e}")
 
-                # Check if tools (including web search check) are disabled
-                tools_disabled = False
-                try:
-                    if self.chat_stream.context and self.chat_stream.context.message:
-                        add_conf = self.chat_stream.context.message.message_info.additional_config
-                        if add_conf and isinstance(add_conf, dict) and add_conf.get("disable_tools"):
-                            tools_disabled = True
-                except Exception:
-                    pass
+                # The stream context can still point at a prior ordinary
+                # sender while a verified anonymous speaker is being routed.
+                # Do not inherit that prior message's tool-disable setting.
+                if not actorless_anonymous:
+                    tools_disabled = False
+                    try:
+                        if self.chat_stream.context and self.chat_stream.context.message:
+                            add_conf = self.chat_stream.context.message.message_info.additional_config
+                            if add_conf and isinstance(add_conf, dict) and add_conf.get("disable_tools"):
+                                tools_disabled = True
+                    except Exception:
+                        pass
 
             # === 并行执行：搜索 + 工具判定 ===
             parallel_tasks = {}
@@ -605,29 +612,44 @@ class DefaultReplyer:
                 and capabilities.web_search_mode == "standard"
                 and self.web_search_manager.is_available
             )
-            mcp_access_context = access_context_from_stream(self.chat_stream, user_id)
+            group_info = getattr(self.chat_stream, "group_info", None)
+            group_id = sandbox_group_id or (str(getattr(group_info, "group_id", "") or "") if group_info else None)
+            if not capabilities.mcp_enabled or tools_disabled:
+                mcp_access_context = None
+            elif actorless_anonymous:
+                mcp_access_context = MCPAccessContext(
+                    user_id="",
+                    chat_id=str(group_id or ""),
+                    is_group=bool(group_id),
+                    is_admin=False,
+                )
+            else:
+                mcp_access_context = access_context_from_stream(self.chat_stream, user_id)
             mcp_catalog = (
                 self.mcp_executor.get_tool_catalog_summary(access_context=mcp_access_context)
-                if not tools_disabled
+                if capabilities.mcp_enabled and not tools_disabled
                 else ""
             )
             allow_mcp = bool(not tools_disabled and mcp_catalog)
-            actor_id = str(user_id or getattr(self.chat_stream.user_info, "user_id", "") or "")
+            actor_id = (
+                ""
+                if actorless_anonymous
+                else str(user_id or getattr(self.chat_stream.user_info, "user_id", "") or "")
+            )
             source_message_id = str(sandbox_source_message_id or "")
             context = getattr(self.chat_stream, "context", None)
             context_message = getattr(context, "message", None) if context else None
             context_info = getattr(context_message, "message_info", None)
-            if context_info is not None:
+            if context_info is not None and not actorless_anonymous:
                 source_message_id = source_message_id or str(getattr(context_info, "message_id", "") or "")
                 sender_info = getattr(context_info, "sender_info", None) or getattr(context_info, "user_info", None)
                 if not user_id:
                     actor_id = str(getattr(sender_info, "user_id", "") or actor_id)
-            group_info = getattr(self.chat_stream, "group_info", None)
-            group_id = sandbox_group_id or (str(getattr(group_info, "group_id", "") or "") if group_info else None)
             try:
                 file_edit_set = getattr(model_config.model_task_config, "file_edit", None)
                 sandbox_edit_available = bool(
-                    not mcp_only
+                    not actorless_anonymous
+                    and not mcp_only
                     and not tools_disabled
                     and sandbox_user_allowed(actor_id)
                     and getattr(file_edit_set, "model_list", None)
@@ -665,8 +687,11 @@ class DefaultReplyer:
                     bot_name=global_config.bot.nickname,
                 )
 
-            # 标准工具
-            if not mcp_only and not tools_disabled:
+            # The legacy executor injects its cached ChatStream into plugin
+            # tools, so it cannot safely handle an actorless anonymous row.
+            # Explicitly authorized MCP, URL, and web-search paths above remain
+            # available with the empty-user context for this turn.
+            if not actorless_anonymous and not mcp_only and not tools_disabled:
                 parallel_tasks["standard_tool"] = self.tool_executor.execute_from_chat_message(
                     sender=sender, target_message=target, chat_history=chat_history, return_details=False
                 )
@@ -682,6 +707,8 @@ class DefaultReplyer:
                     return_details=False,
                     access_context=mcp_access_context,
                 )
+            elif not capabilities.mcp_enabled:
+                logger.info("当前输入声明 mcp_enabled=False，跳过 MCP 目录、判定和调用")
             elif not mcp_catalog and not tools_disabled:
                 logger.info("当前用户没有获准使用的 MCP 工具，跳过 MCP 能力检查")
             else:
@@ -1071,9 +1098,13 @@ class DefaultReplyer:
         injection_detected = bool(prompt_context and prompt_context.injection_detected)
 
         reply_system_event = None
+        realtime_speaker_label = ""
+        actorless_anonymous = False
         if reply_message:
             reply_user_info = getattr(reply_message, "user_info", None)
             reply_system_event = get_system_event(reply_message)
+            from src.chat.realtime_speaker import stored_realtime_speaker
+
             if reply_system_event is None and reply_user_info is not None:
                 user_id = reply_user_info.user_id
                 person = Person(platform=platform, user_id=user_id)
@@ -1084,6 +1115,14 @@ class DefaultReplyer:
                     fallback="用户",
                 )
                 sender = person_name
+            elif reply_system_event is None and (speaker := stored_realtime_speaker(reply_message)) is not None:
+                # Anonymous cluster labels are presentation only. Keep sender
+                # empty so relationship/person lookup cannot promote the label
+                # into a user identity.
+                sender = ""
+                user_id = ""
+                realtime_speaker_label = speaker.label
+                actorless_anonymous = True
             else:
                 actor = reply_system_event.get("actor") if reply_system_event else None
                 actor_name = (
@@ -1249,6 +1288,7 @@ class DefaultReplyer:
                         if getattr(getattr(reply_message, "chat_info", None), "group_info", None)
                         else None
                     ),
+                    actorless_anonymous=actorless_anonymous,
                 ),
                 "tool_info",
             ),
@@ -1306,13 +1346,14 @@ class DefaultReplyer:
         keywords_reaction_prompt = await self.build_keywords_reaction_prompt(target)
 
         tts_language_prompt = ""
-        tts_selected = False
+        tts_capabilities = runtime_capabilities_from_stream(chat_stream)
+        tts_selected = tts_capabilities.reply_delivery == "tts_text"
         try:
             from src.plugins.built_in.tts_plugin.plugin import TTSAction
 
             tts_action_name = getattr(TTSAction, "action_name", "tts_action")
             if chosen_actions:
-                tts_selected = any(
+                tts_selected = tts_selected or any(
                     getattr(action_plan_info, "action_type", "") == tts_action_name
                     for action_plan_info in chosen_actions
                 )
@@ -1324,7 +1365,13 @@ class DefaultReplyer:
                 elif chat_stream.user_info and getattr(chat_stream.user_info, "user_id", None):
                     target_id = str(chat_stream.user_info.user_id)
 
-                tts_language_prompt = await TTSAction.get_language_prompt_for_chat(chat_id=chat_id, target_id=target_id)
+                language_options = (
+                    {"direct_reply": True, "text_lang": tts_capabilities.tts_language or None}
+                    if tts_capabilities.reply_delivery == "tts_text" else {}
+                )
+                tts_language_prompt = await TTSAction.get_language_prompt_for_chat(
+                    chat_id=chat_id, target_id=target_id, **language_options,
+                )
         except Exception as e:
             logger.debug(f"获取TTS语言提示失败: {e}")
 
@@ -1343,6 +1390,8 @@ class DefaultReplyer:
 
         if reply_system_event:
             reply_target_block = f"现在发生了系统事件：{target}。引起了你的注意"
+        elif realtime_speaker_label:
+            reply_target_block = f"现在匿名语音说话人「{realtime_speaker_label}」说：{target}。引起了你的注意"
         elif sender:
             if is_group_chat:
                 reply_target_block = f"现在{sender}说的:{target}。引起了你的注意"
@@ -1727,7 +1776,9 @@ class AdvancedGroupReplyer(DefaultReplyer):
             model_set = model_config.model_task_config.replyer
             if getattr(self, "request_type", "advanced_replyer") == "file_edit":
                 model_set = getattr(model_config.model_task_config, "file_edit", model_set)
-        return LLMRequest(model_set=model_set, request_type=getattr(self, "request_type", "advanced_replyer"))
+        from src.llm_models.request_cache import cached_replyer_request
+        return cached_replyer_request(self, model_set=model_set, request_type=getattr(self, "request_type", "advanced_replyer"),
+                                      config=model_config, factory=LLMRequest)
 
     def __init__(self, *args, **kwargs):
         kwargs.setdefault("request_type", "advanced_replyer")

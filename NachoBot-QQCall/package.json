@@ -1,0 +1,12 @@
+{
+  "name": "nachobot-qqcall-shim-probe",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Standalone QQ Kernel Agent, named-pipe probe, and explicit AVSDK Bridge controller",
+  "scripts": {
+    "test": "node --test --test-timeout=10000 tests/*.test.cjs",
+    "test:agent": "node --test --test-timeout=10000 tests/agent*.test.cjs",
+    "test:bridge": "node --test --test-timeout=10000 tests/bridge*.test.cjs",
+    "test:host": "node --test --test-timeout=10000 tests/host*.test.cjs"
+  }
+}

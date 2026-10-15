@@ -14,8 +14,15 @@ from src.llm_models.payload_content.message import Message
 from src.llm_models.utils_model import LLMRequest, RequestType
 from src.config.config import model_config
 from src.config.api_ada_configs import TaskConfig
+from src.llm_models.request_cache import LLMRequestCache
 
 logger = get_logger("llm_api")
+_request_cache = LLMRequestCache()
+
+
+def _request_for(model_set: TaskConfig, request_type: str) -> LLMRequest:
+    return _request_cache.get(model_set=model_set, request_type=request_type,
+                              config=model_config, factory=LLMRequest)
 
 # =============================================================================
 # LLM模型API函数
@@ -71,7 +78,7 @@ async def generate_with_model(
         logger.info(f"[LLMAPI] 使用模型集合 {model_name_list} 生成内容")
         logger.debug(f"[LLMAPI] 完整提示词: {prompt}")
 
-        llm_request = LLMRequest(model_set=model_config, request_type=request_type)
+        llm_request = _request_for(model_config, request_type)
 
         response, (reasoning_content, model_name, _) = await llm_request.generate_response_async(
             prompt, temperature=temperature, max_tokens=max_tokens
@@ -110,7 +117,7 @@ async def generate_with_model_with_tools(
         logger.info(f"[LLMAPI] 使用模型集合 {model_name_list} 生成内容")
         logger.debug(f"[LLMAPI] 完整提示词: {prompt}")
 
-        llm_request = LLMRequest(model_set=model_config, request_type=request_type)
+        llm_request = _request_for(model_config, request_type)
 
         response, (reasoning_content, model_name, tool_call) = await llm_request.generate_response_async(
             prompt, tools=tool_options, temperature=temperature, max_tokens=max_tokens
@@ -148,7 +155,7 @@ async def generate_with_model_with_tools_by_message_factory(
         model_name_list = model_config.model_list
         logger.info(f"[LLMAPI] 使用模型集合 {model_name_list} (message_factory模式) 生成内容")
 
-        llm_request = LLMRequest(model_set=model_config, request_type=request_type)
+        llm_request = _request_for(model_config, request_type)
         tool_built = llm_request._build_tool_options(tool_options)
 
         response, model_info = await llm_request._execute_request(

@@ -1,0 +1,57 @@
+# Canonical public QQCall configuration, schema 6.
+# [plugin].enabled is the only QQCall enable switch for Core, adapters, service, and audio.
+# Keep real account, identity, OneBot, device, and policy values in config.toml only.
+schema = 6
+
+[plugin]
+enabled = false
+
+[qqcall]
+adapter = "auto" # 自动发现；多个可用实例时优先 NapCat
+account_id = ""
+identity_file = ""
+runtime_dir = "../../../NachoBot-QQCall/.runtime/service"
+allow_planner_accept = false
+group_intent_model_task = "utils"
+group_intent_timeout_seconds = 10
+
+[qqcall.onebot]
+# 自动模式可留空；显式选择单一适配器时必须填写。
+url = ""
+token_file = ""
+
+[qqcall.paths]
+qq_exe = ""
+loader_root = "../../../NapCat.Shell"
+python_exe = "../../.venv/Scripts/python.exe"
+node_exe = "node"
+
+[qqcall.ports]
+host = 6111
+callback = 6110
+control = 6120
+
+[qqcall.audio]
+# Optional name overrides. Leave blank or omit this table to resolve the names
+# from the active endpoints already pinned by the native audio route guard.
+capture_device = ""
+playback_device = ""
+
+[qqcall.universal_api]
+url = "http://127.0.0.1:8016"
+token_file = ""
+
+[qqcall.policy]
+auto_accept = false
+
+[qqcall.peer_map]
+
+[qqcall.supervision]
+poll_interval_sec = 2
+retry_initial_sec = 2
+retry_max_sec = 30
+max_failures_per_generation = 3
+
+[qqcall.native]
+shim_variant = "recovery2"
+guard_config_file = ""

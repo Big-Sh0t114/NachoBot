@@ -426,6 +426,22 @@ class TTSVoiceStreamRelayTests(unittest.IsolatedAsyncioTestCase):
         with patch("src.chat.message_receive.uni_message_sender.get_global_api", return_value=api):
             self.assertFalse(await _send_message(message))
 
+    async def test_provider_rejected_audio_is_not_stored_or_reported_as_delivered(self):
+        from src.plugin_system.apis import delivery_api
+
+        message = _message(delivery_target={"kind": "session", "turn_id": "turn"})
+        message.message_info.platform = "example"
+        with patch.dict(delivery_api._providers), patch(
+            "src.chat.message_receive.uni_message_sender._relay_tts_text",
+            new=AsyncMock(return_value=False),
+        ):
+            delivery_api.register_delivery_provider(
+                "example", "session", AsyncMock(return_value=True), enabled=lambda: True,
+            )
+            self.assertFalse(await self.sender.send_message(message))
+        self.sender.storage.store_message.assert_not_awaited()
+        self.assertNotIn(EventType.AFTER_SEND, self.event_calls)
+
     async def test_false_chunk_send_aborts_without_buffered_replay(self):
         self.api.reject_event = "chunk"
 

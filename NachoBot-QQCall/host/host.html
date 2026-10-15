@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>QQCall AVSDK Host</title>
+</head>
+<body>
+  <embed id="avsdk" type="application/x-ppapi-avSDK" width="1" height="1">
+  <script>
+    "use strict";
+
+    const PLUGIN_READY_TIMEOUT_MS = 10000;
+    const PLUGIN_POLL_MS = 100;
+
+    window.__qqCallHostInvoke = (command, id, params, deadlineMs) => {
+      if (!Number.isSafeInteger(deadlineMs) || Date.now() >= deadlineMs) {
+        return { posted: false, code: "invoke_deadline_elapsed" };
+      }
+      const plugin = document.getElementById("avsdk");
+      if (!plugin || typeof plugin.postMessage !== "function") {
+        return { posted: false, code: "plugin_unavailable" };
+      }
+      try {
+        plugin.postMessage({ cmd: command, id, param: params });
+        return { posted: true, id, command };
+      } catch {
+        return { posted: false, code: "plugin_post_failed" };
+      }
+    };
+
+    window.addEventListener("load", () => {
+      const bridge = window.qqCallHostBridge;
+      const plugin = document.getElementById("avsdk");
+      let readySent = false;
+      let pollTimer = null;
+      const startedAt = Date.now();
+
+      const reportReady = () => {
+        const pluginFound = Boolean(plugin);
+        const hasPostMessage = Boolean(plugin && typeof plugin.postMessage === "function");
+        if (pluginFound && hasPostMessage) {
+          if (!readySent) {
+            readySent = true;
+            bridge?.reportReady({ pluginFound, hasPostMessage });
+          }
+          return;
+        }
+        if (Date.now() - startedAt >= PLUGIN_READY_TIMEOUT_MS) {
+          bridge?.reportReady({ pluginFound, hasPostMessage });
+          readySent = true;
+          return;
+        }
+        pollTimer = window.setTimeout(reportReady, PLUGIN_POLL_MS);
+      };
+
+      plugin?.addEventListener("message", (event) => {
+        if (!event.data || typeof event.data !== "object" || Array.isArray(event.data)) return;
+        try {
+          bridge?.publishOutput(event.data);
+        } catch {
+          bridge?.reportFailure("renderer_output_send_failed");
+        }
+      });
+
+      reportReady();
+      window.addEventListener("beforeunload", () => {
+        if (pollTimer !== null) window.clearTimeout(pollTimer);
+      }, { once: true });
+    });
+  </script>
+</body>
+</html>

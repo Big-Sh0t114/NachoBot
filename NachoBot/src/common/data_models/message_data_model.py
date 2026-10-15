@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import Optional, TYPE_CHECKING, List, Tuple, Union, Dict, Any
 from dataclasses import dataclass, field
 from enum import Enum
@@ -6,6 +8,7 @@ from . import BaseDataModel
 
 if TYPE_CHECKING:
     from .database_data_model import DatabaseMessages
+    from src.chat.realtime_speaker import RealtimeSpeakerContext
 
 
 @dataclass
@@ -24,10 +27,17 @@ class MessageAndActionModel(BaseDataModel):
     is_notify: bool = field(default=False)
     additional_config: Optional[str | dict] = None
     planner_alias: Optional[str] = field(default=None, compare=False, repr=False)
+    realtime_speaker: Optional[RealtimeSpeakerContext] = field(
+        default=None,
+        init=False,
+        compare=False,
+        repr=False,
+    )
+
     @classmethod
     def from_DatabaseMessages(cls, message: "DatabaseMessages", *, planner_alias: Optional[str] = None):
         user_info = getattr(message, "user_info", None)
-        return cls(
+        model = cls(
             chat_id=message.chat_id,
             time=message.time,
             user_id=getattr(user_info, "user_id", "") or "",
@@ -41,6 +51,10 @@ class MessageAndActionModel(BaseDataModel):
             additional_config=getattr(message, "additional_config", None),
             planner_alias=planner_alias,
         )
+        from src.chat.realtime_speaker import stored_realtime_speaker
+
+        model.realtime_speaker = stored_realtime_speaker(message)
+        return model
 
 
 class ReplyContentType(Enum):

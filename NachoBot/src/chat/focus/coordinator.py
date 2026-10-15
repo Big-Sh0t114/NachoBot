@@ -210,6 +210,7 @@ class _FocusGroupState:
     recovery_collecting: bool = False
     recovery_queue: list[FocusRecoveryBatch] = field(default_factory=list)
     recovered_row_ids: dict[str, set[int]] = field(default_factory=dict)
+    realtime_priority_rows: dict[str, list[int]] = field(default_factory=dict)
     recovery_retry_at: float = 0.0
 
 
@@ -573,6 +574,13 @@ class FocusCoordinator:
                 return SwitchResult(False, "stale source lease", lease, target_chat_id=batch.chat_id)
             if not state.recovery_queue or state.recovery_queue[0].batch_id != batch.batch_id:
                 return SwitchResult(False, "recovery queue head changed", lease, target_chat_id=batch.chat_id)
+            if self._realtime_priority_ingress_pending(state):
+                return SwitchResult(
+                    False,
+                    "realtime_priority_preempts_recovery",
+                    lease,
+                    target_chat_id=batch.chat_id,
+                )
             decision = self._policy.decide_switch(
                 state.definition,
                 lease.chat_id,
@@ -651,7 +659,7 @@ class FocusCoordinator:
             expected_event_revision=attention.revision,
             reasoning="Switching to the oldest-first offline recovery queue head.",
         )
-        result = await self.switch_chat(request, handoff)
+        result = await self.switch_chat(request, handoff, _preempt_if_realtime_pending=True)
         async with state.condition:
             if result.success:
                 if previous_attention is not None:
@@ -716,6 +724,8 @@ class FocusCoordinator:
         Priority promotion remains the normal rule. Distinct private sessions are
         additionally switched deterministically so equal PRIVATE priority cannot
         leave a newly active private chat waiting on a Gate or Planner decision.
+        Verified pending realtime rows also preempt an equal-priority group,
+        while retaining the same membership and handoff policy checks.
         """
 
         state = self._state_for_chat(source_chat_id)
@@ -750,7 +760,23 @@ class FocusCoordinator:
         private_to_private = (
             source_member.kind is ChatKind.PRIVATE and target_member.kind is ChatKind.PRIVATE
         )
-        return higher_priority or private_to_private
+        return higher_priority or private_to_private or self.has_pending_realtime_ingress(target_chat_id)
+
+    def has_pending_realtime_ingress(self, chat_id: str) -> bool:
+        """Require both routed rows and a still-valid provider session proof."""
+        state = self._state_for_chat(chat_id)
+        if state is None:
+            return False
+        routed = tuple(state.realtime_priority_rows.get(chat_id, ()))
+        if not routed:
+            return False
+        try:
+            from src.chat.realtime_ingress import realtime_ingress_manager
+
+            pending = set(realtime_ingress_manager.pending_row_ids(chat_id))
+            return bool(pending.intersection(routed))
+        except Exception:
+            return False
 
     async def is_current(self, lease: FocusLease) -> bool:
         state = self._groups.get(lease.group_id)
@@ -765,6 +791,7 @@ class FocusCoordinator:
         stored_ref: StoredMessageRef,
         *,
         offline_recovery_row: bool = False,
+        priority_realtime_session: bool = False,
     ) -> FocusDispatch:
         """Route a stored message without waking a background chat runtime."""
 
@@ -778,9 +805,24 @@ class FocusCoordinator:
             if state.phase in {FocusGroupPhase.STOPPING, FocusGroupPhase.STOPPED}:
                 return FocusDispatch(True, group_id, state.active_chat_id, False)
 
+            if priority_realtime_session:
+                try:
+                    from src.chat.realtime_ingress import realtime_ingress_manager
+
+                    priority_realtime_session = realtime_ingress_manager.is_active_message(
+                        message, stored_ref.chat_id
+                    )
+                except Exception:
+                    priority_realtime_session = False
+
+            if priority_realtime_session:
+                priority_rows = state.realtime_priority_rows.setdefault(stored_ref.chat_id, [])
+                if stored_ref.row_id not in priority_rows:
+                    priority_rows.append(stored_ref.row_id)
+
             prior_latest = state.latest_message_row.get(stored_ref.chat_id, 0)
             next_latest = max(prior_latest, stored_ref.row_id)
-            if not offline_recovery_row:
+            if not offline_recovery_row and not priority_realtime_session:
                 state.latest_live_message_row[stored_ref.chat_id] = max(
                     state.latest_live_message_row.get(
                         stored_ref.chat_id,
@@ -800,7 +842,7 @@ class FocusCoordinator:
                 state.active_chat_id = stored_ref.chat_id
                 state.epoch = next_epoch
                 state.latest_message_row[stored_ref.chat_id] = next_latest
-                if offline_recovery_row:
+                if offline_recovery_row and not priority_realtime_session:
                     return FocusDispatch(
                         managed=True,
                         group_id=group_id,
@@ -822,7 +864,7 @@ class FocusCoordinator:
 
             if stored_ref.chat_id == state.active_chat_id:
                 state.latest_message_row[stored_ref.chat_id] = next_latest
-                if offline_recovery_row:
+                if offline_recovery_row and not priority_realtime_session:
                     return FocusDispatch(
                         managed=True,
                         group_id=group_id,
@@ -843,7 +885,7 @@ class FocusCoordinator:
                 )
 
             state.latest_message_row[stored_ref.chat_id] = next_latest
-            if offline_recovery_row:
+            if offline_recovery_row and not priority_realtime_session:
                 return FocusDispatch(
                     managed=True,
                     group_id=group_id,
@@ -866,6 +908,7 @@ class FocusCoordinator:
 
             should_surface = may_emit and (
                 is_system_event
+                or priority_realtime_session
                 or force_ingress_preemption
                 or attention.visible
                 or attention.is_mentioned
@@ -902,7 +945,38 @@ class FocusCoordinator:
                 interrupt_active=force_ingress_preemption,
             )
 
+    def complete_realtime_priority_rows(self, chat_id: str, row_ids: Any) -> None:
+        """Retire direct-call IDs without changing Focus's ordinary row cursor."""
 
+        ids = {int(row_id) for row_id in row_ids if int(row_id) > 0}
+        if not ids:
+            return
+        for state in self._groups.values():
+            pending = state.realtime_priority_rows.get(chat_id)
+            if pending is None:
+                continue
+            remaining = [row_id for row_id in pending if row_id not in ids]
+            if remaining:
+                state.realtime_priority_rows[chat_id] = remaining
+            else:
+                state.realtime_priority_rows.pop(chat_id, None)
+
+    def clear_realtime_priority_rows(self, chat_id: str, row_ids: Any = ()) -> None:
+        """Drop call rows whose active scope was revoked or replaced."""
+
+        ids = {int(row_id) for row_id in row_ids if int(row_id) > 0}
+        for state in self._groups.values():
+            pending = state.realtime_priority_rows.get(chat_id)
+            if pending is None:
+                continue
+            if not ids:
+                state.realtime_priority_rows.pop(chat_id, None)
+                continue
+            remaining = [row_id for row_id in pending if row_id not in ids]
+            if remaining:
+                state.realtime_priority_rows[chat_id] = remaining
+            else:
+                state.realtime_priority_rows.pop(chat_id, None)
 
     async def wait_for_turn(self, chat_id: str) -> FocusTurn:
         state = self._state_for_chat(chat_id)
@@ -911,11 +985,57 @@ class FocusCoordinator:
 
         while True:
             async with state.condition:
-                await state.condition.wait_for(lambda: self._can_dispatch_or_stop(state, chat_id))
+                expiry_delay = self._realtime_priority_expiry_delay(chat_id)
+                try:
+                    if expiry_delay is None:
+                        await state.condition.wait_for(lambda: self._can_dispatch_or_stop(state, chat_id))
+                    else:
+                        await asyncio.wait_for(
+                            state.condition.wait_for(lambda: self._can_dispatch_or_stop(state, chat_id)),
+                            timeout=max(0.001, expiry_delay),
+                        )
+                except asyncio.TimeoutError:
+                    # Re-evaluate scoped call proof on the next pass. This
+                    # releases queued recovery even when the Adapter vanished
+                    # without a terminal lifecycle event or a later message.
+                    continue
                 if state.phase in {FocusGroupPhase.STOPPING, FocusGroupPhase.STOPPED}:
                     raise FocusStoppedError(f"Focus group {state.definition.group_id!r} is stopping")
 
-                if state.recovery_queue:
+                priority_targets = self._realtime_priority_targets(state)
+                if chat_id in priority_targets:
+                    cursor = state.committed_cursor.get(chat_id, 0)
+                    lease = FocusLease(state.definition.group_id, chat_id, state.epoch, uuid.uuid4().hex)
+                    turn = FocusTurn(
+                        lease=lease,
+                        wake_reason=WakeReason.LOCAL_MESSAGE,
+                        read_after_row_id=cursor,
+                        read_through_row_id=cursor,
+                        recovered_row_ids=tuple(sorted(state.recovered_row_ids.get(chat_id, ()))),
+                    )
+                    state.in_flight_turn = turn
+                    handoffs = ()
+                elif priority_targets and state.active_chat_id == chat_id:
+                    priority_events = tuple(
+                        event
+                        for event in self._undelivered_events(state)
+                        if event.target_chat_id in priority_targets
+                    )
+                    if not priority_events:
+                        raise RuntimeError("Realtime priority ingress has no Focus preemption event")
+                    cursor = state.committed_cursor.get(chat_id, 0)
+                    lease = FocusLease(state.definition.group_id, chat_id, state.epoch, uuid.uuid4().hex)
+                    turn = FocusTurn(
+                        lease=lease,
+                        wake_reason=WakeReason.FOCUS_EVENT | WakeReason.SWITCH_TARGET,
+                        read_after_row_id=cursor,
+                        read_through_row_id=cursor,
+                        events=priority_events[: self._max_events_per_turn],
+                        recovered_row_ids=tuple(sorted(state.recovered_row_ids.get(chat_id, ()))),
+                    )
+                    state.in_flight_turn = turn
+                    handoffs = ()
+                elif state.recovery_queue:
                     if self._has_ordinary_online_work(state, chat_id):
                         turn, handoffs = self._ordinary_turn(state, chat_id)
                     else:
@@ -1191,6 +1311,8 @@ class FocusCoordinator:
         self,
         request: SwitchChatRequest,
         handoff: FocusHandoff | None = None,
+        *,
+        _preempt_if_realtime_pending: bool = False,
     ) -> SwitchResult:
         """Commit a terminal event-directed switch with durable CAS fencing."""
 
@@ -1200,6 +1322,12 @@ class FocusCoordinator:
 
         target_chat_id: str | None = None
         async with state.condition:
+            if _preempt_if_realtime_pending and self._realtime_priority_ingress_pending(state):
+                return SwitchResult(
+                    False,
+                    "realtime_priority_preempts_recovery",
+                    request.lease,
+                )
             validation = self._validate_switch(state, request, handoff)
             if validation is not None:
                 return SwitchResult(False, validation, request.lease)
@@ -1638,22 +1766,79 @@ class FocusCoordinator:
             return False
         if state.in_flight_turn is not None:
             return False
+        priority_targets = self._realtime_priority_targets(state)
+        if chat_id in priority_targets:
+            return True
+        if priority_targets:
+            return any(
+                event.target_chat_id in priority_targets
+                for event in self._undelivered_events_for_dispatch(state)
+            )
         if state.recovery_collecting or state.recovery_queue:
             if self._has_ordinary_online_work(state, chat_id):
                 return True
             if state.recovery_collecting:
+                return False
+            if self._realtime_priority_active(chat_id):
                 return False
             return time.monotonic() >= state.recovery_retry_at
         if state.pending_wakes.get(chat_id, WakeReason.NONE):
             return True
         if self._has_ordinary_online_work(state, chat_id):
             return True
+        if self._realtime_priority_active(chat_id):
+            return False
         return False
 
+    @staticmethod
+    def _realtime_priority_active(chat_id: str) -> bool:
+        try:
+            from src.chat.realtime_ingress import realtime_ingress_manager
 
+            return realtime_ingress_manager.has_active_session(chat_id)
+        except Exception:
+            return False
 
+    @staticmethod
+    def _realtime_priority_expiry_delay(chat_id: str) -> float | None:
+        try:
+            from src.chat.realtime_ingress import realtime_ingress_manager
 
+            return realtime_ingress_manager.session_expiry_delay(chat_id)
+        except Exception:
+            return None
 
+    @staticmethod
+    def _realtime_priority_targets(state: _FocusGroupState) -> set[str]:
+        targets: set[str] = set()
+        for chat_id, row_ids in tuple(state.realtime_priority_rows.items()):
+            if not row_ids:
+                continue
+            try:
+                from src.chat.realtime_ingress import realtime_ingress_manager
+
+                if realtime_ingress_manager.has_active_session(chat_id):
+                    targets.add(chat_id)
+                else:
+                    state.realtime_priority_rows.pop(chat_id, None)
+            except Exception:
+                continue
+        return targets
+
+    @staticmethod
+    def _realtime_priority_ingress_pending(state: _FocusGroupState) -> bool:
+        try:
+            from src.chat.realtime_ingress import realtime_ingress_manager
+
+            return any(
+                realtime_ingress_manager.pending_row_ids(member.chat_id)
+                for member in state.definition.members
+            )
+        except Exception:
+            return False
+
+    def _undelivered_events_for_dispatch(self, state: _FocusGroupState) -> list[FocusEventSnapshot]:
+        return self._undelivered_events(state)
 
     @staticmethod
     def _release_deferred_wakes(state: _FocusGroupState) -> None:

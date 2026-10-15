@@ -80,6 +80,7 @@ _KAOMOJI_BARE_PATTERN = re.compile(
     r"|[Oo][Rr][Zz]"               # orz
     r"|[Oo][Tt][Zz]"               # OTZ
     r"|[Xx][Dd]"                    # XD
+    r"|≡ω≡"                        # bare cat face seen in voice replies
     r"|[>＞][_\.][<＜]"              # >_< >.<
     r")"
     r"(?![a-zA-Z0-9_])",

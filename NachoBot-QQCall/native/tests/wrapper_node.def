@@ -1,0 +1,5 @@
+LIBRARY wrapper.node
+EXPORTS
+  WrapperGetCbInfoImport
+  WrapperInvoke
+  WrapperInstallForeign

@@ -12,6 +12,10 @@ import toml
 
 
 ADAPTER_ROOT = Path(__file__).resolve().parents[1]
+if str(ADAPTER_ROOT) not in sys.path:
+    sys.path.insert(0, str(ADAPTER_ROOT))
+
+from scripts.tts_public_runtime import resolve_public_python
 
 
 def resolve_engine(config_path: Path, override: str = "") -> str:
@@ -47,8 +51,9 @@ def main() -> None:
 
     engine = resolve_engine(args.config, os.environ.get("NACHOBOT_TTS_ENGINE", ""))
     manager = ADAPTER_ROOT / "scripts" / "tts_runtime_manager.py"
+    public_python = resolve_public_python(engine, args.config, platform=os.name)
     command = [
-        sys.executable,
+        public_python,
         str(manager),
         "serve",
         "--engine",
@@ -57,13 +62,15 @@ def main() -> None:
         args.host,
         "--port",
         str(args.port),
+        "--config",
+        str(args.config),
     ]
     if args.backend_port is not None:
         command.extend(["--backend-port", str(args.backend_port)])
     if os.name == "nt":
         child = subprocess.run(command, check=False)
         raise SystemExit(child.returncode)
-    os.execv(sys.executable, command)
+    os.execv(public_python, command)
 
 
 if __name__ == "__main__":

@@ -73,6 +73,8 @@ from src.chat.offline_recovery import (
     merge_recovery_context_rows,
     recovery_row_id,
 )
+from src.chat.realtime_ingress import realtime_ingress_manager
+from src.chat.reply_generation_interrupt import interrupt_reply_generation, run_reply_generation
 from src.chat.focus.switch_action import (
     SWITCH_CHAT_ACTION,
     SwitchDisposition,
@@ -475,9 +477,13 @@ class HeartFChatting:
             + (f"\n详情: {'; '.join(timer_strings)}" if timer_strings else "")
         )
 
-    def signal_new_message(self, skip_interrupt: bool = False):
+    def signal_new_message(self, skip_interrupt: bool = False, *, priority_realtime: bool = False):
         """由消息处理器推送调用，通知有新消息到达。如果 Planner 正在执行则触发打断。"""
         self._last_message_received_at = time.time()
+        if priority_realtime:
+            interrupted = interrupt_reply_generation(self)
+            if interrupted:
+                logger.info("Verified realtime ingress interrupted Replyer count=%s", interrupted)
         if skip_interrupt or not getattr(global_config.chat, "planner_interrupt_enabled", True):
             return
         if self._planner_interrupt_flag is not None and not self._planner_interrupt_requested:
@@ -493,6 +499,36 @@ class HeartFChatting:
 
     async def _loopbody(self, focus_turn: FocusTurn | None = None):  # sourcery skip: hoist-if-from-if
         self._ensure_offline_recovery_state()
+        realtime_row_ids = realtime_ingress_manager.pending_row_ids(self.stream_id)
+        if realtime_row_ids and self._offline_recovery_batch is not None:
+            # A claimed history batch already owns this Focus/non-Focus turn.
+            # Release it for retry before the direct realtime path gets its own
+            # zero-width-cursor turn; otherwise call delivery could falsely
+            # acknowledge the historical batch.
+            if focus_turn is not None:
+                self._focus_turn_interrupted = True
+            return False
+        if realtime_row_ids:
+            realtime_messages = self._filter_blocked_users(
+                list(load_message_rows_by_ids(self.stream_id, realtime_row_ids)),
+                caller="realtime_live",
+            )
+            verified_messages = []
+            verified_row_ids = []
+            for message in realtime_messages:
+                if await realtime_ingress_manager.revalidate_message(message, self.stream_id):
+                    verified_messages.append(message)
+                    row_id = recovery_row_id(message)
+                    if row_id is not None:
+                        verified_row_ids.append(row_id)
+            if verified_messages:
+                if focus_turn is not None:
+                    self._focus_consumed_through_row_id = focus_turn.read_after_row_id
+                result = await self._observe(recent_messages_list=verified_messages, focus_turn=focus_turn)
+                realtime_ingress_manager.complete_rows(self.stream_id, verified_row_ids)
+                return result
+            realtime_ingress_manager.discard_rows(self.stream_id, realtime_row_ids)
+
         recovery_batch = self._offline_recovery_batch
         if recovery_batch is not None:
             recent_messages_list = list(
@@ -545,6 +581,9 @@ class HeartFChatting:
                 self.stream_id, recent_messages_list
             )
             recent_messages_list = offline_recovery_manager.filter_recovered_nonfocus(
+                self.stream_id, recent_messages_list
+            )
+            recent_messages_list = realtime_ingress_manager.filter_ordinary_messages(
                 self.stream_id, recent_messages_list
             )
         focus_has_actionable_work = _focus_turn_has_actionable_work(focus_turn, recent_messages_list)
@@ -825,7 +864,7 @@ class HeartFChatting:
         available_actions: Dict[str, ActionInfo],
         recent_messages: List["DatabaseMessages"] | None = None,
     ) -> ActionPlannerInfo | None:
-        """Immediately preempt the active session for a higher-priority event."""
+        """Preempt for higher priority or verified pending realtime ingress."""
 
         definition = coordinator.definition_for_chat(source_chat_id)
         if definition is None:
@@ -854,7 +893,11 @@ class HeartFChatting:
             if target is None:
                 continue
             target_priority = focus_session_priority(target)
-            if target_priority <= source_priority:
+            realtime_preemption = (
+                coordinator.has_pending_realtime_ingress(event.target_chat_id)
+                and coordinator.is_forced_ingress_preemption(source_chat_id, event.target_chat_id)
+            )
+            if target_priority <= source_priority and not realtime_preemption:
                 continue
 
             metadata_only = coordinator.policy.can_switch_without_handoff(
@@ -871,7 +914,10 @@ class HeartFChatting:
             if not decision.allowed:
                 continue
 
-            target_kind = "Planner bypass 会话" if HeartFChatting._focus_member_bypasses_planner(target) else "私聊"
+            target_kind = (
+                "实时语音会话" if realtime_preemption else
+                "Planner bypass 会话" if HeartFChatting._focus_member_bypasses_planner(target) else "私聊"
+            )
             action_data = {"event_id": event.event_id}
             if not metadata_only:
                 if not recent_results:
@@ -889,7 +935,8 @@ class HeartFChatting:
                 action_data["handoff"] = handoff
             return ActionPlannerInfo(
                 action_type=SWITCH_CHAT_ACTION,
-                reasoning=("Focus priority preemption: planner-bypass > private > normal-group"),
+                reasoning=("Focus verified realtime ingress" if realtime_preemption else
+                           "Focus priority preemption: planner-bypass > private > normal-group"),
                 action_data=action_data,
                 action_message=None,
                 available_actions=available_actions,
@@ -1255,6 +1302,10 @@ class HeartFChatting:
                     limit=_stepped_limit_hf,
                 )
                 message_list_before_now = offline_recovery_manager.filter_recovery_rows_from_context(
+                    self.stream_id,
+                    message_list_before_now,
+                )
+                message_list_before_now = realtime_ingress_manager.filter_ordinary_messages(
                     self.stream_id,
                     message_list_before_now,
                 )
@@ -1886,15 +1937,18 @@ class HeartFChatting:
         nonfocus_batch = None
         deferred_live_pending = False
         if focus_turn is None:
-            deferred_live_pending = offline_recovery_manager.has_pending_deferred_live_messages(self.stream_id)
-            if not deferred_live_pending:
-                nonfocus_batch = offline_recovery_manager.peek_nonfocus_batch(self.stream_id)
-                if nonfocus_batch is not None and not offline_recovery_manager.claim_nonfocus_batch(
-                    self.stream_id, nonfocus_batch.batch_id
-                ):
-                    nonfocus_batch = None
+            realtime_active = realtime_ingress_manager.has_active_session(self.stream_id)
+            if not realtime_active:
+                deferred_live_pending = offline_recovery_manager.has_pending_deferred_live_messages(self.stream_id)
+                if not deferred_live_pending:
+                    nonfocus_batch = offline_recovery_manager.peek_nonfocus_batch(self.stream_id)
+                    if nonfocus_batch is not None and not offline_recovery_manager.claim_nonfocus_batch(
+                        self.stream_id, nonfocus_batch.batch_id
+                    ):
+                        nonfocus_batch = None
             if (
-                nonfocus_batch is None
+                not realtime_active
+                and nonfocus_batch is None
                 and offline_recovery_manager.is_held(self.stream_id)
                 and not deferred_live_pending
             ):
@@ -2441,7 +2495,10 @@ class HeartFChatting:
                             action_planner_info.action_message
                         )
 
-                        success, llm_response = await generator_api.generate_reply(
+                        success, llm_response = await run_reply_generation(
+                            self, action_planner_info.action_message,
+                            None if trigger_capabilities.planner_bypass else self._planner_interrupt_flag,
+                            generator_api.generate_reply,
                             chat_stream=self.chat_stream,
                             reply_message=action_planner_info.action_message,
                             available_actions=available_actions,
@@ -2453,9 +2510,6 @@ class HeartFChatting:
                             from_plugin=False,
                             extra_info=injection_text,
                             person_profile_block=person_profile_block,
-                            interrupt_flag=(
-                                None if trigger_capabilities.planner_bypass else self._planner_interrupt_flag
-                            ),
                             reply_context=self._focus_reply_context(thinking_id),
                         )
 

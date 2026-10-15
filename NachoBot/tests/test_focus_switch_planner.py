@@ -1556,6 +1556,57 @@ class FocusSwitchPlannerRegressionTests(_PlannerTestMixin, unittest.TestCase):
             self.assertEqual(executed_actions[-1], "reply")
             self.assertIs(executed_targets[-1], message)
 
+            # A fresh QQCall utterance is isolated into its own direct batch.
+            # With a zero-width Focus cursor, the ordinary private stream's
+            # Replyer action still targets the new voice row directly.
+            voice_message = _Message(user_id="42", text="recognized call speech")
+            voice_message.message_id = "qqcall:voice:call-42:4:200"
+            voice_message.time = 2.0
+            voice_message.display_message = voice_message.processed_plain_text
+            voice_message.is_mentioned = False
+            voice_message.is_at = False
+            voice_message.additional_config = {
+                "qqcall_scope": {
+                    "serviceInstance": "01234567-89ab-4cde-8fab-0123456789ab",
+                    "hostGeneration": 2,
+                    "connectionGeneration": 3,
+                    "callId": "call-42",
+                    "callGeneration": 4,
+                },
+                "delivery_target": {
+                    "kind": "qqcall",
+                    "serviceInstance": "01234567-89ab-4cde-8fab-0123456789ab",
+                    "hostGeneration": 2,
+                    "connectionGeneration": 3,
+                    "callId": "call-42",
+                    "callGeneration": 4,
+                    "peer_user_id": "42",
+                },
+                "runtime_capabilities": {
+                    "schema_version": 1,
+                    "reply_delivery": "tts_text",
+                    "voice_stream": True,
+                    "planner_bypass": True,
+                },
+            }
+            voice_action_start = len(executed_actions)
+            on_plan_mock.reset_mock()
+            build_prompt_mock.reset_mock()
+            plan_mock.reset_mock()
+            prompt_fetch_mock.reset_mock()
+            self._run_async(
+                runtime._observe(
+                    recent_messages_list=[voice_message],
+                    focus_turn=focus_turn,
+                )
+            )
+            self.assertEqual(executed_actions[voice_action_start:], ["reply"])
+            self.assertIs(executed_targets[-1], voice_message)
+            on_plan_mock.assert_not_awaited()
+            build_prompt_mock.assert_not_awaited()
+            plan_mock.assert_not_awaited()
+            prompt_fetch_mock.assert_not_awaited()
+
     def test_system_event_capability_is_message_scoped_for_both_batch_orders(self):
         class _PlannerReached(RuntimeError):
             pass

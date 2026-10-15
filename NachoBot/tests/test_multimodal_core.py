@@ -515,7 +515,7 @@ class MultimodalCoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.model_usage["local-b"][2], 0)
 
         with patch.object(client_registry, "get_client_class_instance", return_value=object()):
-            second = await router.start_audio_stream()
+            await router.start_audio_stream()
         self.assertEqual(request.model_usage["local-b"][2], 1)
         await router.shutdown()
         self.assertEqual(local.stream_aborts, ["runtime-stream-1", "runtime-stream-1"])
@@ -608,6 +608,11 @@ class MultimodalCoreTests(unittest.IsolatedAsyncioTestCase):
             receiver.message_info.platform = "qq"
             await MessageRecv._process_single_segment(receiver, Seg(type="voice", data="YQ=="))
 
+            receiver.message_info.additional_config["precomputed_asr_scope"] = "opaque-qq-scope"
+            await MessageRecv._process_single_segment(receiver, Seg(type="voice", data="YQ=="))
+            receiver.message_info.platform = "unsupported-platform"
+            await MessageRecv._process_single_segment(receiver, Seg(type="voice", data="YQ=="))
+
         self.assertEqual(result, "processed")
         self.assertEqual(
             captured[:4],
@@ -620,7 +625,30 @@ class MultimodalCoreTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(captured[4], ("YQ==", "receipt-token", "discord", "opaque-scope"))
         self.assertEqual(captured[5], ("YQ==", None, "discord", None))
+        self.assertEqual(captured[6], ("YQ==", None, "qq", None))
+        self.assertEqual(captured[7], ("YQ==", "receipt-token", "qq", "opaque-qq-scope"))
         self.assertEqual(captured[-1], ("YQ==", None, None, None))
+
+    async def test_public_voice_entry_strips_unknown_receipt_scope_and_keeps_wav_fallback(self):
+        from src.chat.utils import utils_voice
+        captured = []
+
+        async def transcribe(data, **kwargs):
+            captured.append((data, kwargs))
+            return SimpleNamespace(text="wav fallback", degraded=False)
+
+        router = SimpleNamespace(transcribe=transcribe)
+        with patch.object(utils_voice.global_config.voice, "enable_asr", True), \
+                patch("src.multimodal.get_multimodal_router", return_value=router):
+            for platform in ("qq", "unsupported-platform"):
+                result = await utils_voice.get_voice_text("YQ==", precomputed_asr_result_id="receipt-token",
+                                                         precomputed_asr_context=platform,
+                                                         precomputed_asr_scope="opaque-scope")
+                self.assertIn("wav fallback", result)
+        self.assertEqual(captured[0], ("YQ==", {"precomputed_asr_result_id": "receipt-token",
+                                              "precomputed_asr_context": "qq",
+                                              "precomputed_asr_scope": "opaque-scope"}))
+        self.assertEqual(captured[1], ("YQ==", {"precomputed_asr_result_id": None, "precomputed_asr_context": ""}))
 
     async def test_local_client_reuses_and_closes_its_owned_http_pool(self):
         transport = _QueuedJsonHttpClient(
@@ -804,6 +832,33 @@ class MultimodalCoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(potato["ready"])
         self.assertFalse(potato["perception"]["required"])
         self.assertFalse(potato["tts"]["required"])
+
+    async def test_health_times_out_only_the_stalled_component_before_call_admission(self):
+        for stalled in ("tts", "perception"):
+            with self.subTest(stalled=stalled):
+                cancelled = asyncio.Event()
+
+                class StalledLocal(FakePerception):
+                    async def stall(self):
+                        try:
+                            await asyncio.Event().wait()
+                        finally:
+                            cancelled.set()
+
+                    async def health(self):
+                        return await self.stall() if stalled == "perception" else await super().health()
+
+                    async def tts_health(self):
+                        return await self.stall() if stalled == "tts" else await super().tts_health()
+
+                router = CoreMultimodalRouter(profile="full", local=StalledLocal(), remote=FakePerception())
+                result = await asyncio.wait_for(router.health(), timeout=3)
+                self.assertFalse(result["ready"])
+                self.assertFalse(result[stalled]["ready"])
+                self.assertEqual(result[stalled]["error"], "TimeoutError")
+                other = "perception" if stalled == "tts" else "tts"
+                self.assertTrue(result[other]["ready"])
+                self.assertTrue(cancelled.is_set())
 
     async def test_tts_health_requires_loaded_public_9880_model(self):
         active_http = _JsonHttpClient(

@@ -4,6 +4,7 @@ version = "0.2.0"
 description = "SnowLuma adapter for NachoBot Core using ncnk_message"
 requires-python = ">=3.11,<3.14"
 dependencies = [
+    "nachobot-qqcall-client",
     "aiohttp>=3.14.3,<4",
     "cryptography>=50.0.0",
     "fastapi>=0.140.13",
@@ -11,6 +12,16 @@ dependencies = [
     "starlette>=1.3.1",
     "uvicorn>=0.35.0",
 ]
+
+[project.optional-dependencies]
+qqcall-audio = [
+    "nachobot-qqcall-pcm",
+]
+
+[tool.uv.sources]
+nachobot-qqcall-client = { path = "../NachoBot-QQCall/sdk", editable = true }
+nachobot-universalvc-client = { path = "../NachoBot-UniversalVC-Adapter/sdk", editable = true }
+nachobot-qqcall-pcm = { path = "../NachoBot-QQCall", editable = true }
 
 [tool.ruff]
 line-length = 120

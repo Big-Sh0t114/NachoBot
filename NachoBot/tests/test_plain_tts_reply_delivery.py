@@ -14,10 +14,13 @@ import json
 import sys
 import traceback
 import unittest
+import uuid
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
+
+from structlog.contextvars import bound_contextvars
 
 
 CORE_ROOT = Path(__file__).resolve().parents[1]
@@ -120,6 +123,18 @@ class PlainTTSReplyCleanupTests(unittest.TestCase):
         for text in ("你好(´･ω･`)呀", "你好（´･ω･`）呀"):
             with self.subTest(text=text):
                 self.assertEqual("".join(clean(text).split()), "你好呀")
+
+    def test_bare_cat_face_is_removed_in_core_and_shared_tts_but_math_is_kept(self):
+        multimodal = _load_pure_module(
+            'offline_multimodal_text_cleaner',
+            CORE_ROOT.parent/'NachoBot-Multimodal-Adapter/src/utils/text_cleaner.py',
+        )
+        for clean in (self.tts_module.clean_tts_reply_text, multimodal.clean_text_for_tts):
+            for text, expected in (("≡ω≡", ""), ("听到了≡ω≡晚安", "听到了晚安"),
+                                   ("またね≡ω≡。", "またね。"),
+                                   ("a≡ω≡b", "a≡ω≡b"), ("x≡ω", "x≡ω")):
+                with self.subTest(clean=clean.__name__, text=text):
+                    self.assertEqual("".join(clean(text).split()), expected)
 
     def test_complete_kaomoji_groups_are_removed_standalone_attached_and_fullwidth(self):
         clean = self.tts_module.clean_tts_reply_text
@@ -366,6 +381,8 @@ class GeneratorPlainTTSModeTests(unittest.IsolatedAsyncioTestCase):
         cls.namespace = {
             "asyncio": asyncio,
             "json": json,
+            "uuid": uuid,
+            "bound_contextvars": bound_contextvars,
             "traceback": traceback,
             "logger": Mock(),
             "ReplySetModel": _ReplySet,

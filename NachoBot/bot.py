@@ -17,8 +17,12 @@ else:
     print("未找到.env文件，请确保程序所需的环境变量被正确设置")
     raise FileNotFoundError(".env 文件不存在，请创建并配置所需的环境变量")
 
+from src.common.numerical_runtime import configure_numerical_runtime
+
+configure_numerical_runtime()
+
 # 最早期初始化日志系统，确保所有后续模块都使用正确的日志格式
-from src.common.logger import initialize_logging, get_logger, shutdown_logging
+from src.common.logger import initialize_logging, get_logger, shutdown_logging  # noqa: E402
 
 initialize_logging()
 

@@ -42,6 +42,7 @@ _ASCII_EMOTICON = re.compile(
     rf"(?<![A-Za-z0-9]){_ASCII_FACE_BODY}(?![A-Za-z0-9])"
 )
 _SHRUG_EMOTICON = re.compile(r"¯\s*\\?_?\(\s*ツ\s*\)_?/\s*¯")
+_BARE_CAT_FACE = re.compile(r"(?<![A-Za-z0-9_])≡ω≡(?![A-Za-z0-9_])")
 _EMPTY_PARENS = re.compile(r"\(\s*\)|（\s*）")
 _ARM_GLYPHS = "٩۶งლوﾉノ╰╯╮╭づ"
 _ARMS_FACE_GROUP = re.compile(
@@ -66,6 +67,7 @@ def clean_tts_reply_text(text: str) -> str:
     cleaned = _CONTROL_TAG.sub(" ", cleaned)
     cleaned = _CONTROL_TOKEN.sub(" ", cleaned)
     cleaned = _SHRUG_EMOTICON.sub(" ", cleaned)
+    cleaned = _BARE_CAT_FACE.sub(" ", cleaned)
 
     def remove_parenthetical_face(match: re.Match[str]) -> str:
         if _is_face_body(match.group("group")):

@@ -12,6 +12,11 @@ from src.common.message.api import get_global_api
 from src.common.logger import get_logger
 from src.chat.message_receive.message import MessageSending, delivery_target_additional_config
 from src.chat.message_receive.outbound_echo import outbound_echo_registry
+from src.plugin_system.apis.delivery_api import (
+    DeliveryRejected,
+    requires_audio_success,
+    send_message,
+)
 from src.chat.message_receive.storage import MessageStorage
 from src.chat.utils.utils import truncate_message
 from src.chat.utils.utils import calculate_typing_time
@@ -103,7 +108,7 @@ async def _send_message(message: MessageSending, show_log=True) -> bool:
 
     try:
         # 直接调用API发送消息
-        send_result = await get_global_api().send_message(message)
+        send_result = await send_message(get_global_api(), message)
         if send_result is False:
             logger.warning(
                 "ncnk 未能将消息 '%s' 发往平台'%s'",
@@ -115,6 +120,9 @@ async def _send_message(message: MessageSending, show_log=True) -> bool:
             logger.info(f"已将消息  '{message_preview}'  发往平台'{message.message_info.platform}'")
         return True
 
+    except DeliveryRejected as exc:
+        logger.warning("Delivery was not acknowledged (%s)", str(exc))
+        return False
     except Exception as e:
         logger.error(f"发送消息   '{message_preview}'   发往平台'{message.message_info.platform}' 失败: {str(e)}")
         traceback.print_exc()
@@ -263,7 +271,7 @@ async def _send_direct_segment(message: MessageSending, segment: Seg) -> bool:
         ),
         message_segment=segment,
     )
-    return (await get_global_api().send_message(direct_message)) is not False
+    return await send_message(get_global_api(), direct_message)
 
 
 async def _close_tts_iterator(iterator) -> None:
@@ -387,6 +395,10 @@ async def _relay_tts_text(
         except asyncio.CancelledError:
             await _close_tts_iterator(iterator)
             raise
+        except DeliveryRejected:
+            await _close_tts_iterator(iterator)
+            await _best_effort_abort(message, stream_id, parent_message_id, chosen_spec)
+            return False
         except Exception as exc:
             await _close_tts_iterator(iterator)
             logger.info("TTS stream start send failed (%s); using buffered TTS", type(exc).__name__)
@@ -638,6 +650,8 @@ class UniversalMessageSender:
                             text,
                             text_lang or None,
                         ):
+                            if requires_audio_success(message):
+                                return False
                             break
 
             continue_flag, modified_message = await events_manager.handle_nacho_events(

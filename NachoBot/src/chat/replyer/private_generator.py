@@ -108,7 +108,9 @@ class PrivateReplyer:
                 model_set = declared_model_set
         if getattr(self, "request_type", "replyer") == "file_edit":
             model_set = getattr(model_config.model_task_config, "file_edit", model_set)
-        return LLMRequest(model_set=model_set, request_type=getattr(self, "request_type", "replyer"))
+        from src.llm_models.request_cache import cached_replyer_request
+        return cached_replyer_request(self, model_set=model_set, request_type=getattr(self, "request_type", "replyer"),
+                                      config=model_config, factory=LLMRequest)
 
     def __init__(
         self,
@@ -517,10 +519,12 @@ class PrivateReplyer:
             # 构建并行任务列表
             parallel_tasks = {}
 
-            mcp_access_context = None if system_event else access_context_from_stream(self.chat_stream)
+            capabilities = runtime_capabilities_from_stream(self.chat_stream)
+            mcp_enabled = capabilities.mcp_enabled and not system_event
+            mcp_access_context = access_context_from_stream(self.chat_stream) if mcp_enabled else None
             mcp_catalog = (
                 ""
-                if system_event
+                if not mcp_enabled
                 else self.mcp_executor.get_tool_catalog_summary(access_context=mcp_access_context)
             )
             allow_web_search = bool(not urls and self.web_search_manager.is_available)
@@ -597,6 +601,8 @@ class PrivateReplyer:
                     return_details=False,
                     access_context=mcp_access_context,
                 )
+            elif not capabilities.mcp_enabled:
+                logger.info("当前输入声明 mcp_enabled=False，跳过 MCP 目录、判定和调用")
             elif system_event:
                 logger.info("系统事件不继承私聊对象的 MCP 权限，跳过 MCP 能力检查")
             elif not mcp_catalog:
@@ -1151,13 +1157,14 @@ class PrivateReplyer:
         keywords_reaction_prompt = await self.build_keywords_reaction_prompt(target)
 
         tts_language_prompt = ""
-        tts_selected = False
+        tts_capabilities = runtime_capabilities_from_stream(chat_stream)
+        tts_selected = tts_capabilities.reply_delivery == "tts_text"
         try:
             from src.plugins.built_in.tts_plugin.plugin import TTSAction
 
             tts_action_name = getattr(TTSAction, "action_name", "tts_action")
             if chosen_actions:
-                tts_selected = any(
+                tts_selected = tts_selected or any(
                     getattr(action_plan_info, "action_type", "") == tts_action_name
                     for action_plan_info in chosen_actions
                 )
@@ -1169,7 +1176,13 @@ class PrivateReplyer:
                 elif chat_stream.user_info and getattr(chat_stream.user_info, "user_id", None):
                     target_id = str(chat_stream.user_info.user_id)
 
-                tts_language_prompt = await TTSAction.get_language_prompt_for_chat(chat_id=chat_id, target_id=target_id)
+                language_options = (
+                    {"direct_reply": True, "text_lang": tts_capabilities.tts_language or None}
+                    if tts_capabilities.reply_delivery == "tts_text" else {}
+                )
+                tts_language_prompt = await TTSAction.get_language_prompt_for_chat(
+                    chat_id=chat_id, target_id=target_id, **language_options,
+                )
         except Exception as e:
             logger.debug(f"获取TTS语言提示失败: {e}")
 

@@ -1,0 +1,16 @@
+LIBRARY QQNT.dll
+EXPORTS
+  napi_get_cb_info
+  napi_create_string_utf8
+  napi_run_script
+  napi_is_exception_pending
+  napi_get_and_clear_last_exception
+  napi_get_value_int32
+  MockConfigure
+  MockGetOriginalCalls
+  MockGetRunScriptCalls
+  MockGetClearCalls
+  MockGetPending
+  MockGetEnv
+  MockGetScriptLength
+  MockCopyScript

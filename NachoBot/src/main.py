@@ -204,8 +204,10 @@ class MainSystem:
         from src.chat.focus.bootstrap import focus_bootstrap
         from src.chat.heart_flow.heartflow import heartflow
         from src.chat.offline_recovery import offline_recovery_manager
+        from src.chat.realtime_ingress import realtime_ingress_manager
 
         await focus_bootstrap.begin_shutdown()
+        await realtime_ingress_manager.shutdown()
         await offline_recovery_manager.shutdown()
         await heartflow.stop_all()
         await focus_bootstrap.stop()

@@ -1,0 +1,21 @@
+[server]
+host = "127.0.0.1"
+port = 8016
+# Replace this value with a private random token before starting the service.
+token = "REPLACE_WITH_A_RANDOM_SECRET"
+
+[core]
+host = "127.0.0.1"
+port = 8000
+token = ""
+
+[models]
+vad_model_path = "models/silero_vad.onnx"
+speaker_model_path = "models/wespeaker_resnet34.onnx"
+speaker_db_root = "service_data/speakers"
+
+[resources]
+max_sessions = 8
+max_sources_per_session = 4
+max_total_sources = 32
+source_queue_size = 32

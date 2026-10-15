@@ -479,7 +479,7 @@ class MessageRecv(Message):
                         ) if receipt_scope is not None else None,
                         "precomputed_asr_context": platform,
                     }
-                    if receipt_scope:
+                    if platform is not None and receipt_scope:
                         voice_kwargs["precomputed_asr_scope"] = receipt_scope
                     return await get_voice_text(segment.data, **voice_kwargs)
                 return "[发了一段语音，网卡了加载不出来]"

@@ -168,7 +168,9 @@ class RealPlannerTargetFilteringTests(unittest.TestCase):
 
         global_bot_id = str(action_planner_module.global_config.bot.qq_account)
 
-        async def check_planner(planner_type, planner_module, *, messages, expect_shortcut=False):
+        async def check_planner(
+            planner_type, planner_module, *, messages, expect_shortcut=False, expected_execute_count=1
+        ):
             planner = object.__new__(planner_type)
             planner.chat_id = "planner-private"
             planner.log_prefix = "[planner-private]"
@@ -216,8 +218,8 @@ class RealPlannerTargetFilteringTests(unittest.TestCase):
                     stack.enter_context(patch.object(planner_module.global_config.focus, "mode", "off"))
                 actions, _ = await planner.plan(available_actions={}, allow_no_reply=True)
 
-            self.assertEqual(execute.await_count, 1)
-            return planner, actions, prompt_calls[0]
+            self.assertEqual(execute.await_count, expected_execute_count)
+            return planner, actions, prompt_calls[0] if prompt_calls else None
 
         async def exercise():
             for planner_type, planner_module in (
@@ -237,6 +239,30 @@ class RealPlannerTargetFilteringTests(unittest.TestCase):
                     self.assertEqual([message for _, message in prompt["message_id_list"]], [ordinary_text])
                     self.assertEqual(len(actions), 1)
                     self.assertIs(actions[0].action_message, ordinary_text)
+
+                latest_url = make_message("latest-url", "https://latest.example")
+                with self.subTest(planner=planner_type.__name__, scenario="latest-eligible-url-shortcut"):
+                    _, actions, _ = await check_planner(
+                        planner_type,
+                        planner_module,
+                        messages=[latest_url],
+                        expected_execute_count=0,
+                    )
+                    self.assertEqual(len(actions), 1)
+                    self.assertEqual(actions[0].action_type, "reply")
+                    self.assertIs(actions[0].action_message, latest_url)
+
+                latest_reminder = make_message("latest-reminder", "5 分钟后提醒我取文件")
+                with self.subTest(planner=planner_type.__name__, scenario="latest-eligible-reminder-shortcut"):
+                    _, actions, _ = await check_planner(
+                        planner_type,
+                        planner_module,
+                        messages=[latest_reminder],
+                        expected_execute_count=0,
+                    )
+                    self.assertEqual(len(actions), 1)
+                    self.assertEqual(actions[0].action_type, "make_appoint")
+                    self.assertIs(actions[0].action_message, latest_reminder)
 
                 url = make_message("old-url", "https://old.example")
                 reminder = make_message("old-reminder", "5 分钟后提醒我取文件")

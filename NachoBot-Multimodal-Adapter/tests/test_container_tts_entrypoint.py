@@ -61,6 +61,7 @@ class ContainerTtsEntrypointTests(unittest.TestCase):
             )
             config = root / "base.toml"
             config.write_text('[enabled_tts]\nenabled = ["Vox"]\n', encoding="utf-8")
+            (root / "vox.toml").write_text('[emotion]\nenabled=false\n', encoding="utf-8")
             wrapper = textwrap.dedent(
                 """
                 import importlib.util
@@ -123,6 +124,8 @@ class ContainerTtsEntrypointTests(unittest.TestCase):
                     "127.0.0.1",
                     "--port",
                     "19880",
+                    "--config",
+                    str(config),
                     "--backend-port",
                     "19881",
                 ],
@@ -146,10 +149,10 @@ class ContainerTtsEntrypointTests(unittest.TestCase):
                 "127.0.0.1",
                 "--port",
                 "19880",
-                "--backend-port",
-                "19881",
                 "--config",
                 str(config),
+                "--backend-port",
+                "19881",
             ]
             with mock.patch.object(sys, "argv", argv):
                 module.main()
@@ -164,6 +167,8 @@ class ContainerTtsEntrypointTests(unittest.TestCase):
                 "127.0.0.1",
                 "--port",
                 "19880",
+                "--config",
+                str(config),
                 "--backend-port",
                 "19881",
             ]

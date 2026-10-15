@@ -214,6 +214,67 @@ def test_action_waiting_for_send_lock_rejects_replaced_socket_before_send():
     asyncio.run(scenario())
 
 
+def test_action_pre_send_check_refusal_and_identity_replacement_never_send_and_clean_response_pool():
+    async def scenario():
+        client = SnowLumaClient(lambda _payload: _noop_status(False, ""), _noop_status)
+        original = FakeWebSocket()
+        client._ws = original
+        client._connection_generation = 31
+        client._connected_account_id = "90001"
+        client._identity_verified = True
+
+        async def refuse():
+            return False
+
+        with pytest.raises(RuntimeError, match="pre-send check refused"):
+            await client.call_action(
+                "send_private_msg",
+                {"user_id": 77, "message": "busy"},
+                expected_connection=(original, 31, "90001"),
+                pre_send_check=refuse,
+            )
+        assert original.sent == []
+        assert client._response_pool == {}
+        assert not client._send_lock.locked()
+
+        preflight_started = asyncio.Event()
+
+        async def wait_for_cancellation():
+            preflight_started.set()
+            await asyncio.Event().wait()
+
+        cancelled = asyncio.create_task(client.call_action(
+            "send_private_msg",
+            {"user_id": 77, "message": "busy"},
+            expected_connection=(original, 31, "90001"),
+            pre_send_check=wait_for_cancellation,
+        ))
+        await asyncio.wait_for(preflight_started.wait(), timeout=1.0)
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+        assert original.sent == []
+        assert client._response_pool == {}
+        assert not client._send_lock.locked()
+
+        async def replace_socket():
+            client._ws = FakeWebSocket()
+            client._connection_generation = 32
+            client._connected_account_id = "80002"
+            return True
+
+        with pytest.raises(RuntimeError, match="connection changed before send"):
+            await client.call_action(
+                "send_private_msg",
+                {"user_id": 77, "message": "busy"},
+                expected_connection=(original, 31, "90001"),
+                pre_send_check=replace_socket,
+            )
+        assert original.sent == []
+        assert client._response_pool == {}
+        assert not client._send_lock.locked()
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("change", ["socket", "account"])

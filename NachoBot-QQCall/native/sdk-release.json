@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "sdk_version": "10.0.26100.0",
+  "package_version": "10.0.26100.8249",
+  "packages": [
+    {
+      "id": "microsoft.windows.sdk.cpp",
+      "size": 160432822,
+      "sha512": "wVnN5KBDtxrTC38ZcpDMUsGeIbkUBjhJ+2BB1AX0E6YwUludqOQUhv9OxiZElyBbLI/EcyRt20ZPj32DLcThrA==",
+      "catalog": "https://api.nuget.org/v3/catalog0/data/2026.05.26.19.56.28/microsoft.windows.sdk.cpp.10.0.26100.8249.json"
+    },
+    {
+      "id": "microsoft.windows.sdk.cpp.x64",
+      "size": 52951912,
+      "sha512": "UOPLPnlH/Q+FX8l26uR87+wWPSoCQU9SwmoJe80FiAcZLp27kGl9H2D6gv2C7B3R1Wmos06MAzgqRKl134/NJg==",
+      "catalog": "https://api.nuget.org/v3/catalog0/data/2026.05.26.20.03.22/microsoft.windows.sdk.cpp.x64.10.0.26100.8249.json"
+    }
+  ]
+}

@@ -1,0 +1,3 @@
+source=NachoBot-UniversalVC-Adapter/universalvc_service/client.py
+sha256=bb77b7e3319aac138fa9ea58515064851bf21852bd1941d5767edcc8606e0b15
+status=frozen_public_sdk_static_copy

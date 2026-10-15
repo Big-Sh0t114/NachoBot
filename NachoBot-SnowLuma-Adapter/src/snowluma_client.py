@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import time
 from collections.abc import Awaitable, Callable, Mapping
@@ -553,6 +554,7 @@ class SnowLumaClient:
         *,
         timeout_sec: float | None = None,
         expected_connection: tuple[Any, ...] | None = None,
+        pre_send_check: Callable[[], Awaitable[bool] | bool] | None = None,
     ) -> dict[str, Any]:
         ws = expected_connection[0] if expected_connection else self._ws
         generation = (
@@ -592,6 +594,23 @@ class SnowLumaClient:
                     raise RuntimeError("SnowLuma action connection changed before send")
                 if expected_account and self._connected_account_id != expected_account:
                     raise RuntimeError("SnowLuma action account identity changed before send")
+                if pre_send_check is not None:
+                    try:
+                        checked = pre_send_check()
+                        if inspect.isawaitable(checked):
+                            checked = await asyncio.wait_for(checked, timeout=min(timeout_value, 4.0))
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        raise RuntimeError("SnowLuma action pre-send check failed") from None
+                    if checked is not True:
+                        raise RuntimeError("SnowLuma action pre-send check refused")
+                    # The check may await Control HTTP and adapter admission;
+                    # make socket/account identity the final fence before send.
+                    if self._ws is not ws or self._connection_generation != generation or ws.closed:
+                        raise RuntimeError("SnowLuma action connection changed before send")
+                    if expected_account and self._connected_account_id != expected_account:
+                        raise RuntimeError("SnowLuma action account identity changed before send")
                 await ws.send_str(json.dumps(payload, ensure_ascii=False))
             response = await asyncio.wait_for(future, timeout=timeout_value)
             if self._ws is not ws or self._connection_generation != generation or ws.closed:

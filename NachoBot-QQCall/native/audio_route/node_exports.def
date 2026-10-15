@@ -1,0 +1,2 @@
+EXPORTS
+    napi_register_module_v1
