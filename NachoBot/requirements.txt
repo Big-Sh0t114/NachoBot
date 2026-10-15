@@ -221,7 +221,7 @@ pygments==2.20.0
     #   rich
 pyjwt==2.13.0
     # via mcp
-pymongo==4.17.0
+pymongo==4.18.2
     # via nachobot
 pypinyin==0.55.0
     # via nachobot
