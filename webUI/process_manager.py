@@ -4392,7 +4392,7 @@ class ProcessManager:
         torch_index = (
             "https://download.pytorch.org/whl/cpu"
             if runtime == "cpu"
-            else "https://download.pytorch.org/whl/cu128"
+            else "https://download.pytorch.org/whl/cu126"
         )
         return cmd, str(adapter_dir), {
             "NACHOBOT_TTS_TORCH_INDEX": torch_index,

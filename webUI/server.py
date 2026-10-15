@@ -1292,8 +1292,10 @@ async def setup_configure_napcat(body: NapCatConfigRequest):
             )
         result = NapCatConfigurator.configure(body.napcat_dir, body.qq_account)
         logger.info(
-            "[Setup] napcat configure: configured=%s, skipped=%s, errors=%s",
-            result["configured"], result["skipped"], result["errors"]
+            "[Setup] napcat configure: configured_count=%d, skipped_count=%d, error_count=%d",
+            len(result.get("configured", [])),
+            len(result.get("skipped", [])),
+            len(result.get("errors", [])),
         )
         return result
     except HTTPException:

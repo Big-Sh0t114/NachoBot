@@ -204,16 +204,16 @@ class ChatManager:
         else:
             components = [platform, str(stream_user_info.user_id), "private"]  # type: ignore
 
-        # 使用MD5生成唯一ID
+        # MD5 is retained solely for stable persisted stream IDs; it is not used
+        # for authentication or integrity checks, and changing it breaks history lookup.
         key = "_".join(components)
-        # codeql[py/weak-sensitive-data-hashing]
         return hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()
 
     def get_stream_id(self, platform: str, id: str, is_group: bool = True) -> str:
         """获取聊天流ID"""
         components = [platform, id] if is_group else [platform, id, "private"]
         key = "_".join(components)
-        # codeql[py/weak-sensitive-data-hashing]
+        # Keep the same legacy stream-ID digest used by stored chat history.
         return hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()
 
     async def get_or_create_stream(

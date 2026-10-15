@@ -177,7 +177,7 @@ async def maintain(action: str, target: str = "", reason: str = "", core_running
             return result
         return {"success": getattr(result, "success", True), "details": str(result)}
     except asyncio.TimeoutError:
-        logger.warning("Memory maintain timed out: action=%s", action)
+        logger.warning("Memory maintain timed out: action=%s", _log_safe(action, max_len=40))
         return {"success": False, "error": "长期记忆维护请求超时"}
     except Exception as e:
         logger.error("Memory maintain failed: %s", _log_safe(e))
