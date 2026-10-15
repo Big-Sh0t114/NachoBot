@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -9,7 +11,6 @@ import unittest
 from unittest.mock import patch
 
 import httpx
-import toml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -21,6 +22,30 @@ _torch_stub = types.ModuleType("torch")
 _torch_stub.set_float32_matmul_precision = lambda _precision: None
 with patch.dict(sys.modules, {"numpy": _numpy_stub, "torch": _torch_stub}):
     from src.tts.backends.Vox import vox_api_server  # noqa: E402
+
+
+def _write_vox_config(path: Path, **preset_values: str) -> None:
+    lines = ["[tts.models.presets.default]"]
+    lines.extend(f"{key} = {json.dumps(value)}" for key, value in preset_values.items())
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _load_vox_server_without_external_toml():
+    source = PROJECT_ROOT / "src" / "tts" / "backends" / "Vox" / "vox_api_server.py"
+    module_name = "_vox_api_server_without_external_toml_test"
+    spec = importlib.util.spec_from_file_location(module_name, source)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not load Vox API source: {source}")
+    module = importlib.util.module_from_spec(spec)
+    stubs = {
+        "numpy": _numpy_stub,
+        "torch": _torch_stub,
+        "toml": None,
+        module_name: module,
+    }
+    with patch.dict(sys.modules, stubs):
+        spec.loader.exec_module(module)
+    return module
 
 
 class VoxPathSecurityTests(unittest.TestCase):
@@ -38,22 +63,10 @@ class VoxPathSecurityTests(unittest.TestCase):
             audio_file.write_bytes(b"audio")
             other_file.write_bytes(b"private")
             config_path = config_dir / "vox.toml"
-            config_path.write_text(
-                toml.dumps(
-                    {
-                        "tts": {
-                            "models": {
-                                "presets": {
-                                    "default": {
-                                        "ref_audio_path": str(audio_file),
-                                        "prompt_wav_path": str(configured_audio_dir / "prompt.wav"),
-                                    }
-                                }
-                            }
-                        }
-                    }
-                ),
-                encoding="utf-8",
+            _write_vox_config(
+                config_path,
+                ref_audio_path=str(audio_file),
+                prompt_wav_path=str(configured_audio_dir / "prompt.wav"),
             )
 
             roots = vox_api_server._configured_audio_roots(config_path)
@@ -83,19 +96,68 @@ class VoxPathSecurityTests(unittest.TestCase):
             target = outside / "private.wav"
             target.write_bytes(b"private")
             config_path = root / "vox.toml"
-            config_path.write_text(
-                '[tts.models.presets.default]\nref_audio_path = "allowed/reference.wav"\n',
-                encoding="utf-8",
-            )
             link = allowed / "reference.wav"
             try:
                 link.symlink_to(target)
             except (OSError, NotImplementedError):
                 self.skipTest("file symlinks are unavailable on this host")
-            roots = vox_api_server._configured_audio_roots(config_path)
-            self.assertIsNone(
-                vox_api_server._resolve_optional_audio_path(str(link), "reference", roots)
-            )
+            sibling = outside / "sibling.wav"
+            sibling.write_bytes(b"sibling")
+            normal = allowed / "normal.wav"
+            normal.write_bytes(b"normal")
+            for configured_value in ("allowed/reference.wav", str(link)):
+                _write_vox_config(config_path, ref_audio_path=configured_value)
+                roots = vox_api_server._configured_audio_roots(config_path)
+                self.assertEqual(roots, (allowed.resolve(),))
+                self.assertIsNone(
+                    vox_api_server._resolve_optional_audio_path(str(link), "reference", roots)
+                )
+                self.assertIsNone(
+                    vox_api_server._resolve_optional_audio_path(str(sibling), "reference", roots)
+                )
+                self.assertEqual(
+                    vox_api_server._resolve_optional_audio_path(str(normal), "reference", roots),
+                    str(normal.resolve()),
+                )
+
+    def test_configured_audio_roots_resolve_parent_not_symlink_leaf_on_all_platforms(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_dir = root / "config"
+            allowed = config_dir / "allowed"
+            outside = root / "outside"
+            config_dir.mkdir()
+            allowed.mkdir()
+            outside.mkdir()
+            lexical_leaf = allowed / "reference.wav"
+            outside_target = outside / "private.wav"
+            config_path = config_dir / "vox.toml"
+            _write_vox_config(config_path, ref_audio_path="allowed/reference.wav")
+
+            original_resolve = Path.resolve
+
+            def resolve_with_leaf_redirect(path: Path, strict: bool = False) -> Path:
+                if path == lexical_leaf:
+                    return outside_target
+                return original_resolve(path, strict=strict)
+
+            for configured_value in ("allowed/reference.wav", str(lexical_leaf)):
+                _write_vox_config(config_path, ref_audio_path=configured_value)
+                with patch.object(Path, "resolve", autospec=True, side_effect=resolve_with_leaf_redirect):
+                    roots = vox_api_server._configured_audio_roots(config_path)
+                self.assertEqual(roots, (allowed.resolve(),))
+
+    def test_raw_server_import_and_toml_parse_need_no_external_toml_package(self):
+        module = _load_vox_server_without_external_toml()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            audio_dir = root / "voices"
+            audio_dir.mkdir()
+            audio_path = audio_dir / "reference.wav"
+            audio_path.write_bytes(b"audio")
+            config_path = root / "vox.toml"
+            _write_vox_config(config_path, ref_audio_path="voices/reference.wav")
+            self.assertEqual(module._configured_audio_roots(config_path), (audio_dir.resolve(),))
 
     def test_tts_ingress_rejects_unbounded_delay_and_inference_ranges(self):
         async def request(path: str, **params):

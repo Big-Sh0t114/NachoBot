@@ -17,7 +17,14 @@ from nachobot_multimodal.utils.tts_runtime import TTSRuntime
 
 
 class _WeightModel:
-    def __init__(self, fail_sovits=False, gpt_path="old-gpt", sovits_path="old-sovits"):
+    def __init__(
+        self,
+        fail_sovits=False,
+        gpt_path="old-gpt",
+        sovits_path="old-sovits",
+        config_dir=None,
+    ):
+        self._config_dir = Path(config_dir) if config_dir is not None else Path(gpt_path).parent
         self.config = SimpleNamespace(
             tts=SimpleNamespace(
                 models=SimpleNamespace(
@@ -32,6 +39,13 @@ class _WeightModel:
         self._loaded_sovits_weights = "old-sovits"
         self.fail_sovits = fail_sovits
         self.calls = []
+
+    def _resolve_path(self, path):
+        # Exercise the production TTSModel resolver with this lightweight model
+        # fixture, without constructing the model or loading its dependencies.
+        from nachobot_multimodal.tts.backends.GPT_Sovits.tts_model import TTSModel
+
+        return TTSModel._resolve_path(self, path)
 
     def set_gpt_weights(self, path):
         self.calls.append(("gpt", path))
@@ -212,6 +226,97 @@ class FixedGptApiTests(unittest.TestCase):
                     api_server.tts_model = old_model
 
         asyncio.run(scenario())
+
+    def test_configured_weight_roots_do_not_expand_relative_or_absolute_symlink_leaves(self):
+        from nachobot_multimodal.tts.backends.GPT_Sovits import api_server
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_dir = root / "operator-config"
+            configured_dir = config_dir / "models"
+            outside_dir = root / "outside-models"
+            config_dir.mkdir()
+            configured_dir.mkdir()
+            outside_dir.mkdir()
+            escaped_target = outside_dir / "private.ckpt"
+            escaped_target.write_bytes(b"private")
+            sibling = outside_dir / "sibling.ckpt"
+            sibling.write_bytes(b"sibling")
+            normal = configured_dir / "normal.ckpt"
+            normal.write_bytes(b"normal")
+            configured_leaf = configured_dir / "active.ckpt"
+            try:
+                configured_leaf.symlink_to(escaped_target)
+            except (OSError, NotImplementedError):
+                self.skipTest("file symlinks are unavailable on this host")
+
+            model = _WeightModel(
+                gpt_path="models/active.ckpt",
+                sovits_path="models/active.pth",
+                config_dir=config_dir,
+            )
+            for configured_value in ("models/active.ckpt", str(configured_leaf)):
+                model.config.tts.models.presets["default"].gpt_model = configured_value
+                model.config.tts.models.presets["alt"].gpt_model = configured_value
+                roots = api_server._configured_weight_roots(model, "gpt_model")
+                self.assertEqual(roots, (configured_dir.resolve(),))
+                self.assertEqual(
+                    api_server._resolve_weight_file(
+                        str(normal), api_server.GPT_WEIGHT_SUFFIXES, "GPT", roots
+                    ),
+                    normal.resolve(),
+                )
+                for outside in (configured_leaf, sibling):
+                    with self.assertRaises(ValueError):
+                        api_server._resolve_weight_file(
+                            str(outside), api_server.GPT_WEIGHT_SUFFIXES, "GPT", roots
+                        )
+
+    def test_configured_weight_root_resolution_never_resolves_the_leaf_portably(self):
+        from nachobot_multimodal.tts.backends.GPT_Sovits import api_server
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_dir = root / "operator-config"
+            configured_dir = config_dir / "models"
+            outside_dir = root / "outside-models"
+            config_dir.mkdir()
+            configured_dir.mkdir()
+            outside_dir.mkdir()
+            configured_leaf = configured_dir / "active.ckpt"
+            outside_target = outside_dir / "private.ckpt"
+            model = _WeightModel(
+                gpt_path="models/active.ckpt",
+                sovits_path="models/active.pth",
+                config_dir=config_dir,
+            )
+            original_model_resolver = model._resolve_path
+            resolver_inputs = []
+
+            def record_production_resolver(path):
+                resolver_inputs.append(path)
+                return original_model_resolver(path)
+
+            original_resolve = Path.resolve
+
+            def resolve_with_leaf_redirect(path: Path, strict: bool = False) -> Path:
+                if path == configured_leaf:
+                    return outside_target
+                return original_resolve(path, strict=strict)
+
+            for configured_value in ("models/active.ckpt", str(configured_leaf)):
+                model.config.tts.models.presets["default"].gpt_model = configured_value
+                model.config.tts.models.presets["alt"].gpt_model = configured_value
+                resolver_inputs.clear()
+                with mock.patch.object(model, "_resolve_path", side_effect=record_production_resolver), mock.patch.object(
+                    Path, "resolve", autospec=True, side_effect=resolve_with_leaf_redirect
+                ):
+                    roots = api_server._configured_weight_roots(model, "gpt_model")
+                self.assertEqual(roots, (configured_dir.resolve(),))
+                if Path(configured_value).is_absolute():
+                    self.assertEqual(resolver_inputs, [])
+                else:
+                    self.assertEqual(resolver_inputs, ["models", "models"])
 
     def test_weight_path_rejects_parent_traversal_and_symlink_escape(self):
         from nachobot_multimodal.tts.backends.GPT_Sovits import api_server

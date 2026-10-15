@@ -17,7 +17,7 @@ import numpy as np
 import torch
 from typing import Optional, List
 from pathlib import Path
-import toml
+import tomllib
 
 # Direct execution puts this file's directory first on ``sys.path``.  Add the
 # adapter root so the shared helper is still imported through its stable
@@ -59,8 +59,9 @@ def _configured_audio_roots(config_path: str | Path) -> tuple[Path, ...]:
     """Resolve audio directories named by operator-owned Vox presets."""
     path = Path(config_path).expanduser().resolve(strict=False)
     try:
-        config = toml.load(str(path))
-    except Exception as exc:
+        with path.open("rb") as config_file:
+            config = tomllib.load(config_file)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
         logger.warning("Unable to load Vox path configuration (%s)", type(exc).__name__)
         return ()
 
@@ -87,7 +88,10 @@ def _configured_audio_roots(config_path: str | Path) -> tuple[Path, ...]:
             if not configured_path.is_absolute():
                 configured_path = path.parent / configured_path
             try:
-                roots.add(configured_path.resolve(strict=False).parent)
+                # Trust the configured directory boundary, not the resolved
+                # configured file. Resolving a symlinked leaf here would turn
+                # its outside target's parent into an allowed root.
+                roots.add(configured_path.parent.resolve(strict=False))
             except (OSError, RuntimeError, ValueError):
                 continue
     return tuple(sorted(roots))

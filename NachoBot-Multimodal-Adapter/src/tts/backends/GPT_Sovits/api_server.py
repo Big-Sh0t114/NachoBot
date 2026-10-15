@@ -46,14 +46,25 @@ def _configured_weight_roots(model: TTSModel, field_name: str) -> tuple[Path, ..
         return ()
 
     resolver = getattr(model, "_resolve_path", None)
+    config_dir = getattr(model, "_config_dir", None)
     roots: set[Path] = set()
     for preset in presets.values():
         configured_path = getattr(preset, field_name, "")
         if not isinstance(configured_path, (str, Path)) or not str(configured_path).strip():
             continue
         try:
-            resolved_text = resolver(str(configured_path)) if callable(resolver) else str(configured_path)
-            roots.add(Path(resolved_text).expanduser().resolve(strict=False).parent)
+            lexical_path = Path(str(configured_path)).expanduser()
+            if lexical_path.is_absolute():
+                configured_parent = lexical_path.parent
+            elif callable(resolver):
+                # Resolve only the configured parent. Resolving the leaf first
+                # would expand a configured symlink target into a new trust root.
+                configured_parent = Path(resolver(str(lexical_path.parent)))
+            elif config_dir is not None:
+                configured_parent = Path(config_dir).expanduser() / lexical_path.parent
+            else:
+                continue
+            roots.add(configured_parent.expanduser().resolve(strict=False))
         except (OSError, RuntimeError, ValueError):
             continue
     return tuple(sorted(roots))
