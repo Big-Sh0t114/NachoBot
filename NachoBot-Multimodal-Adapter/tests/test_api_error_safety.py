@@ -49,4 +49,3 @@ class ApiErrorSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["error"]["code"], "invalid_request")
         self.assertEqual(payload["error"]["message"], "invalid perception request")
         self.assertNotIn("model.bin", response.body.decode("utf-8"))
-

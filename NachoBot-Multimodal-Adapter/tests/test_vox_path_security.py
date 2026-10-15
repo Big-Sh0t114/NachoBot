@@ -157,4 +157,3 @@ class VoxPathSecurityTests(unittest.TestCase):
                 self.assertEqual(over_path.status_code, 422)
 
         asyncio.run(scenario())
-
