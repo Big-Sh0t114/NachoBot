@@ -285,7 +285,13 @@ class SnowLumaClient:
                 if not task.done():
                     task.cancel()
 
-    async def call_action(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+    async def call_action(
+        self,
+        action: str,
+        params: dict[str, Any],
+        *,
+        timeout_sec: float | None = None,
+    ) -> dict[str, Any]:
         ws = self._ws
         if ws is None or ws.closed:
             logger.warning("SnowLuma action rejected action={} reason=websocket_not_connected", action)
@@ -296,6 +302,10 @@ class SnowLumaClient:
         self._response_pool[echo] = future
         payload = {"action": action, "params": params, "echo": echo}
         started = time.monotonic()
+        timeout_value = max(
+            1.0,
+            float(global_config.snowluma.action_timeout_sec if timeout_sec is None else timeout_sec),
+        )
         logger.debug(
             "SnowLuma action start action={} echo={} param_keys={}",
             action,
@@ -307,7 +317,7 @@ class SnowLumaClient:
         try:
             async with self._send_lock:
                 await ws.send_str(json.dumps(payload, ensure_ascii=False))
-            response = await asyncio.wait_for(future, timeout=max(1.0, global_config.snowluma.action_timeout_sec))
+            response = await asyncio.wait_for(future, timeout=timeout_value)
             error = self.action_error(response)
             duration_ms = int((time.monotonic() - started) * 1000)
             if error:
@@ -335,7 +345,7 @@ class SnowLumaClient:
                 "SnowLuma action timeout action={} echo={} timeout_sec={}",
                 action,
                 short_echo(echo),
-                max(1.0, global_config.snowluma.action_timeout_sec),
+                timeout_value,
             )
             raise TimeoutError(f"SnowLuma action {action} 响应超时") from exc
         except asyncio.CancelledError:

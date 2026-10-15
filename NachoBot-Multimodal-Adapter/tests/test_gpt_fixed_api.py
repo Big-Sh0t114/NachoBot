@@ -118,7 +118,8 @@ class FixedGptApiTests(unittest.TestCase):
                 old_model = api_server.tts_model
                 old_output = api_server.OUTPUT_DIR
                 api_server._runtime = runtime
-                api_server.tts_model = None
+                # Lifespan publishes the eagerly initialized fixed client.
+                api_server.tts_model = model
                 api_server.OUTPUT_DIR = root / "outputs"
                 try:
                     result = await api_server.load_model(
@@ -154,7 +155,9 @@ class FixedGptApiTests(unittest.TestCase):
                 failed = _WeightModel(fail_sovits=True)
                 runtime = _Runtime(failed)
                 old_runtime = api_server._runtime
+                old_model = api_server.tts_model
                 api_server._runtime = runtime
+                api_server.tts_model = failed
                 try:
                     result = await api_server.load_model(
                         _Request({"gpt_path": str(gpt), "sovits_path": str(sovits)})
@@ -165,6 +168,7 @@ class FixedGptApiTests(unittest.TestCase):
                     self.assertTrue(runtime.invalidated)
                 finally:
                     api_server._runtime = old_runtime
+                    api_server.tts_model = old_model
 
         asyncio.run(scenario())
 

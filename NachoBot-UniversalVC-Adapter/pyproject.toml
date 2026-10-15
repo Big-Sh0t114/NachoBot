@@ -1,7 +1,7 @@
 [project]
 name = "nachobot-universalvc-adapter"
 version = "0.2.0"
-description = "NachoBot Universal Voice Channel Adapter - Real-time Denoise + Speaker Diarization + Streaming ASR"
+description = "NachoBot Universal Voice Channel Adapter - Real-time Denoise + Speaker Diarization + Core multimodal perception"
 requires-python = ">=3.11"
 dependencies = [
     "proc-tap",

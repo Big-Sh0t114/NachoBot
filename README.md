@@ -48,7 +48,7 @@
 <h2>🚀 快速开始</h2>
 
 <p>
-推荐环境为 Windows 10/11、Python 3.11 或 3.12；Discord 接入还需要 Node.js<br>
+推荐环境为 Windows 10/11、Python 3.11 或 3.12<br>
 首次同步依赖或下载本地模型会耗时较久
 </p>
 
@@ -90,7 +90,7 @@
 
 <tr>
 <td><code>launch_discord.bat</code></td>
-<td>Koishi 文字适配器 + DiscordVC</td>
+<td>单一原生 Discord 适配器，处理文字、私聊、线程、Slash 命令与语音</td>
 </tr>
 
 <tr>
@@ -104,7 +104,7 @@
 <p>
 三个 <code>launchbot*</code> 档位都支持 QQ/NapCat 与 QQ/SnowLuma 两条等价主链路；<br>
 选择 SnowLuma 时，脚本会先校验并启动项目内托管 Runtime，再启动 SnowLuma 适配器；<br>
-Bilibili、Discord 和 UniversalVC 按需另行启动
+Bilibili、Discord 和 UniversalVC 按需另行启动。Discord 文字与语音共用同一个适配器进程。
 </p>
 
 
@@ -126,13 +126,13 @@ Bilibili、Discord 和 UniversalVC 按需另行启动
 
 📺 <b><a href="./NachoBot-Bilibili-Adapter">Bilibili 适配器</a></b>：直播间弹幕互动、扫码登录、Live2D 联动配置<br>
 
-🎮 <b><a href="./NachoBot-DiscordVC-Adapter">Discord 适配器</a></b>：Slash 指令、语音频道发言<br>
+🎮 <b><a href="./NachoBot-Discord-Adapter/README.md">Discord 适配器</a></b>：群聊、私聊、线程、Slash 指令与语音频道<br>
 
 🐱 <b><a href="./NachoBot-Napcat-Adapter">NapCat 适配器</a></b>：QQ 消息收发与心跳重连机制<br>
 
 ❄️ <b><a href="./NachoBot-SnowLuma-Adapter">SnowLuma 适配器</a></b>：由 WebUI 与 launchbot 档位托管 Runtime 的 QQ 消息链路<br>
 
-🌐 <b><a href="./koishi-app">Koishi 框架</a></b>：Discord 接入的底层依赖与插件管理
+Discord 链路由一个 Python 适配器进程提供，不需要 Node.js、Yarn 或 OneBot sidecar。一个 Gateway 客户端处理全部 Discord 收发；加入语音频道后的 Discord 语音 WebSocket/UDP 连接也由该进程管理。普通服务器文字消息需要在 Discord Developer Portal 为应用启用 <a href="https://support-dev.discord.com/hc/en-us/articles/6207308062871-What-are-Privileged-Intents">Message Content Intent</a>。
 
 
 <h3>🗣️ 3. 感知与表现层</h3>
@@ -165,7 +165,7 @@ Bilibili、Discord 和 UniversalVC 按需另行启动
 <p>
 本项目采用 GPLv3。感谢
 <a href="https://github.com/Mai-with-u/MaiBot">MaiBot</a>、
-NapCat、Koishi、GPT-SoVITS、VoxCPM 及其他上游开源项目
+NapCat、GPT-SoVITS、VoxCPM 及其他上游开源项目
 </p>
 
 

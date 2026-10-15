@@ -12,6 +12,13 @@ const LauncherModule = (() => {
     let runtimeSelectionTouched = false;
     let installingRuntime = null;
     let pollInterval = null;
+    let detailsPollInterval = null;
+    let adapterGroupsRefreshFlight = null;
+    let detailsRefreshFlight = null;
+    let adapterGroupsLoading = true;
+    let adapterGroupsError = false;
+    let pendingSnowLumaRuntimeRefresh = false;
+    const pendingGroupStarts = new Set();
     let qqAdapterStatus = null;
     let snowlumaProcesses = null;
     let snowlumaProcessError = '';
@@ -42,11 +49,11 @@ const LauncherModule = (() => {
             resource: '中等资源占用',
         },
         potato: {
-            name: '无模型模式',
+            name: '文本模式',
             code: 'POTATO',
             tag: '低配置',
-            summary: 'Relay only',
-            detail: '仅消息中继，不加载本地模型',
+            summary: 'Core text + QQ',
+            detail: 'Core 文本档位 + 所选 QQ 适配器；不启动本地 Multimodal 服务',
             resource: '极低资源占用',
         },
     });
@@ -215,62 +222,153 @@ const LauncherModule = (() => {
     }
 
     function init() {
-        refresh();
-        // Poll every 2s when launcher tab is active
+        updateAdapterStatusIndicator();
+        void refresh();
+        // Refresh adapter cards once per minute while idle. Start/stop actions
+        // request their own fresh snapshot immediately.
         pollInterval = setInterval(() => {
-            if (document.getElementById('tab-launcher').classList.contains('active')) {
-                refresh();
+            if (document.getElementById('tab-launcher')?.classList.contains('active')) {
+                void refreshAdapterGroups().catch(() => {});
             }
-        }, 2000);
+        }, 60_000);
+        detailsPollInterval = setInterval(() => {
+            if (document.getElementById('tab-launcher')?.classList.contains('active')) {
+                void refreshDetails();
+            }
+        }, 5000);
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden
+                && document.getElementById('tab-launcher')?.classList.contains('active')) {
+                void refreshAdapterGroups({ requireFresh: true }).catch(() => {});
+            }
+        });
+    }
+
+    function renderIfAvailable() {
+        if (document.getElementById?.('launcher-grid')) render();
+    }
+
+    function updateAdapterStatusIndicator() {
+        const grid = document.getElementById?.('launcher-grid');
+        if (!grid) return;
+        let indicator = document.getElementById('launcher-adapter-status');
+        if (!indicator) {
+            indicator = document.createElement('div');
+            indicator.id = 'launcher-adapter-status';
+            indicator.className = 'launcher-adapter-status';
+            indicator.setAttribute('role', 'status');
+            grid.parentNode.insertBefore(indicator, grid);
+        }
+        indicator.setAttribute('aria-live', adapterGroupsError ? 'polite' : 'off');
+        indicator.setAttribute('aria-busy', adapterGroupsLoading ? 'true' : 'false');
+        indicator.classList.toggle('is-error', adapterGroupsError);
+        indicator.innerHTML = adapterGroupsLoading
+            ? '<span class="launcher-status-spinner" aria-hidden="true"></span><span>正在更新适配器状态…</span>'
+            : adapterGroupsError
+                ? '<span>适配器状态刷新失败，正在重试；适配器启动按钮已暂时禁用</span>'
+                : '<span>适配器状态已更新 · 自动刷新中</span>';
+    }
+
+    function refreshSnowLumaAfterRuntimeStart() {
+        if (!pendingSnowLumaRuntimeRefresh || !qqAdapterStatus) return;
+        pendingSnowLumaRuntimeRefresh = false;
+        if (qqAdapterStatus.selected !== 'snowluma') return;
+        setTimeout(() => {
+            const card = document.querySelector('[data-group-id="qq_adapter"]');
+            if (card) refreshSnowLumaProcesses(card, true);
+        }, 0);
+    }
+
+    async function refreshAdapterGroups({ requireFresh = false } = {}) {
+        if (adapterGroupsRefreshFlight) {
+            if (!requireFresh) return adapterGroupsRefreshFlight;
+            try {
+                await adapterGroupsRefreshFlight;
+            } catch (_) {
+                // A click must check again after an unsuccessful older poll.
+            }
+        }
+        if (adapterGroupsRefreshFlight) {
+            return refreshAdapterGroups({ requireFresh });
+        }
+        adapterGroupsLoading = true;
+        updateAdapterStatusIndicator();
+        const request = (async () => {
+            try {
+                const nextGroups = await apiGet(requireFresh ? '/api/groups?fresh=1' : '/api/groups');
+                if (!Array.isArray(nextGroups)) throw new Error('适配器状态响应无效');
+                groups = mergeSnowLumaOptimisticGroups(nextGroups);
+                const qqGroup = groups.find(group => group.id === 'qq_adapter');
+                const runtimeIsRunning = Boolean((qqGroup?.services || []).some(service =>
+                    service.id === 'snowluma_runtime' && service.status === 'running',
+                ));
+                if (runtimeIsRunning && !snowlumaRuntimeRunning) {
+                    pendingSnowLumaRuntimeRefresh = true;
+                }
+                snowlumaRuntimeRunning = runtimeIsRunning;
+                adapterGroupsError = false;
+                renderIfAvailable();
+                refreshSnowLumaAfterRuntimeStart();
+                return groups;
+            } catch (error) {
+                adapterGroupsError = true;
+                renderIfAvailable();
+                throw error;
+            } finally {
+                adapterGroupsLoading = false;
+                updateAdapterStatusIndicator();
+            }
+        })();
+        const tracked = request.finally(() => {
+            if (adapterGroupsRefreshFlight === tracked) adapterGroupsRefreshFlight = null;
+        });
+        adapterGroupsRefreshFlight = tracked;
+        return tracked;
+    }
+
+    function refreshDetails() {
+        if (detailsRefreshFlight) return detailsRefreshFlight;
+        const request = (async () => {
+            try {
+                const [nextLaunch, nextRuntimeStatus, nextQqAdapterStatus] = await Promise.all([
+                    apiGet('/api/launch'),
+                    apiGet('/api/setup/deps/multimodal/status'),
+                    apiGet('/api/setup/qq-adapter'),
+                ]);
+                launch = nextLaunch;
+                runtimeStatus = nextRuntimeStatus;
+                qqAdapterStatus = nextQqAdapterStatus;
+                if (launch.active_profile) {
+                    selectedProfile = launch.active_profile;
+                }
+                if (launch.active_profile && launch.runtime && launch.active_profile !== 'potato') {
+                    selectedRuntime = launch.runtime;
+                } else if (!runtimeSelectionTouched) {
+                    const recommended = runtimeStatus?.recommended === 'cpu' ? 'cpu' : 'gpu';
+                    const runtimes = runtimeStatus?.runtimes || {};
+                    if (runtimes[recommended]?.installed) {
+                        selectedRuntime = recommended;
+                    } else if (runtimes[recommended === 'gpu' ? 'cpu' : 'gpu']?.installed) {
+                        selectedRuntime = recommended === 'gpu' ? 'cpu' : 'gpu';
+                    } else {
+                        selectedRuntime = recommended;
+                    }
+                }
+                renderIfAvailable();
+                refreshSnowLumaAfterRuntimeStart();
+            } catch (_) {
+                // Will retry on the next details poll.
+            }
+        })();
+        const tracked = request.finally(() => {
+            if (detailsRefreshFlight === tracked) detailsRefreshFlight = null;
+        });
+        detailsRefreshFlight = tracked;
+        return tracked;
     }
 
     async function refresh() {
-        try {
-            const [nextLaunch, nextGroups, nextRuntimeStatus, nextQqAdapterStatus] = await Promise.all([
-                apiGet('/api/launch'),
-                apiGet('/api/groups'),
-                apiGet('/api/setup/deps/multimodal/status'),
-                apiGet('/api/setup/qq-adapter'),
-            ]);
-            launch = nextLaunch;
-            groups = mergeSnowLumaOptimisticGroups(nextGroups);
-            runtimeStatus = nextRuntimeStatus;
-            qqAdapterStatus = nextQqAdapterStatus;
-            const qqGroup = (groups || []).find(group => group.id === 'qq_adapter');
-            const runtimeIsRunning = Boolean((qqGroup?.services || []).some(service =>
-                service.id === 'snowluma_runtime' && service.status === 'running',
-            ));
-            const runtimeJustStarted = runtimeIsRunning && !snowlumaRuntimeRunning;
-            snowlumaRuntimeRunning = runtimeIsRunning;
-            if (launch.active_profile) {
-                selectedProfile = launch.active_profile;
-            }
-            if (launch.active_profile && launch.runtime && launch.runtime !== 'relay') {
-                selectedRuntime = launch.runtime;
-            } else if (!runtimeSelectionTouched) {
-                const recommended = runtimeStatus?.recommended === 'cpu' ? 'cpu' : 'gpu';
-                const runtimes = runtimeStatus?.runtimes || {};
-                if (runtimes[recommended]?.installed) {
-                    selectedRuntime = recommended;
-                } else if (runtimes[recommended === 'gpu' ? 'cpu' : 'gpu']?.installed) {
-                    selectedRuntime = recommended === 'gpu' ? 'cpu' : 'gpu';
-                } else {
-                    selectedRuntime = recommended;
-                }
-            }
-            render();
-            if (runtimeJustStarted && qqAdapterStatus?.selected === 'snowluma') {
-                // Render first so the card exists, then perform one autonomous
-                // saved-credential refresh.  A missing/invalid saved secret
-                // simply moves the operator to the password prompt.
-                setTimeout(() => {
-                    const card = document.querySelector('[data-group-id="qq_adapter"]');
-                    if (card) refreshSnowLumaProcesses(card, true);
-                }, 0);
-            }
-        } catch (e) {
-            // Will retry on next poll
-        }
+        await Promise.allSettled([refreshAdapterGroups(), refreshDetails()]);
     }
 
     function render() {
@@ -313,6 +411,60 @@ const LauncherModule = (() => {
         return ['stopped', '已停止'];
     }
 
+    function launchCoreIsExternal(state) {
+        const core = state?.core;
+        return Boolean(core && core.origin === 'external' && core.managed === false);
+    }
+
+    function launchHasOwnedDependents(state) {
+        return (state?.profiles || []).some(profile =>
+            (profile?.services || []).some(service =>
+                service?.managed === true
+                && service?.origin === 'webui'
+                && service.status !== 'stopped',
+            ),
+        );
+    }
+
+    function launchExternalProfileIsReady(state) {
+        if (!launchCoreIsExternal(state) || state?.core?.status !== 'running') return false;
+        const profileId = state?.active_profile || state?.core?.observed_profile;
+        const profile = (state?.profiles || []).find(item => item?.id === profileId);
+        if (profile?.status === 'running') return true;
+        const requiredIds = profileId === 'full'
+            ? ['tts_runtime_full', 'perception']
+            : profileId === 'lite'
+                ? ['tts_runtime_lite']
+                : [];
+        return requiredIds.length > 0
+            && requiredIds.every(id => profile?.services?.some(
+                service => service?.id === id && service.status === 'running',
+            ));
+    }
+
+    function launchFooterActions(state) {
+        const externalCore = launchCoreIsExternal(state);
+        const ownedDependents = launchHasOwnedDependents(state);
+        const externalProfileReady = launchExternalProfileIsReady(state);
+        const canSwitch = !externalCore && state?.status === 'running';
+        const canStop = externalCore
+            ? ownedDependents
+            : state?.status !== 'stopped';
+        const externalProfile = state?.core?.observed_profile;
+        const canStartWebui = externalCore
+            && !ownedDependents
+            && !externalProfileReady
+            && (externalProfile === 'full' || externalProfile === 'lite');
+        return {
+            externalCore,
+            ownedDependents,
+            externalProfileReady,
+            canSwitch,
+            canStop,
+            showStart: externalCore ? canStartWebui : !canSwitch,
+        };
+    }
+
     function launchServiceProgress(state, activeProfile) {
         const profile = (state.profiles || []).find(item => item.id === activeProfile);
         const services = [state.core, ...(profile?.services || [])].filter(Boolean);
@@ -352,7 +504,14 @@ const LauncherModule = (() => {
         const [badgeClass, badgeText] = launchBadge(state.status);
         const busy = state.status === 'starting' || state.status === 'stopping';
         const running = state.status === 'running';
-        const canStop = state.status !== 'stopped';
+        const footerActions = launchFooterActions(state);
+        const {
+            externalCore,
+            externalProfileReady,
+            canSwitch,
+            canStop,
+            showStart,
+        } = footerActions;
         const activeProfile = state.active_profile || selectedProfile;
         const profileStates = new Map((state.profiles || []).map(profile => [profile.id, profile.status]));
 
@@ -383,23 +542,12 @@ const LauncherModule = (() => {
         const selectedMeta = LAUNCH_PROFILES[selectedProfile];
         const runtimes = runtimeStatus?.runtimes || {};
         const recommendedRuntime = runtimeStatus?.recommended === 'cpu' ? 'cpu' : 'gpu';
-        let requiredRuntime = selectedRuntime;
-        if (selectedProfile === 'potato') {
-            if (runtimes.relay?.installed) {
-                requiredRuntime = 'relay';
-            } else if (runtimes[selectedRuntime]?.installed) {
-                requiredRuntime = selectedRuntime;
-            } else if (runtimes[selectedRuntime === 'gpu' ? 'cpu' : 'gpu']?.installed) {
-                requiredRuntime = selectedRuntime === 'gpu' ? 'cpu' : 'gpu';
-            } else {
-                requiredRuntime = null;
-            }
-        }
-        const requiredInstalled = Boolean(requiredRuntime && runtimes[requiredRuntime]?.installed);
+        const requiredRuntime = selectedProfile === 'potato' ? null : selectedRuntime;
+        const requiredInstalled = selectedProfile === 'potato'
+            || Boolean(requiredRuntime && runtimes[requiredRuntime]?.installed);
         const runtimeMeta = {
             gpu: { name: 'GPU / CUDA', detail: 'CUDA 版 PyTorch 与本地模型依赖' },
             cpu: { name: 'CPU', detail: 'CPU 版 PyTorch 与本地模型依赖' },
-            relay: { name: 'Relay / POTATO', detail: '仅消息中继，不安装本地模型栈' },
         };
         const runtimeMarkup = ['gpu', 'cpu'].map(id => {
             const status = runtimes[id] || { installed: false };
@@ -407,7 +555,7 @@ const LauncherModule = (() => {
             const selectable = selectedProfile !== 'potato' && !busy && !running;
             const selected = selectedProfile === 'potato' ? false : selectedRuntime === id;
             const installing = installingRuntime === id;
-            const recommendation = id === recommendedRuntime && id !== 'relay' ? '<span class="launch-profile-tag">推荐</span>' : '';
+            const recommendation = id === recommendedRuntime ? '<span class="launch-profile-tag">推荐</span>' : '';
             return `
                 <div class="launch-runtime-item ${selected ? 'selected' : ''} ${isRequired ? 'required' : ''}">
                     <button type="button" class="launch-runtime-select"
@@ -439,10 +587,13 @@ const LauncherModule = (() => {
                     <span class="group-icon">${svgIcon('brain')}</span>
                     <div>
                         <div class="group-name">NachoBot</div>
-                        <div class="group-detail">Core 消息总线 + Multimodal Runtime</div>
+                    <div class="group-detail">Core 消息总线 + 可选 Multimodal Runtime</div>
                     </div>
                 </div>
-                <span class="group-status-badge ${badgeClass}">${badgeText}</span>
+                <div class="launch-status-badges">
+                    ${externalCore ? '<span class="group-status-badge partial">外部启动</span>' : ''}
+                    <span class="group-status-badge ${badgeClass}">${badgeText}</span>
+                </div>
             </div>
             <div class="launch-card-body">
                 <div class="launch-profile-heading">
@@ -455,32 +606,35 @@ const LauncherModule = (() => {
                 <div class="launch-profile-grid">${profileMarkup}</div>
                 <div class="launch-selection-summary">
                     已选择 <strong>${selectedMeta.name}</strong> · ${selectedMeta.code}
-                    · 运行环境 <strong>${requiredRuntime ? runtimeMeta[requiredRuntime].name : '不可用'}</strong>
+                    · 运行环境 <strong>${requiredRuntime ? runtimeMeta[requiredRuntime].name : '不需要'}</strong>
                 </div>
                 <div class="launch-runtime-section">
                     <div class="launch-profile-heading">
                         <div>
                             <div class="launch-profile-title">Multimodal 运行环境</div>
-                            <div class="launch-profile-hint">FULL/LITE 可在 GPU 与 CPU 间选择；POTATO 使用首次部署时预装的轻量 Relay 环境</div>
+                            <div class="launch-profile-hint">FULL/LITE 可在 GPU 与 CPU 间选择；POTATO 不需要 Multimodal 运行环境</div>
                         </div>
                     </div>
                     <div class="launch-runtime-grid">${runtimeMarkup}</div>
                 </div>
-                ${!requiredInstalled ? `<div class="launch-runtime-warning">${selectedProfile === 'potato' ? 'POTATO Relay 环境不可用，且没有已安装的 GPU/CPU Multimodal 环境。' : `当前模式所需的 ${runtimeMeta[requiredRuntime].name} 环境尚未安装，请先点击“安装 / 补齐”。`}</div>` : ''}
+                ${!requiredInstalled ? `<div class="launch-runtime-warning">当前模式所需的 ${runtimeMeta[requiredRuntime].name} 环境尚未安装，请先点击“安装 / 补齐”。</div>` : ''}
                 ${launchServiceProgress(state, activeProfile)}
             </div>
             <div class="group-card-footer launch-card-footer">
-                ${running ? `
+                ${canSwitch ? `
                     <button class="btn btn-outline btn-full" id="btn-launch-change">停止并切换模式</button>
-                ` : `
+                ` : showStart ? `
                     <button class="btn btn-primary btn-full" id="btn-launch-start" ${(busy || !requiredInstalled || Boolean(installingRuntime)) ? 'disabled' : ''}>
-                        ${svgIcon('play')}启动 NachoBot
+                        ${svgIcon('play')}${externalCore ? '启动 WebUI 服务' : '启动 NachoBot'}
                     </button>
-                `}
+                ` : ''}
                 ${canStop ? `
                     <button class="btn btn-danger" id="btn-launch-stop">
-                        ${svgIcon('square')}${state.status === 'starting' ? '取消启动' : '停止 NachoBot'}
+                        ${svgIcon('square')}${externalCore ? '停止 WebUI 托管服务' : (state.status === 'starting' ? '取消启动' : '停止 NachoBot')}
                     </button>
+                ` : ''}
+                ${externalCore && externalProfileReady && !footerActions.ownedDependents ? `
+                    <div class="launch-external-notice">由外部启动器管理，请在原启动窗口停止</div>
                 ` : ''}
             </div>
         `;
@@ -493,6 +647,21 @@ const LauncherModule = (() => {
             card.innerHTML = newHTML;
             bindLaunchEvents(card);
         }
+    }
+
+    function setLaunchTestState(nextLaunch, nextRuntimeStatus = null) {
+        launch = nextLaunch;
+        runtimeStatus = nextRuntimeStatus || {
+            recommended: 'gpu',
+            runtimes: {
+                gpu: { installed: true },
+                cpu: { installed: true },
+            },
+        };
+        selectedProfile = nextLaunch?.active_profile || 'lite';
+        selectedRuntime = 'gpu';
+        runtimeSelectionTouched = false;
+        installingRuntime = null;
     }
 
     function bindLaunchEvents(card) {
@@ -531,19 +700,16 @@ const LauncherModule = (() => {
 
     async function startLaunch() {
         try {
-            const runtimes = runtimeStatus?.runtimes || {};
-            let runtime = selectedRuntime;
-            if (selectedProfile === 'potato') {
-                if (runtimes.relay?.installed) runtime = 'relay';
-                else if (runtimes[selectedRuntime]?.installed) runtime = selectedRuntime;
-                else if (runtimes[selectedRuntime === 'gpu' ? 'cpu' : 'gpu']?.installed) {
-                    runtime = selectedRuntime === 'gpu' ? 'cpu' : 'gpu';
-                } else {
-                    throw new Error('POTATO Relay 环境不可用，且没有已安装的 GPU/CPU Multimodal 环境');
-                }
-            }
-            await apiPost('/api/launch/start', { profile: selectedProfile, runtime });
-            toast(`${LAUNCH_PROFILES[selectedProfile].code} 模式正在启动（${runtime.toUpperCase()}）...`, 'info');
+            const runtime = selectedProfile === 'potato' ? null : selectedRuntime;
+            const payload = { profile: selectedProfile };
+            if (runtime) payload.runtime = runtime;
+            await apiPost('/api/launch/start', payload);
+            toast(
+                runtime
+                    ? `${LAUNCH_PROFILES[selectedProfile].code} 模式正在启动（${runtime.toUpperCase()}）...`
+                    : `${LAUNCH_PROFILES[selectedProfile].code} Core 文本 + QQ 模式正在启动...`,
+                'info',
+            );
             refresh();
         } catch (e) {
             toast(`启动失败: ${e.message}`, 'error');
@@ -584,7 +750,7 @@ const LauncherModule = (() => {
     }
 
     async function installRuntime(runtime) {
-        if (!['gpu', 'cpu', 'relay'].includes(runtime) || installingRuntime) return;
+        if (!['gpu', 'cpu'].includes(runtime) || installingRuntime) return;
         installingRuntime = runtime;
         render();
         try {
@@ -605,7 +771,12 @@ const LauncherModule = (() => {
     async function stopLaunch() {
         try {
             await apiPost('/api/launch/stop');
-            toast(launch?.status === 'starting' ? '正在取消启动...' : '正在停止 NachoBot...', 'info');
+            toast(
+                launchCoreIsExternal(launch)
+                    ? '正在停止 WebUI 托管服务...'
+                    : (launch?.status === 'starting' ? '正在取消启动...' : '正在停止 NachoBot...'),
+                'info',
+            );
             refresh();
         } catch (e) {
             toast(`停止失败: ${e.message}`, 'error');
@@ -622,6 +793,85 @@ const LauncherModule = (() => {
         return (group?.services || []).some(service =>
             service.status === 'starting' || service.status === 'stopping'
         );
+    }
+
+    function serviceIsExternalReady(service) {
+        return Boolean(
+            service
+            && service.managed === false
+            && service.origin === 'external'
+            && service.external_state === 'ready'
+            && service.status === 'running',
+        );
+    }
+
+    function serviceIsExternalPresentUnready(service) {
+        return Boolean(
+            service
+            && service.managed === false
+            && service.origin === 'external'
+            && service.external_state === 'present_unready',
+        );
+    }
+
+    function serviceIsIndeterminate(service) {
+        return Boolean(
+            service
+            && service.managed === false
+            && service.origin == null
+            && service.external_state === 'indeterminate',
+        );
+    }
+
+    function serviceIsExternalPresence(service) {
+        return serviceIsExternalReady(service)
+            || serviceIsExternalPresentUnready(service)
+            || serviceIsIndeterminate(service);
+    }
+
+    function serviceIsOwned(service) {
+        return Boolean(
+            service
+            && service.managed === true
+            && service.origin === 'webui'
+            && service.status !== 'stopped',
+        );
+    }
+
+    function groupControlState(group) {
+        const services = Array.isArray(group?.services) ? group.services : [];
+        const externalReady = services.filter(serviceIsExternalReady);
+        const blocked = services.filter(service =>
+            serviceIsExternalPresentUnready(service) || serviceIsIndeterminate(service),
+        );
+        const owned = services.filter(serviceIsOwned);
+        const externalPresence = services.filter(serviceIsExternalPresence);
+        const allExternalReady = Boolean(services.length)
+            && externalReady.length === services.length;
+        const allRowsRunning = Boolean(services.length)
+            && services.every(service => service.status === 'running');
+        const anyRunning = services.some(service => service.status === 'running');
+        const anyStarting = services.some(service => service.status === 'starting');
+        const hasMissing = services.some(service =>
+            service.status === 'stopped' && !serviceIsExternalPresence(service),
+        );
+        const showStart = !blocked.length && (hasMissing || (!externalPresence.length && allRowsRunning));
+        return {
+            services,
+            allExternalReady,
+            allRowsRunning,
+            anyExternal: externalPresence.length > 0,
+            blocked: blocked.length > 0,
+            owned: owned.length > 0,
+            anyRunning,
+            anyStarting,
+            hasMissing,
+            showStart,
+            startLabel: externalPresence.length > 0 ? '启动缺失服务' : (anyRunning ? '重启组' : '启动组'),
+            blockedNotice: blocked.some(serviceIsIndeterminate)
+                ? '无法确认外部进程状态，请在原启动窗口检查'
+                : '检测到外部进程但尚未就绪，请在原启动窗口检查',
+        };
     }
 
     const SNOWLUMA_START_SERVICE_IDS = new Set(['snowluma_runtime', 'snowluma_adapter']);
@@ -812,7 +1062,8 @@ const LauncherModule = (() => {
     function snowlumaGroupCardInnerHTML(group) {
         const adapter = selectedQqAdapter(group);
         const component = qqComponentStatus(adapter);
-        const services = group.services || [];
+        const control = groupControlState(group);
+        const services = control.services;
         const runCount = services.filter(s => s.status === 'running').length;
         const errCount = services.filter(s => s.status === 'error').length;
         const anyStarting = services.some(s => s.status === 'starting');
@@ -820,7 +1071,11 @@ const LauncherModule = (() => {
         const anyRunning = runCount > 0;
         const busy = qqGroupIsBusy(group);
         const transitioning = qqGroupIsTransitioning(group);
-        const badge = errCount > 0
+        const badge = control.blocked
+            ? ['error', '需检查外部进程']
+            : control.allExternalReady
+                ? ['running', '外部运行中']
+                : errCount > 0
             ? ['error', '错误']
             : anyStarting
                 ? ['starting', '启动中']
@@ -838,7 +1093,15 @@ const LauncherModule = (() => {
         );
         const missing = Array.isArray(component.missing) ? component.missing : [];
         const installed = component.installed === true;
-        const startDisabled = transitioning || !installed;
+        const startDisabled = transitioning
+            || !installed
+            || control.blocked
+            || control.allExternalReady
+            || adapterGroupsError
+            || pendingGroupStarts.has(group.id);
+        const showStart = control.showStart;
+        const showStop = control.owned;
+        const selectorDisabled = busy || control.anyExternal || control.blocked;
         const selectedSnowLuma = adapter === 'snowluma';
         return `
             <div class="group-card-header">
@@ -854,7 +1117,7 @@ const LauncherModule = (() => {
             <div class="group-card-body qq-launch-body">
                 <div class="qq-adapter-selector-row">
                     <label for="launcher-qq-adapter"><strong>QQ 后端</strong></label>
-                    <select id="launcher-qq-adapter" class="form-select" ${busy ? 'disabled' : ''}>
+                    <select id="launcher-qq-adapter" class="form-select" ${selectorDisabled ? 'disabled' : ''}>
                         <option value="napcat" ${adapter === 'napcat' ? 'selected' : ''}>NapCat</option>
                         <option value="snowluma" ${selectedSnowLuma ? 'selected' : ''}>SnowLuma</option>
                     </select>
@@ -888,10 +1151,12 @@ const LauncherModule = (() => {
                 </div>
             </div>
             <div class="group-card-footer">
-                <button class="btn ${anyRunning ? 'btn-outline' : 'btn-primary'} btn-full" id="btn-start-${group.id}" ${startDisabled ? 'disabled' : ''}>
-                    ${svgIcon(anyRunning ? 'rotate-ccw' : 'play')}${anyRunning ? '重启组' : '启动组'}
-                </button>
-                ${(anyRunning || anyStarting) ? `<button class="btn btn-danger" id="btn-stop-${group.id}">${svgIcon('square')}${anyStarting && !anyRunning ? '取消启动' : '停止'}</button>` : ''}
+                ${showStart ? `<button class="btn ${anyRunning && !control.anyExternal ? 'btn-outline' : 'btn-primary'} btn-full" id="btn-start-${group.id}" ${startDisabled ? 'disabled' : ''}>
+                    ${pendingGroupStarts.has(group.id) ? '<span class="launcher-status-spinner" aria-hidden="true"></span>正在核对状态…' : `${svgIcon(anyRunning && !control.anyExternal ? 'rotate-ccw' : 'play')}${control.startLabel}`}
+                </button>` : ''}
+                ${showStop ? `<button class="btn btn-danger" id="btn-stop-${group.id}">${svgIcon('square')}${control.anyExternal ? '停止 WebUI 托管服务' : (anyStarting && !anyRunning ? '取消启动' : '停止')}</button>` : ''}
+                ${control.allExternalReady ? '<div class="launch-external-notice">由外部启动器管理，请在原启动窗口停止</div>' : ''}
+                ${control.blocked ? `<div class="launch-external-notice">${escapeHtml(control.blockedNotice)}</div>` : ''}
             </div>
         `;
     }
@@ -908,13 +1173,18 @@ const LauncherModule = (() => {
                 processSnowLumaAction(card, Number(button.dataset.snowlumaPid), button.dataset.snowlumaAction);
             });
         });
-        const anyRunning = group.services.some(s => s.status === 'running');
-        card.querySelector(`#btn-start-${group.id}`)?.addEventListener('click', () => startGroup(group.id, anyRunning));
+        const control = groupControlState(group);
+        const shouldRestart = control.anyRunning && !control.anyExternal;
+        card.querySelector(`#btn-start-${group.id}`)?.addEventListener('click', () => startGroup(group.id, shouldRestart));
         card.querySelector(`#btn-stop-${group.id}`)?.addEventListener('click', () => stopGroup(group.id));
     }
 
     async function selectQqAdapter(adapter, group, card) {
-        if (!['napcat', 'snowluma'].includes(adapter) || qqGroupIsBusy(group)) return;
+        const control = groupControlState(group);
+        if (!['napcat', 'snowluma'].includes(adapter)
+            || qqGroupIsBusy(group)
+            || control.anyExternal
+            || control.blocked) return;
         const select = card.querySelector('#launcher-qq-adapter');
         if (select) select.disabled = true;
         try {
@@ -1087,23 +1357,25 @@ const LauncherModule = (() => {
     /** Generate the inner HTML for a group card (without the wrapper div). */
     function groupCardInnerHTML(group) {
         if (group.id === 'qq_adapter') return snowlumaGroupCardInnerHTML(group);
-        const runCount = group.services.filter(s => s.status === 'running').length;
+        const control = groupControlState(group);
+        const runCount = control.services.filter(s => s.status === 'running').length;
         const errCount = group.services.filter(s => s.status === 'error').length;
         const total = group.services.length;
 
         const anyStarting = group.services.some(s => s.status === 'starting');
 
-        let badgeClass = 'stopped';
-        let badgeText = '已停止';
-        if (errCount > 0) { badgeClass = 'error'; badgeText = '错误'; }
+        let badgeClass = control.allExternalReady ? 'running' : 'stopped';
+        let badgeText = control.allExternalReady ? '外部运行中' : '已停止';
+        if (control.blocked) { badgeClass = 'error'; badgeText = '需检查外部进程'; }
+        else if (errCount > 0) { badgeClass = 'error'; badgeText = '错误'; }
         else if (anyStarting) { badgeClass = 'starting'; badgeText = '启动中'; }
         else if (runCount === total) { badgeClass = 'running'; badgeText = '运行中'; }
         else if (runCount > 0) { badgeClass = 'partial'; badgeText = `${runCount}/${total}`; }
 
         const anyRunning = runCount > 0;
-        const canStop = anyRunning || anyStarting;
+        const canStop = control.owned;
         const groupIcon = svgIcon(GROUP_ICON_NAMES[group.id] || 'component');
-        const primaryActionIcon = svgIcon(anyRunning ? 'rotate-ccw' : 'play');
+        const primaryActionIcon = svgIcon(anyRunning && !control.anyExternal ? 'rotate-ccw' : 'play');
         const stopIcon = svgIcon('square');
 
         return `
@@ -1132,16 +1404,18 @@ const LauncherModule = (() => {
                 `).join('')}
             </div>
             <div class="group-card-footer">
-                <button class="btn ${anyRunning ? 'btn-outline' : 'btn-primary'} btn-full"
+                ${(control.showStart) ? `<button class="btn ${anyRunning && !control.anyExternal ? 'btn-outline' : 'btn-primary'} btn-full"
                         id="btn-start-${group.id}"
-                        ${anyStarting ? 'disabled' : ''}>
-                    ${primaryActionIcon}${anyRunning ? '重启组' : '启动组'}
-                </button>
+                        ${(anyStarting || adapterGroupsError || pendingGroupStarts.has(group.id)) ? 'disabled' : ''}>
+                    ${pendingGroupStarts.has(group.id) ? '<span class="launcher-status-spinner" aria-hidden="true"></span>正在核对状态…' : `${primaryActionIcon}${control.startLabel}`}
+                </button>` : ''}
                 ${canStop ? `
                     <button class="btn btn-danger" id="btn-stop-${group.id}">
-                        ${stopIcon}${anyStarting && !anyRunning ? '取消启动' : '停止'}
+                        ${stopIcon}${control.anyExternal ? '停止 WebUI 托管服务' : (anyStarting && !anyRunning ? '取消启动' : '停止')}
                     </button>
                 ` : ''}
+                ${control.allExternalReady ? '<div class="launch-external-notice">由外部启动器管理，请在原启动窗口停止</div>' : ''}
+                ${control.blocked ? `<div class="launch-external-notice">${escapeHtml(control.blockedNotice)}</div>` : ''}
             </div>
         `;
     }
@@ -1175,11 +1449,12 @@ const LauncherModule = (() => {
             bindSnowLumaCardEvents(card, group);
             return;
         }
-        const anyRunning = group.services.some(s => s.status === 'running');
+        const control = groupControlState(group);
+        const shouldRestart = control.anyRunning && !control.anyExternal;
 
         const startBtn = card.querySelector(`#btn-start-${group.id}`);
         if (startBtn) {
-            startBtn.addEventListener('click', () => startGroup(group.id, anyRunning));
+            startBtn.addEventListener('click', () => startGroup(group.id, shouldRestart));
         }
 
         const stopBtn = card.querySelector(`#btn-stop-${group.id}`);
@@ -1189,10 +1464,20 @@ const LauncherModule = (() => {
     }
 
     async function startGroup(groupId, isRestart) {
+        if (pendingGroupStarts.has(groupId)) return;
+        pendingGroupStarts.add(groupId);
+        renderIfAvailable();
         let snowLumaStart = false;
         try {
+            // A visible card can lag behind a BAT/manual startup. Check a new
+            // snapshot after any in-flight poll before submitting the mutation.
+            await refreshAdapterGroups({ requireFresh: true });
+            const currentGroup = groups.find(item => item.id === groupId);
+            const currentControl = groupControlState(currentGroup);
+            if (!currentControl.showStart || currentControl.blocked) return;
+            isRestart = currentControl.anyRunning && !currentControl.anyExternal;
             if (groupId === 'qq_adapter') {
-                const group = groups.find(item => item.id === groupId);
+                const group = currentGroup;
                 const adapter = selectedQqAdapter(group);
                 snowLumaStart = adapter === 'snowluma';
                 if (snowLumaStart && snowlumaOptimisticStart) return;
@@ -1216,13 +1501,17 @@ const LauncherModule = (() => {
                 if (snowLumaStart) snowlumaStartRequestInFlight = false;
                 toast('正在启动...', 'info');
             }
-            await refresh();
+            await refreshAdapterGroups({ requireFresh: true });
+            void refreshDetails();
         } catch (e) {
             if (snowLumaStart) {
                 clearSnowLumaOptimisticStart(true);
                 void refresh();
             }
             toast(`启动失败: ${e.message}`, 'error');
+        } finally {
+            pendingGroupStarts.delete(groupId);
+            renderIfAvailable();
         }
     }
 
@@ -1258,6 +1547,36 @@ const LauncherModule = (() => {
             applySnowLumaOptimisticStart,
             reconcileSnowLumaOptimisticGroup,
             snowLumaStartReachedTerminalState,
+            launchCoreIsExternal,
+            launchHasOwnedDependents,
+            launchExternalProfileIsReady,
+            launchFooterActions,
+            launchCardInnerHTML,
+            serviceIsExternalReady,
+            serviceIsExternalPresentUnready,
+            serviceIsIndeterminate,
+            groupControlState,
+            groupCardInnerHTML,
+            snowlumaGroupCardInnerHTML,
+            refreshAdapterGroups,
+            updateAdapterStatusIndicator,
+            selectQqAdapter,
+            startGroup,
+            stopGroup,
+            getAdapterRefreshState() {
+                return {
+                    loading: adapterGroupsLoading,
+                    error: adapterGroupsError,
+                    pendingStarts: [...pendingGroupStarts],
+                };
+            },
+            setGroupsTestState(nextGroups) {
+                groups = Array.isArray(nextGroups) ? nextGroups : [];
+            },
+            setQqAdapterTestState(nextState) {
+                qqAdapterStatus = nextState || null;
+            },
+            setLaunchTestState,
             snowlumaOptimisticStartTimeoutMs: SNOWLUMA_OPTIMISTIC_START_TIMEOUT_MS,
             snowlumaUnloadReconciliationDelayMs: SNOWLUMA_UNLOAD_RECONCILIATION_DELAY_MS,
         },

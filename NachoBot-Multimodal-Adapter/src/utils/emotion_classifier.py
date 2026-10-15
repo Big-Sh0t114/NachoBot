@@ -1,7 +1,8 @@
-"""情感分类器 — 基于 zero-shot classification 的文本情感自动判定
+"""Vox emotion classifier with an explicit eager-load boundary.
 
-使用多语言 NLI 模型（mDeBERTa-v3-base）将文本分类到用户自定义的情感标签中。
-模型在首次 classify() 调用时惰性加载，支持 FP16 半精度推理以节省显存。
+The public TTS runtime constructs this classifier only for a selected Vox
+engine.  ``load`` is intentionally public so startup can prove that the
+weights are available before the public listener is marked ready.
 """
 
 import logging
@@ -153,6 +154,23 @@ class EmotionClassifier:
             self._tokenizer = tokenizer
             self._model = model
             logger.info("情感分类模型加载完成")
+
+    @property
+    def loaded(self) -> bool:
+        """Whether tokenizer and classifier weights have both been loaded."""
+
+        return self._model is not None and self._tokenizer is not None
+
+    def load(self) -> None:
+        """Eagerly load tokenizer and model weights.
+
+        ``classify`` keeps the defensive lazy boundary for legacy callers,
+        while the selected Vox TTS model calls this method during
+        construction.  A successful return therefore means the classifier is
+        ready for public runtime health checks.
+        """
+
+        self._ensure_loaded()
 
     def classify(self, text: str) -> Tuple[str, float]:
         """返回最高概率的固定情绪标签及其独立 sigmoid 概率。"""

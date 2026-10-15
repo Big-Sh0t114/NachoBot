@@ -1,7 +1,13 @@
 import aiohttp
-from typing import Optional, Dict, Any
+import os
+from typing import AsyncIterator, Optional, Dict, Any
 from pathlib import Path
-from nachobot_multimodal.tts.base import BaseTTSModel
+from nachobot_multimodal.tts.base import (
+    BaseTTSModel,
+    PCMChunk,
+    close_async_iterator,
+    collect_pcm_stream_to_wav,
+)
 from nachobot_multimodal.logger import logger
 from nachobot_multimodal.utils.text_cleaner import clean_text_for_tts
 
@@ -15,40 +21,46 @@ class TTSModel(BaseTTSModel):
     """VoxCPM TTS 纯 HTTP 客户端
 
     仅负责：加载配置 → 构建参数 → 发送 HTTP GET 请求到 Vox API Server。
-    情感分类通过远程 HTTP 调用 TTS Adapter 服务端的 /api/emotion_preset 接口解析。
+    When enabled, emotion classification is owned by this selected Vox client
+    and is fully loaded during construction; no callback to another HTTP
+    service is involved.
     """
 
     def __init__(
         self,
         config_path: str | Path | None = None,
         base_config_path: str | Path | None = None,
+        engine_host: str | None = None,
+        engine_port: int | None = None,
     ):
         """初始化 VoxCPM TTS 模型"""
         self.config = self.load_config(config_path)
         if not self.config:
             raise ValueError("VoxCPM 配置文件不存在或加载失败")
         self._config_dir = Path(self.config.config_path).parent.resolve()
-        self._base_config_path = Path(base_config_path) if base_config_path else self._config_dir / "base.toml"
-        self.host = self.config.vox.host
-        self.port = self.config.vox.port
+        # ``base_config_path`` remains accepted for compatibility with the
+        # resolver, but is deliberately not read: emotion is local to Vox.
+        self._base_config_path = Path(base_config_path) if base_config_path else None
+        self.host = engine_host or os.environ.get("NACHOBOT_TTS_ENGINE_HOST") or self.config.vox.host
+        self.port = int(engine_port or os.environ.get("NACHOBOT_TTS_ENGINE_PORT") or self.config.vox.port)
         self.base_url = f"http://{self.host}:{self.port}"
         self._current_preset: str = ""
         self._initialized: bool = False
 
-        # 情感分类远程接口（通过 TTS Adapter 服务端解析）
-        self._emotion_api_url: Optional[str] = None
+        self._emotion_classifier = None
         if self.config.emotion.enabled:
-            try:
-                import toml as _toml
-                base_toml_path = self._base_config_path
-                if base_toml_path.exists():
-                    base_cfg = _toml.load(str(base_toml_path))
-                    srv_host = base_cfg.get("server", {}).get("host", "127.0.0.1")
-                    srv_port = base_cfg.get("server", {}).get("port", 8070)
-                    self._emotion_api_url = f"http://{srv_host}:{srv_port}/api/emotion_preset"
-                    logger.info(f"情感分类远程接口: {self._emotion_api_url}")
-            except Exception as e:
-                logger.warning(f"无法解析情感分类接口地址: {e}")
+            # Keep this import conditional: GPT startup must not import the
+            # classifier module or its torch/transformers dependencies.
+            from nachobot_multimodal.utils.emotion_classifier import EmotionClassifier
+
+            self._emotion_classifier = EmotionClassifier(
+                model_name=self.config.emotion.classifier_model,
+                device=self.config.emotion.classifier_device,
+                use_fp16=self.config.emotion.use_fp16,
+            )
+            self._emotion_classifier.load()
+            if not getattr(self._emotion_classifier, "loaded", True):
+                raise RuntimeError("Vox emotion classifier did not become ready")
 
         self.initialize()
 
@@ -139,52 +151,54 @@ class TTSModel(BaseTTSModel):
         }
         return params
 
-    async def _resolve_emotion_preset_remote(self, text: str) -> Optional[str]:
-        """通过远程 HTTP 调用 TTS Adapter 服务端的情感分类接口
+    @property
+    def emotion_ready(self) -> bool:
+        """Whether enabled emotion classification is loaded."""
 
-        Args:
-            text: 待分类的文本
+        return not self.config.emotion.enabled or bool(
+            self._emotion_classifier is not None
+            and getattr(self._emotion_classifier, "loaded", True)
+        )
 
-        Returns:
-            preset_name: 匹配的预设名称，或 None 表示使用平台默认
-        """
-        if not self._emotion_api_url:
+    def resolve_emotion_preset(self, text: str) -> Optional[str]:
+        """Map a classifier label/confidence to a configured Vox preset."""
+
+        classifier = self._emotion_classifier
+        if classifier is None:
             return None
         try:
-            timeout = aiohttp.ClientTimeout(total=5, connect=2)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(
-                    self._emotion_api_url, params={"text": text}
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        preset_name = data.get("preset_name")
-                        if preset_name:
-                            logger.info(f"远程情感分类选择预设: {preset_name}")
-                        return preset_name
-                    else:
-                        logger.warning(f"情感分类接口返回 {resp.status}")
-                        return None
-        except Exception as e:
-            logger.debug(f"情感分类远程调用失败，使用平台默认预设: {e}")
+            tag, confidence = classifier.classify(text)
+            emotion = self.config.emotion
+            if confidence < emotion.confidence_threshold:
+                logger.info(
+                    "情感置信度不足 ({:.3f} < {:.3f})，回退默认预设: {}",
+                    confidence,
+                    emotion.confidence_threshold,
+                    emotion.default_emotion,
+                )
+                return emotion.default_emotion
+            preset_name = emotion.label_preset_map.get(tag)
+            if preset_name:
+                logger.info("情感分类选择预设: {}", preset_name)
+                return preset_name
+            logger.info(
+                "情感标签 {!r} 未配置预设映射，回退默认预设: {}",
+                tag,
+                emotion.default_emotion,
+            )
+            return emotion.default_emotion
+        except Exception as exc:
+            logger.warning("情感分类失败，使用平台默认预设: {}", exc)
             return None
 
     async def tts(self, text: str, **kwargs) -> bytes:
-        """非流式方式获取语音内容
+        """Collect the shared streaming inference path into a WAV file."""
 
-        通过 HTTP GET 调用 VoxCPM API Server 的 /tts 端点。
-        预设选择优先级：
-          1. kwargs["preset_name"] — 由 TTS Adapter 服务端情感分类后传入
-          2. 远程情感分类（调用 TTS Adapter 的 /api/emotion_preset）
-          3. 平台默认预设
+        return await collect_pcm_stream_to_wav(self.tts_pcm_stream(text, **kwargs))
 
-        Args:
-            text (str): 需要合成的语音内容
-            **kwargs: 其他参数 (platform, text_lang, preset_name 等)
+    def _resolve_stream_request(self, text: str, kwargs: dict[str, Any]) -> tuple[dict[str, Any], str]:
+        """Resolve the existing Vox preset and request parameters once."""
 
-        Returns:
-            data (bytes): bytes格式的wav音频内容
-        """
         platform = kwargs.get("platform")
         if not platform:
             raise RuntimeError("未指定平台，请在kwargs中传入platform参数")
@@ -194,9 +208,10 @@ class TTSModel(BaseTTSModel):
         # 优先使用外部传入的预设名（由 TTS Adapter 情感分类决定）
         preset_name = kwargs.get("preset_name")
 
-        # 如果没有外部传入，尝试远程情感分类
-        if not preset_name and not kwargs.get("skip_remote_emotion", False):
-            preset_name = await self._resolve_emotion_preset_remote(text)
+        # If no explicit preset was supplied, classify locally.  The old
+        # callback-to-facade path is intentionally gone.
+        if not preset_name:
+            preset_name = self.resolve_emotion_preset(text)
 
         # 最终回退到平台默认预设
         if not preset_name:
@@ -211,69 +226,21 @@ class TTSModel(BaseTTSModel):
             if not preset:
                 raise ValueError(f"预设 {preset_name} 不存在")
 
-        # 清洗文本：移除颜文字、emoji 等对 TTS 引擎有害的字符
         cleaned_text = clean_text_for_tts(text)
         if cleaned_text != text:
             logger.info(f"文本清洗: '{text[:60]}' -> '{cleaned_text[:60]}'")
         if not cleaned_text:
-            logger.warning("清洗后文本为空，跳过 TTS 生成")
-            return b""
+            raise ValueError("清洗后的 TTS 文本为空")
 
         self._current_preset = preset_name
         split_method = kwargs.get("split_method")
         params = self.build_parameters(cleaned_text, preset, text_lang=text_lang, split_method=split_method)
+        return params, preset_name
 
-        timeout = aiohttp.ClientTimeout(total=120, connect=10)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(
-                f"{self.base_url}/tts",
-                params=params,
-            ) as response:
-                if response.status == 400:
-                    error_response = await response.json()
-                    error_message = error_response.get("message", "未知错误")
-                    raise aiohttp.ClientError(f"请求失败: {response.status}, 错误信息: {error_message}")
-                if response.status == 503:
-                    raise aiohttp.ClientError("VoxCPM 模型未加载，请检查 API 服务器状态")
-                response.raise_for_status()
-                return await response.read()
+    async def tts_pcm_stream(self, text: str, **kwargs) -> AsyncIterator[PCMChunk]:
+        """Yield typed PCM16 chunks from VoxCPM's native streaming endpoint."""
 
-    async def tts_stream(self, text: str, **kwargs):
-        """流式方式获取语音内容 (真流式)
-        
-        调用 API Server 的 /tts_stream 端点，以 async generator 形式逐 chunk 产生 PCM 16-bit 数据。
-        """
-        platform = kwargs.get("platform")
-        if not platform:
-            raise RuntimeError("未指定平台，请在kwargs中传入platform参数")
-
-        text_lang = kwargs.get("text_lang")
-        preset_name = kwargs.get("preset_name")
-
-        if not preset_name and not kwargs.get("skip_remote_emotion", False):
-            preset_name = await self._resolve_emotion_preset_remote(text)
-
-        if not preset_name:
-            preset_name = self.get_platform_preset(platform)
-
-        preset = self.get_preset(preset_name)
-        if not preset:
-            logger.warning(f"预设 '{preset_name}' 不存在，回退到平台默认预设")
-            preset_name = self.get_platform_preset(platform)
-            preset = self.get_preset(preset_name)
-            if not preset:
-                raise ValueError(f"预设 {preset_name} 不存在")
-
-        cleaned_text = clean_text_for_tts(text)
-        if cleaned_text != text:
-            logger.info(f"文本清洗: '{text[:60]}' -> '{cleaned_text[:60]}'")
-        if not cleaned_text:
-            logger.warning("清洗后文本为空，跳过 TTS 生成")
-            return
-
-        self._current_preset = preset_name
-        params = self.build_parameters(cleaned_text, preset, text_lang=text_lang)
-
+        params, _preset_name = self._resolve_stream_request(text, kwargs)
         timeout = aiohttp.ClientTimeout(total=120, connect=10)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(
@@ -288,45 +255,60 @@ class TTSModel(BaseTTSModel):
                     raise aiohttp.ClientError("VoxCPM 模型未加载，请检查 API 服务器状态")
                 response.raise_for_status()
 
-                # 读取流式数据
+                headers = getattr(response, "headers", {}) or {}
+
+                def header_value(name: str, default: str | None = None) -> str | None:
+                    value = headers.get(name)
+                    if value is None:
+                        value = headers.get(name.lower())
+                    return str(value) if value is not None else default
+
+                sample_rate_text = header_value("X-Sample-Rate")
+                if sample_rate_text is None:
+                    raise RuntimeError("VoxCPM streaming response omitted X-Sample-Rate")
+                sample_rate = int(sample_rate_text)
+                channels = int(header_value("X-Channels", "1"))
+                sample_width = int(header_value("X-Sample-Width", "2"))
+                if sample_rate <= 0 or channels <= 0 or sample_width != 2:
+                    raise RuntimeError("VoxCPM returned unsupported PCM metadata")
+
                 async for chunk in response.content.iter_any():
                     if chunk:
-                        yield chunk
+                        yield PCMChunk(
+                            data=bytes(chunk),
+                            sample_rate=sample_rate,
+                            channels=channels,
+                            sample_width=sample_width,
+                        )
+
+    async def tts_stream(self, text: str, **kwargs) -> AsyncIterator[bytes]:
+        """Compatibility byte stream backed by the typed Vox PCM stream."""
+
+        iterator = self.tts_pcm_stream(text, **kwargs).__aiter__()
+        try:
+            async for chunk in iterator:
+                yield chunk.data
+        finally:
+            await close_async_iterator(iterator)
 
     async def tts_stream_to_file(self, text: str, **kwargs) -> Optional[str]:
-        """流式生成并写入 WAV 文件，返回文件路径
-        
-        供 Bilibili/Discord 等需要完整 WAV 文件的适配器使用。
-        边接收 chunk 边写文件，首 chunk 收到即写 WAV header（由于总长度未知，填 0xFFFFFFFF 或在结束后修正）。
-        由于 Python 标准库 wave 不支持未知长度，先缓存 chunk 然后一次性写。
-        这依然避免了在 API server 侧的长时间阻塞拼接。
-        """
+        """Collect the native PCM stream into a WAV file for legacy callers."""
         import os
         import tempfile
-        import wave
 
+        path = None
         try:
             fd, path = tempfile.mkstemp(suffix=".wav")
             os.close(fd)
-            
-            pcm_chunks = []
-            sample_rate = 24000  # VoxCPM 默认 24kHz
-            
-            async for chunk in self.tts_stream(text, **kwargs):
-                pcm_chunks.append(chunk)
-                
-            if not pcm_chunks:
-                return None
-                
-            pcm_data = b"".join(pcm_chunks)
-            
-            with wave.open(path, "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(sample_rate)
-                wf.writeframes(pcm_data)
-                
+            audio_data = await self.tts(text, **kwargs)
+            with open(path, "wb") as output:
+                output.write(audio_data)
             return path
         except Exception as e:
             logger.error(f"tts_stream_to_file error: {e}")
+            if path:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
             return None

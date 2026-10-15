@@ -5,6 +5,7 @@ Provides read/write access to the NachoBot SQLite database for the WebUI.
 
 import hashlib
 import json
+import math
 import re
 import sqlite3
 from pathlib import Path
@@ -170,6 +171,17 @@ class DatabaseManager:
             table_ident = self._table_identifier(conn, table)
             cols = self._get_columns(conn, table)
             col_names = [c["name"] for c in cols]
+            primary_key_columns = self._get_primary_key_columns(conn, table)
+            # Keep a reserved per-row locator outside the schema column set. A
+            # table can legally have a column with the base reserved name, so
+            # extend it until the metadata key cannot overwrite real data.
+            locator_field = "__webui_primary_key__"
+            while locator_field in col_names:
+                locator_field += "_"
+            if any(key not in col_names for key in primary_key_columns):
+                # Unsupported identifiers remain browseable; detail is disabled
+                # for those rows rather than risking an unsafe SQL identifier.
+                primary_key_columns = []
 
             # Validate sort column
             if sort_by not in col_names:
@@ -212,10 +224,17 @@ class DatabaseManager:
             # Convert to dicts, truncating long fields
             data = []
             for row in rows:
-                d = dict(row)
+                raw = dict(row)
+                locator = (
+                    {key: raw[key] for key in primary_key_columns}
+                    if primary_key_columns
+                    else None
+                )
+                d = raw.copy()
                 for key, val in d.items():
                     if key in TRUNCATE_FIELDS and isinstance(val, str) and len(val) > TRUNCATE_LENGTH:
                         d[key] = val[:TRUNCATE_LENGTH] + "..."
+                d[locator_field] = locator
                 data.append(d)
 
             return {
@@ -223,6 +242,7 @@ class DatabaseManager:
                 "label": TABLE_LABELS.get(table, table),
                 "columns": cols,
                 "data": data,
+                "row_locator_field": locator_field,
                 "total": total,
                 "page": page,
                 "page_size": page_size,
@@ -276,6 +296,63 @@ class DatabaseManager:
             return {
                 "table": table,
                 "columns": cols,
+                "data": dict(row),
+                "editable": table in EDITABLE_TABLES,
+            }
+        finally:
+            conn.close()
+
+    def get_row_by_primary_key(
+        self,
+        table: str,
+        primary_key: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Get a complete row using exactly its declared SQLite primary key."""
+        if not isinstance(primary_key, dict):
+            raise ValueError("primary_key must be an object")
+
+        conn = _get_conn()
+        try:
+            table_ident = self._table_identifier(conn, table)
+            primary_key_columns = self._get_primary_key_columns(conn, table)
+            if not primary_key_columns:
+                raise ValueError(f"Table has no declared primary key: {table}")
+
+            supplied_columns = set(primary_key)
+            expected_columns = set(primary_key_columns)
+            if supplied_columns != expected_columns:
+                raise ValueError("primary_key must contain exactly the declared primary-key columns")
+
+            values: list[Any] = []
+            conditions: list[str] = []
+            for column in primary_key_columns:
+                # Identifiers are accepted only after they are confirmed as
+                # columns in the live schema; all locator data stays bound.
+                if column not in {item["name"] for item in self._get_columns(conn, table)}:
+                    raise ValueError("Primary key contains an unsupported column identifier")
+                value = primary_key[column]
+                if value is not None and not isinstance(value, (str, int, float, bool)):
+                    raise ValueError("Primary-key values must be JSON scalars")
+                if isinstance(value, int) and not isinstance(value, bool):
+                    if not -(2**63) <= value < 2**63:
+                        raise ValueError("Primary-key integer is outside SQLite's supported range")
+                if isinstance(value, float) and not math.isfinite(value):
+                    raise ValueError("Primary-key number must be finite")
+                conditions.append(f"{_quote_identifier(column)} IS ?")
+                values.append(value)
+
+            where_clause = " AND ".join(conditions)
+            row = _execute_schema_sql(
+                conn,
+                f"SELECT * FROM {table_ident} WHERE {where_clause}",
+                values,
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Row not found: {table}")
+
+            return {
+                "table": table,
+                "columns": self._get_columns(conn, table),
                 "data": dict(row),
                 "editable": table in EDITABLE_TABLES,
             }
@@ -535,6 +612,16 @@ class DatabaseManager:
             for r in cursor.fetchall()
             if SQLITE_IDENTIFIER_RE.fullmatch(r["name"])
         ]
+
+    def _get_primary_key_columns(self, conn: sqlite3.Connection, table: str) -> list[str]:
+        """Return the declared primary-key columns in SQLite key order."""
+        if table not in self._get_table_names(conn):
+            raise ValueError(f"Table not found: {table}")
+        cursor = conn.execute(
+            "SELECT name FROM pragma_table_info(?) WHERE pk > 0 ORDER BY pk",
+            (table,),
+        )
+        return [row["name"] for row in cursor.fetchall()]
 
     def _table_identifier(self, conn: sqlite3.Connection, table: str) -> str:
         if table not in self._get_table_names(conn):

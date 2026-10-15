@@ -1,4 +1,5 @@
 # 文件路径：src/plugins/GPT_SoVITS/api_server.py
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 import uvicorn
 import logging
@@ -8,7 +9,6 @@ import re
 from .tts_model import TTSModel
 from ....utils.tts_runtime import TTSRuntime
 
-app = FastAPI(title="GPT-SoVITS Adapter API", version="1.1")
 logger = logging.getLogger("api_server")
 OUTPUT_DIR = Path(__file__).resolve().parent / "outputs"
 GPT_WEIGHT_SUFFIXES = {".ckpt", ".pth", ".pt", ".bin", ".safetensors"}
@@ -23,6 +23,7 @@ _runtime = TTSRuntime(
     config_dir=Path(__file__).resolve().parents[4] / "configs",
     fixed_backend="GPT_Sovits",
 )
+_model_lock = asyncio.Lock()
 
 
 def _log_safe(value: object, max_len: int = 200) -> str:
@@ -72,20 +73,25 @@ def _sync_weight_metadata(model: TTSModel) -> None:
     sovits_weights = getattr(model, "_loaded_sovits_weights", None)
 
 
-@app.on_event("startup")
-async def startup_event():
-    """初始化 FastAPI 服务时加载默认模型配置"""
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Eagerly construct the fixed GPT client before opening the listener."""
     global tts_model
 
     print("启动 GPT-SoVITS TTS 服务中 ...")
-    try:
-        async with _runtime.model_context() as model:
-            tts_model = model
-            _sync_weight_metadata(model)
-        print("默认配置加载完成")
-    except Exception:
-        logger.exception("TTS Model initialization failed")
-        print("TTS 模型加载失败，TTS 功能将不可用。")
+    ready = await asyncio.to_thread(_runtime.ensure_tts_model)
+    model = _runtime.model
+    if not ready or model is None:
+        error = _runtime.error or "GPT-SoVITS model is unavailable"
+        logger.error("TTS Model initialization failed: %s", _log_safe(error))
+        raise RuntimeError(error)
+    tts_model = model
+    _sync_weight_metadata(model)
+    print("默认配置加载完成")
+    yield
+
+
+app = FastAPI(title="GPT-SoVITS Adapter API", version="1.1", lifespan=lifespan)
 
 
 # ==================== 模型加载接口 ====================
@@ -113,8 +119,10 @@ async def load_model(request: Request):
         return {"status": "error", "msg": "模型路径无效或文件不存在"}
 
     try:
-        async with _runtime.model_context() as model:
-            tts_model = model
+        async with _model_lock:
+            model = tts_model
+            if model is None:
+                raise RuntimeError("GPT-SoVITS model is not loaded")
             try:
                 await _runtime.call_blocking(
                     _apply_weight_transaction,
@@ -124,6 +132,7 @@ async def load_model(request: Request):
                 )
             except BaseException as exc:
                 _runtime.invalidate(f"Fixed GPT weight transaction failed: {exc}")
+                tts_model = None
                 raise
             gpt_weights, sovits_weights = str(gpt_path), str(sovits_path)
     except Exception as exc:
@@ -158,8 +167,10 @@ async def infer(request: Request):
         return {"status": "error", "msg": "缺少文本输入"}
 
     try:
-        async with _runtime.model_context() as model:
-            tts_model = model
+        async with _model_lock:
+            model = tts_model
+            if model is None:
+                raise RuntimeError("GPT-SoVITS model is not loaded")
             _sync_weight_metadata(model)
             # 调用已有的 TTS 接口（返回音频二进制）
             audio_bytes = await model.tts(text=text, platform=platform)

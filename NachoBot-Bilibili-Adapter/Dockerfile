@@ -22,12 +22,9 @@ RUN uv sync --locked --no-dev --no-install-project
 
 COPY . .
 
-# The adapter imports the canonical message package and the shared
-# Multimodal namespace from sibling build contexts supplied by Compose.
+# The adapter imports only the canonical message package from the Core source
+# context. Local model code remains in the independently deployed runtime.
 COPY --from=nachobot /ncnk_message /workspace/NachoBot/ncnk_message
-COPY --from=multimodal /src /workspace/NachoBot-Multimodal-Adapter/src
-COPY --from=multimodal /nachobot_multimodal /workspace/NachoBot-Multimodal-Adapter/nachobot_multimodal
-COPY --from=multimodal /configs /workspace/NachoBot-Multimodal-Adapter/configs
 
 ENV PATH="/workspace/NachoBot-Bilibili-Adapter/.venv/bin:${PATH}" \
     PYTHONUNBUFFERED=1

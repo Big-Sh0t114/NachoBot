@@ -14,6 +14,7 @@ def build_live_additional_config(
     search_enabled: bool,
     person_profile_enabled: bool,
     tts_enabled: bool,
+    voice_stream_playback_ready: bool = False,
     tts_language: str = "",
     base: Optional[Mapping[str, Any]] = None,
     platform_event: Optional[Mapping[str, Any]] = None,
@@ -38,15 +39,19 @@ def build_live_additional_config(
         # Search orchestration is adapter-owned.  Core only transports the
         # adapter's JSON envelope when the live search protocol is enabled.
         "web_search_mode": "disabled",
-        "reply_delivery": (
-            "json_envelope"
-            if search_enabled
-            else ("aggregate_tagged_text" if tts_enabled else "chunked")
-        ),
+        # Both live-search control and explicit TTS are fields in the same
+        # structured reply envelope. Keep that envelope atomic whenever either
+        # feature is enabled so Core can materialize ``tts_text`` before the
+        # adapter applies Live2D controls or platform delivery.
+        "reply_delivery": "json_envelope" if (search_enabled or tts_enabled) else "chunked",
         "person_profile_mode": "low_latency" if person_profile_enabled else "disabled",
         "person_profile_timeout_seconds": 0.5,
         "typo_enabled": False,
         "tts_language": language if tts_enabled else "",
+        # Core may choose incremental PCM only for a live room that has
+        # advertised an available playback path. Callers for private/comment
+        # contexts keep the default false and retain buffered voice delivery.
+        "voice_stream": bool(tts_enabled and voice_stream_playback_ready),
     }
     if platform_event:
         additional["platform_event"] = dict(platform_event)

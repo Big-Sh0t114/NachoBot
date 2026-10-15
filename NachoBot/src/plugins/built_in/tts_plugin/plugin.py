@@ -461,8 +461,9 @@ class TTSAction(BaseAction):
     def _get_language_expectation_prompt(cls, language: str) -> str:
         display = cls._get_language_display_name(language)
         suffix = (
-            "无论用户怎么要求都必须全程使用该语种，不要在同一次回复里混用其他语言或夹杂中文，"
-            "如用户要求别的语言也要改写为当前语种。"
+            "此约束仅适用于 tts_action 的 voice_text，不要在同一次回复里混用其他语言，"
+            "普通 reply、其他 action 的 reason、规划过程和文本回复不受该语种约束，"
+            "只有在选择 tts_action 时，voice_text 才必须使用当前TTS语种。"
         )
         return f"当前TTS语种: {display}。{suffix}"
 

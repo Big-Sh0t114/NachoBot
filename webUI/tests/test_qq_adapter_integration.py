@@ -212,6 +212,32 @@ def test_qq_launchers_gate_full_snowluma_manifest_and_order_runtime_before_adapt
     ) < runtime_start
 
 
+def test_potato_launcher_starts_selected_qq_adapter_without_multimodal_relay() -> None:
+    source = (WEBUI_DIR.parent / "launchbot_potato.bat").read_text(encoding="utf-8")
+    assert "call :READ_QQ_ADAPTER" in source
+    assert "NACHOBOT_RUNTIME_PROFILE=potato" in source
+    assert 'start "NachoBot"' in source
+    assert "WAIT_FOR_NACHOBOT_CORE" in source
+    assert 'start "NachoBot-Napcat"' in source
+    assert 'start "NachoBot-SnowLuma"' in source
+    assert 'start "NapCatShell"' in source
+    assert "call :START_SNOWLUMA_RUNTIME" in source
+    assert 'start "SnowLuma Runtime" /D "!SNOWLUMA_DIR!" cmd /d /k "call launcher.bat"' in source
+    assert source.index("call :READ_QQ_ADAPTER") < source.index("uv sync --python \">=3.11,<=3.13\"")
+    assert source.index('start "NachoBot"') < source.index('start "NachoBot-SnowLuma"')
+    for forbidden in (
+        "NachoBot-Multimodal-Adapter",
+        "NACHOBOT_MULTIMODAL",
+        "NACHOBOT_TTS_ENDPOINT",
+        "80" + "70",
+        "9874",
+        "9880",
+        "--no-local-models",
+        "RELAY_READY",
+    ):
+        assert forbidden not in source
+
+
 def test_snowluma_manifest_and_standalone_launcher_provision_dependencies() -> None:
     import tomllib
 
@@ -247,7 +273,7 @@ def test_snowluma_manifest_and_standalone_launcher_provision_dependencies() -> N
         ("qq_adapter=untrusted-selector\n", "untrusted-selector"),
     ),
 )
-def test_invalid_selector_blocks_every_qq_start_before_relay_validation(
+def test_invalid_selector_blocks_every_qq_start_before_core_validation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     env_text: str,
@@ -260,10 +286,6 @@ def test_invalid_selector_blocks_every_qq_start_before_relay_validation(
     manager = process_manager.ProcessManager(tmp_path)
     process_manager._register_services()
 
-    def relay_validation_must_not_run(_: str) -> None:
-        pytest.fail("invalid QQ selector must be rejected before relay validation")
-
-    monkeypatch.setattr(manager, "_require_relay_owner", relay_validation_must_not_run)
     for service_id in process_manager.QQ_SERVICE_IDS:
         with pytest.raises(RuntimeError) as raised:
             manager._validate_service_start(service_id)
@@ -319,14 +341,14 @@ def test_snowluma_config_generation_preserves_connection_and_route(
         "[snowluma]\n"
         "host = \"snow-host\"\nport = 3009\npath = \"/custom/ws\"\n"
         "token = \"preserved-token\"\n\n"
-        "[nachobot_server]\nhost = \"relay-host\"\nport = 8123\n"
+        "[nachobot_server]\nhost = \"core-host\"\nport = 8123\n"
         "platform_name = \"qq\"\n\n[voice]\nuse_tts = true\n"
     )
     (snow_dir / "config.toml").write_text(live, encoding="utf-8")
     (snow_dir / "template_config.toml").write_text(
         "[snowluma]\nhost = \"127.0.0.1\"\nport = 3001\n"
         "path = \"/onebot/v11/ws\"\ntoken = \"\"\n\n"
-        "[nachobot_server]\nhost = \"127.0.0.1\"\nport = 8070\n"
+        "[nachobot_server]\nhost = \"127.0.0.1\"\nport = 8000\n"
         "platform_name = \"qq\"\n\n[voice]\nuse_tts = false\n",
         encoding="utf-8",
     )
@@ -363,7 +385,7 @@ def test_snowluma_config_generation_preserves_connection_and_route(
     assert 'port = 3009' in rendered
     assert 'path = "/custom/ws"' in rendered
     assert 'token = "preserved-token"' in rendered
-    assert 'host = "relay-host"' in rendered
+    assert 'host = "core-host"' in rendered
     assert 'port = 8123' in rendered
     assert "use_tts = false" in rendered
     assert "NachoBot-Napcat-Adapter/config.toml" not in result["generated"]
@@ -386,7 +408,7 @@ def test_snowluma_regeneration_preserves_all_user_tables_except_tts(
     live = (
         "[inner]\nversion = \"user-version\"\n\n"
         "[snowluma]\nhost = \"snow-host\"\nport = 3009\ntoken = \"synthetic-token\"\n\n"
-        "[nachobot_server]\nhost = \"relay-host\"\nport = 8123\n\n"
+        "[nachobot_server]\nhost = \"core-host\"\nport = 8123\n\n"
         "[chat]\nenable_chat_list_filter = true\ngroup_list_type = \"whitelist\"\n"
         "group_list = [1001]\nprivate_list_type = \"whitelist\"\nprivate_list = [2002]\n"
         "ban_user_id = [3003]\nban_qq_bot = true\nenable_poke = false\n\n"
@@ -398,7 +420,7 @@ def test_snowluma_regeneration_preserves_all_user_tables_except_tts(
     (snow_dir / "config.toml").write_text(live, encoding="utf-8")
     (snow_dir / "template_config.toml").write_text(
         "[snowluma]\nhost = \"127.0.0.1\"\nport = 3001\ntoken = \"\"\n\n"
-        "[nachobot_server]\nhost = \"127.0.0.1\"\nport = 8070\n\n"
+        "[nachobot_server]\nhost = \"127.0.0.1\"\nport = 8000\n\n"
         "[chat]\nenable_chat_list_filter = true\ngroup_list_type = \"whitelist\"\n"
         "group_list = []\nprivate_list_type = \"blacklist\"\nprivate_list = []\n"
         "ban_user_id = []\nban_qq_bot = false\nenable_poke = true\n\n"
@@ -457,7 +479,7 @@ def test_first_snowluma_generation_seeds_only_napcat_chat_policy(
     snow_dir.mkdir()
     snow_template = (
         "[snowluma]\nhost = \"127.0.0.1\"\nport = 3001\ntoken = \"\"\n\n"
-        "[nachobot_server]\nhost = \"127.0.0.1\"\nport = 8070\n\n"
+        "[nachobot_server]\nhost = \"127.0.0.1\"\nport = 8000\n\n"
         "[chat]\nenable_chat_list_filter = true\ngroup_list_type = \"whitelist\"\n"
         "group_list = []\nprivate_list_type = \"blacklist\"\nprivate_list = []\n"
         "ban_user_id = []\nban_qq_bot = false\nenable_poke = true\n\n[voice]\nuse_tts = false\n"
@@ -618,7 +640,6 @@ def test_retained_qq_runtime_blocks_switch_and_conflicting_start(
     with pytest.raises(ValueError, match="QQ 适配器"):
         process_manager.assert_qq_adapter_switch_allowed(manager)
 
-    monkeypatch.setattr(manager, "_require_relay_owner", lambda _service_id: None)
     with pytest.raises(RuntimeError, match="already active"):
         manager._validate_service_start("snowluma_adapter")
 
@@ -627,6 +648,7 @@ def test_terminal_qq_error_without_retained_runtime_does_not_block(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _seed_snowluma_runtime(tmp_path)
+    monkeypatch.setattr(snowluma_manager, "_port_listening", lambda _port: False)
     (tmp_path / "NachoBot").mkdir(exist_ok=True)
     (tmp_path / "NachoBot" / ".env").write_text(
         "qq_adapter=snowluma\n", encoding="utf-8"
@@ -642,7 +664,6 @@ def test_terminal_qq_error_without_retained_runtime_does_not_block(
     )
 
     process_manager.assert_qq_adapter_switch_allowed(manager)
-    monkeypatch.setattr(manager, "_require_relay_owner", lambda _service_id: None)
     manager._validate_service_start("snowluma_adapter")
 
 
@@ -652,12 +673,13 @@ def test_terminal_qq_error_without_retained_runtime_does_not_block(
      process_manager.ServiceStatus.STARTING,
      process_manager.ServiceStatus.ERROR),
 )
-def test_snowluma_adapter_reports_core_readiness_before_relay(
+def test_snowluma_adapter_reports_core_readiness_before_start(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     core_status: process_manager.ServiceStatus,
 ) -> None:
     _seed_snowluma_runtime(tmp_path)
+    monkeypatch.setattr(snowluma_manager, "_port_listening", lambda _port: False)
     (tmp_path / "NachoBot").mkdir(exist_ok=True)
     (tmp_path / "NachoBot" / ".env").write_text(
         "qq_adapter=snowluma\n", encoding="utf-8"
@@ -666,12 +688,6 @@ def test_snowluma_adapter_reports_core_readiness_before_relay(
     manager = process_manager.ProcessManager(tmp_path)
     process_manager._register_services()
     manager.states["nachobot"] = process_manager.ServiceState(status=core_status)
-    monkeypatch.setattr(
-        manager,
-        "_require_relay_owner",
-        lambda _service_id: pytest.fail("relay validation must wait for Core readiness"),
-    )
-
     with pytest.raises(RuntimeError) as raised:
         manager._validate_service_start("snowluma_adapter")
 
@@ -680,18 +696,18 @@ def test_snowluma_adapter_reports_core_readiness_before_relay(
         "Cannot start SnowLuma 适配器: NachoBot Core is not ready. "
         "Start NachoBot Core first."
     )
-    assert "relay" not in message
-    assert "8070" not in message
+    assert "80" + "70" not in message
     assert "FULL" not in message
     assert "LITE" not in message
     assert "POTATO" not in message
 
 
-def test_snowluma_adapter_keeps_relay_error_after_core_is_ready(
+def test_snowluma_adapter_uses_core_readiness_when_core_is_ready(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _seed_snowluma_runtime(tmp_path)
+    monkeypatch.setattr(snowluma_manager, "_port_listening", lambda _port: False)
     (tmp_path / "NachoBot").mkdir(exist_ok=True)
     (tmp_path / "NachoBot" / ".env").write_text(
         "qq_adapter=snowluma\n", encoding="utf-8"
@@ -702,27 +718,6 @@ def test_snowluma_adapter_keeps_relay_error_after_core_is_ready(
     manager.states["nachobot"] = process_manager.ServiceState(
         status=process_manager.ServiceStatus.RUNNING
     )
-
-    with pytest.raises(RuntimeError, match=r"port 8070 is not ready"):
-        manager._validate_service_start("snowluma_adapter")
-
-
-def test_snowluma_adapter_validation_can_continue_after_core_and_relay_ready(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _seed_snowluma_runtime(tmp_path)
-    (tmp_path / "NachoBot").mkdir(exist_ok=True)
-    (tmp_path / "NachoBot" / ".env").write_text(
-        "qq_adapter=snowluma\n", encoding="utf-8"
-    )
-    monkeypatch.setattr(process_manager, "ROOT_DIR", tmp_path)
-    manager = process_manager.ProcessManager(tmp_path)
-    process_manager._register_services()
-    manager.states["nachobot"] = process_manager.ServiceState(
-        status=process_manager.ServiceStatus.RUNNING
-    )
-    monkeypatch.setattr(manager, "_require_relay_owner", lambda _service_id: None)
 
     manager._validate_service_start("snowluma_adapter")
 
@@ -1403,6 +1398,19 @@ def test_process_manager_start_stop_keeps_launcher_tree_managed_and_closes_stdin
     process_manager._register_services()
     monkeypatch.setattr(manager, "_ensure_required_components", lambda _services: None)
     monkeypatch.setattr(manager, "_port_is_open", lambda _port: False)
+    monkeypatch.setattr(
+        manager,
+        "_build_external_process_snapshot",
+        lambda: process_manager._ProcessSnapshot((), {}),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_scan_external_adapters",
+        lambda **_kwargs: {
+            service_id: process_manager.AdapterObservation(service_id, "absent", 0.0)
+            for service_id in process_manager.EXTERNAL_ADAPTER_SERVICE_IDS
+        },
+    )
 
     import snowluma_manager
 
@@ -1498,8 +1506,6 @@ def test_snowluma_group_recovery_reuses_managed_running_runtime(
     manager = process_manager.ProcessManager(tmp_path)
     process_manager._register_services()
     monkeypatch.setattr(manager, "_ensure_required_components", lambda _services: None)
-    monkeypatch.setattr(manager, "_require_relay_owner", lambda _service_id: None)
-
     calls: list[bool] = []
     import snowluma_manager
 

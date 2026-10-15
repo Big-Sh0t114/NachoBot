@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.env
+config.toml
+config.toml.legacy-v1.bak
+*.bak
+data/
+logs/

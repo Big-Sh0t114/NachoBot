@@ -10,7 +10,7 @@ from src.utils import (
 )
 from .qq_emoji_list import qq_face
 from .message_sending import message_send_instance
-from . import RealMessageType, MessageType, ACCEPT_FORMAT
+from . import RealMessageType, MessageType, get_accept_format
 from .card_handler import parse_json_card
 
 import time
@@ -149,7 +149,7 @@ class MessageHandler:
         template_info: TemplateInfo = None  # 模板信息，暂时为空，等待启用
         format_info: FormatInfo = FormatInfo(
             content_format=["text", "image", "emoji", "voice"],
-            accept_format=ACCEPT_FORMAT,
+            accept_format=get_accept_format(bool(global_config.voice.use_tts)),
         )  # 格式化信息
         if message_type == MessageType.private:
             sub_type = raw_message.get("sub_type")
@@ -249,8 +249,6 @@ class MessageHandler:
 
         # 获取Seg列表
         seg_message, additional_config = await self.handle_real_message(raw_message)
-        if global_config.voice.use_tts:
-            additional_config["allow_tts"] = True
 
         if not seg_message:
             logger.warning("处理后消息内容为空")

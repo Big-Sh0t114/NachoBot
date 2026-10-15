@@ -1,7 +1,7 @@
 """Download and verify UniversalVC-owned support models.
 
-Streaming ASR is owned by NachoBot-Multimodal-Adapter. UniversalVC keeps only
-the VAD and speaker-embedding models that are specific to its audio pipeline.
+Speech perception is owned by Core. UniversalVC keeps only the VAD and
+speaker-embedding models that are specific to its audio pipeline.
 """
 
 import logging

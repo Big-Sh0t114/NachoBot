@@ -7,6 +7,7 @@ from ncnk_message import (
     MessageBase,
 )
 from src.logger import logger
+from src.config import global_config
 from .send_command_handler import SendCommandHandleClass
 from .send_message_handler import SendMessageHandleClass
 from .nc_sending import nc_message_sender
@@ -87,13 +88,22 @@ class SendHandler:
             logger.error("无法识别的消息类型")
             return
         logger.info("尝试发送到napcat")
-        response = await nc_message_sender.send_message_to_napcat(
-            action,
-            {
-                id_name: target_id,
-                "message": processed_message,
-            },
+        contains_video = any(
+            isinstance(segment, dict) and segment.get("type") == "video"
+            for segment in processed_message
         )
+        params = {
+            id_name: target_id,
+            "message": processed_message,
+        }
+        if contains_video:
+            response = await nc_message_sender.send_message_to_napcat(
+                action,
+                params,
+                timeout_sec=global_config.napcat_server.media_action_timeout_sec,
+            )
+        else:
+            response = await nc_message_sender.send_message_to_napcat(action, params)
         if response.get("status") == "ok":
             logger.info("消息发送成功")
             qq_message_id = response.get("data", {}).get("message_id")

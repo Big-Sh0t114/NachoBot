@@ -148,10 +148,6 @@ price_out = 2
 [models.extra_params]
 enable_thinking = false
 
-
-
-
-
 [model_task_config.utils] # 一些组件中使用的模型，例如表情包模块，取名模块，关系模块，情绪变化等，是必须的模型
 model_list = ["deepseek-ai/DeepSeek-R1-0528-Qwen3-8B/Silicon","deepseek-ai/DeepSeek-R1-Distill-Qwen-7B/Silicon","THUDM/GLM-Z1-9B-0414/Silicon"] # 使用的模型列表，每个子项对应上面的模型名称(name)
 temperature = 0.2                        # 模型温度，新V3建议0.1-0.3
@@ -223,8 +219,12 @@ model_list = []
 temperature = 0.05
 max_tokens = 800
 
-[model_task_config.vlm] # 图像识别模型（核心聊天图片/表情包描述）
+[model_task_config.vlm] # 普通图片和表情包视觉理解模型
 model_list = ["Qwen/Qwen3.5-4B/Silicon","Florence-2"]
+max_tokens = 8000
+
+[model_task_config.vlm_fast] # 直播识图等低延迟视觉任务模型
+model_list = ["Florence-2"]
 max_tokens = 8000
 
 [model_task_config.realtime_replyer] # 适配器实时会话专属独立回复模型组

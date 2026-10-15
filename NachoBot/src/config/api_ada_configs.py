@@ -133,6 +133,9 @@ class ModelTaskConfig(ConfigBase):
     lpmm_qa: TaskConfig
     """LPMM问答模型配置"""
 
+    vlm_fast: TaskConfig = field(default_factory=TaskConfig)
+    """对延迟敏感的图像识别模型配置"""
+
     replyer1: TaskConfig = field(default_factory=TaskConfig)
     """备用回复模型组1（可选）"""
 

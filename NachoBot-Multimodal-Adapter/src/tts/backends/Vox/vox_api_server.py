@@ -18,6 +18,14 @@ import torch
 from typing import Optional, List
 from pathlib import Path
 
+# Direct execution puts this file's directory first on ``sys.path``.  Add the
+# adapter root so the shared helper is still imported through its stable
+# ``nachobot_multimodal`` namespace in the managed raw runtime.
+_ADAPTER_ROOT = Path(__file__).resolve().parents[4]
+if str(_ADAPTER_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ADAPTER_ROOT))
+from nachobot_multimodal.utils.uvicorn_logging import install_quiet_access_logging
+
 torch.set_float32_matmul_precision('high')
 
 from fastapi import FastAPI, Query
@@ -525,9 +533,11 @@ async def tts_stream(
 @app.get("/health")
 async def health():
     """健康检查"""
+    loaded = voxcpm_model is not None
     return {
-        "status": "ok",
-        "model_loaded": voxcpm_model is not None,
+        "status": "ok" if loaded else "starting",
+        "ready": loaded,
+        "model_loaded": loaded,
         "sample_rate": model_sample_rate,
     }
 
@@ -535,7 +545,7 @@ async def health():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="VoxCPM TTS API Server")
     parser.add_argument("--host", type=str, default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8808)
+    parser.add_argument("--port", type=int, default=9881)
     parser.add_argument(
         "--model-dir",
         type=str,
@@ -545,6 +555,14 @@ if __name__ == "__main__":
     parser.add_argument("--no-denoiser", action="store_true", help="禁用降噪器")
     args = parser.parse_args()
 
+    # The raw engine is an implementation detail of the 9880 supervisor.  A
+    # non-loopback bind would expose backend-specific schemas and bypass the
+    # uniform public contract, so fail closed instead of silently widening it.
+    if args.host not in {"127.0.0.1", "localhost", "::1"}:
+        raise SystemExit("Vox raw API must bind to loopback")
+    if args.port == 9880:
+        raise SystemExit("Vox raw API cannot bind the public 9880 port")
+
     # 启动时加载模型
     load_model(
         model_dir=args.model_dir,
@@ -552,4 +570,6 @@ if __name__ == "__main__":
         enable_denoiser=not args.no_denoiser,
     )
 
-    uvicorn.run(app, host=args.host, port=args.port)
+    config = uvicorn.Config(app, host=args.host, port=args.port)
+    install_quiet_access_logging()
+    uvicorn.Server(config).run()

@@ -24,6 +24,7 @@ from src.config.official_configs import (
 install(extra_lines=3)
 
 TEMPLATE_DIR = "template"
+CORE_PORT = 8000
 
 
 def update_config():

@@ -131,9 +131,49 @@ def _extract_plain_text(seg) -> str:
     if seg.type == "seglist" and isinstance(seg.data, list):
         parts = [_extract_plain_text(child) for child in seg.data]
         return "".join(parts)
-    if seg.type == "text" or seg.type == "tts_text":
+    if seg.type == "text":
         return _strip_emoji(str(seg.data or ""))
+    if seg.type == "tts_text":
+        data = seg.data
+        if isinstance(data, dict):
+            data = data.get("display_text") if data.get("display_text") is not None else data.get("text")
+        return _strip_emoji(str(data or ""))
     return ""
+
+
+def _extract_voice_base64(seg) -> str:
+    """Return the first Core-produced voice payload from a segment tree."""
+    if seg.type == "voice":
+        data = seg.data
+        if isinstance(data, dict):
+            data = data.get("audio_base64") or data.get("audio")
+        return str(data or "").strip()
+    if seg.type == "seglist" and isinstance(seg.data, list):
+        for child in seg.data:
+            voice_data = _extract_voice_base64(child)
+            if voice_data:
+                return voice_data
+    return ""
+
+
+def _extract_voice_stream_payload(seg) -> Any:
+    """Return a lifecycle segment without treating PCM chunks as complete audio."""
+    if seg.type == "voice_stream":
+        return seg.data
+    if seg.type == "seglist" and isinstance(seg.data, list):
+        for child in seg.data:
+            payload = _extract_voice_stream_payload(child)
+            if payload is not None:
+                return payload
+    return None
+
+
+def _has_voice_stream_segment(seg) -> bool:
+    if seg.type == "voice_stream":
+        return True
+    if seg.type == "seglist" and isinstance(seg.data, list):
+        return any(_has_voice_stream_segment(child) for child in seg.data)
+    return False
 
 
 def _extract_image_base64(seg) -> str:

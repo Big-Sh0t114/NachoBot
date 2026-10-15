@@ -3,23 +3,30 @@ import json
 import re
 import time
 import random
-import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Callable
 
-_multimodal_adapter_path = Path(__file__).resolve().parents[3] / "NachoBot-Multimodal-Adapter"
-if _multimodal_adapter_path.exists() and str(_multimodal_adapter_path) not in sys.path:
-    sys.path.insert(0, str(_multimodal_adapter_path))
+from bili_src.core.multimodal_client import CoreMultimodalClient
 
-try:
-    from nachobot_multimodal.utils.emotion_resolver import resolve_emotion_preset_remote
-except ImportError:
-    resolve_emotion_preset_remote = None
 
-try:
-    from nachobot_multimodal.utils.tts_runtime import TTSRuntime
-except ImportError:
-    TTSRuntime = None
+def _split_text_for_streaming(text: str, max_length: int = 80) -> List[str]:
+    """Split playback-sized chunks without importing the local model runtime."""
+
+    text = str(text or "").strip()
+    if not text:
+        return []
+    parts = re.split(r"(?<=[。！？!?.，,、；;：:])", text)
+    segments: List[str] = []
+    for part in (item.strip() for item in parts):
+        if not part:
+            continue
+        for offset in range(0, len(part), max_length):
+            chunk = part[offset : offset + max_length]
+            if segments and len(segments[-1]) < 10:
+                segments[-1] += chunk
+            else:
+                segments.append(chunk)
+    return segments or [text]
 
 def _clean_text_for_tts(text: str) -> str:
     """Helper to clean text for TTS, similar to how utils did it. 
@@ -41,40 +48,27 @@ class TTSManager:
         live2d_finish_reply_callback: Optional[Callable] = None,
         live2d_apply_control_callback: Optional[Callable] = None,
         prepare_reply_callback: Optional[Callable] = None,
-        tts_model_class: Any = None,
-        tts_import_error: Optional[str] = None,
-        tts_config_dir: Optional[Path] = None,
+        multimodal_client: Optional[CoreMultimodalClient] = None,
     ):
         self.config = config
         self.logger = logger
         self.config_path = config_path
         self.audio_player = audio_player
         
-        self.send_danmu = send_danmu_callback
+        # Ordinary chat replies are delivered by OutgoingHandler.  This
+        # manager keeps only the explicitly non-chat idle-speech path.
+        del send_danmu_callback, live2d_finish_reply_callback
         self.on_start_replying = live2d_start_reply_callback
-        self.on_reply_finished = live2d_finish_reply_callback
         self.apply_live2d_control = live2d_apply_control_callback
         self.prepare_reply = prepare_reply_callback
-        
-        self.tts_model_class = tts_model_class
-        self.tts_import_error = tts_import_error
-        self.tts_config_dir = Path(tts_config_dir) if tts_config_dir else None
-        self._tts_runtime = (
-            TTSRuntime(
-                self.tts_config_dir,
-                model_class=tts_model_class,
-                import_error=tts_import_error,
-            )
-            if TTSRuntime is not None
-            else None
+
+        self.multimodal_client = multimodal_client or CoreMultimodalClient(
+            getattr(config, "nachobot_host", "127.0.0.1"),
+            getattr(config, "nachobot_port", 8000),
         )
-        self.tts_model = None
         self.tts_enable = False
         self.subtitle_path = "subtitles.txt"
 
-        self._tts_buffer: Dict[int, List[str]] = {}
-        self._tts_timer: Dict[int, asyncio.Task] = {}
-        self._tts_metadata: Dict[int, Dict[str, Any]] = {}
         self._tts_manual_overrides: Dict[int, bool] = {}
 
         # Per-room language preference: "ja" (default, bilingual JP+ZH) or "zh" (Chinese-only)
@@ -93,9 +87,6 @@ class TTSManager:
                     self.subtitle_path = str(room_cfg.get("tts", {}).get("subtitle_path", "subtitles.txt"))
                     break
 
-        if self.tts_enable:
-            self.ensure_tts_model()
-
     def _get_next_idle_interval(self) -> float:
         min_sec = max(10, self.config.idle_tts_min_seconds)
         max_sec = max(min_sec, self.config.idle_tts_max_seconds)
@@ -105,45 +96,23 @@ class TTSManager:
         self._last_active_time = time.time()
         self._next_idle_target = self._get_next_idle_interval()
 
-    def ensure_tts_model(self) -> bool:
-        """Refresh the shared runtime and mirror its actual model."""
-
-        if self._tts_runtime is None:
-            self.logger.error(f"TTS enabled but TTSModel not available: {self.tts_import_error}")
-            self.tts_model = None
-            return False
-        ready = self._tts_runtime.ensure_tts_model()
-        self.tts_model = self._tts_runtime.model
-        if not ready:
-            self.logger.error(f"TTS configuration unavailable: {self._tts_runtime.error}")
-        return ready
-
     async def _synthesize_tts_segment(self, text: str, **kwargs) -> Any:
-        """Refresh and synthesize one segment under the shared async boundary."""
+        """Synthesize explicit non-chat idle speech through Core."""
 
-        if self._tts_runtime is None:
-            raise RuntimeError("TTS runtime unavailable")
+        response = await self.multimodal_client.synthesize_tts(
+            text,
+            platform=str(kwargs.get("platform") or self.config.platform),
+            text_lang=kwargs.get("text_lang"),
+        )
+        import base64
+
+        audio = response.get("audio_base64") or response.get("audio")
+        if not isinstance(audio, str) or not audio.strip():
+            raise RuntimeError("Core TTS returned no audio")
         try:
-            async with self._tts_runtime.model_context() as model:
-                self.tts_model = model
-                return await model.tts(text=text, **kwargs)
-        except Exception:
-            self.tts_model = self._tts_runtime.model
-            raise
-
-    async def _resolve_remote_emotion_preset(self, text: str) -> Optional[str]:
-        """Resolve emotion through the same base config selected for TTS."""
-
-        if resolve_emotion_preset_remote is None:
-            return None
-        base_path = None
-        if self.tts_config_dir:
-            base_path = (
-                self.tts_config_dir
-                if self.tts_config_dir.suffix.lower() == ".toml"
-                else self.tts_config_dir / "base.toml"
-            )
-        return await resolve_emotion_preset_remote(text, base_config_path=base_path)
+            return base64.b64decode(audio, validate=True)
+        except Exception as exc:
+            raise RuntimeError("Core TTS returned invalid audio") from exc
 
     async def _prepare_idle_reply(self, idle_item: Any) -> Any:
         """Normalize idle strings/dicts through the Live2D owner when present."""
@@ -363,32 +332,6 @@ class TTSManager:
 
         return text_jp, text_zh
 
-    def repair_unbalanced_tags(self, text: str, open_zh: int, close_zh: int, open_jp: int, close_jp: int) -> str:
-        repaired = text
-
-        if open_zh == 0 and close_zh > 0:
-            self.logger.warning(f"Removing {close_zh} orphaned </ZH> closing tag(s) without opening tags")
-            repaired = repaired.replace("</ZH>", "")
-        elif close_zh == 0 and open_zh > 0:
-            self.logger.warning(f"Adding {open_zh} missing </ZH> closing tag(s)")
-            repaired = repaired + "</ZH>" * open_zh
-
-        if open_jp == 0 and close_jp > 0:
-            self.logger.warning(f"Removing {close_jp} orphaned </JP> closing tag(s) without opening tags")
-            repaired = repaired.replace("</JP>", "")
-        elif close_jp == 0 and open_jp > 0:
-            self.logger.warning(f"Adding {open_jp} missing </JP> closing tag(s)")
-            repaired = repaired + "</JP>" * open_jp
-
-        if repaired != text:
-            self.logger.info(
-                "Tag repair applied: original_chars={} repaired_chars={}",
-                len(text),
-                len(repaired),
-            )
-
-        return repaired
-
     def update_subtitle(self, text: str, subtitle_path: str = None) -> None:
         if not text:
             return
@@ -438,19 +381,10 @@ class TTSManager:
                     cleaned_tts_text = _clean_text_for_tts(tts_text)
                     
                     # 分段流式：按句切分，逐句生成并立即送入空闲播放队列
-                    from nachobot_multimodal.utils.text_splitter import split_text_for_streaming
-                    segments = split_text_for_streaming(cleaned_tts_text)
+                    segments = _split_text_for_streaming(cleaned_tts_text)
                     self.logger.info(f"Idle TTS 分段流式: {len(segments)} 个分段")
 
                     preset_name = None
-                    if resolve_emotion_preset_remote is not None:
-                        try:
-                            preset_name = await self._resolve_remote_emotion_preset(cleaned_tts_text)
-                        except Exception as exc:
-                            self.logger.error(
-                                "Failed to resolve emotion preset: error_type={}",
-                                type(exc).__name__,
-                            )
 
                     first_segment = True
                     for idx, seg_text in enumerate(segments):
@@ -481,238 +415,3 @@ class TTSManager:
                         "Failed to generate/play idle TTS: error_type={}",
                         type(exc).__name__,
                     )
-
-    async def wait_and_process_tts(self, room_id: int, delay: float = 0.5) -> None:
-        try:
-            await asyncio.sleep(delay)
-            await self.process_buffered_live_reply(room_id)
-        except asyncio.CancelledError:
-            pass
-        except Exception as exc:
-            self.logger.error(
-                "TTS timer error: error_type={}",
-                type(exc).__name__,
-            )
-
-    def buffer_tts_reply(
-        self,
-        room_id: int,
-        text: str,
-        reply_mid: str,
-        reply_dmid: str,
-        control_id: Optional[str] = None,
-    ):
-        # Normalize full-width symbols and brackets to standard uppercase tags
-        text = text.replace("＜", "<").replace("＞", ">")
-        text = text.replace("／", "/")
-        text = text.replace("Ｚ", "Z").replace("Ｈ", "H").replace("ｚ", "Z").replace("ｈ", "H")
-        text = text.replace("Ｊ", "J").replace("Ｐ", "P").replace("ｊ", "J").replace("ｐ", "P")
-        text = re.sub(r"[<\[【［](/?)(ZH|JP)[>\]】］]", lambda m: f"<{m.group(1)}{m.group(2).upper()}>", text, flags=re.IGNORECASE)
-        
-        buffer = self._tts_buffer.setdefault(room_id, [])
-        buffer.append(text)
-
-        if room_id not in self._tts_metadata:
-            self._tts_metadata[room_id] = {
-                "reply_mid": reply_mid,
-                "reply_dmid": reply_dmid,
-                "start_time": time.time(),
-                "control_id": control_id,
-            }
-        elif control_id:
-            self._tts_metadata[room_id]["control_id"] = control_id
-
-        if room_id in self._tts_timer:
-            self._tts_timer[room_id].cancel()
-
-        self._tts_timer[room_id] = asyncio.create_task(self.wait_and_process_tts(room_id))
-
-    async def process_buffered_live_reply(self, room_id: int) -> None:
-        try:
-            buffer = self._tts_buffer.get(room_id)
-            if not buffer:
-                return
-
-            full_text = "".join(buffer)
-
-            open_zh = full_text.count("<ZH>")
-            close_zh = full_text.count("</ZH>")
-            open_jp = full_text.count("<JP>")
-            close_jp = full_text.count("</JP>")
-
-            is_balanced = (open_zh == close_zh) and (open_jp == close_jp)
-
-            self.logger.info(
-                "SmartBuffering Check: balanced={} (ZH:{}/{} JP:{}/{}) chars={}",
-                is_balanced,
-                open_zh,
-                close_zh,
-                open_jp,
-                close_jp,
-                len(full_text),
-            )
-
-            metadata = self._tts_metadata.get(room_id, {})
-            start_time = metadata.get("start_time", 0)
-            elapsed = time.time() - start_time
-
-            if not is_balanced and elapsed < 8.0:
-                self.logger.info(f"Buffered TTS text unbalanced, extending wait... (elapsed={elapsed:.1f}s)")
-                self._tts_timer[room_id] = asyncio.create_task(self.wait_and_process_tts(room_id, delay=1.0))
-                return
-
-            if not is_balanced:
-                self.logger.warning("TTS buffer timeout with unbalanced tags. Attempting repair...")
-                full_text = self.repair_unbalanced_tags(full_text, open_zh, close_zh, open_jp, close_jp)
-
-            self._tts_buffer[room_id] = []
-            self._tts_timer.pop(room_id, None)
-            self._tts_metadata.pop(room_id, None)
-
-            reply_mid = metadata.get("reply_mid")
-            reply_dmid = metadata.get("reply_dmid")
-            control_id = metadata.get("control_id")
-            reply_started = False
-            control_apply_attempted = False
-
-            async def activate_reply() -> None:
-                nonlocal reply_started, control_apply_attempted
-                if not reply_started and self.on_start_replying:
-                    reply_started = True
-                    await self.on_start_replying()
-                if not control_apply_attempted and self.apply_live2d_control and control_id:
-                    control_apply_attempted = True
-                    await self.apply_live2d_control(control_id)
-
-            self.logger.info(
-                "Processing buffered TTS reply for room {}: chars={} buffer_segments={}",
-                room_id,
-                len(full_text),
-                len(buffer),
-            )
-
-            room_config = self.config.live_room_prompts.get(room_id, {})
-            tts_config = room_config.get("tts", {})
-
-            # Determine TTS language mode for this room
-            room_lang = self.get_room_language(room_id)
-
-            if room_lang == "zh":
-                # Chinese-only mode: strip any residual bilingual tags and TTS the Chinese text directly
-                display_text = re.sub(r"</?[A-Z]{2}>", "", full_text).strip()
-                msg_to_send = display_text
-                tts_text = display_text
-            else:
-                # Default bilingual mode: parse <JP> and <ZH> tags
-                text_jp, text_zh = self.parse_bilingual_response(full_text)
-                display_text = text_zh if text_zh else full_text
-                msg_to_send = text_zh if text_zh else full_text
-                tts_text = text_jp if text_jp else ""
-
-            # Enter the TTS path when an already-created client exists or this
-            # room is configured for TTS. Each segment below performs the live
-            # refresh; the cached object must not bypass configuration checks.
-            if self.tts_model or (tts_config and tts_config.get("enable")):
-                subtitle_path = str(tts_config.get("subtitle_path") or "subtitles.txt")
-                self.update_subtitle(display_text, subtitle_path=subtitle_path)
-
-                if tts_text:
-                    cleaned_tts_text = _clean_text_for_tts(tts_text)
-                    self.logger.info(
-                        "TTS Generating for room {} (lang={}): chars={}",
-                        room_id,
-                        room_lang,
-                        len(cleaned_tts_text),
-                    )
-                    try:
-                        # 分段流式：按句切分文本，逐句生成并立即送入播放队列
-                        from nachobot_multimodal.utils.text_splitter import split_text_for_streaming
-                        segments = split_text_for_streaming(cleaned_tts_text)
-                        self.logger.info(f"TTS 分段流式: {len(segments)} 个分段")
-
-                        preset_name = None
-                        if resolve_emotion_preset_remote is not None:
-                            try:
-                                preset_name = await self._resolve_remote_emotion_preset(cleaned_tts_text)
-                            except Exception as exc:
-                                self.logger.error(
-                                    "Failed to resolve emotion preset: error_type={}",
-                                    type(exc).__name__,
-                                )
-
-                        first_segment = True
-                        for idx, seg_text in enumerate(segments):
-                            self.logger.info(
-                                "TTS segment {}/{}: chars={}",
-                                idx + 1,
-                                len(segments),
-                                len(seg_text),
-                            )
-                            audio_data = await self._synthesize_tts_segment(
-                                seg_text,
-                                platform=self.config.platform,
-                                preset_name=preset_name,
-                                split_method="cut0",
-                            )
-
-                            if first_segment and audio_data:
-                                first_segment = False
-                                # 首段音频就绪后触发 Live2D 控制，最多一次
-                                try:
-                                    await activate_reply()
-                                except Exception as exc:
-                                    self.logger.error(
-                                        "Live2D reply hook error: error_type={}",
-                                        type(exc).__name__,
-                                    )
-                                self.audio_player.interrupt_idle()
-
-                            if audio_data:
-                                self.audio_player.play(audio_data)
-
-                        self.logger.info(f"TTS Played successfully for room {room_id}")
-                        return
-                    except Exception as exc:
-                        self.logger.error(
-                            "TTS generation failed: error_type={}",
-                            type(exc).__name__,
-                        )
-                        self.logger.info("Fallback to sending danmu due to TTS error")
-                else:
-                    self.logger.warning(
-                        "TTS enabled for room {} but no parseable text for TTS. Sending danmu.",
-                        room_id,
-                    )
-
-            # Fallback
-            if self.on_start_replying or self.apply_live2d_control:
-                try:
-                    await activate_reply()
-                except Exception as exc:
-                    self.logger.error(
-                        "Live2D reply hook error: error_type={}",
-                        type(exc).__name__,
-                    )
-
-            safe_danmu_text = msg_to_send
-            if len(safe_danmu_text) > 30:
-                safe_danmu_text = safe_danmu_text[:30] + "..."
-
-            await self.send_danmu(room_id, safe_danmu_text, reply_mid, reply_dmid)
-
-            if self.on_reply_finished:
-                try:
-                    await self.on_reply_finished()
-                except Exception as exc:
-                    self.logger.error(
-                        "Live2D reply hook error: error_type={}",
-                        type(exc).__name__,
-                    )
-
-        except Exception as exc:
-            self.logger.error(
-                "Error processing buffered TTS reply: error_type={}",
-                type(exc).__name__,
-            )
-            self._tts_buffer.pop(room_id, None)
-            self._tts_metadata.pop(room_id, None)

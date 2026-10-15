@@ -136,7 +136,7 @@ class ConfigInitializerDefaultsTests(unittest.TestCase):
             self._write_live_configs(root)
             _write(
                 root,
-                "NachoBot-DiscordVC-Adapter/config.toml",
+                "NachoBot-Discord-Adapter/config.toml",
                 '[discord]\ntoken = "live-discord-token"\n',
             )
             _write(

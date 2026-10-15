@@ -8,7 +8,7 @@ from typing import Tuple, Optional
 from src.logger import logger
 from src.config import global_config
 from src.database import BanUser, db_manager, is_identical
-from . import NoticeType, ACCEPT_FORMAT
+from . import NoticeType, get_accept_format
 from .message_sending import message_send_instance
 from src.send_handler.nc_sending import nc_message_sender
 from .message_handler import message_handler
@@ -429,7 +429,7 @@ class NoticeHandler:
             template_info=None,
             format_info=FormatInfo(
                 content_format=["text", "notify"],
-                accept_format=ACCEPT_FORMAT,
+                accept_format=get_accept_format(bool(global_config.voice.use_tts)),
             ),
             additional_config=additional_config,
         )

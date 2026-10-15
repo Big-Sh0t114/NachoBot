@@ -1,6 +1,6 @@
 # NachoBot Universal Voice Adapter (Real-Time Edition)
 
-基于 [ProcTap](https://github.com/m96-chan/ProcTap) 的 Windows 通用语音适配器。它从指定进程捕获音频，经 VAD、可选降噪、声纹追踪和共享流式 ASR 转成文本发送至 NachoBot Core，再把回复语音送入虚拟声卡，适合多人连麦与游戏场景。
+基于 [ProcTap](https://github.com/m96-chan/ProcTap) 的 Windows 通用语音适配器。它从指定进程捕获音频，经 VAD、可选降噪和声纹追踪后，把有界 WAV `voice` 段发送至 NachoBot Core，再播放 Core 返回的语音段，适合多人连麦与游戏场景。
 
 ## 🌟 核心特性
 
@@ -8,8 +8,8 @@
 - 🔇 **智能批量去噪 (RNNoise)** — 内置基于 `pyrnnoise` 的深度学习降噪。VAD 触发后异步进行批量降噪，在保证低至毫秒级捕获延迟的同时，完美过滤游戏底噪、键盘声与环境噪音。
 - 🎙 **高精度语音活动检测 (Silero VAD)** — 通过 `sherpa-onnx` 运行，比传统 RMS 阈值拥有更高的精准度，能完美切分连续对话。
 - 👥 **实时声纹追踪 (WeSpeaker)** — 在多人频道中，能够通过声纹特征 (WeSpeaker ResNet34) 自动聚类并追踪说话人，给 NachoBot Core 提供说话人 ID 区分上下文！
-- ⚡ **共享流式语音识别 (Zipformer)** — 复用 `NachoBot-Multimodal-Adapter` 的 2025 中文 xlarge INT8 模型，在 CPU 上逐块解码；VAD 结束时直接提交最终文本，无需重新识别整段语音。
-- 📦 **单一模型所有权** — UniversalVC 只管理 Silero VAD 与 WeSpeaker；ASR 配置、实现和模型下载统一由 Multimodal-Adapter 负责。
+- ⚡ **Core multimodal perception** — VAD 完成后提交有大小上限的 WAV `voice` 段，由 Core 按运行态选择 local/remote perception。
+- 📦 **单一模型所有权** — UniversalVC 只管理 Silero VAD、WeSpeaker 和降噪；感知与语音生成模型由 Core/multimodal runtime 负责。
 
 ## 💻 前置要求
 
@@ -17,7 +17,7 @@
 2. **Python 3.11+**（推荐使用 `uv` 管理依赖）
 3. **虚拟声卡驱动** — 推荐 [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) 或 [VoiceMeeter](https://vb-audio.com/Voicemeeter/)
 4. **NachoBot Core** 处于运行状态
-5. 相邻的 **NachoBot-Multimodal-Adapter** 已准备共享 ASR 配置和模型
+5. NachoBot Core 已启动并提供 multimodal API
 
 ## 🎛️ 输入/输出设备设置指南
 
@@ -25,7 +25,7 @@
 
 ### 1. 适配器配置 (`config.toml`)
 - **`[capture] target_process_name`**：填写目标语音软件的进程名（例如 `"QQ.exe"`、`"Discord.exe"`）。这是 **Bot 的耳朵**，适配器会自动从该进程中捕获其他人说话的声音。
-- **`[output] device_name`**：填写虚拟声卡的**输入端**名称（例如 `"CABLE Input (VB-Audio Virtual Cable)"`）。这是 **Bot 的嘴巴**，Bot 的 TTS 回复会播放到这个虚拟声卡中。
+- **`[output] device_name`**：填写虚拟声卡的**输入端**名称（例如 `"CABLE Input (VB-Audio Virtual Cable)"`）。这是 **Bot 的嘴巴**，Core 返回的语音会播放到这个虚拟声卡中。
 
 ### 2. 语音软件配置 (以 Discord/QQ/游戏 为例)
 进入该目标语音软件的音频设置界面：
@@ -75,17 +75,8 @@ similarity_threshold = 0.6 # 声纹区分灵敏度
 
 ```
 
-流式 ASR 不再在 UniversalVC 中重复配置。请在相邻的
-`NachoBot-Multimodal-Adapter/configs/perception.toml` 中统一设置：
-
-```toml
-[asr]
-mode = "local_streaming"
-provider = "cpu"
-num_threads = 4
-models_dir = "models"
-auto_download = true
-```
+UniversalVC 不配置 ASR/TTS provider 或模型。`config.toml` 中的 `nachobot.port`
+默认是 Core 的 `8000`；运行态和 local/remote 模型路由由 Core multimodal 层管理。
 
 ## 🧩 架构流水线工作原理
 
@@ -107,14 +98,14 @@ auto_download = true
     │                                               │
     │ [5. 声纹特征] WeSpeaker 提取特征并分配 ID     │
     │                                               │
-    │ [6. 语音识别] xlarge INT8 Zipformer (CPU流式) │
+    │ [6. Core perception] local/remote multimodal API │
     └───────────────────────────────────────────────┘
                           │
                           ↓
              NachoBot Core (附带 UserInfo)
                           │
                           ↓
-            虚拟声卡 ←─ TTS ←─ 回复文本
+            虚拟声卡 ←─ Core voice segment ←─ 回复字段
 ```
 
 ## 📂 目录结构概述
@@ -123,7 +114,7 @@ auto_download = true
 NachoBot-UniversalVC-Adapter/
 ├── main.py               # 入口程序，负责检查环境与依赖
 ├── model_manager.py      # VAD 与声纹模型下载管理器
-├── multimodal_bridge.py  # 接入 Multimodal 共享 ASR 包
+├── runtime_compat.py      # VAD/声纹使用的 Windows ONNX Runtime loader
 ├── audio_pipeline.py     # 核心组件: 异步音频调度流水线
 ├── denoise.py            # RNNoise 降噪封装
 ├── vad_processor.py      # Silero VAD 封装

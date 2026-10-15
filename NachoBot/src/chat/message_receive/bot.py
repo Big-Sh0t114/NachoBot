@@ -20,7 +20,9 @@ from src.common.logger import get_logger
 from src.config.config import global_config
 from src.mood.mood_manager import mood_manager  # 导入情绪管理器
 from src.chat.message_receive.chat_stream import get_chat_manager, ChatStream
+from src.chat.message_receive.delivery_context import scoped_delivery_target
 from src.chat.message_receive.message import MessageRecv
+from src.chat.message_receive.outbound_echo import outbound_echo_registry
 from src.chat.message_receive.storage import MessageStorage
 from src.chat.replyer.sandbox_callback import consume_sandbox_callback_reply
 from src.chat.heart_flow.heartflow_message_processor import HeartFCMessageReceiver
@@ -118,6 +120,41 @@ def _check_ban_regex(text: str, chat: ChatStream, userinfo: Optional[UserInfo]) 
     return False
 
 
+def _sanitize_message_data_for_log(message_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a shallow log-only copy with large Base64 segment payloads redacted."""
+    sanitized = dict(message_data)
+    message_segment = message_data.get("message_segment")
+    if not isinstance(message_segment, dict):
+        return sanitized
+
+    sanitized_segment = dict(message_segment)
+    segments = message_segment.get("data")
+    if not isinstance(segments, list):
+        sanitized["message_segment"] = sanitized_segment
+        return sanitized
+
+    sanitized_segments = []
+    for segment in segments:
+        if not isinstance(segment, dict):
+            sanitized_segments.append(segment)
+            continue
+
+        sanitized_item = dict(segment)
+        payload = segment.get("data")
+        segment_type = str(segment.get("type", "")).lower()
+        if segment_type in {"image", "emoji", "voice", "audio", "video"} and isinstance(payload, str) and len(payload) >= 1024:
+            sample = payload[:256]
+            base64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\r\n"
+            if all(char in base64_chars for char in sample):
+                sanitized_item["data"] = f"<base64 omitted: {len(payload)} chars>"
+
+        sanitized_segments.append(sanitized_item)
+
+    sanitized_segment["data"] = sanitized_segments
+    sanitized["message_segment"] = sanitized_segment
+    return sanitized
+
+
 class ChatBot:
     def __init__(self):
         self.bot = None  # bot 实例引用
@@ -133,6 +170,11 @@ class ChatBot:
             self._started = True
 
     async def _process_commands_with_new_system(self, message: MessageRecv):
+        """Process a command with its source delivery target bound throughout."""
+        with scoped_delivery_target(message):
+            return await self._process_commands_with_new_system_scoped(message)
+
+    async def _process_commands_with_new_system_scoped(self, message: MessageRecv):
         # sourcery skip: use-named-expression
         """使用新插件系统处理命令"""
         try:
@@ -421,30 +463,31 @@ class ChatBot:
                 command_instance: BaseCommand = command_class(message, plugin_config)
                 command_instance.set_matched_groups(matched_groups)
 
-                try:
-                    # 执行命令
-                    success, response, intercept_message = await command_instance.execute()
-
-                    # 记录命令执行结果
-                    if success:
-                        logger.info(f"命令执行成功: {command_class.__name__} (拦截: {intercept_message})")
-                    else:
-                        logger.warning(f"命令执行失败: {command_class.__name__} - {response}")
-
-                    # 根据命令的拦截设置决定是否继续处理消息
-                    return True, response, not intercept_message  # 找到命令，根据intercept_message决定是否继续
-
-                except Exception as e:
-                    logger.error(f"执行命令时出错: {command_class.__name__} - {e}")
-                    logger.error(traceback.format_exc())
-
+                with scoped_delivery_target(message):
                     try:
-                        await command_instance.send_text(f"命令执行出错: {str(e)}")
-                    except Exception as send_error:
-                        logger.error(f"发送错误消息失败: {send_error}")
+                        # 执行命令
+                        success, response, intercept_message = await command_instance.execute()
 
-                    # 命令出错时，根据命令的拦截设置决定是否继续处理消息
-                    return True, str(e), False  # 出错时继续处理消息
+                        # 记录命令执行结果
+                        if success:
+                            logger.info(f"命令执行成功: {command_class.__name__} (拦截: {intercept_message})")
+                        else:
+                            logger.warning(f"命令执行失败: {command_class.__name__} - {response}")
+
+                        # 根据命令的拦截设置决定是否继续处理消息
+                        return True, response, not intercept_message  # 找到命令，根据intercept_message决定是否继续
+
+                    except Exception as e:
+                        logger.error(f"执行命令时出错: {command_class.__name__} - {e}")
+                        logger.error(traceback.format_exc())
+
+                        try:
+                            await command_instance.send_text(f"命令执行出错: {str(e)}")
+                        except Exception as send_error:
+                            logger.error(f"发送错误消息失败: {send_error}")
+
+                        # 命令出错时，根据命令的拦截设置决定是否继续处理消息
+                        return True, str(e), False  # 出错时继续处理消息
 
             # 近似匹配提示：以 # 开头但未匹配到命令
             if command_text and command_text.strip().startswith("#"):
@@ -593,14 +636,51 @@ class ChatBot:
         echo_platform = raw_data.get("platform")
         if not isinstance(echo_platform, str) or not echo_platform:
             echo_platform = message_data.get("platform")
+        if isinstance(actual_message_id, int) and not isinstance(actual_message_id, bool):
+            # Several adapters publish native numeric IDs (for example QQ
+            # message IDs) while the database and waiter contracts use text.
+            actual_message_id = str(actual_message_id)
+
+        if (
+            not isinstance(mmc_message_id, str)
+            or not mmc_message_id
+            or not isinstance(actual_message_id, str)
+            or not actual_message_id
+            or not isinstance(echo_platform, str)
+            or not echo_platform
+        ):
+            logger.warning("忽略缺少消息ID或平台标识的平台回执")
+            return
 
         # Resolve the receipt only when both the message id and the platform
         # match a pending send.  A mismatched platform must not satisfy a
         # waiter belonging to another adapter route.
+        echo_match = outbound_echo_registry.observe_echo(
+            mmc_message_id,
+            echo_platform,
+            actual_message_id,
+        )
+        if echo_match.conflict:
+            # A known send already has a different canonical platform ID.
+            # Reject the conflicting echo before it can resolve a waiter or
+            # fall through to the stored-row update path.
+            logger.warning("忽略与已确认平台回执冲突的消息ID: %s", mmc_message_id)
+            return
         ack_resolved = send_api.resolve_message_ack(mmc_message_id, echo_platform, actual_message_id)
-        stored = MessageStorage.update_message(mmc_message_id, actual_message_id)
+        if echo_match.matched and not echo_match.stored:
+            # The sender will reconcile this early ACK after the original row
+            # has been created. Calling storage here would lose that race.
+            stored = False
+        else:
+            stored = MessageStorage.update_message(
+                mmc_message_id,
+                actual_message_id,
+                platform=echo_platform,
+            )
         if stored:
             logger.debug(f"更新消息ID成功: {mmc_message_id} -> {actual_message_id}")
+        elif echo_match.matched:
+            logger.debug(f"已跟踪平台ACK: {mmc_message_id} -> {actual_message_id}")
         elif ack_resolved:
             # Media receipts may deliberately use storage_message=False.  The
             # upstream ACK is still valid even though there is no DB row.
@@ -630,7 +710,7 @@ class ChatBot:
 
             # Debug Log: Trace incoming platform
             logger.debug(f"Incoming Message Platform: {platform}, Message Type: {message_data.get('type')}")
-            logger.debug(f"Full message data: {message_data}")
+            logger.debug(f"Full message data: {_sanitize_message_data_for_log(message_data)}")
 
             if message_data["message_info"].get("group_info") is not None:
                 message_data["message_info"]["group_info"]["group_id"] = str(

@@ -31,6 +31,7 @@ from src.common.logger import get_logger
 from src.common.data_models.message_data_model import ReplyContentType
 from src.config.config import global_config
 from src.chat.message_receive.chat_stream import get_chat_manager
+from src.chat.message_receive.delivery_context import current_delivery_target_binding
 from src.chat.message_receive.uni_message_sender import UniversalMessageSender
 from src.chat.message_receive.message import MessageSending, MessageRecv
 from src.chat.message_receive.storage import MessageStorage
@@ -106,6 +107,16 @@ def pending_ack_count() -> int:
     """Return the number of message ACK waiters (for diagnostics/tests)."""
 
     return len(_pending_ack_waiters)
+
+
+def _outgoing_message_id(outgoing_message: Any, send_result: Any, fallback: str) -> str:
+    """Read the reconciled ID from the mutable outgoing message first."""
+    message_id = getattr(
+        getattr(outgoing_message, "message_info", None),
+        "message_id",
+        None,
+    ) or getattr(getattr(send_result, "message_info", None), "message_id", None)
+    return str(message_id or fallback)
 
 
 # =============================================================================
@@ -361,16 +372,19 @@ async def _send_to_target_receipt_permitted(
                 return SendReceipt(SendStatus.FAILED, stream_id, detail="cross_stream_reply")
 
             reply_user_info = getattr(reply_message, "user_info", None)
+            anchor_message = db_message_to_message_recv(reply_message)
+            anchor_message.update_chat_stream(target_stream)
             if reply_user_info is None:
-                # structured system_event 没有平台 sender，因此不能构造原生引用回复锚点。
-                # 业务层仍然是在回复该事件；发送层仅降级为普通消息，不能伪造用户。
+                # structured system_event 没有平台 sender，不能构造原生平台引用；
+                # 但仍保留逻辑 anchor，让 MessageSending 写入 reply_to_message_id，
+                # 供 WebUI 等上层正确关联到触发它的消息。
                 effective_set_reply = False
-                logger.debug("[SendAPI] 回复目标为 senderless system_event，跳过平台原生引用锚点")
+                logger.debug("[SendAPI] 回复目标为 senderless system_event，仅保留逻辑回复锚点并跳过平台原生引用")
             else:
-                anchor_message = db_message_to_message_recv(reply_message)
                 logger.info(f"[SendAPI] 找到匹配的回复消息，发送者: {reply_user_info.user_id}")
-                anchor_message.update_chat_stream(target_stream)
                 reply_to_platform_id = f"{anchor_message.message_info.platform}:{reply_user_info.user_id}"
+
+        delivery_scope_active, delivery_target_config = current_delivery_target_binding(stream_id)
 
         # 构建发送消息对象
         bot_message = MessageSending(
@@ -386,6 +400,8 @@ async def _send_to_target_receipt_permitted(
             thinking_start_time=current_time,
             reply_to=reply_to_platform_id,
             selected_expressions=selected_expressions,
+            delivery_target_scope_active=delivery_scope_active,
+            delivery_target_config=delivery_target_config,
         )
 
         # 兼容概率转语音：写入当前TTS语种元数据，供后端TTS概率链路读取
@@ -433,9 +449,10 @@ async def _send_to_target_receipt_permitted(
                 return SendReceipt(SendStatus.FAILED, stream_id, message_id=message_id, detail="adapter_failed")
 
             logger.debug(f"[SendAPI] 成功发送消息到 {stream_id}")
-            delivered_message_id = str(
-                getattr(getattr(sent_msg, "message_info", None), "message_id", None) or message_id
-            )
+            # UniversalMessageSender returns a boolean. Its outgoing message
+            # object carries a reconciled platform ID when an early echo was
+            # received before the storage step.
+            delivered_message_id = _outgoing_message_id(bot_message, sent_msg, message_id)
             if ack_future is not None:
                 try:
                     delivered_message_id = await asyncio.wait_for(ack_future, ack_timeout_value)
@@ -446,12 +463,17 @@ async def _send_to_target_receipt_permitted(
                         message_id=message_id,
                         detail="platform_ack_timeout",
                     )
+                bot_message.message_info.message_id = delivered_message_id
                 # UniversalMessageSender stores after the transport enqueue.
                 # Re-apply the platform id here to cover an ACK that raced the
                 # storage step; unstored messages simply have no matching row.
                 if storage_message:
                     try:
-                        MessageStorage.update_message(message_id, delivered_message_id)
+                        MessageStorage.update_message(
+                            message_id,
+                            delivered_message_id,
+                            platform=str(target_stream.platform),
+                        )
                     except Exception:
                         logger.debug("[SendAPI] ACK 后更新消息ID失败", exc_info=True)
             return SendReceipt(SendStatus.DELIVERED, stream_id, message_id=delivered_message_id)
@@ -580,6 +602,42 @@ async def text_to_stream_receipt(
     )
 
 
+async def tts_text_to_stream_receipt(
+    text: str,
+    stream_id: str,
+    typing: bool = False,
+    set_reply: bool = False,
+    reply_message: Optional["DatabaseMessages"] = None,
+    storage_message: bool = True,
+    selected_expressions: Optional[List[int]] = None,
+    display_message: str = "",
+    transport_text: str = "",
+    text_lang: str = "",
+) -> SendReceipt:
+    """Send one explicit TTS field through the normal Focus-gated path.
+
+    ``transport_text`` is optional adapter-facing text/control metadata. It is
+    not synthesized; the multimodal router consumes only ``text``. On TTS
+    failure and in potato mode it becomes the plain-text fallback.
+    """
+
+    content: Dict[str, str] = {"text": str(text or "")}
+    if transport_text:
+        content["display_text"] = str(transport_text)
+    if text_lang:
+        content["lang"] = str(text_lang)
+    return await _send_to_target_receipt(
+        message_segment=Seg(type="tts_text", data=content),
+        stream_id=stream_id,
+        display_message=display_message,
+        typing=typing,
+        set_reply=set_reply,
+        reply_message=reply_message,
+        storage_message=storage_message,
+        selected_expressions=selected_expressions,
+    )
+
+
 async def custom_to_stream_receipt(
     message_type: str,
     content: str | Dict,
@@ -618,6 +676,8 @@ async def local_media_to_stream_receipt(
     local_path: str,
     stream_id: str,
     *,
+    reply_message: Optional["DatabaseMessages"] = None,
+    set_reply: bool = False,
     storage_message: bool = False,
     show_log: bool = True,
     ack_timeout: float = 300.0,
@@ -630,6 +690,8 @@ async def local_media_to_stream_receipt(
         media_type,
         local_path,
         stream_id,
+        reply_message=reply_message,
+        set_reply=set_reply,
         storage_message=storage_message,
         show_log=show_log,
         ack_timeout=ack_timeout,

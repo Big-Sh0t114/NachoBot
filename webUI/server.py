@@ -4,19 +4,21 @@ Main entry point: REST API + WebSocket endpoints + static file serving.
 """
 
 import asyncio
+import base64
+import binascii
 import inspect
 import json
 import logging
-import socket
+import mimetypes
 import uvicorn
 from pathlib import Path
 from contextlib import asynccontextmanager
-from urllib.parse import urlparse
+from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from config_manager import ConfigManager
 from qq_adapter_selector import (
@@ -32,7 +34,11 @@ from memory_manager import is_available as memory_is_available
 import memory_manager
 from music_library import build_music_playlist
 from chat_backend import ChatBackendError, chat_backend
+from chat_media import ChatMediaError, chat_media_store
 from tts_manager import TTSGenerationError, TTSManager, TTSUnavailableError
+from voice_calls import voice_call_store, VoiceCallError
+from voice_routes import create_voice_router
+from live2d_web import router as live2d_router, live2d_web_manager
 from setup_manager import (
     BilibiliLoginNotReady,
     ConfigInitializer,
@@ -136,9 +142,13 @@ async def lifespan(app: FastAPI):
         )
     webui_security.ensure_safe_bind()
     await tts_mgr.start()
+    voice_call_store.recover_after_restart()
+    await voice_router.audio_stream_proxy.start()
     try:
         yield
     finally:
+        await voice_router.audio_stream_proxy.aclose()
+        voice_call_store.recover_after_restart()
         await bilibili_login_manager.shutdown()
         await tts_mgr.close()
         await chat_backend.close()
@@ -146,6 +156,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="NachoBot WebUI", lifespan=lifespan)
+voice_router = create_voice_router(voice_call_store, chat_backend, tts_mgr)
+app.include_router(voice_router)
+app.include_router(live2d_router)
 
 
 @app.middleware("http")
@@ -226,6 +239,11 @@ class ConfigUpdate(BaseModel):
 @app.put("/api/configs/{file_id}")
 async def update_config(file_id: str, body: ConfigUpdate):
     try:
+        if file_id == "env":
+            # ConfigManager performs its synchronous selector guard during the
+            # write. Refresh the non-owning process cache immediately before
+            # that guard so external QQ processes cannot be missed.
+            await process_mgr.refresh_adapter_observation_for_mutation()
         if file_id != "env":
             import tomlkit
             try:
@@ -276,6 +294,8 @@ class RestoreBackupRequest(BaseModel):
 @app.post("/api/configs/{file_id}/restore")
 async def restore_config_backup(file_id: str, body: RestoreBackupRequest):
     try:
+        if file_id == "env":
+            await process_mgr.refresh_adapter_observation_for_mutation()
         validator = _validate_webui_config_raw if file_id == "webui_config" else None
         bak_name = config_mgr.restore_backup(
             file_id,
@@ -302,17 +322,29 @@ async def restore_config_backup(file_id: str, body: RestoreBackupRequest):
 
 
 @app.get("/api/groups")
-async def get_groups():
+async def get_groups(fresh: bool = False):
+    if fresh:
+        await asyncio.gather(
+            process_mgr.refresh_core_observation(force=True),
+            process_mgr.refresh_adapter_observation_for_mutation(),
+        )
+    else:
+        await process_mgr.refresh_external_observation(force=True)
     return process_mgr.get_group_statuses()
 
 
 @app.get("/api/services")
 async def get_services():
+    await process_mgr.refresh_external_observation(force=True)
     return process_mgr.get_all_statuses()
 
 
 @app.get("/api/launch")
 async def get_launch_status():
+    # The launch overview depends on Core/profile readiness only. Scanning all
+    # external adapters here made each chat status poll wait on a full process
+    # inventory, even though adapter state is refreshed by the groups endpoint.
+    await process_mgr.refresh_core_observation(force=True)
     return process_mgr.get_launch_status()
 
 
@@ -324,6 +356,7 @@ class LaunchStartRequest(BaseModel):
 @app.post("/api/launch/start")
 async def start_launch(body: LaunchStartRequest):
     try:
+        await process_mgr.prepare_start_launch(body.profile, body.runtime)
         process_mgr.request_start_launch(body.profile, body.runtime)
         return {
             "status": "starting",
@@ -346,6 +379,7 @@ async def stop_launch():
 @app.post("/api/groups/{group_id}/start")
 async def start_group(group_id: str):
     try:
+        await process_mgr.prepare_start_group(group_id)
         process_mgr.request_start_group(group_id)
         return {"status": "starting", "group": group_id}
     except (ValueError, RuntimeError) as e:
@@ -364,6 +398,7 @@ async def stop_group(group_id: str):
 @app.post("/api/services/{service_id}/start")
 async def start_service(service_id: str):
     try:
+        await process_mgr.prepare_start_service(service_id)
         process_mgr.request_start_service(service_id)
         return {"status": "starting", "service": service_id}
     except (ValueError, RuntimeError) as e:
@@ -399,18 +434,58 @@ async def send_service_input(service_id: str, body: ServiceInput):
 
 class ChatMessageRequest(BaseModel):
     conversation_id: str = ""
-    message: str
+    message: str = ""
     request_message_id: str = ""
     user_id: str = "webui-user"
     user_name: str = "WebUI"
+    attachments: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ChatMediaUploadRequest(BaseModel):
+    type: str
+    name: str = ""
+    mime_type: str = "application/octet-stream"
+    data_base64: str
 
 
 class ChatTTSRequest(BaseModel):
     text: str
 
 
+@app.post("/api/chat/media")
+async def upload_chat_media(body: ChatMediaUploadRequest):
+    try:
+        raw = str(body.data_base64 or "").strip()
+        if raw.startswith("data:") and "," in raw:
+            raw = raw.split(",", 1)[1]
+        data = base64.b64decode(raw, validate=True)
+        return chat_media_store.save_bytes(
+            body.type,
+            data,
+            name=body.name,
+            mime_type=body.mime_type,
+        )
+    except (ValueError, binascii.Error, ChatMediaError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/chat/media/{media_id}")
+async def get_chat_media(media_id: str):
+    try:
+        path = chat_media_store.resolve(media_id)
+    except ChatMediaError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    return FileResponse(
+        path,
+        media_type=media_type,
+        headers={"Cache-Control": "private, max-age=86400"},
+    )
+
+
 @app.get("/api/chat/status")
 async def chat_status():
+    await process_mgr.refresh_core_observation(force=True)
     core_status = _get_core_status()
     result = await chat_backend.status(core_running=core_status == "running")
     result["core_status"] = core_status
@@ -444,18 +519,27 @@ async def chat_tts(body: ChatTTSRequest):
 
 @app.post("/api/chat/message")
 async def chat_message(body: ChatMessageRequest):
-    if not _is_core_running():
+    await process_mgr.refresh_core_observation(force=True)
+    if not process_mgr.core_chat_delivery_allowed():
         raise HTTPException(503, "NachoBot Core 未运行，请先启动核心服务")
     try:
-        return await chat_backend.send_message(
-            conversation_id=body.conversation_id,
-            text=body.message,
-            user_id=body.user_id,
-            user_name=body.user_name,
-            request_message_id=body.request_message_id,
+        # Browser Chat aborts at 10 seconds. Leave room for the 1.5-second
+        # health probe above and bound a stalled WebSocket handshake/send.
+        return await asyncio.wait_for(
+            chat_backend.send_message(
+                conversation_id=body.conversation_id,
+                text=body.message,
+                user_id=body.user_id,
+                user_name=body.user_name,
+                request_message_id=body.request_message_id,
+                attachments=body.attachments,
+            ),
+            timeout=7.5,
         )
     except ChatBackendError as e:
         raise HTTPException(e.status_code, str(e))
+    except asyncio.TimeoutError as e:
+        raise HTTPException(503, "连接 NachoBot Core 聊天通道超时") from e
 
 
 @app.delete("/api/chat/conversations/{conversation_id}")
@@ -473,6 +557,10 @@ async def delete_chat_conversation(conversation_id: str):
             backend_user_id,
         )
         chat_backend.forget_conversation(conversation_id)
+        for call_id in voice_call_store.call_ids_for_conversation(conversation_id):
+            await voice_router.audio_stream_proxy.abort_call(call_id)
+            live2d_web_manager.discard(call_id)
+        voice_call_store.delete_conversation(conversation_id)
         logger.info(
             "Deleted WebUI conversation %s: backend_user_id=%s, deleted_rows=%s",
             _log_safe(conversation_id),
@@ -623,7 +711,13 @@ async def update_plugin_config(plugin_id: str, body: PluginConfigUpdate):
 
 @app.get("/api/status")
 async def get_status():
-    """Quick status snapshot for the status bar."""
+    """Quick status snapshot using the last adapter scan.
+
+    The launcher refreshes adapter identities on its own 60-second cadence
+    and mutation boundaries probe them independently. The global status bar
+    polls more often, so it must not trigger a full process scan each time.
+    """
+    await process_mgr.refresh_core_observation(force=True)
     groups = process_mgr.get_group_statuses()
     summary = {}
     for g in groups:
@@ -719,6 +813,27 @@ async def db_get_row(table_name: str, row_id: int):
         raise HTTPException(404, str(e))
 
 
+class RowDetailRequest(BaseModel):
+    primary_key: dict[str, Any]
+
+    class Config:
+        extra = "forbid"
+
+
+@app.post("/api/db/tables/{table_name}/detail")
+async def db_detail_row(table_name: str, body: RowDetailRequest):
+    try:
+        return await asyncio.to_thread(
+            db_mgr.get_row_by_primary_key,
+            table_name,
+            body.primary_key,
+        )
+    except ValueError as e:
+        message = str(e)
+        status_code = 404 if message.startswith(("Table not found:", "Row not found:")) else 400
+        raise HTTPException(status_code, message)
+
+
 class RowUpdate(BaseModel):
     data: dict
 
@@ -751,31 +866,13 @@ async def db_delete_row(table_name: str, row_id: int):
 
 
 def _get_core_status() -> str:
-    """Return stopped/starting/running/stopping/error for NachoBot Core."""
-    from process_manager import ServiceStatus
+    """Return status from manager state or verified Core observation.
 
-    state = process_mgr.states.get("nachobot")
-    if state is not None:
-        if state.status == ServiceStatus.STARTING:
-            return "starting"
-        if state.status == ServiceStatus.STOPPING:
-            return "stopping"
-        if state.status == ServiceStatus.ERROR:
-            return "error"
-        if state.status == ServiceStatus.STOPPED:
-            return "stopped"
-
-    try:
-        parsed = urlparse(memory_manager._get_core_base_url())
-        host = parsed.hostname or "127.0.0.1"
-        if parsed.port is None:
-            return "starting" if state is not None else "stopped"
-        with socket.create_connection((host, parsed.port), timeout=0.3):
-            return "running"
-    except (OSError, RuntimeError):
-        if state is not None and state.status == ServiceStatus.RUNNING:
-            return "starting"
-        return "stopped"
+    Network probing belongs to ``ProcessManager.refresh_core_observation``;
+    this helper is intentionally a pure cached read so synchronous callers
+    cannot perform raw port-only I/O on the FastAPI event loop.
+    """
+    return process_mgr.core_readiness_status()
 
 
 def _is_core_running() -> bool:
@@ -790,6 +887,7 @@ async def knowledge_list_files():
 
 @app.get("/api/knowledge/files/{filename}")
 async def knowledge_read_file(filename: str):
+    await process_mgr.refresh_core_observation(force=True)
     try:
         content = knowledge_mgr.read_file(filename)
         return {
@@ -807,6 +905,7 @@ class KnowledgeFileUpdate(BaseModel):
 
 @app.put("/api/knowledge/files/{filename}")
 async def knowledge_update_file(filename: str, body: KnowledgeFileUpdate):
+    await process_mgr.refresh_core_observation(force=True)
     if _is_core_running():
         raise HTTPException(
             409, "NachoBot Core 正在运行，请先停止核心后再编辑知识库文件"
@@ -825,6 +924,7 @@ class KnowledgeFileCreate(BaseModel):
 
 @app.post("/api/knowledge/files")
 async def knowledge_create_file(body: KnowledgeFileCreate):
+    await process_mgr.refresh_core_observation(force=True)
     if _is_core_running():
         raise HTTPException(
             409, "NachoBot Core 正在运行，请先停止核心后再新建知识库文件"
@@ -849,12 +949,14 @@ async def knowledge_stats():
 @app.get("/api/memory/status")
 async def memory_status():
     """Check if A_Memorix is enabled."""
+    await process_mgr.refresh_core_observation(force=True)
     return {"enabled": memory_is_available(), "core_running": _is_core_running()}
 
 
 @app.get("/api/memory/stats")
 async def memory_stats():
     """Get memory store statistics."""
+    await process_mgr.refresh_core_observation(force=True)
     try:
         return await memory_manager.get_stats(core_running=_is_core_running())
     except Exception:
@@ -871,6 +973,7 @@ class MemorySearchRequest(BaseModel):
 @app.post("/api/memory/search")
 async def memory_search(body: MemorySearchRequest):
     """Search long-term memories."""
+    await process_mgr.refresh_core_observation(force=True)
     try:
         return await memory_manager.search_memory(
             query=body.query,
@@ -892,6 +995,7 @@ class MemoryMaintainRequest(BaseModel):
 @app.post("/api/memory/maintain")
 async def memory_maintain(body: MemoryMaintainRequest):
     """Execute a memory maintenance action."""
+    await process_mgr.refresh_core_observation(force=True)
     try:
         return await memory_manager.maintain(
             action=body.action,
@@ -953,6 +1057,7 @@ async def setup_qq_adapter_status():
 async def setup_qq_adapter_select(body: QQAdapterSelectionRequest):
     """Select NapCat/SnowLuma through the live .env authority."""
     try:
+        await process_mgr.refresh_adapter_observation_for_mutation()
         return select_qq_adapter(body.qq_adapter, root=config_mgr.root, process_manager=process_mgr)
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(409, str(exc)) from exc
@@ -1004,6 +1109,7 @@ async def setup_generate_configs(body: SetupWizardData):
         # Validate selector syntax and any live backend switch before entering
         # the QR lifecycle context.  ConfigInitializer repeats this check after
         # entering the context to close the TOCTOU window before target writes.
+        await process_mgr.refresh_adapter_observation_for_mutation()
         _, qq_selection_error = ConfigInitializer.prevalidate_qq_adapter_selection(data)
         if qq_selection_error:
             raise HTTPException(400, qq_selection_error)
@@ -1012,6 +1118,7 @@ async def setup_generate_configs(body: SetupWizardData):
         # helper and keeps unproven process/QR cleanup fail-closed before any
         # target write begins.
         async with bilibili_login_manager.config_generation():
+            await process_mgr.refresh_adapter_observation_for_mutation()
             result = ConfigInitializer.generate_configs(data)
         if "bilibili" in set(data.get("components", [])):
             bilibili_login_manager.mark_config_generation(result)

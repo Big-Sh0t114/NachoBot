@@ -14,11 +14,6 @@ class ServerConfig:
 
 
 @dataclass
-class ProbabilityConfig:
-    voice_probability: float
-
-
-@dataclass
 class EnabledPluginClass:
     enabled: List[str]
 
@@ -32,8 +27,6 @@ class ttsClass:
 @dataclass
 class BaseConfig:
     server: ServerConfig
-    routes: Dict[str, str]
-    probability: ProbabilityConfig
     enabled_plugin: EnabledPluginClass
     tts_base_config: ttsClass
 
@@ -41,8 +34,6 @@ class BaseConfig:
     def from_dict(cls, data: Dict[str, Any]) -> "BaseConfig":
         return cls(
             server=ServerConfig(**data["server"]),
-            routes=data["routes"],
-            probability=ProbabilityConfig(**data["probability"]),
             enabled_plugin=EnabledPluginClass(**data["enabled_tts"]),
             tts_base_config=ttsClass(**data["tts_base_config"]),
         )
@@ -52,18 +43,19 @@ class Config:
     def __init__(self, config_path: str):
         self.config_path = config_path
         self.config_data = load_config(config_path)
-        server = self.config_data["server"]
-        server["host"] = os.getenv("NACHOBOT_MULTIMODAL_HOST", str(server["host"]))
-        server["port"] = int(
-            os.getenv("NACHOBOT_MULTIMODAL_PORT", str(server["port"]))
+        server = self.config_data.setdefault(
+            "server",
+            {"host": "127.0.0.1", "port": 9880},
         )
-        core_url = os.getenv("NACHOBOT_MULTIMODAL_CORE_URL", "").strip()
-        if core_url:
-            if not core_url.startswith(("ws://", "wss://")):
-                raise ValueError("NACHOBOT_MULTIMODAL_CORE_URL must use ws:// or wss://")
-            self.config_data["routes"] = {
-                platform: core_url for platform in self.config_data["routes"]
-            }
+        server["host"] = os.getenv("NACHOBOT_MULTIMODAL_HOST", str(server.get("host", "127.0.0.1")))
+        server["port"] = int(
+            os.getenv("NACHOBOT_MULTIMODAL_PORT", str(server.get("port", 9880)))
+        )
+        self.config_data.setdefault("enabled_tts", {"enabled": []})
+        self.config_data.setdefault(
+            "tts_base_config",
+            {"stream_mode": False, "post_process": False},
+        )
         self.base_config = BaseConfig.from_dict(self.config_data)
 
     def __getitem__(self, key: str) -> Any:
@@ -78,14 +70,6 @@ class Config:
     @property
     def server(self) -> ServerConfig:
         return self.base_config.server
-
-    @property
-    def routes(self) -> Dict[str, str]:
-        return self.base_config.routes
-
-    @property
-    def probability(self) -> ProbabilityConfig:
-        return self.base_config.probability
 
     @property
     def enabled_plugin(self) -> EnabledPluginClass:
@@ -109,7 +93,7 @@ def load_config(config_path: str) -> Dict[str, Any]:
         config = toml.load(f)
     global logging_level
     # 设置全局日志级别
-    logging_level = config["debug"].get("logging_level", "INFO").upper()
+    logging_level = config.get("debug", {}).get("logging_level", "INFO").upper()
     return config
 
 

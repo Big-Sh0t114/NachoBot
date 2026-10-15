@@ -87,18 +87,41 @@ class CommandType(Enum):
         return self.value
 
 
-ACCEPT_FORMAT = [
+_BASE_ACCEPT_FORMAT = [
     "text",
     "image",
     "emoji",
     "reply",
     "voice",
+    "voice_stream",
     "command",
     "voiceurl",
+    "voicefile",
     "music",
     "videourl",
     "file",
     "imageurl",
     "forward",
     "video",
+    "videofile",
 ]
+
+
+def get_accept_format(use_tts: bool) -> list[str]:
+    """Return Core capabilities for the current NapCat TTS setting.
+
+    ``voice`` remains supported regardless of this switch because it denotes
+    already-materialized audio.  Only the Core TTS action capability is
+    conditional.
+    """
+
+    formats = list(_BASE_ACCEPT_FORMAT)
+    if use_tts:
+        formats.insert(formats.index("command"), "tts_text")
+    return formats
+
+
+# Keep the import-safe historical export enabled.  Message ingress uses the
+# live setting through ``get_accept_format(global_config.voice.use_tts)``;
+# importing global_config here would create a config/logger cycle.
+ACCEPT_FORMAT = get_accept_format(True)

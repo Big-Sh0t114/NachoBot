@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
+import json
 import os
 import shutil
+import signal
 import subprocess
+import sys
+import threading
+import time
 from pathlib import Path
+from typing import Any, Callable
 from urllib.request import Request, urlopen
+
+from urllib.error import URLError
 
 ADAPTER_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = ADAPTER_ROOT.parent
@@ -21,9 +30,92 @@ os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
 GPT_REF = os.environ.get("NACHOBOT_GPT_SOVITS_REF", "20250606v2pro")
 GPT_REPO = "https://github.com/RVC-Boss/GPT-SoVITS.git"
 
+PUBLIC_DEFAULT_HOST = "127.0.0.1"
+PUBLIC_DEFAULT_PORT = 9880
+PRIVATE_DEFAULT_HOST = "127.0.0.1"
+PRIVATE_DEFAULT_PORT = 9881
+PUBLIC_MAIN_MODULE_NAME = "_nachobot_multimodal_public_main"
+_ENGINE_ALIASES = {
+    "vox": "voxcpm",
+    "voxcpm": "voxcpm",
+    "gpt_sovits": "gpt-sovits",
+    "gpt-sovits": "gpt-sovits",
+    "gptsovits": "gpt-sovits",
+}
+
+
+def normalize_engine(value: object) -> str:
+    """Normalize CLI/env/base.toml backend names."""
+
+    normalized = str(value or "").strip().lower()
+    try:
+        return _ENGINE_ALIASES[normalized]
+    except KeyError as exc:
+        raise ValueError("TTS backend must be gpt-sovits or voxcpm") from exc
+
+
+def resolve_engine(config_path: Path, override: str | None = None) -> str:
+    """Resolve exactly one backend once at process startup.
+
+    An explicit CLI/env value wins over the live base file.  The selected
+    value is stored by the supervisor and is never re-read for a hot switch.
+    """
+
+    if str(override or "").strip():
+        return normalize_engine(override)
+    config = read_toml(Path(config_path))
+    enabled = config.get("enabled_tts", {}).get("enabled", [])
+    if not isinstance(enabled, list) or len(enabled) != 1:
+        raise ValueError("base.toml must enable exactly one TTS backend")
+    return normalize_engine(enabled[0])
+
+
+def resolve_private_port(
+    config_path: Path,
+    engine: str,
+    *,
+    explicit_port: int | None = None,
+    public_port: int = PUBLIC_DEFAULT_PORT,
+) -> int:
+    """Read one private backend port and reject a public-port collision."""
+
+    if explicit_port is not None:
+        port = int(explicit_port)
+    else:
+        filename = "vox.toml" if normalize_engine(engine) == "voxcpm" else "gpt-sovits.toml"
+        data = read_toml(Path(config_path).parent / filename)
+        port = int(data.get("tts", {}).get("port", PRIVATE_DEFAULT_PORT))
+    if not 1 <= port <= 65535:
+        raise ValueError(f"invalid private TTS port: {port}")
+    if port == int(public_port):
+        raise ValueError("private TTS backend cannot bind the public 9880 port")
+    return port
+
 
 def log(message: str) -> None:
     print(f"[TTS Runtime] {message}", flush=True)
+
+
+def _load_public_main() -> Any:
+    """Load the repository-root public runtime without relying on cwd/import state."""
+
+    main_path = ADAPTER_ROOT / "main.py"
+    spec = importlib.util.spec_from_file_location(PUBLIC_MAIN_MODULE_NAME, main_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"unable to resolve public runtime module at {main_path}")
+
+    module = importlib.util.module_from_spec(spec)
+    previous = sys.modules.get(PUBLIC_MAIN_MODULE_NAME)
+    sys.modules[PUBLIC_MAIN_MODULE_NAME] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        if previous is None:
+            sys.modules.pop(PUBLIC_MAIN_MODULE_NAME, None)
+        else:
+            sys.modules[PUBLIC_MAIN_MODULE_NAME] = previous
+        raise
+    return module
 
 
 def require_uv() -> str:
@@ -411,8 +503,8 @@ def prepare_voxcpm() -> Path:
     return python
 
 
-def resolve_vox_model_and_lora() -> tuple[str, str]:
-    config_path = ADAPTER_ROOT / "configs" / "vox.toml"
+def resolve_vox_model_and_lora(config_path: Path | None = None) -> tuple[str, str]:
+    config_path = config_path or (ADAPTER_ROOT / "configs" / "vox.toml")
     tts = read_toml(config_path).get("tts", {})
 
     configured_model = str(tts.get("model_dir", "")).strip()
@@ -436,9 +528,17 @@ def resolve_vox_model_and_lora() -> tuple[str, str]:
     return model, lora
 
 
-def serve_voxcpm(port: int) -> int:
+def build_voxcpm_command(
+    port: int = PRIVATE_DEFAULT_PORT,
+    host: str = PRIVATE_DEFAULT_HOST,
+    config_path: Path | None = None,
+) -> tuple[list[str], Path, dict[str, str]]:
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        raise ValueError("Vox raw API must bind to loopback")
+    if int(port) == PUBLIC_DEFAULT_PORT:
+        raise ValueError("Vox raw API cannot bind the public 9880 port")
     python = prepare_voxcpm()
-    model, lora = resolve_vox_model_and_lora()
+    model, lora = resolve_vox_model_and_lora(config_path)
 
     # VoxCPM.from_pretrained ultimately uses huggingface_hub.snapshot_download.
     # Resolve remote model IDs here first so we can fail over between mirrors
@@ -450,15 +550,24 @@ def serve_voxcpm(port: int) -> int:
     server = ADAPTER_ROOT / "src" / "tts" / "backends" / "Vox" / "vox_api_server.py"
     cmd = [
         str(python), str(server),
-        "--host", "127.0.0.1",
+        "--host", host,
         "--port", str(port),
         "--model-dir", model,
         "--no-denoiser",
     ]
     if lora:
         cmd.extend(["--lora-weights", lora])
-    log(f"启动 VoxCPM API: 127.0.0.1:{port}，model={model}")
-    return subprocess.call(cmd, cwd=str(ADAPTER_ROOT), env=base_env())
+    log(f"启动 VoxCPM API: {host}:{port}，model={model}")
+    return cmd, ADAPTER_ROOT, base_env()
+
+
+def serve_voxcpm(
+    port: int = PRIVATE_DEFAULT_PORT,
+    host: str = PRIVATE_DEFAULT_HOST,
+    config_path: Path | None = None,
+) -> int:
+    cmd, cwd, env = build_voxcpm_command(port, host, config_path)
+    return subprocess.call(cmd, cwd=str(cwd), env=env)
 
 
 def ensure_gpt_source(runtime_dir: Path) -> Path:
@@ -774,8 +883,8 @@ def prepare_gpt_sovits() -> tuple[Path, Path]:
     return python, source_dir
 
 
-def resolve_gpt_preset_weights() -> tuple[Path | None, Path | None]:
-    config_path = ADAPTER_ROOT / "configs" / "gpt-sovits.toml"
+def resolve_gpt_preset_weights(config_path: Path | None = None) -> tuple[Path | None, Path | None]:
+    config_path = config_path or (ADAPTER_ROOT / "configs" / "gpt-sovits.toml")
     config = read_toml(config_path)
     default_preset = str(config.get("pipeline", {}).get("default_preset", "default"))
     preset = (
@@ -839,9 +948,13 @@ def patch_gpt_version_parser(source_dir: Path) -> None:
         log("修补 GPT-SoVITS v2Pro/v2ProPlus 版本配置解析")
 
 
-def make_gpt_infer_config(source_dir: Path, runtime_dir: Path) -> Path:
+def make_gpt_infer_config(
+    source_dir: Path,
+    runtime_dir: Path,
+    config_path: Path | None = None,
+) -> Path:
     patch_gpt_version_parser(source_dir)
-    gpt_weights, sovits_weights = resolve_gpt_preset_weights()
+    gpt_weights, sovits_weights = resolve_gpt_preset_weights(config_path)
     if not gpt_weights or not sovits_weights:
         return source_dir / "GPT_SoVITS" / "configs" / "tts_infer.yaml"
 
@@ -871,10 +984,18 @@ def make_gpt_infer_config(source_dir: Path, runtime_dir: Path) -> Path:
     return config_path
 
 
-def serve_gpt_sovits(port: int) -> int:
+def build_gpt_sovits_command(
+    port: int = PRIVATE_DEFAULT_PORT,
+    host: str = PRIVATE_DEFAULT_HOST,
+    config_path: Path | None = None,
+) -> tuple[list[str], Path, dict[str, str]]:
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        raise ValueError("GPT-SoVITS raw API must bind to loopback")
+    if int(port) == PUBLIC_DEFAULT_PORT:
+        raise ValueError("GPT-SoVITS raw API cannot bind the public 9880 port")
     python, source_dir = prepare_gpt_sovits()
     runtime_dir = RUNTIME_ROOT / "gpt-sovits"
-    infer_config = make_gpt_infer_config(source_dir, runtime_dir)
+    infer_config = make_gpt_infer_config(source_dir, runtime_dir, config_path)
     env = base_env()
     env["PYTHONPATH"] = os.pathsep.join([
         str(source_dir),
@@ -883,34 +1004,382 @@ def serve_gpt_sovits(port: int) -> int:
 
     cmd = [
         str(python), "-s", str(source_dir / "api_v2.py"),
-        "-a", "127.0.0.1",
+        "-a", host,
         "-p", str(port),
         "-c", str(infer_config),
     ]
-    log(f"启动 GPT-SoVITS API: 127.0.0.1:{port}")
-    return subprocess.call(cmd, cwd=str(source_dir), env=env)
+    log(f"启动 GPT-SoVITS API: {host}:{port}")
+    return cmd, source_dir, env
 
 
-def main() -> int:
+def serve_gpt_sovits(
+    port: int = PRIVATE_DEFAULT_PORT,
+    host: str = PRIVATE_DEFAULT_HOST,
+    config_path: Path | None = None,
+) -> int:
+    cmd, cwd, env = build_gpt_sovits_command(port, host, config_path)
+    return subprocess.call(cmd, cwd=str(cwd), env=env)
+
+
+class TTSRuntimeSupervisor:
+    """Own public 9880 and exactly one private raw TTS child."""
+
+    def __init__(
+        self,
+        config_path: Path,
+        *,
+        engine: str | None = None,
+        public_host: str | None = None,
+        public_port: int = PUBLIC_DEFAULT_PORT,
+        private_host: str = PRIVATE_DEFAULT_HOST,
+        private_port: int | None = None,
+        startup_timeout: float = 900.0,
+        popen_factory: Callable[..., Any] | None = None,
+        pipeline_factory: Callable[..., Any] | None = None,
+    ) -> None:
+        self.config_path = Path(config_path).resolve()
+        explicit_engine = engine or os.environ.get("NACHOBOT_TTS_ENGINE", "")
+        self.engine = resolve_engine(self.config_path, explicit_engine)
+        configured_public_host = read_toml(self.config_path).get("server", {}).get("host")
+        self.public_host = str(public_host or configured_public_host or PUBLIC_DEFAULT_HOST)
+        self.public_port = int(public_port)
+        self.private_host = str(private_host)
+        if self.private_host not in {"127.0.0.1", "localhost", "::1"}:
+            raise ValueError("raw TTS backend must bind to loopback")
+        env_private_port = os.environ.get("NACHOBOT_TTS_PRIVATE_PORT", "").strip()
+        if private_port is None and env_private_port:
+            private_port = int(env_private_port)
+        self.private_port = resolve_private_port(
+            self.config_path,
+            self.engine,
+            explicit_port=private_port,
+            public_port=self.public_port,
+        )
+        self.startup_timeout = float(startup_timeout)
+        self._popen = popen_factory or subprocess.Popen
+        self._pipeline_factory = pipeline_factory
+        self.child: Any | None = None
+        self.pipeline: Any | None = None
+        self.public_server: Any | None = None
+        self._monitor_stop = threading.Event()
+        self._monitor_thread: threading.Thread | None = None
+        self._raw_spec: tuple[list[str], Path, dict[str, str]] | None = None
+        self._started = False
+
+    @property
+    def backend_url(self) -> str:
+        return f"http://{self.private_host}:{self.private_port}"
+
+    def child_command(self) -> list[str]:
+        """Return the actual backend command owned by ``start``.
+
+        Preparation is performed once and cached with its cwd/environment;
+        the returned command is the Vox/GPT API process itself, not a
+        ``serve-raw`` Python wrapper that could outlive this supervisor.
+        """
+
+        if self._raw_spec is None:
+            self._raw_spec = self._build_raw_spec()
+        return list(self._raw_spec[0])
+
+    def _build_raw_spec(self) -> tuple[list[str], Path, dict[str, str]]:
+        if self.engine == "voxcpm":
+            return build_voxcpm_command(
+                self.private_port,
+                self.private_host,
+                self.config_path.parent / "vox.toml",
+            )
+        return build_gpt_sovits_command(
+            self.private_port,
+            self.private_host,
+            self.config_path.parent / "gpt-sovits.toml",
+        )
+
+    def _spawn_child(self) -> Any:
+        if self._raw_spec is None:
+            self._raw_spec = self._build_raw_spec()
+        command, cwd, env = self._raw_spec
+        env["NACHOBOT_TTS_ENGINE_HOST"] = self.private_host
+        env["NACHOBOT_TTS_ENGINE_PORT"] = str(self.private_port)
+        log(
+            f"启动单一 TTS raw child: engine={self.engine} "
+            f"bind={self.private_host}:{self.private_port} command={command[0]}"
+        )
+        process_kwargs: dict[str, Any] = {"cwd": str(cwd), "env": env}
+        if os.name == "nt":
+            # The PID is an explicit Windows process-tree boundary. stop()
+            # uses taskkill /PID /T only for this process, never by name.
+            process_kwargs["creationflags"] = getattr(
+                subprocess,
+                "CREATE_NEW_PROCESS_GROUP",
+                0,
+            )
+        else:
+            # Own all descendants in a dedicated POSIX process group.
+            process_kwargs["start_new_session"] = True
+        return self._popen(command, **process_kwargs)
+
+    @staticmethod
+    def _fetch_json(url: str, timeout: float = 1.0) -> tuple[int, dict[str, Any] | None]:
+        request = Request(url, headers={"User-Agent": "NachoBot-TTS-Supervisor/1.0"})
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                raw = response.read()
+                try:
+                    payload = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    payload = None
+                return int(getattr(response, "status", 200)), payload
+        except Exception:
+            return 0, None
+
+    def _raw_socket_ready(self) -> bool:
+        """Return whether a GPT raw HTTP socket responds at all."""
+
+        status, _payload = self._fetch_json(f"{self.backend_url}/health")
+        if status:
+            return status < 500
+        # Upstream GPT-SoVITS versions have not all exposed /health. A root
+        # response proves that the API process has bound its socket; fixed
+        # client validation below is the engine-specific readiness gate.
+        request = Request(self.backend_url, headers={"User-Agent": "NachoBot-TTS-Supervisor/1.0"})
+        try:
+            with urlopen(request, timeout=1.0) as response:
+                return int(getattr(response, "status", 200)) < 500
+        except URLError as exc:
+            status = getattr(exc, "code", None)
+            if status is None:
+                status = getattr(getattr(exc, "reason", None), "code", None)
+            if status is None:
+                status = getattr(getattr(exc, "reason", None), "status", None)
+            return status is not None and int(status) < 500
+        except Exception:
+            return False
+
+    def _raw_ready(self) -> bool:
+        if self.engine == "voxcpm":
+            status, payload = self._fetch_json(f"{self.backend_url}/health")
+            return bool(status == 200 and isinstance(payload, dict) and payload.get("model_loaded") is True)
+        return self._raw_socket_ready()
+
+    def wait_for_backend(self) -> None:
+        """Wait for raw model readiness, not merely a listening process."""
+
+        deadline = time.monotonic() + self.startup_timeout
+        last_error = "backend did not report ready"
+        while time.monotonic() < deadline:
+            if self.child is not None:
+                return_code = self.child.poll()
+                if return_code is not None:
+                    raise RuntimeError(f"TTS raw child exited before readiness: {return_code}")
+            try:
+                if self._raw_ready():
+                    return
+            except Exception as exc:
+                last_error = str(exc)
+            time.sleep(0.2)
+        raise TimeoutError(f"TTS raw backend startup timed out: {last_error}")
+
+    def _build_pipeline(self) -> Any:
+        if self._pipeline_factory is not None:
+            return self._pipeline_factory(
+                self.config_path,
+                backend=self.engine,
+                engine_host=self.private_host,
+                engine_port=self.private_port,
+                backend_alive=True,
+            )
+
+        # Import only after the selected raw child has proven readiness. The
+        # file-based loader is independent of sys.path[0] (which is the
+        # scripts directory for direct execution) and cannot accidentally
+        # reuse an unrelated preloaded ``main`` module.
+        public_main = _load_public_main()
+
+        return public_main.TTSPipeline(
+            self.config_path,
+            backend="Vox" if self.engine == "voxcpm" else "GPT_Sovits",
+            engine_host=self.private_host,
+            engine_port=self.private_port,
+            backend_alive=True,
+            public_host=self.public_host,
+            public_port=self.public_port,
+        )
+
+    def _validate_fixed_client(self) -> Any:
+        """Construct one fixed client after raw readiness is observed.
+
+        The raw child has already passed its startup/readiness contract at
+        this point. Import, config, and eager classifier failures are therefore
+        deterministic public-pipeline initialization failures, not conditions
+        that can be repaired by retrying the same constructor for 900 seconds.
+        """
+
+        try:
+            return self._build_pipeline()
+        except Exception as exc:
+            raise RuntimeError(
+                f"public pipeline initialization failed for {self.engine}: {exc}"
+            ) from exc
+
+    def _monitor_child(self) -> None:
+        while not self._monitor_stop.wait(0.2):
+            if self.child is None:
+                return
+            if self.child.poll() is not None:
+                if self.pipeline is not None:
+                    self.pipeline.set_backend_alive(False)
+                log("TTS raw child exited; public runtime is unhealthy")
+                return
+
+    @staticmethod
+    def _terminate_owned_process(process: Any) -> None:
+        """Terminate/reap only the process tree created by this supervisor."""
+
+        pid = getattr(process, "pid", None)
+        running = process.poll() is None
+        if os.name == "nt" and pid and running:
+            # /T scopes the operation to this supervisor-owned PID tree.
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        elif os.name != "nt" and pid and running:
+            try:
+                os.killpg(os.getpgid(pid), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+        elif running:
+            process.terminate()
+
+        try:
+            process.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            if os.name != "nt" and pid:
+                try:
+                    os.killpg(os.getpgid(pid), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+            else:
+                process.kill()
+            process.wait(timeout=5)
+
+    def start(self) -> Any:
+        """Start child, prove readiness, then publish the fixed public pipeline."""
+
+        if self._started:
+            return self.pipeline
+        self.child = self._spawn_child()
+        try:
+            self.wait_for_backend()
+            self.pipeline = self._validate_fixed_client()
+            if self.child.poll() is not None:
+                raise RuntimeError("TTS raw child exited before public readiness")
+            self._monitor_thread = threading.Thread(
+                target=self._monitor_child,
+                name="nachobot-tts-child-monitor",
+                daemon=True,
+            )
+            self._monitor_thread.start()
+            self._started = True
+            return self.pipeline
+        except Exception:
+            self.stop()
+            raise
+
+    def stop(self) -> None:
+        """Drain monitor and terminate the one child cleanly."""
+
+        self._monitor_stop.set()
+        if self._monitor_thread is not None and self._monitor_thread.is_alive():
+            self._monitor_thread.join(timeout=2.0)
+        if self.pipeline is not None:
+            self.pipeline.stop()
+        child = self.child
+        if child is not None:
+            self._terminate_owned_process(child)
+        self._started = False
+
+    def run(self) -> int:
+        """Run public 9880 until shutdown, then drain the raw child."""
+
+        pipeline = self.start()
+        try:
+            # Keep every post-start operation in this boundary. Importing
+            # uvicorn or constructing Config/Server can fail before bind, and
+            # the raw child still belongs to this supervisor in that case.
+            import uvicorn
+
+            config = uvicorn.Config(
+                pipeline.app,
+                host=self.public_host,
+                port=self.public_port,
+                log_level="info",
+            )
+            # Config applies Uvicorn's logging tree; install the shared probe
+            # filter only after that configuration is complete.
+            from nachobot_multimodal.utils.uvicorn_logging import install_quiet_access_logging
+
+            install_quiet_access_logging()
+            self.public_server = uvicorn.Server(config)
+            self.public_server.run()
+        finally:
+            self.stop()
+        return 0
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="NachoBot managed TTS runtime")
-    parser.add_argument("action", choices=["prepare", "serve"])
-    parser.add_argument("--engine", required=True, choices=["gpt-sovits", "voxcpm"])
-    parser.add_argument("--port", type=int, default=9880)
-    args = parser.parse_args()
+    parser.add_argument("action", choices=["prepare", "serve", "serve-raw"])
+    parser.add_argument("--engine", default="")
+    parser.add_argument("--host", default=None)
+    parser.add_argument("--port", type=int, default=None)
+    parser.add_argument("--backend-port", type=int, default=None)
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=ADAPTER_ROOT / "configs" / "base.toml",
+    )
+    parser.add_argument("--startup-timeout", type=float, default=900.0)
+    args = parser.parse_args(argv)
 
     RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
     HF_CACHE.mkdir(parents=True, exist_ok=True)
 
-    if args.engine == "voxcpm":
+    engine = resolve_engine(args.config, args.engine or os.environ.get("NACHOBOT_TTS_ENGINE", ""))
+
+    if engine == "voxcpm":
         if args.action == "prepare":
             prepare_voxcpm()
             return 0
-        return serve_voxcpm(args.port)
+        if args.action == "serve-raw":
+            return serve_voxcpm(
+                args.port if args.port is not None else PRIVATE_DEFAULT_PORT,
+                args.host or PRIVATE_DEFAULT_HOST,
+                args.config.parent / "vox.toml",
+            )
 
     if args.action == "prepare":
         prepare_gpt_sovits()
         return 0
-    return serve_gpt_sovits(args.port)
+    if args.action == "serve-raw":
+        return serve_gpt_sovits(
+            args.port if args.port is not None else PRIVATE_DEFAULT_PORT,
+            args.host or PRIVATE_DEFAULT_HOST,
+            args.config.parent / "gpt-sovits.toml",
+        )
+
+    supervisor = TTSRuntimeSupervisor(
+        args.config,
+        engine=engine,
+        public_host=args.host,
+        public_port=args.port if args.port is not None else PUBLIC_DEFAULT_PORT,
+        private_port=args.backend_port,
+        startup_timeout=args.startup_timeout,
+    )
+    return supervisor.run()
 
 
 if __name__ == "__main__":

@@ -49,29 +49,38 @@ class NCMessageSender:
                 logger.error(f"[Queue] 发送 Worker 发生异常: {e}")
                 await asyncio.sleep(1) # 出错也稍微等一下，避免死循环爆日志
 
-    async def send_message_to_napcat(self, action: str, params: dict) -> dict:
+    async def send_message_to_napcat(
+        self,
+        action: str,
+        params: dict,
+        *,
+        timeout_sec: float | None = None,
+    ) -> dict:
         request_uuid = str(uuid.uuid4())
         payload = json.dumps({"action": action, "params": params, "echo": request_uuid})
-        
+
         # 创建一个 Future 用于等待 NapCat 的 echo 返回
         loop = asyncio.get_running_loop()
         future = loop.create_future()
-        
+
         # 将任务塞入队列
         await self._send_queue.put((payload, request_uuid, future))
-        
+
+        timeout_value = 10.0 if timeout_sec is None else max(1.0, float(timeout_sec))
+
         # 等待 get_response 的返回（由底层的 ws 接收循环触发 response_pool 里的事件）
         try:
-            # 这里我们依然依赖原有的 get_response 机制，
-            # Worker 只负责推送并卡住节奏，接收回执还是靠你写好的 src.response_pool
-            response = await get_response(request_uuid)
+            # Worker 只负责推送并卡住节奏，接收回执仍由 src.response_pool 处理。
+            response = await get_response(request_uuid, timeout=timeout_value)
         except TimeoutError:
-            logger.error(f"发送消息超时，未收到响应 UUID: {request_uuid}")
+            logger.error(
+                f"发送消息超时，未收到响应 UUID: {request_uuid}, timeout_sec={timeout_value}"
+            )
             return {"status": "error", "message": "timeout"}
         except Exception as e:
             logger.error(f"等待消息回执失败: {e}")
             return {"status": "error", "message": str(e)}
-            
+
         return response
 
     async def message_sent_back(self, message_base: MessageBase, qq_message_id: str) -> None:

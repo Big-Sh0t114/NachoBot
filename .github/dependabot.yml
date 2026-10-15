@@ -5,8 +5,7 @@ updates:
     directories:
       - "NachoBot"
       - "NachoBot-Bilibili-Adapter"
-      - "NachoBot-DiscordVC-Adapter"
-      - "NachoBot-Koishi-Adapter"
+      - "NachoBot-Discord-Adapter"
       - "NachoBot-Live2D-Adapter"
       - "NachoBot-Multimodal-Adapter"
       - "NachoBot-Napcat-Adapter"
@@ -27,10 +26,4 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-    target-branch: "dev"
-
-  - package-ecosystem: "npm"
-    directory: "/koishi-app"
-    schedule:
-      interval: "monthly"
     target-branch: "dev"

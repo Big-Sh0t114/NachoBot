@@ -7,12 +7,39 @@ from src.common.database.database_model import Messages, Images
 from src.common.logger import get_logger
 from .chat_stream import ChatStream
 from src.chat.focus.models import StoredMessageRef
+from src.chat.json_reply_delivery import prepare_json_envelope_delivery
+from src.chat.runtime_capabilities import runtime_capabilities_from_message
 from .message import MessageSending, MessageRecv
 
 logger = get_logger("message_storage")
 
 
 class MessageStorage:
+    @staticmethod
+    def _outgoing_body_for_projection(message: MessageSending) -> str:
+        """Read transport-facing text segments without adding reply context."""
+        parts: list[str] = []
+
+        def collect(segment) -> None:
+            segment_type = getattr(segment, "type", "")
+            data = getattr(segment, "data", None)
+            if segment_type == "reply":
+                return
+            if segment_type == "seglist":
+                if isinstance(data, (list, tuple)):
+                    for child in data:
+                        collect(child)
+                return
+            if segment_type == "text":
+                parts.append(str(data if data is not None else ""))
+            elif segment_type == "tts_text":
+                if isinstance(data, dict):
+                    data = data.get("display_text") if data.get("display_text") is not None else data.get("text")
+                parts.append(str(data if data is not None else ""))
+
+        collect(message.message_segment)
+        return " ".join(part for part in parts if part)
+
     @staticmethod
     def _serialize_keywords(keywords) -> str:
         """将关键词列表序列化为JSON字符串"""
@@ -42,6 +69,27 @@ class MessageStorage:
             # print(message)
 
             processed_plain_text = message.processed_plain_text
+            delivery_capabilities = (
+                runtime_capabilities_from_message(message.reply)
+                if isinstance(message, MessageSending)
+                else None
+            )
+            display_message = message.display_message if isinstance(message, MessageSending) else ""
+            if delivery_capabilities and delivery_capabilities.reply_delivery == "json_envelope":
+                projection_input = MessageStorage._outgoing_body_for_projection(message)
+                if display_message and display_message != projection_input:
+                    # A differing display value is already the clean body from
+                    # the reply-delivery path. It is also authoritative when
+                    # TTS materialization made processed_plain_text an audio
+                    # placeholder, and must not be parsed again if the reply
+                    # body itself contains ordinary JSON.
+                    processed_plain_text = display_message
+                else:
+                    processed_plain_text, _ = prepare_json_envelope_delivery(
+                        projection_input,
+                        tts_language=delivery_capabilities.tts_language,
+                    )
+                    display_message = processed_plain_text
 
             # print(processed_plain_text)
 
@@ -52,7 +100,6 @@ class MessageStorage:
                 filtered_processed_plain_text = ""
 
             if isinstance(message, MessageSending):
-                display_message = message.display_message
                 if display_message:
                     filtered_display_message = re.sub(pattern, "", display_message, flags=re.DOTALL)
                 else:
@@ -167,22 +214,34 @@ class MessageStorage:
             raise
     # 如果需要其他存储相关的函数，可以在这里添加
     @staticmethod
-    def update_message(mmc_message_id: str | None, qq_message_id: str | None) -> bool:
+    def update_message(
+        mmc_message_id: str | None,
+        qq_message_id: str | None,
+        platform: str | None = None,
+    ) -> bool:
         """实时更新数据库的自身发送消息ID"""
         try:
             if not qq_message_id:
                 logger.info("消息不存在message_id，无法更新")
                 return False
-            if matched_message := (
-                Messages.select().where((Messages.message_id == mmc_message_id)).order_by(Messages.time.desc()).first()
-            ):
+            if platform is not None and (not isinstance(platform, str) or not platform):
+                return False
+
+            conditions = Messages.message_id == mmc_message_id
+            if platform is not None:
+                conditions = conditions & (Messages.chat_info_platform == platform)
+
+            matched_message = (
+                Messages.select().where(conditions).order_by(Messages.time.desc()).first()
+            )
+            if matched_message:
                 # 更新找到的消息记录
                 Messages.update(message_id=qq_message_id).where(Messages.id == matched_message.id).execute()  # type: ignore
                 logger.debug(f"更新消息ID成功: {matched_message.message_id} -> {qq_message_id}")
                 return True
-            else:
-                logger.debug("未找到匹配的消息")
-                return False
+
+            logger.debug("未找到匹配的消息")
+            return False
 
         except Exception as e:
             logger.error(f"更新消息ID失败: {e}")

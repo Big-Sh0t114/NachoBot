@@ -49,8 +49,7 @@ CONFIG_REGISTRY: list[dict[str, str]] = [
     {"id": "napcat_config",       "group": "Napcat 适配器",    "path": "NachoBot-Napcat-Adapter/config.toml",       "label": "Napcat 适配器配置"},
     {"id": "snowluma_config",     "group": "SnowLuma 适配器",  "path": "NachoBot-SnowLuma-Adapter/config.toml",     "label": "SnowLuma 适配器配置"},
     {"id": "bilibili_config",     "group": "Bilibili 适配器",  "path": "NachoBot-Bilibili-Adapter/config.toml",     "label": "Bilibili 适配器配置"},
-    {"id": "discord_config",      "group": "Discord 适配器",   "path": "NachoBot-DiscordVC-Adapter/config.toml",    "label": "Discord VC 适配器配置"},
-    {"id": "koishi_config",       "group": "Discord 适配器",   "path": "NachoBot-Koishi-Adapter/config.toml",       "label": "Koishi 适配器配置"},
+    {"id": "discord_config",      "group": "Discord 适配器",   "path": "NachoBot-Discord-Adapter/config.toml",      "label": "Discord 适配器配置"},
     {"id": "universalvc_config",  "group": "全局语音适配器",    "path": "NachoBot-UniversalVC-Adapter/config.toml",  "label": "UniversalVC 配置"},
     # Temporarily hidden from WebUI; restore when VRChat config exposure is wanted.
     # {"id": "vrchat_config",       "group": "VRChat 适配器",     "path": "NachoBot-VRChat-Adapter/config.toml",       "label": "VRChat 适配器配置"},

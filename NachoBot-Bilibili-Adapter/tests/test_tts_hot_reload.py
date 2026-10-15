@@ -1,75 +1,79 @@
 import asyncio
-from pathlib import Path
-import sys
+import base64
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT / "NachoBot-Multimodal-Adapter") not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT / "NachoBot-Multimodal-Adapter"))
-
 import adapter as adapter_module
 from adapter import BilibiliAdapter
 from bili_src.audio.tts_manager import TTSManager
+from bili_src.core.runtime_profile import build_live_additional_config
 import bili_src.live.event_manager as event_manager_module
 from bili_src.live.event_manager import EventManager
 from bili_src.live.live_worker import LiveRoomWorker
 
 
-class _Model:
-    def __init__(self, name):
-        self.name = name
+class _CoreClient:
+    def __init__(self):
         self.calls = []
 
-    async def tts(self, **kwargs):
-        self.calls.append(kwargs)
-        return self.name.encode("ascii")
-
-
-class _Runtime:
-    def __init__(self, model):
-        self.model = model
-        self.entries = 0
-
-    def model_context(self):
-        runtime = self
-
-        class Context:
-            async def __aenter__(self):
-                runtime.entries += 1
-                return runtime.model
-
-            async def __aexit__(self, exc_type, exc, tb):
-                return False
-
-        return Context()
+    async def synthesize_tts(self, text, **kwargs):
+        self.calls.append((text, kwargs))
+        return {"audio_base64": base64.b64encode(text.encode("utf-8")).decode("ascii")}
 
 
 class BiliTTSHotReloadTests(unittest.TestCase):
-    def test_idle_and_buffered_segments_share_refresh_boundary(self):
+    def test_tts_without_search_still_uses_json_envelope_delivery(self):
+        additional = build_live_additional_config(
+            search_enabled=False,
+            person_profile_enabled=False,
+            tts_enabled=True,
+            tts_language="ja",
+        )
+
+        capabilities = additional["runtime_capabilities"]
+        self.assertEqual(capabilities["reply_delivery"], "json_envelope")
+        self.assertEqual(capabilities["tts_language"], "ja")
+
+    def test_enabled_room_prompt_requires_explicit_tts_field(self):
         async def scenario():
-            first = _Model("vox")
-            second = _Model("gpt")
-            runtime = _Runtime(first)
+            adapter = BilibiliAdapter.__new__(BilibiliAdapter)
+            adapter._get_cached_screen_summary = Mock(return_value=None)
+            adapter._resolve_live_prompts = Mock(return_value=("base prompt", ""))
+            adapter.tts_manager = SimpleNamespace(
+                is_tts_enabled=Mock(return_value=True),
+                get_room_language=Mock(return_value="ja"),
+            )
+
+            template = await adapter._get_template_info(100, "user", "hello")
+
+            self.assertIsNotNone(template)
+            prompt = template.template_items["replyer_prompt"]
+            self.assertIn("`tts_text`", prompt)
+            self.assertIn("`reply`只放给观众阅读的中文", prompt)
+            self.assertNotIn("<JP>/<ZH>标签。\n<JP>", prompt)
+
+        asyncio.run(scenario())
+
+    def test_idle_segments_use_core_tts_boundary(self):
+        async def scenario():
+            client = _CoreClient()
             manager = TTSManager.__new__(TTSManager)
-            manager._tts_runtime = runtime
-            manager.tts_model = first
+            manager.multimodal_client = client
+            manager.config = SimpleNamespace(platform="bilibili.live")
 
-            idle_audio = await manager._synthesize_tts_segment(
-                "idle", platform="bilibili", preset_name=None, split_method="cut0"
+            first_audio = await manager._synthesize_tts_segment(
+                "idle-1", platform="bilibili.live", text_lang="ja"
             )
-            runtime.model = second
-            buffered_audio = await manager._synthesize_tts_segment(
-                "buffered", platform="bilibili", preset_name=None, split_method="cut0"
+            second_audio = await manager._synthesize_tts_segment(
+                "idle-2", platform="bilibili.live", text_lang="zh"
             )
 
-            self.assertEqual(idle_audio, b"vox")
-            self.assertEqual(buffered_audio, b"gpt")
-            self.assertEqual(runtime.entries, 2)
-            self.assertIs(manager.tts_model, second)
-            self.assertEqual(first.calls[0]["platform"], "bilibili")
-            self.assertEqual(second.calls[0]["platform"], "bilibili")
+            self.assertEqual(first_audio, b"idle-1")
+            self.assertEqual(second_audio, b"idle-2")
+            self.assertEqual([call[0] for call in client.calls], ["idle-1", "idle-2"])
+            self.assertEqual(client.calls[0][1]["platform"], "bilibili.live")
+            self.assertEqual(client.calls[0][1]["text_lang"], "ja")
 
         asyncio.run(scenario())
 

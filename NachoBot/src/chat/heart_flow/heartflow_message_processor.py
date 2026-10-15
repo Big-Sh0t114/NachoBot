@@ -103,7 +103,10 @@ class HeartFCMessageReceiver:
                     if heartflow_chat is None:
                         raise RuntimeError(f"Cannot start Focus active chat: {dispatch.active_chat_id}")
                     if dispatch.interrupt_active:
-                        heartflow_chat.signal_new_message(skip_interrupt=is_mentioned)
+                        forced_background_interrupt = dispatch.active_chat_id != stored_ref.chat_id
+                        heartflow_chat.signal_new_message(
+                            skip_interrupt=is_mentioned and not forced_background_interrupt
+                        )
             else:
                 heartflow_chat = await heartflow.get_or_create_heartflow_chat(chat.stream_id)
                 if heartflow_chat is None:

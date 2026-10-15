@@ -6,10 +6,7 @@ set "PYTHONNOUSERSITE=1"
 
 set "ROOT=%~dp0"
 set "NACHOBOT_FFMPEG_DIR=%ROOT%.runtime\ffmpeg"
-set "NACHOBOT_DIR=%ROOT%NachoBot"
-set "KOISHI_DIR=%ROOT%koishi-app"
-set "KOISHI_ADAPTER_DIR=%ROOT%NachoBot-Koishi-Adapter"
-set "DISCORD_ADAPTER_DIR=%ROOT%NachoBot-DiscordVC-Adapter"
+set "DISCORD_ADAPTER_DIR=%ROOT%NachoBot-Discord-Adapter"
 
 REM ===== check and install uv =====
 where uv >nul 2>&1
@@ -32,11 +29,11 @@ if errorlevel 1 (
 )
 
 REM ===== sync deps =====
-echo [SYNC] NachoBot-Koishi-Adapter ...
-cd /d "%KOISHI_ADAPTER_DIR%"
-uv sync
+echo [SYNC] NachoBot-Discord-Adapter ...
+cd /d "%DISCORD_ADAPTER_DIR%"
+uv sync --locked
 if errorlevel 1 (
-  echo [ERROR] Koishi Adapter uv sync failed.
+  echo [ERROR] Discord Adapter uv sync failed.
   pause
   exit /b 1
 )
@@ -55,30 +52,9 @@ if errorlevel 1 (
   exit /b 1
 )
 
-echo [SYNC] NachoBot-DiscordVC-Adapter ...
-cd /d "%DISCORD_ADAPTER_DIR%"
-uv sync
-if errorlevel 1 (
-  echo [ERROR] DiscordVC Adapter uv sync failed.
-  pause
-  exit /b 1
-)
-
-REM ===== start Koishi =====
-echo.
-echo [START] Koishi ...
-start "Koishi" cmd /k "cd /d ""%KOISHI_DIR%"" && set HTTPS_PROXY=http://127.0.0.1:7897 && set HTTP_PROXY=http://127.0.0.1:7897 && corepack yarn start"
-
-REM ===== wait for Koishi =====
-timeout /t 5 /nobreak >nul
-
-REM ===== start NachoBot-Koishi-Adapter =====
-echo [START] NachoBot-Koishi-Adapter ...
-start "NachoBot-Koishi-Adapter" cmd /k "cd /d ""%KOISHI_ADAPTER_DIR%"" && uv run python main.py"
-
-REM ===== start NachoBot-DiscordVC-Adapter =====
-echo [START] NachoBot-DiscordVC-Adapter ...
-start "NachoBot-DiscordVC-Adapter" cmd /k "cd /d ""%DISCORD_ADAPTER_DIR%"" && uv run python main.py"
+REM ===== start the unified Discord adapter only =====
+echo [START] NachoBot-Discord-Adapter ...
+start "NachoBot-Discord-Adapter" cmd /k "cd /d ""%DISCORD_ADAPTER_DIR%"" && uv run python main.py"
 
 echo.
 echo [DONE] Launch sequence complete.

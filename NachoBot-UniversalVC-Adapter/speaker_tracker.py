@@ -13,11 +13,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from multimodal_bridge import ensure_multimodal_import
-
-ensure_multimodal_import()
-
-from nachobot_multimodal.asr.onnxruntime_compat import preload_onnxruntime  # noqa: E402
+from runtime_compat import preload_onnxruntime
 
 preload_onnxruntime()
 

@@ -12,6 +12,7 @@ from .log_safety import safe_endpoint
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "config.toml"
 TEMPLATE_PATH = ROOT / "template_config.toml"
+CORE_PORT = 8000
 
 
 def _load_raw() -> dict[str, Any]:
@@ -42,6 +43,7 @@ class SnowLumaConfig:
     token: str = ""
     reconnect_delay_sec: float = 5.0
     action_timeout_sec: float = 10.0
+    media_action_timeout_sec: float = 240.0
     heartbeat_sec: float = 30.0
 
     def ws_url(self) -> str:
@@ -63,7 +65,7 @@ class SnowLumaConfig:
 @dataclass(slots=True)
 class NachoBotConfig:
     host: str = "127.0.0.1"
-    port: int = 8070
+    port: int = CORE_PORT
     platform_name: str = "qq"
 
 
@@ -165,11 +167,12 @@ def load_config() -> Config:
             token=str(s.get("token", "")),
             reconnect_delay_sec=float(s.get("reconnect_delay_sec", 5.0)),
             action_timeout_sec=float(s.get("action_timeout_sec", 10.0)),
+            media_action_timeout_sec=float(s.get("media_action_timeout_sec", 240.0)),
             heartbeat_sec=float(s.get("heartbeat_sec", 30.0)),
         ),
         nachobot=NachoBotConfig(
             host=str(n.get("host", "127.0.0.1")),
-            port=int(n.get("port", 8070)),
+            port=int(n.get("port", CORE_PORT)),
             platform_name=str(n.get("platform_name", "qq")),
         ),
         chat=ChatConfig(

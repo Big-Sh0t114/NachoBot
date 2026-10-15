@@ -215,7 +215,7 @@ def _migrate_renamed_model_task_groups(
     target: TOMLDocument | dict,
     source: TOMLDocument | dict,
 ) -> bool:
-    """Copy legacy platform-specific model groups into their generic replacements."""
+    """Migrate legacy groups and seed new groups from live model choices."""
     target_tasks = target.get("model_task_config")
     source_tasks = source.get("model_task_config")
     if not isinstance(target_tasks, (dict, Table)) or not isinstance(
@@ -232,6 +232,12 @@ def _migrate_renamed_model_task_groups(
             continue
         _update_dict(target_tasks[generic_name], source_tasks[legacy_name])
         logger.info(f"已迁移模型组 {legacy_name} -> {generic_name}")
+        migrated = True
+    # Seed the new low-latency group from the deployment's live VLM list so
+    # upgrades preserve working models instead of adopting template defaults.
+    if "vlm_fast" not in source_tasks and "vlm_fast" in target_tasks and "vlm" in source_tasks:
+        _update_dict(target_tasks["vlm_fast"], source_tasks["vlm"])
+        logger.info("已从现有 vlm 模型组初始化 vlm_fast 模型组")
         migrated = True
     return migrated
 

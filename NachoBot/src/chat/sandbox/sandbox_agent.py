@@ -2302,6 +2302,7 @@ class SandboxAgentCoordinator:
                 group_id=handoff.group_id,
                 actor_id=handoff.actor_id,
             )
+            source_message = await self._resolve_source_message(handoff)
             for relative in paths:
                 artifact = scope.path_for_write(relative).resolve(strict=True)
                 if not artifact.is_file():
@@ -2312,6 +2313,7 @@ class SandboxAgentCoordinator:
                     stream_id=handoff.stream_id,
                     display_message=f"已完成文件：{Path(relative).name}",
                     typing=False,
+                    reply_message=source_message,
                 )
                 if published is False:
                     return False

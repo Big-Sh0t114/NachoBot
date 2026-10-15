@@ -10,12 +10,12 @@ import hashlib
 import time
 import asyncio
 import os
-import tempfile
 import wave
 import audioop
 
 from src.plugin_system import BasePlugin, register_plugin, BaseCommand
 from src.plugin_system.apis import send_api
+from src.common.media_paths import get_shared_media_temp_dir
 
 
 PLUGIN_DIR = Path(__file__).resolve().parent
@@ -275,6 +275,28 @@ def _best_similarity(query: str, candidates: List[str]) -> Tuple[float, Optional
         return best_score, best_item
 
 
+def _declared_voice_payload_formats(cmd) -> Optional[set[str]]:
+    """Read transport-neutral audio capabilities from the received envelope."""
+    message = getattr(cmd, "message", None)
+    message_info = getattr(message, "message_info", None)
+    additional = getattr(message_info, "additional_config", None)
+    if isinstance(additional, dict):
+        runtime = additional.get("runtime_capabilities")
+    else:
+        runtime = getattr(additional, "runtime_capabilities", None)
+    if isinstance(runtime, dict):
+        if "voice_payload_formats" not in runtime:
+            return None
+        formats = runtime.get("voice_payload_formats")
+    else:
+        if runtime is None or not hasattr(runtime, "voice_payload_formats"):
+            return None
+        formats = getattr(runtime, "voice_payload_formats")
+    if not isinstance(formats, (list, tuple, set, frozenset)):
+        return set()
+    return {str(value).strip().lower() for value in formats if str(value).strip()}
+
+
 def _fuzzy_contains(query: str, candidates: set[str], threshold: float) -> Tuple[bool, float]:
     score, _ = _best_similarity(query, list(candidates))
     return score >= threshold, score
@@ -289,6 +311,9 @@ async def _play_song(cmd: BaseCommand, song: dict) -> Tuple[bool, Optional[str],
         return True, f"file_missing:{wav.name}", True
 
     prefer_silk = bool(cmd.get_config("mus_library.prefer_silk", _cfg(cmd, "prefer_silk", True)))  # type: ignore
+    declared_formats = _declared_voice_payload_formats(cmd)
+    if declared_formats is not None and "silk" not in declared_formats:
+        prefer_silk = False
     silk_bitrate = int(cmd.get_config("mus_library.silk_bitrate", _cfg(cmd, "silk_bitrate", 24000)) or 24000)
     cache_ttl_hours = float(cmd.get_config("mus_library.cache_ttl_hours", _cfg(cmd, "cache_ttl_hours", 0)) or 0)
     debug_timing = bool(cmd.get_config("mus_library.debug_timing", _cfg(cmd, "debug_timing", False)))
@@ -408,7 +433,7 @@ async def _trim_wav(src: Path, max_seconds: int) -> Path:
     """把 WAV 裁剪为前 max_seconds 秒；max_seconds<=0 则返回原文件。"""
     if not max_seconds or max_seconds <= 0:
         return src
-    tmp = Path(tempfile.gettempdir()) / f"mus_trim_{os.getpid()}_{int(asyncio.get_event_loop().time() * 1000)}.wav"
+    tmp = get_shared_media_temp_dir() / f"mus_trim_{os.getpid()}_{int(asyncio.get_event_loop().time() * 1000)}.wav"
     with wave.open(str(src), "rb") as r:
         ch, sw, sr, n = r.getnchannels(), r.getsampwidth(), r.getframerate(), r.getnframes()
         frames_keep = min(n, int(max_seconds * sr))

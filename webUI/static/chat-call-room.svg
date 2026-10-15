@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800" fill="none">
+  <defs>
+    <linearGradient id="wall" x1="0" y1="0" x2="1100" y2="750" gradientUnits="userSpaceOnUse"><stop stop-color="#f4eddf"/><stop offset="1" stop-color="#ded1bc"/></linearGradient>
+    <linearGradient id="daylight" x1="190" y1="80" x2="430" y2="570" gradientUnits="userSpaceOnUse"><stop stop-color="#c8e0df"/><stop offset=".58" stop-color="#e7eee0"/><stop offset="1" stop-color="#b9c9a7"/></linearGradient>
+    <linearGradient id="curtain" x1="0" y1="0" x2="120" y2="0" gradientUnits="userSpaceOnUse"><stop stop-color="#b8c9be"/><stop offset=".36" stop-color="#dce5d9"/><stop offset=".64" stop-color="#becfc3"/><stop offset="1" stop-color="#dde5d8"/></linearGradient>
+    <linearGradient id="sunbeam" x1="340" y1="390" x2="650" y2="770" gradientUnits="userSpaceOnUse"><stop stop-color="#fff9df" stop-opacity=".45"/><stop offset="1" stop-color="#fff9df" stop-opacity="0"/></linearGradient>
+    <linearGradient id="cabinet" x1="890" y1="570" x2="1150" y2="700" gradientUnits="userSpaceOnUse"><stop stop-color="#cebda4"/><stop offset="1" stop-color="#bba488"/></linearGradient>
+    <radialGradient id="lampglow"><stop stop-color="#ffdda2" stop-opacity=".7"/><stop offset="1" stop-color="#ffdda2" stop-opacity="0"/></radialGradient>
+    <filter id="soft"><feGaussianBlur stdDeviation="8"/></filter>
+  </defs>
+  <!-- A shallow room with daylight at one side and a warm reading corner. -->
+  <path fill="url(#wall)" d="M0 0h1200v800H0z"/>
+  <path fill="#e8ddca" d="m0 0 70 45v605L0 702z"/>
+  <path fill="#d5c4aa" d="M0 652h1200v148H0z"/>
+  <path stroke="#c9b798" stroke-width="4" d="M0 652h1200"/>
+  <path stroke="#ecdfc9" stroke-width="2" opacity=".5" d="m150 652-80 148m410-148 25 148m310-148 110 148M0 725h1200"/>
+  <ellipse cx="302" cy="409" rx="300" ry="310" fill="#fff4d8" opacity=".32" filter="url(#soft)"/>
+  <!-- Window, greenery beyond the glass, and folded sage curtains. -->
+  <rect x="117" y="78" width="337" height="514" rx="10" fill="#baa98c" opacity=".2"/>
+  <rect x="107" y="66" width="337" height="514" rx="8" fill="#fcf8ed"/>
+  <rect x="127" y="87" width="297" height="467" rx="3" fill="url(#daylight)"/>
+  <g filter="url(#soft)" opacity=".7">
+    <path fill="#aabf9c" d="M127 437q83-115 174-28t123 13v132H127z"/>
+    <path fill="#93ad96" d="M127 508q112-93 193-29t104 5v70H127z"/>
+    <ellipse cx="411" cy="369" rx="45" ry="85" fill="#92b39a"/>
+  </g>
+  <path stroke="#f7f3e8" stroke-width="12" d="M275 88v466M127 292h297"/>
+  <path stroke="#fffdf5" stroke-opacity=".35" stroke-width="15" d="m154 114 86 133m58 53 96 143"/>
+  <rect x="97" y="566" width="359" height="18" rx="5" fill="#f9f1df"/>
+  <path stroke="#ab997f" stroke-width="7" stroke-linecap="round" d="M63 55h421"/>
+  <path d="M66 66h95q-19 249-43 355l24 202q-28 22-94 0l23-211z" fill="url(#curtain)"/>
+  <path d="M414 66h67l-8 345 21 211q-43 17-85 0l30-210z" fill="url(#curtain)"/>
+  <path stroke="#a9bfb0" stroke-width="3" opacity=".55" d="m87 80-1 326-20 200m54-526-15 326 18 200m322-528 11 326-25 200m34-525-2 326 11 198"/>
+  <path stroke="#a3987b" stroke-width="9" stroke-linecap="round" d="m68 425 53 5m317-5 34 2"/>
+  <path fill="url(#sunbeam)" d="m150 340 266-29 446 489H223z"/>
+  <!-- Wall print and a narrow shelf give the far wall a recognizable scale. -->
+  <rect x="900" y="108" width="159" height="199" rx="3" fill="#c6b292"/>
+  <rect x="910" y="118" width="139" height="179" fill="#f7f0e1"/>
+  <circle cx="984" cy="175" r="28" fill="#d5b995"/>
+  <path fill="#b6c7b7" d="M923 282v-59q29-46 60 0t52-12v71z"/>
+  <path fill="#869e91" d="M923 282v-25q40-38 70-4t42-5v34z"/>
+  <path stroke="#c3ad8b" stroke-width="11" stroke-linecap="round" d="M746 399h380"/>
+  <path fill="#93a99d" d="M772 363h20v30h-20z"/>
+  <path fill="#d2b398" d="M796 350h18v43h-18z"/>
+  <path fill="#e7d9bd" d="M819 356h25v37h-25z"/>
+  <path fill="#93a59b" d="m857 354 17-5 13 41-17 5z"/>
+  <path fill="#e8dfcc" d="M1044 361h43l-8 32h-27z"/>
+  <path stroke="#92ab97" stroke-width="3" d="M1065 365v-40m-1 28-13-14m14 5 13-18"/>
+  <ellipse cx="1049" cy="333" rx="7" ry="13" transform="rotate(-35 1049 333)" fill="#9db39d"/>
+  <ellipse cx="1080" cy="324" rx="7" ry="13" transform="rotate(30 1080 324)" fill="#859f8b"/>
+  <!-- A shaded lamp, books, and a ceramic cup on a low wooden sideboard. -->
+  <ellipse cx="1048" cy="469" rx="155" ry="160" fill="url(#lampglow)"/>
+  <rect x="870" y="570" width="300" height="125" rx="6" fill="url(#cabinet)"/>
+  <rect x="858" y="557" width="325" height="15" rx="5" fill="#dfcbae"/>
+  <path stroke="#ad9578" stroke-width="2" d="M1017 583v101m-126-42h106m-86-35h34m103 0h34"/>
+  <path stroke="#aa9377" stroke-width="9" d="M890 695v28m259-28v28"/>
+  <path stroke="#ad9776" stroke-width="6" d="M1070 426v125"/>
+  <ellipse cx="1070" cy="551" rx="38" ry="6" fill="#c0a582"/>
+  <path d="M1028 363h83l32 69h-146z" fill="#f4dfb7"/>
+  <ellipse cx="1070" cy="431" rx="73" ry="7" fill="#d9bd90"/>
+  <rect x="885" y="532" width="97" height="13" rx="3" fill="#90a89b"/>
+  <rect x="897" y="518" width="80" height="12" rx="2" fill="#e8d9bb"/>
+  <rect x="889" y="546" width="96" height="10" rx="2" fill="#c2a388"/>
+  <path d="M1002 523h24v25q0 8-12 8t-12-8z" fill="#f5ebd9"/>
+  <path stroke="#f5ebd9" stroke-width="5" d="M1026 528q16-2 14 8t-14 8"/>
+  <!-- Foreground foliage makes the camera view feel seated in the room. -->
+  <path stroke="#7f9680" stroke-width="6" d="M182 688q-1-77-19-158m19 151q31-87 74-134m-75 125q-43-45-81-72"/>
+  <path fill="#8da58c" d="M164 582q-63-33-61-92 60 15 61 92z"/>
+  <path fill="#718f7c" d="M180 632q-34-79 2-122 36 64-2 122z"/>
+  <path fill="#a4b59a" d="M208 608q0-71 64-91-1 62-64 91z"/>
+  <path fill="#819e85" d="M159 650q-69 1-76-66 53 5 76 66z"/>
+  <path fill="#93ab90" d="M191 667q18-62 84-67-21 62-84 67z"/>
+  <path d="M139 674h84l-12 83h-60z" fill="#d4b99c"/>
+  <ellipse cx="181" cy="674" rx="43" ry="8" fill="#b89c80"/>
+  <ellipse cx="181" cy="761" rx="66" ry="10" fill="#bba98d" opacity=".2"/>
+</svg>

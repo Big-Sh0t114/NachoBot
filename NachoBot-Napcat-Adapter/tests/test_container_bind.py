@@ -19,13 +19,43 @@ if str(NACHOBOT_ROOT) not in sys.path:
     sys.path.append(str(NACHOBOT_ROOT))
 
 from src.listen_address import resolve_listen_address  # noqa: E402
-from src.recv_handler import NoticeType  # noqa: E402
+from src.recv_handler import ACCEPT_FORMAT, NoticeType  # noqa: E402
 from src.recv_handler.notice_handler import NoticeHandler  # noqa: E402
 import src.recv_handler.notice_handler as notice_handler_module  # noqa: E402
 import src.send_handler.main_send_handler as main_send_handler_module  # noqa: E402
+from src.config import global_config  # noqa: E402
 
 
 class ContainerBindTests(unittest.TestCase):
+    def test_adapter_connects_to_core_and_advertises_tts_field(self) -> None:
+        self.assertEqual(global_config.nachobot_server.port, 8000)
+        self.assertIn("tts_text", ACCEPT_FORMAT)
+
+    def test_core_port_is_read_directly_without_rewriting_file(self) -> None:
+        from src.config.config import load_config
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.toml"
+            original = (
+                "[nickname]\nnickname = 'test'\n\n"
+                "[napcat_server]\nport = 8095\n\n"
+                "[nachobot_server]\nhost = '127.0.0.1'\nport = 8000\n\n"
+                "[chat]\n"
+                "group_list_type = 'whitelist'\n"
+                "group_list = []\n"
+                "private_list_type = 'blacklist'\n"
+                "private_list = []\n"
+                "ban_user_id = []\n"
+                "ban_qq_bot = false\n"
+                "enable_poke = true\n\n"
+                "[voice]\nuse_tts = false\n\n"
+                "[debug]\nlevel = 'INFO'\n"
+            )
+            config_path.write_text(original, encoding="utf-8")
+            loaded = load_config(str(config_path))
+            self.assertEqual(loaded.nachobot_server.port, 8000)
+            self.assertEqual(config_path.read_text(encoding="utf-8"), original)
+
     def test_listen_address_import_does_not_require_runtime_config(self) -> None:
         env = os.environ.copy()
         env["PYTHONPATH"] = os.pathsep.join(
@@ -1006,6 +1036,48 @@ class NoticeSystemEventTests(unittest.TestCase):
                 {"group_id": 100, "message": processed_message},
             )
             sent_back_mock.assert_awaited_once_with(raw_message_base, 321)
+
+        asyncio.run(scenario())
+
+    def test_send_normal_message_uses_media_timeout_for_video(self) -> None:
+        async def scenario():
+            handler = main_send_handler_module.SendHandler()
+            raw_message_base = SimpleNamespace(
+                message_info=SimpleNamespace(
+                    group_info=SimpleNamespace(group_id=100),
+                    user_info=None,
+                ),
+                message_segment=SimpleNamespace(type="videofile", data="C:/tmp/example.mp4"),
+            )
+
+            processed_message = [
+                {"type": "video", "data": {"file": "file://C:/tmp/example.mp4"}}
+            ]
+            with (
+                mock.patch.object(
+                    main_send_handler_module.SendMessageHandleClass,
+                    "process_seg_recursive",
+                    return_value=processed_message,
+                ),
+                mock.patch.object(
+                    main_send_handler_module.nc_message_sender,
+                    "send_message_to_napcat",
+                    new=AsyncMock(return_value={"status": "ok", "data": {"message_id": 322}}),
+                ) as send_mock,
+                mock.patch.object(
+                    main_send_handler_module.nc_message_sender,
+                    "message_sent_back",
+                    new=AsyncMock(),
+                ) as sent_back_mock,
+            ):
+                await handler.send_normal_message(raw_message_base)
+
+            send_mock.assert_awaited_once_with(
+                "send_group_msg",
+                {"group_id": 100, "message": processed_message},
+                timeout_sec=main_send_handler_module.global_config.napcat_server.media_action_timeout_sec,
+            )
+            sent_back_mock.assert_awaited_once_with(raw_message_base, 322)
 
         asyncio.run(scenario())
 

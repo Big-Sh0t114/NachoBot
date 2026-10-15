@@ -400,7 +400,7 @@
 }
 
 .db-th-actions {
-    width: 80px;
+    width: 160px;
     text-align: center;
 }
 
@@ -423,8 +423,21 @@
     margin: 0 2px;
 }
 
+.db-td-actions .btn-row-detail:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
 .db-table tbody tr:hover {
     background: rgba(13, 148, 136, 0.04);
+}
+
+.db-table tbody tr.db-row-detail-available {
+    cursor: zoom-in;
+}
+
+.db-table tbody tr.db-row-detail-available:hover {
+    background: rgba(13, 148, 136, 0.08);
 }
 
 .db-table tbody tr:nth-child(even) {
@@ -461,6 +474,37 @@
     gap: 12px;
     max-height: 60vh;
     overflow-y: auto;
+}
+
+.db-detail-form {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.db-detail-field {
+    min-width: 0;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border-light);
+}
+
+.db-detail-label {
+    margin-bottom: 6px;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    overflow-wrap: anywhere;
+}
+
+.db-detail-value {
+    margin: 0;
+    color: var(--text-primary);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.8rem;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 
 .db-edit-field label {

@@ -92,16 +92,20 @@ window.ChatSupport = (() => {
 
     function createTTS({ getActiveSession, getMessagesElement, escapeText, apiGet, toast }) {
         let ttsReady = false;
+        let ttsTextOnly = false;
         let ttsLoadingMessageId = '';
         let activeSpeechMessageId = '';
         let activeSpeechAudio = null;
         let activeSpeechUrl = '';
+        let ttsStatusPromise = null;
+        let ttsStatusRefreshPending = false;
+        let ttsStatusGeneration = 0;
 
         function createSpeakerMarkup(message) {
             return `
                 <button type="button" class="chat-tts-button"
                     data-message-id="${escapeText(String(message.id || ''))}"
-                    aria-label="生成并播放语音" title="TTS 服务未就绪" disabled>
+                    aria-label="尝试生成语音" title="TTS 就绪状态未确认，点击尝试生成语音">
                     <svg viewBox="0 0 24 24" aria-hidden="true">
                         <path d="M4 9v6h4l5 4V5L8 9H4z"></path>
                         <path class="chat-tts-wave chat-tts-wave-one"
@@ -117,7 +121,7 @@ window.ChatSupport = (() => {
             const messageId = button.dataset.messageId || '';
             const session = getActiveSession();
             const message = session?.messages.find(item => item.id === messageId);
-            if (!message || !ttsReady || ttsLoadingMessageId) return;
+            if (!message || ttsTextOnly || ttsLoadingMessageId) return;
 
             if (
                 activeSpeechMessageId === messageId
@@ -150,6 +154,9 @@ window.ChatSupport = (() => {
                 const audioBlob = await response.blob();
                 if (!audioBlob.size) throw new Error('TTS 服务返回了空音频');
 
+                ttsStatusGeneration += 1;
+                ttsReady = true;
+                ttsTextOnly = false;
                 const audioUrl = URL.createObjectURL(audioBlob);
                 const audio = new Audio(audioUrl);
                 activeSpeechMessageId = messageId;
@@ -171,6 +178,7 @@ window.ChatSupport = (() => {
                 console.warn('TTS generation or playback failed:', error);
                 stopActiveSpeech();
                 if (error.status === 503) {
+                    ttsStatusGeneration += 1;
                     ttsReady = false;
                 }
                 toast(`语音生成失败：${error.message}`, 'error');
@@ -203,11 +211,11 @@ window.ChatSupport = (() => {
 
                 button.classList.toggle('is-loading', isLoading);
                 button.classList.toggle('is-playing', Boolean(isPlaying));
-                button.disabled = !ttsReady || Boolean(ttsLoadingMessageId);
+                button.disabled = ttsTextOnly || Boolean(ttsLoadingMessageId);
 
-                if (!ttsReady) {
-                    button.title = 'TTS 服务未就绪';
-                    button.setAttribute('aria-label', 'TTS 服务未就绪');
+                if (ttsTextOnly) {
+                    button.title = '当前为 POTATO 纯文本模式，TTS 不可用';
+                    button.setAttribute('aria-label', '当前为 POTATO 纯文本模式，TTS 不可用');
                 } else if (isLoading) {
                     button.title = '正在生成语音';
                     button.setAttribute('aria-label', '正在生成语音');
@@ -215,6 +223,9 @@ window.ChatSupport = (() => {
                     button.title = '停止播放';
                     button.setAttribute('aria-label', '停止播放');
                     button.disabled = false;
+                } else if (!ttsReady) {
+                    button.title = 'TTS 就绪状态未确认，点击尝试生成语音';
+                    button.setAttribute('aria-label', '尝试生成语音');
                 } else {
                     button.title = '生成并播放语音';
                     button.setAttribute('aria-label', '生成并播放语音');
@@ -222,12 +233,35 @@ window.ChatSupport = (() => {
             });
         }
 
-        async function updateTTSStatus() {
+        function updateTTSStatus(forceRefresh = false) {
+            if (ttsStatusPromise) {
+                if (forceRefresh) ttsStatusRefreshPending = true;
+                return ttsStatusPromise;
+            }
+            const request = refreshTTSStatus();
+            ttsStatusPromise = request;
+            return request.finally(() => {
+                if (ttsStatusPromise === request) ttsStatusPromise = null;
+                if (ttsStatusRefreshPending) {
+                    ttsStatusRefreshPending = false;
+                    window.setTimeout(updateTTSStatus, 0);
+                }
+            });
+        }
+
+        async function refreshTTSStatus() {
+            const statusGeneration = ttsStatusGeneration;
             try {
                 const data = await apiGet('/api/chat/tts/status');
-                ttsReady = Boolean(data.ready);
+                if (statusGeneration === ttsStatusGeneration) {
+                    ttsReady = data?.ready === true;
+                    ttsTextOnly = data?.text_only === true;
+                }
             } catch (error) {
-                ttsReady = false;
+                if (statusGeneration === ttsStatusGeneration) {
+                    ttsReady = false;
+                    ttsTextOnly = false;
+                }
             }
             syncSpeakerButtons();
         }

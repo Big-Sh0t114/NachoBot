@@ -414,10 +414,7 @@ class BilibiliLiveSearchOrchestrator:
         return self._model_client
 
     def _fallback_reply(self, room_id: int) -> str:
-        if self._adapter.tts_manager.is_tts_enabled(room_id):
-            language = self._adapter.tts_manager.get_room_language(room_id)
-            if language == "ja":
-                return "<JP>ちょっと待ってにゃ、猫猫が調べるにゃ</JP><ZH>稍等喵，猫猫查查看~</ZH>"
+        del room_id
         return self.FALLBACK_REPLY
 
     def _build_followup_prompt(
@@ -443,13 +440,10 @@ class BilibiliLiveSearchOrchestrator:
 emotion 只能从 "normal"、"shy"、"disgust"、"angry" 中四选一。
 action 只能从 "待机/放松"、"点头/同意"、"摇头/否定"、"转身向左/看左边"、"转身向右/看右边"、"眨眼/卖萌/Wink"、"身体晃动/开心/兴奋"、"歪头/疑惑/思考"、"害羞/移开视线/不好意思"、"一般" 中选择一个，大多数情况使用 "一般"。"""
 
-        if self._adapter.tts_manager.is_tts_enabled(room_id):
-            if self._adapter.tts_manager.get_room_language(room_id) == "ja":
-                prompt += "\n必须输出 <JP>日文</JP><ZH>中文</ZH> 的双语格式。"
-            else:
-                prompt += "\n只用中文回复，不要使用 <JP><ZH> 标签。"
-        else:
-            prompt += "\n只用中文回复，不要使用 <JP><ZH> 标签。"
+        # Search follow-ups are ordinary text.  Adapter-local TTS preferences
+        # must not silently turn them into speech or into legacy bilingual
+        # markup; only a Core reply field can request synthesis.
+        prompt += "\n只用中文回复，不要使用 <JP><ZH> 标签。"
         return prompt
 
     def _room_context(self, room_id: int) -> str:

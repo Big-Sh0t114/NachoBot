@@ -7,8 +7,11 @@ from typing import Any, Optional
 from src.common.logger import get_logger
 from src.common.database.database import db
 from src.common.database.database_model import ImageDescriptions
-from src.config.config import model_config
-from src.llm_models.utils_model import LLMRequest
+from src.multimodal.contracts import (
+    MAX_VIDEO_BYTES,
+    decode_bounded_base64,
+    max_base64_chars,
+)
 from src.chat.utils.visual_policy import (
     CORE_GENERIC_VIDEO_PROMPT,
     resolve_visual_task_policy,
@@ -30,7 +33,9 @@ class VideoManager:
     def __init__(self):
         if not self._initialized:
             os.makedirs(os.path.join(self.VIDEO_DIR, "video"), exist_ok=True)
-            self.vlm = LLMRequest(model_set=model_config.model_task_config.video, request_type="video")
+            # Video understanding is a Core facade operation; model selection
+            # belongs to the local Multimodal runtime or Core remote provider.
+            self.vlm = None
             try:
                 db.connect(reuse_if_open=True)
                 db.create_tables([ImageDescriptions], safe=True)
@@ -40,6 +45,31 @@ class VideoManager:
 
     async def _download_or_read_video(self, video_info: dict) -> Optional[bytes]:
         """下载或读取视频文件到内存字节串"""
+        # Adapters may provide bounded inline media when they already fetched
+        # it through their own authenticated/proxied transport. Keep this
+        # generic: a present inline field is authoritative and is never
+        # replaced by a URL download if it is malformed.
+        if "base64" in video_info:
+            try:
+                encoded = video_info.get("base64")
+                size = video_info.get("size")
+                if not isinstance(encoded, str):
+                    raise ValueError("inline video payload must be a base64 string")
+                if not isinstance(size, int) or isinstance(size, bool):
+                    raise ValueError("inline video size must be an integer")
+                if size <= 0 or size > MAX_VIDEO_BYTES:
+                    raise ValueError(f"inline video size must be between 1 and {MAX_VIDEO_BYTES} bytes")
+                if len(encoded) > max_base64_chars(MAX_VIDEO_BYTES):
+                    raise ValueError(f"inline video exceeds {MAX_VIDEO_BYTES} bytes")
+
+                data = decode_bounded_base64(encoded, max_bytes=MAX_VIDEO_BYTES)
+                if len(data) != size:
+                    raise ValueError("inline video size does not match decoded payload")
+                return data
+            except Exception as e:
+                logger.error(f"读取内联视频失败: {e}")
+                return None
+
         path = video_info.get("path")
         url = video_info.get("url")
 
@@ -47,7 +77,10 @@ class VideoManager:
         if path and os.path.exists(path):
             try:
                 with open(path, "rb") as f:
-                    return f.read()
+                    data = f.read(MAX_VIDEO_BYTES + 1)
+                if len(data) > MAX_VIDEO_BYTES:
+                    raise ValueError(f"video exceeds the {MAX_VIDEO_BYTES}-byte perception bound")
+                return data
             except Exception as e:
                 logger.error(f"读取本地视频失败: {e}")
 
@@ -59,6 +92,8 @@ class VideoManager:
                 async with httpx.AsyncClient() as client:
                     resp = await client.get(url, timeout=60)
                     if resp.status_code == 200:
+                        if len(resp.content) > MAX_VIDEO_BYTES:
+                            raise ValueError(f"video exceeds the {MAX_VIDEO_BYTES}-byte perception bound")
                         return resp.content
             except Exception as e:
                 logger.error(f"下载视频失败: {e}")
@@ -82,7 +117,7 @@ class VideoManager:
                 "video",
                 default_prompt=CORE_GENERIC_VIDEO_PROMPT,
                 default_temperature=0.4,
-                default_max_tokens=int(getattr(self.vlm.model_for_task, "max_tokens", 800)),
+                default_max_tokens=800,
             )
 
             # 检查是否有缓存
@@ -97,14 +132,22 @@ class VideoManager:
             video_base64 = base64.b64encode(video_bytes).decode("utf-8")
 
             # 请注意：由于不支持任意视频格式，一律先标注为 mp4 交由远端处理
-            description, _ = await self.vlm.generate_response_for_video(
+            from src.multimodal import get_multimodal_router
+
+            result = await get_multimodal_router().understand_video(
+                video_base64,
                 prompt=policy.prompt,
-                video_base64=video_base64,
-                video_format="mp4",
-                temperature=policy.temperature,
-                max_tokens=policy.max_tokens,
-                extra_params=dict(policy.extra_params),
+                media_format="mp4",
+                metadata={
+                    "temperature": policy.temperature,
+                    "max_tokens": policy.max_tokens,
+                    "extra_params": dict(policy.extra_params),
+                },
             )
+            description = result.text
+
+            if result.degraded:
+                return description
 
             if not description:
                 logger.warning("VLM未能生成视频描述")

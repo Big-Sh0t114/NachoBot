@@ -1,33 +1,67 @@
 services:
-  multimodal-adapter:
-    container_name: nacho-bot-multimodal-adapter
+  multimodal-tts-runtime:
+    profiles: ["full", "lite"]
+    container_name: nacho-bot-multimodal-tts-runtime
     build:
       context: .
       dockerfile: dockerfile
       additional_contexts:
         nachobot: ../NachoBot
+    entrypoint: ["python", "scripts/container_tts_entrypoint.py", "--host", "0.0.0.0", "--port", "9880", "--backend-port", "9881"]
     environment:
       - TZ=Asia/Shanghai
-      - NACHOBOT_CORE_TOKEN=${NACHOBOT_CORE_TOKEN:-}
-      - NACHOBOT_MULTIMODAL_HOST=0.0.0.0
-      - NACHOBOT_MULTIMODAL_PORT=8070
-      - NACHOBOT_MULTIMODAL_CORE_URL=ws://core:8000/ws
+      - NACHOBOT_TTS_ENGINE=${NACHOBOT_TTS_ENGINE:-}
+    volumes:
+      - ./configs:/workspace/NachoBot-Multimodal-Adapter/configs
+      - ./models:/workspace/NachoBot-Multimodal-Adapter/models
+      - ./logs:/workspace/NachoBot-Multimodal-Adapter/logs
+      - multimodal_runtime:/workspace/NachoBot-Multimodal-Adapter/.runtime
     ports:
-      - "127.0.0.1:8070:8070"
+      - "127.0.0.1:9880:9880"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request; response=urllib.request.urlopen('http://127.0.0.1:9880/api/health', timeout=3); payload=json.loads(response.read().decode('utf-8')); raise SystemExit(0 if isinstance(payload, dict) and payload.get('ready') is True and payload.get('model_loaded') is True else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 900s
+    restart: unless-stopped
+    networks:
+      - nacho_bot
+  multimodal-perception:
+    profiles: ["full"]
+    container_name: nacho-bot-multimodal-perception
+    build:
+      context: .
+      dockerfile: dockerfile
+      additional_contexts:
+        nachobot: ../NachoBot
+    entrypoint: ["python", "-m", "nachobot_multimodal.api_server"]
+    environment:
+      - TZ=Asia/Shanghai
+      - HOST=0.0.0.0
+      - PORT=9874
+    ports:
+      - "127.0.0.1:9874:9874"
     volumes:
       - ./configs:/workspace/NachoBot-Multimodal-Adapter/configs
       - ./models:/workspace/NachoBot-Multimodal-Adapter/models
       - ./logs:/workspace/NachoBot-Multimodal-Adapter/logs
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8070/api/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9874/v1/capabilities', timeout=3)"]
       interval: 30s
       timeout: 5s
       retries: 5
-      start_period: 120s
+      start_period: 900s
     restart: unless-stopped
     networks:
       - nacho_bot
-
 networks:
   nacho_bot:
     external: true
+
+volumes:
+  multimodal_runtime:
+
+# POTATO is intentionally Core-only. It does not start a service from this
+# compose file and therefore does not require the Multimodal runtime, 9874, or
+# 9880.
