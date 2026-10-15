@@ -10,9 +10,9 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from .secure_paths import resolve_external_path
+    from .secure_paths import ensure_within, resolve_external_path
 except ImportError:
-    from secure_paths import resolve_external_path
+    from secure_paths import ensure_within, resolve_external_path
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
@@ -147,8 +147,8 @@ class EnvironmentChecker:
         except FileNotFoundError:
             result["message"] = "Python 未安装或不在 PATH 中"
             return result
-        except Exception as e:
-            result["message"] = f"检测 Python 时出错: {e}"
+        except Exception:
+            result["message"] = "检测 Python 失败"
             return result
 
         # Check uv
@@ -204,8 +204,8 @@ class EnvironmentChecker:
             result["message"] = "Git 不可用"
         except FileNotFoundError:
             result["message"] = "Git 未安装或不在 PATH 中"
-        except Exception as e:
-            result["message"] = f"检测 Git 时出错: {e}"
+        except Exception:
+            result["message"] = "检测 Git 失败"
             return result
 
         if os.name == "nt":
@@ -722,7 +722,14 @@ class PathVerifier:
         # The setup wizard edits <NapCat>/config/onebot11_*.json directly.
         # Verify that the directory can actually be created and written now,
         # instead of passing the path check and failing later during deployment.
-        config_dir = p / "config"
+        try:
+            config_dir = ensure_within(p, p / "config")
+        except ValueError:
+            return {
+                "valid": False,
+                "message": "❌ NapCat 配置目录路径无效",
+                "download_url": download_url,
+            }
         try:
             config_dir.mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile(
@@ -736,10 +743,10 @@ class PathVerifier:
                 test_file.write("ok")
                 test_path = Path(test_file.name)
             test_path.unlink(missing_ok=True)
-        except Exception as e:
+        except Exception:
             return {
                 "valid": False,
-                "message": f"❌ NapCat 配置目录不可写: {config_dir} ({e})",
+                "message": "❌ NapCat 配置目录不可写，请检查目录权限",
                 "download_url": download_url,
             }
 

@@ -1,5 +1,6 @@
 # 文件路径：src/plugins/GPT_SoVITS/api_server.py
 from contextlib import asynccontextmanager
+from collections.abc import Mapping
 from fastapi import FastAPI, Request
 import uvicorn
 import logging
@@ -35,16 +36,75 @@ def _log_safe(value: object, max_len: int = 200) -> str:
     return text
 
 
-def _resolve_weight_file(raw_path: str | None, suffixes: set[str], label: str) -> Path:
+def _configured_weight_roots(model: TTSModel, field_name: str) -> tuple[Path, ...]:
+    """Return trusted directories declared by the active model presets."""
+    config = getattr(model, "config", None)
+    tts_config = getattr(config, "tts", None)
+    models = getattr(tts_config, "models", None)
+    presets = getattr(models, "presets", None)
+    if not isinstance(presets, Mapping):
+        return ()
+
+    resolver = getattr(model, "_resolve_path", None)
+    config_dir = getattr(model, "_config_dir", None)
+    roots: set[Path] = set()
+    for preset in presets.values():
+        configured_path = getattr(preset, field_name, "")
+        if not isinstance(configured_path, (str, Path)) or not str(configured_path).strip():
+            continue
+        try:
+            lexical_path = Path(str(configured_path)).expanduser()
+            if lexical_path.is_absolute():
+                configured_parent = lexical_path.parent
+            elif callable(resolver):
+                # Resolve only the configured parent. Resolving the leaf first
+                # would expand a configured symlink target into a new trust root.
+                configured_parent = Path(resolver(str(lexical_path.parent)))
+            elif config_dir is not None:
+                configured_parent = Path(config_dir).expanduser() / lexical_path.parent
+            else:
+                continue
+            roots.add(configured_parent.expanduser().resolve(strict=False))
+        except (OSError, RuntimeError, ValueError):
+            continue
+    return tuple(sorted(roots))
+
+
+def _is_within_any_root(path: Path, roots: tuple[Path, ...]) -> bool:
+    for root in roots:
+        try:
+            path.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _resolve_weight_file(
+    raw_path: str | None,
+    suffixes: set[str],
+    label: str,
+    allowed_roots: tuple[Path, ...],
+) -> Path:
     text = str(raw_path or "").strip()
     if not text:
         raise ValueError(f"{label}模型路径不能为空")
-    # codeql[py/path-injection]
-    path = Path(text).expanduser().resolve(strict=False)
+    if len(text) > 4096:
+        raise ValueError(f"{label}模型路径过长")
+    candidate = Path(text).expanduser()
+    if ".." in candidate.parts:
+        raise ValueError(f"{label}模型路径不能包含父目录跳转")
+    try:
+        path = candidate.resolve(strict=True)
+        roots = tuple(root.resolve(strict=True) for root in allowed_roots)
+    except (OSError, RuntimeError) as exc:
+        raise FileNotFoundError(f"{label}模型文件或配置目录不存在") from exc
     if path.suffix.lower() not in suffixes:
         raise ValueError(f"{label}模型文件类型不支持: {path.suffix}")
     if not path.is_file():
-        raise FileNotFoundError(f"{label}模型文件不存在: {path}")
+        raise FileNotFoundError(f"{label}模型文件不存在")
+    if not roots or not _is_within_any_root(path, roots):
+        raise ValueError(f"{label}模型文件不在已配置的模型目录中")
     return path
 
 
@@ -52,7 +112,12 @@ def _safe_output_path(platform: str) -> Path:
     token = PLATFORM_FILENAME_RE.sub("_", str(platform or "default")).strip("._")
     if not token:
         token = "default"
-    return OUTPUT_DIR / f"output_{token[:80]}.wav"
+    output_root = Path(OUTPUT_DIR).expanduser().resolve(strict=False)
+    candidate = output_root / f"output_{token[:80]}.wav"
+    resolved = candidate.resolve(strict=False)
+    if candidate.is_symlink() or resolved.parent != output_root:
+        raise ValueError("生成音频路径无效")
+    return resolved
 
 
 def _apply_weight_transaction(model: TTSModel, gpt_path: str, sovits_path: str) -> None:
@@ -112,17 +177,22 @@ async def load_model(request: Request):
     sovits_path = data.get("sovits_path")
 
     try:
-        gpt_path = _resolve_weight_file(gpt_path, GPT_WEIGHT_SUFFIXES, "GPT")
-        sovits_path = _resolve_weight_file(sovits_path, SOVITS_WEIGHT_SUFFIXES, "SoVITS")
-    except (FileNotFoundError, ValueError) as e:
-        logger.warning("Model path validation failed: %s", _log_safe(e))
-        return {"status": "error", "msg": "模型路径无效或文件不存在"}
-
-    try:
         async with _model_lock:
             model = tts_model
             if model is None:
                 raise RuntimeError("GPT-SoVITS model is not loaded")
+            gpt_path = _resolve_weight_file(
+                gpt_path,
+                GPT_WEIGHT_SUFFIXES,
+                "GPT",
+                _configured_weight_roots(model, "gpt_model"),
+            )
+            sovits_path = _resolve_weight_file(
+                sovits_path,
+                SOVITS_WEIGHT_SUFFIXES,
+                "SoVITS",
+                _configured_weight_roots(model, "sovits_model"),
+            )
             try:
                 await _runtime.call_blocking(
                     _apply_weight_transaction,
@@ -131,10 +201,13 @@ async def load_model(request: Request):
                     str(sovits_path),
                 )
             except BaseException as exc:
-                _runtime.invalidate(f"Fixed GPT weight transaction failed: {exc}")
+                _runtime.invalidate(f"Fixed GPT weight transaction failed: {_log_safe(exc)}")
                 tts_model = None
                 raise
             gpt_weights, sovits_weights = str(gpt_path), str(sovits_path)
+    except (FileNotFoundError, ValueError) as exc:
+        logger.warning("Model path validation failed: %s", _log_safe(exc))
+        return {"status": "error", "msg": "模型路径无效或文件不存在"}
     except Exception as exc:
         logger.error("Model load failed: %s", _log_safe(exc))
         tts_model = _runtime.model
@@ -176,13 +249,12 @@ async def infer(request: Request):
             audio_bytes = await model.tts(text=text, platform=platform)
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         output_path = _safe_output_path(platform)
-        # codeql[py/path-injection]
         with output_path.open("wb") as f:
             f.write(audio_bytes)
 
         return {"status": "ok", "msg": "语音生成成功", "audio_file": str(output_path)}
     except Exception as e:
-        logger.error("TTS inference failed: %s", _log_safe(e), exc_info=True)
+        logger.error("TTS inference failed: %s", _log_safe(e))
         return {"status": "error", "msg": "语音生成失败"}
 
 

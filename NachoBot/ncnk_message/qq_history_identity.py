@@ -75,13 +75,20 @@ def snow_message_id(value: Any) -> str | None:
 
 
 def snow_message_id_for_native_sequence(native_sequence: Any, peer_id: Any) -> str | None:
-    """Recompute SnowLuma's signed hash for a canonical QQNT C2C sequence."""
+    """Recompute SnowLuma's signed identity digest for a QQNT C2C sequence.
+
+    This SHA1 truncation is a wire-compatible message ID, not a security
+    credential. Replacing the digest would make old SnowLuma history unreadable.
+    """
 
     sequence = native_nt_sequence(native_sequence)
     peer = positive_qq_id(peer_id)
     if sequence is None or peer is None:
         return None
-    digest = hashlib.sha1(f"{sequence}:{peer}:private_message_nt".encode("utf-8")).digest()
+    digest = hashlib.sha1(
+        f"{sequence}:{peer}:private_message_nt".encode("utf-8"),
+        usedforsecurity=False,
+    ).digest()
     result = int.from_bytes(digest[:4], byteorder="big", signed=True)
     return str(result or 1)
 

@@ -28,9 +28,10 @@ class LocalRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError("preload failed")
 
         with patch.object(api_server, "_runtime", FailingRuntime()):
-            with self.assertRaisesRegex(RuntimeError, "preload failed"):
+            with self.assertRaisesRegex(RuntimeError, "Local ASR/VLM preload failed") as raised:
                 async with api_server.lifespan(api_server.app):
                     self.fail("a failed preload must not enter the ready lifespan")
+            self.assertNotIn("preload failed", str(raised.exception).replace("Local ASR/VLM preload failed", ""))
 
     async def test_capabilities_are_perception_only_and_video_is_explicitly_unsupported(self):
         runtime = LocalMultimodalRuntime(

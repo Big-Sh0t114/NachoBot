@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -13,6 +14,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 from urllib.request import Request, urlopen
+from urllib.parse import urlsplit
 
 from urllib.error import URLError
 
@@ -35,6 +37,10 @@ os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
 
 GPT_REF = os.environ.get("NACHOBOT_GPT_SOVITS_REF", "20250606v2pro")
 GPT_REPO = "https://github.com/RVC-Boss/GPT-SoVITS.git"
+PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
+PYTORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu126"
+TTS_TORCH_RECIPE = "torch213-audio211-triton371-v3"
+TTS_TRITON_WINDOWS_VERSION = "3.7.1.post27"
 
 PUBLIC_DEFAULT_HOST = "127.0.0.1"
 PUBLIC_DEFAULT_PORT = 9880
@@ -155,7 +161,17 @@ def run(
     cwd: Path | None = None,
     env: dict[str, str] | None = None,
 ) -> None:
-    log("$ " + " ".join(map(str, cmd)))
+    displayed: list[str] = []
+    redact_next = False
+    for item in map(str, cmd):
+        if redact_next:
+            displayed.append("<index URL redacted>")
+            redact_next = False
+            continue
+        displayed.append(item)
+        if item in {"--index-url", "--extra-index-url", "--index"}:
+            redact_next = True
+    log("$ " + " ".join(displayed))
     subprocess.run(
         cmd,
         cwd=str(cwd) if cwd else None,
@@ -277,11 +293,221 @@ def select_gpt_python_version() -> str:
 
 def torch_index_url() -> str:
     override = os.environ.get("NACHOBOT_TTS_TORCH_INDEX", "").strip()
+    profile = explicit_tts_runtime_profile()
     if override:
+        index_kind = _known_pytorch_index_kind(override)
+        if index_kind == "cu128":
+            raise RuntimeError(
+                "NACHOBOT_TTS_TORCH_INDEX 指向已停用的 cu128 wheel 源；"
+                "请改为官方 cu126 源或 CPU 源后重新启动 TTS Runtime"
+            )
+        if profile == "cpu" and index_kind == "cu126":
+            raise RuntimeError("CPU TTS profile 不能使用 cu126 wheel 源，请选择官方 CPU 源")
+        if profile == "gpu" and index_kind == "cpu":
+            raise RuntimeError("GPU TTS profile 不能使用 CPU wheel 源，请选择官方 cu126 源")
         return override
-    if shutil.which("nvidia-smi"):
-        return "https://download.pytorch.org/whl/cu128"
-    return "https://download.pytorch.org/whl/cpu"
+    if profile == "cpu":
+        return PYTORCH_CPU_INDEX
+    if profile == "gpu" or shutil.which("nvidia-smi"):
+        return PYTORCH_CUDA_INDEX
+    return PYTORCH_CPU_INDEX
+
+
+def _known_pytorch_index_kind(index_url: str) -> str | None:
+    parsed = urlsplit(index_url.strip())
+    if (parsed.hostname or "").lower() != "download.pytorch.org":
+        return None
+    path = parsed.path.rstrip("/").lower()
+    if path == "/whl/cpu":
+        return "cpu"
+    if path == "/whl/cu126":
+        return "cu126"
+    if path == "/whl/cu128":
+        return "cu128"
+    return None
+
+
+def _safe_torch_index_label(index_url: str) -> str:
+    parsed = urlsplit(index_url)
+    if (parsed.hostname or "").lower() == "download.pytorch.org":
+        path = parsed.path.rstrip("/")
+        return f"https://download.pytorch.org{path}"
+    return "custom package index (credentials hidden)"
+
+
+def _tts_torch_profile(index_url: str) -> str:
+    explicit = explicit_tts_runtime_profile()
+    if explicit:
+        return explicit
+    if _known_pytorch_index_kind(index_url) == "cpu":
+        return "cpu"
+    if _known_pytorch_index_kind(index_url) == "cu126":
+        return "gpu"
+    return "gpu" if shutil.which("nvidia-smi") else "cpu"
+
+
+def _tts_torch_versions(profile: str) -> dict[str, str]:
+    suffix = "+cpu" if profile == "cpu" else "+cu126"
+    return {
+        "torch": f"2.13.0{suffix}",
+        "torchaudio": f"2.11.0{suffix}",
+    }
+
+
+def _tts_triton_required(profile: str, backend: str) -> bool:
+    return os.name == "nt" and profile == "gpu" and backend == "voxcpm-2.0.3"
+
+
+def _tts_dependency_constraints(runtime_dir: Path, profile: str, backend: str) -> Path:
+    versions = _tts_torch_versions(profile)
+    versions["torchvision"] = f"0.28.0{'+cpu' if profile == 'cpu' else '+cu126'}"
+    requirements = [f"{package}=={version}" for package, version in versions.items()]
+    if _tts_triton_required(profile, backend):
+        requirements.append(f"triton-windows=={TTS_TRITON_WINDOWS_VERSION}")
+    path = runtime_dir / f"constraints-{TTS_TORCH_RECIPE}-{profile}.txt"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    content = "\n".join(requirements) + "\n"
+    if not path.is_file() or path.read_text(encoding="utf-8") != content:
+        path.write_text(content, encoding="utf-8")
+    return path
+
+
+def _tts_marker_path(runtime_dir: Path, backend: str, python_version: str, profile: str) -> Path:
+    return runtime_dir / (
+        f".deps-{profile}-{backend}-py{python_version}-{TTS_TORCH_RECIPE}.ready"
+    )
+
+
+def _invalidate_old_tts_markers(runtime_dir: Path, current_marker: Path) -> None:
+    for old_marker in runtime_dir.glob(".deps-*.ready"):
+        if old_marker == current_marker:
+            continue
+        try:
+            old_marker.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _tts_marker_values(
+    index_url: str,
+    python_version: str,
+    profile: str,
+    backend: str,
+) -> dict[str, str]:
+    values = {
+        "recipe": TTS_TORCH_RECIPE,
+        "profile": profile,
+        "python": python_version,
+        "index_sha256": hashlib.sha256(index_url.encode("utf-8")).hexdigest(),
+        **_tts_torch_versions(profile),
+    }
+    if _tts_triton_required(profile, backend):
+        values["triton-windows"] = TTS_TRITON_WINDOWS_VERSION
+    return values
+
+
+def _read_tts_installed_versions(python: Path, include_triton: bool) -> dict[str, str] | None:
+    packages = ["torch", "torchaudio"]
+    if include_triton:
+        packages.append("triton-windows")
+    script = (
+        "from importlib.metadata import PackageNotFoundError, version; import json; "
+        f"names={packages!r}; result={{}}; "
+        "\nfor name in names:\n"
+        "    try: result[name] = version(name)\n"
+        "    except PackageNotFoundError: result[name] = ''\n"
+        "print(json.dumps(result, sort_keys=True))"
+    )
+    try:
+        probe = subprocess.run(
+            [str(python), "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+    except Exception:
+        return None
+    if probe.returncode != 0:
+        return None
+    try:
+        result = json.loads(probe.stdout.strip())
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return result if isinstance(result, dict) else None
+
+
+def _tts_stack_matches(python: Path, profile: str, backend: str) -> bool:
+    expected = _tts_torch_versions(profile)
+    include_triton = _tts_triton_required(profile, backend)
+    if include_triton:
+        expected["triton-windows"] = TTS_TRITON_WINDOWS_VERSION
+    return _read_tts_installed_versions(python, include_triton) == expected
+
+
+def _tts_marker_is_valid(
+    marker: Path,
+    python: Path,
+    index_url: str,
+    python_version: str,
+    profile: str,
+    backend: str,
+) -> bool:
+    if not marker.is_file():
+        return False
+    try:
+        values = dict(
+            line.split("=", 1)
+            for line in marker.read_text(encoding="utf-8").splitlines()
+            if "=" in line
+        )
+    except OSError:
+        return False
+    return values == _tts_marker_values(index_url, python_version, profile, backend) and _tts_stack_matches(
+        python, profile, backend
+    )
+
+
+def _write_tts_marker(
+    marker: Path,
+    python: Path,
+    index_url: str,
+    python_version: str,
+    profile: str,
+    backend: str,
+) -> None:
+    if not _tts_stack_matches(python, profile, backend):
+        actual = _read_tts_installed_versions(python, _tts_triton_required(profile, backend))
+        expected = _tts_torch_versions(profile)
+        if _tts_triton_required(profile, backend):
+            expected["triton-windows"] = TTS_TRITON_WINDOWS_VERSION
+        raise RuntimeError(
+            "TTS 安全依赖版本不匹配，拒绝写入就绪标记: "
+            f"expected={expected}, installed={actual}"
+        )
+    values = _tts_marker_values(index_url, python_version, profile, backend)
+    marker.write_text("".join(f"{key}={value}\n" for key, value in values.items()), encoding="utf-8")
+
+
+def _install_tts_torch_stack(
+    python: Path,
+    constraints: Path,
+    index_url: str,
+    profile: str,
+    backend: str,
+) -> None:
+    versions = _tts_torch_versions(profile)
+    packages = [f"{package}=={version}" for package, version in versions.items()]
+    run([
+        require_uv(), "pip", "install", "--python", str(python),
+        "--constraint", str(constraints), *packages, "--index-url", index_url,
+    ])
+    if _tts_triton_required(profile, backend):
+        run([
+            require_uv(), "pip", "install", "--python", str(python),
+            "--constraint", str(constraints),
+            f"triton-windows=={TTS_TRITON_WINDOWS_VERSION}",
+        ])
 
 
 def read_toml(path: Path) -> dict:
@@ -479,32 +705,25 @@ def prepare_voxcpm() -> Path:
         check=False,
     )
     python_version = probe.stdout.strip() if probe.returncode == 0 else "unknown"
-    profile = explicit_tts_runtime_profile()
-    marker_prefix = f"{profile}-" if profile else ""
-    marker = runtime_dir / f".deps-{marker_prefix}voxcpm-2.0.3-py{python_version}-torch211-triton36.ready"
-    if marker.is_file():
+    index_url = torch_index_url()
+    profile = _tts_torch_profile(index_url)
+    marker = _tts_marker_path(runtime_dir, "voxcpm-2.0.3", python_version, profile)
+    _invalidate_old_tts_markers(runtime_dir, marker)
+    if _tts_marker_is_valid(marker, python, index_url, python_version, profile, "voxcpm-2.0.3"):
         return python
 
-    index_url = torch_index_url()
-    log(f"安装 VoxCPM PyTorch 2.11: {index_url} (Python {python_version})")
+    try:
+        marker.unlink()
+    except FileNotFoundError:
+        pass
+    constraints = _tts_dependency_constraints(runtime_dir, profile, "voxcpm-2.0.3")
+    log(f"安装 VoxCPM 安全 PyTorch 运行时: {_safe_torch_index_label(index_url)} (Python {python_version})")
+    _install_tts_torch_stack(python, constraints, index_url, profile, "voxcpm-2.0.3")
     run([
         require_uv(), "pip", "install", "--python", str(python),
-        "torch>=2.11,<2.12", "torchaudio>=2.11,<2.12", "--index-url", index_url,
+        "--constraint", str(constraints), "voxcpm==2.0.3",
     ])
-    if os.name == "nt" and index_url != "https://download.pytorch.org/whl/cpu":
-        log("安装 Windows torch.compile 后端: triton-windows 3.6.x")
-        run([
-            require_uv(), "pip", "install", "--python", str(python),
-            "triton-windows>=3.6,<3.7",
-        ])
-    run([
-        require_uv(), "pip", "install", "--python", str(python),
-        "voxcpm==2.0.3",
-    ])
-    marker.write_text(
-        f"python={python_version}\ntorch_index={index_url}\n",
-        encoding="utf-8",
-    )
+    _write_tts_marker(marker, python, index_url, python_version, profile, "voxcpm-2.0.3")
     log(f"VoxCPM 托管运行时就绪: {runtime_dir} (Python {python_version})")
     return python
 
@@ -558,6 +777,7 @@ def build_voxcpm_command(
         str(python), str(server),
         "--host", host,
         "--port", str(port),
+        "--config", str((config_path or (ADAPTER_ROOT / "configs" / "vox.toml")).expanduser().resolve(strict=False)),
         "--model-dir", model,
         "--no-denoiser",
     ]
@@ -851,19 +1071,22 @@ def prepare_gpt_sovits() -> tuple[Path, Path]:
         check=False,
     )
     python_version = probe.stdout.strip() if probe.returncode == 0 else "unknown"
-    profile = explicit_tts_runtime_profile()
-    marker_prefix = f"{profile}-" if profile else ""
-    marker = runtime_dir / f".deps-{marker_prefix}{GPT_REF}-py{python_version}-v2.ready"
-    if marker.is_file():
+    index_url = torch_index_url()
+    profile = _tts_torch_profile(index_url)
+    marker = _tts_marker_path(runtime_dir, GPT_REF, python_version, profile)
+    _invalidate_old_tts_markers(runtime_dir, marker)
+    if _tts_marker_is_valid(marker, python, index_url, python_version, profile, GPT_REF):
         patch_gpt_runtime_compat(source_dir, runtime_dir)
         ensure_gpt_assets(python, source_dir, runtime_dir)
         return python, source_dir
 
-    index_url = torch_index_url()
-    run([
-        require_uv(), "pip", "install", "--python", str(python),
-        "torch", "torchaudio", "--index-url", index_url,
-    ])
+    try:
+        marker.unlink()
+    except FileNotFoundError:
+        pass
+    constraints = _tts_dependency_constraints(runtime_dir, profile, GPT_REF)
+    log(f"安装 GPT-SoVITS 安全 PyTorch 运行时: {_safe_torch_index_label(index_url)} (Python {python_version})")
+    _install_tts_torch_stack(python, constraints, index_url, profile, GPT_REF)
     extra_requirements = source_dir / "extra-req.txt"
     requirements = patch_gpt_runtime_compat(source_dir, runtime_dir)
     if not extra_requirements.is_file():
@@ -872,18 +1095,15 @@ def prepare_gpt_sovits() -> tuple[Path, Path]:
         raise FileNotFoundError(f"GPT-SoVITS requirements 不存在: {requirements}")
     run([
         require_uv(), "pip", "install", "--python", str(python),
-        "-r", str(extra_requirements), "--no-deps",
+        "--constraint", str(constraints), "-r", str(extra_requirements), "--no-deps",
     ])
     run([
         require_uv(), "pip", "install", "--python", str(python),
-        "-r", str(requirements),
+        "--constraint", str(constraints), "-r", str(requirements),
     ])
     # requirements 安装后 g2p_en 才存在于托管 venv，因此再次应用源码兼容补丁。
     patch_gpt_runtime_compat(source_dir, runtime_dir)
-    marker.write_text(
-        f"ref={GPT_REF}\npython={python_version}\ntorch_index={index_url}\n",
-        encoding="utf-8",
-    )
+    _write_tts_marker(marker, python, index_url, python_version, profile, GPT_REF)
     ensure_gpt_assets(python, source_dir, runtime_dir)
     log(f"GPT-SoVITS 托管运行时就绪: {runtime_dir} (Python {python_version})")
     return python, source_dir

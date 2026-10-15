@@ -146,6 +146,59 @@ jobs:
         working-directory: NachoBot-Discord-Adapter
         run: uv run --locked python -m unittest discover -s tests
 
+  security-regressions:
+    name: Focused security regressions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          version: "0.9.5"
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          package-manager-cache: false
+
+      - name: Run WebUI security and middleware regressions
+        run: >-
+          uv run --no-project --python 3.12
+          --with pytest --with fastapi --with httpx --with uvicorn
+          --with tomlkit --with psutil --with websockets --with pydantic
+          python -m unittest webUI.tests.test_security_regressions
+          webUI.tests.test_security webUI.tests.test_config_manager_security
+
+      - name: Check SnowLuma frontend contract
+        run: node webUI/tests/snowluma_frontend_contract.test.js
+
+      - name: Run Core API and legacy digest regressions
+        working-directory: NachoBot
+        run: >-
+          uv run --no-project --python 3.12
+          --with pytest --with httpx --with beautifulsoup4 --with json5 --
+          python -m pytest -q tests/test_maizone_qzone_api.py
+          tests/test_legacy_digest_ids.py
+
+      - name: Run lightweight Multimodal API regressions
+        working-directory: NachoBot-Multimodal-Adapter
+        run: >-
+          uv run --no-project --python 3.12
+          --with pytest --with fastapi --with pydantic --with httpx --with toml
+          --with numpy --with scipy --with uvicorn --with requests --with aiohttp
+          --with python-multipart --with loguru --
+          python -m pytest -q tests/test_local_runtime.py
+          tests/test_gpt_fixed_api.py tests/test_vox_path_security.py
+          tests/test_api_error_safety.py tests/test_tts_runtime_supervisor.py
+          tests/test_tts_dependency_security.py
+
+      # The Vox test stubs NumPy/Torch at import time, so this job does not install
+      # Torch or download model/GPU runtimes.
+
   compose:
     name: Compose configuration
     runs-on: ubuntu-latest

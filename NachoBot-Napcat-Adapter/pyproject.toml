@@ -13,7 +13,7 @@ dependencies = [
     "rich>=14.3.3",
     "sqlmodel>=0.0.37",
     "tomlkit>=0.14.0",
-    "urllib3>=2.0.0",
+    "urllib3>=2.8.0",
     "uvicorn>=0.41.0",
     "websockets>=16.0",
 ]
