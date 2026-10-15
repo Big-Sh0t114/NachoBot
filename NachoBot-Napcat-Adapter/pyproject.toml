@@ -4,6 +4,7 @@ version = "0.5.5"
 description = "A NachoBot adapter for Napcat"
 requires-python = ">=3.11,<3.14"
 dependencies = [
+    "nachobot-qqcall-client",
     "aiohttp>=3.14.0",
     "cryptography>=50.0.0",
     "fastapi>=0.140.13",
@@ -16,6 +17,16 @@ dependencies = [
     "uvicorn>=0.41.0",
     "websockets>=16.0",
 ]
+
+[project.optional-dependencies]
+qqcall-audio = [
+    "nachobot-qqcall-pcm",
+]
+
+[tool.uv.sources]
+nachobot-qqcall-client = { path = "../NachoBot-QQCall/sdk", editable = true }
+nachobot-universalvc-client = { path = "../NachoBot-UniversalVC-Adapter/sdk", editable = true }
+nachobot-qqcall-pcm = { path = "../NachoBot-QQCall", editable = true }
 
 [tool.ruff]
 

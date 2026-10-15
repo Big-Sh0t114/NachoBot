@@ -26,9 +26,11 @@ from src.chat.advanced.advanced_manager import advanced_manager
 from src.chat.runtime_capabilities import (
     classify_runtime_message_batch,
     planner_target_eligible,
+    platform_event_from_message,
     runtime_capabilities_from_message,
 )
 from src.chat.json_reply_delivery import prepare_json_envelope_delivery
+from src.chat.tts_reply_delivery import clean_tts_reply_text
 from src.chat.keyword_cache import promise_cache_manager
 from src.chat.injection.injection_manager import injection_manager
 from src.person_info.person_info import Person
@@ -61,6 +63,8 @@ from src.chat.offline_recovery import (
     merge_recovery_context_rows,
     recovery_row_id,
 )
+from src.chat.realtime_ingress import realtime_ingress_manager
+from src.chat.reply_generation_interrupt import interrupt_reply_generation, run_reply_generation
 from src.chat.focus.switch_action import (
     SWITCH_CHAT_ACTION,
     SwitchDisposition,
@@ -258,9 +262,13 @@ class BrainChatting:
             + (f"\n详情: {'; '.join(timer_strings)}" if timer_strings else "")
         )
 
-    def signal_new_message(self, skip_interrupt: bool = False):
+    def signal_new_message(self, skip_interrupt: bool = False, *, priority_realtime: bool = False):
         """由消息处理器推送调用，通知有新消息到达。如果 Planner 正在执行则触发打断。"""
         self._last_message_received_at = time.time()
+        if priority_realtime:
+            interrupted = interrupt_reply_generation(self)
+            if interrupted:
+                logger.info("Verified realtime ingress interrupted Replyer count=%s", interrupted)
         if skip_interrupt or not getattr(global_config.chat, "planner_interrupt_enabled", True):
             return
         if self._planner_interrupt_flag is not None and not self._planner_interrupt_requested:
@@ -461,6 +469,33 @@ class BrainChatting:
 
     async def _loopbody(self, focus_turn: FocusTurn | None = None):  # sourcery skip: hoist-if-from-if
         self._ensure_offline_recovery_state()
+        realtime_row_ids = realtime_ingress_manager.pending_row_ids(self.stream_id)
+        if realtime_row_ids and self._offline_recovery_batch is not None:
+            # A claimed history batch already owns this Focus/non-Focus turn.
+            # Release it for retry before the direct realtime path gets its own
+            # zero-width-cursor turn; otherwise call delivery could falsely
+            # acknowledge the historical batch.
+            if focus_turn is not None:
+                self._focus_turn_interrupted = True
+            return False
+        if realtime_row_ids:
+            realtime_messages = list(load_message_rows_by_ids(self.stream_id, realtime_row_ids))
+            verified_messages = []
+            verified_row_ids = []
+            for message in realtime_messages:
+                if await realtime_ingress_manager.revalidate_message(message, self.stream_id):
+                    verified_messages.append(message)
+                    row_id = recovery_row_id(message)
+                    if row_id is not None:
+                        verified_row_ids.append(row_id)
+            if verified_messages:
+                if focus_turn is not None:
+                    self._focus_consumed_through_row_id = focus_turn.read_after_row_id
+                result = await self._observe(recent_messages_list=verified_messages, focus_turn=focus_turn)
+                realtime_ingress_manager.complete_rows(self.stream_id, verified_row_ids)
+                return result
+            realtime_ingress_manager.discard_rows(self.stream_id, realtime_row_ids)
+
         recovery_batch = self._offline_recovery_batch
         if recovery_batch is not None:
             recent_messages_list = list(load_message_rows_by_ids(self.stream_id, recovery_batch.row_ids))
@@ -502,6 +537,9 @@ class BrainChatting:
                 self.stream_id, recent_messages_list
             )
             recent_messages_list = offline_recovery_manager.filter_recovered_nonfocus(
+                self.stream_id, recent_messages_list
+            )
+            recent_messages_list = realtime_ingress_manager.filter_ordinary_messages(
                 self.stream_id, recent_messages_list
             )
         focus_has_actionable_work = _focus_turn_has_actionable_work(focus_turn, recent_messages_list)
@@ -669,6 +707,43 @@ class BrainChatting:
 
         return [action for action in actions if action.action_type == SWITCH_CHAT_ACTION]
 
+    def _should_skip_foreground_expression_learning(
+        self,
+        message_batch,
+        recent_messages_list: List["DatabaseMessages"],
+        focus_turn: FocusTurn | None,
+    ) -> bool:
+        """Keep awaited style learning off authorized streaming reply turns."""
+
+        if self._offline_recovery_batch is not None or not recent_messages_list:
+            return False
+        if not message_batch.planner_bypass or len(message_batch.direct_messages) != len(recent_messages_list):
+            return False
+        if not all(runtime_capabilities_from_message(message).voice_stream for message in message_batch.direct_messages):
+            return False
+
+        try:
+            if any(
+                get_system_event(message) is not None or platform_event_from_message(message) is not None
+                for message in message_batch.direct_messages
+            ):
+                return False
+        except Exception:
+            # Unknown event shapes must keep the normal learning and routing path.
+            return False
+
+        if focus_turn is not None:
+            try:
+                focus_events = focus_turn.events
+                handoff_ids = focus_turn.handoff_ids
+                wake_reason = focus_turn.wake_reason
+                if focus_events or handoff_ids or wake_reason & (WakeReason.FOCUS_EVENT | WakeReason.SWITCH_TARGET):
+                    return False
+            except Exception:
+                # An unknown Focus turn shape is not eligible for the fast path.
+                return False
+
+        return True
 
     async def _observe(
         self,  # interest_value: float = 0.0,
@@ -708,7 +783,8 @@ class BrainChatting:
             if run_planner and not advanced_direct:
                 debug_prompt = await global_prompt_manager.get_prompt_async("brain_planner_prompt")
                 logger.debug(f"{self.log_prefix} Resolved brain_planner_prompt preview: {str(debug_prompt)[:50]}...")
-            await self.expression_learner.trigger_learning_for_chat()
+            if not self._should_skip_foreground_expression_learning(message_batch, recent_messages_list, focus_turn):
+                await self.expression_learner.trigger_learning_for_chat()
 
             cycle_timers, thinking_id = self.start_cycle()
             logger.info(f"{self.log_prefix} 开始第{self._cycle_counter}次思考")
@@ -748,6 +824,10 @@ class BrainChatting:
                 limit=planner_history_limit,
             )
             message_list_before_now = offline_recovery_manager.filter_recovery_rows_from_context(
+                self.stream_id,
+                message_list_before_now,
+            )
+            message_list_before_now = realtime_ingress_manager.filter_ordinary_messages(
                 self.stream_id,
                 message_list_before_now,
             )
@@ -1223,15 +1303,18 @@ class BrainChatting:
         nonfocus_batch = None
         deferred_live_pending = False
         if focus_turn is None:
-            deferred_live_pending = offline_recovery_manager.has_pending_deferred_live_messages(self.stream_id)
-            if not deferred_live_pending:
-                nonfocus_batch = offline_recovery_manager.peek_nonfocus_batch(self.stream_id)
-                if nonfocus_batch is not None and not offline_recovery_manager.claim_nonfocus_batch(
-                    self.stream_id, nonfocus_batch.batch_id
-                ):
-                    nonfocus_batch = None
+            realtime_active = realtime_ingress_manager.has_active_session(self.stream_id)
+            if not realtime_active:
+                deferred_live_pending = offline_recovery_manager.has_pending_deferred_live_messages(self.stream_id)
+                if not deferred_live_pending:
+                    nonfocus_batch = offline_recovery_manager.peek_nonfocus_batch(self.stream_id)
+                    if nonfocus_batch is not None and not offline_recovery_manager.claim_nonfocus_batch(
+                        self.stream_id, nonfocus_batch.batch_id
+                    ):
+                        nonfocus_batch = None
             if (
-                nonfocus_batch is None
+                not realtime_active
+                and nonfocus_batch is None
                 and offline_recovery_manager.is_held(self.stream_id)
                 and not deferred_live_pending
             ):
@@ -1476,6 +1559,31 @@ class BrainChatting:
             return ("Filtered" if receipt.delivered else ""), receipts
 
         delivery_capabilities = runtime_capabilities_from_message(message_data)
+        if delivery_capabilities.reply_delivery == "tts_text":
+            utterance = clean_tts_reply_text(
+                "".join(
+                    str(reply_content.content)
+                    for reply_content in reply_set.reply_data
+                    if reply_content.content_type == ReplyContentType.TEXT
+                )
+            )
+            if not utterance:
+                return "", receipts
+
+            receipt = await send_api.tts_text_to_stream_receipt(
+                text=utterance,
+                stream_id=self.chat_stream.stream_id,
+                reply_message=message_data,
+                set_reply=need_reply,
+                typing=False,
+                selected_expressions=selected_expressions,
+                display_message=utterance,
+                transport_text=utterance,
+                text_lang=delivery_capabilities.tts_language,
+            )
+            receipts.append(receipt)
+            return (utterance if receipt.delivered else ""), receipts
+
         if delivery_capabilities.reply_delivery == "json_envelope":
             # Keep adapter controls in the single transport envelope while
             # returning only its human-facing reply to Core action history.
@@ -1728,7 +1836,12 @@ class BrainChatting:
                                     "loop_info": loop_info,
                                 }
 
-                        success, llm_response = await generator_api.generate_reply(
+                        success, llm_response = await run_reply_generation(
+                            self, action_planner_info.action_message,
+                            None if runtime_capabilities_from_message(
+                                action_planner_info.action_message
+                            ).planner_bypass else self._planner_interrupt_flag,
+                            generator_api.generate_reply,
                             chat_stream=self.chat_stream,
                             reply_message=action_planner_info.action_message,
                             available_actions=filtered_available_actions,
@@ -1738,13 +1851,6 @@ class BrainChatting:
                             request_type=request_type,
                             from_plugin=False,
                             extra_info=injection_text,
-                            interrupt_flag=(
-                                None
-                                if runtime_capabilities_from_message(
-                                    action_planner_info.action_message
-                                ).planner_bypass
-                                else self._planner_interrupt_flag
-                            ),
                             reply_context=self._focus_reply_context(thinking_id),
                         )
 

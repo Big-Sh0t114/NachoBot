@@ -23,6 +23,12 @@ PROJECT_ROOT = ADAPTER_ROOT.parent
 RUNTIME_ROOT = ADAPTER_ROOT / ".runtime" / "tts"
 HF_CACHE = ADAPTER_ROOT / "models" / "hf_cache"
 
+# Apply before public-model imports and pass the same policy to managed raw
+# engines. Windows OpenBLAS otherwise commits large idle per-worker buffers.
+# Explicit deployment settings continue to take precedence.
+if os.name == "nt":
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
 # Keep Hub behaviour predictable on mainland-China networks. These values are
 # also propagated to every managed TTS subprocess by base_env().
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")

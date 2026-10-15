@@ -9,6 +9,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml uv.lock ./
+# uv validates metadata for optional dependencies even when the extra is disabled.
+COPY --from=qqcall /pyproject.toml /workspace/NachoBot-QQCall/pyproject.toml
+COPY --from=qqcall /sdk/pyproject.toml /workspace/NachoBot-QQCall/sdk/pyproject.toml
+COPY --from=qqcall /sdk/qqcall_client /workspace/NachoBot-QQCall/sdk/qqcall_client
+COPY --from=universalvc_sdk /pyproject.toml /workspace/NachoBot-UniversalVC-Adapter/sdk/pyproject.toml
+COPY --from=universalvc_sdk /universalvc_client.py /workspace/NachoBot-UniversalVC-Adapter/sdk/universalvc_client.py
 RUN uv sync --locked --no-dev --no-install-project
 
 COPY . .

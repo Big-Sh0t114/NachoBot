@@ -61,7 +61,7 @@ def _seed_snowluma_runtime(root: Path, *, runtime_name: str = "SnowLuma") -> Pat
     )
     (root / "NachoBot-SnowLuma-Adapter" / "config.toml").write_text(
         "[snowluma]\nhost='127.0.0.1'\nport=3001\npath='/'\nscheme='ws'\n"
-        f"token='{TOKEN}'\n\n[nachobot_server]\nport=8123\n\n[voice]\nenabled=false\n",
+        f"token='{TOKEN}'\n\n[nachobot_server]\nport=8123\n\n[voice]\nuse_tts='invalid'\n",
         encoding="utf-8",
     )
     (root / "NachoBot" / ".env").write_text("qq_adapter=snowluma\n", encoding="utf-8")
@@ -720,6 +720,25 @@ def test_snowluma_adapter_uses_core_readiness_when_core_is_ready(
     )
 
     manager._validate_service_start("snowluma_adapter")
+
+
+def test_snowluma_adapter_start_selection_ignores_invalid_voice_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_snowluma_runtime(tmp_path)
+    monkeypatch.setattr(snowluma_manager, "_port_listening", lambda _port: False)
+    (tmp_path / "NachoBot" / ".env").write_text("qq_adapter=snowluma\n", encoding="utf-8")
+    monkeypatch.setattr(process_manager, "ROOT_DIR", tmp_path)
+    manager = process_manager.ProcessManager(tmp_path)
+    process_manager._register_services()
+    manager.states["nachobot"] = process_manager.ServiceState(
+        status=process_manager.ServiceStatus.RUNNING
+    )
+
+    manager._validate_service_start("snowluma_adapter")
+    command, _cwd, _env = manager._resolve_cmd(process_manager.SERVICE_DEFS["snowluma_adapter"])
+
+    assert command == process_manager.SERVICE_DEFS["snowluma_adapter"].cmd
 
 
 def test_dependency_install_rejects_stale_qq_task_before_running_uv(

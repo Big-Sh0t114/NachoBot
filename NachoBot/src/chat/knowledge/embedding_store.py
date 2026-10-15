@@ -26,6 +26,7 @@ from rich.progress import (
     TextColumn,
 )
 from src.config.config import global_config
+from src.common.faiss_runtime import single_query_threads
 
 
 install(extra_lines=3)
@@ -520,9 +521,10 @@ class EmbeddingStore:
             return []
 
         # L2归一化
-        faiss.normalize_L2(np.array([query], dtype=np.float32))
-        # 搜索
-        distances, indices = self.faiss_index.search(np.array([query]), k)
+        with single_query_threads(faiss):
+            faiss.normalize_L2(np.array([query], dtype=np.float32))
+            # 搜索
+            distances, indices = self.faiss_index.search(np.array([query]), k)
         # 整理结果
         indices = list(indices.flatten())
         distances = list(distances.flatten())

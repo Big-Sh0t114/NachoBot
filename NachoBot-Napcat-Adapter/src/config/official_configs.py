@@ -2,6 +2,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Literal
 
 from src.config.config_base import ConfigBase
+from qqcall_client.qqcall import QQCallConfig as RuntimeQQCallConfig
+from qqcall_client.qqcall_service import load_qqcall_adapter_settings
 
 """
 须知：
@@ -132,6 +134,11 @@ class OfflineRecoveryConfig(ConfigBase):
     receipt_timeout_sec: float = 8.0
 
 
+@dataclass
+class QQCallAdapterConfig(ConfigBase):
+    def to_runtime_config(self) -> RuntimeQQCallConfig:
+        settings = load_qqcall_adapter_settings("napcat", "", {})
+        return settings.config
 
 
 @dataclass

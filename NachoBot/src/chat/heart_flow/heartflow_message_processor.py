@@ -2,6 +2,7 @@ import asyncio
 import math
 import re
 import traceback
+import time
 from datetime import datetime
 
 from typing import Tuple
@@ -17,6 +18,7 @@ from src.chat.offline_recovery import (
     offline_recovery_manager,
     is_offline_recovery_row,
 )
+from src.chat.realtime_ingress import realtime_ingress_manager
 from src.chat.utils.utils import is_mentioned_bot_in_message
 from src.chat.utils.chat_message_builder import replace_user_references
 from src.common.logger import get_logger
@@ -113,20 +115,33 @@ class HeartFCMessageReceiver:
             userinfo = message.message_info.user_info
             chat = message.chat_stream
             is_system_event = system_event is not None
+            realtime_decision = await realtime_ingress_manager.inspect_message(message, chat.stream_id)
 
             # 兴趣度计算与更新。系统事件保留在环境上下文中，由普通会话的
             # Planner 或 planner_bypass 会话的 Replyer 继续处理。
             _, keywords = await _calculate_interest(message)
 
             stored_ref = await self.storage.store_message(message, chat)
-            offline_recovery_row = offline_recovery_manager.record_stored_message(message, stored_ref)
+            offline_recovery_row = (
+                False
+                if realtime_decision.declared
+                else offline_recovery_manager.record_stored_message(message, stored_ref)
+            )
+            realtime_priority_row = realtime_ingress_manager.record_message(realtime_decision, stored_ref)
             deferred_live_row = False
-            if not offline_recovery_row:
+            if not offline_recovery_row and not realtime_priority_row and not realtime_decision.declared:
                 deferred_live_row = offline_recovery_manager.record_deferred_live_message(message, stored_ref)
+            realtime_route_started = time.monotonic()
+            if realtime_decision.declared:
+                logger.info(
+                    "Realtime ingress scheduling stage=before_route row_id=%s authorized=%s priority=%s",
+                    stored_ref.row_id, realtime_decision.authorized, realtime_priority_row,
+                )
             dispatch = await focus_coordinator.route_message(
                 message,
                 stored_ref,
                 offline_recovery_row=offline_recovery_row,
+                priority_realtime_session=realtime_priority_row,
             )
 
             heartflow_chat = None
@@ -142,15 +157,29 @@ class HeartFCMessageReceiver:
                         forced_background_interrupt = dispatch.active_chat_id != stored_ref.chat_id
                         heartflow_chat.signal_new_message(
                             skip_interrupt=(
-                                is_mentioned and not forced_background_interrupt
-                            )
+                                is_mentioned and not forced_background_interrupt and not realtime_priority_row
+                            ),
+                            **({"priority_realtime": True} if realtime_priority_row else {}),
                         )
             else:
-                if deferred_live_row or not offline_recovery_manager.is_held(chat.stream_id):
+                if realtime_priority_row or deferred_live_row or not offline_recovery_manager.is_held(chat.stream_id):
                     heartflow_chat = await heartflow.get_or_create_heartflow_chat(chat.stream_id)
                     if heartflow_chat is None:
                         raise RuntimeError(f"Cannot start chat runtime: {chat.stream_id}")
-                    heartflow_chat.signal_new_message(skip_interrupt=is_mentioned)
+                    heartflow_chat.signal_new_message(
+                        skip_interrupt=is_mentioned and not realtime_priority_row,
+                        **({"priority_realtime": True} if realtime_priority_row else {}),
+                    )
+
+            if realtime_decision.declared:
+                logger.info(
+                    "Realtime ingress scheduling stage=after_wake row_id=%s authorized=%s priority=%s "
+                    "managed=%s managed_woke=%s managed_interrupt=%s runtime_selected=%s route_ms=%s",
+                    stored_ref.row_id, realtime_decision.authorized, realtime_priority_row,
+                    dispatch.managed, getattr(dispatch, "woke_active", False),
+                    getattr(dispatch, "interrupt_active", False), heartflow_chat is not None,
+                    round((time.monotonic() - realtime_route_started) * 1000),
+                )
 
             # system_event 到这里已经完成：数据库持久化 + Focus 路由 + HeartFlow 唤醒。
             # actor/target 仅存在于 additional_config.system_event 元数据中，不是 sender，
@@ -165,6 +194,18 @@ class HeartFCMessageReceiver:
                     if actor_name and not event_text.lstrip().startswith(actor_name):
                         event_text = f"{actor_name}{event_text}"
                 logger.info(f"[{mes_name}][系统事件] {event_text}")
+                return
+
+            if userinfo is None:
+                # Anonymous realtime speakers have display labels, not user
+                # identities. Storage and wake-up are already complete above;
+                # never run Person or user-specific mood hooks for these rows.
+                speaker = realtime_decision.speaker if realtime_decision.authorized else None
+                if speaker is not None:
+                    mes_name = chat.group_info.group_name if chat.group_info else "私聊"
+                    logger.info(f"[{mes_name}][实时语音]{speaker.label}:{message.processed_plain_text or ''}")
+                else:
+                    logger.debug("无发送者消息已完成路由，跳过用户身份处理")
                 return
 
             if global_config.mood.enable_mood:

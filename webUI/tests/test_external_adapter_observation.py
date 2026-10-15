@@ -329,6 +329,29 @@ class ExternalAdapterObservationTests(unittest.TestCase):
         )
         self.assertEqual(runtime_result["napcat_shell"].outcome, "external_ready")
 
+    def test_qqcall_av_host_loader_is_not_a_napcat_runtime(self) -> None:
+        profile = self.manager.root / "NachoBot-QQCall/.runtime/service/hosts/host-223/profile"
+        for args in ((f'--user-data-dir="{profile}"',), ("--user-data-dir", str(profile))):
+            record = self._record("napcat_shell", 152,
+                                  argv=("NapCatWinBootMain.exe", *args),
+                                  name="NapCatWinBootMain.exe", executable="NapCatWinBootMain.exe")
+            result = self.manager._classify_external_adapters(
+                process_manager._ProcessSnapshot((record,), {})
+            )
+            self.assertEqual(result["napcat_shell"].outcome, "absent")
+
+    def test_other_or_ambiguous_loader_profiles_remain_napcat(self) -> None:
+        root = self.manager.root / "NachoBot-QQCall/.runtime/service/hosts"
+        cases = [(f"--user-data-dir={p}",) for p in (
+            root / "host-223/profile/extra", root / "host-fake/profile",
+            self.manager.root / "other/host-223/profile")]
+        cases.append((f"--user-data-dir={root / 'host-223/profile'}", "--user-data-dir=other"))
+        for args in cases:
+            record = self._record("napcat_shell", 152,
+                                  argv=("NapCatWinBootMain.exe", *args),
+                                  name="NapCatWinBootMain.exe", executable="NapCatWinBootMain.exe")
+            self.assertTrue(self.manager._record_matches_napcat_shell_anchor(record))
+
     def test_manager_owned_service_precedes_external_and_external_pid_is_null(self) -> None:
         self.manager.adapter_observation_cache["bilibili"] = process_manager.AdapterObservation(
             "bilibili", "external_ready", 0.0, "external evidence"

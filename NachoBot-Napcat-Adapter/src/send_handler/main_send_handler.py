@@ -6,6 +6,7 @@ from ncnk_message import (
     BaseMessageInfo,
     MessageBase,
 )
+from qqcall_client.qqcall import is_qqcall_delivery_target
 from ncnk_message.qq_history_identity import resolve_qq_reply_segments
 from src.logger import logger
 from src.config import global_config
@@ -19,6 +20,18 @@ class SendHandler:
         pass
 
     async def handle_message(self, raw_message_base_dict: dict) -> None:
+        # Consume scoped call-target output before parsing, logging, or routing
+        # it through ordinary NapCat send commands.
+        from src.qqcall_runtime import get_qqcall_runtime
+
+        qqcall_runtime = get_qqcall_runtime()
+        if qqcall_runtime is not None:
+            if await qqcall_runtime.intercept_outbound(raw_message_base_dict):
+                return
+        elif is_qqcall_delivery_target(raw_message_base_dict):
+            # During startup/teardown the binding can be absent. Still fail
+            # closed so a call-targeted payload never becomes ordinary QQ chat.
+            return
         raw_message_base: MessageBase = MessageBase.from_dict(raw_message_base_dict)
         message_segment: Seg = raw_message_base.message_segment
         logger.info("接收到来自NachoBot的消息，处理中")

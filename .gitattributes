@@ -3,4 +3,8 @@
 *.bat text eol=crlf
 *.cmd text eol=crlf
 
+# Frozen SDK provenance hashes require identical bytes after Windows checkout.
+NachoBot-UniversalVC-Adapter/sdk/universalvc_client.py text eol=lf
+NachoBot-UniversalVC-Adapter/universalvc_service/client.py text eol=lf
+
 koishi-app/node_modules/** linguist-vendored

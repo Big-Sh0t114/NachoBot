@@ -1,0 +1,5 @@
+LIBRARY QQCallShim
+EXPORTS
+  QQCallShimStart
+  QQCallShimCancel
+  QQCallShimGetStatus

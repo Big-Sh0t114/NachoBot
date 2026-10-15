@@ -9,6 +9,7 @@ fingerprint refresh on request boundaries and no platform transport relay.
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import os
 import sys
 from pathlib import Path
@@ -171,6 +172,7 @@ class TTSPipeline:
         self.tts_list = [self.model]
         self._backend_alive = bool(backend_alive)
         self._engine_ready = bool(getattr(self.model, "_initialized", True))
+        self._synthesis_ready = not callable(getattr(self.model, "startup_warmup", None))
         self._webui_tts_lock = asyncio.Lock()
         self._stopped = False
         self.public_host = public_host or self.config.server.host
@@ -179,8 +181,19 @@ class TTSPipeline:
             title="NachoBot TTS Runtime",
             docs_url=None,
             redoc_url=None,
+            lifespan=self._lifespan,
         )
         self._register_http_endpoints()
+
+    @asynccontextmanager
+    async def _lifespan(self, _app):
+        try:
+            if not self._synthesis_ready:
+                await self.model.startup_warmup()
+                self._synthesis_ready = True
+            yield
+        finally:
+            self._synthesis_ready = False
 
     @staticmethod
     def _backend_from_model(model: Any) -> str:
@@ -236,6 +249,7 @@ class TTSPipeline:
     def ready(self) -> bool:
         return bool(
             getattr(self, "_backend_alive", True)
+            and getattr(self, "_synthesis_ready", True)
             and self.model_ready
             and not getattr(self, "_stopped", False)
         )
@@ -373,6 +387,7 @@ class TTSPipeline:
             "backend_alive": self.backend_alive,
             "engine_ready": self.model_ready,
             "emotion_ready": bool(getattr(getattr(self, "model", None), "emotion_ready", True)),
+            "synthesis_ready": getattr(self, "_synthesis_ready", True),
         }
 
     async def get_voice_no_stream(

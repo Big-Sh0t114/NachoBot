@@ -23,6 +23,7 @@ except ImportError:
     HAS_FAISS = False
 
 from src.common.logger import get_logger
+from src.common.faiss_runtime import single_query_threads
 from ..utils.quantization import QuantizationType
 from ..utils.io import atomic_write, atomic_save_path
 
@@ -331,12 +332,11 @@ class VectorStore:
         if not np.all(np.isfinite(query_local)):
             raise ValueError("query embedding contains non-finite values")
 
-        faiss.normalize_L2(query_local)
-
         # 查询路径仅负责检索，不在此触发训练/回放。
         # 训练/回放前置到 warmup_index()，并由插件启动阶段触发。
         # Faiss 索引在并发 search 下可能出现阻塞，这里串行化检索调用保证稳定性。
-        with self._lock:
+        with self._lock, single_query_threads(faiss):
+            faiss.normalize_L2(query_local)
             self._flush_write_buffer_unlocked()
             search_index = self._index if (self._is_trained and self._index.ntotal > 0) else self._fallback_index
             if search_index.ntotal == 0:

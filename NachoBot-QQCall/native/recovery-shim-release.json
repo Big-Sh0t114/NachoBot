@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "artifact": "QQCallRecoveryShim2.dll",
+  "sha256": "147BD253F08BCFF910DE4D63FAB94DB3B2501413C613A543E61F994DABF5ED93",
+  "size": 16896,
+  "pe_offset": 200,
+  "timestamp": 1791843598,
+  "timestamp_offsets": [208, 14612],
+  "msvc_toolset": "14.44.35207"
+}

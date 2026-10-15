@@ -949,6 +949,7 @@ dependencies = [
     { name = "jsonlines" },
     { name = "loguru" },
     { name = "mcp" },
+    { name = "nachobot-qqcall-client" },
     { name = "networkx" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
@@ -1007,6 +1008,7 @@ requires-dist = [
     { name = "jsonlines", specifier = ">=4.0.0" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "mcp", specifier = ">=2.0.0" },
+    { name = "nachobot-qqcall-client", editable = "../NachoBot-QQCall/sdk" },
     { name = "networkx", specifier = ">=3.4.2" },
     { name = "numpy", specifier = ">=2.2.6" },
     { name = "openai", specifier = ">=2.50.0" },
@@ -1045,6 +1047,32 @@ requires-dist = [
     { name = "uvicorn", specifier = ">=0.35.0" },
     { name = "websockets", specifier = ">=15.0.1" },
 ]
+
+[[package]]
+name = "nachobot-qqcall-client"
+version = "0.1.0"
+source = { editable = "../NachoBot-QQCall/sdk" }
+dependencies = [
+    { name = "aiohttp" },
+    { name = "nachobot-universalvc-client" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aiohttp", specifier = ">=3.12,<4" },
+    { name = "nachobot-universalvc-client", editable = "../NachoBot-UniversalVC-Adapter/sdk" },
+]
+
+[[package]]
+name = "nachobot-universalvc-client"
+version = "0.1.0"
+source = { editable = "../NachoBot-UniversalVC-Adapter/sdk" }
+dependencies = [
+    { name = "aiohttp" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "aiohttp", specifier = ">=3.12,<4" }]
 
 [[package]]
 name = "networkx"

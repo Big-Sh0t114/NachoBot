@@ -1,0 +1,23 @@
+LIBRARY KERNEL32.dll
+EXPORTS
+  CloseHandle
+  CreateFileW
+  CreateThread
+  CreateToolhelp32Snapshot
+  DisableThreadLibraryCalls
+  ExitProcess
+  GetCommandLineW
+  GetCurrentProcessId
+  GetLastError
+  GetStdHandle
+  GetPrivateProfileStringW
+  GetProcAddress
+  Module32FirstW
+  Module32NextW
+  ReadFile
+  Sleep
+  VirtualProtect
+  WaitForSingleObject
+  WideCharToMultiByte
+  WriteFile
+  LoadLibraryW

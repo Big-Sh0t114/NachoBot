@@ -1,4 +1,5 @@
 import aiohttp
+import asyncio
 import os
 from typing import AsyncIterator, Optional, Dict, Any
 from pathlib import Path
@@ -7,6 +8,7 @@ from nachobot_multimodal.tts.base import (
     PCMChunk,
     close_async_iterator,
     collect_pcm_stream_to_wav,
+    iter_validated_pcm,
 )
 from nachobot_multimodal.logger import logger
 from nachobot_multimodal.utils.text_cleaner import clean_text_for_tts
@@ -241,7 +243,44 @@ class TTSModel(BaseTTSModel):
         """Yield typed PCM16 chunks from VoxCPM's native streaming endpoint."""
 
         params, _preset_name = self._resolve_stream_request(text, kwargs)
-        timeout = aiohttp.ClientTimeout(total=120, connect=10)
+        iterator = self._request_pcm_stream(params, timeout_seconds=120)
+        try:
+            async for chunk in iterator:
+                yield chunk
+        finally:
+            await close_async_iterator(iterator)
+
+    async def startup_warmup(self) -> None:
+        """Compile configured conditioning paths before public readiness.
+
+        Raw Vox warmup has no reference audio, so its success cannot prove
+        that the first configured clone can meet the normal request deadline.
+        The longer deadline applies only to this bounded startup phase.
+        """
+        names = [self.config.pipeline.default_preset, *self.config.pipeline.platform_presets.values()]
+        if self.config.emotion.enabled:
+            names.extend([self.config.emotion.default_emotion, *self.config.emotion.label_preset_map.values()])
+        consumed = set()
+        async with asyncio.timeout(900):
+            for name in dict.fromkeys(names):
+                params, _ = self._resolve_stream_request("声音测试完成。", {"platform": "webui", "preset_name": name})
+                signature = tuple(sorted(params.items()))
+                if signature in consumed:
+                    continue
+                consumed.add(signature)
+                stream = iter_validated_pcm(
+                    self._request_pcm_stream(params, timeout_seconds=900),
+                    max_stream_seconds=900,
+                )
+                try:
+                    async for _chunk in stream:
+                        pass
+                finally:
+                    await close_async_iterator(stream)
+                logger.info("Vox startup conditioning warmup completed: paths={}", len(consumed))
+
+    async def _request_pcm_stream(self, params: Dict[str, Any], *, timeout_seconds: float) -> AsyncIterator[PCMChunk]:
+        timeout = aiohttp.ClientTimeout(total=timeout_seconds, connect=10)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(
                 f"{self.base_url}/tts_stream",

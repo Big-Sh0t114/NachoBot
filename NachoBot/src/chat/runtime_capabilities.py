@@ -45,6 +45,7 @@ class RuntimeCapabilities:
     knowledge_retrieval: bool = True
     reply_model_group: str = ""
     tool_mode: str = "standard"
+    mcp_enabled: bool = True
     web_search_mode: str = "standard"
     reply_delivery: str = "chunked"
     person_profile_mode: str = "standard"
@@ -83,6 +84,7 @@ class RuntimeCapabilities:
             knowledge_retrieval=_bool(value, "knowledge_retrieval", True),
             reply_model_group=_text(value.get("reply_model_group")),
             tool_mode=_choice(value.get("tool_mode"), _TOOL_MODES, "standard"),
+            mcp_enabled=_bool(value, "mcp_enabled", True),
             web_search_mode=_choice(value.get("web_search_mode"), _WEB_SEARCH_MODES, "standard"),
             reply_delivery=_choice(value.get("reply_delivery"), _REPLY_DELIVERY_MODES, "chunked"),
             person_profile_mode=_choice(
@@ -244,6 +246,26 @@ def classify_runtime_message_batch(
         malformed_event = has_raw_system_event and not valid_event
         has_sender = bool(user_id)
         has_direct_target = (has_sender and not malformed_event) or (not has_sender and valid_event)
+        try:
+            from src.chat.realtime_speaker import has_realtime_speaker_claim
+
+            speaker_claimed = has_realtime_speaker_claim(message) or getattr(message, "realtime_speaker", None) is not None
+        except Exception:
+            speaker_claimed = False
+        if speaker_claimed:
+            # A stored marker is display metadata only. The live ingress ledger
+            # and its immediately preceding provider revalidation authorize the
+            # senderless row; marker text or planner_bypass alone do not.
+            try:
+                from src.chat.realtime_ingress import realtime_ingress_manager
+
+                has_direct_target = (
+                    not has_sender
+                    and not malformed_event
+                    and realtime_ingress_manager.is_authorized_anonymous_speaker_message(message)
+                )
+            except Exception:
+                has_direct_target = False
 
         if capabilities.planner_bypass and has_direct_target:
             direct_messages.append(message)

@@ -1,0 +1,77 @@
+body {
+    isolation: isolate;
+}
+
+#bg-canvas {
+    z-index: -3 !important;
+}
+
+#lava-background-layer {
+    position: fixed;
+    inset: 0 0 0 var(--content-sidebar-width, 292px);
+    z-index: -1;
+    overflow: hidden;
+    pointer-events: none;
+    user-select: none;
+    contain: layout paint;
+}
+
+#lava-background-canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    opacity: 1;
+    pointer-events: none;
+}
+
+#doodle-background-layer {
+    position: fixed;
+    inset: 0 0 0 var(--content-sidebar-width, 292px);
+    z-index: -2;
+    overflow: hidden;
+    pointer-events: none;
+    user-select: none;
+    contain: layout paint;
+}
+
+.doodle-background-item {
+    position: absolute;
+    z-index: 2;
+    display: block;
+    transform-origin: center;
+    opacity: 0.34;
+    pointer-events: none;
+    will-change: transform, opacity;
+}
+
+.doodle-background-drift {
+    width: 100%;
+    height: 100%;
+    transform-origin: center;
+}
+
+.doodle-background-item img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    pointer-events: none;
+    user-select: none;
+    -webkit-user-drag: none;
+}
+
+#doodle-background-layer[data-paused="true"] .doodle-background-item {
+    will-change: auto;
+}
+
+body:has(#lava-background-layer) .chat-composer-area {
+    background: transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .doodle-background-item,
+    .doodle-background-drift {
+        animation: none;
+        will-change: auto;
+    }
+}

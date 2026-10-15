@@ -51,7 +51,7 @@ async def get_voice_text(
             "precomputed_asr_result_id": receipt_id,
             "precomputed_asr_context": receipt_context or "",
         }
-        if receipt_scope:
+        if receipt_context is not None and receipt_scope:
             transcribe_kwargs["precomputed_asr_scope"] = receipt_scope
         result = await get_multimodal_router().transcribe(voice_base64, **transcribe_kwargs)
         text = result.text.strip()

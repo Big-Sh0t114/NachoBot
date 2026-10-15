@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nachobot-qqcall-client"
+version = "0.1.0"
+description = "Shared QQCall adapter runtime and control contracts"
+requires-python = ">=3.11,<3.14"
+dependencies = ["aiohttp>=3.12,<4", "nachobot-universalvc-client"]
+
+[tool.setuptools]
+packages = ["qqcall_client"]
+
+[tool.uv.sources]
+nachobot-universalvc-client = { path = "../../NachoBot-UniversalVC-Adapter/sdk", editable = true }

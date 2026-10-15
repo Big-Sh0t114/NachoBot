@@ -51,12 +51,117 @@ _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
 # Process-group shutdown is deliberately bounded. These values are shortened
 # by isolated lifecycle tests without creating real subprocesses.
 _PROCESS_GROUP_TERM_TIMEOUT = 10.0
+_QQCALL_STOP_REQUEST_TIMEOUT = 2.0
+_QQCALL_GRACEFUL_STOP_TIMEOUT = 20.0
 _PROCESS_GROUP_KILL_TIMEOUT = 2.0
 _PROCESS_REAP_TIMEOUT = 2.0
 _PROCESS_GROUP_POLL_INTERVAL = 0.05
 _WINDOWS_JOB_POLL_INTERVAL = 0.05
 _CORE_DISPLAY_GRACE_SECONDS = 6.0
 _CORE_LAST_VERIFIED_MAX_AGE_SECONDS = 15.0
+_QQCALL_STATUS_MAX_BYTES = 64 * 1024
+# One full identity discovery may take 15 seconds, plus adapter RPC and poll
+# time. Keep a bounded report window that covers a normal supervision cycle.
+_QQCALL_STATUS_MAX_AGE_MS = 30_000
+_QQCALL_PHASE_LABELS = {
+    "disabled": "QQCall 已禁用",
+    "starting": "QQCall 控制服务正在启动",
+    "waiting_adapter": "等待平台适配器连接",
+    "waiting_login": "等待 QQ 身份验证",
+    "waiting_identity": "等待身份信息",
+    "waiting_target": "等待 QQ 进程",
+    "needs_attachment": "需要人工附加到 QQ",
+    "waiting_kernel_restart": "等待重启 QQ 以启用通话",
+    "quarantined": "安全隔离中，等待确认清理状态",
+    "ready": "通话控制链就绪",
+    "stopping": "QQCall 控制服务正在停止",
+    "stopped": "QQCall 控制服务已停止",
+    "error": "QQCall 控制服务遇到错误",
+}
+_QQCALL_UNIVERSAL_SERVICE_CODES = {
+    "universal_api_service_ready",
+    "universal_api_service_unavailable",
+    "universal_api_auth_failed",
+    "universal_api_health_invalid",
+    "universal_api_route_mismatch",
+    "universal_api_url_unsupported",
+    "universal_api_https_autostart_unsupported",
+    "universal_api_token_invalid",
+    "universal_api_token_mismatch",
+    "universal_api_service_config_invalid",
+    "universal_api_service_cli_unavailable",
+    "universal_api_start_lock_unavailable",
+    "universal_api_start_in_progress_timeout",
+    "universal_api_start_process_exited",
+    "universal_api_start_timeout",
+    "universal_api_start_cancelled",
+    "universal_api_process_cleanup_unconfirmed",
+}
+_QQCALL_UNIVERSAL_SERVICE_DETAILS = {
+    "universal_api_service_unavailable": "UniversalVC 服务不可用，QQCall 音频不可用",
+    "universal_api_auth_failed": "UniversalVC 认证失败，QQCall 音频不可用；请检查本机 token 配置",
+    "universal_api_health_invalid": "UniversalVC 健康检查未通过 pipeline 就绪要求",
+    "universal_api_route_mismatch": "UniversalVC 配置的 loopback 地址与 QQCall 地址不匹配",
+    "universal_api_url_unsupported": "UniversalVC 地址不支持自动启动，请使用本机 loopback 根地址",
+    "universal_api_https_autostart_unsupported": "HTTPS 地址只支持复用已运行的 UniversalVC 服务",
+    "universal_api_token_invalid": "UniversalVC token 配置不可用，QQCall 音频不可用",
+    "universal_api_token_mismatch": "QQCall 与 UniversalVC 使用的 token 文件不一致",
+    "universal_api_service_config_invalid": "UniversalVC 服务配置无效，QQCall 音频不可用",
+    "universal_api_service_cli_unavailable": "找不到 UniversalVC 现有 Python 环境或服务入口",
+    "universal_api_start_lock_unavailable": "QQCall 无法取得 UniversalVC 启动锁",
+    "universal_api_start_in_progress_timeout": "等待其他进程启动 UniversalVC 超时",
+    "universal_api_start_process_exited": "UniversalVC 在健康就绪前退出",
+    "universal_api_start_timeout": "UniversalVC 未在 15 秒内就绪",
+    "universal_api_start_cancelled": "UniversalVC 启动已取消",
+    "universal_api_process_cleanup_unconfirmed": "UniversalVC 启动失败，进程清理尚未确认",
+}
+_QQCALL_PUBLIC_CONFIG_ERROR = (
+    "QQCall 公共配置无效或不可用，请检查 NachoBot/plugins/qqcall_plugin/config.toml"
+)
+_QQCALL_PUBLIC_CONFIG_CODE_ERRORS = {
+    "enabled_identity_and_onebot_required": (
+        "QQCall 配置缺少 OneBot 地址或身份信息 "
+        "(enabled_identity_and_onebot_required)，请检查 "
+        "NachoBot/plugins/qqcall_plugin/config.toml"
+    ),
+    "enabled_qq_exe_required": (
+        "QQCall 配置缺少 QQ 程序路径 "
+        "(enabled_qq_exe_required)，请检查 "
+        "NachoBot/plugins/qqcall_plugin/config.toml"
+    ),
+}
+class _QQCallPublicConfigError(ValueError):
+    """Validator failure carrying only an allowlisted WebUI message."""
+
+    def __init__(self, message: str) -> None:
+        allowed_messages = (
+            _QQCALL_PUBLIC_CONFIG_ERROR,
+            *_QQCALL_PUBLIC_CONFIG_CODE_ERRORS.values(),
+        )
+        self.safe_message = (
+            message
+            if type(message) is str and message in allowed_messages
+            else _QQCALL_PUBLIC_CONFIG_ERROR
+        )
+        super().__init__(self.safe_message)
+
+
+def _qqcall_public_config_error_message(error: object) -> str:
+    """Return only a message created by the fixed QQCall validator mapping."""
+    if type(error) is not _QQCallPublicConfigError:
+        return _QQCALL_PUBLIC_CONFIG_ERROR
+    message = error.safe_message
+    if type(message) is not str:
+        return _QQCALL_PUBLIC_CONFIG_ERROR
+    is_known_hint = message in _QQCALL_PUBLIC_CONFIG_CODE_ERRORS.values()
+    if message != _QQCALL_PUBLIC_CONFIG_ERROR and not is_known_hint:
+        return _QQCALL_PUBLIC_CONFIG_ERROR
+    return message
+
+
+_QQCALL_DISABLED_ERROR = (
+    "QQCall 已禁用，请在 NachoBot/plugins/qqcall_plugin/config.toml 中启用后再启动"
+)
 
 
 class _WindowsJobBasicLimitInformation(ctypes.Structure):
@@ -97,6 +202,7 @@ _WINDOWS_CREATE_SUSPENDED = 0x00000004
 _WINDOWS_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 _WINDOWS_JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
 _WINDOWS_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+_WINDOWS_JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x00000800
 _WINDOWS_TH32CS_SNAPTHREAD = 0x00000004
 _WINDOWS_THREAD_SUSPEND_RESUME = 0x0002
 _WINDOWS_THREAD_QUERY_INFORMATION = 0x0040
@@ -192,7 +298,9 @@ class _WindowsJobFacade:
             if not self.kernel32.CloseHandle(ctypes.c_void_p(handle)):
                 self._raise_last_error("CloseHandle failed")
 
-    def create_assign_resume(self, pid: int) -> _WindowsJobCapability:
+    def create_assign_resume(self, pid: int, *, allow_breakaway: bool = False) -> _WindowsJobCapability:
+        if type(allow_breakaway) is not bool:
+            raise ValueError("allow_breakaway must be a bool")
         job_handle = self.kernel32.CreateJobObjectW(None, None)
         if not job_handle:
             self._raise_last_error("CreateJobObjectW failed")
@@ -203,7 +311,10 @@ class _WindowsJobFacade:
         uncertain_handles: list[tuple[str, int]] = []
         try:
             limits = _WindowsJobExtendedLimitInformation()
-            limits.BasicLimitInformation.LimitFlags = _WINDOWS_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            limit_flags = _WINDOWS_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            if allow_breakaway:
+                limit_flags |= _WINDOWS_JOB_OBJECT_LIMIT_BREAKAWAY_OK
+            limits.BasicLimitInformation.LimitFlags = limit_flags
             if not self.kernel32.SetInformationJobObject(
                 ctypes.c_void_p(capability.handle),
                 _WINDOWS_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
@@ -872,6 +983,19 @@ def _register_services(root_dir: Path | str | None = None):
                         f"SnowLuma Runtime WebSocket · ws://{snowluma_host}:{snowluma_port}"
                         f"{snowluma_path} · Core :{snowluma_core_port}"
                     )),
+        ServiceDef(
+            "qqcall",
+            "QQCall 控制服务",
+            "qqcall",
+            "NachoBot-QQCall",
+            [
+                "uv", "run", "--project", "../NachoBot", "--locked", "python",
+                "service/manager.py", "run", "--config",
+                "../NachoBot/plugins/qqcall_plugin/config.toml",
+            ],
+            order=3,
+            detail="独立 QQ 语音通话控制服务",
+        ),
 
         # ── Multimodal FULL ──
         ServiceDef("tts_runtime_full", "统一 TTS Runtime", "tts_full",
@@ -962,6 +1086,8 @@ def _register_services(root_dir: Path | str | None = None):
                   "Discord 文字与语音频道适配器"),
         GroupDef("universalvc", "UniversalVC 语音", "🎤", ["universalvc"],
                   "进程音频捕获、实时 ASR 与虚拟声卡输出"),
+        GroupDef("qqcall", "QQ语音通话", "📞", ["qqcall"],
+                 "独立 QQCall 控制与语音通话服务"),
         # Temporarily hidden from WebUI; restore to expose the VRChat group.
         # GroupDef("vrchat", "VRChat 语音与安全控制", "orbit", ["vrchat_guardian", "vrchat_adapter"],
         #          "语音/聊天默认；独立 guardian 的 bounded follow/wander/stop"),
@@ -1102,6 +1228,12 @@ class ProcessManager:
         if self._windows_job_facade is None:
             self._windows_job_facade = _WindowsJobFacade()
         return self._windows_job_facade
+
+    def _create_service_windows_job(self, service_id: str, pid: int) -> _WindowsJobCapability:
+        facade = self._get_windows_job_facade()
+        if service_id == "qqcall":
+            return facade.create_assign_resume(pid, allow_breakaway=True)
+        return facade.create_assign_resume(pid)
 
     # ---- external Core observation ---------------------------------
 
@@ -1797,6 +1929,22 @@ class ProcessManager:
             self._token_basename(candidate) == "napcatwinbootmain.exe"
             for candidate in (record.name, record.executable)
         ):
+            # QQCall also uses this loader binary for its isolated AVSDK Host.
+            profiles = []
+            for index, token in enumerate(record.argv):
+                text = str(token).strip().strip('"')
+                if text.casefold().startswith("--user-data-dir="):
+                    profiles.append(text.split("=", 1)[1].strip('"'))
+                elif text.casefold() == "--user-data-dir" and index + 1 < len(record.argv):
+                    profiles.append(str(record.argv[index + 1]).strip().strip('"'))
+            if len(profiles) == 1:
+                host_root = self._normalize_external_path(
+                    "NachoBot-QQCall/.runtime/service/hosts", self.root
+                )
+                profile = self._normalize_external_path(profiles[0], record.cwd)
+                prefix = host_root + "/"
+                if profile.startswith(prefix) and re.fullmatch(r"host-[1-9][0-9]*/profile", profile[len(prefix):]):
+                    return False
             return True
         launcher = self._normalize_external_path("launcher-user.bat", expected_cwd)
         return any(
@@ -2414,7 +2562,296 @@ class ProcessManager:
         self._ensure_required_components((service_id,))
         self._validate_service_start(service_id)
 
+    @staticmethod
+    def _qqcall_process_creation_time_100ns(pid: int) -> str | None:
+        """Read an exact Windows FILETIME for a status-report process."""
+        if os.name != "nt":
+            return None
+
+        class FILETIME(ctypes.Structure):
+            _fields_ = [("dwLowDateTime", wintypes.DWORD), ("dwHighDateTime", wintypes.DWORD)]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetProcessTimes.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(FILETIME),
+            ctypes.POINTER(FILETIME),
+            ctypes.POINTER(FILETIME),
+            ctypes.POINTER(FILETIME),
+        ]
+        kernel32.GetProcessTimes.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return None
+        try:
+            creation = FILETIME()
+            exit_time = FILETIME()
+            kernel_time = FILETIME()
+            user_time = FILETIME()
+            if not kernel32.GetProcessTimes(
+                handle,
+                ctypes.byref(creation),
+                ctypes.byref(exit_time),
+                ctypes.byref(kernel_time),
+                ctypes.byref(user_time),
+            ):
+                return None
+            return str((int(creation.dwHighDateTime) << 32) | int(creation.dwLowDateTime))
+        finally:
+            kernel32.CloseHandle(handle)
+
+    def _load_qqcall_public_config(self) -> Mapping[str, Any]:
+        """Load the canonical QQCall plugin config through the fixed validator."""
+        public_config_path = (
+            self.root / "NachoBot" / "plugins" / "qqcall_plugin" / "config.toml"
+        )
+        validator_path = (
+            Path(__file__).resolve().parent.parent
+            / "NachoBot-QQCall"
+            / "service"
+            / "config.py"
+        )
+        validator = None
+        try:
+            import importlib.util
+
+            spec = importlib.util.spec_from_file_location(
+                "_nachobot_qqcall_webui_fixed_validator",
+                validator_path,
+            )
+            if spec is None or spec.loader is None:
+                raise ValueError
+            validator = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(validator)
+            config = validator.load_config(public_config_path)
+        except Exception as exc:
+            config_error_type = getattr(validator, "ConfigError", None)
+            code = getattr(exc, "code", None)
+            message = _QQCALL_PUBLIC_CONFIG_ERROR
+            if (
+                isinstance(config_error_type, type)
+                and isinstance(exc, config_error_type)
+                and type(code) is str
+            ):
+                message = _QQCALL_PUBLIC_CONFIG_CODE_ERRORS.get(
+                    code,
+                    _QQCALL_PUBLIC_CONFIG_ERROR,
+                )
+            raise _QQCallPublicConfigError(message) from None
+        if not isinstance(config, Mapping):
+            raise _QQCallPublicConfigError(_QQCALL_PUBLIC_CONFIG_ERROR)
+        return config
+
+    def _external_qqcall_observation(self) -> dict[str, Any] | None:
+        """Observe the independent supervisor without adopting its process tree."""
+        if not (self.root / "NachoBot/plugins/qqcall_plugin/config.toml").exists():
+            return None
+        try:
+            config = self._load_qqcall_public_config()
+            runtime = Path(config["runtime_dir"])
+            path = runtime / "manager.private.json"
+            if not path.exists():
+                return None
+            if path.is_symlink():
+                raise ValueError("invalid manager record")
+            with path.open("rb") as stream:
+                raw = stream.read(32769)
+            if len(raw) > 32768:
+                raise ValueError("invalid manager record")
+            def unique_object(pairs):
+                result = {}
+                for key, value in pairs:
+                    if key in result:
+                        raise ValueError("duplicate manager key")
+                    result[key] = value
+                return result
+            record = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object)
+            pid, creation = record.get("pid"), record.get("creationTime100ns")
+            if (type(record.get("schema")) is not int or record["schema"] != 1 or
+                    type(pid) is not int or not 0 < pid <= 2**31 - 1 or
+                    type(creation) is not str or not creation.isdecimal() or
+                    not 0 < int(creation) <= 2**64 - 1):
+                raise ValueError("invalid manager record")
+            current = self._qqcall_process_creation_time_100ns(pid)
+            if current != creation:
+                # A reused or exited PID cannot keep an old record active.
+                if current is not None or not psutil.pid_exists(pid):
+                    return None
+                raise ValueError("unqueryable supervisor")
+            process = psutil.Process(pid)
+            cwd, argv = Path(process.cwd()), process.cmdline()
+            project = (self.root / "NachoBot-QQCall").resolve()
+            canonical = (self.root / "NachoBot/plugins/qqcall_plugin/config.toml").resolve()
+            if (cwd.resolve() != project or len(argv) != 5 or argv[2:4] != ["run", "--config"] or
+                    (cwd / argv[1]).resolve() != project / "service/manager.py" or
+                    (cwd / argv[4]).resolve() != canonical or
+                    ntpath.basename(process.exe()).lower() not in {"python.exe", "pythonw.exe", "python", "python3"} or
+                    self._qqcall_process_creation_time_100ns(pid) != creation):
+                raise ValueError("supervisor identity mismatch")
+            phase = self._read_qqcall_phase(supervisor_identity=(pid, creation))
+            return {"external_state": "ready" if phase and phase["ready"] else "present_unready", "phase": phase}
+        except Exception:
+            return {"external_state": "indeterminate", "phase": None}
+
+    def _read_qqcall_phase(self, *, supervisor_identity: tuple[int, str] | None = None) -> dict[str, Any] | None:
+        """Read a fresh, owned QQCall phase without exposing supervisor payloads."""
+        state = self.states.get("qqcall")
+        if supervisor_identity is None and (state is None or state.process is None or state.pid is None):
+            return None
+        if supervisor_identity is None and getattr(state.process, "returncode", None) is not None:
+            return None
+        try:
+            public_config = self._load_qqcall_public_config()
+            runtime_dir = Path(public_config["runtime_dir"])
+            status_path = runtime_dir / "status.json"
+            with status_path.open("rb") as stream:
+                raw = stream.read(_QQCALL_STATUS_MAX_BYTES + 1)
+            if len(raw) > _QQCALL_STATUS_MAX_BYTES:
+                return None
+
+            def unique_object(pairs):
+                value = {}
+                for key, item in pairs:
+                    if key in value:
+                        raise ValueError("duplicate status key")
+                    value[key] = item
+                return value
+
+            payload = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object)
+        except Exception:
+            return None
+
+        required = {
+            "schema", "phase", "ready", "updatedAtMs", "supervisorPid",
+            "supervisorCreationTime100ns",
+        }
+        allowed = required | {"code", "universalService"}
+        if (
+            not isinstance(payload, dict)
+            or not required.issubset(payload)
+            or not set(payload).issubset(allowed)
+            or type(payload.get("schema")) is not int
+            or payload["schema"] != 1
+            or not isinstance(payload.get("phase"), str)
+            or payload["phase"] not in _QQCALL_PHASE_LABELS
+            or type(payload.get("ready")) is not bool
+            or ("code" in payload and payload["code"] is not None and not isinstance(payload["code"], str))
+            or (payload["phase"] == "ready" and payload.get("code") not in (None, ""))
+            or (payload["phase"] == "ready" and payload.get("ready") is not True)
+            or (payload["phase"] != "ready" and payload.get("ready") is not False)
+            or type(payload.get("updatedAtMs")) is not int
+            or payload["updatedAtMs"] < 0
+            or not isinstance(payload.get("supervisorPid"), int)
+            or isinstance(payload.get("supervisorPid"), bool)
+            or not 1 <= payload["supervisorPid"] <= 2**31 - 1
+            or not isinstance(payload.get("supervisorCreationTime100ns"), str)
+            or not payload["supervisorCreationTime100ns"].isdecimal()
+            or not 1 <= len(payload["supervisorCreationTime100ns"]) <= 20
+            or not 1 <= int(payload["supervisorCreationTime100ns"]) <= 2**64 - 1
+        ):
+            return None
+        universal = payload.get("universalService")
+        if "universalService" in payload and (
+            not isinstance(universal, dict)
+            or set(universal) != {"state", "code", "reused"}
+            or universal.get("state") not in ("ready", "unavailable", "not_checked")
+            or type(universal.get("code")) is not str
+            or (universal["code"] and universal["code"] not in _QQCALL_UNIVERSAL_SERVICE_CODES)
+            or type(universal.get("reused")) is not bool
+            or (universal["state"] == "ready" and universal["code"] != "universal_api_service_ready")
+            or (universal["state"] == "not_checked" and universal["code"] != "")
+            or (universal["state"] == "unavailable" and not universal["code"])
+        ):
+            return None
+        if payload["phase"] == "ready" and public_config.get("enabled") is not True:
+            return None
+
+        now_ms = int(time.time() * 1000)
+        age_ms = now_ms - payload["updatedAtMs"]
+        if age_ms < -1000 or age_ms > _QQCALL_STATUS_MAX_AGE_MS:
+            return None
+
+        reported_pid = payload["supervisorPid"]
+        owned_root_pid = state.pid if state else None
+        if supervisor_identity is not None:
+            if (reported_pid, payload["supervisorCreationTime100ns"]) != supervisor_identity:
+                return None
+        elif reported_pid != owned_root_pid:
+            try:
+                owned_process = psutil.Process(owned_root_pid)
+                if reported_pid not in {child.pid for child in owned_process.children(recursive=True)}:
+                    return None
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.Error):
+                return None
+        if self._qqcall_process_creation_time_100ns(reported_pid) != payload["supervisorCreationTime100ns"]:
+            return None
+
+        detail = _QQCALL_PHASE_LABELS[payload["phase"]]
+        normalized_universal = None
+        if universal is not None:
+            normalized_universal = {
+                "state": universal["state"],
+                "code": universal["code"],
+                "reused": universal["reused"],
+            }
+            if universal["state"] == "unavailable":
+                component_detail = _QQCALL_UNIVERSAL_SERVICE_DETAILS.get(
+                    universal["code"], _QQCALL_UNIVERSAL_SERVICE_DETAILS["universal_api_service_unavailable"]
+                )
+                detail = f"{detail}；{component_detail}"
+        result = {
+            "phase": payload["phase"],
+            "ready": payload["ready"] is True and payload["phase"] == "ready",
+            "detail": detail,
+        }
+        if normalized_universal is not None:
+            result["universalService"] = normalized_universal
+        return result
+
     # ---- public API ----
+
+    def request_qqcall_injection(self) -> dict[str, str]:
+        """Run the fixed binding BAT; its supervisor remains independently owned."""
+        existing = self._operation_tasks.get("qqcall:inject")
+        if existing and not existing.done():
+            return {"status": "injecting"}
+        config = self._load_qqcall_public_config()
+        if config.get("enabled") is not True:
+            raise RuntimeError(_QQCALL_DISABLED_ERROR)
+        observation = self._external_qqcall_observation()
+        owned = self._read_qqcall_phase()
+        phase = owned or (observation or {}).get("phase")
+        if phase and phase["ready"]:
+            return {"status": "ready"}
+        if observation is not None and (not phase or phase["phase"] != "needs_attachment"):
+            raise RuntimeError((phase or {}).get("detail", "无法确认 QQCall 状态，请检查原启动窗口"))
+        if owned and owned["phase"] != "needs_attachment":
+            raise RuntimeError(owned["detail"])
+        entry = self.root / "NachoBot-QQCall" / "start-qqcall.bat"
+        if os.name != "nt" or not entry.is_file() or entry.is_symlink():
+            raise RuntimeError("QQCall 固定注入入口不可用")
+        self._schedule_operation("qqcall:inject", lambda: self._run_qqcall_injection(entry), (), operation_kind="inject")
+        return {"status": "injecting"}
+
+    async def _run_qqcall_injection(self, entry: Path) -> None:
+        await self._broadcast("qqcall", "[WebUI] 正在运行 QQCall 固定注入入口；如出现 UAC，请确认。\n")
+        child = await asyncio.create_subprocess_exec(
+            "cmd.exe", "/d", "/c", str(entry), cwd=str(entry.parent),
+            stdin=None, stdout=None, stderr=None,
+            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+        )
+        result = await child.wait()
+        # The BAT's independent supervisor, QQ and elevated helper are never
+        # adopted into a WebUI service job or killed by a generic restart.
+        phase = self._read_qqcall_phase() or (self._external_qqcall_observation() or {}).get("phase")
+        if result != 0 or not phase or not phase["ready"]:
+            await self._broadcast("qqcall", "[WebUI] QQCall 注入未确认；请查看当前通话服务状态和原启动窗口。\n")
+            raise RuntimeError("QQCall 注入未确认")
+        await self._broadcast("qqcall", "[WebUI] QQCall 已注入，通话控制链就绪。\n")
 
     def get_service_status(self, service_id: str) -> dict[str, Any]:
         """Get status info for a single service."""
@@ -2430,6 +2867,8 @@ class ProcessManager:
                 or service_state_retains_runtime(state)
             )
         )
+        if service_id == "qqcall" and state and state.process is None and state.pid is None and not service_state_retains_runtime(state):
+            manager_owned = False
         status = state.status.value if state else ServiceStatus.STOPPED.value
         origin: str | None = "webui" if manager_owned else None
         observed_profile: str | None = None
@@ -2437,6 +2876,7 @@ class ProcessManager:
         pid = state.pid if state else None
         started_at = state.started_at if state else None
         external_state: str | None = None
+        qqcall_phase: dict[str, Any] | None = None
 
         if service_id == "nachobot" and manager_owned:
             observed_profile = self._core_runtime_profile
@@ -2497,12 +2937,26 @@ class ProcessManager:
                 pid = None
                 started_at = None
 
-        return {
-            "id": service_id,
-            "name": sdef.name,
-            "group_id": sdef.group_id,
-            "port": started_port if status == ServiceStatus.RUNNING and started_port is not None else sdef.port,
-            "detail": (
+        if service_id == "qqcall" and manager_owned:
+            qqcall_phase = self._read_qqcall_phase()
+        if service_id == "qqcall" and qqcall_phase is None:
+            observation = self._external_qqcall_observation()
+            if observation is not None and (not manager_owned or
+                    getattr(getattr(state, "process", None), "returncode", None) is not None):
+                manager_owned = False
+                external_state = observation["external_state"]
+                origin = None if external_state == "indeterminate" else "external"
+                status = "running" if external_state == "ready" else "error"
+                pid, started_at = None, None
+                qqcall_phase = observation["phase"]
+        if service_id == "qqcall" and manager_owned and qqcall_phase is None:
+            detail = "QQCall 控制服务进程已启动，等待经验证的状态"
+        elif service_id == "qqcall" and qqcall_phase is not None:
+            detail = qqcall_phase["detail"]
+        elif service_id == "qqcall" and external_state is not None:
+            detail = "检测到独立 QQCall 控制服务，等待有效状态" if origin else "无法验证 QQCall 控制服务，请检查原启动窗口"
+        else:
+            detail = (
                 self._external_presence_detail(adapter_observation)
                 if (
                     adapter_observation is not None
@@ -2510,7 +2964,14 @@ class ProcessManager:
                     and adapter_observation.outcome in _EXTERNAL_BLOCKING_OUTCOMES
                 )
                 else sdef.detail
-            ),
+            )
+
+        return {
+            "id": service_id,
+            "name": sdef.name,
+            "group_id": sdef.group_id,
+            "port": started_port if status == ServiceStatus.RUNNING and started_port is not None else sdef.port,
+            "detail": detail,
             "status": status,
             "pid": pid,
             "started_at": started_at,
@@ -2518,6 +2979,10 @@ class ProcessManager:
             "origin": origin,
             "observed_profile": observed_profile,
             "external_state": external_state,
+            "qqcall": qqcall_phase,
+            "injection_pending": service_id == "qqcall" and bool(
+                (injection := self._operation_tasks.get("qqcall:inject")) and not injection.done()
+            ),
         }
 
     def get_all_statuses(self) -> list[dict[str, Any]]:
@@ -3337,6 +3802,45 @@ class ProcessManager:
                 )
                 return
 
+        if service_id == "qqcall":
+            public_config_error = _QQCALL_PUBLIC_CONFIG_ERROR
+            try:
+                public_config = self._load_qqcall_public_config()
+            except Exception as exc:
+                public_config = None
+                public_config_error = _qqcall_public_config_error_message(exc)
+            if public_config is None:
+                if state is None:
+                    state = ServiceState()
+                    self.states[service_id] = state
+                state.start_reservation = False
+                state.status = ServiceStatus.ERROR
+                await self._broadcast(
+                    service_id,
+                    f"[WebUI] ERROR: {public_config_error}\n",
+                )
+                return
+            if public_config.get("enabled") is not True:
+                if state is None:
+                    state = ServiceState()
+                    self.states[service_id] = state
+                state.start_reservation = False
+                state.status = ServiceStatus.ERROR
+                await self._broadcast(
+                    service_id,
+                    f"[WebUI] ERROR: {_QQCALL_DISABLED_ERROR}\n",
+                )
+                return
+
+            observation = self._external_qqcall_observation()
+            if observation is not None:
+                self._clear_start_reservation(service_id, remove=True)
+                await self._broadcast(
+                    service_id,
+                    "[WebUI] 已检测到独立 QQCall 控制服务，未重复启动；绑定请使用注入按钮。\n",
+                )
+                return
+
         if state is None:
             state = ServiceState()
             self.states[service_id] = state
@@ -3466,7 +3970,8 @@ class ProcessManager:
                     if not proc.pid:
                         raise RuntimeError("Windows child has no PID for Job Object assignment")
                     state.windows_job = await asyncio.to_thread(
-                        self._get_windows_job_facade().create_assign_resume,
+                        self._create_service_windows_job,
+                        service_id,
                         proc.pid,
                     )
                 except Exception as exc:
@@ -3537,7 +4042,13 @@ class ProcessManager:
                 return
             state.status = ServiceStatus.RUNNING
             state.started_port = sdef.port
-            await self._broadcast(service_id, f"[WebUI] {sdef.name} is ready.\n")
+            if service_id == "qqcall":
+                await self._broadcast(
+                    service_id,
+                    "[WebUI] QQCall process started; waiting for a fresh, verified phase report.\n",
+                )
+            else:
+                await self._broadcast(service_id, f"[WebUI] {sdef.name} is ready.\n")
 
         except asyncio.CancelledError:
             await self._terminate_state_process(state)
@@ -3617,6 +4128,73 @@ class ProcessManager:
         async with lock:
             await self._stop_service_locked(service_id, _prepared=_prepared)
 
+    @staticmethod
+    def _qqcall_stop_clock() -> float:
+        return asyncio.get_running_loop().time()
+
+    async def _request_qqcall_supervisor_stop(self, state: ServiceState) -> bool:
+        """Ask QQCall's supervisor to detach and exit before job cleanup."""
+        if state.process is None:
+            return False
+        cwd = self.root / SERVICE_DEFS["qqcall"].cwd
+        command = [
+            "uv", "run", "--project", "../NachoBot", "--locked", "python",
+            "service/manager.py", "stop", "--config",
+            "../NachoBot/plugins/qqcall_plugin/config.toml",
+        ]
+        started = self._qqcall_stop_clock()
+        try:
+            request_process = await asyncio.create_subprocess_exec(
+                *command,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+                cwd=str(cwd),
+            )
+            await asyncio.wait_for(request_process.wait(), timeout=_QQCALL_STOP_REQUEST_TIMEOUT)
+        except (OSError, asyncio.TimeoutError):
+            if "request_process" in locals() and request_process.returncode is None:
+                try:
+                    request_process.kill()
+                    await asyncio.wait_for(request_process.wait(), timeout=0.5)
+                except Exception:
+                    pass
+            return False
+        if request_process.returncode != 0:
+            return False
+
+        deadline = started + _QQCALL_GRACEFUL_STOP_TIMEOUT
+        remaining = deadline - self._qqcall_stop_clock()
+        if remaining <= 0:
+            return False
+        try:
+            await asyncio.wait_for(state.process.wait(), timeout=remaining)
+        except asyncio.TimeoutError:
+            return False
+        if state.process.returncode not in (0, None):
+            return False
+
+        # A successful supervisor exit should also leave its owned Windows
+        # Job empty before the same overall graceful deadline; otherwise the
+        # caller uses the existing Job Object termination path afterward.
+        if os.name == "nt" and state.windows_job is not None:
+            facade = self._get_windows_job_facade()
+            while True:
+                try:
+                    active = await asyncio.to_thread(
+                        facade.active_processes,
+                        state.windows_job,
+                    )
+                except Exception:
+                    return False
+                if active == 0:
+                    break
+                remaining = deadline - self._qqcall_stop_clock()
+                if remaining <= 0:
+                    return False
+                await asyncio.sleep(min(_WINDOWS_JOB_POLL_INTERVAL, remaining))
+        return True
+
     async def _stop_service_locked(self, service_id: str, *, _prepared: bool) -> None:
         state = self.states.get(service_id)
         if not state:
@@ -3638,6 +4216,13 @@ class ProcessManager:
         state.status = ServiceStatus.STOPPING
         await self._broadcast(service_id, f"[WebUI] Stopping {sdef.name}...\n")
         try:
+            if service_id == "qqcall":
+                graceful = await self._request_qqcall_supervisor_stop(state)
+                if not graceful:
+                    await self._broadcast(
+                        service_id,
+                        "[WebUI] QQCall graceful stop was not confirmed; using the managed process cleanup path.\n",
+                    )
             await self._terminate_state_process(state)
         except Exception:
             state.status = ServiceStatus.ERROR
@@ -4346,6 +4931,27 @@ class ProcessManager:
 
     def _resolve_cmd(self, sdef: ServiceDef) -> tuple[list[str], str, dict[str, str]]:
         """Resolve dynamic commands (e.g., TTS engine based on config)."""
+        if sdef.id in ("napcat_adapter", "snowluma_adapter"):
+            cmd = list(sdef.cmd)
+            try:
+                public_config = self._load_qqcall_public_config()
+            except ValueError:
+                # QQCall is optional for ordinary QQ messaging. An unavailable
+                # public config must disable only its optional audio dependency;
+                # adapter-local legacy flags are never a fallback.
+                return cmd, sdef.cwd, {}
+            expected_adapter = {
+                "napcat_adapter": "napcat",
+                "snowluma_adapter": "snowluma",
+            }[sdef.id]
+            if (
+                public_config.get("enabled") is True
+                and public_config.get("adapter") in ("auto", expected_adapter)
+            ):
+                if cmd[:2] == ["uv", "run"]:
+                    # Keep the QQCall-only PCM transport optional for adapter startup.
+                    cmd[2:2] = ["--extra", "qqcall-audio"]
+            return cmd, sdef.cwd, {}
         if sdef.id in ("tts_runtime_full", "tts_runtime_lite"):
             return self._resolve_tts_runtime_cmd()
         if sdef.id == "bilibili":

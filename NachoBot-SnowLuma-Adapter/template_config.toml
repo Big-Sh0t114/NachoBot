@@ -42,6 +42,8 @@ max_pages = 200
 retry_delay_sec = 15.0
 receipt_timeout_sec = 8.0
 
+# QQCall is configured only in ../NachoBot/plugins/qqcall_plugin/config.toml.
+
 [visual.image]
 temperature = 0.1
 max_tokens = 220

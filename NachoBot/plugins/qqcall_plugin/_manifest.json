@@ -1,0 +1,33 @@
+{
+  "manifest_version": 1,
+  "name": "QQCall 插件",
+  "version": "0.1.0",
+  "description": "查询 QQ 通话状态、加入或离开群语音，并处理受验证的来电接听。",
+  "author": {
+    "name": "NachoBot"
+  },
+  "license": "GPL-v3.0-or-later",
+  "host_application": {
+    "min_version": "0.8.0"
+  },
+  "keywords": ["qq", "qqcall", "voice-call"],
+  "categories": ["chat"],
+  "default_locale": "zh-CN",
+  "plugin_info": {
+    "is_built_in": false,
+    "plugin_type": "chat",
+    "components": [
+      {
+        "type": "command",
+        "name": "qqcall_control",
+        "description": "查询 QQ 通话状态，加入或离开群语音"
+      },
+      {
+        "type": "action",
+        "name": "qqcall_accept",
+        "description": "可选的、严格绑定当前来电事件的 Planner 接听动作"
+      }
+    ],
+    "features": ["通话状态查询", "群语音加入与退出", "可选来电事件接听"]
+  }
+}

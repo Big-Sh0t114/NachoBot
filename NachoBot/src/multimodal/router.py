@@ -42,6 +42,7 @@ from .contracts import (
 from .profile import RuntimeProfile, get_runtime_profile, normalize_runtime_profile
 
 logger = logging.getLogger("core.multimodal")
+_HEALTH_PROBE_TIMEOUT_SECONDS = 2.0
 
 
 class AudioStreamError(RuntimeError):
@@ -176,7 +177,9 @@ class CoreMultimodalRouter:
     async def _probe_component(self, method_name: str) -> dict[str, Any]:
         try:
             method = getattr(self.local, method_name)
-            observed = await method()
+            # Health must settle before the call admission route's 3s deadline.
+            # Inference retains the client's separate, longer request timeout.
+            observed = await asyncio.wait_for(method(), timeout=_HEALTH_PROBE_TIMEOUT_SECONDS)
             if not isinstance(observed, Mapping):
                 raise TypeError("health response is not an object")
             return {

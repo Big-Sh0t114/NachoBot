@@ -912,6 +912,12 @@ class OfflineRecoveryManager:
         collection = self._collections.get(group_key)
         if collection is not None:
             excluded.update(collection.rows.get(chat_id, {}).keys())
+        try:
+            from src.chat.realtime_ingress import realtime_ingress_manager
+
+            excluded.update(realtime_ingress_manager.excluded_row_ids_for_chat(chat_id))
+        except Exception:
+            logger.debug("Could not query realtime excluded rows", exc_info=True)
         return excluded
 
     def filter_recovery_rows_from_context(self, chat_id: str, messages: Iterable[Any]) -> list[Any]:

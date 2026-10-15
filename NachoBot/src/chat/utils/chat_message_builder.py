@@ -534,6 +534,16 @@ def _build_readable_messages_internal(
         if show_pic:
             content = process_pic_ids(content)
 
+        from src.chat.realtime_speaker import RealtimeSpeakerContext
+
+        speaker = getattr(message, "realtime_speaker", None)
+        if isinstance(speaker, RealtimeSpeakerContext):
+            if timestamp is not None and content:
+                display_name = f"匿名语音说话人（{speaker.label}）"
+                content = replace_user_references(content, platform, replace_bot_name=replace_bot_name)
+                detailed_messages_raw.append((timestamp, display_name, content, False, planner_alias))
+            continue
+
         # 检查必要信息是否存在
         if not all([platform, user_id, timestamp is not None]):
             continue

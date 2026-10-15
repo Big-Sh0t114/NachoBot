@@ -25,6 +25,7 @@ from src.mmc_com_layer import mmc_start_com, mmc_stop_com, router
 from src.offline_history import get_offline_history_runtime
 from src.response_pool import put_response, check_timeout_response
 from src.listen_address import resolve_listen_address
+from qqcall_client.qqcall_service import QQCallPlatformBindingHeartbeat
 
 logger.info(f"版本\n\nNachobot-Napcat-Adapter 版本: {version}\n喜欢的话点个star喵~\n")
 
@@ -63,6 +64,21 @@ def _offline_history_platform_state() -> dict:
     }
 
 
+def _qqcall_platform_state() -> dict:
+    connection = _active_server_connection
+    account_id = message_handler.verified_account_id
+    generation = message_handler.connection_generation
+    return {
+        "connected": bool(
+            connection is not None
+            and connection is message_handler.server_connection
+            and account_id
+            and _connection_is_open(connection)
+        ),
+        "account_id": account_id if isinstance(account_id, str) else "",
+        "identity": (id(connection), generation, account_id) if connection is not None else (),
+        "connection_generation": generation,
+    }
 
 
 async def _verify_napcat_login(connection, epoch_started_at: float) -> None:
@@ -267,6 +283,14 @@ async def message_process():
 async def main():
     message_send_instance.nachobot_router = router
     offline_history = configure_offline_history_runtime()
+    qqcall_config = global_config.qqcall.to_runtime_config()
+    heartbeat = None
+    if qqcall_config.platform_manifest_file:
+        heartbeat = QQCallPlatformBindingHeartbeat(
+            adapter="napcat",
+            manifest_file=qqcall_config.platform_manifest_file,
+            account_id=qqcall_config.account_id,
+        )
     tasks = [
         napcat_server(),
         mmc_start_com(),
@@ -278,6 +302,8 @@ async def main():
             on_core_generation=lambda _account_id: notify_platform_status(online=True),
         ),
     ]
+    if heartbeat is not None:
+        tasks.append(heartbeat.run(_qqcall_platform_state))
     _ = await asyncio.gather(*tasks)
 
 

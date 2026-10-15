@@ -7,6 +7,8 @@ from urllib.parse import urlencode
 import shutil
 import tomllib
 
+from qqcall_client.qqcall import QQCallConfig as SharedQQCallConfig
+from qqcall_client.qqcall_service import load_qqcall_adapter_settings
 
 from .log_safety import safe_endpoint
 
@@ -108,6 +110,7 @@ class OfflineRecoveryConfig:
     receipt_timeout_sec: float = 8.0
 
 
+QQCallAdapterConfig = SharedQQCallConfig
 
 
 @dataclass(slots=True)
@@ -150,6 +153,7 @@ class Config:
     send: SendConfig
     visual: VisualConfig
     offline_recovery: OfflineRecoveryConfig = field(default_factory=OfflineRecoveryConfig)
+    qqcall: SharedQQCallConfig = field(default_factory=SharedQQCallConfig)
 
 
 def _visual_task(raw: dict[str, Any], default: VisualTaskConfig) -> VisualTaskConfig:
@@ -170,6 +174,11 @@ def load_config() -> Config:
     d = raw.get("debug", {})
     se = raw.get("send", {})
     oh = raw.get("offline_recovery", {})
+    qqcall_settings = load_qqcall_adapter_settings(
+        "snowluma",
+        CONFIG_PATH,
+        {},
+    )
     vi = raw.get("visual", {})
     defaults = VisualConfig()
     return Config(
@@ -218,6 +227,7 @@ def load_config() -> Config:
             retry_delay_sec=max(0.1, float(oh.get("retry_delay_sec", 15.0))),
             receipt_timeout_sec=max(1.0, float(oh.get("receipt_timeout_sec", 8.0))),
         ),
+        qqcall=qqcall_settings.config,
     )
 
 

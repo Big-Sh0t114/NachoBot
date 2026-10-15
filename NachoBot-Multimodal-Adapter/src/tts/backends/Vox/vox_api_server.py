@@ -6,15 +6,18 @@ VoxCPM TTS API Server
 不再依赖用户单独下载 VoxCPM 源码仓库或推理客户端。
 """
 
-import os
 import sys
 import io
 import re
 
 import logging
 import argparse
+import anyio
 import numpy as np
 import torch
+from fastapi import FastAPI, Query
+from fastapi.responses import Response, StreamingResponse
+import uvicorn
 from typing import Optional, List
 from pathlib import Path
 import tomllib
@@ -25,13 +28,11 @@ import tomllib
 _ADAPTER_ROOT = Path(__file__).resolve().parents[4]
 if str(_ADAPTER_ROOT) not in sys.path:
     sys.path.insert(0, str(_ADAPTER_ROOT))
-from nachobot_multimodal.utils.uvicorn_logging import install_quiet_access_logging
+from nachobot_multimodal.utils.uvicorn_logging import install_quiet_access_logging  # noqa: E402
+from nachobot_multimodal.utils.voxcpm_loading import load_pretrained_on_runtime_device  # noqa: E402
+from nachobot_multimodal.utils.vox_inference_worker import InferenceWorker  # noqa: E402
 
 torch.set_float32_matmul_precision('high')
-
-from fastapi import FastAPI, Query
-from fastapi.responses import Response, StreamingResponse
-import uvicorn
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,6 +40,18 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger("vox_api_server")
+inference_worker = InferenceWorker()
+
+
+class OwnedStreamingResponse(StreamingResponse):
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            close = getattr(self.body_iterator, "aclose", None)
+            if close is not None:
+                with anyio.CancelScope(shield=True):
+                    await close()
 
 
 AUDIO_FILE_SUFFIXES = {".wav", ".flac", ".mp3", ".m4a", ".ogg", ".opus"}
@@ -354,7 +367,23 @@ def load_model(
                 target_modules_dit=["q_proj", "v_proj", "k_proj", "o_proj"],
             )
 
-    voxcpm_model = VoxCPM.from_pretrained(**kwargs)
+    from voxcpm.model.utils import get_dtype, pick_runtime_dtype, resolve_runtime_device
+
+    voxcpm_model = load_pretrained_on_runtime_device(
+        VoxCPM.from_pretrained, kwargs, torch=torch, resolve_device=resolve_runtime_device,
+        resolve_dtype=lambda device, dtype: get_dtype(pick_runtime_dtype(device, dtype)),
+        thread_confined=inference_worker.is_owner_thread,
+    )
+    device = voxcpm_model.tts_model.device
+    if str(device).startswith("cuda"):
+        with torch.cuda.device(device):
+            allocated = torch.cuda.memory_allocated()
+            reserved_before = torch.cuda.memory_reserved()
+            torch.cuda.empty_cache()
+            logger.info(
+                "VoxCPM CUDA storage allocated_bytes=%d reserved_before_bytes=%d reserved_after_bytes=%d",
+                allocated, reserved_before, torch.cuda.memory_reserved(),
+            )
     model_sample_rate = voxcpm_model.tts_model.sample_rate
     logger.info(f"VoxCPM model loaded. Sample rate: {model_sample_rate}")
 
@@ -459,7 +488,7 @@ async def tts(
             generate_kwargs = {**base_kwargs, "text": seg_text}
 
             logger.info("  生成第 %d/%d 段: '%s'", idx + 1, len(segments), _log_safe(seg[:50]))
-            wav_segment = voxcpm_model.generate(**generate_kwargs)
+            wav_segment = await inference_worker.generate(voxcpm_model.generate, **generate_kwargs)
 
             if wav_segment is not None and len(wav_segment) > 0:
                 audio_parts.append(wav_segment)
@@ -591,8 +620,8 @@ async def tts_stream(
         except Exception as e:
             logger.error("TTS stream generation error: %s", _log_safe(e))
 
-    return StreamingResponse(
-        generate_pcm_stream(),
+    return OwnedStreamingResponse(
+        inference_worker.stream(generate_pcm_stream),
         media_type="application/octet-stream",
         headers={
             "X-Sample-Rate": str(model_sample_rate),
@@ -638,13 +667,16 @@ if __name__ == "__main__":
 
     _AUDIO_PATH_ROOTS = _configured_audio_roots(args.config)
 
-    # 启动时加载模型
-    load_model(
-        model_dir=args.model_dir,
-        lora_weights_path=args.lora_weights,
-        enable_denoiser=not args.no_denoiser,
-    )
+    try:
+        inference_worker.initialize(
+            load_model,
+            model_dir=args.model_dir,
+            lora_weights_path=args.lora_weights,
+            enable_denoiser=not args.no_denoiser,
+        )
 
-    config = uvicorn.Config(app, host=args.host, port=args.port)
-    install_quiet_access_logging()
-    uvicorn.Server(config).run()
+        config = uvicorn.Config(app, host=args.host, port=args.port)
+        install_quiet_access_logging()
+        uvicorn.Server(config).run()
+    finally:
+        inference_worker.shutdown()

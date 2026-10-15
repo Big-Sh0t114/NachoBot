@@ -18,6 +18,7 @@ from src.config.official_configs import (
     NapcatServerConfig,
     NicknameConfig,
     OfflineRecoveryConfig,
+    QQCallAdapterConfig,
     VoiceConfig,
     VisualConfig,
 )
@@ -123,6 +124,7 @@ class Config(ConfigBase):
     debug: DebugConfig
     visual: VisualConfig = field(default_factory=VisualConfig)
     offline_recovery: OfflineRecoveryConfig = field(default_factory=OfflineRecoveryConfig)
+    qqcall: QQCallAdapterConfig = field(default_factory=QQCallAdapterConfig)
 
 
 def load_config(config_path: str) -> Config:
@@ -137,7 +139,12 @@ def load_config(config_path: str) -> Config:
 
     # 创建Config对象
     try:
-        return Config.from_dict(config_data)
+        # The historical adapter-local QQCall table is retired. Remove it from
+        # the in-memory parse before nested dataclass conversion so malformed
+        # legacy values cannot block the fixed root config reader.
+        config_data.pop("qqcall", None)
+        config = Config.from_dict(config_data)
+        return config
     except Exception as e:
         logger.critical("配置文件解析失败")
         raise e

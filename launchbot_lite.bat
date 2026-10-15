@@ -278,6 +278,7 @@ set "NAPCAT_SHELL_DIR=%ROOT%NapCat.Shell"
 set "NAPCAT_SHELL_BAT=launcher-user.bat"
 
 set "PYTHON_CMD=uv run python"
+set "ADAPTER_PYTHON_CMD=uv run --no-sync python"
 set "MAX_WAIT=60"
 
 if /i "%QQ_ADAPTER%"=="snowluma" (
@@ -309,7 +310,14 @@ if errorlevel 1 (
   echo [FATAL] %QQ_ADAPTER% adapter setup failed: project directory could not be entered.
   endlocal & exit /b 1
 )
-uv sync --python ">=3.11,<=3.13"
+echo --- Selecting optional QQCall audio dependency...
+set "QQCALL_EXTRA=none"
+for /f "usebackq delims=" %%E in (`uv run --project "%NACHOBOT_DIR%" --no-sync python "%ROOT%NachoBot-QQCall\scripts\adapter_extra.py" --adapter "%QQ_ADAPTER%"`) do if "%%E"=="qqcall-audio" set "QQCALL_EXTRA=qqcall-audio"
+if /i "%QQCALL_EXTRA%"=="qqcall-audio" (
+  uv sync --extra qqcall-audio --python ">=3.11,<=3.13"
+) else (
+  uv sync --python ">=3.11,<=3.13"
+)
 if errorlevel 1 (
   echo [FATAL] %QQ_ADAPTER% adapter dependency sync failed.
   endlocal & exit /b 1
@@ -332,9 +340,9 @@ if /i "%QQ_ADAPTER%"=="snowluma" (
 if exist "%ADAPTER_DIR%\%ADAPTER_MAIN%" (
   echo --- Start %QQ_ADAPTER% Adapter...
   if /i "%QQ_ADAPTER%"=="snowluma" (
-    start "NachoBot-SnowLuma" /D "%ADAPTER_DIR%" cmd /k "%PYTHON_CMD% %ADAPTER_MAIN%"
+    start "NachoBot-SnowLuma" /D "%ADAPTER_DIR%" cmd /k "%ADAPTER_PYTHON_CMD% %ADAPTER_MAIN%"
   ) else (
-    start "NachoBot-Napcat" /D "%ADAPTER_DIR%" cmd /k "set HOST=0.0.0.0 && set PORT=%ADAPTER_PORT% && %PYTHON_CMD% %ADAPTER_MAIN%"
+    start "NachoBot-Napcat" /D "%ADAPTER_DIR%" cmd /k "set HOST=0.0.0.0 && set PORT=%ADAPTER_PORT% && %ADAPTER_PYTHON_CMD% %ADAPTER_MAIN%"
   )
   timeout /t 5 /nobreak >nul
 )

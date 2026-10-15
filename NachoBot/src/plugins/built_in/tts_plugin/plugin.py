@@ -378,9 +378,21 @@ class TTSAction(BaseAction):
         return cls.DEFAULT_LANGUAGE
 
     @classmethod
-    async def get_language_prompt_for_chat(cls, chat_id: Optional[str], target_id: Optional[str] = None) -> str:
+    async def get_language_prompt_for_chat(
+        cls, chat_id: Optional[str], target_id: Optional[str] = None,
+        *, direct_reply: bool = False, text_lang: Optional[str] = None,
+    ) -> str:
         """供 planner/replyer 注入的TTS语种约束提示。"""
-        language = await cls.get_language_for_chat(chat_id=chat_id, target_id=target_id)
+        language = (text_lang if direct_reply and text_lang in {"ja", "zh"}
+                    else await cls.get_language_for_chat(chat_id=chat_id, target_id=target_id))
+        if direct_reply:
+            display = cls._get_language_display_name(language)
+            return (
+                f"本次reply正文会直接合成为语音，当前语种为{display}。"
+                f"请只使用{display}输出完整、自然的口语回复，保留既有人设和原意。"
+                "不要添加颜文字、emoji、舞台动作或非朗读标记。"
+                "不要输出另一种语言的正文再用voice_text翻译；直接输出可朗读的最终回复。"
+            )
         return cls._get_language_internal_prompt(language)
 
     def _get_current_language(self) -> str:

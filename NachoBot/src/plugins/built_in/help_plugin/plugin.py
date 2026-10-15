@@ -1,5 +1,4 @@
 from typing import Dict, List, Optional, Tuple, Type
-import re
 
 from src.common.logger import get_logger
 from src.plugin_system import BaseCommand, BasePlugin, ComponentInfo, register_plugin
@@ -9,6 +8,7 @@ from src.plugin_system.base.base_command import SwitchGpRpyCommand, SwitchPrRpyC
 from src.chat.advanced.advanced_manager import advanced_manager
 from src.plugin_system.core.component_registry import component_registry
 from src.plugin_system.core.global_announcement_manager import global_announcement_manager
+from .pattern_display import format_pattern_for_display
 
 logger = get_logger("help_plugin")
 
@@ -71,8 +71,8 @@ class HelpCommand(BaseCommand):
             if name in skip_names:
                 continue  # 不显示本指令或指定跳过的指令
 
-            pattern_raw = getattr(info, "command_pattern", "") or name
-            pattern = self._format_pattern_for_display(pattern_raw)
+            pattern_raw = getattr(info, "command_pattern", "") or ""
+            pattern = self._format_pattern_for_display(pattern_raw, fallback_name=name)
             desc = info.description or "暂无描述"
 
             permission = self._classify_permission(name, info, user_id)
@@ -239,62 +239,9 @@ class HelpCommand(BaseCommand):
         enable_cmd = plugin_cfg.get("enable_command", True)
         return bool(enabled and enable_cmd)
 
-    def _format_pattern_for_display(self, pattern: str) -> str:
+    def _format_pattern_for_display(self, pattern: str, fallback_name: Optional[str] = None) -> str:
         """将正则模式转成更易懂的触发格式"""
-        if not pattern:
-            return pattern
-
-        # 针对已知非标命令做映射，避免过度解析
-        if "lang_switch" in pattern:
-            return "#lang_switch"
-        if "mus_rand" in pattern:
-            return "#mus_rand"
-        if "点歌|播放|来首" in pattern:
-            return "点歌/播放/来首 + 关键词"
-        if "diary_" in pattern:
-            tag_match = re.search(r"#diary_\w+", pattern)
-            if tag_match:
-                return tag_match.group(0)
-        if "advanced_enable" in pattern or "#adv_on" in pattern:
-            return "#adv_on"
-        if "advanced_disable" in pattern or "#adv_off" in pattern:
-            return "#adv_off"
-        if "advanced_check" in pattern or "#adv_check" in pattern:
-            return "#adv_check"
-
-        # 如果 pattern 包含手动指定的参数标记如 <平台> (且不是正则命名分组)，则保留
-        if "<" in pattern and ">" in pattern and "(?P<" not in pattern:
-            return pattern
-
-        cleaned = pattern
-        
-        # 核心逻辑：将命名分组 (?P<name>...) 提取为 [name]
-        cleaned = re.sub(r"\(\?P<([^>]+)>.*?\)", r"[\1]", cleaned)
-        
-        # 移除正则元字符：忽略大小写标记、非捕获分组标记
-        cleaned = cleaned.replace("(?i)", "")
-        cleaned = cleaned.replace("(?:", "")
-        
-        # 移除闭合括号及可选标记 ( )?
-        cleaned = re.sub(r"\)\??", "", cleaned)
-        
-        # 移除其余正则符号：锚点、非转义的括号、量词等
-        cleaned = re.sub(r"[\^\$]", "", cleaned)
-        cleaned = cleaned.replace("(", "").replace(")", "")
-        
-        # 转换空白符号
-        cleaned = re.sub(r"\\s\+", " ", cleaned)
-        cleaned = re.sub(r"\\s\*", "", cleaned)
-        
-        # 移除转义斜杠
-        cleaned = cleaned.replace("\\", "")
-        
-        # 逻辑分支符号转换
-        cleaned = cleaned.replace("|", "/")
-        
-        # 规范化空格：将多个连续空格转换为单个，并去除首尾空白
-        cleaned = re.sub(r"\s{2,}", " ", cleaned)
-        return cleaned.strip()
+        return format_pattern_for_display(pattern, fallback_name)
 
     def _scope_suffix(self, command_name: str, pattern: str) -> str:
         """根据配置的作用域标识返回后缀"""

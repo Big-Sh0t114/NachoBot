@@ -11,8 +11,10 @@
 import asyncio
 import json
 import traceback
+import uuid
 from typing import Tuple, Any, Dict, List, Optional, TYPE_CHECKING
 from rich.traceback import install
+from structlog.contextvars import bound_contextvars
 from src.common.logger import get_logger
 from src.common.data_models.message_data_model import ReplySetModel
 from src.chat.replyer.group_generator import DefaultReplyer
@@ -187,7 +189,19 @@ async def generate_reply(
                           "避免训斥、重复提醒或声称用户听完了被打断的内容。").strip()
 
         # 调用回复器生成回复
-        with scoped_runtime_capabilities(canonical_chat_id, request_capabilities):
+        # Diagnostic fields follow this task and its preparation subtasks, not
+        # the shared Replyer instance. They never authorize a request or carry
+        # peer IDs, prompts, or provider endpoints.
+        source_row = getattr(reply_message, "focus_row_id", None)
+        if source_row is None:
+            source_row = getattr(reply_message, "id", None)
+        if type(source_row) is not int or not 0 < source_row < 2**63:
+            source_row = None
+        with scoped_runtime_capabilities(canonical_chat_id, request_capabilities), bound_contextvars(
+            reply_generation_id=uuid.uuid4().hex,
+            reply_source_row=source_row,
+        ):
+            logger.debug("[GeneratorAPI] Reply generation diagnostic scope")
             success, llm_response = await replyer.generate_reply_with_context(
                 extra_info=extra_info,
                 person_profile_block=person_profile_block,
