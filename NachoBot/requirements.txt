@@ -219,7 +219,7 @@ pygments==2.20.0
     # via
     #   readme-renderer
     #   rich
-pyjwt==2.13.0
+pyjwt==2.15.0
     # via mcp
 pymongo==4.17.0
     # via nachobot
