@@ -50,6 +50,14 @@ perception_template.toml   -> configs/perception.toml
 
 TTS Runtime 在进程启动时固定读取一次活动配置并选择唯一后端。切换 GPT-SoVITS/Vox 或修改模型配置后需要重启 TTS Runtime；请求期间不会重载或切换本地模型。
 
+## PyTorch 运行时依赖
+
+FULL 多模态环境的 GPU manifest 固定使用 PyTorch `2.13.0+cu126`、TorchVision `0.28.0+cu126` 与 TorchAudio `2.11.0+cu126`，通过 PyTorch 官方 CUDA 12.6 wheel index 安装。GPU 环境需要支持 CUDA 12.6 的 NVIDIA 驱动；CUDA 12.6 GA 对应的驱动版本为 Windows `560.76` 或更高、Linux `560.28.03` 或更高，驱动由主机提供，不会由 Python 依赖安装。CPU-only 环境可用 `pyproject.toml.cpu` 中对应的 `+cpu` 三件套与官方 CPU wheel index。不要把 CPU 与 GPU wheel 混装。版本组合参见 [PyTorch 官方安装矩阵](https://pytorch.org/get-started/previous-versions/) 与 [NVIDIA CUDA 12.6 驱动说明](https://docs.nvidia.com/cuda/archive/12.6.0/cuda-toolkit-release-notes/index.html)。
+
+TorchAudio `2.11.0` 使用 PyTorch stable ABI，并支持 PyTorch `2.11` 及更高版本。已对 Windows/Linux、Python 3.11/3.12 的依赖解析与 wheel 可用性做 dry-run 验证；模型加载和实时推理仍需在部署环境验证。详见 [TorchAudio 官方兼容性说明](https://docs.pytorch.org/audio/stable/installation.html)。
+
+FULL/LITE 启动器与 TTS 托管 VoxCPM/GPT-SoVITS 环境固定到 PyTorch `2.13.0` 与 TorchAudio `2.11.0`：GPU 使用官方 cu126 wheels，CPU-only 使用官方 CPU wheels；若后端 requirements 引入 TorchVision，则约束到匹配的 `0.28.0` wheel。托管运行时会将版本约束应用到后续后端 requirements 安装，并在写入或复用就绪标记前检查 PyTorch/TorchAudio 版本；旧依赖标记会触发重新安装。Windows GPU VoxCPM `torch.compile` 使用 `triton-windows==3.7.1.post27`，其 PyTorch `2.13` 支持范围见 [triton-windows 官方说明](https://github.com/triton-lang/triton-windows)。这验证的是安装约束和包元数据；后端模型加载、编译及实时推理仍需在部署环境验证。
+
 所有本地模型都在各自服务公开就绪前加载：FULL 的 9874 会完成 ASR 与 VLM 预加载；9880 会先启动并验证所选 TTS 后端，Vox 启用情感分类时还会在公开端口监听前加载分类器。任一必需模型加载失败，所属服务启动失败并由 Core 执行既定降级。
 
 ## 启动

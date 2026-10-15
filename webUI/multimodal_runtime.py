@@ -291,6 +291,7 @@ class MultimodalRuntimeManager:
 
     @classmethod
     def _prepare_project(cls, profile: str) -> Path:
+        profile = cls.normalize_profile(profile)
         if profile == "gpu":
             # Main pyproject.toml + uv.lock own the CUDA environment.
             return cls.ADAPTER_DIR

@@ -84,6 +84,24 @@ def _error_response(status: int, message: str, code: str = "inference_failure") 
     return JSONResponse(status_code=status, content={"error": {"code": code, "message": message}})
 
 
+def _log_safe(value: object, max_len: int = 512) -> str:
+    text = str(value).replace("\r", "\\r").replace("\n", "\\n")
+    text = "".join(char if char >= " " and char != "\x7f" else "?" for char in text)
+    if len(text) > max_len:
+        return text[:max_len].rstrip() + "...[truncated]"
+    return text
+
+
+def _log_exception(message: str, exc: Exception, *, level: int = logging.ERROR) -> None:
+    logger.log(
+        level,
+        "%s (exception_type=%s): %s",
+        message,
+        type(exc).__name__,
+        _log_safe(exc),
+    )
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Load both local perception models before the listener is ready.
@@ -103,9 +121,9 @@ async def lifespan(_app: FastAPI):
         if callable(start_reaper):
             await start_reaper()
         yield
-    except Exception:
-        logger.exception("Local ASR/VLM preload failed; refusing 9874 readiness")
-        raise
+    except Exception as exc:
+        _log_exception("Local ASR/VLM preload failed; refusing 9874 readiness", exc)
+        raise RuntimeError("Local ASR/VLM preload failed") from None
     finally:
         close_streams = getattr(_runtime, "close_audio_streams", None)
         if callable(close_streams):
@@ -173,18 +191,20 @@ async def audio_stream_start(body: AudioStreamStartBody) -> dict[str, str] | JSO
             channels=body.channels,
         )
     except ValueError as exc:
-        return _audio_stream_error(400, str(exc), "invalid_request")
+        _log_exception("Invalid local ASR stream start request", exc, level=logging.WARNING)
+        return _audio_stream_error(400, "invalid audio stream start request", "invalid_request")
     except LocalBusy:
         return _audio_stream_error(503, "streaming ASR is busy", "busy")
     except RuntimeUnavailable:
         return _audio_stream_error(503, "local streaming ASR is unavailable", "runtime_unavailable")
     except UnsupportedOperation as exc:
-        return _audio_stream_error(501, str(exc), "unsupported")
-    except AudioStreamInferenceError:
-        logger.exception("Local ASR stream start failed")
+        _log_exception("Unsupported local ASR stream start request", exc, level=logging.WARNING)
+        return _audio_stream_error(501, "operation is not supported by the local runtime", "unsupported")
+    except AudioStreamInferenceError as exc:
+        _log_exception("Local ASR stream start failed", exc)
         return _audio_stream_error(502, "local ASR stream could not start", "inference_failure")
-    except Exception:
-        logger.exception("Local ASR stream start failed")
+    except Exception as exc:
+        _log_exception("Local ASR stream start failed", exc)
         return _audio_stream_error(502, "local ASR stream could not start", "inference_failure")
     return {"stream_id": stream_id}
 
@@ -199,20 +219,23 @@ async def audio_stream_chunk(body: AudioStreamChunkBody) -> dict[str, Any] | JSO
             pcm_bytes=pcm_bytes,
         )
     except ValueError as exc:
-        return _audio_stream_error(400, str(exc), "invalid_request")
+        _log_exception("Invalid local ASR stream chunk request", exc, level=logging.WARNING)
+        return _audio_stream_error(400, "invalid audio stream chunk", "invalid_request")
     except KeyError:
         return _audio_stream_error(404, "audio stream was not found or has expired", "not_found")
     except AudioStreamConflict as exc:
-        return _audio_stream_error(409, str(exc), "conflict")
+        _log_exception("Conflicting local ASR stream chunk request", exc, level=logging.WARNING)
+        return _audio_stream_error(409, "audio stream is not accepting chunks", "conflict")
     except AudioStreamInferenceError as exc:
-        logger.exception("Local ASR stream chunk failed")
-        return _audio_stream_error(502, str(exc), "chunk_failure")
+        _log_exception("Local ASR stream chunk failed", exc)
+        return _audio_stream_error(502, "local ASR stream chunk failed", "chunk_failure")
     except RuntimeUnavailable:
         return _audio_stream_error(503, "local streaming ASR is unavailable", "runtime_unavailable")
     except UnsupportedOperation as exc:
-        return _audio_stream_error(501, str(exc), "unsupported")
-    except Exception:
-        logger.exception("Local ASR stream chunk failed")
+        _log_exception("Unsupported local ASR stream chunk request", exc, level=logging.WARNING)
+        return _audio_stream_error(501, "operation is not supported by the local runtime", "unsupported")
+    except Exception as exc:
+        _log_exception("Local ASR stream chunk failed", exc)
         return _audio_stream_error(502, "local ASR stream chunk failed", "chunk_failure")
     return {"seq": body.seq, "partial_text": partial_text}
 
@@ -224,16 +247,18 @@ async def audio_stream_finish(body: AudioStreamBody) -> dict[str, str] | JSONRes
     except KeyError:
         return _audio_stream_error(404, "audio stream was not found or has expired", "not_found")
     except AudioStreamConflict as exc:
-        return _audio_stream_error(409, str(exc), "conflict")
+        _log_exception("Conflicting local ASR stream finalization request", exc, level=logging.WARNING)
+        return _audio_stream_error(409, "audio stream cannot be finalized in its current state", "conflict")
     except AudioStreamInferenceError as exc:
-        logger.exception("Local ASR stream finalization failed")
-        return _audio_stream_error(502, str(exc), "finalization_failure")
+        _log_exception("Local ASR stream finalization failed", exc)
+        return _audio_stream_error(502, "local ASR stream finalization failed", "finalization_failure")
     except RuntimeUnavailable:
         return _audio_stream_error(503, "local streaming ASR is unavailable", "runtime_unavailable")
     except UnsupportedOperation as exc:
-        return _audio_stream_error(501, str(exc), "unsupported")
-    except Exception:
-        logger.exception("Local ASR stream finalization failed")
+        _log_exception("Unsupported local ASR stream finalization request", exc, level=logging.WARNING)
+        return _audio_stream_error(501, "operation is not supported by the local runtime", "unsupported")
+    except Exception as exc:
+        _log_exception("Local ASR stream finalization failed", exc)
         return _audio_stream_error(502, "local ASR stream finalization failed", "finalization_failure")
     return {"text": text}
 
@@ -245,13 +270,15 @@ async def audio_stream_abort(body: AudioStreamBody) -> dict[str, bool] | JSONRes
     except KeyError:
         return _audio_stream_error(404, "audio stream was not found or has expired", "not_found")
     except AudioStreamConflict as exc:
-        return _audio_stream_error(409, str(exc), "conflict")
+        _log_exception("Conflicting local ASR stream abort request", exc, level=logging.WARNING)
+        return _audio_stream_error(409, "audio stream cannot be aborted in its current state", "conflict")
     except RuntimeUnavailable:
         return _audio_stream_error(503, "local streaming ASR is unavailable", "runtime_unavailable")
     except UnsupportedOperation as exc:
-        return _audio_stream_error(501, str(exc), "unsupported")
-    except Exception:
-        logger.exception("Local ASR stream abort failed")
+        _log_exception("Unsupported local ASR stream abort request", exc, level=logging.WARNING)
+        return _audio_stream_error(501, "operation is not supported by the local runtime", "unsupported")
+    except Exception as exc:
+        _log_exception("Local ASR stream abort failed", exc)
         return _audio_stream_error(502, "local ASR stream abort failed", "inference_failure")
     return {"aborted": True}
 
@@ -266,15 +293,20 @@ async def perception(body: PerceptionBody) -> dict[str, Any] | JSONResponse:
             prompt=body.prompt,
         )
     except ValueError as exc:
-        return _error_response(400, str(exc), "invalid_request")
+        _log_exception("Invalid local perception request", exc, level=logging.WARNING)
+        return _error_response(400, "invalid perception request", "invalid_request")
     except LocalBusy:
         return _error_response(503, "local Florence worker is busy", "busy")
     except RuntimeUnavailable:
         return _error_response(503, "local perception runtime unavailable", "runtime_unavailable")
     except UnsupportedOperation as exc:
-        return _error_response(501, str(exc), "unsupported")
-    except Exception:
-        logger.exception("Local perception operation failed: %s", body.operation)
+        _log_exception("Unsupported local perception operation", exc, level=logging.WARNING)
+        return _error_response(501, "operation is not supported by the local runtime", "unsupported")
+    except Exception as exc:
+        _log_exception(
+            f"Local perception operation failed: operation={_log_safe(body.operation, 64)}",
+            exc,
+        )
         return _error_response(502, "local perception operation failed", "inference_failure")
     if not text:
         return _error_response(502, "local perception returned empty text", "inference_failure")
@@ -341,9 +373,10 @@ async def vlm_chat_completions(request: Request) -> dict[str, Any] | JSONRespons
     except RuntimeUnavailable:
         return _error_response(503, "local perception runtime unavailable", "runtime_unavailable")
     except UnsupportedOperation as exc:
-        return _error_response(501, str(exc), "unsupported")
-    except Exception:
-        logger.exception("Legacy VLM inference failed")
+        _log_exception("Unsupported legacy VLM request", exc, level=logging.WARNING)
+        return _error_response(501, "operation is not supported by the local runtime", "unsupported")
+    except Exception as exc:
+        _log_exception("Legacy VLM inference failed", exc)
         return _error_response(502, "local VLM inference failed")
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
@@ -374,9 +407,10 @@ async def audio_transcriptions(
     except RuntimeUnavailable:
         return _error_response(503, "local perception runtime unavailable", "runtime_unavailable")
     except UnsupportedOperation as exc:
-        return _error_response(501, str(exc), "unsupported")
-    except Exception:
-        logger.exception("Legacy ASR inference failed")
+        _log_exception("Unsupported legacy ASR request", exc, level=logging.WARNING)
+        return _error_response(501, "operation is not supported by the local runtime", "unsupported")
+    except Exception as exc:
+        _log_exception("Legacy ASR inference failed", exc)
         return _error_response(502, "local ASR inference failed")
     return {"text": text}
 

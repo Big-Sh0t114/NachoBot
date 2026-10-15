@@ -3,6 +3,7 @@ import json
 import os
 import time
 from typing import Any
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 import bs4
@@ -14,6 +15,50 @@ from src.plugin_system.apis import config_api
 from src.chat.utils.utils_image import get_image_manager
 
 logger = get_logger('Maizone.QzoneAPI')
+
+_QZONE_IMAGE_HOSTS = ("qpic.cn", "qlogo.cn", "gtimg.cn", "gtimg.com", "qq.com")
+_QZONE_EMOJI_HOST = "qzonestyle.gtimg.cn"
+_MAX_QZONE_IMAGE_BYTES = 20 * 1024 * 1024
+
+
+def _log_safe(value: object, max_len: int = 200) -> str:
+    text = str(value).replace("\r", "\\r").replace("\n", "\\n")
+    text = "".join(char if char >= " " and char != "\x7f" else "?" for char in text)
+    if len(text) > max_len:
+        return text[:max_len].rstrip() + "...[truncated]"
+    return text
+
+
+def _normalize_qzone_image_url(raw_url: str) -> str:
+    """Allow only HTTP(S) URLs hosted on QQ's image/content domains."""
+    text = str(raw_url or "").strip()
+    if not text or any(ord(char) < 32 or ord(char) == 127 for char in text):
+        raise ValueError("unsupported Qzone image URL")
+    url = urljoin("https://qzone.qq.com/", text)
+    try:
+        parsed = urlsplit(url)
+        hostname = (parsed.hostname or "").lower().rstrip(".")
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("unsupported Qzone image URL") from exc
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, 80 if parsed.scheme.lower() == "http" else 443)
+        or not any(hostname == domain or hostname.endswith("." + domain) for domain in _QZONE_IMAGE_HOSTS)
+    ):
+        raise ValueError("unsupported Qzone image URL")
+    return url
+
+
+def _is_qzone_emoji_url(url: str) -> bool:
+    try:
+        normalized = _normalize_qzone_image_url(url)
+        return urlsplit(normalized).hostname == _QZONE_EMOJI_HOST
+    except ValueError:
+        return False
 
 
 class QzoneAPIError(RuntimeError):
@@ -195,20 +240,40 @@ class QzoneAPI:
             Raises:
                 Exception: 如果请求失败或状态码不是200，将抛出异常。
         """
+        current_url = _normalize_qzone_image_url(url)
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
             "Referer": "https://qzone.qq.com/"
         }
-        async with httpx.AsyncClient(follow_redirects=True) as client:
-            request = httpx.Request("GET", url, headers=headers)
-            response = await client.send(request)
+        downloaded = bytearray()
+        status_code = 0
+        async with httpx.AsyncClient(follow_redirects=False, timeout=15.0) as client:
+            for redirect_count in range(4):
+                async with client.stream("GET", current_url, headers=headers) as response:
+                    status_code = response.status_code
+                    if status_code in {301, 302, 303, 307, 308}:
+                        location = response.headers.get("Location", "")
+                        if not location or redirect_count == 3:
+                            raise QzoneAPIError("QQ空间图片重定向无效")
+                        current_url = _normalize_qzone_image_url(urljoin(current_url, location))
+                        continue
+                    if status_code != 200:
+                        break
 
-        if response.status_code != 200:
-            logger.error(f"请求失败: {response.url}")
-            logger.error(f"原始URL: {url}")
-            raise Exception(f"图片请求失败: {response.status_code}")
+                    content_length = response.headers.get("Content-Length", "")
+                    if content_length.isdecimal() and int(content_length) > _MAX_QZONE_IMAGE_BYTES:
+                        raise QzoneAPIError("QQ空间图片超过大小限制")
+                    async for chunk in response.aiter_bytes():
+                        if len(downloaded) + len(chunk) > _MAX_QZONE_IMAGE_BYTES:
+                            raise QzoneAPIError("QQ空间图片超过大小限制")
+                        downloaded.extend(chunk)
+                    break
 
-        return base64.b64encode(response.content).decode('utf-8')
+        if status_code != 200:
+            logger.error("Qzone image request failed status=%s url=%s", status_code, _log_safe(current_url))
+            raise QzoneAPIError(f"图片请求失败: {status_code}")
+
+        return base64.b64encode(downloaded).decode('utf-8')
 
     async def upload_image(self, image: bytes) -> str:
         """
@@ -748,8 +813,14 @@ class QzoneAPI:
                 if img_box:
                     for img in img_box.find_all('img'):
                         src = img.get('src')
-                        if src and not src.startswith('http://qzonestyle.gtimg.cn'):  # 过滤表情图标
-                            image_urls.append(src)
+                        if src:
+                            try:
+                                image_url = _normalize_qzone_image_url(src)
+                            except ValueError:
+                                logger.warning("Skipping Qzone image URL outside QQ content hosts")
+                                continue
+                            if not _is_qzone_emoji_url(image_url):
+                                image_urls.append(image_url)
                 # TODO 临时视频处理办法（视频缩略图）
                 img_tag = soup.select_one('div.video-img img')
                 if img_tag and 'src' in img_tag.attrs:
@@ -765,7 +836,7 @@ class QzoneAPI:
                         description = await image_manager.get_image_description(image_base64)
                         images.append(description)
                     except Exception as e:
-                        logger.info(f'图片识别失败: {url} - {str(e)}')
+                        logger.info("图片识别失败: %s - %s", _log_safe(url), _log_safe(e))
                 # 获取视频url
                 videos = []
                 video_div = soup.select_one('div.img-box.f-video-wrap.play')

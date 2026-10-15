@@ -314,9 +314,9 @@ class MessengerRelayAction(BaseAction):
                 logger.warning(f"[信使] PersonInfo 中缺少 platform 或 user_id: {person_id}")
                 return None
 
-            # 计算私聊 stream_id: md5(platform_userId_private)
+            # Reuse the persisted ChatManager stream key format; this digest is
+            # an identifier, not an authentication or integrity primitive.
             key = f"{platform}_{user_id}_private"
-            # codeql[py/weak-sensitive-data-hashing]
             stream_id = hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()
 
             # 验证该 stream 是否存在于 ChatManager
@@ -453,9 +453,8 @@ class ConveyCommand(BaseCommand):
         if self.message and self.message.message_info:
             source_platform = getattr(self.message.message_info, "platform", "") or ""
 
-        # 直接通过 QQ号 计算私聊 stream_id
+        # Reuse ChatManager's persisted QQ private-stream identifier.
         key = f"qq_{target_qq}_private"
-        # codeql[py/weak-sensitive-data-hashing]
         target_stream_id = hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()
 
         # 验证 stream 存在

@@ -17,6 +17,7 @@ import numpy as np
 import torch
 from typing import Optional, List
 from pathlib import Path
+import toml
 
 # Direct execution puts this file's directory first on ``sys.path``.  Add the
 # adapter root so the shared helper is still imported through its stable
@@ -41,6 +42,8 @@ logger = logging.getLogger("vox_api_server")
 
 
 AUDIO_FILE_SUFFIXES = {".wav", ".flac", ".mp3", ".m4a", ".ogg", ".opus"}
+_DEFAULT_VOX_CONFIG_PATH = _ADAPTER_ROOT / "configs" / "vox.toml"
+_AUDIO_PATH_ROOTS: tuple[Path, ...] = ()
 
 
 def _log_safe(value: object, max_len: int = 120) -> str:
@@ -52,11 +55,58 @@ def _log_safe(value: object, max_len: int = 120) -> str:
     return text
 
 
+def _configured_audio_roots(config_path: str | Path) -> tuple[Path, ...]:
+    """Resolve audio directories named by operator-owned Vox presets."""
+    path = Path(config_path).expanduser().resolve(strict=False)
+    try:
+        config = toml.load(str(path))
+    except Exception as exc:
+        logger.warning("Unable to load Vox path configuration (%s)", type(exc).__name__)
+        return ()
+
+    presets = config.get("tts", {}).get("models", {}).get("presets", {})
+    if not isinstance(presets, dict):
+        return ()
+    roots: set[Path] = set()
+    for preset in presets.values():
+        if not isinstance(preset, dict):
+            continue
+        values: list[object] = []
+        for key in ("ref_audio_path", "reference_wav_path", "prompt_wav_path"):
+            value = preset.get(key)
+            if isinstance(value, (str, Path)):
+                values.append(value)
+        auxiliary = preset.get("aux_ref_audio_paths", [])
+        if isinstance(auxiliary, (list, tuple)):
+            values.extend(auxiliary)
+        for value in values:
+            text = str(value or "").strip()
+            if not text or len(text) > 4096:
+                continue
+            configured_path = Path(text).expanduser()
+            if not configured_path.is_absolute():
+                configured_path = path.parent / configured_path
+            try:
+                roots.add(configured_path.resolve(strict=False).parent)
+            except (OSError, RuntimeError, ValueError):
+                continue
+    return tuple(sorted(roots))
+
+
+def _is_within_audio_root(path: Path, roots: tuple[Path, ...]) -> bool:
+    for root in roots:
+        try:
+            path.relative_to(root.resolve(strict=True))
+            return True
+        except (OSError, RuntimeError, ValueError):
+            continue
+    return False
+
+
 def _resolve_existing_dir(raw_path: str, label: str) -> Optional[Path]:
     text = str(raw_path or "").strip()
     if not text:
         return None
-    # codeql[py/path-injection]
     path = Path(text).expanduser().resolve(strict=False)
     if path.is_dir():
         return path
@@ -64,17 +114,35 @@ def _resolve_existing_dir(raw_path: str, label: str) -> Optional[Path]:
     return None
 
 
-def _resolve_optional_audio_path(raw_path: str, label: str) -> Optional[str]:
+def _resolve_optional_audio_path(
+    raw_path: str,
+    label: str,
+    allowed_roots: tuple[Path, ...] | None = None,
+) -> Optional[str]:
     text = str(raw_path or "").strip()
     if not text:
         return None
-    # codeql[py/path-injection]
-    path = Path(text).expanduser().resolve(strict=False)
+    if len(text) > 4096:
+        logger.warning("%s路径过长", label)
+        return None
+    candidate = Path(text).expanduser()
+    if ".." in candidate.parts:
+        logger.warning("%s路径不能包含父目录跳转", label)
+        return None
+    try:
+        path = candidate.resolve(strict=True)
+    except (OSError, RuntimeError):
+        logger.warning("%s不存在或无法解析", label)
+        return None
     if path.suffix.lower() not in AUDIO_FILE_SUFFIXES:
         logger.warning("%s类型不支持: %s", label, _log_safe(path))
         return None
     if not path.is_file():
         logger.warning("%s不存在: %s", label, _log_safe(path))
+        return None
+    roots = _AUDIO_PATH_ROOTS if allowed_roots is None else allowed_roots
+    if not _is_within_audio_root(path, tuple(Path(root) for root in roots)):
+        logger.warning("%s路径不在已配置的音频目录中: %s", label, _log_safe(path))
         return None
     return str(path)
 
@@ -289,21 +357,21 @@ def load_model(
 
 @app.get("/tts")
 async def tts(
-    text: str = Query(..., description="要合成的文本"),
+    text: str = Query(..., min_length=1, max_length=10_000, description="要合成的文本"),
     text_lang: str = Query("auto", description="文本语言（兼容参数，VoxCPM自动检测）"),
-    control_instruction: str = Query("", description="声音控制描述"),
-    reference_wav_path: str = Query("", description="参考音频路径（可控克隆）"),
-    prompt_text: str = Query("", description="参考音频文本（极致克隆）"),
-    prompt_wav_path: str = Query("", description="提示音频路径（极致克隆，默认同reference_wav_path）"),
-    cfg_value: float = Query(2.0, description="CFG引导强度"),
-    inference_timesteps: int = Query(10, description="LocDiT迭代步数"),
+    control_instruction: str = Query("", max_length=10_000, description="声音控制描述"),
+    reference_wav_path: str = Query("", max_length=4096, description="参考音频路径（可控克隆）"),
+    prompt_text: str = Query("", max_length=10_000, description="参考音频文本（极致克隆）"),
+    prompt_wav_path: str = Query("", max_length=4096, description="提示音频路径（极致克隆，默认同reference_wav_path）"),
+    cfg_value: float = Query(2.0, ge=0.0, le=20.0, description="CFG引导强度"),
+    inference_timesteps: int = Query(10, ge=1, le=100, description="LocDiT迭代步数"),
     denoise: str = Query("false", description="兼容参数，降噪功能已禁用"),
     normalize: str = Query("false", description="是否文本规范化"),
     media_type: str = Query("wav", description="音频格式（仅支持wav）"),
     streaming_mode: str = Query("false", description="流式模式（暂不支持）"),
     split_method: str = Query("cut3", description="文本切句方法: cut0(不切)/cut1(句号)/cut2(+逗号)/cut3(+分号冒号)/cut4(按字数)/cut5(标点+字数)"),
-    max_split_length: int = Query(80, description="cut4/cut5模式下每段最大字符数"),
-    segment_gap_ms: int = Query(100, description="句间静音间隔（毫秒），0为不插入"),
+    max_split_length: int = Query(80, ge=1, le=2000, description="cut4/cut5模式下每段最大字符数"),
+    segment_gap_ms: int = Query(100, ge=0, le=2000, description="句间静音间隔（毫秒），0为不插入"),
 ):
     """文本转语音接口
 
@@ -415,7 +483,7 @@ async def tts(
         return Response(content=wav_bytes, media_type="audio/wav")
 
     except Exception as e:
-        logger.error("TTS generation error: %s", _log_safe(e), exc_info=True)
+        logger.error("TTS generation error: %s", _log_safe(e))
         return Response(
             content='{"message": "生成失败"}',
             status_code=500,
@@ -425,21 +493,21 @@ async def tts(
 
 @app.get("/tts_stream")
 async def tts_stream(
-    text: str = Query(..., description="要合成的文本"),
+    text: str = Query(..., min_length=1, max_length=10_000, description="要合成的文本"),
     text_lang: str = Query("auto", description="文本语言（兼容参数，VoxCPM自动检测）"),
-    control_instruction: str = Query("", description="声音控制描述"),
-    reference_wav_path: str = Query("", description="参考音频路径（可控克隆）"),
-    prompt_text: str = Query("", description="参考音频文本（极致克隆）"),
-    prompt_wav_path: str = Query("", description="提示音频路径（极致克隆，默认同reference_wav_path）"),
-    cfg_value: float = Query(2.0, description="CFG引导强度"),
-    inference_timesteps: int = Query(10, description="LocDiT迭代步数"),
+    control_instruction: str = Query("", max_length=10_000, description="声音控制描述"),
+    reference_wav_path: str = Query("", max_length=4096, description="参考音频路径（可控克隆）"),
+    prompt_text: str = Query("", max_length=10_000, description="参考音频文本（极致克隆）"),
+    prompt_wav_path: str = Query("", max_length=4096, description="提示音频路径（极致克隆，默认同reference_wav_path）"),
+    cfg_value: float = Query(2.0, ge=0.0, le=20.0, description="CFG引导强度"),
+    inference_timesteps: int = Query(10, ge=1, le=100, description="LocDiT迭代步数"),
     denoise: str = Query("true", description="是否降噪"),
     normalize: str = Query("false", description="是否文本规范化"),
     media_type: str = Query("wav", description="音频格式（仅支持wav）"),
     streaming_mode: str = Query("true", description="流式模式（已支持）"),
     split_method: str = Query("cut3", description="文本切句方法: cut0(不切)/cut1(句号)/cut2(+逗号)/cut3(+分号冒号)/cut4(按字数)/cut5(标点+字数)"),
-    max_split_length: int = Query(80, description="cut4/cut5模式下每段最大字符数"),
-    segment_gap_ms: int = Query(100, description="句间静音间隔（毫秒），0为不插入"),
+    max_split_length: int = Query(80, ge=1, le=2000, description="cut4/cut5模式下每段最大字符数"),
+    segment_gap_ms: int = Query(100, ge=0, le=2000, description="句间静音间隔（毫秒），0为不插入"),
 ):
     """流式文本转语音接口"""
     if voxcpm_model is None:
@@ -517,7 +585,7 @@ async def tts_stream(
                     yield silence_gap_pcm
 
         except Exception as e:
-            logger.error("TTS stream generation error: %s", _log_safe(e), exc_info=True)
+            logger.error("TTS stream generation error: %s", _log_safe(e))
 
     return StreamingResponse(
         generate_pcm_stream(),
@@ -544,6 +612,7 @@ async def health():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="VoxCPM TTS API Server")
+    parser.add_argument("--config", type=Path, default=_DEFAULT_VOX_CONFIG_PATH)
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9881)
     parser.add_argument(
@@ -562,6 +631,8 @@ if __name__ == "__main__":
         raise SystemExit("Vox raw API must bind to loopback")
     if args.port == 9880:
         raise SystemExit("Vox raw API cannot bind the public 9880 port")
+
+    _AUDIO_PATH_ROOTS = _configured_audio_roots(args.config)
 
     # 启动时加载模型
     load_model(

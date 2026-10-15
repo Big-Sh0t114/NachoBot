@@ -4,6 +4,7 @@ import base64
 import binascii
 import hashlib
 import mimetypes
+import re
 import shutil
 import uuid
 from pathlib import Path
@@ -50,10 +51,12 @@ class ChatMediaStore:
     @staticmethod
     def _safe_suffix(name: str, mime_type: str = "") -> str:
         suffix = Path(str(name or "")).suffix.lower()
+        # The 12-character allowance includes the leading dot so the stored
+        # extension stays within the media-ID parser's accepted shape.
         if suffix and len(suffix) <= 12 and suffix[1:].isalnum():
             return suffix
         guessed = mimetypes.guess_extension(str(mime_type or "").split(";", 1)[0].strip())
-        if guessed and len(guessed) <= 12:
+        if guessed and len(guessed) <= 12 and guessed[1:].isalnum():
             return guessed.lower()
         return ""
 
@@ -95,12 +98,26 @@ class ChatMediaStore:
 
     def resolve(self, media_id: str) -> Path:
         value = str(media_id or "").strip()
-        if not value or Path(value).name != value:
+        if not self._is_generated_media_id(value):
             raise ChatMediaError("无效的附件标识")
         path = (self.root / value).resolve()
         if path.parent != self.root or not path.is_file():
             raise ChatMediaError("附件不存在或已失效")
         return path
+
+    @staticmethod
+    def _is_generated_media_id(value: str) -> bool:
+        """Accept only identifiers emitted by save_bytes and _copy_local."""
+        if not value or "/" in value or "\\" in value:
+            return False
+        base, separator, suffix = value.partition(".")
+        if separator and (
+            not suffix or len(suffix) + 1 > 12 or not suffix.isalnum()
+        ):
+            return False
+        return bool(
+            re.fullmatch(r"[0-9a-f]{32}|core-[0-9a-f]{20}", base)
+        )
 
     def to_core_segment(self, attachment: dict[str, Any]) -> dict[str, Any]:
         kind = self.normalize_type(str(attachment.get("type") or ""))

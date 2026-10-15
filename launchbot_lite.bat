@@ -142,7 +142,7 @@ if /i "!BAT_RUNTIME!"=="cpu" (
   set "TTS_TORCH_INDEX=https://download.pytorch.org/whl/cpu"
 ) else if /i "!BAT_RUNTIME!"=="gpu" (
   set "ADAPTER_ENV_DIR=%ADAPTER_DIR%\.venv"
-  set "TTS_TORCH_INDEX=https://download.pytorch.org/whl/cu128"
+  set "TTS_TORCH_INDEX=https://download.pytorch.org/whl/cu126"
 ) else (
   echo [FATAL] Invalid [bat_runtime].lite value: !BAT_RUNTIME! ^(expected gpu or cpu^)
   set "TTS_RC=1"

@@ -17,13 +17,13 @@ from nachobot_multimodal.utils.tts_runtime import TTSRuntime
 
 
 class _WeightModel:
-    def __init__(self, fail_sovits=False):
+    def __init__(self, fail_sovits=False, gpt_path="old-gpt", sovits_path="old-sovits"):
         self.config = SimpleNamespace(
             tts=SimpleNamespace(
                 models=SimpleNamespace(
                     presets={
-                        "default": SimpleNamespace(gpt_model="old-gpt", sovits_model="old-sovits"),
-                        "alt": SimpleNamespace(gpt_model="alt-gpt", sovits_model="alt-sovits"),
+                        "default": SimpleNamespace(gpt_model=gpt_path, sovits_model=sovits_path),
+                        "alt": SimpleNamespace(gpt_model=gpt_path, sovits_model=sovits_path),
                     }
                 )
             )
@@ -112,7 +112,9 @@ class FixedGptApiTests(unittest.TestCase):
                 sovits = root / "new.pth"
                 gpt.write_bytes(b"gpt")
                 sovits.write_bytes(b"sovits")
-                model = _WeightModel()
+                configured_gpt = root / "configured-gpt.ckpt"
+                configured_sovits = root / "configured-sovits.pth"
+                model = _WeightModel(gpt_path=str(configured_gpt), sovits_path=str(configured_sovits))
                 runtime = _Runtime(model)
                 old_runtime = api_server._runtime
                 old_model = api_server.tts_model
@@ -152,7 +154,11 @@ class FixedGptApiTests(unittest.TestCase):
                 sovits = root / "new.pth"
                 gpt.write_bytes(b"gpt")
                 sovits.write_bytes(b"sovits")
-                failed = _WeightModel(fail_sovits=True)
+                failed = _WeightModel(
+                    fail_sovits=True,
+                    gpt_path=str(root / "configured-gpt.ckpt"),
+                    sovits_path=str(root / "configured-sovits.pth"),
+                )
                 runtime = _Runtime(failed)
                 old_runtime = api_server._runtime
                 old_model = api_server.tts_model
@@ -171,6 +177,87 @@ class FixedGptApiTests(unittest.TestCase):
                     api_server.tts_model = old_model
 
         asyncio.run(scenario())
+
+    def test_load_model_rejects_paths_outside_configured_model_directories(self):
+        async def scenario():
+            from nachobot_multimodal.tts.backends.GPT_Sovits import api_server
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                configured = root / "configured"
+                requested = root / "unconfigured"
+                configured.mkdir()
+                requested.mkdir()
+                gpt = requested / "new.ckpt"
+                sovits = requested / "new.pth"
+                gpt.write_bytes(b"gpt")
+                sovits.write_bytes(b"sovits")
+                model = _WeightModel(
+                    gpt_path=str(configured / "active.ckpt"),
+                    sovits_path=str(configured / "active.pth"),
+                )
+                old_runtime = api_server._runtime
+                old_model = api_server.tts_model
+                api_server._runtime = _Runtime(model)
+                api_server.tts_model = model
+                try:
+                    result = await api_server.load_model(
+                        _Request({"gpt_path": str(gpt), "sovits_path": str(sovits)})
+                    )
+                    self.assertEqual(result["status"], "error")
+                    self.assertNotIn(str(requested), result["msg"])
+                    self.assertEqual(model.calls, [])
+                finally:
+                    api_server._runtime = old_runtime
+                    api_server.tts_model = old_model
+
+        asyncio.run(scenario())
+
+    def test_weight_path_rejects_parent_traversal_and_symlink_escape(self):
+        from nachobot_multimodal.tts.backends.GPT_Sovits import api_server
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "configured"
+            outside = Path(temp_dir) / "outside"
+            root.mkdir()
+            outside.mkdir()
+            outside_file = outside / "outside.ckpt"
+            outside_file.write_bytes(b"outside")
+            with self.assertRaises(ValueError):
+                api_server._resolve_weight_file("../outside/outside.ckpt", api_server.GPT_WEIGHT_SUFFIXES, "GPT", (root,))
+
+            escaped = root / "escaped.ckpt"
+            try:
+                escaped.symlink_to(outside_file)
+            except (OSError, NotImplementedError):
+                self.skipTest("file symlinks are unavailable on this host")
+            with self.assertRaises(ValueError):
+                api_server._resolve_weight_file(str(escaped), api_server.GPT_WEIGHT_SUFFIXES, "GPT", (root,))
+
+    def test_output_path_stays_in_adapter_owned_output_directory(self):
+        from nachobot_multimodal.tts.backends.GPT_Sovits import api_server
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            old_output = api_server.OUTPUT_DIR
+            api_server.OUTPUT_DIR = root / "outputs"
+            try:
+                safe_path = api_server._safe_output_path("../../private\nfile")
+                self.assertEqual(safe_path.parent, (root / "outputs").resolve())
+                self.assertNotIn("..", safe_path.name)
+
+                api_server.OUTPUT_DIR.mkdir()
+                outside = root / "private.wav"
+                outside.write_bytes(b"private")
+                link = api_server.OUTPUT_DIR / "output_link.wav"
+                try:
+                    link.symlink_to(outside)
+                except (OSError, NotImplementedError):
+                    self.skipTest("file symlinks are unavailable on this host")
+                with self.assertRaises(ValueError):
+                    api_server._safe_output_path("link")
+            finally:
+                api_server.OUTPUT_DIR = old_output
 
     def test_cancelled_weight_transaction_is_drained_before_runtime_reuse(self):
         async def scenario():

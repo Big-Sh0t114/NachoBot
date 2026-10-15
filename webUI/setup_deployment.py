@@ -963,7 +963,7 @@ class ConfigInitializer:
                             }
                     except Exception as e:
                         raise ValueError(
-                            f"现有 NapCat Adapter 配置无法解析，已拒绝用模板覆盖: {e}"
+                            "现有 NapCat Adapter 配置无法解析，已拒绝用模板覆盖"
                         ) from e
                 if target_rel == SNOWLUMA_TARGET and target_path.exists():
                     try:
@@ -1051,8 +1051,8 @@ class ConfigInitializer:
                     errors.append(f"覆写失败 {target_rel}: {override_err}")
 
                 generated.append(target_rel)
-            except Exception as e:
-                errors.append(f"{target_rel}: {e}")
+            except Exception:
+                errors.append(f"{target_rel}: 配置生成失败")
 
         # Post-generation: synchronize adapter TTS flags in existing configs.
         # Core host/port are not rewritten here; adapter configs retain their values.
@@ -1127,8 +1127,8 @@ class ConfigInitializer:
                     config_path.write_text(tomlkit.dumps(doc), encoding="utf-8")
                     patched.append(rel_path)
 
-            except Exception as e:
-                errors.append(f"TTS链路修补失败 {rel_path}: {e}")
+            except Exception:
+                errors.append(f"TTS链路修补失败 {rel_path}: 配置处理失败")
 
         return {"patched": patched, "errors": errors}
 
@@ -1357,8 +1357,10 @@ class ConfigInitializer:
             return False, ["Discord 旧配置迁移失败；请保留旧配置和 Koishi 数据库并检查迁移日志"]
 
         if not bool(getattr(result, "success", False)):
-            error = getattr(result, "error", None)
-            return False, [str(error) if isinstance(error, str) and error else "Discord 旧配置迁移失败"]
+            # The adapter-provided error may include exception details or
+            # values from local legacy files. Do not expose it through the
+            # setup API response.
+            return False, ["Discord 旧配置迁移失败；请保留旧配置并检查迁移日志"]
         validation_error = ConfigInitializer._validate_discord_live_config(target_path)
         if validation_error:
             return False, [validation_error]
@@ -1488,8 +1490,8 @@ class ConfigInitializer:
         try:
             raw = target_path.read_text(encoding="utf-8")
             doc = tomlkit.parse(raw)
-        except Exception as e:
-            return f"TOML解析失败: {e}"
+        except Exception:
+            return "TOML解析失败"
 
         changed = False
 
@@ -1603,8 +1605,8 @@ class ConfigInitializer:
         if changed:
             try:
                 target_path.write_text(tomlkit.dumps(doc), encoding="utf-8")
-            except Exception as e:
-                return f"写入失败: {e}"
+            except Exception:
+                return "写入失败"
 
         return None  # success
 
@@ -1650,7 +1652,7 @@ class NapCatConfigurator:
             port = int(server.get("port", 8095))
             token = str(server.get("token", "") or "")
         except Exception as e:
-            raise ValueError(f"读取 NapCat Adapter 配置失败: {e}") from e
+            raise ValueError("读取 NapCat Adapter 配置失败") from e
 
         # NapCat and the adapter normally run on the same machine. 0.0.0.0 is a
         # listen address, not a valid client destination, so connect via localhost.
@@ -1713,8 +1715,12 @@ class NapCatConfigurator:
 
         try:
             napcat_root = resolve_external_path(napcat_dir, base_dir=ROOT_DIR, must_exist=True, must_be_dir=True)
-        except (FileNotFoundError, NotADirectoryError, ValueError) as e:
-            return {"configured": [], "skipped": [], "errors": [f"NapCat 目录无效: {e}"]}
+        except (FileNotFoundError, NotADirectoryError, ValueError):
+            return {
+                "configured": [],
+                "skipped": [],
+                "errors": ["NapCat 目录无效，请检查安装路径"],
+            }
 
         config_dir = ensure_within(napcat_root, napcat_root / "config")
         configured = []
@@ -1724,11 +1730,11 @@ class NapCatConfigurator:
         if not config_dir.exists():
             try:
                 config_dir.mkdir(parents=True, exist_ok=True)
-            except Exception as e:
+            except Exception:
                 return {
                     "configured": [],
                     "skipped": [],
-                    "errors": [f"无法创建配置目录: {e}"],
+                    "errors": ["无法创建配置目录，请检查路径和权限"],
                 }
 
         # Determine target files
@@ -1780,8 +1786,12 @@ class NapCatConfigurator:
 
         try:
             desired_ws_entry = NapCatConfigurator._load_adapter_ws_entry()
-        except ValueError as e:
-            return {"configured": [], "skipped": [], "errors": [str(e)]}
+        except ValueError:
+            return {
+                "configured": [],
+                "skipped": [],
+                "errors": ["读取 NapCat Adapter 配置失败"],
+            }
 
         for target_path in target_files:
             try:
@@ -1793,8 +1803,8 @@ class NapCatConfigurator:
                     configured.append(str(target_path.name))
                 else:
                     skipped.append(str(target_path.name))
-            except Exception as e:
-                errors.append(f"{target_path.name}: {e}")
+            except Exception:
+                errors.append(f"{target_path.name}: 配置文件处理失败")
 
         return {"configured": configured, "skipped": skipped, "errors": errors}
 
@@ -1822,7 +1832,7 @@ class NapCatConfigurator:
                 doc = _json.loads(raw)
             except _json.JSONDecodeError as e:
                 raise ValueError(
-                    f"现有配置 JSON 损坏，已拒绝覆盖: line {e.lineno}, column {e.colno}: {e.msg}"
+                    f"现有配置 JSON 损坏，已拒绝覆盖: line {e.lineno}, column {e.colno}"
                 ) from e
             if not isinstance(doc, dict):
                 raise ValueError("现有 NapCat 配置顶层必须是 JSON 对象，已拒绝覆盖")

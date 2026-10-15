@@ -52,6 +52,24 @@ class _Pipeline:
 
 
 class RuntimeSupervisorTests(unittest.TestCase):
+    def test_vox_raw_server_receives_the_active_trusted_config_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "custom" / "vox.toml"
+            config_path.parent.mkdir()
+            config_path.write_text("[tts]\nmodel_dir = \"\"\n", encoding="utf-8")
+            snapshot = root / "resolved-model"
+            snapshot.mkdir()
+            with mock.patch.object(manager, "prepare_voxcpm", return_value=Path(sys.executable)), mock.patch.object(
+                manager,
+                "resolve_vox_model_and_lora",
+                return_value=("openbmb/VoxCPM2", ""),
+            ), mock.patch.object(manager, "resolve_hf_snapshot", return_value=snapshot):
+                command, _cwd, _env = manager.build_voxcpm_command(config_path=config_path)
+
+            config_index = command.index("--config")
+            self.assertEqual(command[config_index + 1], str(config_path.resolve()))
+
     def test_exactly_one_backend_and_private_port(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

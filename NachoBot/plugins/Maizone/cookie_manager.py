@@ -2,9 +2,9 @@ import os
 import json
 import asyncio
 import time
-import re
 import ast
 from pathlib import Path
+from urllib.parse import parse_qs, quote, urlsplit
 
 import httpx
 
@@ -28,6 +28,42 @@ check_sig_url = "https://ptlogin2.qzone.qq.com/check_sig?pttype=1&uin={}&service
 _last_cookie_refresh_time = 0.0
 _last_qr_login_time = 0.0
 qrcode_path = str(Path(__file__).parent.resolve() / "qrcode.png")
+MAX_QR_LOGIN_ATTEMPTS = 3
+QR_LOGIN_POLL_ATTEMPTS = 60
+QR_LOGIN_POLL_INTERVAL_SECONDS = 2
+
+
+def _bounded_qr_login_attempts(value: int) -> int:
+    """Keep QR login retries within the existing three-attempt budget."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("二维码登录尝试次数无效")
+    return min(max(value, 0), MAX_QR_LOGIN_ATTEMPTS)
+
+
+def _extract_qr_login_tokens(url: str) -> tuple[str, str]:
+    """Parse and validate the signature and account ID from QQ's redirect."""
+    try:
+        query = parse_qs(urlsplit(str(url)).query, keep_blank_values=True)
+    except ValueError as exc:
+        raise CookieRefreshError("QQ登录跳转格式无效") from exc
+
+    signature = query.get("ptsigx", [""])[0]
+    uin = query.get("uin", [""])[0]
+    if (
+        not signature
+        or len(signature) > 256
+        or not signature.isascii()
+        or any(ord(char) < 32 or ord(char) == 127 for char in signature)
+    ):
+        raise CookieRefreshError("QQ登录签名格式无效")
+    if not uin or len(uin) > 20 or not uin.isascii() or not uin.isdecimal():
+        raise CookieRefreshError("QQ登录账号格式无效")
+    return signature, uin
+
+
+def _build_check_sig_url(signature: str, uin: str) -> str:
+    """Encode opaque QQ login tokens as query values, never as URL syntax."""
+    return check_sig_url.format(quote(uin, safe=""), quote(signature, safe=""))
 
 
 def get_cookie_file_path(uin: str) -> str:
@@ -102,6 +138,7 @@ class QzoneLogin:
 
     async def login_via_qrcode(self, max_timeout_times: int = 3) -> dict:
         """二维码登录"""
+        max_timeout_times = _bounded_qr_login_attempts(max_timeout_times)
         for _i in range(max_timeout_times):
             # 获取二维码
             async with httpx.AsyncClient() as client:
@@ -125,8 +162,8 @@ class QzoneLogin:
                 logger.info(f"二维码已保存于{qrcode_path}，请两分钟内使用手机QQ扫描登录")
 
                 # 检查是否登录成功
-                for _ in range(60):  # 最多等待60次，约2分钟
-                    await asyncio.sleep(2)
+                for _ in range(QR_LOGIN_POLL_ATTEMPTS):
+                    await asyncio.sleep(QR_LOGIN_POLL_INTERVAL_SECONDS)
                     req = await client.get(login_check_url.format(ptqrtoken), cookies={"qrsig": qrsig})
                     if req.text.find("二维码已失效") != -1:
                         logger.info("二维码已失效，重新获取...")
@@ -139,15 +176,10 @@ class QzoneLogin:
                         url = ast.literal_eval(req.text.replace("ptuiCB", ""))[2]
 
                         # 获取ptsigx
-                        m = re.findall(r"ptsigx=[A-z \d]*&", url)
-                        ptsigx = m[0].replace("ptsigx=", "").replace("&", "")
-
-                        # 获取uin
-                        m = re.findall(r"uin=[\d]*&", url)
-                        uin = m[0].replace("uin=", "").replace("&", "")
+                        ptsigx, uin = _extract_qr_login_tokens(url)
 
                         # 获取skey和p_skey
-                        res = await client.get(check_sig_url.format(uin, ptsigx), cookies={"qrsig": qrsig},
+                        res = await client.get(_build_check_sig_url(ptsigx, uin), cookies={"qrsig": qrsig},
                                                headers={'Cookie': response_header_dict.get('Set-Cookie', '')})
 
                         final_cookie = res.headers.get('Set-Cookie', '')
@@ -168,7 +200,7 @@ class QzoneLogin:
 
                         return final_cookie_dict
                     logger.debug("等待扫码登录...")
-        raise Exception("{}次尝试失败".format(max_timeout_times))
+        raise CookieRefreshError("{}次尝试失败".format(max_timeout_times))
 
 
 async def fetch_cookies_by_clientkey() -> dict:
