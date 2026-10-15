@@ -386,6 +386,14 @@ async def start_group(group_id: str):
         raise HTTPException(400, str(e))
 
 
+@app.post("/api/qqcall/inject")
+async def inject_qqcall():
+    try:
+        return process_mgr.request_qqcall_injection()
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(400, str(e))
+
+
 @app.post("/api/groups/{group_id}/stop")
 async def stop_group(group_id: str):
     try:

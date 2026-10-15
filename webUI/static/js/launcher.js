@@ -1354,10 +1354,48 @@ const LauncherModule = (() => {
         }
     }
 
+    function qqcallControlState(group) {
+        const service = (group?.services || []).find(item => item.id === 'qqcall');
+        const phase = service?.qqcall?.phase;
+        const pending = Boolean(service?.injection_pending || pendingGroupStarts.has('qqcall'));
+        const ready = phase === 'ready' && service?.qqcall?.ready === true;
+        const absent = service?.status === 'stopped' && !service?.external_state && !service?.managed;
+        return {
+            pending, ready,
+            canInject: !pending && !adapterGroupsError && (absent || phase === 'needs_attachment'),
+            label: pending ? '正在注入…' : ready ? '已注入'
+                : service?.origin === 'external' && !phase ? '等待状态更新' : '注入',
+        };
+    }
+
+    async function injectQQCall() {
+        if (pendingGroupStarts.has('qqcall')) return;
+        // Refresh before reserving locally; the backend also rechecks the
+        // independent supervisor and serializes the fixed BAT operation.
+        pendingGroupStarts.add('qqcall');
+        renderIfAvailable();
+        try {
+            await refreshAdapterGroups({ requireFresh: true });
+            const group = groups.find(item => item.id === 'qqcall');
+            const service = (group?.services || []).find(item => item.id === 'qqcall');
+            if (service?.injection_pending || service?.qqcall?.ready === true) return;
+            const result = await apiPost('/api/qqcall/inject');
+            toast(result.status === 'ready' ? 'QQCall 已注入' : '正在注入 QQCall；如出现 UAC，请确认', 'info');
+            await refreshAdapterGroups({ requireFresh: true });
+            void refreshDetails();
+        } catch (error) {
+            toast(`QQCall 注入失败: ${error.message}`, 'error');
+        } finally {
+            pendingGroupStarts.delete('qqcall');
+            renderIfAvailable();
+        }
+    }
+
     /** Generate the inner HTML for a group card (without the wrapper div). */
     function groupCardInnerHTML(group) {
         if (group.id === 'qq_adapter') return snowlumaGroupCardInnerHTML(group);
         const control = groupControlState(group);
+        const qqcall = group.id === 'qqcall' ? qqcallControlState(group) : null;
         const runCount = control.services.filter(s => s.status === 'running').length;
         const errCount = group.services.filter(s => s.status === 'error').length;
         const total = group.services.length;
@@ -1371,6 +1409,14 @@ const LauncherModule = (() => {
         else if (anyStarting) { badgeClass = 'starting'; badgeText = '启动中'; }
         else if (runCount === total) { badgeClass = 'running'; badgeText = '运行中'; }
         else if (runCount > 0) { badgeClass = 'partial'; badgeText = `${runCount}/${total}`; }
+        if (qqcall?.pending) { badgeClass = 'starting'; badgeText = '注入中'; }
+        else if (qqcall?.ready) { badgeClass = 'running'; badgeText = '已注入'; }
+        else if (qqcall && group.services.some(service => service.qqcall?.phase === 'needs_attachment')) {
+            badgeClass = 'stopped'; badgeText = '待注入';
+        }
+        else if (qqcall && group.services.some(service => service.origin === 'external' && !service.qqcall)) {
+            badgeClass = 'partial'; badgeText = '服务运行中';
+        }
 
         const anyRunning = runCount > 0;
         const canStop = control.owned;
@@ -1404,18 +1450,19 @@ const LauncherModule = (() => {
                 `).join('')}
             </div>
             <div class="group-card-footer">
-                ${(control.showStart) ? `<button class="btn ${anyRunning && !control.anyExternal ? 'btn-outline' : 'btn-primary'} btn-full"
+                ${qqcall ? `<button type="button" class="btn btn-primary btn-sm" id="btn-inject-qqcall" ${qqcall.canInject ? '' : 'disabled'}>${qqcall.label}</button>` : ''}
+                ${(!qqcall && control.showStart) ? `<button class="btn ${anyRunning && !control.anyExternal ? 'btn-outline' : 'btn-primary'} btn-full"
                         id="btn-start-${group.id}"
                         ${(anyStarting || adapterGroupsError || pendingGroupStarts.has(group.id)) ? 'disabled' : ''}>
                     ${pendingGroupStarts.has(group.id) ? '<span class="launcher-status-spinner" aria-hidden="true"></span>正在核对状态…' : `${primaryActionIcon}${control.startLabel}`}
                 </button>` : ''}
                 ${canStop ? `
                     <button class="btn btn-danger" id="btn-stop-${group.id}">
-                        ${stopIcon}${control.anyExternal ? '停止 WebUI 托管服务' : (anyStarting && !anyRunning ? '取消启动' : '停止')}
+                        ${stopIcon}${qqcall ? '停止控制服务' : control.anyExternal ? '停止 WebUI 托管服务' : (anyStarting && !anyRunning ? '取消启动' : '停止')}
                     </button>
                 ` : ''}
                 ${control.allExternalReady ? '<div class="launch-external-notice">由外部启动器管理，请在原启动窗口停止</div>' : ''}
-                ${control.blocked ? `<div class="launch-external-notice">${escapeHtml(control.blockedNotice)}</div>` : ''}
+                ${control.blocked && !qqcall?.canInject ? `<div class="launch-external-notice">${escapeHtml(control.blockedNotice)}</div>` : ''}
             </div>
         `;
     }
@@ -1449,6 +1496,9 @@ const LauncherModule = (() => {
             bindSnowLumaCardEvents(card, group);
             return;
         }
+        if (group.id === 'qqcall') {
+            card.querySelector('#btn-inject-qqcall')?.addEventListener('click', injectQQCall);
+        }
         const control = groupControlState(group);
         const shouldRestart = control.anyRunning && !control.anyExternal;
 
@@ -1464,6 +1514,7 @@ const LauncherModule = (() => {
     }
 
     async function startGroup(groupId, isRestart) {
+        if (groupId === 'qqcall') return injectQQCall();
         if (pendingGroupStarts.has(groupId)) return;
         pendingGroupStarts.add(groupId);
         renderIfAvailable();
@@ -1557,6 +1608,8 @@ const LauncherModule = (() => {
             serviceIsIndeterminate,
             groupControlState,
             groupCardInnerHTML,
+            qqcallControlState,
+            injectQQCall,
             snowlumaGroupCardInnerHTML,
             refreshAdapterGroups,
             updateAdapterStatusIndicator,

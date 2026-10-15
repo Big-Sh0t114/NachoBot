@@ -2,6 +2,8 @@
     新增独立 QQCall 服务及 NapCat/SnowLuma 接入，支持受验证的私聊与群语音控制、原生音频路由、启动和诊断
     UniversalVC 提取为独立本机音频服务
     优化 VoxCPM 权重加载、CPU 公共运行时与推理线程归属
+    WebUI 新增 QQCall 管理
+    WebUI 互动背景更新
 10/5
     NapCat/SnowLuma 新增私聊离线历史补拉、持久化 outbox 与 Core 精确回执
     修复 NapCat 合并转发消息恢复与异步图片下载，补齐连接代次校验和媒体处理时限

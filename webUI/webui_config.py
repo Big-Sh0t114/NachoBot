@@ -87,9 +87,8 @@ class WebUIConfig:
 
     @property
     def version(self) -> str:
-        # Software version belongs to the checked-out WebUI source. The live
-        # config is user-owned and may retain an older metadata value.
-        return WEBUI_VERSION
+        # The sidebar version follows the loaded WebUI metadata.
+        return str(self.config["webui"]["version"])
 
     @property
     def host(self) -> str:
