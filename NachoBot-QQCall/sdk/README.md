@@ -23,3 +23,18 @@ UniversalVC service process.
 
 After migrating an existing running checkout, restart Core and the selected
 QQ adapter normally so their Python module caches use the new imports.
+
+## Container builds
+
+Core and NapCat Compose files supply the sibling client sources as named build
+contexts. Keep the repository layout when building either image. For direct
+builds from the repository root, use:
+
+```sh
+docker build --tag nachobot-core:local --build-context qqcall=NachoBot-QQCall --build-context universalvc_sdk=NachoBot-UniversalVC-Adapter/sdk NachoBot
+docker build --tag nachobot-napcat-adapter:local --build-context nachobot=NachoBot --build-context qqcall=NachoBot-QQCall --build-context universalvc_sdk=NachoBot-UniversalVC-Adapter/sdk NachoBot-Napcat-Adapter
+```
+
+The images copy only the lightweight client packages. NapCat also copies the
+PCM package's `pyproject.toml` so `uv sync --locked` can validate the optional
+dependency metadata; the `qqcall-audio` extra is not installed by these builds.

@@ -1,1 +1,5 @@
-/build/
+# Generated output; retain only the pinned Windows x64 release artifacts.
+/build/*
+!/build/QQCallAudioRouteGuard-v2.node
+!/build/QQCallAudioRouteGuard-v2.dll
+!/build/artifact-manifest.json

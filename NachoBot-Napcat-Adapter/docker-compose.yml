@@ -5,6 +5,8 @@ services:
       context: .
       additional_contexts:
         nachobot: ../NachoBot
+        qqcall: ../NachoBot-QQCall
+        universalvc_sdk: ../NachoBot-UniversalVC-Adapter/sdk
     environment:
       - TZ=Asia/Shanghai
       - NACHOBOT_CORE_TOKEN=${NACHOBOT_CORE_TOKEN:-}

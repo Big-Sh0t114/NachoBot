@@ -1,0 +1,16 @@
+﻿{
+    "schema":  1,
+    "qqBuild":  "9.9.26-44343",
+    "artifacts":  [
+                      {
+                          "name":  "QQCallAudioRouteGuard-v2.node",
+                          "sha256":  "80e21471c87cf49bedd7db87a412ec8bd3ac65a80baf25054b43315a8c993b4c",
+                          "bytes":  200704
+                      },
+                      {
+                          "name":  "QQCallAudioRouteGuard-v2.dll",
+                          "sha256":  "482ab0e9de167a457e818e830ec08efaad6d90bb7af88ceb45a87cda5202bef2",
+                          "bytes":  172544
+                      }
+                  ]
+}

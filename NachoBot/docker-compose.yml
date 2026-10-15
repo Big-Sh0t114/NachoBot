@@ -26,6 +26,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      additional_contexts:
+        qqcall: ../NachoBot-QQCall
+        universalvc_sdk: ../NachoBot-UniversalVC-Adapter/sdk
     image: nachobot-core:local
     environment:
       - TZ=Asia/Shanghai

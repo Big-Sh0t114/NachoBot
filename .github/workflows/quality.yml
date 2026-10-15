@@ -231,7 +231,10 @@ jobs:
           if [[ -z "$base" || "$base" =~ ^0+$ ]] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
             base="HEAD^"
           fi
-          if git diff --quiet "$base" "$GITHUB_SHA" -- NachoBot ':!NachoBot/**/*.md' ':!NachoBot/tests/**'; then
+          if git diff --quiet "$base" "$GITHUB_SHA" -- \
+              NachoBot ':!NachoBot/**/*.md' ':!NachoBot/tests/**' \
+              NachoBot-QQCall/sdk NachoBot-UniversalVC-Adapter/sdk \
+              .github/workflows/quality.yml; then
             echo "build=false" >> "$GITHUB_OUTPUT"
           else
             echo "build=true" >> "$GITHUB_OUTPUT"
@@ -239,7 +242,11 @@ jobs:
 
       - name: Build the Core image
         if: steps.changes.outputs.build == 'true'
-        run: docker build --tag nachobot-core-ci:latest NachoBot
+        run: >-
+          docker build --tag nachobot-core-ci:latest
+          --build-context qqcall=NachoBot-QQCall
+          --build-context universalvc_sdk=NachoBot-UniversalVC-Adapter/sdk
+          NachoBot
 
   multimodal-image:
     name: Multimodal container image
@@ -293,7 +300,12 @@ jobs:
             base="HEAD^"
           fi
           adapter='NachoBot-Napcat-Adapter'
-          if git diff --quiet "$base" "$GITHUB_SHA" --               "$adapter"               ":!$adapter/**/*.md"               ":!$adapter/tests/**"               && git diff --quiet "$base" "$GITHUB_SHA" --               NachoBot               ':!NachoBot/**/*.md'               ':!NachoBot/tests/**'; then
+          if git diff --quiet "$base" "$GITHUB_SHA" -- \
+              "$adapter" ":!$adapter/**/*.md" ":!$adapter/tests/**" \
+              NachoBot ':!NachoBot/**/*.md' ':!NachoBot/tests/**' \
+              NachoBot-QQCall/sdk NachoBot-UniversalVC-Adapter/sdk \
+              NachoBot-QQCall/pyproject.toml \
+              .github/workflows/quality.yml; then
             echo "build=false" >> "$GITHUB_OUTPUT"
           else
             echo "build=true" >> "$GITHUB_OUTPUT"
@@ -305,4 +317,6 @@ jobs:
           docker build --tag nachobot-napcat-adapter-ci:latest
           --file NachoBot-Napcat-Adapter/Dockerfile
           --build-context nachobot=NachoBot
+          --build-context qqcall=NachoBot-QQCall
+          --build-context universalvc_sdk=NachoBot-UniversalVC-Adapter/sdk
           NachoBot-Napcat-Adapter

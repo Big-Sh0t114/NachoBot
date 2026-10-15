@@ -24,3 +24,6 @@ dependencies = [
     "loguru>=0.7.3",
     "uvicorn",
 ]
+
+[tool.ruff]
+target-version = "py311"

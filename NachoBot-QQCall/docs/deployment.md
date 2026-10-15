@@ -8,6 +8,8 @@ QQCall 的正式服务与 PCM 包应放在同一工作区的 `NachoBot-QQCall`�
 
 当前实机核验的 QQNT 是 `9.9.26-44343`；QQ 启动程序本身的文件版本不能代替应用目录内实际构建版本。Kernel wrapper 与 AVSDK 的原有摘要检查仍生效，其他版本不能仅凭能够启动就算支持。
 
+仓库已跟踪适用于这个锁定构建的 Windows x64 预编译产物，克隆后即可取得：`native/build/x64/QQCallRecoveryShim2.dll`、`native/audio_route/build/QQCallAudioRouteGuard-v2.node`、`QQCallAudioRouteGuard-v2.dll` 和 `artifact-manifest.json`。MSVC 仅在需要从源码重建原生文件时才需要；预编译文件仍受下述摘要与 manifest 校验约束。
+
 Core 的锁定 Python 环境提供 supervisor 所需的 `psutil`；所选适配器的 `qqcall-audio` extra 安装 PCM 包与 Windows PyAudioWPatch。以下命令从完整工作区根目录运行，按实际选用的适配器二选一：
 
 ```powershell
@@ -17,7 +19,11 @@ uv sync --project .\NachoBot-SnowLuma-Adapter --locked --extra qqcall-audio
 uv sync --project .\NachoBot-Napcat-Adapter --locked --extra qqcall-audio
 ```
 
-正式 Recovery2 Shim 使用 MSVC `14.44.35207`。构建在候选目录完成，验证整文件摘要后才发布；已有相同摘要的 DLL 保留原文件。
+共享 Host loader 需要 `NapCatWinBootMain.exe`、`NapCatWinBootHook.dll`、`qqnt.json`，即使消息适配器选 SnowLuma，也需要这些独立 Host 启动依赖。它们不是另一个必须启用的消息机器人。UniversalVC、ASR/VLM 和 TTS 使用各自现有部署，QQCall 不自行复制或更换模型。
+
+### 可选：从源码重建原生文件
+
+正常部署直接使用仓库预置文件。只有要从源码重建时才需要 MSVC `14.44.35207` 和 guard SDK。Recovery2 构建在候选目录完成，验证整文件摘要后才发布；已有相同摘要的 DLL 保留原文件。
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\NachoBot-QQCall\native\build.ps1 -RecoveryAttempt -PythonExe .\NachoBot\.venv\Scripts\python.exe
@@ -25,19 +31,25 @@ powershell -ExecutionPolicy Bypass -File .\NachoBot-QQCall\native\build.ps1 -Rec
 
 产物是 `NachoBot-QQCall/native/build/x64/QQCallRecoveryShim2.dll`，固定摘要与 `native/recovery-shim-release.json`、supervisor 的原校验一致。默认不带 `-RecoveryAttempt` 的构建只生成历史探针，不能代替正式产物。源码、工具链或格式产生其他差异时，构建失败；不要修改摘要来绕过失败。
 
-共享 Host loader 需要 `NapCatWinBootMain.exe`、`NapCatWinBootHook.dll`、`qqnt.json`，即使消息适配器选 SnowLuma，也需要这些独立 Host 启动依赖。它们不是另一个必须启用的消息机器人。UniversalVC、ASR/VLM 和 TTS 使用各自现有部署，QQCall 不自行复制或更换模型。
-
-实际音频还要求配对的 `QQCallAudioRouteGuard-v2.node` / `.dll` 与本机私有 guard 源配置，设备身份必须来自本机活动、唯一的虚拟端点。SDK 获取脚本固定 Microsoft NuGet 的 [CPP 包](https://www.nuget.org/packages/Microsoft.Windows.SDK.CPP/10.0.26100.8249)及对应 x64 包，并校验 `native/sdk-release.json` 中来自官方 catalog 的大小与 SHA-512；只提取到工作区，不安装系统软件或模型。
+重建 audio-route guard 时，SDK 获取脚本固定 Microsoft NuGet 的 [CPP 包](https://www.nuget.org/packages/Microsoft.Windows.SDK.CPP/10.0.26100.8249)及对应 x64 包，并校验 `native/sdk-release.json` 中来自官方 catalog 的大小与 SHA-512；只提取到工作区，不安装系统软件或模型。
 
 ```powershell
 .\NachoBot\.venv\Scripts\python.exe .\NachoBot-QQCall\scripts\acquire-guard-sdk.py
 powershell -ExecutionPolicy Bypass -File .\NachoBot-QQCall\native\build_audio_route.ps1
-.\NachoBot\.venv\Scripts\python.exe .\NachoBot-QQCall\scripts\prepare-audio-route.py
-# 查看干跑结果后，仅创建缺失的本机私有派生配置：
-.\NachoBot\.venv\Scripts\python.exe .\NachoBot-QQCall\scripts\prepare-audio-route.py --apply
 ```
 
-构建验证 CFG 元数据和指定导出，并生成公开的 `artifact-manifest.json`。准备工具验证二进制摘要和活动端点；已有 guard 配置只验证、保留，损坏的已有文件不自动替换。公开 `guard_config_file` 为空时，runtime 视图解析为 `.runtime/service/audio-guard-source.private.json`，不回写 TOML；只有 `--apply` 才原子创建缺失文件。
+构建验证 CFG 元数据和指定导出，并生成公开的 `artifact-manifest.json`。
+
+### 目标机本地音频准备
+
+预编译 guard 不包含本机设备身份。实际音频仍要求配对的 `QQCallAudioRouteGuard-v2.node` / `.dll`、本机私有 guard 源配置，以及本机活动、唯一的虚拟端点。每台目标机都要用下列准备工具验证二进制摘要和活动端点；已有 guard 配置只验证、保留，损坏的已有文件不自动替换。公开 `guard_config_file` 为空时，runtime 视图解析为 `.runtime/service/audio-guard-source.private.json`，不回写 TOML；只有 `--apply` 才原子创建缺失文件。
+
+```powershell
+.\NachoBot\.venv\Scripts\python.exe .\NachoBot-QQCall\scripts\prepare-audio-route.py --list-devices
+# 先查看干跑结果，再仅创建缺失的本机私有派生配置：
+.\NachoBot\.venv\Scripts\python.exe .\NachoBot-QQCall\scripts\prepare-audio-route.py
+.\NachoBot\.venv\Scripts\python.exe .\NachoBot-QQCall\scripts\prepare-audio-route.py --apply
+```
 
 虚拟路由不唯一时返回 `audio_route_selection_required`。用 `prepare-audio-route.py --list-devices` 读取虚拟设备友好名称和方向，在同一公开 TOML 的 `capture_device` / `playback_device` 中指定名称后再干跑。没有合法路由或端点在准备期间变化时拒绝写入；不选择 Windows 默认或物理设备，不复制其他机器的 endpoint ID。guard 技术边界仍见 [native audio route](../native/audio_route/README.md)。绑定继续仅用固定 BAT。
 

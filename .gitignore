@@ -31,3 +31,18 @@ NachoBot-Multimodal-Adapter/models/tts/
 /NachoBot/plugins/vrchat_control_plugin/
 launch_vrchat.bat
 /webUI/data/voice_calls.sqlite3*
+
+# Local compiler and Python package outputs
+*.obj
+*.exp
+*.lib
+*.egg-info/
+
+# Local runtime data and logs
+/data/
+/logs/
+/NachoBot-Napcat-Adapter/data/
+/NachoBot-QQCall/data/
+/NachoBot-QQCall/logs/
+/NachoBot-SnowLuma-Adapter/data/
+/NachoBot-UniversalVC-Adapter/data/

@@ -1,2 +1,6 @@
-/build/
+# Generated output; retain only the pinned Windows x64 release shim.
+/build/*
+!/build/x64/
+/build/x64/*
+!/build/x64/QQCallRecoveryShim2.dll
 /tests/build/
