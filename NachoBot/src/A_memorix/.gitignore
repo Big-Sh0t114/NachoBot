@@ -191,9 +191,6 @@ __pycache__/
 data/
 logs/
 
-# Deprecated / Cleanup (Avoid uploading junk)
-deprecated/
-
 # OS / System
 .DS_Store
 Thumbs.db
@@ -214,32 +211,5 @@ e2e_debug.log
 e2e_error.log
 full_diff.txt
 
-# Large Test Data Files
-机娘导论-openie.json
-scripts/机娘导论-openie.json
-
 # A_memorix recall/tuning generated artifacts
 artifacts/
-scripts/run_arc_light_recall_pipeline.py
-
-# Compressed Data Archives
-data.zip
-scripts/full_feature_smoke_test.py
-ACL2026_DEMO_EVAL.md
-.probe_write
-tests/
-temp_verify_v5_data/metadata/metadata.db
-sql2/t.db
-sql2/t.db-journal
-scripts/test.json
-scripts/test1.json
-scripts/test-sample.json
-USAGE_ARCHITECTURE.md
-scripts/test_conversion.py
-scripts/debug_graph_vis.py
-/.tmp_feature_e2e_real
-/.tmp_sparse_tests
-/.tmp_test_probe
-/.tmp_test_sqlite
-/.tmp_testdata
-/scripts/tmp

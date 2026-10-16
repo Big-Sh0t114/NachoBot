@@ -13,6 +13,7 @@ COPY pyproject.toml uv.lock ./
 COPY --from=qqcall /pyproject.toml /workspace/NachoBot-QQCall/pyproject.toml
 COPY --from=qqcall /sdk/pyproject.toml /workspace/NachoBot-QQCall/sdk/pyproject.toml
 COPY --from=qqcall /sdk/qqcall_client /workspace/NachoBot-QQCall/sdk/qqcall_client
+COPY --from=qqcall /service/config.py /workspace/NachoBot-QQCall/service/config.py
 COPY --from=universalvc_sdk /pyproject.toml /workspace/NachoBot-UniversalVC-Adapter/sdk/pyproject.toml
 COPY --from=universalvc_sdk /universalvc_client.py /workspace/NachoBot-UniversalVC-Adapter/sdk/universalvc_client.py
 RUN uv sync --locked --no-dev --no-install-project

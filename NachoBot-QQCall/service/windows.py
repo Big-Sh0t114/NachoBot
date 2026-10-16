@@ -442,6 +442,22 @@ class WindowsSystem:
                 close_ok = False
         return result if close_ok else None
 
+    def discover_qq_executable(self) -> str:
+        """Discover an installation path, never an injection target or account."""
+        images: dict[str, str] = {}
+        for record in self.process_table().values():
+            image = record.image_path
+            if record.creation_time_100ns <= 0 or ntpath.basename(image).casefold() != "qq.exe":
+                continue
+            if not ntpath.isabs(image):
+                continue
+            images.setdefault(_path_key(image), image)
+        if not images:
+            raise WindowsServiceError("qq_executable_not_found")
+        if len(images) != 1:
+            raise WindowsServiceError("qq_executable_ambiguous")
+        return next(iter(images.values()))
+
     def process_table(self) -> dict[int, ProcessRecord]:
         raw = self._run_powershell(
             "$ErrorActionPreference='Stop'; Get-CimInstance -ClassName Win32_Process "

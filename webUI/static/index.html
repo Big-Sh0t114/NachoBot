@@ -123,18 +123,22 @@
             <div class="ui-settings"
                 style="padding: 1rem; border-top: 1px solid var(--border-light); font-size: 0.85rem; color: var(--text-secondary);">
                 <label
-                    style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem; cursor: pointer;">
+                    style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.25rem; cursor: pointer;">
                     <span>启动动画</span>
-                    <input type="checkbox" id="toggle-startup" checked>
+                    <input type="checkbox" id="toggle-startup" class="sidebar-switch" role="switch" checked>
                 </label>
                 <label
-                    style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem; cursor: pointer;">
+                    style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.25rem; cursor: pointer;">
                     <span>背景音乐</span>
-                    <input type="checkbox" id="toggle-bgm">
+                    <input type="checkbox" id="toggle-bgm" class="sidebar-switch" role="switch">
                 </label>
                 <label style="display: flex; align-items: center; justify-content: space-between; cursor: pointer;">
                     <span>互动背景</span>
-                    <input type="checkbox" id="toggle-interactive" checked>
+                    <input type="checkbox" id="toggle-interactive" class="sidebar-switch" role="switch" checked>
+                </label>
+                <label title="静态显示蓝色粒子、贴纸和熔岩背景" style="display: flex; align-items: center; justify-content: space-between; margin-top: 0.25rem; cursor: pointer;">
+                    <span>减少动态效果</span>
+                    <input type="checkbox" id="toggle-reduced-motion" class="sidebar-switch" role="switch">
                 </label>
             </div>
             <div class="status-bar" id="status-bar">
@@ -953,7 +957,7 @@
                                     <span class="path-check-icon">❄️</span>
                                     <div class="path-check-info">
                                         <span class="path-check-name">SnowLuma Adapter + Runtime</span>
-                                        <span class="path-check-hint">自动发现项目根目录下唯一的 SnowLuma 1.14.x Runtime
+                                        <span class="path-check-hint">自动发现项目根目录下唯一有效的 SnowLuma Runtime
                                             与适配器，不能填写外部路径</span>
                                     </div>
                                     <span class="path-check-status" id="status-snowluma"></span>
@@ -1137,6 +1141,7 @@
     <script src="/static/js/chat.js"></script>
     <script src="/static/js/app.js"></script>
     <script src="/static/js/bgm-player.js"></script>
+    <script src="/static/js/background-motion.js"></script>
     <script src="/static/js/particle-system.js"></script>
     <script src="/static/js/lava-background.js"></script>
     <script src="/static/js/doodle-background.js"></script>

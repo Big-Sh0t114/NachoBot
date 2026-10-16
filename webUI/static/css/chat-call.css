@@ -290,9 +290,12 @@
 .chat-call-start-sheet {
     width: min(100%, 400px);
     padding: 2.5rem 2rem 1.8rem;
-    border: 0;
+    border: 1px solid rgba(226, 217, 204, 0.86);
     border-radius: 28px;
-    background: #fff;
+    background: rgba(255, 255, 255, 0.43);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    box-shadow: var(--shadow-sm);
 }
 
 .chat-call-start-identity { text-align: center; }

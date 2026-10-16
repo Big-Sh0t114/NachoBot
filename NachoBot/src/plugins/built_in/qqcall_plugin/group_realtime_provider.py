@@ -20,9 +20,9 @@ from qqcall_client.qqcall_group_wire import (
     validate_group_audio_claim,
     validate_group_audio_scope,
 )
-from plugins.qqcall_plugin.realtime_provider import qqcall_enabled
+from src.plugins.built_in.qqcall_plugin.realtime_provider import qqcall_enabled
 from src.chat.runtime_capabilities import additional_config_from_message
-from plugins.qqcall_plugin.control_api import request_qqcall
+from src.plugins.built_in.qqcall_plugin.control_api import request_qqcall
 
 
 _SCOPE_KEYS = frozenset(

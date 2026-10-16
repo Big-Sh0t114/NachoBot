@@ -1,3 +1,6 @@
+10/16
+    修复snowluma部署时硬编码版本文件的问题
+    移动QQCall Plugin为build-in plugin
 10/15
     新增独立 QQCall 服务及 NapCat/SnowLuma 接入，支持受验证的私聊与群语音控制、原生音频路由、启动和诊断
     UniversalVC 提取为独立本机音频服务

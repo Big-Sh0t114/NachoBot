@@ -8,6 +8,7 @@ is imported as Python code.
 from __future__ import annotations
 
 import asyncio
+import copy
 import ctypes
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
@@ -51,6 +52,8 @@ _SAFE_SERVICE_ERROR_CODES = frozenset({
     "adapter_qqcall_config_invalid", "service_config_reference_invalid",
     "runtime_path_invalid", "runtime_must_be_private_project_path",
     "shared_config_invalid", "control_token_unavailable", "control_token_write_failed",
+    "bot_account_invalid", "bot_account_mismatch", "bot_config_unavailable",
+    "bot_qqcall_switch_invalid", "enabled_account_required", "account_id_invalid",
     "token_file_invalid", "token_file_unavailable", "token_file_too_large",
     "audio_config_invalid", "audio_mode_unsupported", "audio_scope_invalid",
     "audio_scope_unsupported", "audio_device_invalid", "audio_config_incomplete",
@@ -418,7 +421,7 @@ def read_shared_qqcall_config(path: str | os.PathLike[str], adapter: str) -> dic
 
 def canonical_qqcall_config_path() -> Path:
     """Return the one public QQCall configuration location."""
-    return _SERVICE_PROJECT_ROOT.parent / "NachoBot" / "plugins" / "qqcall_plugin" / "config.toml"
+    return _SERVICE_PROJECT_ROOT.parent / "NachoBot" / "src" / "plugins" / "built_in" / "qqcall_plugin" / "config.toml"
 
 
 def read_qqcall_public_config() -> dict[str, Any]:
@@ -427,6 +430,11 @@ def read_qqcall_public_config() -> dict[str, Any]:
     normalized = _fixed_validator().load_config(config_path)
     _configured_runtime_directory(config_path, normalized.get("runtime_dir", ""))
     return normalized
+
+
+def default_qqcall_config() -> dict[str, Any]:
+    """Return independent defaults from the shared service schema."""
+    return copy.deepcopy(_fixed_validator().DEFAULT_CONFIG)
 
 
 def is_qqcall_enabled() -> bool:
@@ -810,6 +818,7 @@ __all__ = [
     "QQCallAdapterSettings",
     "QQCallPlatformBindingHeartbeat",
     "canonical_qqcall_config_path",
+    "default_qqcall_config",
     "is_qqcall_enabled",
     "read_qqcall_audio_plan",
     "load_qqcall_adapter_settings",

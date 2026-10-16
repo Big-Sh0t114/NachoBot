@@ -14,7 +14,6 @@
     const COLLISION_CONTACT_BIAS = 0.01;
     const MAX_COLLISION_ITERATIONS = 8;
     const MAX_PHYSICS_STEP_SECONDS = 1 / 120;
-    const reduceMotionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
     let cleanupActiveMount = null;
     let lifecycleActive = false;
     let pageSuspended = false;
@@ -22,6 +21,10 @@
     let startupGateObserver = null;
     let pendingMountCallback = null;
     let domReadyHandler = null;
+
+    function isMotionReduced() {
+        return window.BackgroundMotion?.isReduced?.() === true;
+    }
 
     function clamp(value, minimum, maximum) {
         return Math.min(maximum, Math.max(minimum, value));
@@ -152,7 +155,7 @@
         let pointer = null;
 
         function shouldPause() {
-            return disposed || document.hidden || reduceMotionQuery.matches;
+            return disposed || document.hidden || isMotionReduced();
         }
 
         function randomBetween(minimum, maximum) {
@@ -427,7 +430,7 @@
 
         function setDoodles(items) {
             doodles = items;
-            if (reduceMotionQuery.matches) {
+            if (isMotionReduced()) {
                 setStaticDoodles();
                 return;
             }
@@ -540,7 +543,7 @@
         const layer = document.createElement('div');
         layer.id = LAYER_ID;
         layer.setAttribute('aria-hidden', 'true');
-        layer.dataset.paused = document.hidden || reduceMotionQuery.matches ? 'true' : 'false';
+        layer.dataset.paused = document.hidden || isMotionReduced() ? 'true' : 'false';
 
         document.body.insertBefore(layer, document.body.firstChild);
 
@@ -562,6 +565,7 @@
         let resizeTimer = null;
         let resizeObserver = null;
         let fetchController = typeof AbortController === 'function' ? new AbortController() : null;
+        let unsubscribeMotionPreference = () => {};
         const motionSystem = createMotionSystem(layer, () => {
             syncMotionState();
         });
@@ -638,9 +642,10 @@
         }
 
         function syncMotionState() {
-            const paused = document.hidden || reduceMotionQuery.matches;
+            const reduced = isMotionReduced();
+            const paused = document.hidden || reduced;
             layer.dataset.paused = paused ? 'true' : 'false';
-            if (reduceMotionQuery.matches) {
+            if (reduced) {
                 motionSystem.stop(true);
                 if (lavaController) lavaController.stop(true);
             } else if (paused) {
@@ -670,11 +675,7 @@
             if (resizeObserver) resizeObserver.disconnect();
             else window.removeEventListener('resize', onResize);
             document.removeEventListener('visibilitychange', onVisibilityChange);
-            if (typeof reduceMotionQuery.removeEventListener === 'function') {
-                reduceMotionQuery.removeEventListener('change', onMotionPreferenceChange);
-            } else {
-                reduceMotionQuery.removeListener(onMotionPreferenceChange);
-            }
+            unsubscribeMotionPreference();
             motionSystem.dispose();
             if (lavaController) lavaController.dispose();
             layer.remove();
@@ -682,11 +683,8 @@
 
         cleanupActiveMount = cleanup;
         document.addEventListener('visibilitychange', onVisibilityChange);
-        if (typeof reduceMotionQuery.addEventListener === 'function') {
-            reduceMotionQuery.addEventListener('change', onMotionPreferenceChange);
-        } else {
-            reduceMotionQuery.addListener(onMotionPreferenceChange);
-        }
+        unsubscribeMotionPreference = window.BackgroundMotion?.subscribe?.(onMotionPreferenceChange)
+            || (() => {});
 
         if ('ResizeObserver' in window) {
             resizeObserver = new ResizeObserver(onResize);

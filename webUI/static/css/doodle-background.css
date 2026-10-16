@@ -67,11 +67,3 @@ body {
 body:has(#lava-background-layer) .chat-composer-area {
     background: transparent;
 }
-
-@media (prefers-reduced-motion: reduce) {
-    .doodle-background-item,
-    .doodle-background-drift {
-        animation: none;
-        will-change: auto;
-    }
-}

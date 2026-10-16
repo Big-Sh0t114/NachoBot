@@ -116,18 +116,18 @@ _QQCALL_UNIVERSAL_SERVICE_DETAILS = {
     "universal_api_process_cleanup_unconfirmed": "UniversalVC 启动失败，进程清理尚未确认",
 }
 _QQCALL_PUBLIC_CONFIG_ERROR = (
-    "QQCall 公共配置无效或不可用，请检查 NachoBot/plugins/qqcall_plugin/config.toml"
+    "QQCall 公共配置无效或不可用，请检查 NachoBot/src/plugins/built_in/qqcall_plugin/config.toml"
 )
 _QQCALL_PUBLIC_CONFIG_CODE_ERRORS = {
     "enabled_identity_and_onebot_required": (
         "QQCall 配置缺少 OneBot 地址或身份信息 "
         "(enabled_identity_and_onebot_required)，请检查 "
-        "NachoBot/plugins/qqcall_plugin/config.toml"
+        "NachoBot/src/plugins/built_in/qqcall_plugin/config.toml"
     ),
     "enabled_qq_exe_required": (
         "QQCall 配置缺少 QQ 程序路径 "
         "(enabled_qq_exe_required)，请检查 "
-        "NachoBot/plugins/qqcall_plugin/config.toml"
+        "NachoBot/src/plugins/built_in/qqcall_plugin/config.toml"
     ),
 }
 class _QQCallPublicConfigError(ValueError):
@@ -160,7 +160,7 @@ def _qqcall_public_config_error_message(error: object) -> str:
 
 
 _QQCALL_DISABLED_ERROR = (
-    "QQCall 已禁用，请在 NachoBot/plugins/qqcall_plugin/config.toml 中启用后再启动"
+    "QQCall 已禁用，请在 NachoBot/config/bot_config.toml 的 [qqcall] 中设置 enabled = true 后再启动"
 )
 
 
@@ -991,7 +991,7 @@ def _register_services(root_dir: Path | str | None = None):
             [
                 "uv", "run", "--project", "../NachoBot", "--locked", "python",
                 "service/manager.py", "run", "--config",
-                "../NachoBot/plugins/qqcall_plugin/config.toml",
+                "../NachoBot/src/plugins/built_in/qqcall_plugin/config.toml",
             ],
             order=3,
             detail="独立 QQ 语音通话控制服务",
@@ -2607,7 +2607,7 @@ class ProcessManager:
     def _load_qqcall_public_config(self) -> Mapping[str, Any]:
         """Load the canonical QQCall plugin config through the fixed validator."""
         public_config_path = (
-            self.root / "NachoBot" / "plugins" / "qqcall_plugin" / "config.toml"
+            self.root / "NachoBot" / "src" / "plugins" / "built_in" / "qqcall_plugin" / "config.toml"
         )
         validator_path = (
             Path(__file__).resolve().parent.parent
@@ -2648,7 +2648,7 @@ class ProcessManager:
 
     def _external_qqcall_observation(self) -> dict[str, Any] | None:
         """Observe the independent supervisor without adopting its process tree."""
-        if not (self.root / "NachoBot/plugins/qqcall_plugin/config.toml").exists():
+        if not (self.root / "NachoBot/src/plugins/built_in/qqcall_plugin/config.toml").exists():
             return None
         try:
             config = self._load_qqcall_public_config()
@@ -2685,7 +2685,7 @@ class ProcessManager:
             process = psutil.Process(pid)
             cwd, argv = Path(process.cwd()), process.cmdline()
             project = (self.root / "NachoBot-QQCall").resolve()
-            canonical = (self.root / "NachoBot/plugins/qqcall_plugin/config.toml").resolve()
+            canonical = (self.root / "NachoBot/src/plugins/built_in/qqcall_plugin/config.toml").resolve()
             if (cwd.resolve() != project or len(argv) != 5 or argv[2:4] != ["run", "--config"] or
                     (cwd / argv[1]).resolve() != project / "service/manager.py" or
                     (cwd / argv[4]).resolve() != canonical or
@@ -4140,7 +4140,7 @@ class ProcessManager:
         command = [
             "uv", "run", "--project", "../NachoBot", "--locked", "python",
             "service/manager.py", "stop", "--config",
-            "../NachoBot/plugins/qqcall_plugin/config.toml",
+            "../NachoBot/src/plugins/built_in/qqcall_plugin/config.toml",
         ]
         started = self._qqcall_stop_clock()
         try:

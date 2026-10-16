@@ -19,7 +19,7 @@ if ($null -eq $uvCommand) {
 }
 
 if ([string]::IsNullOrWhiteSpace($Config)) {
-    $resolvedConfig = Join-Path $workspaceRoot 'NachoBot\plugins\qqcall_plugin\config.toml'
+    $resolvedConfig = Join-Path $workspaceRoot 'NachoBot\src\plugins\built_in\qqcall_plugin\config.toml'
 }
 elseif ([IO.Path]::IsPathRooted($Config)) {
     $resolvedConfig = [IO.Path]::GetFullPath($Config)

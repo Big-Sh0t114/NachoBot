@@ -14,7 +14,6 @@ __pycache__/
 llm_statistics.txt
 mongodb
 napcat
-run_dev.bat
 elua.confirmed
 # C extensions
 *.so
@@ -202,7 +201,6 @@ jieba.cache
 #  a .local-version file will be created in the root of the project to specify the version.
 .python-version
 
-OtherRes.txt
 
 /eula.confirmed
 /privacy.confirmed
@@ -214,7 +212,6 @@ logs
 .vscode
 
 /config/*
-config/old/bot_config_20250405_212257.toml
 temp/
 
 # General
@@ -271,7 +268,6 @@ $RECYCLE.BIN/
 
 config.toml
 config.toml.back
-test
 data/NapcatAdapter.db
 data/NapcatAdapter.db-shm
 data/NapcatAdapter.db-wal

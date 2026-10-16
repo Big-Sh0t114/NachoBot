@@ -21,3 +21,4 @@ data/
 temp/
 nachobot_statistics.html
 plugins/**/config.toml
+src/plugins/built_in/**/config.toml

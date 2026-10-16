@@ -50,6 +50,23 @@ uv sync
 uv run python main.py
 ```
 
+UniversalVC 的 Silero VAD 和 WeSpeaker 模型会优先复用本地文件；缺失时会依次尝试
+`NACHOBOT_HF_ENDPOINT`、`HF_ENDPOINT`、`https://hf-mirror.com`、
+`https://huggingface.co`，最后回退到原 GitHub 下载地址。空环境变量会忽略，
+重复 endpoint 会合并。
+
+VAD 镜像使用 `codeandwhisky/sva-genesis` 中与当前 Sherpa-ONNX GitHub 导出字节一致的
+`silero_vad.onnx`，避免切换到不同版本的 Silero 导出。新下载会校验对应模型的 SHA-256，
+校验失败时继续尝试下一个 endpoint。需要手动预下载时可运行：
+
+```powershell
+cd NachoBot-UniversalVC-Adapter
+$env:NACHOBOT_HF_ENDPOINT = "https://hf-mirror.com"
+uv run python download_models.py
+```
+
+独立 UniversalVC 服务要求先准备好模型文件；此下载器改动不改变服务启动时的行为。
+
 ### 独立本机服务 API（可选）
 
 需要让外部适配器使用 UniversalVC 音频能力时，可单独启动本机 API 服务；现有 `main.py` 仍按旧的独立适配器方式运行。
