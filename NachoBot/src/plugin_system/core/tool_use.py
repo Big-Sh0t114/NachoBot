@@ -1,7 +1,9 @@
+import inspect
 import time
 from typing import List, Dict, Tuple, Optional, Any
 from src.plugin_system.apis.tool_api import get_llm_available_tool_definitions, get_tool_instance
 from src.plugin_system.base.base_tool import BaseTool
+from src.plugin_system.base.tool_execution_context import ToolExecutionPreparation
 from src.plugin_system.core.global_announcement_manager import global_announcement_manager
 from src.llm_models.utils_model import LLMRequest
 from src.llm_models.payload_content import ToolCall
@@ -118,9 +120,21 @@ class ToolExecutor:
             如果return_details为True: Tuple[List[Dict], List[str], str] - (结果列表, 使用的工具, 提示词)
         """
 
-        # 首先检查缓存
+        # Context-aware tools prepare trusted host data per decision.  Keep the
+        # prepared instances and snapshots local to this call so concurrent
+        # requests cannot exchange message or stream context.
+        tools = self._get_tool_definitions()
+        prepared_contexts = await self._prepare_tool_execution_contexts(tools)
+
+        # Results from context-sensitive tools can change when the current
+        # message media or model version changes, so those executions bypass
+        # the ordinary chat-history cache.
+        cache_sensitive = any(
+            preparation.cache_sensitive
+            for _instance, preparation in prepared_contexts.values()
+        )
         cache_key = self._generate_cache_key(target_message, chat_history, sender)
-        if cached_result := self._get_from_cache(cache_key):
+        if not cache_sensitive and (cached_result := self._get_from_cache(cache_key)):
             logger.info(f"{self.log_prefix}使用缓存结果，跳过工具执行")
             if not return_details:
                 return cached_result, [], ""
@@ -128,12 +142,6 @@ class ToolExecutor:
             # 从缓存结果中提取工具名称
             used_tools = [result.get("tool_name", "unknown") for result in cached_result]
             return cached_result, used_tools, ""
-
-        # 缓存未命中，执行工具调用
-        # 获取可用工具
-        tools = self._get_tool_definitions()
-
-        # print(f"tools: {tools}")
 
         # 获取当前时间
         time_now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
@@ -149,6 +157,9 @@ class ToolExecutor:
             bot_name=bot_name,
             time_now=time_now,
         )
+        prompt_supplement = self._format_tool_context_supplement(prepared_contexts)
+        if prompt_supplement:
+            prompt = f"{prompt}\n\n{prompt_supplement}"
 
         logger.debug(f"{self.log_prefix}开始LLM工具调用分析")
 
@@ -161,10 +172,10 @@ class ToolExecutor:
         )
 
         # 执行工具调用
-        tool_results, used_tools = await self.execute_tool_calls(tool_calls)
+        tool_results, used_tools = await self.execute_tool_calls(tool_calls, prepared_contexts)
 
         # 缓存结果
-        if tool_results:
+        if tool_results and not cache_sensitive:
             self._set_cache(cache_key, tool_results)
 
         if used_tools:
@@ -206,7 +217,64 @@ class ToolExecutor:
 
         return filtered_tools
 
-    async def execute_tool_calls(self, tool_calls: Optional[List[ToolCall]]) -> Tuple[List[Dict[str, Any]], List[str]]:
+    async def _prepare_tool_execution_contexts(
+        self, tools: List[Dict[str, Any]]
+    ) -> Dict[str, Tuple[BaseTool, ToolExecutionPreparation]]:
+        """Prepare opt-in tool contexts without storing them on shared state."""
+        from src.plugin_system.core.component_registry import component_registry
+
+        registered_tools = component_registry.get_llm_available_tools()
+        prepared: Dict[str, Tuple[BaseTool, ToolExecutionPreparation]] = {}
+        for definition in tools:
+            tool_name = definition.get("name")
+            tool_class = registered_tools.get(tool_name)
+            if not tool_name or tool_class is None:
+                continue
+            if not callable(getattr(tool_class, "prepare_execution_context", None)):
+                continue
+
+            tool_instance = get_tool_instance(tool_name)
+            if tool_instance is None:
+                prepared[tool_name] = (None, ToolExecutionPreparation())  # type: ignore[arg-type]
+                continue
+
+            preparation = ToolExecutionPreparation()
+            try:
+                prepare = tool_instance.prepare_execution_context
+                candidate = prepare(self.chat_stream)
+                if inspect.isawaitable(candidate):
+                    candidate = await candidate
+                if isinstance(candidate, ToolExecutionPreparation):
+                    preparation = candidate
+                else:
+                    # A bare object is still supported as an opaque trusted
+                    # context, but it cannot add prompt text.
+                    preparation = ToolExecutionPreparation(context=candidate)
+            except Exception as exc:
+                logger.warning(
+                    f"{self.log_prefix} 工具 {tool_name} 的请求上下文准备失败，执行时将安全拒绝: {exc}"
+                )
+            prepared[tool_name] = (tool_instance, preparation)
+        return prepared
+
+    @staticmethod
+    def _format_tool_context_supplement(
+        prepared_contexts: Dict[str, Tuple[BaseTool, ToolExecutionPreparation]],
+    ) -> str:
+        blocks = []
+        for tool_name, (_, preparation) in prepared_contexts.items():
+            supplement = preparation.prompt_supplement.strip()
+            if supplement:
+                blocks.append(f"仅供工具 `{tool_name}` 使用的当前请求上下文：\n{supplement}")
+        if not blocks:
+            return ""
+        return "\n\n".join(blocks)
+
+    async def execute_tool_calls(
+        self,
+        tool_calls: Optional[List[ToolCall]],
+        prepared_contexts: Optional[Dict[str, Tuple[BaseTool, ToolExecutionPreparation]]] = None,
+    ) -> Tuple[List[Dict[str, Any]], List[str]]:
         """执行工具调用
 
         Args:
@@ -234,7 +302,12 @@ class ToolExecutor:
                 logger.debug(f"{self.log_prefix}执行工具: {tool_name}")
 
                 # 执行工具
-                result = await self.execute_tool_call(tool_call)
+                prepared = (prepared_contexts or {}).get(tool_name)
+                result = await self.execute_tool_call(
+                    tool_call,
+                    tool_instance=prepared[0] if prepared else None,
+                    prepared_context=prepared[1] if prepared else None,
+                )
 
                 if result:
                     tool_info = {
@@ -268,7 +341,10 @@ class ToolExecutor:
         return tool_results, used_tools
 
     async def execute_tool_call(
-        self, tool_call: ToolCall, tool_instance: Optional[BaseTool] = None
+        self,
+        tool_call: ToolCall,
+        tool_instance: Optional[BaseTool] = None,
+        prepared_context: Optional[ToolExecutionPreparation] = None,
     ) -> Optional[Dict[str, Any]]:
         # sourcery skip: use-assigned-variable
         """执行单个工具调用
@@ -281,7 +357,7 @@ class ToolExecutor:
         """
         try:
             function_name = tool_call.func_name
-            function_args = tool_call.args or {}
+            function_args = dict(tool_call.args or {})
             function_args["llm_called"] = True  # 标记为LLM调用
 
             # 获取对应工具实例
@@ -310,7 +386,13 @@ class ToolExecutor:
                 pass  # 忽略错误
 
             # 执行工具
-            result = await tool_instance.execute(function_args)
+            if prepared_context is not None:
+                execute_with_context = getattr(tool_instance, "execute_with_context", None)
+                if not callable(execute_with_context):
+                    raise TypeError(f"工具 {function_name} 准备了上下文，但未实现 execute_with_context")
+                result = await execute_with_context(function_args, prepared_context.context)
+            else:
+                result = await tool_instance.execute(function_args)
             if result:
                 content_val = result.get("content", result.get("error", str(result)))
                 return {

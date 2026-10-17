@@ -1,0 +1,18 @@
+{
+  "manifest_version": 1,
+  "name": "自身角色识别 (MaiSelf adaptation)",
+  "version": "1.0.0",
+  "description": "按冻结类别识别入站图片角色，并提供仅访问当前聊天媒体引用的自身角色与通用角色工具。",
+  "author": {
+    "name": "SengokuCola (Migrated by Big-Sh0t114)"
+  },
+  "license": "GPL-3.0-or-later",
+  "host_application": {
+    "min_version": "0.9.2"
+  },
+  "entry": "plugin.py",
+  "homepage_url": "https://github.com/SengokuCola/MaiSelfPlugin",
+  "keywords": ["self-recognition", "character-recognition", "image", "context"],
+  "categories": ["media", "chat"],
+  "default_locale": "zh-CN"
+}
