@@ -30,6 +30,10 @@
         + '[role="button"], [role="dialog"], [role="menu"], [role="slider"], '
         + '[contenteditable="true"], #sidebar, .sidebar, #mini-player, #player-controls, '
         + '#bgm-playlist, #audio-widget, .audio-widget, .audio-player, .bgm-player, .bgm-panel';
+
+    function isMotionReduced() {
+        return window.BackgroundMotion?.isReduced?.() === true;
+    }
     // Premixed from the SVG's #9A633F at 0.34 opacity over the warm #FAF3E8 backdrop,
     // keeping opaque lava contours close to the artwork's displayed caramel tone.
     const OUTER_COLOR = '#D9C2AF';
@@ -96,9 +100,6 @@
             return makeNoopController();
         }
 
-        const reduceMotionQuery = window.matchMedia
-            ? window.matchMedia('(prefers-reduced-motion: reduce)')
-            : { matches: false };
         const poolNodes = [];
         const blobs = [];
         const bladeNodes = [];
@@ -1630,7 +1631,7 @@
         let spawnTimer = 0;
 
         function shouldPause() {
-            return disposed || document.hidden || Boolean(reduceMotionQuery.matches);
+            return disposed || document.hidden || isMotionReduced();
         }
 
         function frame(timestamp) {
@@ -1638,7 +1639,7 @@
             if (shouldPause()) {
                 previousFrameTime = null;
                 accumulatedMs = 0;
-                if (reduceMotionQuery.matches) renderFrame();
+                if (isMotionReduced()) renderFrame();
                 return;
             }
 
@@ -1688,7 +1689,7 @@
         }
 
         function handlePointerMove(event) {
-            if (disposed || !active || !initialized || document.hidden || reduceMotionQuery.matches
+            if (disposed || !active || !initialized || document.hidden || isMotionReduced()
                 || (event.pointerType && event.pointerType !== 'mouse') || isInteractiveTarget(event.target)) {
                 resetPointer();
                 return;
@@ -1844,7 +1845,7 @@
             previousFrameTime = null;
             accumulatedMs = 0;
             poolAuraReady = false;
-            if (reduceMotionQuery.matches) renderFrame();
+            if (isMotionReduced()) renderFrame();
         }
 
         function start() {
@@ -1853,7 +1854,7 @@
                 stop(false);
                 return;
             }
-            if (reduceMotionQuery.matches) {
+            if (isMotionReduced()) {
                 stop(true);
                 return;
             }

@@ -1,4 +1,5 @@
 /.runtime/
+/docs/
 /probe/.runtime/
 /native/tests/build/
 /probe/*.config.json

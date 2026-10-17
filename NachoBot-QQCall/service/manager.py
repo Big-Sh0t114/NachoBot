@@ -65,7 +65,9 @@ from service.windows import (
 DEFAULT_CONFIG_PATH = (
     Path(__file__).resolve().parents[2]
     / "NachoBot"
+    / "src"
     / "plugins"
+    / "built_in"
     / "qqcall_plugin"
     / "config.toml"
 )
@@ -2820,6 +2822,13 @@ if ($LASTEXITCODE -ne 0) {{ throw "The requested attach failed; inspect the inje
         return detached and stopped
 
     def _validate_static_dependencies(self) -> None:
+        if not self.config["paths"]["qq_exe"]:
+            try:
+                qq_exe = self.system.discover_qq_executable()
+            except WindowsServiceError as exc:
+                raise ServiceError(exc.code, "waiting_target") from None
+            self.config["paths"]["qq_exe"] = qq_exe
+            self._discovery_config["paths"]["qq_exe"] = qq_exe
         project = self.project_root
         loader = Path(self.config["paths"]["loader_root"])
         qq_exe = Path(self.config["paths"]["qq_exe"])

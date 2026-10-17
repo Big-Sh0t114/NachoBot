@@ -25,7 +25,6 @@ _UID = re.compile(r"^u_[A-Za-z0-9_-]{22}$")
 # canonical plugin TOML directory and resolve to the existing project layout.
 DEFAULT_CONFIG: dict[str, Any] = {
     "schema": 6,
-    "plugin": {"enabled": False},
     "qqcall": {
         "adapter": "auto",
         "account_id": "",
@@ -33,12 +32,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "onebot": {"url": "", "token_file": ""},
         "paths": {
             "qq_exe": "",
-            "loader_root": "../../../NapCat.Shell",
-            "python_exe": "../../.venv/Scripts/python.exe",
+            "loader_root": "../../../../../NapCat.Shell",
+            "python_exe": "../../../../.venv/Scripts/python.exe",
             "node_exe": "node",
         },
         "ports": {"host": 6111, "callback": 6110, "control": 6120},
-        "runtime_dir": "../../../NachoBot-QQCall/.runtime/service",
+        "runtime_dir": "../../../../../NachoBot-QQCall/.runtime/service",
         "audio": {
             "capture_device": "",
             "playback_device": "",
@@ -172,30 +171,36 @@ def _path(base: Path, value: str, code: str, *, empty_allowed: bool = True) -> s
         raise ConfigError(code) from None
 
 
-def _normalize(raw: Any, config_dir: Path) -> dict[str, Any]:
+def _normalize(raw: Any, config_dir: Path, *, enabled: bool = False) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ConfigError("config_fields_invalid")
     schema = raw.get("schema")
     if type(schema) is not int or schema != SCHEMA:
         raise ConfigError("config_schema_unsupported")
-    root = _exact_keys(raw, {"schema", "plugin", "qqcall"}, "config_fields_invalid")
-
-    plugin_raw = _exact_keys(root["plugin"], {"enabled"}, "plugin_fields_invalid")
-    enabled = _boolean(plugin_raw["enabled"], "enabled_invalid")
+    # Accept the old switch for migration only. Runtime enablement comes from
+    # bot_config.toml, so this legacy field cannot enable any component.
+    expected = {"schema", "qqcall"} | ({"plugin"} if "plugin" in raw else set())
+    root = _exact_keys(raw, expected, "config_fields_invalid")
+    if "plugin" in root:
+        plugin_raw = _exact_keys(root["plugin"], {"enabled"}, "plugin_fields_invalid")
+        _boolean(plugin_raw["enabled"], "enabled_invalid")
 
     qqcall_value = root["qqcall"]
     if not isinstance(qqcall_value, dict):
         raise ConfigError("qqcall_fields_invalid")
-    required_qqcall_keys = set(DEFAULT_CONFIG["qqcall"]) - {"audio"}
-    if not required_qqcall_keys.issubset(qqcall_value) or set(qqcall_value) - (required_qqcall_keys | {"audio"}):
+    optional = {"audio", "account_id", "identity_file"}
+    required_qqcall_keys = set(DEFAULT_CONFIG["qqcall"]) - optional
+    if not required_qqcall_keys.issubset(qqcall_value) or set(qqcall_value) - (required_qqcall_keys | optional):
         raise ConfigError("qqcall_fields_invalid")
     qqcall = qqcall_value
     adapter = _string(qqcall["adapter"], "adapter_invalid", maximum=32, allow_empty=False)
     if adapter not in ("auto", "napcat", "snowluma"):
         raise ConfigError("adapter_invalid")
 
-    account_id = _string(qqcall["account_id"], "account_id_invalid", maximum=20)
-    identity_file = _string(qqcall["identity_file"], "identity_file_invalid")
+    account_id = _string(qqcall.get("account_id", ""), "account_id_invalid", maximum=20)
+    identity_file = _string(qqcall.get("identity_file", ""), "identity_file_invalid")
+    if account_id and _UIN.fullmatch(account_id) is None:
+        raise ConfigError("account_id_invalid")
 
     onebot = _exact_keys(qqcall["onebot"], {"url", "token_file"}, "onebot_fields_invalid")
     onebot_url = _string(onebot["url"], "onebot_url_invalid", maximum=2048)
@@ -218,8 +223,8 @@ def _normalize(raw: Any, config_dir: Path) -> dict[str, Any]:
             raise ConfigError("enabled_account_required")
         if not onebot_url and adapter != "auto":
             raise ConfigError("enabled_identity_and_onebot_required")
-        if not qq_exe:
-            raise ConfigError("enabled_qq_exe_required")
+        # An empty QQ path is resolved from running QQ images by the supervisor.
+        # The normal listener/account/PID-generation binding still follows.
 
     ports_raw = _exact_keys(qqcall["ports"], {"host", "callback", "control"}, "ports_fields_invalid")
     ports = {key: _integer(ports_raw[key], "port_invalid", 1, 65535) for key in ("host", "callback", "control")}
@@ -353,7 +358,7 @@ def _is_bare_command(value: str) -> bool:
     return not Path(value).is_absolute() and "/" not in value and "\\" not in value and ":" not in value and value not in (".", "..")
 
 
-def load_config(path: str | os.PathLike[str]) -> dict[str, Any]:
+def load_config(path: str | os.PathLike[str], *, bot_config_path: Path | None = None) -> dict[str, Any]:
     """Load and normalize the sole public schema-6 TOML config.
 
     Relative paths resolve from the TOML file's parent. Unknown keys, duplicate
@@ -376,7 +381,34 @@ def load_config(path: str | os.PathLike[str]) -> dict[str, Any]:
         value = tomllib.loads(source)
     except (tomllib.TOMLDecodeError, ValueError, TypeError):
         raise ConfigError("config_invalid_toml") from None
-    return _normalize(value, config_path.parent)
+    bot_path = bot_config_path or Path(__file__).resolve().parents[2] / "NachoBot/config/bot_config.toml"
+    try:
+        with bot_path.open("rb") as stream:
+            bot_config = tomllib.load(stream)
+    except FileNotFoundError:
+        bot_config = {}
+    except (OSError, ValueError):
+        raise ConfigError("bot_config_unavailable") from None
+    section = bot_config.get("qqcall", {})
+    if not isinstance(section, dict):
+        raise ConfigError("bot_qqcall_switch_invalid")
+    enabled = _boolean(section.get("enabled", False), "bot_qqcall_switch_invalid")
+    bot = bot_config.get("bot", {})
+    if not isinstance(bot, dict):
+        raise ConfigError("bot_account_invalid")
+    account = bot.get("qq_account", "")
+    if type(account) is not str or (account and _UIN.fullmatch(account) is None):
+        raise ConfigError("bot_account_invalid")
+    settings = value.get("qqcall")
+    if isinstance(settings, dict):
+        explicit = settings.get("account_id", "")
+        if account and explicit and explicit != account:
+            raise ConfigError("bot_account_mismatch")
+        if account and explicit == "":
+            # Only an omitted/blank field inherits; malformed explicit values
+            # are still rejected by the normal schema validator.
+            settings["account_id"] = account
+    return _normalize(value, config_path.parent, enabled=enabled)
 
 
 __all__ = ["DEFAULT_CONFIG", "MAX_CONFIG_BYTES", "SCHEMA", "ConfigError", "load_config"]

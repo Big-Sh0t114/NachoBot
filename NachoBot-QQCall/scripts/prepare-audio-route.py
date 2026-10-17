@@ -15,12 +15,12 @@ from service.guard_setup import prepare_guard
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=Path, default=ROOT.parent / "NachoBot/plugins/qqcall_plugin/config.toml")
+    parser.add_argument("--config", type=Path, default=ROOT.parent / "NachoBot/src/plugins/built_in/qqcall_plugin/config.toml")
     parser.add_argument("--artifacts", type=Path, default=ROOT / "native/audio_route/build/artifact-manifest.json")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--list-devices", action="store_true")
     args = parser.parse_args()
-    canonical = ROOT.parent / "NachoBot/plugins/qqcall_plugin/config.toml"
+    canonical = ROOT.parent / "NachoBot/src/plugins/built_in/qqcall_plugin/config.toml"
     try:
         if args.config.resolve() != canonical.resolve():
             raise ValueError("config_path_noncanonical")

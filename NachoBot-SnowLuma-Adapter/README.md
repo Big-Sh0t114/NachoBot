@@ -165,14 +165,14 @@ v0.2.0 构建时按以下协议基准对齐：
 
 ## QQCall 共享适配层
 
-QQCall 只由 `../NachoBot/plugins/qqcall_plugin/config.toml` 中 `[plugin].enabled` 控制。适配器、音频和 supervisor 都读取这份固定配置。启用后，适配器复用 SnowLuma 当前已验证 socket 身份、现有 Core `qq` 路由和当前 `_admission_check` 私聊/群聊策略；每次回调都会重新检查策略，不维护单独的 QQCall 白名单或开关。适配器不会创建第二条 QQ 连接，也不自动登录或接听。来电仍要求中央配置中的 UID→QQ UIN 映射及 `kernel_from_uid_matched` 关联。
+QQCall 只由 `../NachoBot/config/bot_config.toml` 中 `[qqcall].enabled` 控制；连接参数保存在 `../NachoBot/src/plugins/built_in/qqcall_plugin/config.toml`。适配器、音频和 supervisor 都读取这份固定配置。启用后，适配器复用 SnowLuma 当前已验证 socket 身份、现有 Core `qq` 路由和当前 `_admission_check` 私聊/群聊策略；每次回调都会重新检查策略，不维护单独的 QQCall 白名单或开关。适配器不会创建第二条 QQ 连接，也不自动登录或接听。来电仍要求中央配置中的 UID→QQ UIN 映射及 `kernel_from_uid_matched` 关联。
 
-在 canonical TOML `../NachoBot/plugins/qqcall_plugin/config.toml` 中管理 QQCall；此适配器模板不提供本地副本或独立开关。
+在 canonical TOML `../NachoBot/src/plugins/built_in/qqcall_plugin/config.toml` 中管理 QQCall；此适配器模板不提供本地副本或独立开关。
 
 共享 Runtime 从本机认证控制服务读取有界事件，并将已关联的来电、接通和终态作为 senderless `qq.call.*` system event 交给 Core。只有明确的 `qqcall_request` 才会请求接听；HTTP `posted` 只表示动作已交给 Host 控制链，不是 QQ SDK 对接听成功的确认。
 
-音频状态严格跟随 canonical `[plugin].enabled`，不再单独开关。启用后，即使没有手动设备名称，共享 Runtime 也会发布 QQCall 心跳并创建可选 streaming-ASR client；音频端点仍须通过 native guard 验证后才可使用。`[qqcall.audio]` 可选，只支持 `capture_device` 与 `playback_device` 两个名称覆盖项，两者可分别省略或留空。supervisor 会把已验证的 guard 设备 ID 固定到对应名称；采集固定为 loopback，播放固定为 virtual，不会默认打开物理麦克风。缺少 guard 产物或私有 guard 配置时音频保持 unavailable。默认 `engine = "universalvc"`，惰性导入仓库内 `NachoBot-UniversalVC-Adapter` 的 Silero `VADProcessor` 与 WAV 编码 helper，不复制其处理算法；每通新建 VAD 实例，使用 400 ms pre-roll、250 ms 最短语音和 500 ms 静音结束。UniversalVC 依赖、模型缺失或初始化失败时音频保持 unavailable，不会静默退回 RMS。入站音频经有界 VAD 分段后优先使用 Core 的 QQ streaming-ASR API，流服务不可用或结果无效时把同一段 PCM16 作为普通 Core voice 消息交给现有 voice 模型选择。Core 的 TTS 文本和 PCM 流由适配器本地消费，不会作为普通 QQ 消息发送；播放成功只表示选定本地渲染端点已排空，不表示远端已听到。
+音频状态严格跟随 canonical `bot_config.toml 的 [qqcall].enabled`，不再单独开关。启用后，即使没有手动设备名称，共享 Runtime 也会发布 QQCall 心跳并创建可选 streaming-ASR client；音频端点仍须通过 native guard 验证后才可使用。`[qqcall.audio]` 可选，只支持 `capture_device` 与 `playback_device` 两个名称覆盖项，两者可分别省略或留空。supervisor 会把已验证的 guard 设备 ID 固定到对应名称；采集固定为 loopback，播放固定为 virtual，不会默认打开物理麦克风。缺少 guard 产物或私有 guard 配置时音频保持 unavailable。默认 `engine = "universalvc"`，惰性导入仓库内 `NachoBot-UniversalVC-Adapter` 的 Silero `VADProcessor` 与 WAV 编码 helper，不复制其处理算法；每通新建 VAD 实例，使用 400 ms pre-roll、250 ms 最短语音和 500 ms 静音结束。UniversalVC 依赖、模型缺失或初始化失败时音频保持 unavailable，不会静默退回 RMS。入站音频经有界 VAD 分段后优先使用 Core 的 QQ streaming-ASR API，流服务不可用或结果无效时把同一段 PCM16 作为普通 Core voice 消息交给现有 voice 模型选择。Core 的 TTS 文本和 PCM 流由适配器本地消费，不会作为普通 QQ 消息发送；播放成功只表示选定本地渲染端点已排空，不表示远端已听到。
 
 PPAPI readiness 本身不证明音频路由：Runtime 还要求当前 Host generation 对应的 Windows 活跃会话证据，并每秒复核；缺失、过期或端点名不匹配会撤销音频 ready 状态和当前 turn fence。Core streaming-ASR 使用现有 Core route token；没有 token 时，仅允许通过 Router 已配置的 loopback HTTP origin 访问无认证本机 Core，远程 origin 会 fail closed。该音频链尚未在运行中的 QQ/SnowLuma 会话或真实 QQ 端点上验收。
 
-Windows adapter 基础依赖包含 PyAudioWPatch；Python 3.13+ 使用 `audioop-lts`。`[plugin].enabled = false` 时适配器不会打开或探测音频设备。启用 UniversalVC VAD 前，在 SnowLuma adapter 目录执行 `uv sync --extra qqcall-audio`，以安装锁定的 NumPy、sherpa-onnx 与 ONNX Runtime；依赖导入保持惰性。
+Windows adapter 基础依赖包含 PyAudioWPatch；Python 3.13+ 使用 `audioop-lts`。`bot_config.toml 的 [qqcall].enabled = false` 时适配器不会打开或探测音频设备。启用 UniversalVC VAD 前，在 SnowLuma adapter 目录执行 `uv sync --extra qqcall-audio`，以安装锁定的 NumPy、sherpa-onnx 与 ONNX Runtime；依赖导入保持惰性。

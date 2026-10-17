@@ -234,6 +234,7 @@ jobs:
           if git diff --quiet "$base" "$GITHUB_SHA" -- \
               NachoBot ':!NachoBot/**/*.md' ':!NachoBot/tests/**' \
               NachoBot-QQCall/sdk NachoBot-UniversalVC-Adapter/sdk \
+              NachoBot-QQCall/service/config.py \
               .github/workflows/quality.yml; then
             echo "build=false" >> "$GITHUB_OUTPUT"
           else
@@ -305,6 +306,7 @@ jobs:
               NachoBot ':!NachoBot/**/*.md' ':!NachoBot/tests/**' \
               NachoBot-QQCall/sdk NachoBot-UniversalVC-Adapter/sdk \
               NachoBot-QQCall/pyproject.toml \
+              NachoBot-QQCall/service/config.py \
               .github/workflows/quality.yml; then
             echo "build=false" >> "$GITHUB_OUTPUT"
           else

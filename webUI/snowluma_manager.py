@@ -48,6 +48,11 @@ try:
         SnowLumaLocatorError,
         SnowLumaRuntime,
         resolve_snowluma_runtime,
+        validated_snowluma_version,
+    )
+    from .snowluma_runtime_files import (
+        REQUIRED_RUNTIME_FILES as _REQUIRED_SNOWLUMA_RUNTIME_FILES,
+        required_runtime_components,
     )
 except ImportError:  # pragma: no cover - direct module imports in older callers
     from snowluma_credentials import (  # type: ignore
@@ -63,6 +68,11 @@ except ImportError:  # pragma: no cover - direct module imports in older callers
         SnowLumaLocatorError,
         SnowLumaRuntime,
         resolve_snowluma_runtime,
+        validated_snowluma_version,
+    )
+    from snowluma_runtime_files import (  # type: ignore
+        REQUIRED_RUNTIME_FILES as _REQUIRED_SNOWLUMA_RUNTIME_FILES,
+        required_runtime_components,
     )
 
 
@@ -76,26 +86,10 @@ SNOWLUMA_ADAPTER_RELATIVE = "NachoBot-SnowLuma-Adapter"
 SNOWLUMA_DEFAULT_WEBUI_PORT = 5099
 SNOWLUMA_DEFAULT_ONEBOT_PORT = 3001
 SNOWLUMA_DEFAULT_ONEBOT_PATH = "/"
-SNOWLUMA_VERSION_PREFIX = (1, 14)
 MAX_API_RESPONSE_BYTES = 1_048_576
 HTTP_TIMEOUT_SECONDS = 4.0
 
-REQUIRED_SNOWLUMA_RUNTIME_FILES: tuple[str, ...] = (
-    "package.json",
-    "index.mjs",
-    # These chunks are imported unconditionally by index.mjs.  Treating only
-    # the native binaries as mandatory lets a partial/unpacked distribution
-    # pass the setup gate and fail later with an opaque Node import error.
-    "utils-tSVKpzEf.js",
-    "logger-BAozzyTt.js",
-    "config-GJCFWjtq.js",
-    "server-CLw7fwOG.js",
-    "launcher.bat",
-    "client/index.html",
-    "native/snowluma-win32-x64.dll",
-    "native/snowluma-win32-x64.node",
-    "native/websocket-win32-x64.node",
-)
+REQUIRED_SNOWLUMA_RUNTIME_FILES: tuple[str, ...] = _REQUIRED_SNOWLUMA_RUNTIME_FILES
 REQUIRED_SNOWLUMA_ADAPTER_FILES: tuple[str, ...] = ("main.py", "pyproject.toml")
 
 
@@ -382,12 +376,11 @@ def _load_runtime_version(runtime_dir: Path) -> str:
         document = json.loads(package_path.read_text(encoding="utf-8"))
     except Exception as exc:
         raise SnowLumaSynchronizationError("SnowLuma package.json 无法解析，已拒绝同步") from exc
-    if not isinstance(document, dict) or not isinstance(document.get("version"), str):
-        raise SnowLumaSynchronizationError("无法识别 SnowLuma 版本，请升级到 1.14.x")
-    version = document["version"].strip()
-    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?", version)
-    if not match or tuple(int(match.group(i)) for i in range(1, 3)) != SNOWLUMA_VERSION_PREFIX:
-        raise SnowLumaSynchronizationError("SnowLuma 版本不兼容，请升级到 1.14.x 后重试")
+    version = validated_snowluma_version(document.get("version") if isinstance(document, dict) else None)
+    if version is None:
+        raise SnowLumaSynchronizationError(
+            "无法识别 SnowLuma 版本，package.json 必须包含有效语义版本"
+        )
     return version
 
 
@@ -516,8 +509,8 @@ def _synchronize_onebot_document(path: Path, qq_account: str, port: int, token: 
     document = _read_json_object(path, "SnowLuma OneBot")
     networks = document.get("networks")
     if networks is None:
-        # Match SnowLuma's v1.14.x snapshot schema when creating a per-UIN
-        # file.  Keeping all four network arrays and the auxiliary sections
+        # Match SnowLuma's snapshot schema when creating a per-UIN file.
+        # Keeping all four network arrays and the auxiliary sections
         # avoids producing a file that the native runtime cannot restore.
         networks = {
             "httpServers": [],
@@ -699,9 +692,10 @@ class SnowLumaManager:
             for relative in REQUIRED_SNOWLUMA_ADAPTER_FILES:
                 if not (adapter / relative).is_file():
                     missing.append(f"NachoBot-SnowLuma-Adapter/{relative}")
-            for relative in REQUIRED_SNOWLUMA_RUNTIME_FILES:
-                if not (runtime / relative).is_file():
-                    missing.append(f"{runtime_info.name}/{relative}")
+            missing.extend(
+                f"{runtime_info.name}/{relative}"
+                for relative in required_runtime_components(runtime)
+            )
         elif selected == "napcat":
             adapter = _safe_relative(base, "NachoBot-Napcat-Adapter")
             shell = _safe_relative(base, "NapCat.Shell")
@@ -1041,7 +1035,7 @@ class SnowLumaManager:
             raise SnowLumaSynchronizationError(str(exc)) from exc
         runtime = runtime_info.path
         adapter = cls.adapter_path(base)
-        version = runtime_info.version
+        version = _load_runtime_version(runtime)
         ports = cls.configured_ports(base, resolution=runtime_info)
         if _port_listening(ports["webui"]):
             raise SnowLumaSynchronizationError("SnowLuma WebUI 正在运行，请停止后再同步磁盘凭据")

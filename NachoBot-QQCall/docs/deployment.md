@@ -55,14 +55,14 @@ powershell -ExecutionPolicy Bypass -File .\NachoBot-QQCall\native\build_audio_ro
 
 ## 配置与入口
 
-唯一公开配置是 `NachoBot/plugins/qqcall_plugin/config.toml`。已有文件从现有内容读取；只有不存在时才以 `config.example.toml` 为起点。配置损坏应修正原文件，不能用模板悄悄替换。CLI 不负责创建不存在的 canonical 文件；新工作区应先完成 Core 插件配置准备。
+唯一公开配置是 `NachoBot/src/plugins/built_in/qqcall_plugin/config.toml`。已有文件从现有内容读取；只有不存在时才由内置插件从代码默认值生成。配置损坏应修正原文件，不能用模板悄悄替换。CLI 不负责创建不存在的 canonical 文件；新工作区应先完成 Core 插件配置准备。
 
 | 配置 | 作用 |
 | --- | --- |
-| `[plugin].enabled` | 唯一 QQCall 总开关，示例默认关闭。 |
-| `qqcall.adapter` / `account_id` | 所选适配器与经核验的机器人账号，不能填主叫个人账号。 |
+| `bot_config.toml 的 [qqcall].enabled` | 唯一 QQCall 总开关，默认关闭。 |
+| `qqcall.adapter` / `account_id` | 默认自动选择适配器；账号省略或留空时继承 bot_config 的 `[bot].qq_account`，显式账号不一致时拒绝启动。 |
 | `qqcall.onebot` / `identity_file` | 当前适配器身份与鉴权；私有 token 留在私有文件。 |
-| `qqcall.paths` | QQ、共享 loader、Core Python、Node 的实际路径。 |
+| `qqcall.paths` | QQ 路径留空时从运行中的 QQ 进程发现；若存在多个安装路径则需显式指定。loader、Core Python 和 Node 使用仓库默认值，可手动覆盖。 |
 | `qqcall.ports` | Host、callback、control 端口；与其他服务避免冲突。 |
 | `qqcall.audio` | 可选设备名称覆盖；默认通过 runtime 解析和证明设备。 |
 | `qqcall.universal_api` | 独立本机 UniversalVC API；优先复用已认证、就绪的共享实例。 |

@@ -48,7 +48,7 @@ DEFAULT_PORTS: dict[str, int] = {
     "WebUI": 8088,
     # SnowLuma is a managed QQ backend.  Keep its two endpoints visible in
     # setup checks even when the optional distribution has not been deployed
-    # yet; the defaults are the upstream 1.14.x defaults.
+    # yet; these are the upstream SnowLuma defaults.
     "SnowLuma WebUI": 5099,
     "SnowLuma OneBot WS": 3001,
 }
@@ -576,13 +576,13 @@ class PathVerifier:
         },
         "snowluma": {
             "name": "SnowLuma",
-            "hint": "项目根目录下自动发现唯一 SnowLuma 1.14.x Runtime 与适配器",
+            "hint": "项目根目录下自动发现唯一有效的 SnowLuma Runtime 与适配器",
             "download_url": "https://github.com/SnowLuma/SnowLuma/releases/latest",
             "default_rel": None,
         },
         "snowluma_runtime": {
             "name": "SnowLuma Runtime",
-            "hint": "项目根目录下自动发现唯一 SnowLuma 1.14.x Runtime",
+            "hint": "项目根目录下自动发现唯一有效的 SnowLuma Runtime",
             "download_url": "https://github.com/SnowLuma/SnowLuma/releases/latest",
             "default_rel": None,
         },

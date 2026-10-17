@@ -33,6 +33,7 @@ from src.config.official_configs import (
     RelationshipConfig,
     ToolConfig,
     VoiceConfig,
+    QQCallConfig,
     DebugConfig,
     AdvancedConfig,
     InjectionConfig,
@@ -515,6 +516,7 @@ class Config(ConfigBase):
     response_filter: ResponseFilterConfig = field(default_factory=ResponseFilterConfig)
     injections: InjectionConfig = field(default_factory=InjectionConfig)
     focus: FocusConfig = field(default_factory=FocusConfig)
+    qqcall: QQCallConfig = field(default_factory=QQCallConfig)
 
 
 @dataclass

@@ -1359,11 +1359,12 @@ const LauncherModule = (() => {
         const phase = service?.qqcall?.phase;
         const pending = Boolean(service?.injection_pending || pendingGroupStarts.has('qqcall'));
         const ready = phase === 'ready' && service?.qqcall?.ready === true;
-        const absent = service?.status === 'stopped' && !service?.external_state && !service?.managed;
+        const absent = ['stopped', 'error'].includes(service?.status) && !service?.external_state && !service?.managed;
         return {
             pending, ready,
+            preflightError: service?.preflight_error || '',
             canInject: !pending && !adapterGroupsError && (absent || phase === 'needs_attachment'),
-            label: pending ? '正在注入…' : ready ? '已注入'
+            label: pending ? '检查并注入中…' : ready ? '已注入'
                 : service?.origin === 'external' && !phase ? '等待状态更新' : '注入',
         };
     }
@@ -1380,7 +1381,7 @@ const LauncherModule = (() => {
             const service = (group?.services || []).find(item => item.id === 'qqcall');
             if (service?.injection_pending || service?.qqcall?.ready === true) return;
             const result = await apiPost('/api/qqcall/inject');
-            toast(result.status === 'ready' ? 'QQCall 已注入' : '正在注入 QQCall；如出现 UAC，请确认', 'info');
+            toast(result.status === 'ready' ? 'QQCall 已注入' : '正在检查 UniversalVC 部署，检查通过后开始注入', 'info');
             await refreshAdapterGroups({ requireFresh: true });
             void refreshDetails();
         } catch (error) {
@@ -1463,6 +1464,7 @@ const LauncherModule = (() => {
                 ` : ''}
                 ${control.allExternalReady ? '<div class="launch-external-notice">由外部启动器管理，请在原启动窗口停止</div>' : ''}
                 ${control.blocked && !qqcall?.canInject ? `<div class="launch-external-notice">${escapeHtml(control.blockedNotice)}</div>` : ''}
+                ${qqcall?.preflightError ? `<div class="launch-external-notice" role="alert">${escapeHtml(qqcall.preflightError)}</div>` : ''}
             </div>
         `;
     }

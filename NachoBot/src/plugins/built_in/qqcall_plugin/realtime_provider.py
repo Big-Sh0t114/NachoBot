@@ -9,7 +9,7 @@ from typing import Any
 from ncnk_message import get_system_event, get_system_event_route
 from qqcall_client.qqcall_service import is_qqcall_enabled
 from src.chat.runtime_capabilities import additional_config_from_message, runtime_capabilities_from_message
-from plugins.qqcall_plugin.control_api import QQCallAPIError, request_qqcall, validate_qqcall_scope
+from src.plugins.built_in.qqcall_plugin.control_api import QQCallAPIError, request_qqcall, validate_qqcall_scope
 from src.plugin_system.apis.realtime_api import RealtimeLifecycleChange, RealtimeSession
 
 _SCOPE_KEYS = (

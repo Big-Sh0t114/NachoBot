@@ -41,7 +41,7 @@ def _select_extra(adapter: object) -> tuple[str, bool]:
 
     validator_path = REPO_ROOT / "NachoBot-QQCall" / "service" / "config.py"
     public_config_path = (
-        REPO_ROOT / "NachoBot" / "plugins" / "qqcall_plugin" / "config.toml"
+        REPO_ROOT / "NachoBot" / "src" / "plugins" / "built_in" / "qqcall_plugin" / "config.toml"
     )
     try:
         config = _load_validator(validator_path).load_config(public_config_path)

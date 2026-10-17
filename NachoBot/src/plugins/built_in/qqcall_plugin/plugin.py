@@ -14,7 +14,7 @@ from typing import Any, List, Tuple, Type
 
 from ncnk_message import get_system_event, get_system_event_route, is_offline_replay
 from qqcall_client.qqcall_policy import match_group_call_trigger
-from qqcall_client.qqcall_service import is_qqcall_enabled, read_qqcall_public_config
+from qqcall_client.qqcall_service import canonical_qqcall_config_path, is_qqcall_enabled, read_qqcall_public_config
 
 from src.config.config import global_config
 from src.common.logger import get_logger
@@ -27,7 +27,8 @@ from src.plugin_system import (
     register_plugin,
 )
 from src.plugin_system.apis import llm_api, message_api
-from plugins.qqcall_plugin.control_api import (
+from src.plugins.built_in.qqcall_plugin.config_bootstrap import ensure_default_config
+from src.plugins.built_in.qqcall_plugin.control_api import (
     QQCallAPIError,
     request_qqcall,
     validate_qq_peer_user_id,
@@ -1221,19 +1222,26 @@ class QQCallPlugin(BasePlugin):
         "plugin": "插件开关",
         "qqcall": "QQCall 安全策略与可选 Planner 接听；来电准入由适配器策略决定",
     }
-    # The service owns the single schema-5 TOML file. An empty plugin schema
-    # prevents BasePlugin from creating or migrating a plugin-local copy.
+    # The service owns schema validation. Bootstrap the shared file from its
+    # complete template instead of letting BasePlugin migrate a partial schema.
     config_schema = {}
+
+    def __init__(self, plugin_dir: str):
+        super().__init__(plugin_dir)
+        self.plugin_info.is_built_in = True
 
     def _load_plugin_config(self) -> None:
         # plugin_dir only locates the manifest. The public config reader always
-        # resolves the fixed plugins/qqcall_plugin/config.toml path.
+        # resolves the fixed src/plugins/built_in/qqcall_plugin/config.toml path.
         self.enable_plugin = False
         self.config = {}
         self._unregister_realtime_provider()
         try:
+            if ensure_default_config(canonical_qqcall_config_path()):
+                logger.info("已生成 QQCall config.toml；总开关位于 bot_config.toml 的 [qqcall].enabled。")
             public_config = read_qqcall_public_config()
         except Exception:
+            logger.error("QQCall 配置创建或加载失败，插件已禁用；请检查 config.toml、bot_config.toml 及目录权限，已有配置不会被覆盖。")
             return
 
         if not isinstance(public_config, dict) or type(public_config.get("enabled")) is not bool:
@@ -1272,7 +1280,7 @@ class QQCallPlugin(BasePlugin):
 
     @staticmethod
     def _unregister_realtime_provider() -> None:
-        from plugins.qqcall_plugin.delivery import unregister
+        from src.plugins.built_in.qqcall_plugin.delivery import unregister
 
         unregister()
         try:
@@ -1287,7 +1295,7 @@ class QQCallPlugin(BasePlugin):
 
     @staticmethod
     def _register_realtime_provider() -> None:
-        from plugins.qqcall_plugin.delivery import register
+        from src.plugins.built_in.qqcall_plugin.delivery import register
 
         register(_core_qqcall_enabled)
         try:
@@ -1301,7 +1309,7 @@ class QQCallPlugin(BasePlugin):
         # Keep the established private-call provider independent from the new
         # group module.  A partial group install must never disable private calls.
         try:
-            from plugins.qqcall_plugin.realtime_provider import (
+            from src.plugins.built_in.qqcall_plugin.realtime_provider import (
                 qqcall_enabled,
                 verify_qqcall_lifecycle,
                 verify_qqcall_realtime_message,
@@ -1319,10 +1327,10 @@ class QQCallPlugin(BasePlugin):
             pass
 
         try:
-            from plugins.qqcall_plugin.group_realtime_provider import (
+            from src.plugins.built_in.qqcall_plugin.group_realtime_provider import (
                 verify_qqcall_group_realtime_message,
             )
-            from plugins.qqcall_plugin.realtime_provider import qqcall_enabled
+            from src.plugins.built_in.qqcall_plugin.realtime_provider import qqcall_enabled
 
             if not qqcall_enabled():
                 unregister_realtime_provider("qqcall_group")

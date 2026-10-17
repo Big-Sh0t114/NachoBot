@@ -1,16 +1,32 @@
 # QQCall plugin
 
-`NachoBot/plugins/qqcall_plugin/config.toml` is the fixed public QQCall
-configuration. It uses schema 5 with `[plugin].enabled` as the only on/off
-switch for the service, adapters, audio, and this Core plugin. The same file's
-`[qqcall]` table holds the service settings and the Core behavior settings
-`allow_planner_accept`, `group_intent_model_task`, and
-`group_intent_timeout_seconds`. Core reads this canonical file
-when it starts; changing `plugin.enabled` requires restarting Core to refresh
-command and Planner-action registration. Command and action invocations also
-reread the switch before dispatch and fail closed if it has been disabled.
-Missing or invalid canonical TOML disables plugin registration. The plugin
-does not generate a plugin-local config or use a local copy. It sends requests
+`NachoBot/src/plugins/built_in/qqcall_plugin/config.toml` is the fixed public QQCall
+configuration for connection and policy settings (schema 6). The sole enable
+switch is `[qqcall].enabled` in `NachoBot/config/bot_config.toml`, defaulting to
+false. Core, adapters, audio, and the supervisor read the same switch; the old
+`[plugin].enabled` field is accepted for migration but cannot enable QQCall.
+Restart Core after changing the switch to refresh command/action registration.
+
+`qqcall.account_id` may be omitted or left empty: the shared loader inherits
+`[bot].qq_account` from `bot_config.toml` on each read, without writing it back.
+An explicit account must match the bot account. The adapter's live login is
+still checked against this account before binding. `identity_file` may also be
+omitted; the verified adapter supplies the UID. With `adapter = "auto"`, OneBot
+connection settings come from the discovered adapter configuration.
+
+An empty `qqcall.paths.qq_exe` lets the supervisor discover the executable from
+running QQ processes. Multiple instances of one installation are supported;
+multiple installation paths require an explicit override. This discovers only
+the installation path: account, listener ownership, PID, and process creation
+time checks still select the actual binding. Other path defaults use the fixed
+repository layout, and explicit path overrides remain supported.
+
+This is a built-in plugin. Missing settings are generated from the shared
+service schema defaults; there is no example TOML to copy. An existing legacy
+`NachoBot/plugins/qqcall_plugin/config.toml` can seed the new file with relative
+paths rebased. Set the new bot-config switch explicitly when upgrading another
+installation. Existing destination files are never overwritten, including invalid
+ones. Initialization errors are logged and leave the plugin disabled. Requests go
 through Core's typed `qqcall_request` API and the shared QQCall Runtime; it does
 not open another QQ socket or call a vendor API directly.
 

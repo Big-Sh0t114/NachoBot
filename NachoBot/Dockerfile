@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml uv.lock ./
 COPY --from=qqcall /sdk/pyproject.toml /NachoBot-QQCall/sdk/pyproject.toml
 COPY --from=qqcall /sdk/qqcall_client /NachoBot-QQCall/sdk/qqcall_client
+COPY --from=qqcall /service/config.py /NachoBot-QQCall/service/config.py
 COPY --from=universalvc_sdk /pyproject.toml /NachoBot-UniversalVC-Adapter/sdk/pyproject.toml
 COPY --from=universalvc_sdk /universalvc_client.py /NachoBot-UniversalVC-Adapter/sdk/universalvc_client.py
 RUN uv sync --locked --no-dev --no-install-project

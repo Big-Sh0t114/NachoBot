@@ -16,7 +16,7 @@ src/plugins/built_in/help_plugin/config.toml
 src/plugins/built_in/plugin_management/config.toml
 src/plugins/built_in/relation/config.toml
 src/plugins/built_in/tts_plugin/config.toml
-fast_update_nicknames.py
+src/plugins/built_in/qqcall_plugin/config.toml
 logs/
 out/
 temp/

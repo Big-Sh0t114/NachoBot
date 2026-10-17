@@ -513,6 +513,13 @@ class MCPConfig(ConfigBase):
 
 
 @dataclass
+class QQCallConfig(ConfigBase):
+    """内置 QQCall 插件与通话链路的统一开关。"""
+
+    enabled: bool = False
+
+
+@dataclass
 class VoiceConfig(ConfigBase):
     """语音识别配置类"""
 

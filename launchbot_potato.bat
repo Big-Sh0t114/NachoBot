@@ -187,21 +187,23 @@ setlocal EnableExtensions EnableDelayedExpansion
 set "SNOWLUMA_DIR="
 for /f "usebackq delims=" %%D in (`uv run --project "%ROOT%NachoBot" python "%ROOT%webUI\snowluma_locator.py" --root "%ROOT:~0,-1%" --field path 2^>nul`) do if not defined SNOWLUMA_DIR set "SNOWLUMA_DIR=%%D"
 if not defined SNOWLUMA_DIR (
-  echo [FATAL] SnowLuma Runtime discovery failed; deploy exactly one valid SnowLuma 1.14.x directory.
+  echo [FATAL] SnowLuma Runtime discovery failed; deploy exactly one valid SnowLuma Runtime directory.
   echo [INFO] SnowLuma download: https://github.com/SnowLuma/SnowLuma/releases/latest
   endlocal & exit /b 1
 )
 for %%D in ("!SNOWLUMA_DIR!") do set "SNOWLUMA_NAME=%%~nxD"
 set "SNOWLUMA_ADAPTER_DIR=%ROOT%NachoBot-SnowLuma-Adapter"
 set "SNOWLUMA_MISSING="
-for %%F in (package.json index.mjs utils-tSVKpzEf.js logger-BAozzyTt.js config-GJCFWjtq.js server-CLw7fwOG.js launcher.bat client\index.html native\snowluma-win32-x64.dll native\snowluma-win32-x64.node native\websocket-win32-x64.node) do (
-  if not exist "!SNOWLUMA_DIR!\%%F" set "SNOWLUMA_MISSING=!SNOWLUMA_MISSING! !SNOWLUMA_NAME!/%%F;"
-)
 if not exist "!SNOWLUMA_ADAPTER_DIR!\main.py" set "SNOWLUMA_MISSING=!SNOWLUMA_MISSING! NachoBot-SnowLuma-Adapter/main.py;"
 if not exist "!SNOWLUMA_ADAPTER_DIR!\pyproject.toml" set "SNOWLUMA_MISSING=!SNOWLUMA_MISSING! NachoBot-SnowLuma-Adapter/pyproject.toml;"
 if defined SNOWLUMA_MISSING (
   echo [FATAL] SnowLuma components are incomplete: !SNOWLUMA_MISSING!
   echo [INFO] Redeploy from https://github.com/SnowLuma/SnowLuma/releases/latest
+  endlocal & exit /b 1
+)
+uv run --no-sync --project "%ROOT%NachoBot" python "%ROOT%webUI\snowluma_locator.py" --root "%ROOT:~0,-1%" --runtime-path "!SNOWLUMA_DIR!" --check-components
+if errorlevel 1 (
+  echo [FATAL] SnowLuma Runtime components are incomplete; redeploy from https://github.com/SnowLuma/SnowLuma/releases/latest
   endlocal & exit /b 1
 )
 uv run --project "%ROOT%NachoBot" python "%ROOT%webUI\snowluma_locator.py" --root "%ROOT:~0,-1%" --runtime-path "!SNOWLUMA_DIR!" --check-credentials >nul 2>&1

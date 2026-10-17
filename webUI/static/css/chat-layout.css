@@ -475,6 +475,58 @@ body.sidebar-collapsed .sidebar-version {
     font-size: 0.7rem !important;
 }
 
+.sidebar-footer .ui-settings input.sidebar-switch {
+    -webkit-appearance: none;
+    appearance: none;
+    position: relative;
+    box-sizing: border-box;
+    flex: 0 0 36px;
+    width: 36px;
+    height: 20px;
+    margin: 0 0 0 12px;
+    padding: 0;
+    border: 1px solid #555560;
+    border-radius: 999px;
+    background-color: #383840;
+    cursor: pointer;
+    transition: background-color 160ms ease, border-color 160ms ease;
+}
+
+.sidebar-footer .ui-settings input.sidebar-switch::before {
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background-color: #c4c4cc;
+    pointer-events: none;
+    transition: transform 160ms ease, background-color 160ms ease;
+}
+
+.sidebar-footer .ui-settings input.sidebar-switch:checked {
+    border-color: #75BFB6;
+    background-color: #75BFB6;
+}
+
+.sidebar-footer .ui-settings input.sidebar-switch:checked::before {
+    transform: translateX(16px);
+    background-color: #fff;
+}
+
+.sidebar-footer .ui-settings input.sidebar-switch:focus-visible {
+    outline: 2px solid #75BFB6;
+    outline-offset: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .sidebar-footer .ui-settings input.sidebar-switch,
+    .sidebar-footer .ui-settings input.sidebar-switch::before {
+        transition-duration: 0.01ms;
+    }
+}
+
 .sidebar-footer .status-bar {
     padding: 6px 7px 3px;
     color: #a6a6b1;

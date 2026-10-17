@@ -14,7 +14,7 @@
   "categories": ["chat"],
   "default_locale": "zh-CN",
   "plugin_info": {
-    "is_built_in": false,
+    "is_built_in": true,
     "plugin_type": "chat",
     "components": [
       {

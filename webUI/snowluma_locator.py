@@ -1,9 +1,10 @@
 """Authoritative, credential-safe SnowLuma runtime discovery.
 
-SnowLuma releases are unpacked directly below the NachoBot repository.  The
-release archive name is not stable (the exact ``SnowLuma`` directory and
-versioned names such as ``SnowLuma-v1.14.17-win-x64`` are both seen in the
-wild), so callers must use this module instead of guessing a path.
+SnowLuma releases are unpacked directly below the NachoBot repository. The
+release archive name is not stable: deployments may use the exact
+``SnowLuma`` directory or a versioned name such as
+``SnowLuma-v2.1.0-win-x64``, so callers must use this module instead of
+guessing a path.
 
 The module intentionally uses only the Python standard library.  That keeps it
 safe to invoke from the three top-level ``.bat`` launchers before any project
@@ -24,13 +25,25 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+try:
+    from .snowluma_runtime_files import required_runtime_components
+except ImportError:  # pragma: no cover - direct script execution in BAT files
+    from snowluma_runtime_files import required_runtime_components
 
-SUPPORTED_VERSION_PREFIX = (1, 14)
-_PACKAGE_VERSION_RE = re.compile(r"^1\.14\.(\d+)$")
-_DIRECTORY_NAME_RE = re.compile(
-    r"^snowluma(?:[-_]?v?(?P<version>\d+\.\d+\.\d+)"
-    r"(?:-(?P<suffix>[A-Za-z0-9][A-Za-z0-9._-]*))?)?$",
-    re.IGNORECASE,
+
+_NUMERIC_VERSION_PART = r"(?:0|[1-9][0-9]*)"
+_PRERELEASE_IDENTIFIER = (
+    r"(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
+)
+_BUILD_IDENTIFIER = r"[0-9A-Za-z-]+"
+_SEMANTIC_VERSION_RE = re.compile(
+    rf"{_NUMERIC_VERSION_PART}\.{_NUMERIC_VERSION_PART}\."
+    rf"{_NUMERIC_VERSION_PART}"
+    rf"(?:-(?:{_PRERELEASE_IDENTIFIER})(?:\.{_PRERELEASE_IDENTIFIER})*)?"
+    rf"(?:\+(?:{_BUILD_IDENTIFIER})(?:\.{_BUILD_IDENTIFIER})*)?"
+)
+_VERSIONED_DIRECTORY_PREFIX_RE = re.compile(
+    r"^snowluma[-_]?v?(?P<tail>.+)$", re.IGNORECASE
 )
 _REPARSE_POINT_ATTRIBUTE = 0x0400
 
@@ -72,13 +85,22 @@ class SnowLumaRuntime:
         }
 
 
+def validated_snowluma_version(value: object) -> str | None:
+    """Return a normalized semantic version, or ``None`` for invalid metadata."""
+
+    if not isinstance(value, str):
+        return None
+    version = value.strip()
+    return version if _SEMANTIC_VERSION_RE.fullmatch(version) else None
+
+
 def _repository_root(value: Path | str | None) -> Path:
     root = Path(value) if value is not None else Path(__file__).resolve().parent.parent
     try:
         return root.resolve()
     except OSError as exc:
         raise SnowLumaLocatorError(
-            "missing", "SnowLuma Runtime 项目根目录无效，请在项目根目录部署 1.14.x Runtime"
+            "missing", "SnowLuma Runtime 项目根目录无效，请检查项目根目录"
         ) from exc
 
 
@@ -106,11 +128,21 @@ def _inside_root(root: Path, candidate: Path) -> Path | None:
     return resolved
 
 
-def _directory_version(name: str) -> str | None:
-    match = _DIRECTORY_NAME_RE.fullmatch(name)
-    if not match:
-        return None
-    return match.group("version")
+def _directory_matches_package_version(name: str, package_version: str) -> bool:
+    if re.fullmatch(r"snowluma", name, re.IGNORECASE):
+        return True
+    match = _VERSIONED_DIRECTORY_PREFIX_RE.fullmatch(name)
+    if match is None:
+        return False
+    tail = match.group("tail")
+    if tail == package_version:
+        return True
+    if not tail.startswith(package_version):
+        return False
+    # Keep accepting the prior generic archive suffix grammar rather than
+    # coupling discovery to a particular OS/architecture naming convention.
+    suffix = tail[len(package_version) :]
+    return bool(re.fullmatch(r"-[A-Za-z0-9][A-Za-z0-9._-]*", suffix))
 
 
 def _package_version(path: Path) -> str | None:
@@ -123,10 +155,7 @@ def _package_version(path: Path) -> str | None:
     version = document.get("version")
     if not isinstance(version, str):
         return None
-    version = version.strip()
-    if not _PACKAGE_VERSION_RE.fullmatch(version):
-        return None
-    return version
+    return validated_snowluma_version(version)
 
 
 def _candidate_directories(root: Path) -> Iterable[tuple[str, Path, str]]:
@@ -136,14 +165,15 @@ def _candidate_directories(root: Path) -> Iterable[tuple[str, Path, str]]:
         entries = list(root.iterdir())
     except OSError as exc:
         raise SnowLumaLocatorError(
-            "missing", "SnowLuma Runtime 项目根目录无法读取，请在项目根目录部署 1.14.x Runtime"
+            "missing", "SnowLuma Runtime 项目根目录无法读取，请检查项目根目录"
         ) from exc
 
     for entry in entries:
         if not entry.is_dir() or _is_reparse_or_symlink(entry):
             continue
-        directory_version = _directory_version(entry.name)
-        if not re.fullmatch(r"snowluma", entry.name, re.IGNORECASE) and directory_version is None:
+        if not re.fullmatch(r"snowluma", entry.name, re.IGNORECASE) and not (
+            _VERSIONED_DIRECTORY_PREFIX_RE.fullmatch(entry.name)
+        ):
             continue
         resolved = _inside_root(root, entry)
         if resolved is None or resolved == root:
@@ -151,23 +181,21 @@ def _candidate_directories(root: Path) -> Iterable[tuple[str, Path, str]]:
         package_version = _package_version(resolved)
         if package_version is None:
             continue
-        # An exact SnowLuma directory gets its version from package.json.  A
-        # release archive name must agree exactly with that package version;
-        # otherwise it is not a genuine candidate and must not create a false
-        # ambiguity with a valid release.
-        if directory_version is not None and directory_version != package_version:
+        # package.json is authoritative. Versioned directory names must match
+        # it exactly, optionally followed by the archive's generic suffix.
+        if not _directory_matches_package_version(entry.name, package_version):
             continue
         yield entry.name, resolved, package_version
 
 
 def resolve_snowluma_runtime(root: Path | str | None = None) -> SnowLumaRuntime:
-    """Resolve exactly one valid SnowLuma 1.14.x runtime below ``root``."""
+    """Resolve exactly one valid SnowLuma runtime below ``root``."""
 
     repository = _repository_root(root)
     candidates = sorted(_candidate_directories(repository), key=lambda item: item[0].casefold())
     if not candidates:
         raise SnowLumaLocatorError(
-            "missing", "SnowLuma Runtime 未找到有效的 1.14.x 目录，请部署 SnowLuma Runtime"
+            "missing", "SnowLuma Runtime 未找到有效的目录，请部署 SnowLuma Runtime"
         )
     if len(candidates) > 1:
         names = ", ".join(item[0] for item in candidates)
@@ -338,7 +366,7 @@ def credential_consistency(
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Resolve the repository-local SnowLuma 1.14.x runtime")
+    parser = argparse.ArgumentParser(description="Resolve the repository-local SnowLuma runtime")
     parser.add_argument("--root", default=None, help=argparse.SUPPRESS)
     parser.add_argument(
         "--field",
@@ -348,6 +376,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--check-credentials",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--check-components",
         action="store_true",
         help=argparse.SUPPRESS,
     )
@@ -366,16 +399,27 @@ def main(argv: list[str] | None = None) -> int:
     except SnowLumaLocatorError as exc:
         print(exc.message, file=sys.stderr)
         return 2
-    if args.check_credentials:
+    if args.check_credentials or args.check_components:
         if args.runtime_path:
             try:
                 supplied = Path(args.runtime_path).resolve()
-            except OSError:
+            except (OSError, RuntimeError):
                 print("SnowLuma Runtime 路径无效，请重新部署 SnowLuma", file=sys.stderr)
                 return 2
             if supplied != runtime.path:
                 print("SnowLuma Runtime 路径与权威解析不一致，请重新部署 SnowLuma", file=sys.stderr)
                 return 2
+    if args.check_components:
+        missing = required_runtime_components(runtime.path)
+        if missing:
+            print(
+                "SnowLuma Runtime 组件缺失或无法读取：" + ", ".join(missing),
+                file=sys.stderr,
+            )
+            return 4
+        print("ok")
+        return 0
+    if args.check_credentials:
         status = credential_consistency(args.root, runtime=runtime)
         if not status.get("consistent"):
             print(str(status.get("message") or "SnowLuma 凭据缺失，请重新部署 SnowLuma"), file=sys.stderr)
@@ -398,7 +442,6 @@ if __name__ == "__main__":  # pragma: no cover - exercised by BAT launchers
 
 
 __all__ = [
-    "SUPPORTED_VERSION_PREFIX",
     "SnowLumaLocatorError",
     "SnowLumaRuntime",
     "RuntimeResolution",
@@ -411,4 +454,5 @@ __all__ = [
     "resolve_runtime_path",
     "resolve_snowluma_runtime",
     "resolve_runtime_directory",
+    "validated_snowluma_version",
 ]

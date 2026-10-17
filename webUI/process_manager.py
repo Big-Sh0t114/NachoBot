@@ -116,18 +116,18 @@ _QQCALL_UNIVERSAL_SERVICE_DETAILS = {
     "universal_api_process_cleanup_unconfirmed": "UniversalVC 启动失败，进程清理尚未确认",
 }
 _QQCALL_PUBLIC_CONFIG_ERROR = (
-    "QQCall 公共配置无效或不可用，请检查 NachoBot/plugins/qqcall_plugin/config.toml"
+    "QQCall 公共配置无效或不可用，请检查 NachoBot/src/plugins/built_in/qqcall_plugin/config.toml"
 )
 _QQCALL_PUBLIC_CONFIG_CODE_ERRORS = {
     "enabled_identity_and_onebot_required": (
         "QQCall 配置缺少 OneBot 地址或身份信息 "
         "(enabled_identity_and_onebot_required)，请检查 "
-        "NachoBot/plugins/qqcall_plugin/config.toml"
+        "NachoBot/src/plugins/built_in/qqcall_plugin/config.toml"
     ),
     "enabled_qq_exe_required": (
         "QQCall 配置缺少 QQ 程序路径 "
         "(enabled_qq_exe_required)，请检查 "
-        "NachoBot/plugins/qqcall_plugin/config.toml"
+        "NachoBot/src/plugins/built_in/qqcall_plugin/config.toml"
     ),
 }
 class _QQCallPublicConfigError(ValueError):
@@ -160,7 +160,7 @@ def _qqcall_public_config_error_message(error: object) -> str:
 
 
 _QQCALL_DISABLED_ERROR = (
-    "QQCall 已禁用，请在 NachoBot/plugins/qqcall_plugin/config.toml 中启用后再启动"
+    "QQCall 已禁用，请在 NachoBot/config/bot_config.toml 的 [qqcall] 中设置 enabled = true 后再启动"
 )
 
 
@@ -991,7 +991,7 @@ def _register_services(root_dir: Path | str | None = None):
             [
                 "uv", "run", "--project", "../NachoBot", "--locked", "python",
                 "service/manager.py", "run", "--config",
-                "../NachoBot/plugins/qqcall_plugin/config.toml",
+                "../NachoBot/src/plugins/built_in/qqcall_plugin/config.toml",
             ],
             order=3,
             detail="独立 QQ 语音通话控制服务",
@@ -1183,6 +1183,7 @@ class ProcessManager:
         self._active_group_env: dict[str, dict[str, str]] = {}
         self._operation_tasks: dict[str, asyncio.Task[None]] = {}
         self._operation_kinds: dict[str, str] = {}
+        self._qqcall_preflight_error: str | None = None
         self._service_locks: dict[str, asyncio.Lock] = {}
         # Runtime selected for the current/next NachoBot launch transaction.
         # FULL/LITE use gpu|cpu; POTATO does not select a Multimodal runtime.
@@ -2607,7 +2608,7 @@ class ProcessManager:
     def _load_qqcall_public_config(self) -> Mapping[str, Any]:
         """Load the canonical QQCall plugin config through the fixed validator."""
         public_config_path = (
-            self.root / "NachoBot" / "plugins" / "qqcall_plugin" / "config.toml"
+            self.root / "NachoBot" / "src" / "plugins" / "built_in" / "qqcall_plugin" / "config.toml"
         )
         validator_path = (
             Path(__file__).resolve().parent.parent
@@ -2648,7 +2649,7 @@ class ProcessManager:
 
     def _external_qqcall_observation(self) -> dict[str, Any] | None:
         """Observe the independent supervisor without adopting its process tree."""
-        if not (self.root / "NachoBot/plugins/qqcall_plugin/config.toml").exists():
+        if not (self.root / "NachoBot/src/plugins/built_in/qqcall_plugin/config.toml").exists():
             return None
         try:
             config = self._load_qqcall_public_config()
@@ -2685,7 +2686,7 @@ class ProcessManager:
             process = psutil.Process(pid)
             cwd, argv = Path(process.cwd()), process.cmdline()
             project = (self.root / "NachoBot-QQCall").resolve()
-            canonical = (self.root / "NachoBot/plugins/qqcall_plugin/config.toml").resolve()
+            canonical = (self.root / "NachoBot/src/plugins/built_in/qqcall_plugin/config.toml").resolve()
             if (cwd.resolve() != project or len(argv) != 5 or argv[2:4] != ["run", "--config"] or
                     (cwd / argv[1]).resolve() != project / "service/manager.py" or
                     (cwd / argv[4]).resolve() != canonical or
@@ -2838,6 +2839,7 @@ class ProcessManager:
         return {"status": "injecting"}
 
     async def _run_qqcall_injection(self, entry: Path) -> None:
+        await self._check_qqcall_deployment()
         await self._broadcast("qqcall", "[WebUI] 正在运行 QQCall 固定注入入口；如出现 UAC，请确认。\n")
         child = await asyncio.create_subprocess_exec(
             "cmd.exe", "/d", "/c", str(entry), cwd=str(entry.parent),
@@ -2852,6 +2854,20 @@ class ProcessManager:
             await self._broadcast("qqcall", "[WebUI] QQCall 注入未确认；请查看当前通话服务状态和原启动窗口。\n")
             raise RuntimeError("QQCall 注入未确认")
         await self._broadcast("qqcall", "[WebUI] QQCall 已注入，通话控制链就绪。\n")
+
+    async def _check_qqcall_deployment(self) -> None:
+        try:
+            from .qqcall_preflight import check_qqcall_deployment, deployment_error
+        except ImportError:
+            from qqcall_preflight import check_qqcall_deployment, deployment_error
+        self._qqcall_preflight_error = None
+        await self._broadcast("qqcall", "[WebUI] 正在检查 UniversalVC 环境、模型及虚拟音频路由…\n")
+        issues = await check_qqcall_deployment(self.root)
+        if issues:
+            message = deployment_error(issues)
+            self._qqcall_preflight_error = message
+            await self._broadcast("qqcall", f"[WebUI] ERROR: {message}\n")
+            raise RuntimeError(message)
 
     def get_service_status(self, service_id: str) -> dict[str, Any]:
         """Get status info for a single service."""
@@ -2980,6 +2996,10 @@ class ProcessManager:
             "observed_profile": observed_profile,
             "external_state": external_state,
             "qqcall": qqcall_phase,
+            "preflight_error": (
+                self._qqcall_preflight_error if service_id == "qqcall"
+                and not (qqcall_phase or {}).get("ready") else None
+            ),
             "injection_pending": service_id == "qqcall" and bool(
                 (injection := self._operation_tasks.get("qqcall:inject")) and not injection.done()
             ),
@@ -3841,6 +3861,16 @@ class ProcessManager:
                 )
                 return
 
+            try:
+                await self._check_qqcall_deployment()
+            except RuntimeError:
+                if state is None:
+                    state = ServiceState()
+                    self.states[service_id] = state
+                state.start_reservation = False
+                state.status = ServiceStatus.ERROR
+                return
+
         if state is None:
             state = ServiceState()
             self.states[service_id] = state
@@ -4140,7 +4170,7 @@ class ProcessManager:
         command = [
             "uv", "run", "--project", "../NachoBot", "--locked", "python",
             "service/manager.py", "stop", "--config",
-            "../NachoBot/plugins/qqcall_plugin/config.toml",
+            "../NachoBot/src/plugins/built_in/qqcall_plugin/config.toml",
         ]
         started = self._qqcall_stop_clock()
         try:

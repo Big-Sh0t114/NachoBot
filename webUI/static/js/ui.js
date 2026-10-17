@@ -23,6 +23,7 @@ const UI = (() => {
         const startupCheckbox = document.getElementById('toggle-startup');
         const bgmCheckbox = document.getElementById('toggle-bgm');
         const interactiveCheckbox = document.getElementById('toggle-interactive');
+        const reduceMotionCheckbox = document.getElementById('toggle-reduced-motion');
 
         const startupScreen = document.getElementById('startup-screen');
         const startupVideo = document.getElementById('startup-video');
@@ -58,16 +59,25 @@ const UI = (() => {
         });
 
         // Load settings from localStorage
-        const defaultSettings = { startup: true, bgm: false, interactive: true, volume: 0.2 };
+        const defaultSettings = { startup: true, bgm: false, interactive: true, volume: 0.2, reducedMotion: false };
         let settings = defaultSettings;
         try {
             const saved = localStorage.getItem('nacho_ui_settings');
             if (saved) settings = { ...defaultSettings, ...JSON.parse(saved) };
         } catch (e) { }
 
+        settings.reducedMotion = window.BackgroundMotion?.isReduced?.() ?? false;
+
         if (startupCheckbox) startupCheckbox.checked = settings.startup;
         if (bgmCheckbox) bgmCheckbox.checked = settings.bgm;
         if (interactiveCheckbox) interactiveCheckbox.checked = settings.interactive;
+        if (reduceMotionCheckbox) reduceMotionCheckbox.checked = settings.reducedMotion;
+        if (window.BackgroundMotion?.subscribe) {
+            window.BackgroundMotion.subscribe((reduced) => {
+                settings.reducedMotion = reduced;
+                if (reduceMotionCheckbox) reduceMotionCheckbox.checked = reduced;
+            });
+        }
         if (settings.bgm) armAutoplayPlayback();
 
         applyVoiceCallState = () => {
@@ -398,6 +408,17 @@ const UI = (() => {
             });
         }
 
+        if (reduceMotionCheckbox) {
+            reduceMotionCheckbox.addEventListener('change', (e) => {
+                if (typeof window.BackgroundMotion?.setReduced === 'function') {
+                    settings.reducedMotion = window.BackgroundMotion.setReduced(e.target.checked);
+                } else {
+                    settings.reducedMotion = e.target.checked;
+                    saveSettings(settings);
+                }
+            });
+        }
+
         easterEggs.bind();
     }
 
@@ -529,7 +550,23 @@ const UI = (() => {
     }
 
     function saveSettings(settings) {
-        localStorage.setItem('nacho_ui_settings', JSON.stringify(settings));
+        let savedSettings = {};
+        try {
+            const saved = localStorage.getItem('nacho_ui_settings');
+            const parsed = saved ? JSON.parse(saved) : {};
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                savedSettings = parsed;
+            }
+        } catch (e) { }
+
+        const mergedSettings = { ...savedSettings, ...settings };
+        if (window.BackgroundMotion?.isReduced) {
+            mergedSettings.reducedMotion = window.BackgroundMotion.isReduced();
+        }
+
+        try {
+            localStorage.setItem('nacho_ui_settings', JSON.stringify(mergedSettings));
+        } catch (e) { }
     }
 
     return { init, setVoiceCallActive };

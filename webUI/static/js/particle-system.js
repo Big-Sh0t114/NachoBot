@@ -4,6 +4,7 @@
 window.ParticleSystem = (() => {
     let particleAnimationId = null;
     let particleCleanup = null;
+    let particleSession = null;
     let particleAudioSource = null;
     const NOMINAL_FRAME_RATE = 60;
     const MAX_FRAME_DELTA_SECONDS = 0.1;
@@ -14,12 +15,16 @@ window.ParticleSystem = (() => {
     const SPRING_DAMPING_PER_SECOND = -Math.log(0.79) * NOMINAL_FRAME_RATE;
     const HEARTBEAT_DECAY_PER_SECOND = -Math.log(0.86) * NOMINAL_FRAME_RATE;
 
+    function isMotionReduced() {
+        return window.BackgroundMotion?.isReduced?.() === true;
+    }
+
     function setAudioSource(source) {
         particleAudioSource = source;
     }
 
     function initParticles() {
-        if (particleAnimationId) return;
+        if (particleSession) return;
 
         const canvas = document.getElementById('bg-canvas');
         if (!canvas) return;
@@ -32,6 +37,7 @@ window.ParticleSystem = (() => {
         const NORMAL_PARTICLE_LIMIT = 120;
         let populationTransitionBudget = 0;
         let lastFrameTimestamp = null;
+        let sessionActive = true;
         const mouse = { x: null, y: null };
         const chatScrollContainer = document.getElementById('chat-messages');
         const mainScrollContainer = document.getElementById('main-content');
@@ -40,8 +46,23 @@ window.ParticleSystem = (() => {
         let lastMainScrollTop = mainScrollContainer?.scrollTop || 0;
 
         const resizeCanvas = () => {
+            const oldWidth = width;
+            const oldHeight = height;
             width = window.innerWidth;
             height = window.innerHeight;
+
+            if (sessionActive && isMotionReduced() && oldWidth > 0 && oldHeight > 0) {
+                const scaleX = width / oldWidth;
+                const scaleY = height / oldHeight;
+                for (const particle of particles) {
+                    particle.x *= scaleX;
+                    particle.y *= scaleY;
+                    particle.pulseX *= scaleX;
+                    particle.pulseY *= scaleY;
+                    particle.pulseVelocityX *= scaleX;
+                    particle.pulseVelocityY *= scaleY;
+                }
+            }
 
             const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
             canvas.width = Math.max(1, Math.floor(width * pixelRatio));
@@ -49,9 +70,11 @@ window.ParticleSystem = (() => {
             canvas.style.width = `${width}px`;
             canvas.style.height = `${height}px`;
             ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+            if (sessionActive && isMotionReduced()) renderStatic();
         };
 
         const onMouseMove = (event) => {
+            if (isMotionReduced()) return;
             mouse.x = event.clientX;
             mouse.y = event.clientY;
         };
@@ -67,7 +90,7 @@ window.ParticleSystem = (() => {
         };
 
         const shiftParticlesWithScroll = deltaY => {
-            if (!Number.isFinite(deltaY) || Math.abs(deltaY) < 0.01) return;
+            if (isMotionReduced() || !Number.isFinite(deltaY) || Math.abs(deltaY) < 0.01) return;
 
             // 内容向上滚动时，粒子同步向上移动；反向滚动时同步向下。
             for (const particle of particles) {
@@ -231,6 +254,44 @@ window.ParticleSystem = (() => {
             particles.push(new Particle());
         }
 
+        function renderStatic() {
+            if (!sessionActive) return;
+            ctx.clearRect(0, 0, width, height);
+
+            const positions = particles.map(particle => ({
+                particle,
+                x: particle.drawX,
+                y: particle.drawY,
+                alpha: Math.max(0.72, Math.min(1, particle.lifeAlpha || 0.72)),
+            }));
+            const connectionDistance = 100;
+
+            for (let index = 0; index < positions.length; index += 1) {
+                const point = positions[index];
+                for (let otherIndex = index + 1; otherIndex < positions.length; otherIndex += 1) {
+                    const other = positions[otherIndex];
+                    const distance = Math.hypot(point.x - other.x, point.y - other.y);
+                    if (distance >= connectionDistance) continue;
+
+                    const alpha = 0.22 * (1 - distance / connectionDistance)
+                        * point.alpha * other.alpha;
+                    ctx.beginPath();
+                    ctx.strokeStyle = `hsla(214, 88%, 58%, ${alpha})`;
+                    ctx.lineWidth = 0.8;
+                    ctx.moveTo(point.x, point.y);
+                    ctx.lineTo(other.x, other.y);
+                    ctx.stroke();
+                }
+            }
+
+            for (const point of positions) {
+                ctx.fillStyle = `hsla(214, 88%, 60%, ${0.38 * point.alpha})`;
+                ctx.beginPath();
+                ctx.arc(point.x, point.y, point.particle.baseSize, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
         function buildHeartbeatCluster(reaction, excludedParticles) {
             const availableSeeds = particles.filter(
                 particle => !excludedParticles.has(particle)
@@ -358,6 +419,18 @@ window.ParticleSystem = (() => {
         }
 
         function animate(now = performance.now()) {
+            particleAnimationId = null;
+            if (!sessionActive) return;
+            if (document.hidden) {
+                lastFrameTimestamp = null;
+                return;
+            }
+            if (isMotionReduced()) {
+                lastFrameTimestamp = null;
+                renderStatic();
+                return;
+            }
+
             const timestamp = Number.isFinite(now) ? now : performance.now();
             const elapsed = lastFrameTimestamp === null
                 ? 1 / NOMINAL_FRAME_RATE
@@ -524,23 +597,78 @@ window.ParticleSystem = (() => {
                 }
             }
 
-            particleAnimationId = requestAnimationFrame(animate);
+            if (sessionActive && !document.hidden && !isMotionReduced()) {
+                particleAnimationId = requestAnimationFrame(animate);
+            }
+        }
+
+        function suspendAnimation() {
+            if (particleAnimationId !== null) cancelAnimationFrame(particleAnimationId);
+            particleAnimationId = null;
+            lastFrameTimestamp = null;
+        }
+
+        function syncMotionState() {
+            if (!sessionActive) return;
+            if (document.hidden) {
+                suspendAnimation();
+                return;
+            }
+
+            if (isMotionReduced()) {
+                suspendAnimation();
+                mouse.x = null;
+                mouse.y = null;
+                renderStatic();
+                return;
+            }
+
+            if (particleAnimationId === null) {
+                lastFrameTimestamp = null;
+                animate();
+            }
+        }
+
+        function onVisibilityChange() {
+            if (document.hidden) suspendAnimation();
+            else syncMotionState();
+        }
+
+        function onPageHide() {
+            suspendAnimation();
+        }
+
+        function onPageShow() {
+            syncMotionState();
         }
 
         particleCleanup = () => {
+            sessionActive = false;
+            suspendAnimation();
             window.removeEventListener('resize', resizeCanvas);
             window.removeEventListener('scroll', onWindowScroll);
+            window.removeEventListener('pagehide', onPageHide);
+            window.removeEventListener('pageshow', onPageShow);
             chatScrollContainer?.removeEventListener('scroll', onChatScroll);
             mainScrollContainer?.removeEventListener('scroll', onMainScroll);
             document.removeEventListener('mousemove', onMouseMove);
             document.removeEventListener('mouseleave', onMouseLeave);
+            document.removeEventListener('visibilitychange', onVisibilityChange);
+            motionPreferenceUnsubscribe();
+            particleSession = null;
+            particleCleanup = null;
         };
 
-        animate();
+        window.addEventListener('pagehide', onPageHide);
+        window.addEventListener('pageshow', onPageShow);
+        document.addEventListener('visibilitychange', onVisibilityChange);
+        particleSession = {};
+        const motionPreferenceUnsubscribe = window.BackgroundMotion?.subscribe?.(syncMotionState) || (() => {});
+        if (!window.BackgroundMotion?.subscribe) syncMotionState();
     }
 
     function stopParticles() {
-        if (particleAnimationId) {
+        if (particleAnimationId !== null) {
             cancelAnimationFrame(particleAnimationId);
             particleAnimationId = null;
         }
