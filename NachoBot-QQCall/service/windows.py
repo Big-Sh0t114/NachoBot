@@ -13,6 +13,7 @@ import re
 import socket
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import dataclass
@@ -1001,9 +1002,17 @@ class WindowsSystem:
                 birth_ns = getattr(metadata, "st_birthtime_ns", None)
                 if type(birth_ns) is not int:
                     birth = getattr(metadata, "st_birthtime", None)
-                    if type(birth) not in (int, float):
+                    if type(birth) in (int, float):
+                        birth_ns = int(birth * 1_000_000_000)
+                    elif os.name == "nt" and sys.version_info < (3, 12):
+                        # Windows Python 3.11 exposes creation time as ctime;
+                        # birthtime was added in 3.12. Keep nanosecond precision
+                        # and never apply this interpretation on other systems.
+                        birth_ns = metadata.st_ctime_ns
+                        if type(birth_ns) is not int:
+                            raise ValueError
+                    else:
                         raise ValueError
-                    birth_ns = int(birth * 1_000_000_000)
                 identity = (
                     int(metadata.st_dev),
                     int(metadata.st_ino),

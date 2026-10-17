@@ -208,6 +208,9 @@ set "UV_PROJECT_ENVIRONMENT="
 if not "!SYNC_RC!"=="0" (
   echo [FATAL] !BAT_RUNTIME! runtime uv sync failed. >> "%SETUP_LOG%"
   echo [FATAL] !BAT_RUNTIME! runtime uv sync failed.
+  echo [INFO] uv sync log: !SETUP_LOG!
+  echo [INFO] Latest 40 log lines:
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Content -LiteralPath $env:SETUP_LOG -Tail 40"
   set "TTS_RC=1"
   goto :TTS_FAIL
 )

@@ -1,3 +1,5 @@
+10/17
+    修复QQCall的python版本兼容性问题
 10/16
     修复snowluma部署时硬编码版本文件的问题
     移动QQCall Plugin为build-in plugin

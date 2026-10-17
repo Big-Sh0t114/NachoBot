@@ -1183,6 +1183,7 @@ class ProcessManager:
         self._active_group_env: dict[str, dict[str, str]] = {}
         self._operation_tasks: dict[str, asyncio.Task[None]] = {}
         self._operation_kinds: dict[str, str] = {}
+        self._qqcall_preflight_error: str | None = None
         self._service_locks: dict[str, asyncio.Lock] = {}
         # Runtime selected for the current/next NachoBot launch transaction.
         # FULL/LITE use gpu|cpu; POTATO does not select a Multimodal runtime.
@@ -2838,6 +2839,7 @@ class ProcessManager:
         return {"status": "injecting"}
 
     async def _run_qqcall_injection(self, entry: Path) -> None:
+        await self._check_qqcall_deployment()
         await self._broadcast("qqcall", "[WebUI] 正在运行 QQCall 固定注入入口；如出现 UAC，请确认。\n")
         child = await asyncio.create_subprocess_exec(
             "cmd.exe", "/d", "/c", str(entry), cwd=str(entry.parent),
@@ -2852,6 +2854,20 @@ class ProcessManager:
             await self._broadcast("qqcall", "[WebUI] QQCall 注入未确认；请查看当前通话服务状态和原启动窗口。\n")
             raise RuntimeError("QQCall 注入未确认")
         await self._broadcast("qqcall", "[WebUI] QQCall 已注入，通话控制链就绪。\n")
+
+    async def _check_qqcall_deployment(self) -> None:
+        try:
+            from .qqcall_preflight import check_qqcall_deployment, deployment_error
+        except ImportError:
+            from qqcall_preflight import check_qqcall_deployment, deployment_error
+        self._qqcall_preflight_error = None
+        await self._broadcast("qqcall", "[WebUI] 正在检查 UniversalVC 环境、模型及虚拟音频路由…\n")
+        issues = await check_qqcall_deployment(self.root)
+        if issues:
+            message = deployment_error(issues)
+            self._qqcall_preflight_error = message
+            await self._broadcast("qqcall", f"[WebUI] ERROR: {message}\n")
+            raise RuntimeError(message)
 
     def get_service_status(self, service_id: str) -> dict[str, Any]:
         """Get status info for a single service."""
@@ -2980,6 +2996,10 @@ class ProcessManager:
             "observed_profile": observed_profile,
             "external_state": external_state,
             "qqcall": qqcall_phase,
+            "preflight_error": (
+                self._qqcall_preflight_error if service_id == "qqcall"
+                and not (qqcall_phase or {}).get("ready") else None
+            ),
             "injection_pending": service_id == "qqcall" and bool(
                 (injection := self._operation_tasks.get("qqcall:inject")) and not injection.done()
             ),
@@ -3839,6 +3859,16 @@ class ProcessManager:
                     service_id,
                     "[WebUI] 已检测到独立 QQCall 控制服务，未重复启动；绑定请使用注入按钮。\n",
                 )
+                return
+
+            try:
+                await self._check_qqcall_deployment()
+            except RuntimeError:
+                if state is None:
+                    state = ServiceState()
+                    self.states[service_id] = state
+                state.start_reservation = False
+                state.status = ServiceStatus.ERROR
                 return
 
         if state is None:
