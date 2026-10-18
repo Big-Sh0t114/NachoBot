@@ -6,14 +6,12 @@ from contextlib import AbstractContextManager
 from pathlib import Path
 import json
 import os
-import shutil
 import subprocess
-import sys
 import time
 import uuid
 
 from .paths import CORE_ROOT
-from .environment import worker_environment
+from .environment import select_worker_python, worker_environment
 from .images import MAX_BYTES
 from .labels import ordered_class_names, validate_class_name
 from .processes import process_identity, worker_identity, worker_is_same_process
@@ -85,19 +83,10 @@ def _job_dir(store: Store, job_id: str) -> Path:
 
 
 def _worker_python(store: Store, explicit: str = "", *, persist: bool = False) -> str:
-    if explicit:
-        candidate = shutil.which(explicit) or explicit
-        path = Path(candidate).expanduser().resolve()
-        if not path.is_file():
-            raise ValueError(f"worker Python不存在：{path}")
-        selected = str(path)
-        if persist:
-            store.set_setting("worker_python", selected)
-        return selected
-    saved = store.setting("worker_python")
-    if saved and Path(saved).is_file():
-        return str(Path(saved).resolve())
-    return sys.executable
+    selected = select_worker_python(store.root, explicit)
+    if explicit and persist:
+        store.set_setting("worker_python", selected)
+    return selected
 
 
 def _worker_command(python: str, operation: str, root: Path, argument: str = "") -> list[str]:

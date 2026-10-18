@@ -13,6 +13,7 @@ import copy
 import hashlib
 import json
 import math
+import re
 import threading
 import time
 from collections import OrderedDict
@@ -23,6 +24,13 @@ from typing import Any, Iterable, Optional
 
 from ncnk_message import Seg
 
+from .backend.diagnostics import (
+    exception_summary,
+    image_result,
+    preprocessing_error,
+    preprocessing_stopped,
+    tool_result,
+)
 from src.common.logger import get_logger
 from src.plugin_system import BaseEventHandler, BasePlugin, BaseTool, ConfigField, EventType, ToolParamType, register_plugin
 
@@ -97,6 +105,8 @@ class _TraversalState:
     total_bytes: int = 0
     changed: bool = False
     stopped: bool = False
+    stop_reason: Optional[str] = None
+    message_id: Optional[str] = None
 
 
 def _field(value: Any, name: str, default: Any = None) -> Any:
@@ -210,6 +220,48 @@ def _safe_budget(value: Any) -> float:
     return min(seconds, MAX_BUDGET_SECONDS)
 
 
+def _stop_traversal(state: _TraversalState, reason: str) -> None:
+    state.stopped = True
+    if state.stop_reason is None:
+        state.stop_reason = reason
+
+
+def _image_log_fields(plugin: "MaiRecogSelfPlugin", prediction: dict[str, Any]) -> dict[str, Any]:
+    """Return only bounded inference diagnostics, consulting an existing service if needed."""
+    prediction_status = prediction.get("status")
+    prediction_status = prediction_status if isinstance(prediction_status, str) else ""
+    fields = {
+        "predicted_class": prediction.get("predicted_class"),
+        "character": prediction.get("character_id") or prediction.get("character"),
+        "score": prediction.get("score"),
+        "margin": prediction.get("margin"),
+        "actual_version": prediction.get("loaded_version") or prediction.get("version"),
+        "desired_version": prediction.get("desired_version"),
+        "is_self": prediction.get("is_self"),
+        "error": prediction.get("error") or prediction.get("model_error") or prediction.get("fallback_error"),
+        "warming": None,
+    }
+    if (
+        prediction_status not in {"busy", "model_error", "timeout"}
+        and all(fields[key] not in (None, "") for key in ("actual_version", "desired_version"))
+    ):
+        return fields
+    try:
+        with plugin._state_lock:
+            service = plugin._service
+            service_error = plugin._service_error
+        status = service.status() if service is not None else {}
+        if not isinstance(status, dict):
+            status = {}
+        fields["actual_version"] = fields["actual_version"] or status.get("loaded_version")
+        fields["desired_version"] = fields["desired_version"] or status.get("desired_version")
+        fields["error"] = fields["error"] or status.get("last_error") or service_error
+        fields["warming"] = status.get("warming") if isinstance(status.get("warming"), bool) else None
+    except Exception:
+        pass
+    return fields
+
+
 def _canonical_message_id(value: Any) -> Optional[str]:
     if value is None or isinstance(value, bool) or not isinstance(value, (str, int)):
         return None
@@ -217,6 +269,14 @@ def _canonical_message_id(value: Any) -> Optional[str]:
     if not message_id or len(message_id) > 256 or "\n" in message_id or "\r" in message_id:
         return None
     return message_id
+
+
+def _tool_display_text(value: Any, limit: int = 128) -> str:
+    if not isinstance(value, str):
+        return ""
+    result = "".join(" " if ord(char) < 32 or ord(char) == 127 else char for char in value[:512])
+    result = re.sub(r"[A-Za-z0-9+/=_-]{64,}", "[redacted]", result)
+    return " ".join(result.split())[:limit]
 
 
 def _has_multiclass_schema_marker(prediction: dict[str, Any]) -> bool:
@@ -348,7 +408,7 @@ class MaiRecogSelfPlugin(BasePlugin):
             "worker_python": ConfigField(
                 type=str,
                 default="",
-                description="识别 worker 的 Python 路径；留空时优先使用训练时保存的解释器，否则使用当前解释器",
+                description="识别 worker 的显式 Python 路径；留空时先检查同级 NachoBot-Multimodal-Adapter/.venv 的 Torch/torchvision，再回退到当前 Core Python；忽略目录库中保存的旧路径",
             ),
             "data_dir": ConfigField(
                 type=str,
@@ -445,6 +505,7 @@ class MaiRecogSelfPlugin(BasePlugin):
                 except Exception as exc:
                     self._service_error = type(exc).__name__
                     logger.warning("自身角色识别服务初始化失败 (%s)", self._service_error)
+                    preprocessing_error(message_id=None, error=exc)
             if self._service is None:
                 return None, self._generation, self._executor, self._service_error or "model_error"
             return self._service, self._generation, self._executor, None
@@ -507,7 +568,9 @@ class MaiRecogSelfPlugin(BasePlugin):
             raise
         except Exception as exc:
             logger.warning("自身角色识别推理失败 (%s)", type(exc).__name__)
-            return {"status": "model_error"}
+            error = exception_summary(exc)
+            preprocessing_error(message_id=None, error=error)
+            return {"status": "model_error", "error": error}
         if not self.is_generation_current(generation):
             return {"status": "stopped"}
         return result if isinstance(result, dict) else {"status": "model_error"}
@@ -541,7 +604,9 @@ class MaiRecogSelfPlugin(BasePlugin):
             before = service.status()
         except Exception as exc:
             logger.warning("读取自身角色识别状态失败 (%s)", type(exc).__name__)
-            return {"status": "model_error"}
+            error = exception_summary(exc)
+            preprocessing_error(message_id=None, error=error)
+            return {"status": "model_error", "error": error}
         if not isinstance(before, dict):
             return {"status": "model_error"}
         desired = before.get("desired_version")
@@ -557,8 +622,10 @@ class MaiRecogSelfPlugin(BasePlugin):
             if cached is not None and self.is_generation_current(generation):
                 try:
                     after_cache = service.status()
-                except Exception:
-                    return {"status": "stopped"}
+                except Exception as exc:
+                    error = exception_summary(exc)
+                    preprocessing_error(message_id=None, error=error)
+                    return {"status": "stopped", "error": error}
                 if (
                     isinstance(after_cache, dict)
                     and after_cache.get("desired_version") == desired
@@ -582,8 +649,10 @@ class MaiRecogSelfPlugin(BasePlugin):
 
         try:
             after = service.status()
-        except Exception:
-            return {"status": "stopped"}
+        except Exception as exc:
+            error = exception_summary(exc)
+            preprocessing_error(message_id=None, error=error)
+            return {"status": "stopped", "error": error}
         version = prediction.get("version") or prediction.get("loaded_version")
         loaded_after = after.get("loaded_version") if isinstance(after, dict) else None
         desired_after = after.get("desired_version") if isinstance(after, dict) else None
@@ -813,7 +882,9 @@ class SelfRecognitionPreProcess(BaseEventHandler):
         budget = _safe_budget(self.get_config("recognition.budget_seconds", DEFAULT_BUDGET_SECONDS))
         deadline = time.monotonic() + budget
         character_name = plugin._effective_character_name(self.plugin_config)
-        state = _TraversalState(deadline=deadline)
+        base_info = _field(message, "message_base_info", {})
+        message_id = _canonical_message_id(_field(base_info, "message_id"))
+        state = _TraversalState(deadline=deadline, message_id=message_id)
         segments = _field(message, "message_segments", ()) or ()
         try:
             updated, changed = await self._annotate_segments(plugin, segments, character_name, state, 0)
@@ -821,7 +892,14 @@ class SelfRecognitionPreProcess(BaseEventHandler):
             raise
         except Exception as exc:
             logger.warning("自身角色消息标注失败 (%s)", type(exc).__name__)
+            preprocessing_error(message_id=message_id, error=type(exc).__name__)
             return True, True, "自身角色识别失败，保留原消息", None, None
+        if state.stop_reason:
+            preprocessing_stopped(
+                message_id=message_id,
+                reason=state.stop_reason,
+                image_count=state.image_count,
+            )
         if not changed or not plugin.is_generation_current(plugin._generation):
             return True, True, "自身角色识别未产生上下文提示", None, None
 
@@ -853,31 +931,88 @@ class SelfRecognitionPreProcess(BaseEventHandler):
                 or state.segment_count >= MAX_SEGMENT_NODES
                 or time.monotonic() >= state.deadline
             ):
-                state.stopped = True
+                if not state.stopped:
+                    if state.image_count >= MAX_MESSAGE_IMAGES:
+                        reason = "image_limit"
+                    elif state.segment_count >= MAX_SEGMENT_NODES:
+                        reason = "segment_limit"
+                    else:
+                        reason = "budget_timeout"
+                    _stop_traversal(state, reason)
                 output.extend(segments[index:])
                 break
             state.segment_count += 1
             segment_type = _field(segment, "type")
             if segment_type in {"image", "emoji"}:
+                image_index = state.image_count
                 state.image_count += 1
                 raw, status = _base64_payload(segment)
-                if status == "ok" and raw is not None:
-                    if state.total_bytes + len(raw) > MAX_MESSAGE_BYTES:
-                        state.stopped = True
+                if status != "ok" or raw is None:
+                    image_result(
+                        message_id=state.message_id,
+                        image_index=image_index,
+                        status=status,
+                        reason=status,
+                        annotation="rejected",
+                    )
+                    output.append(segment)
+                    continue
+                if state.total_bytes + len(raw) > MAX_MESSAGE_BYTES:
+                    _stop_traversal(state, "message_byte_limit")
+                    image_result(
+                        message_id=state.message_id,
+                        image_index=image_index,
+                        status="skipped",
+                        reason="message_byte_limit",
+                        annotation="rejected",
+                    )
+                    output.append(segment)
+                    continue
+                state.total_bytes += len(raw)
+                prediction = await plugin.classify_image(raw, character_name, state.deadline)
+                annotation = _annotation_for_prediction(prediction, character_name)
+                fields = _image_log_fields(plugin, prediction)
+                warming = fields.pop("warming", None)
+                if prediction.get("status") == "busy" and warming:
+                    reason = "warming"
+                elif prediction.get("status") == "ok" and prediction.get("is_other") is True:
+                    reason = "other"
+                elif prediction.get("status") == "ok" and prediction.get("character_id") is None and _has_multiclass_schema_marker(prediction):
+                    reason = "uncertain"
+                elif prediction.get("status") == "ok" and not _has_multiclass_schema_marker(prediction):
+                    score = prediction.get("score")
+                    if not _finite_number(score):
+                        reason = "legacy_invalid_score"
+                    elif float(score) >= POSITIVE_SCORE_THRESHOLD:
+                        reason = "legacy_match"
+                    elif float(score) <= 1.0 - POSITIVE_SCORE_THRESHOLD:
+                        reason = "legacy_no_match"
                     else:
-                        state.total_bytes += len(raw)
-                        prediction = await plugin.classify_image(raw, character_name, state.deadline)
-                        annotation = _annotation_for_prediction(prediction, character_name)
-                        if annotation and plugin.is_generation_current(plugin._generation):
-                            output.extend(
-                                [
-                                    segment,
-                                    Seg(type="text", data=annotation),
-                                ]
-                            )
-                            changed = True
-                            state.changed = True
-                            continue
+                        reason = "legacy_uncertain"
+                elif prediction.get("status") == "ok":
+                    reason = "recognized"
+                else:
+                    reason = prediction.get("status")
+                can_annotate = bool(annotation and plugin.is_generation_current(plugin._generation))
+                image_result(
+                    message_id=state.message_id,
+                    image_index=image_index,
+                    status=prediction.get("status", "model_error"),
+                    reason=reason,
+                    annotation="added" if can_annotate else "rejected",
+                    warming=warming,
+                    **fields,
+                )
+                if can_annotate:
+                    output.extend(
+                        [
+                            segment,
+                            Seg(type="text", data=annotation),
+                        ]
+                    )
+                    changed = True
+                    state.changed = True
+                    continue
                 output.append(segment)
                 continue
 
@@ -906,7 +1041,14 @@ class SelfRecognitionPreProcess(BaseEventHandler):
                             or state.segment_count >= MAX_SEGMENT_NODES
                             or time.monotonic() >= state.deadline
                         ):
-                            state.stopped = True
+                            if not state.stopped:
+                                if state.image_count >= MAX_MESSAGE_IMAGES:
+                                    reason = "image_limit"
+                                elif state.segment_count >= MAX_SEGMENT_NODES:
+                                    reason = "segment_limit"
+                                else:
+                                    reason = "budget_timeout"
+                                _stop_traversal(state, reason)
                             updated_nodes.extend(nodes[node_index:])
                             break
                         # Media capture counts every forward node as well as
@@ -914,7 +1056,7 @@ class SelfRecognitionPreProcess(BaseEventHandler):
                         # budget so neither path can reach media beyond it.
                         state.segment_count += 1
                         if state.segment_count >= MAX_SEGMENT_NODES:
-                            state.stopped = True
+                            _stop_traversal(state, "segment_limit")
                             updated_nodes.extend(nodes[node_index:])
                             break
                         nested = _field(node, "message_segment")
@@ -1020,41 +1162,42 @@ class _ScopedImageRecognitionTool(BaseTool):
         return ToolExecutionPreparation(supplement, snapshot, cache_sensitive=bool(snapshot.messages))
 
     async def execute(self, function_args: dict[str, Any]) -> dict[str, Any]:
-        return self._result("context_required")
+        return self._logged_result("context_required")
 
     async def execute_with_context(self, function_args: dict[str, Any], context: Any) -> dict[str, Any]:
         if not isinstance(context, MediaExecutionSnapshot):
-            return self._result("context_required")
+            return self._logged_result("context_required")
         if context.tool_name != self.name:
-            return self._result("context_required")
+            return self._logged_result("context_required")
         plugin = context.owner
         if not isinstance(plugin, MaiRecogSelfPlugin) or not plugin.is_generation_current(context.generation):
-            return self._result("stopped")
+            return self._logged_result("stopped")
         if not context.stream_id:
-            return self._result("context_required")
+            return self._logged_result("context_required")
 
         message_id = function_args.get("message_id")
         if not isinstance(message_id, str) or not message_id:
-            return self._result("empty" if not context.messages else "not_found")
+            return self._logged_result("empty" if not context.messages else "not_found")
         message = next((item for item in context.messages if item.message_id == message_id), None)
         if message is None:
-            return self._result("not_found")
+            return self._logged_result("not_found")
+        canonical_id = message.message_id
 
         image_index = function_args.get("image_index", 0)
         if isinstance(image_index, bool) or not isinstance(image_index, int):
-            return self._result("invalid_image_index")
+            return self._logged_result("invalid_image_index", message_id=canonical_id)
         if image_index < 0 or image_index >= len(message.images):
-            return self._result("invalid_image_index")
+            return self._logged_result("invalid_image_index", message_id=canonical_id, image_index=image_index)
         reference = message.images[image_index]
         if time.monotonic() >= reference.expires_at:
-            return self._result("expired", message_id=message_id, image_index=image_index)
+            return self._logged_result("expired", message_id=canonical_id, image_index=image_index)
         if reference.status != "ok":
-            return self._result(reference.status, message_id=message_id, image_index=image_index)
+            return self._logged_result(reference.status, message_id=canonical_id, image_index=image_index)
         raw = reference.data
         if raw is None or not raw:
-            return self._result("empty", message_id=message_id, image_index=image_index)
+            return self._logged_result("empty", message_id=canonical_id, image_index=image_index)
         if len(raw) > MAX_IMAGE_BYTES:
-            return self._result("oversized", message_id=message_id, image_index=image_index)
+            return self._logged_result("oversized", message_id=canonical_id, image_index=image_index)
 
         budget = _safe_budget(plugin._recognition_config().get("budget_seconds", DEFAULT_BUDGET_SECONDS))
         prediction = await plugin.classify_image(
@@ -1064,8 +1207,79 @@ class _ScopedImageRecognitionTool(BaseTool):
         )
         status = prediction.get("status", "model_error")
         if status != "ok":
-            return self._result(status, message_id=message_id, image_index=image_index)
-        return self._format_prediction(prediction, message_id, image_index)
+            return self._logged_result(
+                status,
+                message_id=canonical_id,
+                image_index=image_index,
+                error=prediction.get("error") or prediction.get("model_error"),
+                prediction=prediction,
+                service_owner=plugin,
+            )
+        return self._logged_result(
+            "ok",
+            message_id=canonical_id,
+            image_index=image_index,
+            prediction=prediction,
+            service_owner=plugin,
+        )
+
+    def _logged_result(
+        self,
+        status: str,
+        *,
+        message_id: str | None = None,
+        image_index: int | None = None,
+        error: Any = None,
+        prediction: dict[str, Any] | None = None,
+        service_owner: MaiRecogSelfPlugin | None = None,
+    ) -> dict[str, Any]:
+        prediction = prediction or {}
+        runtime_fields = _image_log_fields(service_owner, prediction) if service_owner is not None and prediction else {}
+        warming = runtime_fields.get("warming")
+        if status == "busy" and warming:
+            reason = "warming"
+        elif status == "ok" and prediction.get("is_other") is True:
+            reason = "other"
+        elif status == "ok" and prediction.get("character_id") is None and _has_multiclass_schema_marker(prediction):
+            reason = "uncertain"
+        elif status == "ok" and prediction.get("recognized") is True:
+            reason = "recognized"
+        elif status == "ok" and not _has_multiclass_schema_marker(prediction):
+            score = prediction.get("score")
+            if not _finite_number(score):
+                reason = "legacy_invalid_score"
+            elif float(score) >= POSITIVE_SCORE_THRESHOLD:
+                reason = "legacy_match"
+            elif float(score) <= 1.0 - POSITIVE_SCORE_THRESHOLD:
+                reason = "legacy_no_match"
+            else:
+                reason = "legacy_uncertain"
+        else:
+            reason = status
+        tool_result(
+            tool_name=self.name,
+            message_id=message_id,
+            image_index=image_index,
+            status=status,
+            reason=reason,
+            predicted_class=prediction.get("predicted_class"),
+            character=prediction.get("character_id") or prediction.get("character"),
+            score=prediction.get("score"),
+            margin=prediction.get("margin"),
+            actual_version=prediction.get("loaded_version") or prediction.get("version") or runtime_fields.get("actual_version"),
+            desired_version=prediction.get("desired_version") or runtime_fields.get("desired_version"),
+            is_self=prediction.get("is_self"),
+            error=error or prediction.get("error") or prediction.get("model_error") or runtime_fields.get("error"),
+            warming=warming,
+        )
+        if status == "ok" and prediction:
+            return self._format_prediction(prediction, message_id or "", image_index or 0)
+        details = {}
+        if message_id:
+            details["message_id"] = message_id
+        if image_index is not None and isinstance(image_index, int) and not isinstance(image_index, bool):
+            details["image_index"] = image_index
+        return self._result(status, **details)
 
     def _format_prediction(self, prediction: dict[str, Any], message_id: str, image_index: int) -> dict[str, Any]:
         details: dict[str, Any] = {"message_id": message_id, "image_index": image_index}
@@ -1122,8 +1336,74 @@ class _ScopedImageRecognitionTool(BaseTool):
         return self._result("ok", **details)
 
     def _result(self, status: str, **details: Any) -> dict[str, Any]:
-        content = json.dumps({"status": status, **details}, ensure_ascii=False, separators=(",", ":"))
-        return {"name": self.name, "content": content}
+        payload = {"status": status, **details}
+        return {"name": self.name, "content": self._natural_language(payload), "data": payload}
+
+    def _natural_language(self, payload: dict[str, Any]) -> str:
+        message_id = _tool_display_text(payload.get("message_id"))
+        image_index = payload.get("image_index")
+        location = ""
+        if (
+            message_id
+            and isinstance(image_index, int)
+            and not isinstance(image_index, bool)
+            and 0 <= image_index < 1_000_000
+        ):
+            location = f"消息「{message_id}」的第{image_index + 1}张图片："
+        elif message_id:
+            location = f"消息「{message_id}」的图片："
+
+        status = payload.get("status")
+        if status != "ok":
+            explanations = {
+                "context_required": "没有可用的这条聊天图片信息。",
+                "stopped": "这次没有完成图片识别。",
+                "empty": "没有可识别的图片。",
+                "not_found": "当前聊天中找不到这条图片引用。",
+                "invalid_image_index": "图片序号无效。",
+                "expired": "图片引用已过期，请重新选择消息。",
+                "oversized": "图片过大，无法识别。",
+                "invalid_image": "图片格式无效或不受支持，无法识别。",
+                "busy": "现在暂时无法完成识别，请稍后重试。",
+                "no_model": "当前无法识别图片中的角色，请稍后重试。",
+                "timeout": "图片识别超时，未得到结果。",
+                "model_error": "角色识别暂时失败，未得到可靠结果。",
+                "stale": "识别过程中发生变化，本次结果无法使用，请重试。",
+            }
+            return location + explanations.get(str(status), "图片识别未完成。")
+
+        if not _has_multiclass_schema_marker(payload):
+            is_self = payload.get("is_self")
+            if is_self is True:
+                summary = "图片看起来像当前 Bot 的自身角色。"
+            elif is_self is False:
+                summary = "图片看起来不像当前 Bot 的自身角色。"
+            else:
+                summary = "暂时无法判断图片是否为当前 Bot 的自身角色。"
+            return location + summary
+
+        character_id = _tool_display_text(payload.get("character_id"))
+        if payload.get("recognized") is True and character_id:
+            summary = f"识别为角色 {character_id}。"
+            is_self = payload.get("is_self")
+            if is_self is True:
+                summary += "它是当前 Bot 的自身角色。"
+            elif is_self is False:
+                summary += "它不是当前 Bot 的自身角色。"
+            else:
+                summary += "暂时无法判断它是否为 Bot 自身角色。"
+            return location + summary
+
+        if payload.get("is_other") is True:
+            if self.self_semantics:
+                is_self = payload.get("is_self")
+                if is_self is False:
+                    return location + "未识别到已知角色；这张图片不是当前 Bot 的自身角色。"
+                if is_self is True:
+                    return location + "未识别到已知角色；按当前身份设置，这张图片被判断为当前 Bot 的自身角色。"
+                return location + "未识别到已知角色；暂时无法判断它是否为当前 Bot 自身角色。"
+            return location + "未识别到已知角色类别，无法判断图片中的具体角色。"
+        return location + "无法确定图片中的角色。"
 
 
 class RecognizeSelfImageTool(_ScopedImageRecognitionTool):
@@ -1139,6 +1419,6 @@ class RecognizeSelfImageTool(_ScopedImageRecognitionTool):
 class RecognizeCharacterImageTool(_ScopedImageRecognitionTool):
     name = "recognize_character_image"
     description = (
-        "识别当前聊天一条指定真实消息中的图片角色，并返回类别、置信分数和自身关系。"
+        "识别当前聊天一条指定真实消息中的图片角色，并用自然语言说明识别结果和自身关系。"
         "只能使用本次工具上下文列出的 canonical message_id；图片序号从 0 开始，省略时默认为 0。"
     )

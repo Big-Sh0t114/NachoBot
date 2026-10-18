@@ -40,13 +40,13 @@ class JsonArgumentParser(argparse.ArgumentParser):
 
 def _add_global_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--data-dir", type=Path, default=argparse.SUPPRESS, help="数据目录，默认 Core/data/plugins/mai_recog_self")
-    parser.add_argument("--worker-python", default=argparse.SUPPRESS, help="训练/推理专用Python路径；训练时保存为该数据目录的worker解释器")
+    parser.add_argument("--worker-python", default=argparse.SUPPRESS, help="显式worker Python；省略时优先使用可导入Torch/torchvision的同级NachoBot-Multimodal-Adapter/.venv，否则使用当前Core Python；不读取目录库中的旧路径")
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = JsonArgumentParser(description="MaiSelf folder import, CPU/CUDA training, activation, and inference test")
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_ROOT, help="数据目录")
-    parser.add_argument("--worker-python", default="", help="可选训练/推理专用Python；训练时保存供后续命令复用")
+    parser.add_argument("--worker-python", default="", help="显式worker Python；省略时优先使用可导入Torch/torchvision的同级NachoBot-Multimodal-Adapter/.venv，否则使用当前Core Python；不读取目录库中的旧路径")
     sub = parser.add_subparsers(dest="command", required=True, parser_class=JsonArgumentParser)
 
     command = sub.add_parser("import", help="从legacy self/other或角色名称文件夹导入静态图片")

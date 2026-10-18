@@ -10,6 +10,14 @@
 缺失，插件加载会明确报错并提示更新 NachoBot；配套的 `ToolExecutor` 调用路径也必须由宿主提供。插件不会
 绕过调用上下文继续媒体访问。
 
+## Worker Python选择
+
+配置中的 `recognition.worker_python` 和CLI的 `--worker-python` 是显式覆盖项，提供后会优先使用；部署时CLI值优先于配置值。路径不存在时会直接报错，不会静默切换。没有显式值时，后端会根据插件所在的 Core 根目录定位其同级 `NachoBot-Multimodal-Adapter`，检查 `.venv/Scripts/python.exe`（Windows）或 `.venv/bin/python`（POSIX）。只有解释器可启动并能在受限时间内导入 `torch` 与 `torchvision`，才会选择该环境；否则使用当前运行的 Core Python。选择过程不读取目录库中历史保存的 `worker_python`，因此移动过来的目录库不会把旧机器的绝对路径带入新环境。自动部署不把所选路径写成配置覆盖项，后续启动仍会重新按自动规则选择。
+
+检查在单独子进程中进行，并使用与worker相同的 `worker_environment(root)`，包括清理继承的 `PYTHONPATH`/`PYTHONHOME` 和加载该目录的 `worker_deps`。检查只导入大型框架，不要求Multimodal环境预装 `psutil`。训练、激活和部署命令同步完成选择；宿主推理把首次自动检查放入已有的后台worker预热线程，所以首次图片请求不会等待Torch导入，但模型准备好之前仍会按现有策略返回 `busy`。每个运行中的推理服务只选择一次，worker重启沿用该解释器；控制台命令会在各自进程中重新检查。默认检查预算为20秒。
+
+Core Python若也没有Torch或torchvision，自动选择仍会回退到Core解释器，之后由训练worker或部署预检返回常规依赖错误。插件不会安装这些框架或修改共享环境；部署仅按既有规则处理数据目录内缺失的小依赖。
+
 CLI 会根据脚本位置定位 Core，因此可以从任意工作目录运行：
 
 ```powershell
@@ -96,11 +104,13 @@ python plugins\mai_recog_self\deploy.py --help
 
 省略 `-ProbeImage` 时，部署会从该模型冻结快照中选一张自身类别的TRAIN图片，并在推理前校验SHA。用户提供的探针须符合后端格式和图片大小限制。脚本默认更新 `plugins/mai_recog_self/config.toml`，也可通过 `-PluginConfig` 指定其他配置文件；成功输出JSON会给出版本、worker、依赖变化、备份位置、推理结果和 `restart_required`。部署不会重启Bot。
 
-插件配置存在时，部署保留其他设置、注释、BOM和换行风格，只设置 `plugin.enabled`、`recognition.data_dir`、`recognition.self_character_id` 和 `recognition.worker_python`。只有配置实际改变时才原子写入并备份。TOML损坏或`[plugin]`/`[recognition]`不是表时会在修改前失败；启用或推理失败会恢复本次写入的活动版本、回退版本、worker设置和插件配置。部署期间检测到并发配置编辑时会保留编辑内容。
+插件配置存在时，部署保留其他设置、注释、BOM和换行风格，并更新 `plugin.enabled`、`recognition.data_dir`、`recognition.self_character_id`；`recognition.worker_python` 仅在CLI或现有配置显式提供时才设置。自动选择不会固定写入配置，因此后续启动仍可重新检查Multimodal环境。只有配置实际改变时才原子写入并备份。TOML损坏或`[plugin]`/`[recognition]`不是表时会在修改前失败；启用或推理失败会恢复本次写入的活动版本、回退版本、worker设置和插件配置。部署期间检测到并发配置编辑时会保留编辑内容。
 
-PowerShell入口会显式启用 `--install-missing`。依赖探测在选定worker子进程中进行，并清除继承的`PYTHONPATH`和`PYTHONHOME`；训练、CPU模型校验和推理也使用同一环境策略，只在存在时添加该数据目录下的`worker_deps`。缺失的`Pillow`、`numpy`或`psutil`可安装到`<data-dir>/worker_deps`，安装受`plugins/mai_recog_self/backend/requirements-worker.txt`版本范围约束且不会拉取依赖。已有包导入失败或版本不兼容时会给出修复提示，不会升级它们；缺少`torch`或`torchvision`时必须先选择已有兼容worker环境。共享worker环境不会被部署修改，之后的`uv sync`不会清掉这些小依赖。直接调用插件目录下的部署CLI时，只有明确传入`--install-missing`才会安装缺失的小包。
+PowerShell入口会显式启用 `--install-missing`。依赖探测在选定worker子进程中进行，并清除继承的`PYTHONPATH`和`PYTHONHOME`；训练、CPU模型校验和推理也使用同一环境策略，只在存在时添加该数据目录下的`worker_deps`。缺失的`Pillow`、`numpy`或`psutil`可安装到`<data-dir>/worker_deps`，安装受`plugins/mai_recog_self/backend/requirements-worker.txt`版本范围约束且不会拉取依赖。已有包导入失败或版本不兼容时会给出修复提示，不会升级它们；自动选择若找不到可用的Multimodal环境，会继续使用Core Python并由预检报告缺少的`torch`或`torchvision`，需要时显式传入`--worker-python`。共享worker环境不会被部署修改，之后的`uv sync`不会清掉这些小依赖。直接调用插件目录下的部署CLI时，只有明确传入`--install-missing`才会安装缺失的小包。
 
-宿主接口为 `plugins.mai_recog_self.backend.runtime.InferenceService(root, worker_python="")`。导入接口不会导入 Torch；没有活动模型时，构造服务也不会启动 worker。存在活动模型时，会在后台启动一个持久推理 worker，并给冷启动最多 45 秒；聊天请求在 worker 预热时会快速返回 `busy`，不会反复杀掉并重启 worker。服务分别报告期望启用版本和实际加载版本。新候选模型加载失败时，会缓存失败版本并在可行时继续用之前加载的版本；`status()` 会报告加载错误。`close()` 可重复调用，只停止本服务创建的 worker，并阻止后续请求启动新进程。
+宿主接口为 `plugins.mai_recog_self.backend.runtime.InferenceService(root, worker_python="")`。导入接口不会导入 Torch；没有活动模型时，构造服务也不会启动 worker。存在活动模型时，会在后台启动一个持久推理 worker；worker自身冷启动最多 45 秒，自动环境探测另有最多 20 秒预算，因此首次自动准备整体最多约 65 秒。聊天请求在worker预热时会快速返回 `busy`，不会反复杀掉并重启worker。服务分别报告期望启用版本和实际加载版本。新候选模型加载失败时，会缓存失败版本并在可行时继续用之前加载的版本；`status()` 会报告加载错误。`close()` 可重复调用，只停止本服务创建的worker，并阻止后续请求启动新进程。
+
+运行时事件通过标准 `mai_recog_self` logger 写入 Core 主日志，包括 worker 环境选择、启动/就绪、模型加载失败及推理故障。预处理和工具调用会为每张实际处理的图片记录状态、判定原因、类别、原始 softmax 分数（不是校准百分比）、多类别 margin、模型版本和注释结果；图片内容、媒体 URL、用户文本及完整分类结果不会进入日志。只有本次 worker 启动的 stderr 会被有界内存尾部捕获并映射到主日志错误；同一 stderr 仍追加到数据目录的 `inference.log`。
 
 推理分数是 MobileNet softmax 原始分数，并非校准概率。旧版二分类保留原判定阈值：分数至少 `0.6` 判为“是自己”，至多 `0.4` 判为“不是自己”，中间区间为不确定。多类别模型固定保存类别映射、`score_threshold=0.6` 和 `margin_threshold=0.15`：最高分和第一、第二名差值都达到阈值才接受结果；获接受的 `other` 表示背景，不会标记为角色识别成功。低分或低差值会返回“不确定”；不确定是判定状态，不是训练类别。`predicted_class` 始终是原始最高分类别，`character_id` 仅在判定接受时有值。可用 `plugins/mai_recog_self/self_recognition.py test FILE` 检查单张静态图片。
 

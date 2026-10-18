@@ -352,18 +352,10 @@ def _ensure_worker_dependencies(
 
 
 def _select_worker(store: Store, explicit: str) -> str:
-    if explicit:
+    try:
         return _worker_python(store, explicit)
-    saved = store.setting("worker_python")
-    if saved:
-        path = Path(saved).expanduser()
-        if not path.is_file():
-            raise DeploymentError(f"catalog保存的worker Python不存在：{path.resolve()}；请显式传入--worker-python。")
-        return str(path.resolve())
-    path = Path(sys.executable).expanduser().resolve()
-    if not path.is_file():
-        raise DeploymentError(f"当前Python解释器不存在：{path}")
-    return str(path)
+    except ValueError as exc:
+        raise DeploymentError(str(exc)) from exc
 
 
 def _read_json(path: Path, label: str) -> dict:
@@ -543,7 +535,8 @@ def _render_config(snapshot: dict, root: Path, self_character_id: str, worker_py
     plugin["enabled"] = True
     recognition["data_dir"] = str(root.resolve())
     recognition["self_character_id"] = self_character_id
-    recognition["worker_python"] = worker_python
+    if worker_python:
+        recognition["worker_python"] = worker_python
     rendered = tomlkit.dumps(document).replace("\r\n", "\n").encode("utf-8")
     if snapshot["newline"] == "\r\n":
         rendered = rendered.replace(b"\n", b"\r\n")
@@ -552,6 +545,20 @@ def _render_config(snapshot: dict, root: Path, self_character_id: str, worker_py
     if snapshot["bom"]:
         rendered = b"\xef\xbb\xbf" + rendered
     return rendered
+
+
+def _configured_worker_override(snapshot: dict) -> str:
+    recognition = snapshot["document"].get("recognition")
+    if recognition is None:
+        return ""
+    value = recognition.get("worker_python", "")
+    if not isinstance(value, str):
+        raise DeploymentError("插件配置中的recognition.worker_python必须是文本")
+    return value.strip()
+
+
+def _resolve_worker_override(snapshot: dict, explicit: str) -> str:
+    return explicit if explicit else _configured_worker_override(snapshot)
 
 
 def _backup_config(path: Path, original: bytes) -> Path:
@@ -712,7 +719,9 @@ def deploy(
     config_path = Path(plugin_config or DEFAULT_PLUGIN_CONFIG).expanduser().resolve()
     config = _load_config(config_path)
     store, model, _record = _preflight_model(data_root, version, self_character_id)
-    selected_worker = _select_worker(store, worker_python)
+    worker_override = _resolve_worker_override(config, worker_python)
+    selected_worker = _select_worker(store, worker_override)
+    configured_worker = selected_worker if worker_override else ""
     raw_probe, probe = _read_probe(data_root, model, self_character_id, probe_image)
 
     dependency_changes: list[dict] = []
@@ -731,7 +740,7 @@ def deploy(
                     raise DeploymentError("目标模型在部署期间发生变化")
                 dependency_versions = _ensure_worker_dependencies(selected_worker, data_root, install_missing=False, changes=dependency_changes)
                 settings_before = _read_setting_state(store)
-                rendered_config = _render_config(config, data_root, self_character_id, selected_worker)
+                rendered_config = _render_config(config, data_root, self_character_id, configured_worker)
                 config_identity: tuple[int, int] | None = None
                 config_changed = False
                 config_backup_path: str | None = None
@@ -790,7 +799,7 @@ class JsonArgumentParser(argparse.ArgumentParser):
 def build_parser() -> argparse.ArgumentParser:
     parser = JsonArgumentParser(description="验证、启用并配置 MaiSelf 插件模型")
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_ROOT, help="模型目录")
-    parser.add_argument("--worker-python", default="", help="训练/推理专用 Python 路径")
+    parser.add_argument("--worker-python", default="", help="显式 worker Python；省略时使用插件配置路径（若有），再检查同级 Multimodal .venv，最后回退当前 Core Python；忽略目录库保存的旧路径")
     parser.add_argument("--version", required=True, help="要启用的32位模型版本ID")
     parser.add_argument("--self-character-id", required=True, help="区分大小写的模型角色类别ID，不能是other")
     parser.add_argument("--plugin-config", type=Path, default=None, help="插件config.toml；默认使用本目录配置")
