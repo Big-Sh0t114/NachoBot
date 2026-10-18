@@ -1,0 +1,32 @@
+# Host-managed configuration and deployment backups.
+/config.toml
+/config.toml.bak.*
+/config.toml.backup_*
+
+# Python caches and local test / lint output.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+*.log
+/logs/
+
+# Local Python environments.
+/.venv/
+/venv/
+/.self-recognition-worker/
+
+# Plugin-local runtime data. This includes future model versions under data/.
+/data/
+/localdata/
+/models/
+/uploads/
+/jobs/
+/raw/
+/worker_deps/
