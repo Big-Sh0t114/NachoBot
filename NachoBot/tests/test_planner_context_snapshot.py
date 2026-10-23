@@ -264,7 +264,6 @@ class PlannerContextSnapshotTests(unittest.IsolatedAsyncioTestCase):
             patch.object(module, "get_raw_msg_before_timestamp_with_chat", new=history_query),
             patch.object(module, "build_readable_messages_with_id", side_effect=render_messages),
             patch.object(module, "offline_recovery_manager", _ContextRecoveryFilter()),
-            patch.object(module.promise_cache_manager, "collect_snippets_for_messages", return_value=[]),
             patch.object(
                 module.events_manager,
                 "handle_nacho_events",

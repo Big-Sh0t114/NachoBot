@@ -3,3 +3,4 @@ __pycache__
 config.toml
 *.toml
 config.toml.backup
+qr_login.png

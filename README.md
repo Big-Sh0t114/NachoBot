@@ -165,7 +165,7 @@ Discord 链路由一个 Python 适配器进程提供，不需要 Node.js、Yarn 
 <p>
 本项目采用 GPLv3。感谢
 <a href="https://github.com/Mai-with-u/MaiBot">MaiBot</a>、
-NapCat、GPT-SoVITS、VoxCPM 及其他上游开源项目
+NapCat、Snowluma、GPT-SoVITS、VoxCPM 及其他上游开源项目
 </p>
 
 

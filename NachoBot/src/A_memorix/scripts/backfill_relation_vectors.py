@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
+import pickle
 import sys
 import time
 from pathlib import Path
@@ -22,6 +24,7 @@ from typing import Any, Dict, List
 import tomlkit
 
 from _bootstrap import DEFAULT_CONFIG_PATH, DEFAULT_DATA_DIR, resolve_repo_path
+from _preview_sqlite import connect_readonly, table_columns, table_exists
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="关系向量一次性回填")
@@ -57,15 +60,145 @@ if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
     _build_arg_parser().print_help()
     raise SystemExit(0)
 
-from A_memorix.core.storage import (
-    VectorStore,
-    GraphStore,
-    MetadataStore,
-    QuantizationType,
-    SparseMatrixFormat,
-)
-from A_memorix.core.embedding import create_embedding_api_adapter
-from A_memorix.core.utils.relation_write_service import RelationWriteService
+VectorStore = None
+GraphStore = None
+MetadataStore = None
+QuantizationType = None
+SparseMatrixFormat = None
+create_embedding_api_adapter = None
+RelationWriteService = None
+
+
+def _load_runtime_components() -> None:
+    global VectorStore, GraphStore, MetadataStore, QuantizationType, SparseMatrixFormat
+    global create_embedding_api_adapter, RelationWriteService
+
+    from A_memorix.core.storage import (
+        VectorStore as LoadedVectorStore,
+        GraphStore as LoadedGraphStore,
+        MetadataStore as LoadedMetadataStore,
+        QuantizationType as LoadedQuantizationType,
+        SparseMatrixFormat as LoadedSparseMatrixFormat,
+    )
+    from A_memorix.core.embedding import create_embedding_api_adapter as loaded_embedding_adapter
+    from A_memorix.core.utils.relation_write_service import RelationWriteService as LoadedRelationWriteService
+
+    VectorStore = LoadedVectorStore
+    GraphStore = LoadedGraphStore
+    MetadataStore = LoadedMetadataStore
+    QuantizationType = LoadedQuantizationType
+    SparseMatrixFormat = LoadedSparseMatrixFormat
+    create_embedding_api_adapter = loaded_embedding_adapter
+    RelationWriteService = LoadedRelationWriteService
+
+
+def _select_preview_rows(
+    conn,
+    *,
+    states: List[str],
+    limit: int,
+    max_retry: int,
+) -> List[Dict[str, Any]]:
+    if not table_exists(conn, "relations"):
+        return []
+    columns = table_columns(conn, "relations")
+    if "hash" not in columns:
+        return []
+
+    valid_states = [
+        state for state in (str(value or "").strip().lower() for value in states)
+        if state in {"none", "pending", "ready", "failed"}
+    ]
+    if not valid_states:
+        return []
+
+    state_expr = 'LOWER(COALESCE("vector_state", \'none\'))' if "vector_state" in columns else "'none'"
+    selected_columns = ["\"hash\" AS hash"]
+    for name in ("subject", "predicate", "object"):
+        selected_columns.append(f'COALESCE("{name}", \'\') AS "{name}"' if name in columns else f"'' AS \"{name}\"")
+
+    state_placeholders = ",".join("?" for _ in valid_states)
+    where_parts = [f"{state_expr} IN ({state_placeholders})"]
+    params: List[Any] = list(valid_states)
+    if "vector_retry_count" in columns:
+        where_parts.append('COALESCE("vector_retry_count", 0) < ?')
+        params.append(max(1, int(max_retry)))
+
+    order_columns = [f'"{name}"' for name in ("vector_updated_at", "created_at") if name in columns]
+    order_expr = f"COALESCE({', '.join(order_columns + ['0'])}) ASC" if order_columns else "rowid ASC"
+    params.append(max(1, int(limit)))
+    sql = (
+        f"SELECT {', '.join(selected_columns)} FROM relations WHERE {' AND '.join(where_parts)} "
+        f"ORDER BY {order_expr} LIMIT ?"
+    )
+    return [dict(row) for row in conn.execute(sql, tuple(params)).fetchall()]
+
+
+class _PreviewUnpickler(pickle.Unpickler):
+    def find_class(self, module: str, name: str):
+        raise pickle.UnpicklingError(f"global pickle values are not allowed in a dry-run preview: {module}.{name}")
+
+
+def _load_vector_membership_preview(data_dir: Path) -> tuple[set[str], set[int]]:
+    metadata_path = data_dir / "vectors" / "vectors_metadata.pkl"
+    if not metadata_path.exists():
+        return set(), set()
+
+    with metadata_path.open("rb") as metadata_file:
+        metadata = _PreviewUnpickler(metadata_file).load()
+    if not isinstance(metadata, dict):
+        raise ValueError(f"Invalid vector metadata preview: {metadata_path}")
+
+    known_hashes = metadata.get("known_hashes", [])
+    if metadata.get("vector_norm") != "l2":
+        known_hashes = list(metadata.get("ids", [])) + list(known_hashes)
+    deleted_ids = metadata.get("deleted_ids", [])
+    if not isinstance(known_hashes, (list, tuple)) or not isinstance(deleted_ids, (list, tuple)):
+        raise ValueError(f"Invalid vector metadata preview fields: {metadata_path}")
+
+    return {str(value) for value in known_hashes}, {int(value) for value in deleted_ids}
+
+
+def _vector_preview_contains(known_hashes: set[str], deleted_ids: set[int], hash_value: str) -> bool:
+    hash_id = int.from_bytes(
+        hashlib.sha1(hash_value.encode("utf-8"), usedforsecurity=False).digest()[:8],
+        byteorder="big",
+        signed=False,
+    ) & 0x7FFFFFFFFFFFFFFF
+    return hash_value in known_hashes and hash_id not in deleted_ids
+
+
+def _preview_candidates(
+    data_dir: Path,
+    *,
+    states: List[str],
+    limit: int,
+    max_retry: int,
+    include_ready_missing: bool,
+) -> tuple[List[Dict[str, Any]], int]:
+    metadata_db = data_dir / "metadata" / "metadata.db"
+    if not metadata_db.exists():
+        return [], 0
+
+    conn = connect_readonly(metadata_db)
+    try:
+        rows = _select_preview_rows(conn, states=states, limit=limit, max_retry=max_retry)
+        if not include_ready_missing:
+            return rows, 0
+
+        ready_rows = _select_preview_rows(conn, states=["ready"], limit=limit, max_retry=max_retry)
+    finally:
+        conn.close()
+
+    known_hashes, deleted_ids = _load_vector_membership_preview(data_dir)
+    ready_missing_rows = [
+        row for row in ready_rows
+        if not _vector_preview_contains(known_hashes, deleted_ids, str(row.get("hash", "")))
+    ]
+    dedup: Dict[str, Dict[str, Any]] = {str(row.get("hash", "")): row for row in rows}
+    for row in ready_missing_rows:
+        dedup.setdefault(str(row.get("hash", "")), row)
+    return list(dedup.values())[: max(1, int(limit))], len(ready_missing_rows)
 
 
 def _load_config(config_path: Path) -> Dict[str, Any]:
@@ -181,6 +314,29 @@ async def main_async(args: argparse.Namespace) -> int:
     print(f"data_dir: {data_dir}")
     print(f"config: {config_path}")
 
+    states = [s.strip() for s in str(args.states).split(",") if s.strip()]
+    if not states:
+        states = ["none", "failed", "pending"]
+    max_retry = int(args.max_retry) if args.max_retry is not None else int(rv_cfg.get("max_retry", 3))
+    limit = int(args.limit)
+
+    if args.dry_run:
+        rows, added_ready_missing = _preview_candidates(
+            data_dir,
+            states=states,
+            limit=max(1, limit),
+            max_retry=max(1, max_retry),
+            include_ready_missing=bool(args.include_ready_missing),
+        )
+        print(f"candidates: {len(rows)} (states={states}, max_retry={max(1, max_retry)})")
+        if args.include_ready_missing:
+            print(f"ready_missing_candidates_added: {added_ready_missing}")
+        if rows:
+            print("dry_run=true，未执行写入。")
+        return 0
+
+    _load_runtime_components()
+
     vector_store = _build_vector_store(data_dir, emb_cfg)
     graph_store = _build_graph_store(data_dir, graph_cfg)
     metadata_store = _build_metadata_store(data_dir)
@@ -193,12 +349,6 @@ async def main_async(args: argparse.Namespace) -> int:
     )
 
     try:
-        states = [s.strip() for s in str(args.states).split(",") if s.strip()]
-        if not states:
-            states = ["none", "failed", "pending"]
-        max_retry = int(args.max_retry) if args.max_retry is not None else int(rv_cfg.get("max_retry", 3))
-        limit = int(args.limit)
-
         rows = metadata_store.list_relations_by_vector_state(
             states=states,
             limit=max(1, limit),
@@ -226,10 +376,6 @@ async def main_async(args: argparse.Namespace) -> int:
         if args.include_ready_missing:
             print(f"ready_missing_candidates_added: {added_ready_missing}")
         if not rows:
-            return 0
-
-        if args.dry_run:
-            print("dry_run=true，未执行写入。")
             return 0
 
         started = time.time()

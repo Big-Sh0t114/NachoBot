@@ -477,7 +477,6 @@ class OfflineRecoveryRuntimeTests(unittest.TestCase):
                     ),
                 )
             )
-            stack.enter_context(patch.object(module.promise_cache_manager, "collect_snippets_for_messages", return_value=[]))
             stack.enter_context(patch.object(module.injection_manager, "build_injection_text", return_value=""))
             stack.enter_context(patch.object(module, "runtime_capabilities_from_message", return_value=caps))
             stack.enter_context(patch.object(module.generator_api, "generate_reply", new=AsyncMock(side_effect=generate_reply)))

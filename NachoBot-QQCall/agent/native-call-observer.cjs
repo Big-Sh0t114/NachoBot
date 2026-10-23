@@ -5,6 +5,14 @@ const MAX_BREAKPOINT_ID_LENGTH = 256;
 const OWNED_OBJECT_GROUP_PREFIX = "qqcall-official-av-native-conditional";
 const STATE_SCHEMA = "qqcall.official.av.observer.page.v1";
 const STATE_SYMBOL_PREFIX = "qqcall.official.av.observer.";
+const JAVASCRIPT_STRING_ESCAPES = Object.freeze({
+  "<": "\\u003C",
+  ">": "\\u003E",
+  "&": "\\u0026",
+  "/": "\\u002F",
+  "\u2028": "\\u2028",
+  "\u2029": "\\u2029",
+});
 
 const OUTCOMES = new Set([
   "not_started", "breakpoint_set", "debugger_unavailable", "debugger_already_attached",
@@ -34,15 +42,20 @@ function stateSymbolKey(runId, epoch) {
   return `${STATE_SYMBOL_PREFIX}${runId}.${epoch}`;
 }
 
+// JSON string escaping alone leaves HTML-sensitive delimiters and JS line separators unescaped.
+function javascriptStringLiteral(value) {
+  return JSON.stringify(value).replace(/[<>\/&\u2028\u2029]/g, (character) => JAVASCRIPT_STRING_ESCAPES[character]);
+}
+
 function buildNativeTargetExpression(runId, ordinal, epoch) {
   const key = stateSymbolKey(runId, epoch);
   if (!Number.isSafeInteger(ordinal) || ordinal < 1 || ordinal > 16) throw new TypeError("invalid observer window binding");
-  return `(()=>{try{const __d=Object.getOwnPropertyDescriptor(globalThis,Symbol.for(${JSON.stringify(key)}));if(!__d||!Object.hasOwn(__d,"value"))return null;const __s=__d.value;const __own=(o,k)=>{try{const d=Object.getOwnPropertyDescriptor(o,k);return d&&Object.hasOwn(d,"value")?d.value:void 0}catch{return void 0}};if(__own(__s,"schema")!==${JSON.stringify(STATE_SCHEMA)}||__own(__s,"runId")!==${JSON.stringify(runId)}||__own(__s,"ordinal")!==${ordinal}||__own(__s,"epoch")!==${epoch}||__own(__s,"nativeConditional")!==true||__own(__s,"active")!==true)return null;const __f=__own(__s,"original");return typeof __f==="function"?__f:null}catch{return null}})()`;
+  return `(()=>{try{const __d=Object.getOwnPropertyDescriptor(globalThis,Symbol.for(${javascriptStringLiteral(key)}));if(!__d||!Object.hasOwn(__d,"value"))return null;const __s=__d.value;const __own=(o,k)=>{try{const d=Object.getOwnPropertyDescriptor(o,k);return d&&Object.hasOwn(d,"value")?d.value:void 0}catch{return void 0}};if(__own(__s,"schema")!==${javascriptStringLiteral(STATE_SCHEMA)}||__own(__s,"runId")!==${javascriptStringLiteral(runId)}||__own(__s,"ordinal")!==${ordinal}||__own(__s,"epoch")!==${epoch}||__own(__s,"nativeConditional")!==true||__own(__s,"active")!==true)return null;const __f=__own(__s,"original");return typeof __f==="function"?__f:null}catch{return null}})()`;
 }
 
 function buildNativeConditionalExpression(runId, epoch) {
   const key = stateSymbolKey(runId, epoch);
-  return `(()=>{try{const __d=Object.getOwnPropertyDescriptor(globalThis,Symbol.for(${JSON.stringify(key)}));const __s=__d&&Object.hasOwn(__d,"value")?__d.value:null;const __f=__s&&Object.getOwnPropertyDescriptor(__s,"observeNativeAttempt");if(__f&&Object.hasOwn(__f,"value")&&typeof __f.value==="function")__f.value(this,arguments)}catch(_){}return false})()`;
+  return `(()=>{try{const __d=Object.getOwnPropertyDescriptor(globalThis,Symbol.for(${javascriptStringLiteral(key)}));const __s=__d&&Object.hasOwn(__d,"value")?__d.value:null;const __f=__s&&Object.getOwnPropertyDescriptor(__s,"observeNativeAttempt");if(__f&&Object.hasOwn(__f,"value")&&typeof __f.value==="function")__f.value(this,arguments)}catch(_){}return false})()`;
 }
 
 function safeStatus(value) {

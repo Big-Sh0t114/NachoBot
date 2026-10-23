@@ -506,4 +506,3 @@ class InferenceService:
         thread = self._warm_thread
         if thread and thread is not threading.current_thread():
             thread.join(timeout=5.0)
-

@@ -31,7 +31,6 @@ from src.chat.runtime_capabilities import (
 )
 from src.chat.json_reply_delivery import prepare_json_envelope_delivery
 from src.chat.tts_reply_delivery import clean_tts_reply_text
-from src.chat.keyword_cache import promise_cache_manager
 from src.chat.injection.injection_manager import injection_manager
 from src.person_info.person_info import Person
 from src.plugin_system.base.component_types import EventType, ActionInfo
@@ -848,9 +847,6 @@ class BrainChatting:
                     limit=planner_context_limit,
                     history_before=history_before,
                 )
-            promise_snippets = promise_cache_manager.collect_snippets_for_messages(
-                self.stream_id, message_list_before_now
-            )
             chat_content_block, message_id_list = build_readable_messages_with_id(
                 messages=message_list_before_now,
                 timestamp_mode="normal_no_YMD",
@@ -874,9 +870,6 @@ class BrainChatting:
                 for message_id, message in message_id_list
                 if planner_target_eligible(message)
             ]
-            if promise_snippets:
-                promise_block = "\n".join(["[约定缓存]"] + promise_snippets)
-                chat_content_block = f"{promise_block}\n----\n{chat_content_block}"
 
             # --- 人物画像注入 ---
             try:

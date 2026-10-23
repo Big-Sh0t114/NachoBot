@@ -1,6 +1,6 @@
 # A_Memorix
 
-NachoBot 内置的长期记忆与认知增强子系统（v2.0.0）。它统一管理文本记忆、关系图谱、Episode、人物画像、导入与检索调优；当前主入口为宿主 host service 与 `core/runtime/sdk_memory_kernel.py`，不再提供旧版独立 `server.py` 或 slash 命令。
+由 Maibot 的长期记忆与认知增强子系统（v2.0.0）进行了兼容性更改而来。它统一管理文本记忆、关系图谱、Episode、人物画像、导入与检索调优；当前主入口为宿主 host service 与 `core/runtime/sdk_memory_kernel.py`，不再提供旧版独立 `server.py` 或 slash 命令。
 
 ## 文档导航
 
@@ -116,4 +116,4 @@ enabled = false
 
 出现向量维度不一致时，先运行 `runtime_self_check.py`，确认当前 embedding 输出与已有索引；不要在未备份数据前直接重建存储。
 
-默认许可证为 AGPL-3.0；针对 MaiBot 的额外授权见 [LICENSE-MAIBOT-GPL.md](LICENSE-MAIBOT-GPL.md)。
+默认许可证为 AGPL-3.0；针对 MaiBot 的授权见 [LICENSE-MAIBOT-GPL.md](LICENSE-MAIBOT-GPL.md)。

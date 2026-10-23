@@ -34,6 +34,71 @@ function codedError(code) {
   return error;
 }
 
+function sameOpenedPath(opened, named) {
+  if (!named.isFile() || named.isSymbolicLink()) return false;
+  if (Number.isFinite(opened.dev) && Number.isFinite(opened.ino) && opened.ino !== 0 &&
+      Number.isFinite(named.dev) && Number.isFinite(named.ino) && named.ino !== 0) {
+    return opened.dev === named.dev && opened.ino === named.ino;
+  }
+  return opened.size === named.size && opened.mtimeMs === named.mtimeMs;
+}
+
+function sameOpenedState(before, after) {
+  return after.isFile() && before.size === after.size && before.mtimeMs === after.mtimeMs &&
+    (before.ctimeMs === undefined || after.ctimeMs === undefined || before.ctimeMs === after.ctimeMs);
+}
+
+function readBoundedRegularFile(filePath, maxBytes, invalidCode, permissionCode = null) {
+  let descriptor;
+  try {
+    const constants = fs.constants;
+    let flags = constants.O_RDONLY;
+    if (Number.isInteger(constants.O_NOFOLLOW)) flags |= constants.O_NOFOLLOW;
+    if (Number.isInteger(constants.O_NONBLOCK)) flags |= constants.O_NONBLOCK;
+    try { descriptor = fs.openSync(filePath, flags); }
+    catch (error) {
+      try {
+        const named = fs.lstatSync(filePath);
+        if (!named.isFile() || named.isSymbolicLink()) throw codedError(invalidCode);
+      } catch (inspectionError) {
+        if (inspectionError?.code === invalidCode) throw inspectionError;
+      }
+      throw error;
+    }
+
+    const before = fs.fstatSync(descriptor);
+    if (!before.isFile() || !Number.isSafeInteger(before.size) || before.size < 0 || before.size > maxBytes) {
+      throw codedError(invalidCode);
+    }
+    if (permissionCode && process.platform !== "win32" && (before.mode & 0o077) !== 0) {
+      throw codedError(permissionCode);
+    }
+    if (!sameOpenedPath(before, fs.lstatSync(filePath))) throw codedError(invalidCode);
+
+    const chunks = [];
+    const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, maxBytes + 1));
+    let offset = 0;
+    while (offset <= maxBytes) {
+      const requested = Math.min(buffer.length, maxBytes + 1 - offset);
+      if (requested <= 0) break;
+      const count = fs.readSync(descriptor, buffer, 0, requested, offset);
+      if (count === 0) break;
+      offset += count;
+      if (offset > maxBytes) throw codedError(invalidCode);
+      chunks.push(Buffer.from(buffer.subarray(0, count)));
+    }
+    const after = fs.fstatSync(descriptor);
+    if (!sameOpenedState(before, after) || !sameOpenedPath(after, fs.lstatSync(filePath))) {
+      throw codedError(invalidCode);
+    }
+    return Buffer.concat(chunks, offset);
+  } finally {
+    if (descriptor !== undefined) {
+      try { fs.closeSync(descriptor); } catch { /* preserve the original read result or failure */ }
+    }
+  }
+}
+
 function ownKeysExactly(value, keys) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const actual = Object.keys(value).sort();
@@ -58,10 +123,8 @@ function readPrivateJson(filePath, code) {
   let parsed;
   try {
     const resolved = path.resolve(filePath);
-    const stat = fs.lstatSync(resolved);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_CONFIG_BYTES) throw codedError(code);
-    if (process.platform !== "win32" && (stat.mode & 0o077) !== 0) throw codedError("audio_route_config_not_private");
-    parsed = JSON.parse(fs.readFileSync(resolved, "utf8"));
+    const bytes = readBoundedRegularFile(resolved, MAX_CONFIG_BYTES, code, "audio_route_config_not_private");
+    parsed = JSON.parse(bytes.toString("utf8"));
   } catch (error) {
     if (error?.code === code || error?.code === "audio_route_config_not_private") throw error;
     throw codedError(code);
@@ -551,9 +614,8 @@ function writeOwnedRequest(filePath, value) {
 
 function readOwnedReport(filePath) {
   try {
-    const stat = fs.lstatSync(filePath);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_REPORT_BYTES) throw codedError("observer_report_invalid");
-    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+    const bytes = readBoundedRegularFile(filePath, MAX_REPORT_BYTES, "observer_report_invalid");
+    return JSON.parse(bytes.toString("utf8"));
   } catch (error) {
     if (error?.code === "observer_report_invalid") throw error;
     throw codedError("observer_report_missing");

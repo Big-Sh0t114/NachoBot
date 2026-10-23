@@ -87,18 +87,27 @@ class BilibiliApi:
         self.config = config
         self.logger = logger
         self.session: Optional[aiohttp.ClientSession] = None
+        self.download_session: aiohttp.ClientSession | None = None
         self.login_valid: Optional[bool] = None
         self.signer = WbiSigner(self, logger)
 
     async def start(self) -> None:
-        if self.session is None:
-            timeout = aiohttp.ClientTimeout(total=20)
+        timeout = aiohttp.ClientTimeout(total=20)
+        if self.session is None or self.session.closed:
             self.session = aiohttp.ClientSession(timeout=timeout)
+        if self.download_session is None or self.download_session.closed:
+            self.download_session = aiohttp.ClientSession(
+                timeout=timeout,
+                cookie_jar=aiohttp.DummyCookieJar(),
+            )
 
     async def close(self) -> None:
-        if self.session:
-            await self.session.close()
-            self.session = None
+        for attribute in ("session", "download_session"):
+            session = getattr(self, attribute)
+            if session is not None:
+                if not session.closed:
+                    await session.close()
+                setattr(self, attribute, None)
 
     def _cookie_header(self) -> str:
         cookies = []
@@ -123,6 +132,14 @@ class BilibiliApi:
         if cookie:
             headers["Cookie"] = cookie
         return headers
+
+    def _build_download_headers(
+        self, referer: str = "https://message.bilibili.com/"
+    ) -> Dict[str, str]:
+        return {
+            "User-Agent": self.config.user_agent,
+            "Referer": referer,
+        }
 
     async def request_json(
         self,
@@ -180,10 +197,10 @@ class BilibiliApi:
     async def fetch_bytes(
         self, url: str, referer: str = "https://message.bilibili.com/"
     ) -> Optional[bytes]:
-        if self.session is None:
+        if self.download_session is None or self.download_session.closed:
             raise RuntimeError("HTTP session not started")
-        headers = self._build_headers(referer=referer)
-        async with self.session.get(url, headers=headers) as resp:
+        headers = self._build_download_headers(referer=referer)
+        async with self.download_session.get(url, headers=headers) as resp:
             if resp.status >= 400:
                 self.logger.warning(
                     "HTTP error: status={} url={}",

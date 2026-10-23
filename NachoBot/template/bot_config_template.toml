@@ -147,16 +147,6 @@ keyword_rules = [
     { keywords = ["晚"], reaction = "说晚安相关话句" }    
 ]
 
-[promise_cache]
-# 独立的约定/誓言缓存，不与关键词反应混用
-enable = true
-keywords = ['约定', '誓言', '誓约', '说好了', '约好了', '说定了']
-context_size = 10       # 触发时回溯的历史消息条数
-post_context_size = 10  # 触发后继续追加的消息条数
-max_cache_per_keyword = 5
-cache_dir = "data/promise_cache"
-case_sensitive = false
-
 [response_post_process]
 enable_response_post_process = true # 是否启用回复后处理，包括错别字生成器，回复分割器
 

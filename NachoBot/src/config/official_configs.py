@@ -673,38 +673,6 @@ class InjectionConfig(ConfigBase):
 
 
 @dataclass
-class PromiseCacheConfig(ConfigBase):
-    """约定/誓言缓存配置（独立于普通关键词系统）"""
-
-    enable: bool = False
-    """是否启用约定缓存"""
-
-    keywords: list[str] = field(default_factory=lambda: ["约定", "誓言", "说好了"])
-    """触发缓存的关键词列表"""
-
-    context_size: int = 10
-    """触发时向前回溯的消息条数"""
-
-    post_context_size: int = 10
-    """触发后继续追加的消息条数"""
-
-    cache_dir: str = "data/promise_cache"
-    """缓存存放目录（相对项目根路径）"""
-
-    max_cache_per_keyword: int = 5
-    """每个关键词保留的缓存文件数量"""
-
-    case_sensitive: bool = False
-    """是否区分大小写"""
-
-    def __post_init__(self):
-        if self.context_size < 0 or self.post_context_size < 0:
-            raise ValueError("context_size 和 post_context_size 必须大于等于0")
-        if self.max_cache_per_keyword < 1:
-            raise ValueError("max_cache_per_keyword 必须至少为1")
-
-
-@dataclass
 class ResponsePostProcessConfig(ConfigBase):
     """回复后处理配置类"""
 

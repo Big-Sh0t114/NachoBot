@@ -640,4 +640,3 @@ def import_default_root(root: Path, source: Path) -> dict:
     if directories and names <= {"self", "other"}:
         return import_folders(root, source / "self", source / "other")
     return import_named_folders(root, source)
-

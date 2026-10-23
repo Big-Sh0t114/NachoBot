@@ -398,7 +398,6 @@ class NonFocusOnlineDuringRecoveryTests(unittest.IsolatedAsyncioTestCase):
             stack.enter_context(patch.object(module.global_prompt_manager, "async_message_scope", new=focus_helpers._prompt_scope))
             stack.enter_context(patch.object(module.global_config.chat, "get_max_context_size", return_value=100))
             stack.enter_context(patch.object(module.events_manager, "handle_nacho_events", new=AsyncMock(return_value=(True, None))))
-            stack.enter_context(patch.object(module.promise_cache_manager, "collect_snippets_for_messages", return_value=[]))
         stack.enter_context(patch.object(heart_module, "focus_coordinator", recovery_module.focus_coordinator))
         stack.enter_context(patch.object(brain_module, "focus_coordinator", recovery_module.focus_coordinator))
         stack.enter_context(patch.object(heart_module, "offline_recovery_manager", receiver_module.offline_recovery_manager))

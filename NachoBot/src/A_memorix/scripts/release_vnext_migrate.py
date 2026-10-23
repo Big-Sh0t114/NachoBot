@@ -22,6 +22,9 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import tomlkit
 
 from _bootstrap import DEFAULT_CONFIG_PATH, DEFAULT_DATA_DIR, resolve_repo_path
+from _preview_sqlite import connect_readonly, table_exists
+
+_ALLOWED_KNOWLEDGE_TYPES = ("structured", "narrative", "factual", "quote", "mixed")
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="A_Memorix vNext release migration tool")
@@ -59,17 +62,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
     _build_arg_parser().print_help()
     raise SystemExit(0)
-
-try:
-    from A_memorix.core.storage import GraphStore, KnowledgeType, MetadataStore, QuantizationType, VectorStore
-    from A_memorix.core.storage.metadata_store import (
-        RUNTIME_AUTO_MIGRATION_MIN_SCHEMA_VERSION,
-        SCHEMA_VERSION,
-    )
-except Exception as e:  # pragma: no cover
-    print(f"❌ failed to import storage modules: {e}")
-    raise SystemExit(2)
-
 
 @dataclass
 class CheckItem:
@@ -166,6 +158,8 @@ def _collect_invalid_knowledge_types(conn: sqlite3.Connection) -> List[str]:
     if not _sqlite_column_exists(conn, "paragraphs", "knowledge_type"):
         return []
 
+    from A_memorix.core.storage import KnowledgeType
+
     allowed = {item.value for item in KnowledgeType}
     rows = conn.execute("SELECT DISTINCT knowledge_type FROM paragraphs").fetchall()
     invalid: List[str] = []
@@ -198,6 +192,11 @@ def _guess_vector_dimension(config_doc: Dict[str, Any], vectors_dir: Path) -> in
 
 
 def _preflight_impl(config_path: Path, data_dir: Path) -> Dict[str, Any]:
+    from A_memorix.core.storage.metadata_store import (
+        RUNTIME_AUTO_MIGRATION_MIN_SCHEMA_VERSION,
+        SCHEMA_VERSION,
+    )
+
     checks: List[CheckItem] = []
     facts: Dict[str, Any] = {
         "config_path": str(config_path),
@@ -255,7 +254,7 @@ def _preflight_impl(config_path: Path, data_dir: Path) -> Dict[str, Any]:
             )
         )
 
-    if summary_knowledge_type not in {item.value for item in KnowledgeType}:
+    if summary_knowledge_type not in set(_ALLOWED_KNOWLEDGE_TYPES):
         checks.append(
             CheckItem(
                 "CP-13",
@@ -492,7 +491,7 @@ def _migrate_config(config_doc: Dict[str, Any]) -> Dict[str, Any]:
         changes["summarization.model_name"] = {"old": summary_model, "new": normalized}
 
     default_knowledge_type = str(summary.get("default_knowledge_type", "narrative") or "").strip().lower()
-    allowed_knowledge_types = {item.value for item in KnowledgeType}
+    allowed_knowledge_types = set(_ALLOWED_KNOWLEDGE_TYPES)
     if default_knowledge_type not in allowed_knowledge_types:
         summary["default_knowledge_type"] = "narrative"
         changes["summarization.default_knowledge_type"] = {
@@ -523,22 +522,53 @@ def _migrate_impl(config_path: Path, data_dir: Path, dry_run: bool) -> Dict[str,
     if config_changes and not dry_run:
         _write_toml(config_path, config_doc)
 
+    if dry_run:
+        vectors_dir = data_dir / "vectors"
+        npy_path = vectors_dir / "vectors.npy"
+        bin_path = vectors_dir / "vectors.bin"
+        ids_bin_path = vectors_dir / "vectors_ids.bin"
+        if npy_path.exists() and not (bin_path.exists() and ids_bin_path.exists()):
+            result["steps"]["vector"] = {"migrated": False, "reason": "dry_run"}
+        else:
+            result["steps"]["vector"] = {"migrated": False, "reason": "not_required"}
+
+        metadata_db = data_dir / "metadata" / "metadata.db"
+        metadata_result: Dict[str, Any] = {"migrated": False, "reason": "not_required"}
+        relation_count = 0
+        if metadata_db.exists():
+            conn = connect_readonly(metadata_db)
+            try:
+                if table_exists(conn, "relations"):
+                    row = conn.execute("SELECT COUNT(*) FROM relations").fetchone()
+                    relation_count = int(row[0] or 0)
+                metadata_result = {"migrated": False, "reason": "dry_run"}
+            finally:
+                conn.close()
+        result["steps"]["metadata"] = metadata_result
+        result["steps"]["graph"] = {
+            "rebuilt": False,
+            "mapped_hashes": 0,
+            "relation_count": relation_count,
+            "topology_rebuilt_from_relations": False,
+            "reason": "dry_run" if relation_count > 0 else "no_relations",
+        }
+        return result
+
+    from A_memorix.core.storage import GraphStore, MetadataStore, QuantizationType, VectorStore
+
     vectors_dir = data_dir / "vectors"
     vectors_dir.mkdir(parents=True, exist_ok=True)
     npy_path = vectors_dir / "vectors.npy"
     bin_path = vectors_dir / "vectors.bin"
     ids_bin_path = vectors_dir / "vectors_ids.bin"
     if npy_path.exists() and not (bin_path.exists() and ids_bin_path.exists()):
-        if dry_run:
-            result["steps"]["vector"] = {"migrated": False, "reason": "dry_run"}
-        else:
-            dim = _guess_vector_dimension(config_doc, vectors_dir)
-            store = VectorStore(
-                dimension=max(1, int(dim)),
-                quantization_type=QuantizationType.INT8,
-                data_dir=vectors_dir,
-            )
-            result["steps"]["vector"] = store.migrate_legacy_npy(vectors_dir)
+        dim = _guess_vector_dimension(config_doc, vectors_dir)
+        store = VectorStore(
+            dimension=max(1, int(dim)),
+            quantization_type=QuantizationType.INT8,
+            data_dir=vectors_dir,
+        )
+        result["steps"]["vector"] = store.migrate_legacy_npy(vectors_dir)
     else:
         result["steps"]["vector"] = {"migrated": False, "reason": "not_required"}
 
@@ -575,37 +605,34 @@ def _migrate_impl(config_path: Path, data_dir: Path, dry_run: bool) -> Dict[str,
         "topology_rebuilt_from_relations": False,
     }
     if relation_count > 0:
-        if dry_run:
-            graph_step["reason"] = "dry_run"
-        else:
-            if graph_store.has_data():
-                graph_store.load()
+        if graph_store.has_data():
+            graph_store.load()
 
-            mapped = graph_store.rebuild_edge_hash_map(triples)
+        mapped = graph_store.rebuild_edge_hash_map(triples)
 
-            # 兜底：历史数据里 graph 节点/边与 relations 脱节时，直接从 relations 重建图。
-            if mapped <= 0 or not graph_store.has_edge_hash_map():
-                nodes = sorted({s for s, _, o, _ in triples} | {o for _, _, o, _ in triples})
-                edges = [(s, o) for s, _, o, _ in triples]
-                hashes = [h for _, _, _, h in triples]
+        # 兜底：历史数据里 graph 节点/边与 relations 脱节时，直接从 relations 重建图。
+        if mapped <= 0 or not graph_store.has_edge_hash_map():
+            nodes = sorted({s for s, _, o, _ in triples} | {o for _, _, o, _ in triples})
+            edges = [(s, o) for s, _, o, _ in triples]
+            hashes = [h for _, _, _, h in triples]
 
-                graph_store.clear()
-                if nodes:
-                    graph_store.add_nodes(nodes)
-                if edges:
-                    mapped = graph_store.add_edges(edges, relation_hashes=hashes)
-                else:
-                    mapped = 0
-                graph_step.update(
-                    {
-                        "topology_rebuilt_from_relations": True,
-                        "rebuilt_nodes": len(nodes),
-                        "rebuilt_edges": int(graph_store.num_edges),
-                    }
-                )
+            graph_store.clear()
+            if nodes:
+                graph_store.add_nodes(nodes)
+            if edges:
+                mapped = graph_store.add_edges(edges, relation_hashes=hashes)
+            else:
+                mapped = 0
+            graph_step.update(
+                {
+                    "topology_rebuilt_from_relations": True,
+                    "rebuilt_nodes": len(nodes),
+                    "rebuilt_edges": int(graph_store.num_edges),
+                }
+            )
 
-            graph_store.save()
-            graph_step.update({"rebuilt": True, "mapped_hashes": int(mapped)})
+        graph_store.save()
+        graph_step.update({"rebuilt": True, "mapped_hashes": int(mapped)})
     else:
         graph_step["reason"] = "no_relations"
     result["steps"]["graph"] = graph_step
@@ -614,6 +641,9 @@ def _migrate_impl(config_path: Path, data_dir: Path, dry_run: bool) -> Dict[str,
 
 
 def _verify_impl(config_path: Path, data_dir: Path) -> Dict[str, Any]:
+    from A_memorix.core.storage import GraphStore, MetadataStore
+    from A_memorix.core.storage.metadata_store import SCHEMA_VERSION
+
     checks: List[CheckItem] = []
     facts: Dict[str, Any] = {
         "config_path": str(config_path),
@@ -635,7 +665,7 @@ def _verify_impl(config_path: Path, data_dir: Path) -> Dict[str, Any]:
     summary_knowledge_type = str(
         _get_nested(config_doc, ("summarization", "default_knowledge_type"), "narrative") or "narrative"
     ).strip().lower()
-    if summary_knowledge_type not in {item.value for item in KnowledgeType}:
+    if summary_knowledge_type not in set(_ALLOWED_KNOWLEDGE_TYPES):
         checks.append(
             CheckItem("CP-13", "error", f"invalid summarization.default_knowledge_type: {summary_knowledge_type}")
         )

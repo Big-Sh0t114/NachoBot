@@ -29,7 +29,6 @@ from src.chat.planner_actions.action_manager import ActionManager
 from src.chat.heart_flow.hfc_utils import CycleDetail
 from src.chat.express.expression_learner import expression_learner_manager
 from src.chat.frequency_control.frequency_control import frequency_control_manager
-from src.chat.keyword_cache import promise_cache_manager
 from src.person_info.person_info import Person
 from src.plugin_system.base.component_types import EventType, ActionInfo
 from src.chat.injection.injection_manager import injection_manager
@@ -1328,11 +1327,6 @@ class HeartFChatting:
                     )
                 # 过滤被屏蔽用户的消息
                 message_list_before_now = self._filter_blocked_users(message_list_before_now, caller="observe")
-                promise_snippets = []
-                if not self.chat_stream.group_info and not has_system_event:  # 群聊不启用誓言缓存
-                    promise_snippets = promise_cache_manager.collect_snippets_for_messages(
-                        self.stream_id, message_list_before_now
-                    )
                 chat_content_block, message_id_list = build_readable_messages_with_id(
                     messages=message_list_before_now,
                     timestamp_mode="normal_no_YMD",
@@ -1356,9 +1350,6 @@ class HeartFChatting:
                     for message_id, message in message_id_list
                     if planner_target_eligible(message)
                 ]
-                if promise_snippets:
-                    promise_block = "\n".join(["[约定缓存]"] + promise_snippets)
-                    chat_content_block = f"{promise_block}\n----\n{chat_content_block}"
 
                 event_only_focus_turn = bool(
                     focus_turn is not None and self._is_focus_event_only_turn(focus_turn, recent_messages_list)

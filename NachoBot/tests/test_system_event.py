@@ -371,11 +371,10 @@ class SystemEventContractTests(unittest.TestCase):
             bot._ensure_started = AsyncMock()
             receiver = AsyncMock()
             manager = SimpleNamespace(register_message=Mock(), get_or_create_stream=AsyncMock())
-            touch_activity = Mock()
 
             with patch.object(bot_module, "get_chat_manager", return_value=manager), patch.object(
-                bot_module.promise_cache_manager, "touch_activity", touch_activity
-            ), patch.object(bot, "handle_notice_message", AsyncMock(return_value=False)), patch.object(
+                bot, "handle_notice_message", AsyncMock(return_value=False)
+            ), patch.object(
                 bot_module.events_manager, "handle_nacho_events", AsyncMock()
             ), patch.object(bot_module, "track_platform_event", AsyncMock()), patch.object(
                 bot_module.asyncio, "create_task", side_effect=lambda coroutine: coroutine.close()
@@ -391,7 +390,6 @@ class SystemEventContractTests(unittest.TestCase):
                 await bot.message_process(invalid)
                 await bot.message_process(sender_bearing)
 
-            self.assertEqual(touch_activity.call_count, 0)
             self.assertEqual(manager.register_message.call_count, 0)
             self.assertEqual(receiver.await_count, 0)
 
@@ -412,8 +410,6 @@ class SystemEventContractTests(unittest.TestCase):
             manager = SimpleNamespace(
                 register_message=Mock(), get_or_create_stream=AsyncMock(return_value=chat)
             )
-            touch_activity = Mock()
-            promise_handler = Mock()
             preprocess = AsyncMock()
             on_message = AsyncMock()
             command_handler = AsyncMock()
@@ -424,8 +420,6 @@ class SystemEventContractTests(unittest.TestCase):
             fast_poke_action = AsyncMock(return_value=False)
 
             with patch.object(bot_module, "get_chat_manager", return_value=manager), patch.object(
-                bot_module.promise_cache_manager, "touch_activity", touch_activity
-            ), patch.object(bot_module.promise_cache_manager, "handle_message", promise_handler), patch.object(
                 bot, "handle_notice_message", AsyncMock(return_value=True)
             ), patch.object(
                 bot_module.events_manager, "handle_nacho_events", side_effect=[(True, None), (True, None)]
@@ -448,8 +442,6 @@ class SystemEventContractTests(unittest.TestCase):
                 # asserting the awaited side effect.
                 await asyncio.sleep(0)
 
-            self.assertEqual(touch_activity.call_count, 0)
-            self.assertEqual(promise_handler.call_count, 0)
             self.assertEqual(preprocess.await_count, 0)
             self.assertEqual(command_handler.await_count, 0)
             self.assertEqual(sandbox_callback.await_count, 0)
@@ -534,7 +526,6 @@ class SystemEventContractTests(unittest.TestCase):
             bot = ChatBot()
             bot._ensure_started = AsyncMock()
             receiver = AsyncMock()
-            touch_activity = Mock()
 
             invalid_payloads = (
                 self._bot_message_data(
@@ -572,8 +563,8 @@ class SystemEventContractTests(unittest.TestCase):
 
             manager = SimpleNamespace(register_message=Mock(), get_or_create_stream=AsyncMock())
             with patch.object(bot_module, "get_chat_manager", return_value=manager), patch.object(
-                bot_module.promise_cache_manager, "touch_activity", touch_activity
-            ), patch.object(bot, "handle_notice_message", AsyncMock(return_value=True)), patch.object(
+                bot, "handle_notice_message", AsyncMock(return_value=True)
+            ), patch.object(
                 bot_module, "track_platform_event", AsyncMock()
             ), patch.object(bot_module.asyncio, "create_task", side_effect=lambda coroutine: coroutine.close()), patch.object(
                 bot.heartflow_message_receiver, "process_message", receiver
@@ -583,7 +574,6 @@ class SystemEventContractTests(unittest.TestCase):
 
             self.assertEqual(manager.register_message.call_count, 0)
             self.assertEqual(receiver.await_count, 0)
-            self.assertEqual(touch_activity.call_count, 0)
 
             chat = SimpleNamespace(
                 stream_id="qq-private-peer-7",

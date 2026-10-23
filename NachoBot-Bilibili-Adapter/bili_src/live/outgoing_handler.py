@@ -154,6 +154,22 @@ class OutgoingHandler:
         text = _strip_emoji(text).strip()
         return text if any(not char.isspace() for char in text) else ""
 
+    @staticmethod
+    def _is_comment_message(message: MessageBase) -> bool:
+        message_info = getattr(message, "message_info", None)
+        group_info = getattr(message_info, "group_info", None)
+        group_id = str(getattr(group_info, "group_id", "") or "")
+        if group_id.startswith("comment:"):
+            return True
+        additional_config = getattr(message_info, "additional_config", None)
+        if not isinstance(additional_config, dict):
+            return False
+        delivery_target = additional_config.get("delivery_target")
+        return (
+            isinstance(delivery_target, dict)
+            and delivery_target.get("kind") == "bilibili.comment"
+        )
+
     def _prepared_with_clean_reply(self, prepared: Any) -> PreparedReplyResult:
         reply = self._clean_display_text(
             getattr(prepared, "reply", "")
@@ -459,9 +475,16 @@ class OutgoingHandler:
             await self._handle_command(message)
             return
 
+        is_comment_message = self._is_comment_message(message)
+
         # Core's PCM lifecycle is a sequence of audio-control messages, not a
         # complete WAV artifact or a second display-text reply.
         if _has_voice_stream_segment(seg):
+            if is_comment_message:
+                self.logger.warning(
+                    "Comment voice_stream reply suppressed: audio playback is unsupported"
+                )
+                return
             await self._handle_voice_stream_event(
                 _extract_voice_stream_payload(seg),
                 room_id=self._resolve_room_id(message),
@@ -471,6 +494,11 @@ class OutgoingHandler:
         voice_data = _extract_voice_base64(seg)
         image_data = _extract_image_base64(seg)
         if image_data:
+            if is_comment_message:
+                self.logger.warning(
+                    "Comment image reply suppressed: image delivery is unsupported"
+                )
+                return
             private_target = self.adapter.private_handler.resolve_private_target(
                 message
             )
@@ -490,12 +518,22 @@ class OutgoingHandler:
         text = _extract_plain_text(seg).strip()
         if not text and not voice_data:
             return
+        if is_comment_message and not text and voice_data:
+            self.logger.warning(
+                "Comment voice reply suppressed: audio playback is unsupported"
+            )
+            return
 
-        room_id = self._resolve_room_id(message)
+        room_id = None if is_comment_message else self._resolve_room_id(message)
         comment_target = self.adapter.comment_handler.resolve_comment_target(message)
+        if is_comment_message and comment_target is None:
+            self.logger.warning(
+                "Comment reply suppressed: missing or invalid delivery target"
+            )
+            return
         private_target = (
             self.adapter.private_handler.resolve_private_target(message)
-            if room_id is None and comment_target is None
+            if room_id is None and comment_target is None and not is_comment_message
             else None
         )
 
@@ -576,12 +614,6 @@ class OutgoingHandler:
 
         if comment_target:
             await self.adapter.live2d_manager.apply_control(prepared.control_id)
-            if voice_data:
-                await self._play_core_voice(
-                    voice_data,
-                    idle=False,
-                    control_id=prepared.control_id,
-                )
             if text:
                 await self.adapter.comment_handler.send_comment_reply_from_context(
                     comment_target, text

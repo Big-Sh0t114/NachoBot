@@ -143,6 +143,19 @@ class BindManager:
         return list(set(m for m in all_memories if m is not None))
 
     @staticmethod
+    def _load_merged_memories(merged_row) -> list:
+        """Load authoritative memories from an existing aggregate row."""
+        if merged_row.merged_memory is None:
+            raise ValueError("Existing merged group has no merged_memory value")
+        try:
+            memories = json.loads(merged_row.merged_memory)
+        except (json.JSONDecodeError, TypeError) as e:
+            raise ValueError("Existing merged group has malformed merged_memory JSON") from e
+        if not isinstance(memories, list):
+            raise ValueError("Existing merged group merged_memory must be a JSON list")
+        return memories
+
+    @staticmethod
     def _get_primary_info(person_ids: list[str]):
         """在多个候选 PersonInfo 中选择数据最丰富的作为 '基底' 信息"""
         best = None
@@ -171,7 +184,7 @@ class BindManager:
     #  聚合行管理
     # ──────────────────────────────────────────────────────────────
 
-    def _build_merged_group(self, member_original_ids: list[str]) -> str:
+    def _build_merged_group(self, member_original_ids: list[str], merged_memories: list | None = None) -> str:
         """
         创建或更新聚合行。
 
@@ -182,7 +195,10 @@ class BindManager:
             聚合后的统一 person_id
         """
         group_id = self._compute_group_id(member_original_ids)
-        merged_memories = self._collect_all_memories(member_original_ids)
+        if merged_memories is None:
+            merged_memories = self._collect_all_memories(member_original_ids)
+        else:
+            merged_memories = list(set(m for m in merged_memories if m is not None))
         merged_ids_str = ",".join(sorted(member_original_ids))
         merged_memory_json = json.dumps([m for m in merged_memories if m], ensure_ascii=False)
 
@@ -399,13 +415,17 @@ class BindManager:
                 # 4. 收集所有需要聚合的原始 person_id
                 all_original_ids = set()
                 old_group_ids = set()  # 记录需要清理的旧 group_id
+                grouped_original_ids = set()
+                current_memories = []
 
                 # 如果请求者已经在某个聚合组中，收集组内所有成员
                 existing_merged = self._get_merged_row_for_person(requester_person_id)
                 if existing_merged and existing_merged.merged_ids:
                     old_group_ids.add(existing_merged.person_id)
-                    for mid in existing_merged.merged_ids.split(","):
-                        all_original_ids.add(mid.strip())
+                    group_original_ids = {mid.strip() for mid in existing_merged.merged_ids.split(",")}
+                    grouped_original_ids.update(group_original_ids)
+                    all_original_ids.update(group_original_ids)
+                    current_memories.extend(self._load_merged_memories(existing_merged))
                     # 删除旧的聚合行，准备创建新的
                     existing_merged.delete_instance()
                 else:
@@ -423,8 +443,10 @@ class BindManager:
                 submitter_merged = self._get_merged_row_for_person(submitter_original_pid)
                 if submitter_merged and submitter_merged.merged_ids:
                     old_group_ids.add(submitter_merged.person_id)
-                    for mid in submitter_merged.merged_ids.split(","):
-                        all_original_ids.add(mid.strip())
+                    group_original_ids = {mid.strip() for mid in submitter_merged.merged_ids.split(",")}
+                    grouped_original_ids.update(group_original_ids)
+                    all_original_ids.update(group_original_ids)
+                    current_memories.extend(self._load_merged_memories(submitter_merged))
                     submitter_merged.delete_instance()
                 else:
                     all_original_ids.add(submitter_original_pid)
@@ -446,9 +468,11 @@ class BindManager:
                         logger.debug(f"恢复映射行: {row.platform}:{row.platform_user_id} -> {original_pid}")
 
                 all_original_ids = list(all_original_ids)
+                ungrouped_original_ids = [pid for pid in all_original_ids if pid not in grouped_original_ids]
+                current_memories.extend(self._collect_all_memories(ungrouped_original_ids))
 
                 # 5. 构建新的聚合组
-                group_id = self._build_merged_group(all_original_ids)
+                group_id = self._build_merged_group(all_original_ids, current_memories)
 
             bind_info.delete_instance()
             logger.info(f"账号绑定成功: {submitter_platform}:{submitter_user_id} -> group={group_id}")

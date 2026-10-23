@@ -64,16 +64,7 @@ def _create_bootstrap_logger():
     fallback = logging.getLogger("A_Memorix.MaiBotMigration")
     if not fallback.handlers:
         fallback.addHandler(logging.NullHandler())
-    try:
-        for path in (SRC_ROOT, PROJECT_ROOT, PLUGIN_ROOT):
-            path_str = str(path)
-            if path_str not in sys.path:
-                sys.path.insert(0, path_str)
-        from src.common.logger import get_logger
-
-        return get_logger("A_Memorix.MaiBotMigration")
-    except Exception:
-        return fallback
+    return fallback
 
 
 logger = _create_bootstrap_logger()
@@ -496,14 +487,16 @@ class SourceDB:
         self.conn: Optional[sqlite3.Connection] = None
         self.schema: Optional[SourceSchema] = None
 
-    def connect(self) -> None:
+    def connect(self, *, require_read_only: bool = False) -> None:
         if not self.db_path.exists():
             raise MigrationError(f"源数据库不存在: {self.db_path}")
 
-        uri = f"file:{self.db_path.resolve().as_posix()}?mode=ro"
+        uri = f"{self.db_path.resolve().as_uri()}?mode=ro"
         try:
             self.conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
         except sqlite3.OperationalError:
+            if require_read_only:
+                raise
             self.conn = sqlite3.connect(str(self.db_path.resolve()), check_same_thread=False)
 
         self.conn.row_factory = sqlite3.Row
@@ -512,8 +505,9 @@ class SourceDB:
             "PRAGMA cache_size = -128000",
             "PRAGMA temp_store = MEMORY",
             "PRAGMA synchronous = OFF",
-            "PRAGMA journal_mode = WAL",
         ]
+        if not require_read_only:
+            pragmas.append("PRAGMA journal_mode = WAL")
         for sql in pragmas:
             try:
                 self.conn.execute(sql)
@@ -821,10 +815,11 @@ class MigrationRunner:
 
     async def run(self) -> int:
         try:
-            _bootstrap_runtime_symbols()
+            if not self.args.dry_run:
+                _bootstrap_runtime_symbols()
             self._prepare_paths()
 
-            self.source_db.connect()
+            self.source_db.connect(require_read_only=bool(self.args.dry_run))
             self.selection = self._build_selection_filter()
             self.filter_fingerprint = _json_hash(self.selection.fingerprint_payload())
 
@@ -834,6 +829,10 @@ class MigrationRunner:
             preview = self.source_db.preview(self.selection, preview_limit=self.args.preview_limit)
             self.stats["source_matched_total"] = int(preview.total)
             self._print_preview(preview)
+
+            if self.args.dry_run:
+                logger.info("dry-run 模式：仅预览，不写入。")
+                return self._finalize()
 
             if preview.total <= 0:
                 logger.info("筛选后无数据，退出。")
@@ -848,10 +847,6 @@ class MigrationRunner:
                 self._load_plugin_config()
                 await self._init_target_stores(require_embedding=False)
                 await self._verify(strict=True)
-                return self._finalize()
-
-            if self.args.dry_run:
-                logger.info("dry-run 模式：仅预览，不写入。")
                 return self._finalize()
 
             if not self.args.yes:
@@ -876,6 +871,8 @@ class MigrationRunner:
             self._close()
 
     def _prepare_paths(self) -> None:
+        if self.args.dry_run:
+            return
         (self.target_data_dir / MIGRATION_STATE_DIRNAME).mkdir(parents=True, exist_ok=True)
         if self.args.reset_state and self.state_file.exists():
             self.state_file.unlink()
@@ -1829,7 +1826,8 @@ class MigrationRunner:
             "timestamp": time.time(),
         }
 
-        _dump_json_atomic(self.report_file, report)
+        if not self.args.dry_run:
+            _dump_json_atomic(self.report_file, report)
 
         if self.failed:
             self.exit_code = 1
@@ -1872,7 +1870,10 @@ class MigrationRunner:
             f"bad_rows={self.stats['verify_bad_rows']}, "
             f"passed={self.stats['verify_passed']}"
         )
-        print(f"report_file: {self.report_file}")
+        if self.args.dry_run:
+            print("report_file: skipped in dry-run")
+        else:
+            print(f"report_file: {self.report_file}")
         print("========================\n")
 
         return self.exit_code

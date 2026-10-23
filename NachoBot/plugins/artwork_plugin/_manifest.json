@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "name": "Artwork Sender",
   "version": "0.1.0",
-  "description": "当用户想看画时，随机发送本地artwork目录中的图片",
+  "description": "当用户明确想看画时，根据当前语境选择并发送本地artwork目录中的图片",
   "author": {
     "name": "Big-Sh0t114"
   },
@@ -26,7 +26,7 @@
       {
         "type": "action",
         "name": "send_artwork",
-        "description": "随机从本地画夹发送一张图片"
+        "description": "根据当前语境选择并发送一张本地画作"
       }
     ]
   }
