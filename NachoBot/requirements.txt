@@ -13,11 +13,11 @@ aiohttp==3.14.5
     #   nachobot-universalvc-client
 aiosignal==1.4.0
     # via aiohttp
-annotated-doc==0.0.4
+annotated-doc==0.0.5
     # via fastapi
 annotated-types==0.8.0
     # via pydantic
-anyio==4.14.2
+anyio==4.15.1
     # via
     #   google-genai
     #   httpx
@@ -43,15 +43,14 @@ certifi==2026.10.23
     #   httpcore
     #   httpx
     #   requests
-cffi==2.1.0 ; platform_python_implementation != 'PyPy'
+cffi==2.1.1 ; platform_python_implementation != 'PyPy'
     # via cryptography
-charset-normalizer==3.4.9
+charset-normalizer==3.5.2
     # via requests
-click==8.4.2
+click==8.5.0
     # via uvicorn
 colorama==0.4.6 ; sys_platform == 'win32'
     # via
-    #   click
     #   loguru
     #   tqdm
 cryptography==50.0.2
@@ -64,7 +63,7 @@ distro==1.9.0
     # via
     #   google-genai
     #   openai
-dnspython==2.8.0
+dnspython==2.9.0
     # via pymongo
 docutils==0.23
     # via readme-renderer
@@ -74,13 +73,13 @@ faiss-cpu==1.15.1
     # via nachobot
 fastapi==0.140.13
     # via nachobot
-filelock==3.32.2
+filelock==3.32.7
     # via static-ffmpeg
 frozenlist==1.8.0
     # via
     #   aiohttp
     #   aiosignal
-google-auth==2.56.2
+google-auth==2.62.0
     # via google-genai
 google-genai==2.33.0
     # via nachobot
@@ -93,14 +92,14 @@ h11==0.16.0
     #   uvicorn
 httpcore==1.0.9
     # via httpx
-httpcore2==2.12.0 ; sys_platform != 'emscripten'
+httpcore2==2.16.0 ; sys_platform != 'emscripten'
     # via httpx2
 httpx==0.28.1
     # via
     #   google-genai
     #   nachobot
     #   openai
-httpx2==2.12.0
+httpx2==2.16.0
     # via mcp
 httpx2-jsfetch==1.0 ; python_full_version >= '3.12' and sys_platform == 'emscripten'
     # via httpx2
@@ -115,7 +114,7 @@ idna==3.20
     #   yarl
 igraph==1.0.0
     # via python-igraph
-importlib-metadata==9.0.0 ; python_full_version < '3.12' and platform_machine != 'ppc64le' and platform_machine != 's390x'
+importlib-metadata==9.1.0 ; python_full_version < '3.12' and platform_machine != 'ppc64le' and platform_machine != 's390x'
     # via keyring
 jaraco-classes==3.4.0 ; platform_machine != 'ppc64le' and platform_machine != 's390x'
     # via keyring
@@ -153,7 +152,7 @@ mcp-types==2.3.0
     # via mcp
 mdurl==0.1.2
     # via markdown-it-py
-more-itertools==11.1.0 ; platform_machine != 'ppc64le' and platform_machine != 's390x'
+more-itertools==11.2.1 ; platform_machine != 'ppc64le' and platform_machine != 's390x'
     # via
     #   jaraco-classes
     #   jaraco-functools
@@ -161,9 +160,11 @@ multidict==6.9.1
     # via
     #   aiohttp
     #   yarl
-networkx==3.6.1
+networkx==3.6.1 ; python_full_version < '3.12'
     # via nachobot
-nh3==0.3.6
+networkx==3.7 ; python_full_version >= '3.12'
+    # via nachobot
+nh3==0.3.7
     # via readme-renderer
 numpy==2.4.6 ; python_full_version < '3.12'
     # via
@@ -171,7 +172,7 @@ numpy==2.4.6 ; python_full_version < '3.12'
     #   nachobot
     #   pandas
     #   scipy
-numpy==2.5.1 ; python_full_version >= '3.12'
+numpy==2.5.4 ; python_full_version >= '3.12'
     # via
     #   faiss-cpu
     #   nachobot
@@ -196,19 +197,19 @@ playwright==1.64.1
     # via nachobot
 progress==1.6.1
     # via static-ffmpeg
-propcache==0.5.2
+propcache==0.5.4
     # via
     #   aiohttp
     #   yarl
 psutil==7.2.2
     # via nachobot
-pyarrow==25.0.0
+pyarrow==25.0.1
     # via nachobot
 pyasn1==0.6.4
     # via pyasn1-modules
 pyasn1-modules==0.4.2
     # via google-auth
-pycparser==3.0 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy'
+pycparser==3.12 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy'
     # via cffi
 pydantic==2.14.1
     # via
@@ -222,7 +223,7 @@ pydantic-core==2.50.1
     # via pydantic
 pyee==13.0.1
     # via playwright
-pygments==2.20.0
+pygments==2.21.0
     # via
     #   readme-renderer
     #   rich
@@ -278,7 +279,7 @@ rich==15.0.0
     # via
     #   nachobot
     #   twine
-rpds-py==2026.6.3
+rpds-py==2026.9.1
     # via
     #   jsonschema
     #   referencing
@@ -288,7 +289,7 @@ ruff==0.16.10
     # via nachobot
 scipy==1.17.1 ; python_full_version < '3.12'
     # via nachobot
-scipy==1.18.0 ; python_full_version >= '3.12'
+scipy==1.18.1 ; python_full_version >= '3.12'
     # via nachobot
 secretstorage==3.5.0 ; platform_machine != 'ppc64le' and platform_machine != 's390x' and sys_platform == 'linux'
     # via keyring
@@ -300,11 +301,11 @@ sniffio==1.3.1
     # via
     #   google-genai
     #   openai
-soupsieve==2.9.1
+soupsieve==2.10
     # via beautifulsoup4
-sse-starlette==3.4.6
+sse-starlette==3.5.0
     # via mcp
-starlette==1.3.1
+starlette==1.9.0
     # via
     #   fastapi
     #   mcp
@@ -317,7 +318,7 @@ tenacity==9.1.4
     # via
     #   google-genai
     #   nachobot
-texttable==1.7.0
+texttable==1.7.2
     # via igraph
 toml==0.10.2
     # via nachobot
@@ -331,7 +332,7 @@ tqdm==4.70.1
     # via
     #   nachobot
     #   openai
-truststore==0.10.4 ; sys_platform != 'emscripten'
+truststore==0.10.5 ; sys_platform != 'emscripten'
     # via
     #   httpcore2
     #   httpx2
@@ -361,11 +362,11 @@ typing-inspection==0.4.4
     #   fastapi
     #   mcp
     #   pydantic
-tzdata==2026.3 ; sys_platform == 'emscripten' or sys_platform == 'win32'
+tzdata==2026.5 ; sys_platform == 'emscripten' or sys_platform == 'win32'
     # via
     #   pandas
     #   tzlocal
-tzlocal==5.4.4
+tzlocal==5.4.5
     # via apscheduler
 urllib3==2.8.0
     # via
@@ -385,5 +386,5 @@ win32-setctime==1.2.0 ; sys_platform == 'win32'
     # via loguru
 yarl==1.25.1
     # via aiohttp
-zipp==4.1.0 ; python_full_version < '3.12' and platform_machine != 'ppc64le' and platform_machine != 's390x'
+zipp==4.1.2 ; python_full_version < '3.12' and platform_machine != 'ppc64le' and platform_machine != 's390x'
     # via importlib-metadata
