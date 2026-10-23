@@ -6,7 +6,7 @@
     # via nachobot-qqcall-client
 aiohappyeyeballs==2.7.1
     # via aiohttp
-aiohttp==3.14.4
+aiohttp==3.14.5
     # via
     #   nachobot
     #   nachobot-qqcall-client
@@ -38,7 +38,7 @@ backports-tarfile==1.2.0 ; python_full_version < '3.12' and platform_machine != 
     # via jaraco-context
 beautifulsoup4==4.15.0
     # via nachobot
-certifi==2026.7.22
+certifi==2026.10.23
     # via
     #   httpcore
     #   httpx
@@ -54,7 +54,7 @@ colorama==0.4.6 ; sys_platform == 'win32'
     #   click
     #   loguru
     #   tqdm
-cryptography==50.0.0
+cryptography==50.0.2
     # via
     #   google-auth
     #   nachobot
@@ -70,7 +70,7 @@ docutils==0.23
     # via readme-renderer
 dotenv==0.9.9
     # via nachobot
-faiss-cpu==1.14.3
+faiss-cpu==1.15.1
     # via nachobot
 fastapi==0.140.13
     # via nachobot
@@ -82,9 +82,9 @@ frozenlist==1.8.0
     #   aiosignal
 google-auth==2.56.2
     # via google-genai
-google-genai==2.14.0
+google-genai==2.33.0
     # via nachobot
-greenlet==3.5.4
+greenlet==3.5.6
     # via playwright
 h11==0.16.0
     # via
@@ -106,7 +106,7 @@ httpx2-jsfetch==1.0 ; python_full_version >= '3.12' and sys_platform == 'emscrip
     # via httpx2
 id==1.6.1
     # via twine
-idna==3.18
+idna==3.20
     # via
     #   anyio
     #   httpx
@@ -147,9 +147,9 @@ loguru==0.7.3
     # via nachobot
 markdown-it-py==4.2.0
     # via rich
-mcp==2.2.0
+mcp==2.3.0
     # via nachobot
-mcp-types==2.2.0
+mcp-types==2.3.0
     # via mcp
 mdurl==0.1.2
     # via markdown-it-py
@@ -177,22 +177,22 @@ numpy==2.5.1 ; python_full_version >= '3.12'
     #   nachobot
     #   pandas
     #   scipy
-openai==2.50.0
+openai==2.54.0
     # via nachobot
 opentelemetry-api==1.45.1
     # via mcp
-packaging==26.2
+packaging==26.3
     # via
     #   faiss-cpu
     #   nachobot
     #   twine
-pandas==3.0.5
+pandas==3.1.0
     # via nachobot
-peewee==4.2.6
+peewee==4.5.3
     # via nachobot
 pillow==13.0.0
     # via nachobot
-playwright==1.61.0
+playwright==1.64.1
     # via nachobot
 progress==1.6.1
     # via static-ffmpeg
@@ -210,7 +210,7 @@ pyasn1-modules==0.4.2
     # via google-auth
 pycparser==3.0 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy'
     # via cffi
-pydantic==2.13.4
+pydantic==2.14.1
     # via
     #   fastapi
     #   google-genai
@@ -218,7 +218,7 @@ pydantic==2.13.4
     #   mcp-types
     #   nachobot
     #   openai
-pydantic-core==2.46.4
+pydantic-core==2.50.1
     # via pydantic
 pyee==13.0.1
     # via playwright
@@ -236,7 +236,7 @@ python-dateutil==2.9.0.post0
     # via
     #   nachobot
     #   pandas
-python-dotenv==1.2.2
+python-dotenv==1.2.4
     # via
     #   dotenv
     #   nachobot
@@ -244,7 +244,7 @@ python-igraph==1.0.0
     # via nachobot
 python-multipart==0.0.32
     # via mcp
-pytz==2026.3.post1
+pytz==2026.5
     # via nachobot
 pywin32==312 ; sys_platform == 'win32'
     # via
@@ -254,7 +254,7 @@ pywin32-ctypes==0.2.3 ; platform_machine != 'ppc64le' and platform_machine != 's
     # via keyring
 quick-algo==0.1.4
     # via nachobot
-rapidfuzz==3.14.5
+rapidfuzz==3.14.6
     # via nachobot
 readme-renderer==45.0
     # via twine
@@ -284,7 +284,7 @@ rpds-py==2026.6.3
     #   referencing
 rsilk==0.1.4
     # via nachobot
-ruff==0.16.0
+ruff==0.16.10
     # via nachobot
 scipy==1.17.1 ; python_full_version < '3.12'
     # via nachobot
@@ -321,13 +321,13 @@ texttable==1.7.0
     # via igraph
 toml==0.10.2
     # via nachobot
-tomli==2.4.1
+tomli==2.5.0
     # via nachobot
 tomli-w==1.2.0
     # via nachobot
-tomlkit==0.15.1
+tomlkit==0.15.2
     # via nachobot
-tqdm==4.70.0
+tqdm==4.70.1
     # via
     #   nachobot
     #   openai
@@ -356,7 +356,7 @@ typing-extensions==4.16.0
     #   referencing
     #   starlette
     #   typing-inspection
-typing-inspection==0.4.2
+typing-inspection==0.4.4
     # via
     #   fastapi
     #   mcp
@@ -373,7 +373,7 @@ urllib3==2.8.0
     #   nachobot
     #   requests
     #   twine
-uvicorn==0.51.0
+uvicorn==0.54.0
     # via
     #   mcp
     #   nachobot

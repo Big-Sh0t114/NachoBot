@@ -5,7 +5,7 @@ description = "NachoBot Universal Voice Channel Adapter - Real-time Denoise + Sp
 requires-python = ">=3.11"
 dependencies = [
     "proc-tap",
-    "aiohttp",
+    "aiohttp>=3.14.4,<4",
     "numpy",
     "scipy",
     "tomlkit",
@@ -19,10 +19,10 @@ dependencies = [
     "onnxruntime>=1.27.0",
     "pynput",
     "websockets",
-    "cryptography",
+    "cryptography>=50.0.1",
     "fastapi",
     "loguru>=0.7.3",
-    "uvicorn",
+    "uvicorn>=0.53.0",
 ]
 
 [tool.ruff]

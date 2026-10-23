@@ -1,4 +1,4 @@
 httpx
-Pillow
+Pillow>=13.0.0
 bs4
 json5
