@@ -6,7 +6,7 @@
     # via nachobot-qqcall-client
 aiohappyeyeballs==2.7.1
     # via aiohttp
-aiohttp==3.14.3
+aiohttp==3.14.4
     # via
     #   nachobot
     #   nachobot-qqcall-client
@@ -383,7 +383,7 @@ websockets==16.1.1
     #   nachobot
 win32-setctime==1.2.0 ; sys_platform == 'win32'
     # via loguru
-yarl==1.24.5
+yarl==1.25.1
     # via aiohttp
 zipp==4.1.0 ; python_full_version < '3.12' and platform_machine != 'ppc64le' and platform_machine != 's390x'
     # via importlib-metadata
