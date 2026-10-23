@@ -190,7 +190,7 @@ pandas==3.0.5
     # via nachobot
 peewee==4.2.6
     # via nachobot
-pillow==12.3.0
+pillow==13.0.0
     # via nachobot
 playwright==1.61.0
     # via nachobot
