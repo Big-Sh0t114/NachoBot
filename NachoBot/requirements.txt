@@ -149,7 +149,7 @@ markdown-it-py==4.2.0
     # via rich
 mcp==2.2.0
     # via nachobot
-mcp-types==2.0.0
+mcp-types==2.2.0
     # via mcp
 mdurl==0.1.2
     # via markdown-it-py
