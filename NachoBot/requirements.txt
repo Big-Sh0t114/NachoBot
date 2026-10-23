@@ -6,7 +6,7 @@
     # via nachobot-qqcall-client
 aiohappyeyeballs==2.7.1
     # via aiohttp
-aiohttp==3.14.3
+aiohttp==3.14.5
     # via
     #   nachobot
     #   nachobot-qqcall-client
@@ -38,7 +38,7 @@ backports-tarfile==1.2.0 ; python_full_version < '3.12' and platform_machine != 
     # via jaraco-context
 beautifulsoup4==4.15.0
     # via nachobot
-certifi==2026.7.22
+certifi==2026.10.23
     # via
     #   httpcore
     #   httpx
@@ -54,7 +54,7 @@ colorama==0.4.6 ; sys_platform == 'win32'
     #   click
     #   loguru
     #   tqdm
-cryptography==50.0.0
+cryptography==50.0.2
     # via
     #   google-auth
     #   nachobot
@@ -84,7 +84,7 @@ google-auth==2.56.2
     # via google-genai
 google-genai==2.14.0
     # via nachobot
-greenlet==3.5.4
+greenlet==3.5.6
     # via playwright
 h11==0.16.0
     # via
@@ -106,7 +106,7 @@ httpx2-jsfetch==1.0 ; python_full_version >= '3.12' and sys_platform == 'emscrip
     # via httpx2
 id==1.6.1
     # via twine
-idna==3.18
+idna==3.20
     # via
     #   anyio
     #   httpx
@@ -147,9 +147,9 @@ loguru==0.7.3
     # via nachobot
 markdown-it-py==4.2.0
     # via rich
-mcp==2.0.0
+mcp==2.3.0
     # via nachobot
-mcp-types==2.0.0
+mcp-types==2.3.0
     # via mcp
 mdurl==0.1.2
     # via markdown-it-py
@@ -179,7 +179,7 @@ numpy==2.5.1 ; python_full_version >= '3.12'
     #   scipy
 openai==2.50.0
     # via nachobot
-opentelemetry-api==1.44.0
+opentelemetry-api==1.45.1
     # via mcp
 packaging==26.2
     # via
@@ -373,7 +373,7 @@ urllib3==2.8.0
     #   nachobot
     #   requests
     #   twine
-uvicorn==0.51.0
+uvicorn==0.54.0
     # via
     #   mcp
     #   nachobot
@@ -383,7 +383,7 @@ websockets==16.1.1
     #   nachobot
 win32-setctime==1.2.0 ; sys_platform == 'win32'
     # via loguru
-yarl==1.24.5
+yarl==1.25.1
     # via aiohttp
 zipp==4.1.0 ; python_full_version < '3.12' and platform_machine != 'ppc64le' and platform_machine != 's390x'
     # via importlib-metadata

@@ -28,7 +28,7 @@ faiss-cpu>=1.7.0
 # ==================
 
 # ASGI 服务器
-uvicorn>=0.20.0
+uvicorn>=0.53.0
 
 # Web 框架
 fastapi>=0.100.0

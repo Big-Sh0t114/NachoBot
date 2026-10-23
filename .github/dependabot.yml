@@ -9,6 +9,7 @@ updates:
       - "NachoBot-Live2D-Adapter"
       - "NachoBot-Multimodal-Adapter"
       - "NachoBot-Napcat-Adapter"
+      - "NachoBot-SnowLuma-Adapter"
       - "NachoBot-UniversalVC-Adapter"
       - "webUI"
 

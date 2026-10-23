@@ -11,9 +11,9 @@ from scripts import tts_runtime_manager as manager
 
 _CPU_TORCH = "torch==2.7.1+cpu"
 _PUBLIC_DEPENDENCIES = (
-    "aiohttp==3.14.3", "fastapi==0.140.7", "loguru==0.7.3",
+    "aiohttp==3.14.4", "fastapi==0.140.7", "loguru==0.7.3",
     "numpy==2.4.6", "scipy==1.17.1", "toml==0.10.2",
-    "transformers==5.14.0", "uvicorn==0.51.0",
+    "transformers==5.14.0", "uvicorn==0.53.0",
 )
 _PROBE = (
     "import aiohttp,fastapi,loguru,numpy,scipy,toml,transformers,uvicorn,torch; "
