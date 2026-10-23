@@ -623,7 +623,7 @@ class EmojiManager:
                         f
                         for f in files
                         if os.path.isfile(os.path.join(EMOJI_DIR, f))
-                        and f.lower().endswith((".jpg", ".jpeg", ".png", ".gif"))
+                        and f.lower().endswith((".jpg", ".jpeg", ".png", ".gif", ".webp"))
                     ]
 
                     # 处理每个符合条件的文件，每周期最多注册5个
