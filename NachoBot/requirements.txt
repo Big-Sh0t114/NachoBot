@@ -188,7 +188,7 @@ packaging==26.2
     #   twine
 pandas==3.0.5
     # via nachobot
-peewee==4.2.6
+peewee==4.5.3
     # via nachobot
 pillow==12.3.0
     # via nachobot
