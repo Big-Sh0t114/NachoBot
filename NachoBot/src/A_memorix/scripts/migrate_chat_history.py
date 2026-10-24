@@ -9,8 +9,7 @@ from datetime import datetime
 from typing import Any, Dict
 
 from _bootstrap import DEFAULT_DATA_DIR, DEFAULT_DB_PATH, PLUGIN_ROOT, resolve_repo_path
-
-from A_memorix.core.runtime.sdk_memory_kernel import SDKMemoryKernel  # noqa: E402
+from _preview_sqlite import connect_readonly
 
 
 def _parse_args() -> argparse.Namespace:
@@ -43,25 +42,29 @@ async def _main() -> int:
         print(f"数据库不存在: {db_path}")
         return 1
 
-    conn = sqlite3.connect(str(db_path))
+    conn = connect_readonly(db_path)
     conn.row_factory = sqlite3.Row
     sql = """
         SELECT id, session_id, start_timestamp, end_timestamp, participants, theme, keywords, summary
         FROM chat_history
         ORDER BY id ASC
     """
-    if int(args.limit or 0) > 0:
-        sql += " LIMIT ?"
-        rows = conn.execute(sql, (int(args.limit),)).fetchall()
-    else:
-        rows = conn.execute(sql).fetchall()
-    conn.close()
+    try:
+        if int(args.limit or 0) > 0:
+            sql += " LIMIT ?"
+            rows = conn.execute(sql, (int(args.limit),)).fetchall()
+        else:
+            rows = conn.execute(sql).fetchall()
+    finally:
+        conn.close()
 
     print(f"chat_history 待处理: {len(rows)}")
     if args.dry_run:
         for row in rows[:5]:
             print(f"- id={row['id']} session={row['session_id']} theme={row['theme']}")
         return 0
+
+    from A_memorix.core.runtime.sdk_memory_kernel import SDKMemoryKernel
 
     data_dir = resolve_repo_path(args.data_dir, fallback=DEFAULT_DATA_DIR)
     kernel = SDKMemoryKernel(plugin_root=PLUGIN_ROOT, config={"storage": {"data_dir": str(data_dir)}})

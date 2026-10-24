@@ -7,7 +7,7 @@ from typing import List, Optional, Sequence, TYPE_CHECKING
 
 from src.common.logger import get_logger
 from src.config.config import global_config
-from src.person_info.person_info import get_person_id, get_person_id_by_person_name
+from src.person_info.person_info import get_person_id
 from src.A_memorix.core.utils.profile_text import build_profile_injection_text
 
 if TYPE_CHECKING:
@@ -46,24 +46,16 @@ def _message_platform(message: object) -> str:
 
 
 def _resolve_person_id(platform: str, user_id: str = "", person_name: str = "") -> str:
-    """解析人物 ID，优先按名字查，回退到 platform+user_id 生成。"""
-    clean_name = _clean_text(person_name)
-    if clean_name:
-        try:
-            if by_name := get_person_id_by_person_name(clean_name):
-                return by_name
-        except Exception:
-            pass
-
+    """Resolve only from the authoritative platform account identity."""
     clean_platform = _clean_text(platform)
     clean_user_id = _clean_text(user_id)
-    if clean_platform and clean_user_id:
-        try:
-            return get_person_id(clean_platform, clean_user_id)
-        except Exception:
-            pass
+    if not clean_platform or not clean_user_id:
+        return ""
 
-    return ""
+    try:
+        return _clean_text(get_person_id(clean_platform, clean_user_id))
+    except Exception:
+        return ""
 
 
 def _is_bot_user_id(user_id: str) -> bool:

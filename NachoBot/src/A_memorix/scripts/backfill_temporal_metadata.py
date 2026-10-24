@@ -14,7 +14,31 @@ import argparse
 from pathlib import Path
 
 from _bootstrap import DEFAULT_DATA_DIR, resolve_repo_path
-from A_memorix.core.storage import MetadataStore  # noqa: E402
+from _preview_sqlite import connect_readonly, table_columns, table_exists
+
+
+def _count_preview_candidates(db_path: Path, limit: int) -> int:
+    if not db_path.exists():
+        return 0
+
+    conn = connect_readonly(db_path)
+    try:
+        if not table_exists(conn, "paragraphs"):
+            return 0
+        columns = table_columns(conn, "paragraphs")
+        temporal_columns = [
+            name for name in ("event_time", "event_time_start", "event_time_end") if name in columns
+        ]
+        where_clause = " AND ".join(f'"{name}" IS NULL' for name in temporal_columns) or "1=1"
+        order_column = '"created_at" DESC' if "created_at" in columns else "rowid DESC"
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM (SELECT 1 FROM paragraphs WHERE {where_clause} "
+            f"ORDER BY {order_column} LIMIT ?)",
+            (int(max(1, limit)),),
+        ).fetchone()
+        return int(row[0] or 0)
+    finally:
+        conn.close()
 
 
 def backfill(
@@ -23,6 +47,13 @@ def backfill(
     limit: int,
     no_created_fallback: bool,
 ) -> int:
+    if dry_run:
+        candidates = _count_preview_candidates(data_dir / "metadata.db", limit)
+        print(f"[dry-run] candidates={candidates}")
+        return candidates
+
+    from A_memorix.core.storage import MetadataStore
+
     store = MetadataStore(data_dir=data_dir)
     store.connect()
     summary = store.backfill_temporal_metadata_from_created_at(
@@ -31,9 +62,6 @@ def backfill(
         no_created_fallback=no_created_fallback,
     )
     store.close()
-    if dry_run:
-        print(f"[dry-run] candidates={summary['candidates']}")
-        return int(summary["candidates"])
     if no_created_fallback:
         print(f"skip update (no-created-fallback), candidates={summary['candidates']}")
         return 0

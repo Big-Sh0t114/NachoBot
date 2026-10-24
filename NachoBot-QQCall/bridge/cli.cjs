@@ -40,6 +40,72 @@ function codedError(code) {
   return error;
 }
 
+function sameOpenedPath(opened, named) {
+  if (!named.isFile() || named.isSymbolicLink()) return false;
+  if (Number.isFinite(opened.dev) && Number.isFinite(opened.ino) && opened.ino !== 0 &&
+      Number.isFinite(named.dev) && Number.isFinite(named.ino) && named.ino !== 0) {
+    return opened.dev === named.dev && opened.ino === named.ino;
+  }
+  return opened.size === named.size && opened.mtimeMs === named.mtimeMs;
+}
+
+function sameOpenedState(before, after) {
+  return after.isFile() && before.size === after.size && before.mtimeMs === after.mtimeMs &&
+    (before.ctimeMs === undefined || after.ctimeMs === undefined || before.ctimeMs === after.ctimeMs);
+}
+
+function openReadOnlyNoFollow(filePath) {
+  const constants = fs.constants;
+  let flags = constants.O_RDONLY;
+  if (Number.isInteger(constants.O_NOFOLLOW)) flags |= constants.O_NOFOLLOW;
+  if (Number.isInteger(constants.O_NONBLOCK)) flags |= constants.O_NONBLOCK;
+  return fs.openSync(filePath, flags);
+}
+
+function readBoundedRegularFile(filePath, maxBytes, invalidCode) {
+  let descriptor;
+  try {
+    try { descriptor = openReadOnlyNoFollow(filePath); }
+    catch (error) {
+      try {
+        const named = fs.lstatSync(filePath);
+        if (!named.isFile() || named.isSymbolicLink()) throw codedError(invalidCode);
+      } catch (inspectionError) {
+        if (inspectionError?.code === invalidCode) throw inspectionError;
+      }
+      throw error;
+    }
+    const before = fs.fstatSync(descriptor);
+    if (!before.isFile() || !Number.isSafeInteger(before.size) || before.size < 0 || before.size > maxBytes) {
+      throw codedError(invalidCode);
+    }
+    const named = fs.lstatSync(filePath);
+    if (!sameOpenedPath(before, named)) throw codedError(invalidCode);
+
+    const chunks = [];
+    const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, maxBytes + 1));
+    let offset = 0;
+    while (offset <= maxBytes) {
+      const requested = Math.min(buffer.length, maxBytes + 1 - offset);
+      if (requested <= 0) break;
+      const count = fs.readSync(descriptor, buffer, 0, requested, offset);
+      if (count === 0) break;
+      offset += count;
+      if (offset > maxBytes) throw codedError(invalidCode);
+      chunks.push(Buffer.from(buffer.subarray(0, count)));
+    }
+    const after = fs.fstatSync(descriptor);
+    if (!sameOpenedState(before, after) || !sameOpenedPath(after, fs.lstatSync(filePath))) {
+      throw codedError(invalidCode);
+    }
+    return Buffer.concat(chunks, offset);
+  } finally {
+    if (descriptor !== undefined) {
+      try { fs.closeSync(descriptor); } catch { /* keep the original read result or failure */ }
+    }
+  }
+}
+
 let controllerExitReportTarget = null;
 let pendingControllerExitEvidence = null;
 let controllerExitObserverInstalled = false;
@@ -452,9 +518,7 @@ function parseArgs(argv) {
 function readPrivateTokenDetails(filePath) {
   let raw;
   try {
-    const stat = fs.statSync(filePath);
-    if (!stat.isFile() || stat.size > 64 * 1024) throw codedError("invalid_token_file");
-    raw = fs.readFileSync(filePath, "utf8").trim();
+    raw = readBoundedRegularFile(filePath, 64 * 1024, "invalid_token_file").toString("utf8").trim();
   } catch (error) {
     if (error.code && /^[a-z0-9_:-]{1,64}$/i.test(error.code)) throw error;
     throw codedError("token_file_unavailable");
@@ -503,9 +567,7 @@ function buildAudioRouteSetup({ audioRouteConfigPath, tokenDetails, token, contr
 function readIdentityFileSnapshot(filePath) {
   let text;
   try {
-    const stat = fs.statSync(filePath);
-    if (!stat.isFile() || stat.size > 64 * 1024) throw codedError("invalid_identity_file");
-    text = fs.readFileSync(filePath, "utf8");
+    text = readBoundedRegularFile(filePath, 64 * 1024, "invalid_identity_file").toString("utf8");
   } catch (error) {
     if (error.code && /^[a-z0-9_:-]{1,64}$/i.test(error.code)) throw error;
     throw codedError("identity_file_unavailable");
@@ -533,14 +595,11 @@ function readIdentityFile(filePath) {
 function readPrivateOneBotIdentitySnapshot(filePath) {
   let text;
   try {
-    const stat = fs.statSync(filePath);
-    if (!stat.isFile() || stat.size > 64 * 1024) throw codedError("invalid_onebot_identity_file");
-    text = fs.readFileSync(filePath, "utf8");
+    text = readBoundedRegularFile(filePath, 64 * 1024, "invalid_onebot_identity_file").toString("utf8");
   } catch (error) {
     if (error.code && /^[a-z0-9_:-]{1,64}$/i.test(error.code)) throw error;
     throw codedError("onebot_identity_file_unavailable");
   }
-  if (Buffer.byteLength(text, "utf8") > 64 * 1024) throw codedError("invalid_onebot_identity_file");
   let value;
   try { value = JSON.parse(text); }
   catch { throw codedError("invalid_onebot_identity_file"); }
@@ -1678,14 +1737,11 @@ function readKernelPeerIdentitiesFile(filePath, { accountUin, targetPid, connect
   }
   let text;
   try {
-    const stat = fs.statSync(filePath);
-    if (!stat.isFile() || stat.size > 32 * 1024) throw codedError("invalid_kernel_peer_identities_file");
-    text = fs.readFileSync(filePath, "utf8");
+    text = readBoundedRegularFile(filePath, 32 * 1024, "invalid_kernel_peer_identities_file").toString("utf8");
   } catch (error) {
     if (error.code === "invalid_kernel_peer_identities_file") throw error;
     throw codedError("kernel_peer_identities_unavailable");
   }
-  if (Buffer.byteLength(text, "utf8") > 32 * 1024) throw codedError("invalid_kernel_peer_identities_file");
   let value;
   try { value = JSON.parse(text); }
   catch { throw codedError("invalid_kernel_peer_identities_file"); }

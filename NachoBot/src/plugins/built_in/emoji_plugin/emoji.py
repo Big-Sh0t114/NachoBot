@@ -1,9 +1,6 @@
 import asyncio
-import json
 import random
 from typing import Tuple
-
-from json_repair import repair_json
 
 # 导入新插件系统
 from src.plugin_system import BaseAction, ActionActivationType
@@ -11,6 +8,7 @@ from src.plugin_system import BaseAction, ActionActivationType
 # 导入依赖的系统组件
 from src.common.logger import get_logger
 from src.chat.emoji_system.emoji_collage import build_emoji_collage
+from src.chat.emoji_system.image_selection import request_numbered_image_selection
 from src.chat.utils.utils_image import image_path_to_base64
 
 # 导入API模块 - 标准Python包方式
@@ -21,19 +19,6 @@ from src.config.config import global_config
 
 
 logger = get_logger("emoji")
-
-
-def _parse_selected_index(response: str, candidate_count: int) -> int | None:
-    try:
-        data = json.loads(repair_json(response))
-        index = data.get("index") if isinstance(data, dict) else None
-        if isinstance(index, bool) or not isinstance(index, int):
-            return None
-        if 1 <= index <= candidate_count:
-            return index - 1
-    except (json.JSONDecodeError, TypeError, ValueError):
-        pass
-    return None
 
 
 class EmojiAction(BaseAction):
@@ -175,28 +160,25 @@ class EmojiAction(BaseAction):
                     logger.info(f"{self.log_prefix} 生成的 VLM 选图 Prompt: {visual_prompt}")
                 else:
                     logger.debug(f"{self.log_prefix} 生成的 VLM 选图 Prompt: {visual_prompt}")
-                selected_index = None
-                try:
-                    from src.multimodal import get_multimodal_router
-
-                    perceived = await get_multimodal_router().describe_emoji(
-                        collage.image_base64,
-                        prompt=visual_prompt,
-                        media_format=collage.image_format,
-                        metadata={"temperature": 0, "max_tokens": 50},
+                selection = await request_numbered_image_selection(
+                    collage.image_base64,
+                    prompt=visual_prompt,
+                    candidate_count=len(collage.candidates),
+                    media_format=collage.image_format,
+                    image_kind="emoji",
+                    metadata={"temperature": 0, "max_tokens": 50},
+                )
+                selected_index = selection.index
+                if selection.error:
+                    logger.warning(f"{self.log_prefix} VLM选图失败，将在候选内随机选择: {selection.error}")
+                elif selection.degraded:
+                    logger.warning(f"{self.log_prefix} VLM选图失败，将在候选内随机选择: 表情包选图视觉理解不可用")
+                elif selected_index is None:
+                    logger.warning(f"{self.log_prefix} VLM返回无效选择: {selection.response[:200]}")
+                else:
+                    logger.info(
+                        f"{self.log_prefix} VLM选图完成: index={selected_index + 1}, response={selection.response[:100]}"
                     )
-                    if perceived.degraded:
-                        raise RuntimeError("表情包选图视觉理解不可用")
-                    response = perceived.text
-                    selected_index = _parse_selected_index(response, len(collage.candidates))
-                    if selected_index is None:
-                        logger.warning(f"{self.log_prefix} VLM返回无效选择: {response[:200]}")
-                    else:
-                        logger.info(
-                            f"{self.log_prefix} VLM选图完成: index={selected_index + 1}, response={response[:100]}"
-                        )
-                except Exception as error:
-                    logger.warning(f"{self.log_prefix} VLM选图失败，将在候选内随机选择: {error}")
 
                 if selected_index is None:
                     selected_candidate = random.choice(collage.candidates)

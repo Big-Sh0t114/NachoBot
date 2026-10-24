@@ -113,27 +113,41 @@ function archiveDevMismatchFdHashStatus(fsModule, descriptor, before, maxBytes, 
   }
 }
 
+function openPhysicalReadOnly(fsModule, filePath) {
+  const constants = fsModule.constants || fs.constants;
+  let flags = constants.O_RDONLY;
+  if (Number.isInteger(constants.O_NOFOLLOW)) flags |= constants.O_NOFOLLOW;
+  if (Number.isInteger(constants.O_NONBLOCK)) flags |= constants.O_NONBLOCK;
+  return fsModule.openSync(filePath, flags);
+}
+
+function classifyPhysicalOpenFailure(fsModule, filePath, failure) {
+  let linkInfo;
+  try { linkInfo = fsModule.lstatSync(filePath); }
+  catch { throw failure("archive_lstat_failed"); }
+  if (linkInfo.isSymbolicLink()) throw failure("archive_symlink");
+  if (!linkInfo.isFile()) throw failure("archive_not_file");
+  throw failure("archive_open_failed");
+}
+
 function readBoundedPhysicalFile(fsModule, filePath, maxBytes, cryptoModule, keepBytes = false, archiveDiagnostics = false, archiveExpectedHash) {
   let descriptor = null;
   const failure = (code) => archiveDiagnostics ? archiveStageError(code) : codedError("file_unavailable");
   try {
-    let linkInfo;
-    try { linkInfo = fsModule.lstatSync(filePath); }
-    catch { throw failure("archive_lstat_failed"); }
-    if (archiveDiagnostics) {
-      if (linkInfo.isSymbolicLink()) throw failure("archive_symlink");
-      if (!linkInfo.isFile()) throw failure("archive_not_file");
-    } else if (!linkInfo.isFile() || linkInfo.isSymbolicLink()) throw codedError("file_unavailable");
-
-    try { descriptor = fsModule.openSync(filePath, "r"); }
-    catch { throw failure("archive_open_failed"); }
+    try { descriptor = openPhysicalReadOnly(fsModule, filePath); }
+    catch { classifyPhysicalOpenFailure(fsModule, filePath, failure); }
 
     let before;
     try { before = fsModule.fstatSync(descriptor); }
     catch { throw failure("archive_fstat_before_failed"); }
-    if (!before.isFile()) throw failure("archive_fstat_not_file");
+    if (!before.isFile()) throw failure("archive_not_file");
     if (!Number.isSafeInteger(before.size) || before.size < 0) throw failure("archive_size_invalid");
     if (before.size > maxBytes) throw failure("archive_size_exceeded");
+    let linkInfo;
+    try { linkInfo = fsModule.lstatSync(filePath); }
+    catch { throw failure("archive_lstat_failed"); }
+    if (linkInfo.isSymbolicLink()) throw failure("archive_symlink");
+    if (!linkInfo.isFile()) throw failure("archive_not_file");
     if (archiveDiagnostics) {
       const mismatches = archiveOpenStatMismatches(linkInfo, before);
       if (mismatches.length === 1 && mismatches[0] === "archive_open_dev_mismatch") {
@@ -163,7 +177,12 @@ function readBoundedPhysicalFile(fsModule, filePath, maxBytes, cryptoModule, kee
     let after;
     try { after = fsModule.fstatSync(descriptor); }
     catch { throw failure("archive_fstat_after_failed"); }
-    if (!statMatches(before, after)) throw failure("archive_after_stat_changed");
+    let finalPathInfo;
+    try { finalPathInfo = fsModule.lstatSync(filePath); }
+    catch { throw failure("archive_after_stat_changed"); }
+    if (finalPathInfo.isSymbolicLink() || !statMatches(before, after) || !statMatches(after, finalPathInfo)) {
+      throw failure("archive_after_stat_changed");
+    }
     let sha256;
     try { sha256 = digest.digest("hex").toUpperCase(); }
     catch { throw failure("archive_hash_failed"); }
@@ -187,21 +206,38 @@ function hashBoundedFile(fsModule, filePath, maxBytes, cryptoModule, archiveDiag
 }
 
 function readBoundedVirtualFile(fsModule, filePath, maxBytes) {
+  let descriptor;
   try {
-    const before = fsModule.statSync(filePath);
+    descriptor = fsModule.openSync(filePath, "r");
+    const before = fsModule.fstatSync(descriptor);
     if (!before.isFile() || !Number.isSafeInteger(before.size) || before.size < 0 || before.size > maxBytes) {
       throw codedError(before.size > maxBytes ? "source_entry_oversize" : "source_entry_invalid");
     }
-    const bytes = fsModule.readFileSync(filePath);
-    // Electron's ASAR virtual stat size may describe stored bytes while
-    // readFileSync returns decoded/decompressed bytes. Bound both independently.
-    if (!Buffer.isBuffer(bytes) || bytes.length > maxBytes) throw codedError("source_entry_invalid");
-    const after = fsModule.statSync(filePath);
-    if (!statMatches(before, after)) throw codedError("source_entry_invalid");
-    return bytes;
+    // ASAR descriptors read through Electron's virtual filesystem. The stat
+    // size and decoded bytes are bounded independently because ASAR metadata
+    // may describe stored bytes differently from the bytes returned by read.
+    const chunks = [];
+    const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, maxBytes + 1));
+    let offset = 0;
+    while (offset <= maxBytes) {
+      const requested = Math.min(buffer.length, maxBytes + 1 - offset);
+      if (requested <= 0) break;
+      const count = fsModule.readSync(descriptor, buffer, 0, requested, offset);
+      if (count === 0) break;
+      offset += count;
+      if (offset > maxBytes) throw codedError("source_entry_invalid");
+      chunks.push(Buffer.from(buffer.subarray(0, count)));
+    }
+    const after = fsModule.fstatSync(descriptor);
+    if (!after.isFile() || before.size !== after.size) throw codedError("source_entry_invalid");
+    return Buffer.concat(chunks, offset);
   } catch (error) {
     if (error?.code === "source_entry_oversize" || error?.code === "source_entry_invalid") throw error;
     throw codedError("source_entry_unavailable");
+  } finally {
+    if (descriptor !== undefined) {
+      try { fsModule.closeSync(descriptor); } catch { /* preserve the original read result or failure */ }
+    }
   }
 }
 
@@ -260,7 +296,7 @@ function extractHtmlScripts(text) {
       }
     }
   }
-  const scriptTags = /<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi;
+  const scriptTags = /<script\b([^>]*)>([\s\S]*?)<\/script(?=[\t\n\f\r />])[^>]*>/gi;
   let match;
   while ((match = scriptTags.exec(text)) !== null) {
     const src = attributeValue(match[1], "src");

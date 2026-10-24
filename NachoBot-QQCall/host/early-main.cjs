@@ -13,6 +13,66 @@ const PLAN_KEYS = Object.freeze([
   "listenPort", "outputPort", "hostGeneration", "sessionName",
 ]);
 
+function sameOpenedPath(opened, named) {
+  if (!named.isFile() || named.isSymbolicLink()) return false;
+  if (Number.isFinite(opened.dev) && Number.isFinite(opened.ino) && opened.ino !== 0 &&
+      Number.isFinite(named.dev) && Number.isFinite(named.ino) && named.ino !== 0) {
+    return opened.dev === named.dev && opened.ino === named.ino;
+  }
+  return opened.size === named.size && opened.mtimeMs === named.mtimeMs;
+}
+
+function sameOpenedState(before, after) {
+  return after.isFile() && before.size === after.size && before.mtimeMs === after.mtimeMs &&
+    (before.ctimeMs === undefined || after.ctimeMs === undefined || before.ctimeMs === after.ctimeMs);
+}
+
+function readBoundedRegularFile(filePath, maxBytes, invalidCode) {
+  let descriptor;
+  try {
+    const constants = fs.constants;
+    let flags = constants.O_RDONLY;
+    if (Number.isInteger(constants.O_NOFOLLOW)) flags |= constants.O_NOFOLLOW;
+    if (Number.isInteger(constants.O_NONBLOCK)) flags |= constants.O_NONBLOCK;
+    try { descriptor = fs.openSync(filePath, flags); }
+    catch (error) {
+      try {
+        const named = fs.lstatSync(filePath);
+        if (!named.isFile() || named.isSymbolicLink()) throw codedError(invalidCode);
+      } catch (inspectionError) {
+        if (inspectionError?.code === invalidCode) throw inspectionError;
+      }
+      throw error;
+    }
+    const before = fs.fstatSync(descriptor);
+    if (!before.isFile() || !Number.isSafeInteger(before.size) || before.size < 0 || before.size > maxBytes) {
+      throw codedError(invalidCode);
+    }
+    if (!sameOpenedPath(before, fs.lstatSync(filePath))) throw codedError(invalidCode);
+    const chunks = [];
+    const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, maxBytes + 1));
+    let offset = 0;
+    while (offset <= maxBytes) {
+      const requested = Math.min(buffer.length, maxBytes + 1 - offset);
+      if (requested <= 0) break;
+      const count = fs.readSync(descriptor, buffer, 0, requested, offset);
+      if (count === 0) break;
+      offset += count;
+      if (offset > maxBytes) throw codedError(invalidCode);
+      chunks.push(Buffer.from(buffer.subarray(0, count)));
+    }
+    const after = fs.fstatSync(descriptor);
+    if (!sameOpenedState(before, after) || !sameOpenedPath(after, fs.lstatSync(filePath))) {
+      throw codedError(invalidCode);
+    }
+    return Buffer.concat(chunks, offset);
+  } finally {
+    if (descriptor !== undefined) {
+      try { fs.closeSync(descriptor); } catch { /* preserve the original read result or failure */ }
+    }
+  }
+}
+
 function absolutePath(value, code) {
   if (typeof value !== "string" || !path.isAbsolute(value)) throw codedError(code);
   return path.resolve(value);
@@ -69,9 +129,7 @@ function readLaunchPlan(planPath) {
   const filename = absolutePath(planPath, "launch_plan_path_invalid");
   let source;
   try {
-    const stat = fs.statSync(filename);
-    if (!stat.isFile() || stat.size > 64 * 1024) throw codedError("launch_plan_invalid");
-    source = fs.readFileSync(filename, "utf8");
+    source = readBoundedRegularFile(filename, 64 * 1024, "launch_plan_invalid").toString("utf8");
   } catch (error) {
     if (typeof error?.code === "string" && /^[a-z][a-z0-9_:-]{1,63}$/.test(error.code)) throw error;
     throw codedError("launch_plan_unavailable");

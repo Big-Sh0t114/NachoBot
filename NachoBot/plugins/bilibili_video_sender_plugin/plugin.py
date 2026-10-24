@@ -377,11 +377,7 @@ class BilibiliParser:
 
     _logger = get_logger("plugin.bilibili_video_sender.parser")
 
-    USER_AGENT = (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    )
+    USER_AGENT = os.getenv("NACHOBOT_BILI_USER_AGENT", "curl/8.0.1")
 
     VIDEO_URL_PATTERN = re.compile(
         r"https?://(?:(?:www|m)\.)?bilibili\.com/video/(?P<bv>BV[\w]+|av\d+)",
@@ -401,10 +397,29 @@ class BilibiliParser:
         return urllib.request.Request(url, headers=default_headers)
 
     @staticmethod
+    def _read_json_bytes(resp: Any) -> bytes:
+        """分块读取 API JSON，避免完整响应已到达后继续等待分块结束。"""
+        data = bytearray()
+        while True:
+            chunk = resp.read1(65536)
+            if not chunk:
+                break
+            data.extend(chunk)
+            if len(data) > 16 * 1024 * 1024:
+                raise ValueError("Bilibili API response exceeds 16 MiB")
+            if data.rstrip().endswith(b"}"):
+                try:
+                    json.loads(data)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                break
+        return bytes(data)
+
+    @staticmethod
     def _fetch_json(url: str) -> Dict[str, Any]:
         req = BilibiliParser._build_request(url)
-        with urllib.request.urlopen(req, timeout=15) as resp:  # nosec - trusted public API
-            data = resp.read()
+        with urllib.request.urlopen(req, timeout=30) as resp:  # nosec - trusted public API
+            data = BilibiliParser._read_json_bytes(resp)
         return json.loads(data.decode("utf-8", errors="ignore"))
 
     @staticmethod
@@ -656,15 +671,14 @@ class BilibiliParser:
             if buvid3:
                 cookie_parts.append(f"buvid3={buvid3}")
             headers["Cookie"] = "; ".join(cookie_parts)
-            headers["gaia_source"] = sessdata  # 添加 gaia_source
         else:
             BilibiliParser._logger.info("使用游客模式")
 
         # 发起请求
         try:
             req = BilibiliParser._build_request(api, headers=headers)
-            with urllib.request.urlopen(req, timeout=15) as resp:  # nosec - trusted public API
-                data_bytes = resp.read()
+            with urllib.request.urlopen(req, timeout=30) as resp:  # nosec - trusted public API
+                data_bytes = BilibiliParser._read_json_bytes(resp)
         except Exception as e:
             BilibiliParser._logger.error(f"HTTP请求失败: {e}")
             return [], f"网络请求失败: {e}"
@@ -681,7 +695,27 @@ class BilibiliParser:
             return [], error_msg
 
         BilibiliParser._logger.debug("API请求成功，开始解析响应数据")
-        data = payload.get("data", {})
+        data = payload.get("data") or {}
+        if not isinstance(data, dict):
+            return [], "播放接口数据结构异常"
+
+        # 保留登录优先级；仅当登录响应没有可用媒体结构时尝试一次游客请求。
+        if sessdata and not data.get("dash") and not data.get("durl"):
+            has_voucher = bool(data.get("v_voucher"))
+            BilibiliParser._logger.warning(
+                "登录播放请求未返回媒体流，尝试游客回退",
+                has_voucher=has_voucher,
+                data_keys=list(data.keys()),
+                fnval=fnval,
+                qn=qn,
+                platform=platform,
+            )
+            guest_opts = dict(opts)
+            guest_opts.update({"sessdata": "", "buvid3": "", "qn": 32, "high_quality": False})
+            guest_urls, guest_status = BilibiliParser.get_play_urls(aid, cid, guest_opts)
+            if guest_urls:
+                return guest_urls, f"{guest_status} (游客模式回退)"
+            return [], f"登录播放请求无媒体流；游客回退失败：{guest_status}"
 
         # 处理dash格式
         dash = data.get("dash")
@@ -694,12 +728,22 @@ class BilibiliParser:
                 # 处理durl格式
                 candidates = []
                 for i, item in enumerate(durl):
-                    url = item.get("baseUrl") or item.get("base_url")
+                    url = item.get("url") or item.get("baseUrl") or item.get("base_url")
                     if url:
                         candidates.append(url.replace("http:", "https:"))
                         BilibiliParser._logger.info(f"添加durl文件{i + 1}: {url[:50]}...")
                 if candidates:
                     return candidates, "ok (durl格式)"
+            BilibiliParser._logger.warning(
+                "播放地址响应无可用DASH/DURL",
+                data_keys=list(data.keys()),
+                durl_count=len(durl) if isinstance(durl, list) else 0,
+                durl_first_keys=list(durl[0].keys()) if isinstance(durl, list) and durl and isinstance(durl[0], dict) else [],
+                fnval=fnval,
+                platform=platform,
+                qn=qn,
+                use_wbi=use_wbi,
+            )
             return [], "未找到dash数据"
 
         videos = dash.get("video") or []
@@ -866,12 +910,11 @@ class BilibiliParser:
             if buvid3:
                 cookie_parts.append(f"buvid3={buvid3}")
             headers["Cookie"] = "; ".join(cookie_parts)
-            headers["gaia_source"] = sessdata  # 添加 gaia_source
 
         try:
             req = BilibiliParser._build_request(api, headers=headers)
-            with urllib.request.urlopen(req, timeout=15) as resp:  # nosec - trusted public API
-                data_bytes = resp.read()
+            with urllib.request.urlopen(req, timeout=30) as resp:  # nosec - trusted public API
+                data_bytes = BilibiliParser._read_json_bytes(resp)
         except Exception as e:
             BilibiliParser._logger.error(f"Force DASH HTTP error: {e}")
             return [], f"Force DASH network error: {e}"
@@ -2336,28 +2379,73 @@ class BilibiliAutoSendHandler(BaseEventHandler):
 
                 self._logger.debug("Preparing download", title=info.title, temp_path=temp_path)
 
-                # 添加特定的请求头来解决403问题
-                # 请求头（含可选 Cookie）
-                headers = {
-                    "User-Agent": BilibiliParser.USER_AGENT,
-                    "Referer": "https://www.bilibili.com/",
-                    "Origin": "https://www.bilibili.com",
-                    "Accept": "*/*",
-                    "Accept-Encoding": "gzip, deflate, br",
-                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-                    "Range": "bytes=0-",  # 支持断点续传
-                }
-                sessdata_hdr = self.get_config("bilibili.sessdata", "").strip()
-                buvid3_hdr = self.get_config("bilibili.buvid3", "").strip()
-                if sessdata_hdr:
-                    cookie_parts = [f"SESSDATA={sessdata_hdr}"]
-                    if buvid3_hdr:
-                        cookie_parts.append(f"buvid3={buvid3_hdr}")
-                    headers["Cookie"] = "; ".join(cookie_parts)
-                    headers["gaia_source"] = sessdata_hdr  # 添加 gaia_source
-                    self._logger.debug("Cookie auth added for download")
-                else:
-                    self._logger.debug("No Cookie for download, may get 403 error")
+                # API 使用 curl/8.0.1；CDN 独立使用浏览器 UA，且不转发登录 Cookie。
+                cdn_user_agent = os.getenv(
+                    "NACHOBOT_BILI_CDN_USER_AGENT",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                )
+
+                def _download_stream(media_url: str, destination: str, label: str) -> None:
+                    import shutil as _shutil
+                    import subprocess as _subprocess
+
+                    if urllib.parse.urlsplit(media_url).scheme != "https" or any(c in media_url for c in "\r\n"):
+                        raise ValueError("不支持的 CDN 地址")
+                    curl_bin = _shutil.which("curl.exe") or _shutil.which("curl")
+                    if not curl_bin:
+                        # 无 curl 的系统仍可使用原生 HTTP 客户端。
+                        req = BilibiliParser._build_request(media_url, headers={
+                            "User-Agent": cdn_user_agent,
+                            "Referer": "https://www.bilibili.com/",
+                        })
+                        with urllib.request.urlopen(req, timeout=60) as response:
+                            with open(destination, "wb") as output:
+                                while True:
+                                    block = response.read(262144)
+                                    if not block:
+                                        break
+                                    output.write(block)
+                        return
+
+                    # URL 经 stdin 传入，避免带签名的 CDN URL 出现在进程参数中。
+                    escaped_url = media_url.replace("\\", "\\\\").replace('"', '\\"')
+                    command = [
+                        curl_bin, "--silent", "--show-error", "--fail", "--location",
+                        "--proto", "=https", "--proto-redir", "=https",
+                        "--connect-timeout", "15", "--max-time", "600",
+                        "--range", "0-", "--user-agent", cdn_user_agent,
+                        "--header", "Referer: https://www.bilibili.com/",
+                        "--config", "-",
+                    ]
+                    self._logger.debug("Starting CDN download", media_type=label)
+                    proc = _subprocess.Popen(
+                        command,
+                        stdin=_subprocess.PIPE,
+                        stdout=_subprocess.PIPE,
+                        stderr=_subprocess.DEVNULL,
+                    )
+                    try:
+                        assert proc.stdin is not None and proc.stdout is not None
+                        proc.stdin.write(('url = "' + escaped_url + '"\n').encode("utf-8"))
+                        proc.stdin.close()
+                        with open(destination, "wb") as output:
+                            while True:
+                                block = proc.stdout.read(262144)
+                                if not block:
+                                    break
+                                output.write(block)
+                        result = proc.wait(timeout=630)
+                        if result != 0 or os.path.getsize(destination) == 0:
+                            raise RuntimeError(f"CDN {label} 下载失败，curl exit={result}")
+                    except Exception:
+                        if proc.poll() is None:
+                            proc.kill()
+                            proc.wait()
+                        Path(destination).unlink(missing_ok=True)
+                        raise
+                    finally:
+                        if proc.stdout is not None:
+                            proc.stdout.close()
 
                 # 判断是否是分离的视频和音频流
                 # 注意：这里使用外层的urls变量，需要确保在正确的作用域中调用
@@ -2367,61 +2455,17 @@ class BilibiliAutoSendHandler(BaseEventHandler):
                     # 下载视频流
                     video_temp = os.path.join(tmp_dir, f"{safe_title}_video.m4s")
 
-                    req = BilibiliParser._build_request(urls[0], headers)
-                    with urllib.request.urlopen(req, timeout=60) as resp:
-                        # 获取文件总大小（如果可用）
-                        total_size = resp.headers.get("content-length")
-                        total_size = int(total_size) if total_size else 0
-
-                        # 创建进度条
-                        progress_bar = ProgressBar(total_size, "Video stream downloading", 30)
-
-                        with open(video_temp, "wb") as f:
-                            downloaded = 0
-                            while True:
-                                chunk = resp.read(1024 * 256)
-                                if not chunk:
-                                    break
-                                f.write(chunk)
-                                downloaded += len(chunk)
-                                # 使用进度条显示进度
-                                progress_bar.update(downloaded)
-
-                        # 完成进度条显示
-                        progress_bar.finish()
-                        video_size_mb = os.path.getsize(video_temp) / (1024 * 1024)
-                        self._logger.debug("Video stream downloaded", size_mb=f"{video_size_mb:.2f}")
+                    _download_stream(urls[0], video_temp, "video")
+                    video_size_mb = os.path.getsize(video_temp) / (1024 * 1024)
+                    self._logger.debug("Video stream downloaded", size_mb=f"{video_size_mb:.2f}")
 
                     # 下载音频流
                     audio_temp = os.path.join(tmp_dir, f"{safe_title}_audio.m4s")
 
                     # 如果有音频URL，下载音频流
                     if len(urls) >= 2:
-                        req = BilibiliParser._build_request(urls[1], headers)
-                        with urllib.request.urlopen(req, timeout=60) as resp:
-                            # 获取文件总大小（如果可用）
-                            total_size = resp.headers.get("content-length")
-                            total_size = int(total_size) if total_size else 0
-
-                            # 创建进度条
-                            progress_bar = ProgressBar(total_size, "Audio stream downloading", 30)
-
-                            with open(audio_temp, "wb") as f:
-                                downloaded = 0
-                                while True:
-                                    chunk = resp.read(1024 * 256)
-                                    if not chunk:
-                                        break
-                                    f.write(chunk)
-                                    downloaded += len(chunk)
-                                    # 使用进度条显示进度
-                                    progress_bar.update(downloaded)
-
-                            # 完成进度条显示
-                            progress_bar.finish()
-                            self._logger.debug(
-                                f"Audio stream downloaded, size: {os.path.getsize(audio_temp) // (1024 * 1024)}MB"
-                            )
+                        _download_stream(urls[1], audio_temp, "audio")
+                        self._logger.debug(f"Audio stream downloaded, size: {os.path.getsize(audio_temp) // (1024 * 1024)}MB")
                     else:
                         self._logger.debug("No audio stream URL available")
                         audio_temp = None

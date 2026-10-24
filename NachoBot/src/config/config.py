@@ -21,7 +21,6 @@ from src.config.official_configs import (
     EmojiConfig,
     MoodConfig,
     KeywordReactionConfig,
-    PromiseCacheConfig,
     ChineseTypoConfig,
     ResponsePostProcessConfig,
     ResponseFilterConfig,
@@ -501,7 +500,6 @@ class Config(ConfigBase):
     expression: ExpressionConfig
     mood: MoodConfig
     keyword_reaction: KeywordReactionConfig
-    promise_cache: PromiseCacheConfig
     chinese_typo: ChineseTypoConfig
     response_post_process: ResponsePostProcessConfig
     response_splitter: ResponseSplitterConfig

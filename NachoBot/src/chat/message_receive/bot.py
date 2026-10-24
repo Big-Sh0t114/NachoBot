@@ -32,7 +32,6 @@ from src.plugin_system.core import component_registry, events_manager, global_an
 from src.plugin_system.base import BaseCommand, EventType
 from src.plugin_system.apis import database_api, send_api
 from src.live.platform_event_tracker import track_platform_event
-from src.chat.keyword_cache import promise_cache_manager
 from src.person_info.bind_manager import bind_manager  # 导入多平台绑定管理器
 
 # 定义日志配置
@@ -838,11 +837,6 @@ class ChatBot:
                     if route_result.is_valid and route_result.route is not None:
                         additional_config["system_event_route"] = route_result.route
                 message.message_info.additional_config = additional_config
-            else:
-                # Activity accounting is a user-message concern.  Keep it
-                # after the shared classifier so malformed and sender-bearing
-                # system-event payloads cannot update ordinary activity state.
-                promise_cache_manager.touch_activity()
 
             group_info = message.message_info.group_info
             user_info = message.message_info.user_info
@@ -894,12 +888,6 @@ class ChatBot:
 
             # 全局监听：处理适配器声明的打赏/会员事件
             asyncio.create_task(track_platform_event(message))
-
-            if not is_system_event:
-                # 约定/誓言缓存处理
-                promise_cache_hits = promise_cache_manager.handle_message(message)
-                if promise_cache_hits:
-                    message.promise_cache_hits = promise_cache_hits  # 动态附加，供后续流程使用
 
             # if await self.check_ban_content(message):
             #     logger.warning(f"检测到消息中含有违法，色情，暴力，反动，敏感内容，消息内容：{message.processed_plain_text}，发送者：{message.message_info.user_info.user_nickname}")

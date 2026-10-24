@@ -232,7 +232,6 @@ class FocusOnlineDuringRecoveryTests(unittest.IsolatedAsyncioTestCase):
                         else:
                             stack.enter_context(patch.object(module.advanced_manager, "is_on", return_value=False))
                         stack.enter_context(patch.object(module.events_manager, "handle_nacho_events", new=AsyncMock(return_value=(True, None))))
-                        stack.enter_context(patch.object(module.promise_cache_manager, "collect_snippets_for_messages", return_value=[]))
 
                     stack.enter_context(patch.object(heart_module.random, "random", return_value=0.0))
                     stack.enter_context(patch("src.memory_system.heuristic_memory_injector.inject_memory_context", new=AsyncMock(side_effect=lambda **kwargs: kwargs["chat_content_block"])))

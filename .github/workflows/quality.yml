@@ -166,6 +166,13 @@ jobs:
           node-version: "22"
           package-manager-cache: false
 
+      - name: Run QQCall offline JavaScript security regressions
+        run: node --test NachoBot-QQCall/tests/code_scanning_security.test.cjs
+
+      - name: Run QQCall offline Python security regressions
+        working-directory: NachoBot-QQCall
+        run: python -m unittest discover -s tests -p "test_code_scanning_security.py"
+
       - name: Run WebUI security and middleware regressions
         run: >-
           uv run --no-project --python 3.12
@@ -173,6 +180,7 @@ jobs:
           --with tomlkit --with psutil --with websockets --with pydantic
           python -m unittest webUI.tests.test_security_regressions
           webUI.tests.test_security webUI.tests.test_config_manager_security
+          webUI.tests.test_chat_media_response_security
 
       - name: Check SnowLuma frontend contract
         run: node webUI/tests/snowluma_frontend_contract.test.js

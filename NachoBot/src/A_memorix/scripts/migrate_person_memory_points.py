@@ -8,8 +8,7 @@ import sqlite3
 from typing import Any, Dict, List
 
 from _bootstrap import DEFAULT_DATA_DIR, DEFAULT_DB_PATH, PLUGIN_ROOT, resolve_repo_path
-
-from A_memorix.core.runtime.sdk_memory_kernel import SDKMemoryKernel  # noqa: E402
+from _preview_sqlite import connect_readonly
 
 
 def _parse_args() -> argparse.Namespace:
@@ -52,7 +51,7 @@ async def _main() -> int:
         print(f"数据库不存在: {db_path}")
         return 1
 
-    conn = sqlite3.connect(str(db_path))
+    conn = connect_readonly(db_path)
     conn.row_factory = sqlite3.Row
     sql = """
         SELECT person_id, person_name, user_nickname, memory_points
@@ -60,12 +59,14 @@ async def _main() -> int:
         WHERE memory_points IS NOT NULL AND memory_points != ''
         ORDER BY id ASC
     """
-    if int(args.limit or 0) > 0:
-        sql += " LIMIT ?"
-        rows = conn.execute(sql, (int(args.limit),)).fetchall()
-    else:
-        rows = conn.execute(sql).fetchall()
-    conn.close()
+    try:
+        if int(args.limit or 0) > 0:
+            sql += " LIMIT ?"
+            rows = conn.execute(sql, (int(args.limit),)).fetchall()
+        else:
+            rows = conn.execute(sql).fetchall()
+    finally:
+        conn.close()
 
     preview_total = sum(len(_parse_memory_points(row["memory_points"])) for row in rows)
     print(f"person_info 待迁移人物: {len(rows)} 记忆点: {preview_total}")
@@ -73,6 +74,8 @@ async def _main() -> int:
         for row in rows[:5]:
             print(f"- person_id={row['person_id']} person_name={row['person_name'] or row['user_nickname']}")
         return 0
+
+    from A_memorix.core.runtime.sdk_memory_kernel import SDKMemoryKernel
 
     data_dir = resolve_repo_path(args.data_dir, fallback=DEFAULT_DATA_DIR)
     kernel = SDKMemoryKernel(plugin_root=PLUGIN_ROOT, config={"storage": {"data_dir": str(data_dir)}})

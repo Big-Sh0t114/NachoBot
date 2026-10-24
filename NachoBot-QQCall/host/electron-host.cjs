@@ -24,6 +24,28 @@ const MAX_PLUGIN_HASH_BYTES = 256 * 1024 * 1024;
 const MAX_GROUP_INVITE_LIST_ENTRIES = 1000;
 const MAX_GROUP_INVITE_SEQUENCE_STRING_LENGTH = 8192;
 
+function sameOpenedPath(opened, named) {
+  if (!named.isFile() || named.isSymbolicLink()) return false;
+  if (Number.isFinite(opened.dev) && Number.isFinite(opened.ino) && opened.ino !== 0 &&
+      Number.isFinite(named.dev) && Number.isFinite(named.ino) && named.ino !== 0) {
+    return opened.dev === named.dev && opened.ino === named.ino;
+  }
+  return opened.size === named.size && opened.mtimeMs === named.mtimeMs;
+}
+
+function sameOpenedState(before, after) {
+  return after.isFile() && before.size === after.size && before.mtimeMs === after.mtimeMs &&
+    (before.ctimeMs === undefined || after.ctimeMs === undefined || before.ctimeMs === after.ctimeMs);
+}
+
+function openReadOnlyNoFollow(filePath) {
+  const constants = fs.constants;
+  let flags = constants.O_RDONLY;
+  if (Number.isInteger(constants.O_NOFOLLOW)) flags |= constants.O_NOFOLLOW;
+  if (Number.isInteger(constants.O_NONBLOCK)) flags |= constants.O_NONBLOCK;
+  return fs.openSync(filePath, flags);
+}
+
 function matchesVerifiedAudioDevicePluginDigest(digest, platform = process.platform) {
   return platform === "win32" && typeof digest === "string" &&
     /^[a-f0-9]{64}$/i.test(digest) && digest.toUpperCase() === VERIFIED_AUDIO_DEVICE_PLUGIN_SHA256;
@@ -33,20 +55,24 @@ function pluginHasVerifiedAudioDeviceProtocol(pluginPath, platform = process.pla
   if (platform !== "win32" || typeof pluginPath !== "string" || !path.isAbsolute(pluginPath)) return false;
   let descriptor;
   try {
-    const stats = fs.statSync(pluginPath);
-    if (!stats.isFile() || stats.size > MAX_PLUGIN_HASH_BYTES) return false;
-    descriptor = fs.openSync(pluginPath, "r");
+    descriptor = openReadOnlyNoFollow(pluginPath);
     const openedStats = fs.fstatSync(descriptor);
-    if (!openedStats.isFile() || openedStats.size > MAX_PLUGIN_HASH_BYTES) return false;
+    if (!openedStats.isFile() || !Number.isSafeInteger(openedStats.size) ||
+        openedStats.size < 0 || openedStats.size > MAX_PLUGIN_HASH_BYTES ||
+        !sameOpenedPath(openedStats, fs.lstatSync(pluginPath))) return false;
     const hash = crypto.createHash("sha256");
     const buffer = Buffer.allocUnsafe(64 * 1024);
     let totalBytes = 0;
     let read;
-    while ((read = fs.readSync(descriptor, buffer, 0, buffer.byteLength, null)) > 0) {
+    while ((read = fs.readSync(descriptor, buffer, 0,
+      Math.min(buffer.byteLength, MAX_PLUGIN_HASH_BYTES + 1 - totalBytes), totalBytes)) > 0) {
       totalBytes += read;
       if (totalBytes > MAX_PLUGIN_HASH_BYTES) return false;
       hash.update(buffer.subarray(0, read));
     }
+    const finishedStats = fs.fstatSync(descriptor);
+    if (!sameOpenedState(openedStats, finishedStats) ||
+        !sameOpenedPath(finishedStats, fs.lstatSync(pluginPath))) return false;
     return matchesVerifiedAudioDevicePluginDigest(hash.digest("hex"), platform);
   } catch {
     return false;

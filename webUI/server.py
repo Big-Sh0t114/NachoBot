@@ -9,7 +9,6 @@ import binascii
 import inspect
 import json
 import logging
-import mimetypes
 import uvicorn
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -35,6 +34,7 @@ import memory_manager
 from music_library import build_music_playlist
 from chat_backend import ChatBackendError, chat_backend
 from chat_media import ChatMediaError, chat_media_store
+from media_response import chat_media_file_response
 from tts_manager import TTSGenerationError, TTSManager, TTSUnavailableError
 from voice_calls import voice_call_store, VoiceCallError
 from voice_routes import create_voice_router
@@ -483,12 +483,7 @@ async def get_chat_media(media_id: str):
         path = chat_media_store.resolve(media_id)
     except ChatMediaError as exc:
         raise HTTPException(404, str(exc)) from exc
-    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-    return FileResponse(
-        path,
-        media_type=media_type,
-        headers={"Cache-Control": "private, max-age=86400"},
-    )
+    return chat_media_file_response(path, trusted_root=chat_media_store.root)
 
 
 @app.get("/api/chat/status")

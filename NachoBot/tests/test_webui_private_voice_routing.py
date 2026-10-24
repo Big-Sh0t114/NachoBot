@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from src.chat.planner_actions.planner import ActionPlanner  # Prime plugin types before generator imports.
 from src.chat.replyer.group_generator import DefaultReplyer
+from src.chat.reply_generation_interrupt import interrupt_reply_generation, run_reply_generation
 from src.chat.brain_chat.brain_chat import BrainChatting
 from src.chat.heart_flow.heartFC_chat import HeartFChatting
 from src.chat.heart_flow.heartflow import Heartflow
@@ -148,9 +149,6 @@ class BrainPrivateVoiceRoutingTests(unittest.TestCase):
             stack.enter_context(patch.object(brain_module.advanced_manager, "is_on", return_value=advanced))
             stack.enter_context(patch.object(brain_module, "get_raw_msg_before_timestamp_with_chat", return_value=list(history_messages)))
             stack.enter_context(patch.object(brain_module, "build_readable_messages_with_id", side_effect=render))
-            stack.enter_context(
-                patch.object(brain_module.promise_cache_manager, "collect_snippets_for_messages", return_value=[])
-            )
             stack.enter_context(patch.object(brain_module.global_config.chat, "get_max_context_size", return_value=30))
             stack.enter_context(
                 patch.object(
@@ -344,8 +342,9 @@ class BrainPrivateVoiceRoutingTests(unittest.TestCase):
             runtime.stream_id = "webui-private"
             runtime.log_prefix = "[webui-private]"
             runtime.chat_stream = SimpleNamespace(stream_id="webui-private")
-            runtime._planner_interrupt_flag = asyncio.Event()
-            runtime._planner_interrupt_flag.set()
+            stale_planner_flag = asyncio.Event()
+            stale_planner_flag.set()
+            runtime._planner_interrupt_flag = stale_planner_flag
             runtime._build_low_latency_person_profile_block = AsyncMock(return_value="")
             runtime._send_and_store_reply = AsyncMock(return_value=({}, "answer", []))
             runtime._focus_reply_context = Mock(return_value=None)
@@ -371,8 +370,56 @@ class BrainPrivateVoiceRoutingTests(unittest.TestCase):
 
             self.assertTrue(result["success"])
             self.assertIs(generate.await_args.kwargs["reply_message"], trigger)
-            self.assertIsNone(generate.await_args.kwargs["interrupt_flag"])
+            replyer_flag = generate.await_args.kwargs["interrupt_flag"]
+            self.assertIsInstance(replyer_flag, asyncio.Event)
+            self.assertIsNot(replyer_flag, stale_planner_flag)
+            self.assertFalse(replyer_flag.is_set())
+            self.assertTrue(stale_planner_flag.is_set())
+            self.assertEqual(runtime._reply_generation_interrupt_flags, [])
+            self.assertEqual(runtime._reply_generation_abort_events, [])
             runtime._send_and_store_reply.assert_awaited_once()
+
+        asyncio.run(exercise())
+
+    def test_direct_reply_generation_can_be_interrupted_without_touching_planner_flag(self):
+        async def exercise():
+            trigger = _message("voice-interrupt", channel="voice", planner_bypass=True)
+            stale_planner_flag = asyncio.Event()
+            runtime = SimpleNamespace(
+                stream_id="webui-private",
+                _planner_interrupt_flag=stale_planner_flag,
+            )
+            generation_started = asyncio.Event()
+            generated_flags = []
+
+            async def generate(*, interrupt_flag):
+                generated_flags.append(interrupt_flag)
+                generation_started.set()
+                await asyncio.Future()
+
+            generation = asyncio.create_task(
+                run_reply_generation(runtime, trigger, None, generate)
+            )
+            try:
+                await asyncio.wait_for(generation_started.wait(), timeout=1)
+                replyer_flag = generated_flags[0]
+
+                self.assertIsInstance(replyer_flag, asyncio.Event)
+                self.assertIsNot(replyer_flag, stale_planner_flag)
+                self.assertFalse(replyer_flag.is_set())
+                self.assertFalse(stale_planner_flag.is_set())
+                self.assertIn(replyer_flag, runtime._reply_generation_interrupt_flags)
+
+                self.assertEqual(interrupt_reply_generation(runtime), 1)
+                self.assertTrue(replyer_flag.is_set())
+                self.assertFalse(stale_planner_flag.is_set())
+                self.assertEqual(await asyncio.wait_for(generation, timeout=1), (False, None))
+                self.assertEqual(runtime._reply_generation_interrupt_flags, [])
+                self.assertEqual(runtime._reply_generation_abort_events, [])
+            finally:
+                if not generation.done():
+                    generation.cancel()
+                    await asyncio.gather(generation, return_exceptions=True)
 
         asyncio.run(exercise())
 
@@ -497,13 +544,6 @@ class HeartFlowPlannerInterruptTests(unittest.TestCase):
                     patch.object(heart_chat_module, "build_readable_messages_with_id", side_effect=render)
                 )
                 stack.enter_context(
-                    patch.object(
-                        heart_chat_module.promise_cache_manager,
-                        "collect_snippets_for_messages",
-                        return_value=[],
-                    )
-                )
-                stack.enter_context(
                     patch(
                         "src.memory_system.heuristic_memory_injector.inject_memory_context",
                         new=AsyncMock(return_value="message"),
@@ -550,6 +590,8 @@ class HeartFlowPlannerInterruptTests(unittest.TestCase):
                 self.assertTrue(planner_flags[0].is_set())
                 self.assertIs(generate.await_args_list[0].kwargs["interrupt_flag"], planner_flags[0])
                 self.assertIsNone(runtime._planner_interrupt_flag)
+                self.assertEqual(runtime._reply_generation_interrupt_flags, [])
+                self.assertEqual(runtime._reply_generation_abort_events, [])
 
                 stale_direct_flag = asyncio.Event()
                 stale_direct_flag.set()
@@ -559,7 +601,13 @@ class HeartFlowPlannerInterruptTests(unittest.TestCase):
 
                 runtime.action_planner.plan.assert_awaited_once()
                 self.assertEqual(generate.await_count, 2)
-                self.assertIsNone(generate.await_args_list[1].kwargs["interrupt_flag"])
+                direct_replyer_flag = generate.await_args_list[1].kwargs["interrupt_flag"]
+                self.assertIsInstance(direct_replyer_flag, asyncio.Event)
+                self.assertIsNot(direct_replyer_flag, stale_direct_flag)
+                self.assertFalse(direct_replyer_flag.is_set())
+                self.assertTrue(stale_direct_flag.is_set())
+                self.assertEqual(runtime._reply_generation_interrupt_flags, [])
+                self.assertEqual(runtime._reply_generation_abort_events, [])
 
         asyncio.run(exercise())
 

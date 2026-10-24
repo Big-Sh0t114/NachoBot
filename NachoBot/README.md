@@ -4,12 +4,10 @@ NachoBot Core 基于 **MaiBot 0.10.3 Beta** 演进，负责统一对话、记忆
 
 ## 与上游相比的重点能力
 
-- 群聊与私聊分别规划，支持普通 Planner、Heart Flow、Brain Chat 与 Focus 会话切换。
-- A_Memorix 长期记忆、中期对话摘要、人物画像、跨用户检索与跨平台账号绑定。
 - 沙盒读写、回复打断、URL 抓取、预约、封禁等动作；高风险动作由规划与执行边界共同约束。
 - 原生插件体系及 MaiBot 插件商店兼容，并整合 Messenger、日记、聊天总结、曲库、Moderation 等插件。
-- 通过 canonical `ncnk_message` 与 runtime capabilities 统一不同平台的消息、回复和可用能力。
-- 联网搜索不再要求模型声明专用搜索能力；Bilibili 二阶段搜索等平台逻辑已从 Core 解耦。
+- 联网搜索不要求模型声明专用搜索能力；Bilibili 二阶段搜索等。
+- 跨用户检索与跨平台账号绑定。
 
 详细的按日变化见 [NachoBot_Updates.md](./changelogs/NachoBot_Updates.md)。
 

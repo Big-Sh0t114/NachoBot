@@ -91,7 +91,7 @@ function extractHtmlScripts(text) {
       }
     }
   }
-  const scriptTags = /<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi;
+  const scriptTags = /<script\b([^>]*)>([\s\S]*?)<\/script(?=[\t\n\f\r />])[^>]*>/gi;
   let match;
   while ((match = scriptTags.exec(text)) !== null) {
     const src = attributeValue(match[1], "src");
@@ -108,24 +108,37 @@ function extractHtmlScripts(text) {
 }
 
 function readBoundedVirtualFile(fsModule, filePath, maxBytes) {
+  let descriptor;
   try {
-    const before = fsModule.statSync(filePath);
+    descriptor = fsModule.openSync(filePath, "r");
+    const before = fsModule.fstatSync(descriptor);
     if (!before.isFile() || !Number.isSafeInteger(before.size) || before.size < 0 || before.size > maxBytes) {
       throw codedError(before.size > maxBytes ? "source_entry_oversize" : "source_entry_invalid");
     }
-    const bytes = fsModule.readFileSync(filePath);
-    // Independently bound the bytes returned by the virtual filesystem. The
-    // returned-length check follows readFileSync's allocation, so it validates
-    // the result size but is not a hard allocation cap.
-    if (!Buffer.isBuffer(bytes) || bytes.length > maxBytes) throw codedError("source_entry_invalid");
-    const after = fsModule.statSync(filePath);
-    if (!after.isFile() || before.size !== after.size || before.mtimeMs !== after.mtimeMs) {
-      throw codedError("source_entry_invalid");
+    // ASAR descriptors expose decoded virtual-file bytes. Bound those bytes
+    // during each read as well as checking the descriptor's reported size.
+    const chunks = [];
+    const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, maxBytes + 1));
+    let offset = 0;
+    while (offset <= maxBytes) {
+      const requested = Math.min(buffer.length, maxBytes + 1 - offset);
+      if (requested <= 0) break;
+      const count = fsModule.readSync(descriptor, buffer, 0, requested, offset);
+      if (count === 0) break;
+      offset += count;
+      if (offset > maxBytes) throw codedError("source_entry_invalid");
+      chunks.push(Buffer.from(buffer.subarray(0, count)));
     }
-    return bytes;
+    const after = fsModule.fstatSync(descriptor);
+    if (!after.isFile() || before.size !== after.size) throw codedError("source_entry_invalid");
+    return Buffer.concat(chunks, offset);
   } catch (error) {
     if (ENTRY_CODES.has(error?.code) && error.code !== "app_path_invalid" && error.code !== "virtual_fs_unavailable") throw error;
     throw codedError("source_entry_unavailable");
+  } finally {
+    if (descriptor !== undefined) {
+      try { fsModule.closeSync(descriptor); } catch { /* preserve the original read result or failure */ }
+    }
   }
 }
 
@@ -192,7 +205,7 @@ function createAsarCandidateProbe({ fsModule = fs, cryptoModule = crypto, pathMo
     if (typeof appPath !== "string" || !pathModule.isAbsolute(appPath) || appPath.includes("\0")) {
       return rejectedReport("app_path_invalid");
     }
-    if (!fsModule || typeof fsModule.statSync !== "function" || typeof fsModule.readFileSync !== "function") {
+    if (!fsModule || ["openSync", "fstatSync", "readSync", "closeSync"].some((method) => typeof fsModule[method] !== "function")) {
       return rejectedReport("virtual_fs_unavailable");
     }
 

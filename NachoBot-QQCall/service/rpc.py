@@ -29,6 +29,12 @@ class OneBotError(RuntimeError):
         super().__init__(code)
 
 
+def _secure_websocket_socket(sock: socket.socket, host: str) -> socket.socket:
+    context = ssl.create_default_context()
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    return context.wrap_socket(sock, server_hostname=host)
+
+
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -262,7 +268,7 @@ class OneBotClient:
             sock = socket.create_connection((host, port), timeout=remaining)
             sock.settimeout(_remaining(deadline))
             if secure:
-                sock = ssl.create_default_context().wrap_socket(sock, server_hostname=host)
+                sock = _secure_websocket_socket(sock, host)
             key = base64.b64encode(os.urandom(16)).decode("ascii")
             host_header = f"[{host}]" if ":" in host else host
             default_port = 443 if secure else 80

@@ -1452,13 +1452,6 @@ class FocusSwitchPlannerRegressionTests(_PlannerTestMixin, unittest.TestCase):
                 )
             )
             stack.enter_context(
-                patch.object(
-                    heart_chat_module.promise_cache_manager,
-                    "collect_snippets_for_messages",
-                    return_value=[],
-                )
-            )
-            stack.enter_context(
                 patch(
                     "src.memory_system.heuristic_memory_injector.inject_memory_context",
                     new=AsyncMock(return_value="message"),
@@ -1757,13 +1750,6 @@ class FocusSwitchPlannerRegressionTests(_PlannerTestMixin, unittest.TestCase):
                     )
                 )
                 stack.enter_context(
-                    patch.object(
-                        heart_chat_module.promise_cache_manager,
-                        "collect_snippets_for_messages",
-                        return_value=[],
-                    )
-                )
-                stack.enter_context(
                     patch(
                         "src.memory_system.heuristic_memory_injector.inject_memory_context",
                         new=AsyncMock(return_value="message"),
@@ -1920,13 +1906,6 @@ class FocusSwitchPlannerRegressionTests(_PlannerTestMixin, unittest.TestCase):
                     brain_chat_module,
                     "build_readable_messages_with_id",
                     return_value=("message", [("m1", message)]),
-                )
-            )
-            stack.enter_context(
-                patch.object(
-                    brain_chat_module.promise_cache_manager,
-                    "collect_snippets_for_messages",
-                    return_value=[],
                 )
             )
             stack.enter_context(

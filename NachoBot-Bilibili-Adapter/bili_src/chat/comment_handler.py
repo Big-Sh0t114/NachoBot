@@ -16,13 +16,16 @@ from ncnk_message import (
 ACCEPT_FORMAT = ["text", "reply", "command"]
 COMMENT_REPLY_LIMIT = 10
 COMMENT_LIMIT_FALLBACK_TEXT = "NachoBot有点口渴了哦，先休息一下啦~"
+COMMENT_DELIVERY_TARGET_KIND = "bilibili.comment"
 
 class CommentHandler:
     def __init__(self, config: Any, logger, adapter_ref: Any):
         self.config = config
         self.logger = logger
         self.adapter = adapter_ref
-        
+
+        # Keep the legacy inspection surface for callers, but never use this
+        # mutable per-video cache to route an asynchronous reply.
         self.comment_context: Dict[str, Dict[str, Any]] = {}
         self.comment_bootstrap_done = False
         self.comment_reply_state: Dict[Tuple[str, str], Dict[str, Any]] = {}
@@ -100,10 +103,9 @@ class CommentHandler:
         comment_oid: Any,
         reply_item: Dict[str, Any],
     ) -> Optional[Tuple[int, int, Optional[int], Optional[int]]]:
-        try:
-            comment_type_int = int(comment_type)
-            comment_oid_int = int(comment_oid)
-        except (TypeError, ValueError):
+        comment_type_int = CommentHandler._positive_int(comment_type)
+        comment_oid_int = CommentHandler._positive_int(comment_oid)
+        if comment_type_int is None or comment_oid_int is None:
             return None
 
         root = None
@@ -113,24 +115,35 @@ class CommentHandler:
             reply_item.get("source_id"),
             reply_item.get("target_id"),
         ):
-            if value not in (None, "", 0):
-                try:
-                    root = int(value)
-                    break
-                except (TypeError, ValueError):
-                    continue
+            root = CommentHandler._positive_int(value)
+            if root is not None:
+                break
         for value in (
             reply_item.get("source_id"),
             reply_item.get("target_id"),
             reply_item.get("root_id"),
         ):
-            if value not in (None, "", 0):
-                try:
-                    parent = int(value)
-                    break
-                except (TypeError, ValueError):
-                    continue
+            parent = CommentHandler._positive_int(value)
+            if parent is not None:
+                break
+        if root is None or parent is None:
+            return None
         return comment_type_int, comment_oid_int, root, parent
+
+    @staticmethod
+    def _positive_int(value: Any) -> int | None:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            parsed = value
+        elif isinstance(value, str) and value.strip():
+            try:
+                parsed = int(value.strip())
+            except ValueError:
+                return None
+        else:
+            return None
+        return parsed if parsed > 0 else None
 
     async def _handle_reply_notifications(
         self, items: List[Dict[str, Any]], source: str
@@ -169,14 +182,6 @@ class CommentHandler:
             if source == "at" and self.config.dede_user_id and not is_at_me:
                 self.logger.debug("At notice without bot mention: id={}", notify_id)
             group_id = f"comment:{business_id}:{subject_id}"
-            self.remember_comment_context(
-                group_id=group_id,
-                comment_type=business_id,
-                comment_oid=subject_id,
-                root_id=reply_item.get("root_id"),
-                source_id=reply_item.get("source_id"),
-                target_id=reply_item.get("target_id"),
-            )
             state_key = (group_id, user_id)
             state = self.comment_reply_state.get(
                 state_key, {"count": 0, "silenced": False, "fallback_sent": False}
@@ -223,6 +228,8 @@ class CommentHandler:
                     accept_format=ACCEPT_FORMAT,
                 ),
                 additional_config=self._build_comment_notice_config(
+                    notify_id=notify_id,
+                    group_id=group_id,
                     business_id=business_id,
                     subject_id=subject_id,
                     reply_item=reply_item,
@@ -242,6 +249,8 @@ class CommentHandler:
 
     def _build_comment_notice_config(
         self,
+        notify_id: str,
+        group_id: str,
         business_id: Any,
         subject_id: Any,
         reply_item: Dict[str, Any],
@@ -259,6 +268,21 @@ class CommentHandler:
             "notice_source": source,
             "reply_time": reply_time,
         }
+        target = self._build_comment_delivery_target(
+            notify_id=notify_id,
+            group_id=group_id,
+            comment_type=business_id,
+            comment_oid=subject_id,
+            reply_item=reply_item,
+        )
+        if target is None:
+            self.logger.warning(
+                "Comment notice has no exact reply target: group_id={} message_id={}",
+                group_id,
+                notify_id,
+            )
+        else:
+            config["delivery_target"] = target
         if (
             self.config.comment_force_mention
             or source == "reply"
@@ -277,6 +301,7 @@ class CommentHandler:
         source_id: Any,
         target_id: Any,
     ) -> None:
+        """Retain the legacy context snapshot without making it routable."""
         if not group_id:
             return
         self.comment_context[group_id] = {
@@ -288,6 +313,41 @@ class CommentHandler:
             "ts": time.time(),
         }
 
+    def _build_comment_delivery_target(
+        self,
+        notify_id: str,
+        group_id: str,
+        comment_type: Any,
+        comment_oid: Any,
+        reply_item: Dict[str, Any],
+    ) -> dict[str, Any] | None:
+        source_message_id = str(notify_id or "").strip()
+        platform = str(getattr(self.config, "platform", "") or "").strip()
+        target = self._build_comment_reply_target_from_item(
+            comment_type, comment_oid, reply_item
+        )
+        parsed_group = self._parse_comment_group_id(group_id)
+        if (
+            not source_message_id
+            or not platform
+            or target is None
+            or parsed_group != target[:2]
+        ):
+            return None
+
+        target_type, target_oid, root, parent = target
+        return {
+            "kind": COMMENT_DELIVERY_TARGET_KIND,
+            "platform": platform,
+            "group_id": group_id,
+            "scope": {"type": "group", "group_id": group_id},
+            "comment_type": target_type,
+            "oid": target_oid,
+            "root": root,
+            "parent": parent,
+            "source_message_id": source_message_id,
+        }
+
     @staticmethod
     def _parse_comment_group_id(group_id: str) -> Optional[Tuple[int, int]]:
         if not group_id or not group_id.startswith("comment:"):
@@ -295,42 +355,71 @@ class CommentHandler:
         parts = group_id.split(":")
         if len(parts) != 3:
             return None
-        try:
-            return int(parts[1]), int(parts[2])
-        except ValueError:
+        comment_type = CommentHandler._positive_int(parts[1])
+        comment_oid = CommentHandler._positive_int(parts[2])
+        if comment_type is None or comment_oid is None:
             return None
+        return comment_type, comment_oid
 
     def resolve_comment_target(
         self, message: MessageBase
     ) -> Optional[Tuple[int, int, Optional[int], Optional[int]]]:
-        group_info = message.message_info.group_info
-        group_id = group_info.group_id if group_info else None
+        message_info = getattr(message, "message_info", None)
+        group_info = getattr(message_info, "group_info", None)
+        group_id = str(getattr(group_info, "group_id", "") or "")
         if not group_id:
             return None
         parsed = self._parse_comment_group_id(group_id)
         if not parsed:
             return None
-        comment_type, comment_oid = parsed
-        context = self.comment_context.get(group_id, {})
-        root_id = context.get("root_id")
-        source_id = context.get("source_id")
-        target_id = context.get("target_id")
-        root = None
-        parent = None
-        for value in (root_id, source_id, target_id):
-            if value not in (None, "", 0):
-                try:
-                    root = int(value)
-                    break
-                except (TypeError, ValueError):
-                    continue
-        for value in (source_id, target_id, root_id):
-            if value not in (None, "", 0):
-                try:
-                    parent = int(value)
-                    break
-                except (TypeError, ValueError):
-                    continue
+        message_platform = str(getattr(message_info, "platform", "") or "")
+        group_platform = str(getattr(group_info, "platform", "") or "")
+        expected_platform = str(getattr(self.config, "platform", "") or "")
+        if (
+            not expected_platform
+            or message_platform != expected_platform
+            or (group_platform and group_platform != expected_platform)
+        ):
+            return None
+
+        additional_config = getattr(message_info, "additional_config", None)
+        if not isinstance(additional_config, dict):
+            return None
+        if "delivery_target" not in additional_config:
+            return None
+        target = additional_config.get("delivery_target")
+        if not isinstance(target, dict):
+            return None
+
+        scope = target.get("scope")
+        if (
+            target.get("kind") != COMMENT_DELIVERY_TARGET_KIND
+            or target.get("platform") != expected_platform
+            or target.get("group_id") != group_id
+            or not isinstance(scope, dict)
+            or scope.get("type") != "group"
+            or scope.get("group_id") != group_id
+        ):
+            return None
+
+        comment_type = self._positive_int(target.get("comment_type"))
+        comment_oid = self._positive_int(target.get("oid"))
+        root = self._positive_int(target.get("root"))
+        parent = self._positive_int(target.get("parent"))
+        source_message_id = str(target.get("source_message_id") or "").strip()
+        if (
+            comment_type is None
+            or comment_oid is None
+            or root is None
+            or parent is None
+            or not source_message_id
+            or (comment_type, comment_oid) != parsed
+        ):
+            return None
+
+        explicit_source_id = additional_config.get("reply_to_message_id")
+        if explicit_source_id not in (None, "") and str(explicit_source_id) != source_message_id:
+            return None
         return comment_type, comment_oid, root, parent
 
     async def send_comment_reply_from_context(

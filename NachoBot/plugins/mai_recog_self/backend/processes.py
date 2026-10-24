@@ -104,4 +104,3 @@ def worker_is_same_process(identity: dict | None) -> bool | None:
     if current.get("unknown"):
         return None
     return abs(float(current["created"]) - float(identity["created"])) < 0.02
-
