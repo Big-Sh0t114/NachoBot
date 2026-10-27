@@ -16,11 +16,15 @@ window.SetupDefaults = (() => {
         createModelRow,
         bindModelRow,
         syncProviderDropdowns,
+        onQqAdapterLoaded = () => {},
+        isTtsEngineTouched = () => false,
+        onModelsLoaded = () => {},
     }) {
         let loading = false;
         let loaded = false;
 
         async function loadConfigDefaults() {
+            if (loading) return;
             loading = true;
 
             // Show loading overlay on Step 3 panel
@@ -47,14 +51,19 @@ window.SetupDefaults = (() => {
                 if (qqAdapterEl) {
                     const selected = defaults.env?.qq_adapter || 'napcat';
                     qqAdapterEl.value = selected === 'snowluma' ? 'snowluma' : 'napcat';
-                    qqAdapterEl.dispatchEvent(new Event('change', { bubbles: true }));
+                    qqAdapterEl.dataset.liveValue = qqAdapterEl.value;
+                    // Hydration is read-only. A synthetic change would start a
+                    // save request and race with the user's first real choice.
+                    onQqAdapterLoaded();
                 }
                 const nickEl = document.getElementById('setup-nickname');
                 if (nickEl) nickEl.value = defaults.core?.nickname || '';
 
                 // TTS engine
                 const ttsEl = document.getElementById('setup-tts-engine');
-                if (ttsEl) ttsEl.value = defaults.tts?.engine || 'GPT_Sovits';
+                if (ttsEl && !isTtsEngineTouched()) {
+                    ttsEl.value = defaults.tts?.engine || 'GPT_Sovits';
+                }
 
                 // UniversalVC fields
                 if (defaults.universalvc) {
@@ -305,6 +314,7 @@ window.SetupDefaults = (() => {
                     }
                 }
 
+                onModelsLoaded(defaults);
                 loaded = true;
             } catch (e) {
                 console.error('Failed to load config defaults:', e);

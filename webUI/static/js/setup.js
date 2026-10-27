@@ -6,8 +6,18 @@
 const SetupModule = (() => {
     let currentStep = 1;
     let envCheckData = null;
+    let envCheckPromise = null;
     let selectedComponents = ['core']; // core is always selected
     let multimodalRuntimeTouched = false;
+    let ttsEngineTouched = false;
+    let modelGroupDefaults = {};
+    let deepseekModelNames = new Set();
+    let siliconFlowFreeTextIds = [];
+    let modelGroupFallbackMissing = false;
+    const modelGroupFields = {
+        replyer0: 'setup-grp-replyer0', planner: 'setup-grp-planner', utils: 'setup-grp-utils',
+        utils_small: 'setup-grp-utils-small', tool_use: 'setup-grp-tool-use',
+    };
     let deploying = false;
     let defaultsLoader = null;
     let bilibiliQrObjectUrl = null;
@@ -33,6 +43,20 @@ const SetupModule = (() => {
                 createModelRow,
                 bindModelRow,
                 syncProviderDropdowns,
+                isTtsEngineTouched: () => ttsEngineTouched,
+                onModelsLoaded(defaults) {
+                    modelGroupDefaults = Object.fromEntries(Object.entries(defaults.model_groups || {})
+                        .map(([name, value]) => [name, value.split(',').map(item => item.trim()).filter(Boolean)]));
+                    deepseekModelNames = new Set((defaults.models || [])
+                        .filter(model => (model.api_provider || '').trim().toLowerCase() === 'deepseek')
+                        .map(model => model.model_name || model.model_identifier));
+                    siliconFlowFreeTextIds = defaults.siliconflow_free_text_ids || [];
+                    renderModelGroups(reconcileModelGroups());
+                },
+                onQqAdapterLoaded() {
+                    updateQqAdapterVisibility();
+                    updatePathCheckVisibility();
+                },
             });
         }
 
@@ -78,6 +102,9 @@ const SetupModule = (() => {
             });
         });
         document.getElementById('setup-qq-adapter')?.addEventListener('change', onQqAdapterChange);
+        document.getElementById('setup-tts-engine')?.addEventListener('change', () => {
+            ttsEngineTouched = true;
+        });
 
         // "+" add-row buttons
         document.getElementById('btn-add-provider')?.addEventListener('click', addProviderRow);
@@ -92,11 +119,14 @@ const SetupModule = (() => {
             btn.addEventListener('click', () => verifyPath(btn.dataset.type));
         });
         document.getElementById('btn-verify-all')?.addEventListener('click', verifyAllPaths);
+
+        // Do not rely on a later tab click to start the first deployment check.
+        if (document.getElementById('setup-check-list')) refresh();
     }
 
     function refresh() {
         if (!envCheckData) {
-            runEnvCheck();
+            return runEnvCheck();
         }
     }
 
@@ -142,17 +172,22 @@ const SetupModule = (() => {
 
     // ---- Step 1: Environment Check ----
 
-    async function runEnvCheck() {
+    function runEnvCheck() {
+        if (envCheckPromise) return envCheckPromise;
         const list = document.getElementById('setup-check-list');
+        if (!list) return Promise.resolve();
         list.innerHTML = '<div class="setup-check-placeholder"><div class="setup-spinner"></div> 正在检测环境...</div>';
 
-        try {
-            const data = await apiGet('/api/setup/check');
-            envCheckData = data;
-            renderEnvCheck(data);
-        } catch (e) {
-            list.innerHTML = `<div class="setup-check-item error"><span class="check-icon">❌</span><span>检测失败: ${escapeHtml(e.message)}</span></div>`;
-        }
+        envCheckPromise = (async () => {
+            try {
+                const data = await apiGet('/api/setup/check');
+                renderEnvCheck(data);
+                envCheckData = data;
+            } catch (e) {
+                list.innerHTML = `<div class="setup-check-item error"><span class="check-icon">❌</span><span>检测失败: ${escapeHtml(e.message)}</span></div>`;
+            }
+        })().finally(() => { envCheckPromise = null; });
+        return envCheckPromise;
     }
 
     function renderEnvCheck(data) {
@@ -363,6 +398,9 @@ const SetupModule = (() => {
     function applyScheme(scheme) {
         const ttsCb = document.querySelector('.setup-component-cb[value="tts"]');
         const ttsEngineSelect = document.getElementById('setup-tts-engine');
+        if (['gpt_lite', 'gpt_full', 'vox_lite', 'vox_full'].includes(scheme)) {
+            ttsEngineTouched = true;
+        }
 
         if (scheme === 'none') {
             if (ttsCb) ttsCb.checked = false;
@@ -459,6 +497,7 @@ const SetupModule = (() => {
                 updatePathCheckVisibility();
             }
         })();
+        return qqAdapterSelectionPromise;
     }
 
     function validateSnowLumaCredentials() {
@@ -524,6 +563,15 @@ const SetupModule = (() => {
             <button class="btn-remove-row" title="移除此服务商">✕</button>
         `;
         row.querySelector('.btn-remove-row').addEventListener('click', () => {
+            const provider = row.querySelector('.setup-provider-name')?.value.trim().toLowerCase();
+            if (provider === 'deepseek') {
+                document.querySelectorAll('.model-row').forEach(modelRow => {
+                    if (modelRow.querySelector('.setup-model-provider')?.value.trim().toLowerCase() === provider) {
+                        rememberDeepseekModel(modelRow);
+                        modelRow.remove();
+                    }
+                });
+            }
             row.remove();
             syncProviderDropdowns();
             syncModelGroups();
@@ -586,6 +634,7 @@ const SetupModule = (() => {
             <button class="btn-remove-row" title="移除此模型">✕</button>
         `;
         row.querySelector('.btn-remove-row').addEventListener('click', () => {
+            rememberDeepseekModel(row);
             row.remove();
             syncModelGroups();
         });
@@ -641,21 +690,50 @@ const SetupModule = (() => {
         });
     }
 
-    /** Collect all model names and display in model group fields */
+    function rememberDeepseekModel(row) {
+        if (row.querySelector('.setup-model-provider')?.value.trim().toLowerCase() === 'deepseek') {
+            const name = row.querySelector('.setup-model-name')?.value.trim()
+                || row.querySelector('.setup-model-id')?.value.trim();
+            if (name) deepseekModelNames.add(name);
+        }
+    }
+
+    function reconcileModelGroups() {
+        const providers = new Set(Array.from(document.querySelectorAll('.setup-provider-name'))
+            .map(input => input.value.trim().toLowerCase()));
+        const models = Array.from(document.querySelectorAll('.model-row')).map(row => {
+            rememberDeepseekModel(row);
+            return {
+                name: row.querySelector('.setup-model-name')?.value.trim()
+                    || row.querySelector('.setup-model-id')?.value.trim(),
+                identifier: row.querySelector('.setup-model-id')?.value.trim(),
+                provider: row.querySelector('.setup-model-provider')?.value.trim().toLowerCase(),
+            };
+        }).filter(model => providers.has(model.provider));
+        const names = new Set(models.map(model => model.name));
+        const fallbacks = siliconFlowFreeTextIds.flatMap(identifier => models
+            .filter(model => model.provider === 'siliconflow' && model.identifier === identifier)
+            .map(model => model.name));
+        modelGroupFallbackMissing = false;
+        return Object.fromEntries(Object.entries(modelGroupDefaults).map(([group, references]) => {
+            const missing = references.filter(name => deepseekModelNames.has(name) && !names.has(name));
+            if (!missing.length) return [group, [...references]];
+            if (!fallbacks.length) modelGroupFallbackMissing = true;
+            return [group, [...new Set(references.flatMap(name => missing.includes(name) ? fallbacks : [name]))]];
+        }));
+    }
+
+    function renderModelGroups(groups) {
+        for (const [name, id] of Object.entries(modelGroupFields)) {
+            const input = document.getElementById(id);
+            if (input) input.value = (groups[name] || []).join(', ');
+        }
+    }
+
+    /** Preserve each group's assignment, replacing only removed DeepSeek references. */
     function syncModelGroups() {
         if (defaultsLoader?.isLoading()) return;
-        const names = [];
-        document.querySelectorAll('.model-row').forEach(row => {
-            const idInput = row.querySelector('.setup-model-id');
-            const nameInput = row.querySelector('.setup-model-name');
-            const name = (nameInput && nameInput.value.trim()) ||
-                (idInput && idInput.value.trim()) || '';
-            if (name) names.push(name);
-        });
-        const display = names.join(', ') || '';
-        document.querySelectorAll('.setup-model-group').forEach(f => {
-            f.value = display;
-        });
+        renderModelGroups(reconcileModelGroups());
     }
 
     // ---- Data Collection ----
@@ -692,6 +770,7 @@ const SetupModule = (() => {
             },
             providers,
             models,
+            model_groups: reconcileModelGroups(),
             tts: {
                 engine: document.getElementById('setup-tts-engine')?.value || 'GPT_Sovits',
                 runtime: getSelectedMultimodalRuntime(),
@@ -729,6 +808,12 @@ const SetupModule = (() => {
             toast('QQ 后端选择仍在保存，请稍候再继续', 'info');
             return;
         }
+        syncModelGroups();
+        if (modelGroupFallbackMissing) {
+            alert('删除 DeepSeek 模型后，请至少保留一个 SiliconFlow 免费文本模型');
+            return;
+        }
+
         // Check single-value validation
         let allValid = true;
         document.querySelectorAll('#setup-step-3 .setup-single-value').forEach(input => {
@@ -971,7 +1056,7 @@ const SetupModule = (() => {
         try {
             const gitBootstrap = await runGitBootstrapAttempt(
                 wizardData,
-                () => apiPost('/api/setup/bootstrap/git', {})
+                () => bootstrapGitViaWebSocket(logDiv)
             );
             if (!gitBootstrap || gitBootstrap.status !== 'ok') {
                 const detail = gitBootstrap?.message || 'Git 自动安装或验证失败';
@@ -1166,6 +1251,35 @@ const SetupModule = (() => {
         completeDeployment(progressDiv);
     }
 
+    function bootstrapGitViaWebSocket(logDiv) {
+        return new Promise((resolve, reject) => {
+            const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const ws = createAuthenticatedWebSocket(`${proto}//${location.host}/ws/setup/install`);
+            let settled = false;
+            const finish = (fn, result) => {
+                if (settled) return;
+                settled = true;
+                ws.close();
+                fn(result);
+            };
+            ws.onopen = () => ws.send(JSON.stringify({ action: 'bootstrap_git' }));
+            ws.onmessage = event => {
+                try {
+                    const msg = JSON.parse(event.data);
+                    if (msg.type === 'log') addLogLine(logDiv, msg.line, msg.replace === true);
+                    else if (msg.type === 'bootstrap_done') finish(resolve, msg);
+                    else if (msg.type === 'error') finish(reject, new Error(msg.message || 'Git 准备失败'));
+                } catch (error) {
+                    finish(reject, error);
+                }
+            };
+            ws.onerror = () => finish(reject, new Error('Git 安装日志连接失败'));
+            ws.onclose = () => {
+                if (!settled) finish(reject, new Error('Git 安装日志连接提前关闭'));
+            };
+        });
+    }
+
     function installDepsViaWebSocket(tasks, progressDiv, logDiv) {
         return new Promise((resolve, reject) => {
             const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -1194,7 +1308,7 @@ const SetupModule = (() => {
                     updateProgressItem(`dep-${msg.task_id}`, 'running', `  🔄 ${msg.name}...`);
                     addLogLine(logDiv, `\n[Setup] === 安装 ${msg.name} ===\n`);
                 } else if (msg.type === 'log') {
-                    addLogLine(logDiv, msg.line);
+                    addLogLine(logDiv, msg.line, msg.replace === true);
                 } else if (msg.type === 'task_done') {
                     if (msg.status === 'ok') {
                         updateProgressItem(`dep-${msg.task_id}`, 'done', `  ✅ ${msg.message}`);
@@ -1422,9 +1536,16 @@ const SetupModule = (() => {
         return { pending: '⏳', running: '🔄', done: '✅', error: '❌', warning: '⚠️' }[status] || '❓';
     }
 
-    function addLogLine(container, text) {
+    function addLogLine(container, text, replace = false) {
+        // A terminal redraw updates the current command block. Keep earlier
+        // setup messages and completed commands instead of appending every tick.
+        if (replace && container.lastElementChild?.classList.contains('deploy-log-snapshot')) {
+            container.lastElementChild.textContent = text;
+            container.scrollTop = container.scrollHeight;
+            return;
+        }
         const line = document.createElement('div');
-        line.className = 'deploy-log-line';
+        line.className = replace ? 'deploy-log-line deploy-log-snapshot' : 'deploy-log-line';
         line.textContent = text;
         container.appendChild(line);
         container.scrollTop = container.scrollHeight;
@@ -1467,6 +1588,9 @@ const SetupModule = (() => {
         // Explicitly test-only hooks.  They keep request-secret lifecycle
         // contracts executable without changing normal browser behavior.
         __test: {
+            addLogLine,
+            installDepsViaWebSocket,
+            bootstrapGitViaWebSocket,
             collectWizardData,
             renderEnvCheck,
             onComponentToggle,

@@ -12,6 +12,7 @@ const TerminalModule = (() => {
     // introduces gaps between those glyphs, so retain the raw rows briefly and
     // redraw them as a pixel-perfect canvas once the QR URL marker arrives.
     const napCatQrCaptures = new Map();
+    const installProgressLines = new Map();
     const NAPCAT_SHELL_ID = 'napcat_shell';
     const NAPCAT_QR_START_RE = /请扫描下面的二维码/;
     const NAPCAT_QR_END_RE = /二维码解码\s*URL\s*:/i;
@@ -91,6 +92,7 @@ const TerminalModule = (() => {
             ws = null;
         }
         napCatQrCaptures.clear();
+        installProgressLines.clear();
 
         const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
         const url = `${proto}//${location.host}/ws/logs/${serviceId}`;
@@ -105,12 +107,12 @@ const TerminalModule = (() => {
             try {
                 const msg = JSON.parse(evt.data);
                 if (msg.type === 'history') {
-                    for (const line of msg.lines) {
-                        appendLogLine(line, serviceId === 'all');
+                    for (const [index, line] of msg.lines.entries()) {
+                        appendLogLine(line, serviceId === 'all', false, msg.progress_keys?.[index]);
                         checkEulaPrompt(line, serviceId);
                     }
                 } else if (msg.type === 'log') {
-                    appendLogLine(msg.line, serviceId === 'all');
+                    appendLogLine(msg.line, serviceId === 'all', false, msg.progress_key);
                     checkEulaPrompt(msg.line, serviceId);
                 }
                 // Ignore pings
@@ -129,7 +131,7 @@ const TerminalModule = (() => {
         };
     }
 
-    function appendLogLine(text, showTag, skipQrHandling = false) {
+    function appendLogLine(text, showTag, skipQrHandling = false, progressKey = null) {
         const output = document.getElementById('terminal-output');
         text = String(text ?? '');
 
@@ -184,8 +186,13 @@ const TerminalModule = (() => {
         else if (upper.includes('WARNING') || upper.includes('WARN')) level = 'warning';
         else if (upper.includes('DEBUG')) level = 'debug';
 
-        const line = document.createElement('div');
+        const previous = progressKey ? installProgressLines.get(progressKey) : null;
+        const reuse = previous && output.contains(previous);
+        const line = reuse ? previous : document.createElement('div');
+        if (reuse) line.replaceChildren();
+        if (progressKey) installProgressLines.set(progressKey, line);
         line.className = `log-line ${level}`;
+        line.style.display = '';
 
         // Check filter — hide (not discard) lines below threshold
         const filter = document.getElementById('log-filter').value;
@@ -204,11 +211,15 @@ const TerminalModule = (() => {
         }
 
         line.appendChild(document.createTextNode(text));
-        output.appendChild(line);
+        if (!reuse) output.appendChild(line);
 
         // Limit buffer (keep last 5000 lines in DOM)
         while (output.children.length > 5000) {
-            output.removeChild(output.firstChild);
+            const removed = output.firstChild;
+            output.removeChild(removed);
+            for (const [key, node] of installProgressLines) {
+                if (node === removed) installProgressLines.delete(key);
+            }
         }
 
         if (autoScroll) {
@@ -341,6 +352,7 @@ const TerminalModule = (() => {
         const output = document.getElementById('terminal-output');
         output.innerHTML = '';
         napCatQrCaptures.clear();
+        installProgressLines.clear();
     }
 
     function exportLog() {

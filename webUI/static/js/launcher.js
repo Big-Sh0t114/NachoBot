@@ -11,6 +11,7 @@ const LauncherModule = (() => {
     let selectedRuntime = 'gpu';
     let runtimeSelectionTouched = false;
     let installingRuntime = null;
+    let runtimeInstallLogs = [];
     let pollInterval = null;
     let detailsPollInterval = null;
     let adapterGroupsRefreshFlight = null;
@@ -23,6 +24,7 @@ const LauncherModule = (() => {
     let snowlumaProcesses = null;
     let snowlumaProcessError = '';
     let snowlumaProcessBusy = false;
+    let snowlumaManualPassword = false;
     let snowlumaProcessRefreshToken = null;
     let snowlumaRuntimeRunning = false;
     let snowlumaAgreementModal = null;
@@ -118,14 +120,22 @@ const LauncherModule = (() => {
 
     function clearSnowLumaPasswordInput(card) {
         const input = card?.querySelector('#launcher-snowluma-password');
-        if (input) input.value = '';
+        if (input) {
+            input.value = '';
+            input.disabled = true;
+        }
+        snowlumaManualPassword = false;
+        const toggle = card?.querySelector('#launcher-snowluma-manual-password');
+        if (toggle) toggle.checked = false;
     }
 
     function focusSnowLumaPasswordInput(card) {
         const input = card?.querySelector('#launcher-snowluma-password');
-        if (input) {
+        if (input && !input.disabled) {
             input.focus?.();
             input.select?.();
+        } else {
+            card?.querySelector('#launcher-snowluma-manual-password')?.focus?.();
         }
     }
 
@@ -569,14 +579,12 @@ const LauncherModule = (() => {
                         ${recommendation}
                     </button>
                     <div class="launch-runtime-state ${status.installed ? 'installed' : 'missing'}">
-                        <span>${status.installed ? '✓ 已安装' : '未安装'}</span>
-                        ${status.installed ? '' : `
+                        <span title="${escapeHtml(status.message || '')}">${status.installed ? '✓ 依赖已验证' : '需安装 / 补齐'}</span>
                             <button type="button" class="btn btn-primary btn-sm launch-runtime-install"
                                     data-install-runtime="${id}"
-                                    ${installingRuntime ? 'disabled' : ''}>
-                                ${installing ? '安装中...' : '安装 / 补齐'}
+                                    ${(installingRuntime || busy || running) ? 'disabled' : ''}>
+                                ${installing ? '验证 / 安装中...' : (status.installed ? '验证 / 补齐' : '安装 / 补齐')}
                             </button>
-                        `}
                     </div>
                 </div>
             `;
@@ -616,8 +624,9 @@ const LauncherModule = (() => {
                         </div>
                     </div>
                     <div class="launch-runtime-grid">${runtimeMarkup}</div>
+                    ${(installingRuntime || runtimeInstallLogs.length) ? `<div class="deploy-log" id="launch-runtime-install-log" role="log"><div class="deploy-log-line">${escapeHtml(runtimeInstallLogs.map(item => item.line).join('\n'))}</div></div>` : ''}
                 </div>
-                ${!requiredInstalled ? `<div class="launch-runtime-warning">当前模式所需的 ${runtimeMeta[requiredRuntime].name} 环境尚未安装，请先点击“安装 / 补齐”。</div>` : ''}
+                ${!requiredInstalled ? `<div class="launch-runtime-warning">当前模式所需的 ${runtimeMeta[requiredRuntime].name} 依赖缺失或未通过验证，请先点击“安装 / 补齐”。</div>` : ''}
                 ${launchServiceProgress(state, activeProfile)}
             </div>
             <div class="group-card-footer launch-card-footer">
@@ -716,6 +725,19 @@ const LauncherModule = (() => {
         }
     }
 
+    function recordRuntimeInstallLog(line, replace = false) {
+        const last = runtimeInstallLogs.at(-1);
+        if (replace && last?.replace) last.line = line;
+        else runtimeInstallLogs.push({ line, replace });
+        runtimeInstallLogs = runtimeInstallLogs.slice(-30);
+        const panel = document.getElementById('launch-runtime-install-log');
+        if (panel) {
+            panel.textContent = runtimeInstallLogs.map(item => item.line).join('\n');
+            panel.style.whiteSpace = 'pre-wrap';
+            panel.scrollTop = panel.scrollHeight;
+        }
+    }
+
     function installRuntimeTask(task) {
         return new Promise((resolve, reject) => {
             const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -733,11 +755,13 @@ const LauncherModule = (() => {
             ws.addEventListener('message', event => {
                 try {
                     const msg = JSON.parse(event.data);
-                    if (msg.type === 'all_done') finish(resolve);
-                    else if (msg.type === 'error') finish(reject, new Error(msg.message || '依赖安装失败'));
-                    else if (msg.type === 'task_done' && msg.status !== 'ok') {
-                        finish(reject, new Error(msg.message || '依赖安装失败'));
+                    if (msg.type === 'log') recordRuntimeInstallLog(msg.line, msg.replace === true);
+                    else if (msg.type === 'task_done') {
+                        recordRuntimeInstallLog(`[Setup] ${msg.message}`);
+                        if (msg.status !== 'ok') finish(reject, new Error(msg.message || '依赖安装失败'));
                     }
+                    else if (msg.type === 'all_done') finish(resolve);
+                    else if (msg.type === 'error') finish(reject, new Error(msg.message || '依赖安装失败'));
                 } catch (e) {
                     finish(reject, e);
                 }
@@ -751,7 +775,9 @@ const LauncherModule = (() => {
 
     async function installRuntime(runtime) {
         if (!['gpu', 'cpu'].includes(runtime) || installingRuntime) return;
+        if (['starting', 'running', 'stopping'].includes(launch?.status)) return;
         installingRuntime = runtime;
+        runtimeInstallLogs = [];
         render();
         try {
             const tasks = await apiGet(`/api/setup/deps/tasks?components=tts&multimodal_runtime=${encodeURIComponent(runtime)}`);
@@ -761,6 +787,7 @@ const LauncherModule = (() => {
             await installRuntimeTask(task);
             toast(`${runtime.toUpperCase()} Multimodal 环境安装完成`, 'success');
         } catch (e) {
+            recordRuntimeInstallLog(`[Setup] ERROR: ${e.message}`);
             toast(`环境安装失败: ${e.message}`, 'error');
         } finally {
             installingRuntime = null;
@@ -1134,7 +1161,8 @@ const LauncherModule = (() => {
                     <div class="snowluma-instance-panel">
                         <div class="snowluma-instance-toolbar">
                             <label for="launcher-snowluma-password">WebUI 密码</label>
-                            <input type="password" class="form-input" id="launcher-snowluma-password" autocomplete="current-password" placeholder="留空使用已保存密码；首次或失效时输入">
+                            <label><input type="checkbox" id="launcher-snowluma-manual-password" ${snowlumaManualPassword ? 'checked' : ''}> 手动输入密码</label>
+                            <input type="password" class="form-input" id="launcher-snowluma-password" autocomplete="off" ${snowlumaManualPassword ? '' : 'disabled'} placeholder="默认使用已保存密码；勾选后可输入其他密码">
                             <button type="button" class="btn btn-primary btn-sm snowluma-refresh-button" data-snowluma-refresh ${(!installed || snowlumaProcessBusy) ? 'disabled' : ''}>↻ 刷新实例</button>
                         </div>
                         ${snowlumaProcessError ? `<div class="snowluma-process-error">${escapeHtml(snowlumaProcessError)}</div>` : ''}
@@ -1162,6 +1190,15 @@ const LauncherModule = (() => {
     }
 
     function bindSnowLumaCardEvents(card, group) {
+        card.querySelector('#launcher-snowluma-manual-password')?.addEventListener('change', event => {
+            snowlumaManualPassword = event.target.checked;
+            const input = card.querySelector('#launcher-snowluma-password');
+            if (input) {
+                input.value = '';
+                input.disabled = !snowlumaManualPassword;
+                if (snowlumaManualPassword) input.focus();
+            }
+        });
         card.querySelector('#launcher-qq-adapter')?.addEventListener('change', event => {
             selectQqAdapter(event.target.value, group, card);
         });
@@ -1187,6 +1224,7 @@ const LauncherModule = (() => {
             || control.blocked) return;
         const select = card.querySelector('#launcher-qq-adapter');
         if (select) select.disabled = true;
+        clearSnowLumaPasswordInput(card);
         try {
             await apiPost('/api/setup/qq-adapter', { qq_adapter: adapter });
             toast(`已切换到 ${adapter === 'snowluma' ? 'SnowLuma' : 'NapCat'}`, 'success');
@@ -1230,7 +1268,7 @@ const LauncherModule = (() => {
             const code = snowlumaErrorCode(e);
             const suppressFailureUi = options.throwOnFailure === true;
             if (code === 'PASSWORD_REQUIRED') {
-                snowlumaProcessError = '请输入 SnowLuma WebUI 密码后重试';
+                snowlumaProcessError = '已保存密码不可用，请勾选“手动输入密码”后重试';
                 if (!suppressFailureUi) {
                     toast(snowlumaProcessError, 'error');
                     focusSnowLumaPasswordInput(card);
@@ -1318,7 +1356,7 @@ const LauncherModule = (() => {
                 return;
             }
             if (code === 'PASSWORD_REQUIRED') {
-                toast('请输入 SnowLuma WebUI 密码后重试', 'error');
+                toast('已保存密码不可用，请勾选“手动输入密码”后重试', 'error');
                 focusSnowLumaPasswordInput(card);
             } else {
                 toast(e?.message || 'SnowLuma 实例操作失败', 'error');
@@ -1327,7 +1365,10 @@ const LauncherModule = (() => {
     }
 
     async function withSnowLumaPassword(card, request) {
-        const password = card?.querySelector('#launcher-snowluma-password')?.value || '';
+        // Password managers may refill this field after every DOM refresh.
+        // Only explicit manual mode can override the backend's saved password.
+        const manual = card?.querySelector('#launcher-snowluma-manual-password')?.checked === true;
+        const password = manual ? card?.querySelector('#launcher-snowluma-password')?.value || '' : '';
         let replayed = false;
         try {
             return await request(password || undefined);
@@ -1605,6 +1646,7 @@ const LauncherModule = (() => {
             launchExternalProfileIsReady,
             launchFooterActions,
             launchCardInnerHTML,
+            recordRuntimeInstallLog,
             serviceIsExternalReady,
             serviceIsExternalPresentUnready,
             serviceIsIndeterminate,

@@ -12,6 +12,8 @@ const App = (() => {
 
     // ---- Tab Routing ----
     async function init() {
+        const setupCheck = document.getElementById('setup-check-list');
+        if (setupCheck) setupCheck.textContent = '正在准备环境检测...';
         // Complete the first protected request before modules open WebSockets.
         // When authentication is enabled this lets the shared fetch wrapper
         // collect the session token exactly once.
@@ -25,6 +27,7 @@ const App = (() => {
         });
 
         // Initialize modules
+        SetupModule.init();
         ChatModule.init();
         ConfigModule.init();
         LauncherModule.init();
@@ -33,7 +36,6 @@ const App = (() => {
         DatabaseModule.init();
         KnowledgeModule.init();
         MemoryModule.init();
-        SetupModule.init();
 
     }
 
@@ -42,15 +44,24 @@ const App = (() => {
         if (!versionElement) return;
 
         let version = '';
+        async function readInfo(url) {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 5000);
+            try {
+                return await apiGet(url, { signal: controller.signal });
+            } finally {
+                clearTimeout(timer);
+            }
+        }
         try {
-            const data = await apiGet('/api/webui/info');
+            const data = await readInfo('/api/webui/info');
             version = String(data.version || '').trim();
         } catch (error) {
             // Compatibility fallback for a WebUI process that has not yet been
             // restarted after adding /api/webui/info.
             if (error.status === 404) {
                 try {
-                    const config = await apiGet('/api/configs/webui_config');
+                    const config = await readInfo('/api/configs/webui_config');
                     version = parseWebUIVersion(config.raw);
                 } catch (fallbackError) {
                     version = '';
@@ -199,8 +210,8 @@ function toast(message, type = 'info') {
     setTimeout(() => el.remove(), 3000);
 }
 
-async function apiGet(url) {
-    const res = await fetch(url);
+async function apiGet(url, options) {
+    const res = await fetch(url, options);
     if (!res.ok) {
         const error = new Error(`API Error: ${res.status}`);
         error.status = res.status;

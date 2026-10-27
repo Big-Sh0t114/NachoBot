@@ -7,8 +7,10 @@ import asyncio
 import base64
 import binascii
 import inspect
+import hashlib
 import json
 import logging
+import re
 import uvicorn
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -16,7 +18,7 @@ from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from config_manager import ConfigManager
@@ -53,6 +55,7 @@ from setup_checks import NAPCAT_RELEASE_URL
 from security import WebUISecurity, validate_webui_config_raw
 from webui_config import CONFIG_PATH, webui_config
 from multimodal_runtime import MultimodalRuntimeManager
+from install_output import InstallSnapshot
 try:
     from snowluma_credentials import (
         SnowLumaPasswordStore,
@@ -70,6 +73,7 @@ try:
         SNOWLUMA_AGREEMENT_VERSION_MISMATCH,
         SNOWLUMA_PASSWORD_CHANGE_REQUIRED,
         SNOWLUMA_PASSWORD_REQUIRED,
+        SNOWLUMA_LOGIN_RATE_LIMITED,
         SNOWLUMA_SECRET_STORE_UNAVAILABLE,
         SNOWLUMA_TOTP_REQUIRED,
         SnowLumaAPIClient,
@@ -187,7 +191,18 @@ async def favicon():
 
 @app.get("/")
 async def index():
-    return FileResponse(STATIC_DIR / "index.html")
+    content = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+    def version_script(match):
+        url = match.group(2)
+        path = STATIC_DIR / url.removeprefix("/static/")
+        revision = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+        return f'{match.group(1)}{url}?v={revision}{match.group(3)}'
+
+    # Script URLs change with their contents even when an extracted package
+    # preserves old timestamps. A refreshed page cannot reuse an older module.
+    content = re.sub(r'(<script\s+src=")(/static/js/[A-Za-z0-9_-]+\.js)(")', version_script, content)
+    return HTMLResponse(content, headers={"Cache-Control": "no-store"})
 
 @app.get("/api/music/list")
 async def list_music():
@@ -626,7 +641,10 @@ async def ws_logs(ws: WebSocket, service_id: str):
     # Send historical logs
     history = process_mgr.get_log_history(service_id)
     if history:
-        await ws.send_text(json.dumps({"type": "history", "lines": history}))
+        await ws.send_text(json.dumps({
+            "type": "history", "lines": history,
+            "progress_keys": [line.key if isinstance(line, InstallSnapshot) else None for line in history],
+        }))
 
     # Define callback
     queue: asyncio.Queue = asyncio.Queue()
@@ -640,7 +658,10 @@ async def ws_logs(ws: WebSocket, service_id: str):
         while True:
             try:
                 line = await asyncio.wait_for(queue.get(), timeout=30)
-                await ws.send_text(json.dumps({"type": "log", "line": line}))
+                await ws.send_text(json.dumps({
+                    "type": "log", "line": line,
+                    "progress_key": line.key if isinstance(line, InstallSnapshot) else None,
+                }))
             except asyncio.TimeoutError:
                 # Send keepalive
                 await ws.send_text(json.dumps({"type": "ping"}))
@@ -1019,7 +1040,7 @@ async def memory_maintain(body: MemoryMaintainRequest):
 @app.get("/api/setup/check")
 async def setup_check_env():
     """Run all environment checks."""
-    return EnvironmentChecker.check_all()
+    return await asyncio.to_thread(EnvironmentChecker.check_all)
 
 
 @app.get("/api/setup/configs/status")
@@ -1263,13 +1284,16 @@ async def setup_dep_tasks(
 
 @app.get("/api/setup/deps/multimodal/status")
 async def setup_multimodal_runtime_status():
-    """Return all three isolated Multimodal runtime installation states."""
-    gpu = EnvironmentChecker.check_gpu()
+    """Return GPU/CPU readiness after read-only locked dependency checks."""
+    gpu, runtimes = await asyncio.gather(
+        asyncio.to_thread(EnvironmentChecker.check_gpu),
+        asyncio.to_thread(MultimodalRuntimeManager.get_all_statuses),
+    )
     recommended = "gpu" if gpu.get("has_gpu") else "cpu"
     return {
         "recommended": recommended,
         "gpu": gpu,
-        "runtimes": MultimodalRuntimeManager.get_all_statuses(),
+        "runtimes": runtimes,
     }
 
 
@@ -1365,6 +1389,8 @@ def _snowluma_http_error(exc: SnowLumaApiError) -> HTTPException:
     details = getattr(exc, "details", {}) or {}
     if code == SNOWLUMA_SECRET_STORE_UNAVAILABLE:
         status = 503
+    elif code == SNOWLUMA_LOGIN_RATE_LIMITED:
+        status = 429
     elif code in {
         SNOWLUMA_PASSWORD_REQUIRED,
         SNOWLUMA_AGREEMENT_REQUIRED,
@@ -1376,6 +1402,12 @@ def _snowluma_http_error(exc: SnowLumaApiError) -> HTTPException:
     else:
         status = 502
     payload: dict[str, object] = {"code": code, "message": str(exc)}
+    headers = None
+    if code == SNOWLUMA_LOGIN_RATE_LIMITED:
+        retry_after = details.get("retry_after")
+        if type(retry_after) is int and 0 < retry_after <= 86400:
+            payload["retry_after"] = retry_after
+            headers = {"Retry-After": str(retry_after)}
     if code == SNOWLUMA_AGREEMENT_REQUIRED:
         payload.update({
             key: details[key]
@@ -1384,7 +1416,7 @@ def _snowluma_http_error(exc: SnowLumaApiError) -> HTTPException:
         })
     elif code == SNOWLUMA_AGREEMENT_VERSION_MISMATCH and "currentVersion" in details:
         payload["currentVersion"] = details["currentVersion"]
-    return HTTPException(status, detail=payload)
+    return HTTPException(status, detail=payload, headers=headers)
 
 
 def _manual_snowluma_password(value: object) -> str | None:
@@ -1663,6 +1695,16 @@ async def ws_setup_install(ws: WebSocket):
         msg = json.loads(raw)
         tasks = msg.get("tasks", [])
 
+        if msg.get("action") == "bootstrap_git":
+            async def on_git_line(line):
+                await ws.send_text(json.dumps({
+                    "type": "log", "line": line, "replace": isinstance(line, InstallSnapshot),
+                }))
+
+            result = await DependencyInstaller.ensure_git(callback=on_git_line)
+            await ws.send_text(json.dumps({"type": "bootstrap_done", **result}))
+            return
+
         git_check = EnvironmentChecker.check_git()
         if git_check.get("status") != "ok":
             await ws.send_text(json.dumps({
@@ -1684,6 +1726,7 @@ async def ws_setup_install(ws: WebSocket):
                         "type": "log",
                         "task_id": task["id"],
                         "line": line,
+                        "replace": isinstance(line, InstallSnapshot),
                     }))
                 except Exception:
                     pass

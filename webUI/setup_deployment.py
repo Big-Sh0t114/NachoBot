@@ -1,6 +1,5 @@
 """Configuration generation and dependency deployment for the WebUI wizard."""
 
-import asyncio
 import copy
 import json
 import os
@@ -30,6 +29,8 @@ try:
     )
     from .secure_paths import ensure_within, resolve_external_path, resolve_relative_to_root
     from .multimodal_runtime import MultimodalRuntimeManager
+    from .install_output import run_install_command
+    from .setup_model_groups import reconcile_deepseek_groups, siliconflow_free_text_ids
 except ImportError:
     from setup_checks import (
         BUILTIN_BILIBILI_TEMPLATE,
@@ -46,6 +47,8 @@ except ImportError:
     )
     from secure_paths import ensure_within, resolve_external_path, resolve_relative_to_root
     from multimodal_runtime import MultimodalRuntimeManager
+    from install_output import run_install_command
+    from setup_model_groups import reconcile_deepseek_groups, siliconflow_free_text_ids
 
 BACKUP_DIR = ROOT_DIR / "config-save" / "setup_backups"
 MAX_BACKUPS_PER_FILE = 5
@@ -547,10 +550,8 @@ class ConfigInitializer:
 
                 model_groups: dict[str, str] = {}
                 mtc = require_mapping(document.get("model_task_config", {}))
-                for group_name in ("replyer0", "planner", "utils", "utils_small", "tool_use"):
-                    if group_name not in mtc:
-                        continue
-                    group = require_mapping(mtc[group_name])
+                for group_name, group_value in mtc.items():
+                    group = require_mapping(group_value)
                     model_list = array_value(group, "model_list")
                     if not all(isinstance(model_name, str) for model_name in model_list):
                         raise TypeError("expected model names")
@@ -566,6 +567,9 @@ class ConfigInitializer:
                 result["providers"] = values["providers"]
                 result["models"] = values["models"]
                 result["model_groups"] = values["model_groups"]
+                result["siliconflow_free_text_ids"] = siliconflow_free_text_ids(
+                    tomlkit.parse(model_tmpl.read_text(encoding="utf-8"))
+                )
 
             commit_toml_source(
                 model_path,
@@ -831,6 +835,34 @@ class ConfigInitializer:
                 "errors": [qq_selection_error],
                 "patched": [],
             }
+
+        # Resolve every model group before backups/writes, including groups
+        # without a visible wizard field. Use live aliases when available.
+        if "core" in components and wizard_data.get("models"):
+            try:
+                template = tomlkit.parse((ROOT_DIR / "NachoBot/template/model_config_template.toml").read_text(encoding="utf-8"))
+                live = ROOT_DIR / "NachoBot/config/model_config.toml"
+                baseline = tomlkit.parse(live.read_text(encoding="utf-8")) if live.exists() else template
+                model_groups = {
+                    name: list(group.get("model_list", []))
+                    for name, group in baseline.get("model_task_config", {}).items()
+                }
+                overrides = wizard_data.get("model_groups", {})
+                if not isinstance(overrides, dict) or any(
+                    name not in model_groups or not isinstance(names, list)
+                    or any(not isinstance(value, str) for value in names)
+                    for name, names in overrides.items()
+                ):
+                    raise ValueError("模型组配置无效")
+                model_groups.update(overrides)
+                wizard_data = {**wizard_data, "model_groups": reconcile_deepseek_groups(
+                    model_groups, [*template.get("models", []), *baseline.get("models", [])],
+                    wizard_data["models"], wizard_data.get("providers", baseline.get("api_providers", [])),
+                    siliconflow_free_text_ids(template),
+                )}
+            except (ValueError, TypeError, OSError):
+                return {"generated": [], "skipped": list(TEMPLATE_MAP.values()), "backups": [],
+                        "errors": ["模型配置无法验证；删除 DeepSeek 后须保留至少一个 SiliconFlow 免费文本模型"], "patched": []}
 
         # Validate the selected live adapter before any unrelated target can be
         # backed up or materialized.  SnowLuma preservation must never turn a
@@ -1557,6 +1589,12 @@ class ConfigInitializer:
                 doc["models"] = aot
                 changed = True
 
+            for name, model_list in wizard_data.get("model_groups", {}).items():
+                tasks = doc.setdefault("model_task_config", tomlkit.table())
+                group = tasks.setdefault(name, tomlkit.table())
+                group["model_list"] = model_list
+                changed = True
+
         # -- Napcat adapter config.toml --
         # Upstream Core routing remains whatever is configured in nachobot_server.
         if "NachoBot-Napcat-Adapter" in target_rel and filename == "config.toml":
@@ -1972,42 +2010,15 @@ class DependencyInstaller:
             await callback("[Setup] Git 未找到，正在通过 winget 自动安装 Git...\n")
 
         try:
-            proc = await asyncio.create_subprocess_exec(
-                winget,
-                "install",
-                "--id",
-                "Git.Git",
-                "-e",
-                "--source",
-                "winget",
-                "--accept-package-agreements",
-                "--accept-source-agreements",
-                "--silent",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                cwd=str(ROOT_DIR),
+            returncode = await run_install_command(
+                [winget, "install", "--id", "Git.Git", "-e", "--source", "winget",
+                 "--accept-package-agreements", "--accept-source-agreements", "--silent"],
+                cwd=ROOT_DIR, env=os.environ.copy(), callback=callback,
             )
-
-            import locale
-
-            fallback_enc = locale.getpreferredencoding(False) or "gbk"
-            if proc.stdout is not None:
-                while True:
-                    line = await proc.stdout.readline()
-                    if not line:
-                        break
-                    try:
-                        text = line.decode("utf-8")
-                    except UnicodeDecodeError:
-                        text = line.decode(fallback_enc, errors="replace")
-                    if callback:
-                        await callback(text)
-
-            await proc.wait()
-            if proc.returncode != 0:
+            if returncode != 0:
                 return {
                     "status": "error",
-                    "message": f"Git 自动安装失败，winget 退出码: {proc.returncode}",
+                    "message": f"Git 自动安装失败，winget 退出码: {returncode}",
                 }
 
             # The current WebUI process does not automatically inherit PATH changes
@@ -2228,8 +2239,6 @@ class DependencyInstaller:
         locked: bool = False,
     ) -> dict[str, Any]:
         """Execute `uv sync`, optionally requiring the committed lockfile."""
-        import locale
-
         env = os.environ.copy()
         env.pop("VIRTUAL_ENV", None)
         # Never allow the WebUI process' own uv environment override to redirect
@@ -2245,34 +2254,14 @@ class DependencyInstaller:
                 command.append("--locked")
             else:
                 command.extend(["--python", ">=3.11,<=3.13"])
-            proc = await asyncio.create_subprocess_exec(
-                *command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                cwd=str(project_dir),
-                env=env,
-            )
+            returncode = await run_install_command(command, cwd=project_dir, env=env, callback=callback)
 
-            fallback_enc = locale.getpreferredencoding(False) or "gbk"
-            while True:
-                line = await proc.stdout.readline()
-                if not line:
-                    break
-                try:
-                    text = line.decode("utf-8")
-                except UnicodeDecodeError:
-                    text = line.decode(fallback_enc, errors="replace")
-                if callback:
-                    await callback(text)
-
-            await proc.wait()
-
-            if proc.returncode == 0:
+            if returncode == 0:
                 return {"status": "ok", "message": "依赖安装完成"}
             else:
                 return {
                     "status": "error",
-                    "message": f"uv sync 退出码: {proc.returncode}",
+                    "message": f"uv sync 退出码: {returncode}",
                 }
         except FileNotFoundError:
             return {"status": "error", "message": "uv 未安装，请先安装 uv"}
@@ -2285,8 +2274,6 @@ class DependencyInstaller:
         callback: Callable[[str], Any] | None,
     ) -> dict[str, Any]:
         """Install and launch-check the Chromium revision required by Playwright."""
-        import locale
-
         env = os.environ.copy()
         env.pop("VIRTUAL_ENV", None)
         # Playwright must use the Core project environment, not an inherited
@@ -2297,35 +2284,15 @@ class DependencyInstaller:
         env["PYTHONUTF8"] = "1"
 
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "uv",
-                "run",
-                "python",
-                "scripts/ensure_playwright.py",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                cwd=str(project_dir),
-                env=env,
+            returncode = await run_install_command(
+                ["uv", "run", "python", "scripts/ensure_playwright.py"],
+                cwd=project_dir, env=env, callback=callback,
             )
-
-            fallback_enc = locale.getpreferredencoding(False) or "gbk"
-            while True:
-                line = await proc.stdout.readline()
-                if not line:
-                    break
-                try:
-                    text = line.decode("utf-8")
-                except UnicodeDecodeError:
-                    text = line.decode(fallback_enc, errors="replace")
-                if callback:
-                    await callback(text)
-
-            await proc.wait()
-            if proc.returncode == 0:
+            if returncode == 0:
                 return {"status": "ok", "message": "Playwright Chromium 已就绪"}
             return {
                 "status": "error",
-                "message": f"Playwright Chromium 准备失败，退出码: {proc.returncode}",
+                "message": f"Playwright Chromium 准备失败，退出码: {returncode}",
             }
         except FileNotFoundError:
             return {"status": "error", "message": "uv 未安装，请先安装 uv"}

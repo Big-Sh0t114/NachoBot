@@ -15,6 +15,7 @@ import re
 import secrets
 import signal
 import subprocess
+import sys
 import time
 from collections import deque
 from collections.abc import Mapping
@@ -29,6 +30,7 @@ import psutil
 
 try:
     from .multimodal_runtime import MultimodalRuntimeManager
+    from .install_output import InstallSnapshot, decode_install_progress, run_install_command, uv_service_install_plan
     from .qq_adapter_selector import (
         DEFAULT_QQ_ADAPTER,
         QQAdapterSelectorError,
@@ -36,6 +38,7 @@ try:
     )
 except ImportError:
     from multimodal_runtime import MultimodalRuntimeManager
+    from install_output import InstallSnapshot, decode_install_progress, run_install_command, uv_service_install_plan
     from qq_adapter_selector import (
         DEFAULT_QQ_ADAPTER,
         QQAdapterSelectorError,
@@ -3938,6 +3941,7 @@ class ProcessManager:
         # 'VIRTUAL_ENV does not match' warnings in child uv processes
         env = os.environ.copy()
         env.pop("VIRTUAL_ENV", None)
+        env.pop("UV_PROJECT_ENVIRONMENT", None)
         env["PYTHONNOUSERSITE"] = "1"
         # Force Python subprocesses to use UTF-8 output encoding
         env["PYTHONIOENCODING"] = "utf-8"
@@ -3961,12 +3965,17 @@ class ProcessManager:
         # including when a service/group override attempts to inject it.
         env.pop("NACHOBOT_WEBUI_TOKEN", None)
 
-        if service_id == "nachobot":
-            try:
+        try:
+            cmd = await self._prepare_service_dependencies(service_id, cmd, full_cwd, env)
+            if service_id == "nachobot":
                 await self._prepare_playwright_chromium(service_id, full_cwd, env)
-            except asyncio.CancelledError:
-                state.status = ServiceStatus.STOPPED
-                raise
+        except asyncio.CancelledError:
+            state.status = ServiceStatus.STOPPED
+            raise
+        except Exception as exc:
+            state.status = ServiceStatus.ERROR
+            await self._broadcast(service_id, f"[WebUI] ERROR: 依赖准备失败: {exc}\n")
+            return
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -4465,6 +4474,22 @@ class ProcessManager:
 
     # ---- internal helpers ----
 
+    async def _prepare_service_dependencies(self, service_id, command, cwd, env) -> list[str]:
+        plan = uv_service_install_plan(command)
+        if plan is None:
+            return command
+        install, launch = plan
+        await self._broadcast(service_id, "[WebUI] 正在检查并补齐服务依赖...\n")
+
+        async def on_frame(frame):
+            await self._broadcast(service_id, frame)
+
+        returncode = await run_install_command(install, cwd=cwd, env=env, callback=on_frame)
+        if returncode != 0:
+            raise RuntimeError(f"uv sync 退出码: {returncode}")
+        await self._broadcast(service_id, "[WebUI] 服务依赖已就绪，正在启动...\n")
+        return launch
+
     async def _prepare_playwright_chromium(
         self,
         service_id: str,
@@ -4481,38 +4506,20 @@ class ProcessManager:
             return
 
         await self._broadcast(service_id, "[WebUI] Checking Playwright Chromium...\n")
-        proc = None
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "uv",
-                "run",
-                "python",
-                "scripts/ensure_playwright.py",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                cwd=str(cwd),
-                env=env,
+            async def on_frame(frame):
+                await self._broadcast(service_id, frame)
+
+            returncode = await run_install_command(
+                ["uv", "run", "python", "scripts/ensure_playwright.py"],
+                cwd=cwd, env=env, callback=on_frame,
             )
-            fallback_enc = locale.getpreferredencoding(False) or "gbk"
-            while True:
-                line = await proc.stdout.readline()
-                if not line:
-                    break
-                try:
-                    text = line.decode("utf-8")
-                except UnicodeDecodeError:
-                    text = line.decode(fallback_enc, errors="replace")
-                await self._broadcast(service_id, _ANSI_RE.sub("", text))
-            await proc.wait()
-            if proc.returncode != 0:
+            if returncode != 0:
                 await self._broadcast(
                     service_id,
                     "[WebUI] WARN: Playwright Chromium preparation failed; web search will use HTTP fallback\n",
                 )
         except asyncio.CancelledError:
-            if proc is not None and proc.returncode is None:
-                proc.terminate()
-                await proc.wait()
             raise
         except Exception as exc:
             await self._broadcast(
@@ -4527,9 +4534,16 @@ class ProcessManager:
         if state is None:
             state = ServiceState()
             self.states[service_id] = state
-        state.log_buffer.append(line)
+        if (isinstance(line, InstallSnapshot) and state.log_buffer
+                and isinstance(state.log_buffer[-1], InstallSnapshot)
+                and state.log_buffer[-1].key == line.key):
+            state.log_buffer[-1] = line
+        else:
+            state.log_buffer.append(line)
 
         tagged = f"[{service_id}] {line}"
+        if isinstance(line, InstallSnapshot):
+            tagged = InstallSnapshot(tagged, f"{service_id}:{line.key}")
 
         for cb in self._ws_subscribers.get(service_id, []):
             try:
@@ -4558,6 +4572,7 @@ class ProcessManager:
                     text = line.decode(fallback_enc, errors="replace")
                 # Strip ANSI escape codes — the web terminal uses CSS styling
                 text = _ANSI_RE.sub('', text)
+                text = decode_install_progress(text)
                 await self._broadcast(service_id, text)
         except asyncio.CancelledError:
             pass
@@ -5033,4 +5048,6 @@ class ProcessManager:
         return cmd, str(adapter_dir), {
             "NACHOBOT_TTS_TORCH_INDEX": torch_index,
             "NACHOBOT_TTS_RUNTIME_PROFILE": runtime,
+            "NACHOBOT_INSTALL_PROGRESS_PYTHON": sys.executable,
+            "NACHOBOT_INSTALL_PROGRESS_HELPER": str(Path(__file__).resolve().with_name("install_output.py")),
         }

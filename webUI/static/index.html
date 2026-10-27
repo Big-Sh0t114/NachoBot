@@ -516,7 +516,7 @@
                                 刷新 / 验证</button>
                         </div>
                         <div class="setup-check-list" id="setup-check-list">
-                            <div class="setup-check-placeholder">点击下方按钮开始检测...</div>
+                            <div class="setup-check-placeholder"><div class="setup-spinner"></div> 正在准备环境检测...</div>
                         </div>
                     </div>
                     <div class="setup-card" id="setup-port-card" style="display:none">
@@ -801,7 +801,7 @@
 
                             <div class="form-section">
                                 <div class="form-section-title">模型组分配</div>
-                                <p class="form-section-hint">以下必需模型组将自动使用上方填写的模型，部署后可在「配置编辑」中为每个模型组指定不同模型</p>
+                                <p class="form-section-hint">保留各模型组原有分配；删除 DeepSeek 模型后自动改用已保留的 SiliconFlow 免费文本模型。部署后可在「配置编辑」中调整。</p>
                                 <div class="form-row">
                                     <label class="form-label">replyer0</label>
                                     <input type="text" class="form-input setup-model-group" id="setup-grp-replyer0"

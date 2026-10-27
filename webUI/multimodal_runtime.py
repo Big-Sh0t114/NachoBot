@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import json
-import locale
 import os
 import shutil
+import subprocess
+import time
 from pathlib import Path
 from typing import Any, Callable
 
 try:
     from .setup_checks import ROOT_DIR
+    from .install_output import run_install_command
 except ImportError:
     from setup_checks import ROOT_DIR
+    from install_output import run_install_command
 
 
 class MultimodalRuntimeManager:
@@ -26,6 +29,9 @@ class MultimodalRuntimeManager:
     ADAPTER_DIR = ROOT_DIR / "NachoBot-Multimodal-Adapter"
     RUNTIME_DIR = ADAPTER_DIR / ".runtime"
     VALID_PROFILES = ("gpu", "cpu")
+    _installing: set[str] = set()
+    VALIDATION_TIMEOUT = 300
+    VALIDATION_PROGRESS_INTERVAL = 10
 
     PROFILE_META: dict[str, dict[str, str]] = {
         "gpu": {
@@ -73,6 +79,7 @@ class MultimodalRuntimeManager:
             return (
                 data.get("schema") == cls.SCHEMA_VERSION
                 and data.get("profile") == profile
+                and data.get("state", "ready") == "ready"
             )
         except Exception:
             return False
@@ -110,7 +117,10 @@ class MultimodalRuntimeManager:
 
         expected_cuda = "True" if profile == "gpu" else "False"
         check = (
-            "import torch, transformers, timm, sherpa_onnx; "
+            "import importlib; "
+            "[(print('runtime-check: ' + name, flush=True), importlib.import_module(name)) "
+            "for name in ('torch', 'transformers', 'timm', 'sherpa_onnx')]; "
+            "import torch; "
             "has_cuda_build = torch.version.cuda is not None; "
             f"assert has_cuda_build is {expected_cuda}, "
             "f'unexpected torch build: {torch.__version__}, cuda={torch.version.cuda}'; "
@@ -118,28 +128,81 @@ class MultimodalRuntimeManager:
         )
 
         env = os.environ.copy()
+        env.pop("PYTHONHOME", None)
+        env.pop("PYTHONPATH", None)
         env["PYTHONNOUSERSITE"] = "1"
         try:
-            import subprocess
-
             result = subprocess.run(
-                [str(python), "-c", check],
+                [str(python), "-I", "-u", "-c", check],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
                 env=env,
-                timeout=60,
+                cwd=str(cls.ADAPTER_DIR),
+                timeout=cls.VALIDATION_TIMEOUT,
                 check=False,
             )
+        except subprocess.TimeoutExpired as exc:
+            output = exc.output or ""
+            if isinstance(output, bytes):
+                output = output.decode("utf-8", errors="replace")
+            stages = [line for line in output.splitlines() if line.startswith("runtime-check: ")]
+            stage = stages[-1] if stages else "Python 启动"
+            return False, f"依赖导入验证超时（{cls.VALIDATION_TIMEOUT} 秒），最后阶段: {stage}"
         except Exception as exc:
             return False, str(exc)
 
         output = (result.stdout or "").strip()
         if result.returncode != 0:
             return False, output or f"验证进程退出码: {result.returncode}"
-        return True, output or "runtime-ok"
+        return True, output.splitlines()[-1] if output else "runtime-ok"
+
+    @classmethod
+    async def _validate_after_install(cls, profile, callback) -> tuple[bool, str]:
+        """Give cold imports time to finish while keeping the wizard informed."""
+        if callback:
+            await callback(
+                f"[Runtime] 正在导入并验证 {cls.PROFILE_META[profile]['label']} 依赖；"
+                f"首次加载可能较慢，最多等待 {cls.VALIDATION_TIMEOUT} 秒...\n"
+            )
+        started = time.monotonic()
+        validation = asyncio.create_task(asyncio.to_thread(cls._validate_runtime, profile))
+        while True:
+            done, _ = await asyncio.wait({validation}, timeout=cls.VALIDATION_PROGRESS_INTERVAL)
+            if done:
+                return validation.result()
+            if callback:
+                await callback(f"[Runtime] 依赖导入验证仍在进行，已等待 {int(time.monotonic() - started)} 秒...\n")
+
+    @classmethod
+    def _check_dependencies(cls, profile: str) -> tuple[bool, str]:
+        """Check the whole locked environment without changing it or using the network."""
+        project = cls.ADAPTER_DIR if profile == "gpu" else cls.RUNTIME_DIR / f"webui-{profile}"
+        if not (project / "pyproject.toml").is_file() or not (project / "uv.lock").is_file():
+            return False, "缺少依赖清单或锁文件，请验证 / 补齐"
+        if profile == "cpu":
+            try:
+                if (project / "pyproject.toml").read_bytes() != (cls.ADAPTER_DIR / "pyproject.toml.cpu").read_bytes():
+                    return False, "CPU 依赖清单已变化，请验证 / 补齐"
+            except OSError:
+                return False, "无法读取 CPU 依赖清单，请验证 / 补齐"
+        env = os.environ.copy()
+        env.pop("VIRTUAL_ENV", None)
+        env["UV_PROJECT_ENVIRONMENT"] = str(cls.env_dir(profile))
+        env["PYTHONNOUSERSITE"] = "1"
+        command = [shutil.which("uv") or "uv", "sync", "--check", "--locked", "--offline",
+                   "--no-python-downloads", "--python", str(cls.python_path(profile))]
+        if profile == "cpu":
+            command.append("--no-install-project")
+        try:
+            result = subprocess.run(command, cwd=project, env=env, capture_output=True, timeout=15)
+        except (OSError, subprocess.TimeoutExpired):
+            return False, "依赖完整性检查未通过，请验证 / 补齐"
+        if result.returncode != 0:
+            return False, "依赖不完整或与锁文件不一致，请验证 / 补齐"
+        return True, "依赖完整性检查通过"
 
     @classmethod
     def get_status(cls, profile: str) -> dict[str, Any]:
@@ -158,13 +221,20 @@ class MultimodalRuntimeManager:
             and not marker_path.exists()
             and local_payload
         )
-        installed = python.exists() and local_payload and (marker_valid or legacy_gpu)
+        eligible = python.exists() and local_payload and (marker_valid or legacy_gpu)
+        if profile in cls._installing:
+            installed, message = False, "正在验证 / 补齐依赖"
+        elif eligible:
+            installed, message = cls._check_dependencies(profile)
+        else:
+            installed, message = False, "环境缺失、上次安装未完成或依赖不完整，请安装 / 补齐"
         return {
             "id": profile,
             "label": cls.PROFILE_META[profile]["label"],
             "installed": installed,
             "legacy": legacy_gpu,
             "path": str(cls.env_dir(profile)),
+            "message": message,
         }
 
     @classmethod
@@ -177,12 +247,39 @@ class MultimodalRuntimeManager:
         status = cls.get_status(profile)
         if not status["installed"]:
             raise RuntimeError(
-                f"Multimodal {status['label']} 环境尚未安装，请先在一键启动页面补齐依赖"
+                f"Multimodal {status['label']}: {status['message']}，请先在一键启动页面补齐依赖"
             )
         return cls.python_path(profile)
 
     @classmethod
     async def install(
+        cls,
+        profile: str,
+        callback: Callable[[str], Any] | None = None,
+    ) -> dict[str, Any]:
+        """Always sync on retry; retain a failed marker instead of accepting leftovers."""
+        try:
+            profile = cls.normalize_profile(profile)
+        except ValueError as exc:
+            return {"status": "error", "message": str(exc)}
+        if profile in cls._installing:
+            return {"status": "error", "message": "该环境正在安装，请等待当前任务完成"}
+        cls._installing.add(profile)
+        succeeded = False
+        try:
+            result = await cls._install(profile, callback)
+            succeeded = result.get("status") == "ok"
+            return result
+        finally:
+            cls._installing.discard(profile)
+            marker = cls._marker_path(profile)
+            if not succeeded and marker.parent.is_dir():
+                marker.write_text(json.dumps({
+                    "schema": cls.SCHEMA_VERSION, "profile": profile, "state": "failed",
+                }), encoding="utf-8")
+
+    @classmethod
+    async def _install(
         cls,
         profile: str,
         callback: Callable[[str], Any] | None = None,
@@ -196,7 +293,11 @@ class MultimodalRuntimeManager:
         if not cls.ADAPTER_DIR.exists():
             return {"status": "error", "message": f"目录不存在: {cls.ADAPTER_DIR}"}
 
-        cls._marker_path(profile).unlink(missing_ok=True)
+        marker = cls._marker_path(profile)
+        if marker.parent.is_dir():
+            marker.write_text(json.dumps({
+                "schema": cls.SCHEMA_VERSION, "profile": profile, "state": "installing",
+            }), encoding="utf-8")
         if callback:
             await callback(
                 f"[Runtime] 正在准备 {cls.PROFILE_META[profile]['label']} 环境...\n"
@@ -221,36 +322,20 @@ class MultimodalRuntimeManager:
             # application source is executed from ADAPTER_DIR at launch time.
             command.append("--no-install-project")
 
+        if callback:
+            await callback("[Runtime] 正在执行 uv sync 验证并补齐全部依赖（已有环境也会重新检查）...\n")
+
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                cwd=str(project_dir),
-                env=env,
-            )
-            fallback_enc = locale.getpreferredencoding(False) or "gbk"
-            if proc.stdout is not None:
-                while True:
-                    line = await proc.stdout.readline()
-                    if not line:
-                        break
-                    try:
-                        text = line.decode("utf-8")
-                    except UnicodeDecodeError:
-                        text = line.decode(fallback_enc, errors="replace")
-                    if callback:
-                        await callback(text)
-            await proc.wait()
+            returncode = await run_install_command(command, cwd=project_dir, env=env, callback=callback)
         except FileNotFoundError:
             return {"status": "error", "message": "uv 未安装，请先安装 uv"}
         except Exception as exc:
             return {"status": "error", "message": f"安装出错: {exc}"}
 
-        if proc.returncode != 0:
+        if returncode != 0:
             return {
                 "status": "error",
-                "message": f"{cls.PROFILE_META[profile]['label']} 环境安装失败，uv sync 退出码: {proc.returncode}",
+                "message": f"{cls.PROFILE_META[profile]['label']} 环境安装失败，uv sync 退出码: {returncode}",
             }
 
         python = cls.python_path(profile)
@@ -260,7 +345,7 @@ class MultimodalRuntimeManager:
                 "message": f"环境安装完成但未找到 Python: {python}",
             }
 
-        valid, validation_message = await asyncio.to_thread(cls._validate_runtime, profile)
+        valid, validation_message = await cls._validate_after_install(profile, callback)
         if not valid:
             return {
                 "status": "error",

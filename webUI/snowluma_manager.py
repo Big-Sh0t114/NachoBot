@@ -134,6 +134,7 @@ class SnowLumaSecretStoreError(SnowLumaApiError):
 
 
 SNOWLUMA_PASSWORD_REQUIRED = "PASSWORD_REQUIRED"
+SNOWLUMA_LOGIN_RATE_LIMITED = "LOGIN_RATE_LIMITED"
 SNOWLUMA_AGREEMENT_REQUIRED = "AGREEMENT_REQUIRED"
 SNOWLUMA_TOTP_REQUIRED = "TOTP_REQUIRED"
 SNOWLUMA_PASSWORD_CHANGE_REQUIRED = "PASSWORD_CHANGE_REQUIRED"
@@ -1332,6 +1333,28 @@ class SnowLumaAPIClient:
                     payload = json.loads(raw.decode("utf-8")) if raw else {}
             except Exception:
                 payload = {}
+            if exc.code == 429:
+                # Forward only a bounded retry delay, never upstream text or
+                # credentials. The bundled login endpoint reports seconds in
+                # its message rather than a Retry-After header.
+                retry_after = str(exc.headers.get("Retry-After", "")) if exc.headers else ""
+                if not retry_after.isascii() or not retry_after.isdigit():
+                    message = payload.get("message", "") if isinstance(payload, Mapping) else ""
+                    match = (
+                        re.fullmatch(r"登录尝试过多，请 ([0-9]{1,5}) 秒后重试", message)
+                        if isinstance(message, str) else None
+                    )
+                    retry_after = match.group(1) if match else ""
+                seconds = (
+                    min(int(retry_after), 86400)
+                    if retry_after.isascii() and retry_after.isdigit() and len(retry_after) <= 5 else 0
+                )
+                raise SnowLumaApiError(
+                    f"SnowLuma 登录尝试过多，请 {seconds} 秒后重试" if seconds else "SnowLuma 登录请求已限流，请稍后重试",
+                    code=SNOWLUMA_LOGIN_RATE_LIMITED,
+                    details={"retry_after": seconds} if seconds else {},
+                    http_status=429,
+                ) from exc
             state = _state_from_payload(payload)
             if state is not None:
                 code, details = state

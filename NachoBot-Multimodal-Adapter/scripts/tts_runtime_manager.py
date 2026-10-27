@@ -19,6 +19,11 @@ from urllib.parse import urlsplit
 from urllib.error import URLError
 
 ADAPTER_ROOT = Path(__file__).resolve().parents[1]
+if str(ADAPTER_ROOT) not in sys.path:
+    sys.path.insert(0, str(ADAPTER_ROOT))
+
+from nachobot_multimodal.utils.gpt_weights import FALLBACK_GPT, FALLBACK_SOVITS, select_gpt_weights  # noqa: E402
+
 PROJECT_ROOT = ADAPTER_ROOT.parent
 RUNTIME_ROOT = ADAPTER_ROOT / ".runtime" / "tts"
 HF_CACHE = ADAPTER_ROOT / "models" / "hf_cache"
@@ -172,8 +177,20 @@ def run(
         if item in {"--index-url", "--extra-index-url", "--index"}:
             redact_next = True
     log("$ " + " ".join(displayed))
+    # WebUI injects its own terminal bridge and interpreter. Keep their extra
+    # dependencies out of the managed Torch/public/backend environments.
+    effective_env = env if env is not None else os.environ
+    progress_python = effective_env.get("NACHOBOT_INSTALL_PROGRESS_PYTHON", "")
+    progress_helper = effective_env.get("NACHOBOT_INSTALL_PROGRESS_HELPER", "")
+    launch_cmd = cmd
+    if (
+        progress_python and progress_helper
+        and Path(progress_python).is_file() and Path(progress_helper).is_file()
+        and Path(str(cmd[0])).stem.lower() == "uv"
+    ):
+        launch_cmd = [progress_python, "-I", progress_helper, "--", *map(str, cmd)]
     subprocess.run(
-        cmd,
+        launch_cmd,
         cwd=str(cwd) if cwd else None,
         env=env,
         check=True,
@@ -835,10 +852,10 @@ def ensure_gpt_assets(python: Path, source_dir: Path, runtime_dir: Path) -> None
         sovits_base = "v2Pro/s2Gv2Pro.pth"
 
     # Keep the upstream v2 default inference weights available as a fallback.
-    # If a user-configured preset is missing, make_gpt_infer_config() falls back
-    # to GPT-SoVITS' bundled tts_infer.yaml, which references these two files.
-    fallback_t2s = "gsv-v2final-pretrained/s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt"
-    fallback_vits = "gsv-v2final-pretrained/s2G2333k.pth"
+    # The managed inference config and public preset client select this same
+    # complete pair when user-configured weights are unavailable.
+    fallback_t2s = FALLBACK_GPT
+    fallback_vits = FALLBACK_SOVITS
 
     inference_patterns = [
         "chinese-hubert-base/**",
@@ -1181,8 +1198,14 @@ def make_gpt_infer_config(
 ) -> Path:
     patch_gpt_version_parser(source_dir)
     gpt_weights, sovits_weights = resolve_gpt_preset_weights(config_path)
-    if not gpt_weights or not sovits_weights:
-        return source_dir / "GPT_SoVITS" / "configs" / "tts_infer.yaml"
+    pretrained = source_dir / "GPT_SoVITS" / "pretrained_models"
+    selected = select_gpt_weights(
+        (config_path or ADAPTER_ROOT / "configs" / "gpt-sovits.toml").parent,
+        gpt_weights, sovits_weights, pretrained,
+    )
+    gpt_weights, sovits_weights = selected.gpt, selected.sovits
+    if selected.fallback:
+        log("WARN: 自定义 GPT/SoVITS 权重缺失，整组回退到默认 v2 底模")
 
     version = detect_sovits_version(sovits_weights)
     try:
@@ -1193,7 +1216,6 @@ def make_gpt_infer_config(
     is_half = runtime_device == "cuda"
 
     config_path = runtime_dir / "tts_infer.nachobot.yaml"
-    pretrained = source_dir / "GPT_SoVITS" / "pretrained_models"
     yaml_text = (
         f"version: {version}\n"
         "custom:\n"

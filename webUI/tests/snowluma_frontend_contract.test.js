@@ -197,10 +197,12 @@ assert(successRefreshIndex >= 0 && successRefreshIndex < successToastIndex, 'suc
     assert.strictEqual(delayedRefreshCalls, 1, 'delayed reconciliation must invoke the refresh once');
 
     const passwordInput = { value: 'secret-success' };
+    const manualToggle = { checked: true };
     const fakeCard = {
         querySelector(selector) {
-            assert.strictEqual(selector, '#launcher-snowluma-password');
-            return passwordInput;
+            if (selector === '#launcher-snowluma-password') return passwordInput;
+            if (selector === '#launcher-snowluma-manual-password') return manualToggle;
+            throw new Error(`Unexpected selector: ${selector}`);
         },
     };
     let capturedPassword = '';
@@ -210,8 +212,21 @@ assert(successRefreshIndex >= 0 && successRefreshIndex < successToastIndex, 'suc
     });
     assert.strictEqual(capturedPassword, 'secret-success');
     assert.strictEqual(passwordInput.value, '', 'success must clear the active password input');
+    assert.strictEqual(manualToggle.checked, false, 'success must return to saved credentials');
+    assert.strictEqual(passwordInput.disabled, true);
+
+    // A password manager can refill the field repeatedly after it was cleared.
+    // These values must never silently override the server's valid credential.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+        passwordInput.value = 'stale-browser-password';
+        await contract.withSnowLumaPassword(fakeCard, async password => {
+            assert.strictEqual(password, undefined, 'autofill must use saved credentials');
+            return { ok: true };
+        });
+    }
 
     passwordInput.value = 'secret-failure';
+    manualToggle.checked = true;
     await assert.rejects(
         contract.withSnowLumaPassword(fakeCard, async password => {
             capturedPassword = password;
@@ -221,6 +236,7 @@ assert(successRefreshIndex >= 0 && successRefreshIndex < successToastIndex, 'suc
     );
     assert.strictEqual(capturedPassword, 'secret-failure');
     assert.strictEqual(passwordInput.value, '', 'failure must clear the active password input');
+    assert.strictEqual(manualToggle.checked, false, 'failure must return to saved credentials');
 
     process.stdout.write('snowluma frontend contract: ok\n');
 })().catch(error => {

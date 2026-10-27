@@ -4,6 +4,7 @@ import os
 import struct
 from typing import AsyncIterable, AsyncIterator, Dict, Any, List
 from pathlib import Path
+from nachobot_multimodal.utils.gpt_weights import select_gpt_weights
 from nachobot_multimodal.tts.base import (
     BaseTTSModel,
     PCMChunk,
@@ -147,6 +148,7 @@ class TTSModel(BaseTTSModel):
         self._config_dir = Path(self.config.config_path).parent.resolve()
         self.host = engine_host or os.environ.get("NACHOBOT_TTS_ENGINE_HOST") or self.config.tts.host
         self.port = int(engine_port or os.environ.get("NACHOBOT_TTS_ENGINE_PORT") or self.config.tts.port)
+        self._managed_weights = engine_host is not None or bool(os.environ.get("NACHOBOT_TTS_ENGINE_HOST"))
 
         self.base_url = f"http://{self.host}:{self.port}"
         self._ref_audio_path: str = None  # 存储当前使用的参考音频路径
@@ -226,11 +228,22 @@ class TTSModel(BaseTTSModel):
         # 设置参考音频和提示文本
         self.set_refer_audio(self._resolve_path(preset.ref_audio_path), preset.prompt_text)
 
-        # 如果预设指定了模型，则切换模型
-        if preset.gpt_model:
-            self.set_gpt_weights(self._resolve_path(preset.gpt_model))
-        if preset.sovits_model:
-            self.set_sovits_weights(self._resolve_path(preset.sovits_model))
+        # The managed engine and public client must select the same complete
+        # pair. An external API may use server-local paths, so retain its
+        # existing path semantics instead of checking them on this machine.
+        if self._managed_weights:
+            pretrained = (Path(__file__).resolve().parents[4] / ".runtime" / "tts" /
+                          "gpt-sovits" / "source" / "GPT_SoVITS" / "pretrained_models")
+            weights = select_gpt_weights(self._config_dir, preset.gpt_model, preset.sovits_model, pretrained)
+            if weights.fallback:
+                print(f"[GPT-SoVITS] WARN: 预设 {preset_name} 自定义权重缺失，使用默认底模", flush=True)
+            self.set_gpt_weights(str(weights.gpt))
+            self.set_sovits_weights(str(weights.sovits))
+        else:
+            if preset.gpt_model:
+                self.set_gpt_weights(self._resolve_path(preset.gpt_model))
+            if preset.sovits_model:
+                self.set_sovits_weights(self._resolve_path(preset.sovits_model))
 
         self._current_preset = preset_name
 

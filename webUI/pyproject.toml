@@ -10,4 +10,6 @@ dependencies = [
     "tomlkit>=0.13.0",
     "psutil>=6.0.0",
     "pyarrow>=17.0.0",
+    "pyte>=0.8.2",
+    "pywinpty>=2.0.15; sys_platform == 'win32'",
 ]
