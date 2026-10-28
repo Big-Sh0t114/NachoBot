@@ -73,7 +73,7 @@ faiss-cpu==1.15.1
     # via nachobot
 fastapi==0.140.13
     # via nachobot
-filelock==4.2.1
+filelock==3.32.7
     # via static-ffmpeg
 frozenlist==1.8.0
     # via
