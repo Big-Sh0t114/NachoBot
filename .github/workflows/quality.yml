@@ -175,9 +175,7 @@ jobs:
 
       - name: Run WebUI security and middleware regressions
         run: >-
-          uv run --no-project --python 3.12
-          --with pytest --with fastapi --with httpx --with uvicorn
-          --with tomlkit --with psutil --with websockets --with pydantic
+          uv run --project webUI --locked --python 3.12 --with pytest
           python -m unittest webUI.tests.test_security_regressions
           webUI.tests.test_security webUI.tests.test_config_manager_security
           webUI.tests.test_chat_media_response_security
