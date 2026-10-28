@@ -119,7 +119,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
     color: var(--text-primary);
-    background: var(--bg-base);
+    background: var(--bg-popup);
     box-shadow: var(--shadow-lg);
 }
 
@@ -292,9 +292,7 @@
     padding: 2.5rem 2rem 1.8rem;
     border: 1px solid rgba(226, 217, 204, 0.86);
     border-radius: 28px;
-    background: rgba(255, 255, 255, 0.43);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
+    background: var(--bg-popup);
     box-shadow: var(--shadow-sm);
 }
 
@@ -553,7 +551,7 @@
     border: 0;
     border-radius: 999px;
     color: var(--text-secondary);
-    background: color-mix(in srgb, var(--bg-base) 88%, transparent);
+    background: var(--bg-popup);
     font-size: 0.84rem;
     transform: translateX(-50%);
     backdrop-filter: blur(8px);
@@ -714,7 +712,7 @@
     padding: 0.6rem 1.25rem;
     border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
     border-radius: 999px;
-    background: color-mix(in srgb, var(--bg-card) 85%, transparent);
+    background: var(--bg-popup);
     box-shadow: 0 8px 30px color-mix(in srgb, var(--text-primary) 8%, transparent);
     backdrop-filter: blur(16px);
     transform: translateX(-50%);

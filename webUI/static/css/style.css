@@ -10,6 +10,7 @@
     /* Palette */
     --bg-base:       #faf3e8;
     --bg-card:       rgba(255, 255, 255, 0.45);
+    --bg-popup:      #fffaf3;
     --bg-sidebar:    rgba(26, 26, 46, 0.85);
     --bg-sidebar-hover: #252545;
     --bg-terminal:   #1e1e2e;
@@ -1077,7 +1078,7 @@ body {
     overflow: hidden;
     border: 1px solid var(--border-light);
     border-radius: var(--radius-lg);
-    background: var(--bg-primary);
+    background: var(--bg-popup);
     box-shadow: 0 24px 70px rgba(15, 23, 42, 0.28);
 }
 

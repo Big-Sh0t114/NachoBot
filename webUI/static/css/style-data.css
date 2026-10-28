@@ -198,7 +198,7 @@
 
 /* ---- Filter dropdown ---- */
 .db-filter-dropdown {
-    background: var(--bg-card);
+    background: var(--bg-popup);
     border: 1px solid var(--border-light);
     border-radius: var(--radius-md);
     box-shadow: var(--shadow-lg);
@@ -778,7 +778,7 @@
 .modal-overlay.hidden { display: none; }
 
 .modal-card {
-    background: #fefcf9;
+    background: var(--bg-popup);
     border-radius: var(--radius-xl);
     box-shadow: var(--shadow-lg);
     width: 90%;

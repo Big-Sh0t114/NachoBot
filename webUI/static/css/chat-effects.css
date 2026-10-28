@@ -115,7 +115,7 @@ html[data-omega-tip-active="true"] .chat-composer::before {
 .chat-name-modal {
     width: min(92vw, 460px);
     max-height: none;
-    background: #fffaf3;
+    background: var(--bg-popup);
     border: 1px solid rgba(203, 190, 171, 0.7);
     box-shadow:
         0 24px 70px rgba(30, 41, 59, 0.22),
