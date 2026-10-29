@@ -31,7 +31,12 @@ If you need to use a tool, please directly call the corresponding tool function.
 
 现在，{sender}发送了内容:{target_message},你想要回复ta。现在是{time_now}。
 """
-    prompt = Prompt(tool_executor_prompt, "tool_executor_prompt", _should_register=False)
+    prompt = Prompt(
+        tool_executor_prompt,
+        "tool_executor_prompt",
+        _should_register=False,
+        cache_layout=("chat_history", "sender"),
+    )
     global_prompt_manager.register(prompt)
 
     mcp_tool_executor_prompt = """
@@ -54,7 +59,12 @@ If you need to use a tool, please directly call the corresponding tool function.
 
 需要工具时直接调用对应函数；无需继续调用时输出 MCP_TASK_COMPLETE。
 """
-    mcp_prompt = Prompt(mcp_tool_executor_prompt, "mcp_tool_executor_prompt", _should_register=False)
+    mcp_prompt = Prompt(
+        mcp_tool_executor_prompt,
+        "mcp_tool_executor_prompt",
+        _should_register=False,
+        cache_layout=("chat_history", "sender"),
+    )
     global_prompt_manager.register(mcp_prompt)
 
 
@@ -96,7 +106,11 @@ class ToolExecutor:
         self.prompt_template = prompt_template
 
         target_model_set = model_set or model_config.model_task_config.tool_use
-        self.llm_model = LLMRequest(model_set=target_model_set, request_type="tool_executor")
+        self.llm_model = LLMRequest(
+            model_set=target_model_set,
+            request_type="tool_executor",
+            session_id=self.chat_id,
+        )
 
         # 缓存配置
         self.enable_cache = enable_cache
@@ -163,7 +177,7 @@ class ToolExecutor:
         )
         prompt_supplement = self._format_tool_context_supplement(prepared_contexts)
         if prompt_supplement:
-            prompt = f"{prompt}\n\n{prompt_supplement}"
+            prompt += "\n\n" + prompt_supplement
 
         logger.debug(f"{self.log_prefix}开始LLM工具调用分析")
 

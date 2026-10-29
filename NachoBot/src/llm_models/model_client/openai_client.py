@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import hashlib
 import io
 import json
 import re
@@ -48,10 +49,27 @@ from ..exceptions import (
     sanitize_error_text,
 )
 from ..payload_content.message import Message, RoleType
+from ..prompt_layout import PromptCacheScope
 from ..payload_content.resp_format import RespFormat
 from ..payload_content.tool_option import ToolOption, ToolParam, ToolCall
 
 logger = get_logger("OpenAI客户端")
+
+
+def _prompt_cache_key(api_provider: APIProvider, scope: PromptCacheScope) -> str:
+    """Hash stable provider/session/task identity without prompt or credential data."""
+    identity = (api_provider.name, api_provider.client_type, scope.session_id, scope.request_type)
+    canonical = json.dumps(identity, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _request_cache_scope(messages: list[Message]) -> PromptCacheScope | None:
+    """Return the first exact immutable scope carried by request messages."""
+    for message in messages:
+        scope = getattr(message, "cache_context", None)
+        if type(scope) is PromptCacheScope:
+            return scope
+    return None
 
 
 def _optional_mapping_or_attribute(value: Any, key: str) -> Any:
@@ -245,7 +263,11 @@ def _is_loopback_url(url: str) -> bool:
         return False
 
 
-def _convert_messages(messages: list[Message]) -> list[ChatCompletionMessageParam]:
+def _convert_messages(
+    messages: list[Message],
+    *,
+    enable_prompt_cache_breakpoints: bool = False,
+) -> list[ChatCompletionMessageParam]:
     """
     转换消息格式 - 将消息转换为OpenAI API所需的格式
     :param messages: 消息列表
@@ -288,6 +310,15 @@ def _convert_messages(messages: list[Message]) -> list[ChatCompletionMessagePara
                     content.append({"type": "text", "text": item})
         else:
             raise RuntimeError("无法触及的代码：请使用MessageBuilder类构建消息对象")
+
+        if enable_prompt_cache_breakpoints and getattr(message, "cache_breakpoint", False) is True:
+            if isinstance(content, str):
+                content = [{"type": "text", "text": content}]
+            if isinstance(content, list):
+                for text_part in reversed(content):
+                    if isinstance(text_part, dict) and text_part.get("type") == "text":
+                        text_part["prompt_cache_breakpoint"] = {"mode": "explicit"}
+                        break
 
         ret = {
             "role": message.role.value,
@@ -696,10 +727,24 @@ class OpenaiClient(BaseClient):
             async_response_parser = _default_normal_response_parser
 
         # 将messages构造为OpenAI API所需的格式
-        messages: Iterable[ChatCompletionMessageParam] = _convert_messages(message_list)
+        api_provider = getattr(self, "api_provider", None)
+        messages: Iterable[ChatCompletionMessageParam] = _convert_messages(
+            message_list,
+            enable_prompt_cache_breakpoints=(
+                getattr(api_provider, "enable_prompt_cache_breakpoints", False) is True
+            ),
+        )
         # 将tool_options转换为OpenAI API所需的格式
         tools: Iterable[ChatCompletionToolParam] = _convert_tool_options(tool_options) if tool_options else NOT_GIVEN  # type: ignore
         # Shared kwargs feed safe error metadata; keep the legacy request values unchanged.
+        request_extra_params = extra_params
+        if getattr(api_provider, "enable_session_cache_key", False) is True:
+            scope = _request_cache_scope(message_list)
+            if scope is not None:
+                request_extra_params = dict(extra_params or {})
+                if "prompt_cache_key" not in request_extra_params:
+                    request_extra_params["prompt_cache_key"] = _prompt_cache_key(api_provider, scope)
+
         request_params = {
             "model": model_info.model_identifier,
             "messages": messages,
@@ -708,7 +753,7 @@ class OpenaiClient(BaseClient):
             "max_tokens": max_tokens,
             "stream": model_info.force_stream_mode,
             "response_format": NOT_GIVEN,
-            "extra_body": extra_params,
+            "extra_body": request_extra_params,
         }
 
         req_task: asyncio.Task[Any] | None = None

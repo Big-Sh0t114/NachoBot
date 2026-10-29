@@ -356,7 +356,9 @@ class CapabilityRouter:
             model_set = getattr(model_config.model_task_config, "tool_use", None)
             self._decider_enabled = bool(model_set and model_set.model_list)
             self._decider = (
-                LLMRequest(model_set=model_set, request_type="capability_router") if self._decider_enabled else None
+                LLMRequest(model_set=model_set, request_type="capability_router", session_id=self.chat_id)
+                if self._decider_enabled
+                else None
             )
             if auto_mcp is None:
                 mcp_settings = getattr(mcp_config, "mcp", mcp_config)

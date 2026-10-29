@@ -33,8 +33,22 @@ class APIProvider(ConfigBase):
     retry_interval: int = 10
     """重试间隔（如果API调用失败，重试的间隔时间，单位：秒）"""
 
+    enable_session_cache_key: bool = field(default=False)
+    """是否为有会话ID的 OpenAI 响应请求附加稳定的 prompt_cache_key。"""
+
+    enable_prompt_cache_breakpoints: bool = field(default=False)
+    """是否为显式标记的稳定文本边界发送 prompt_cache_breakpoint 元数据。"""
+
     def get_api_key(self) -> str:
         return self.api_key
+
+    @classmethod
+    def from_dict(cls, data: dict):
+        """Reject non-boolean cache-key settings before generic config coercion."""
+        for field_name in ("enable_session_cache_key", "enable_prompt_cache_breakpoints"):
+            if field_name in data and type(data[field_name]) is not bool:
+                raise TypeError(f"Field '{field_name}' must be a boolean")
+        return super().from_dict(data)
 
     def __post_init__(self):
         """确保api_key在repr中不被显示"""
@@ -44,6 +58,10 @@ class APIProvider(ConfigBase):
             raise ValueError("API基础URL不能为空，请在配置中设置有效的基础URL。")
         if not self.name:
             raise ValueError("API提供商名称不能为空，请在配置中设置有效的名称。")
+        if type(self.enable_session_cache_key) is not bool:
+            raise ValueError("enable_session_cache_key 必须是布尔值。")
+        if type(self.enable_prompt_cache_breakpoints) is not bool:
+            raise ValueError("enable_prompt_cache_breakpoints 必须是布尔值。")
 
 
 @dataclass

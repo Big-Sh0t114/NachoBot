@@ -7,10 +7,12 @@ from contextlib import asynccontextmanager
 from typing import Dict, Any, Optional, List, Union
 
 from src.common.logger import get_logger
+from src.llm_models.prompt_layout import SegmentedPrompt
 
 install(extra_lines=3)
 
 logger = get_logger("prompt_build")
+_INTERNAL_FORMAT_VALUES = object()
 
 
 class PromptContext:
@@ -165,11 +167,23 @@ class Prompt(str):
         """将临时标记还原为实际的花括号字符"""
         return template.replace(Prompt._TEMP_LEFT_BRACE, "{").replace(Prompt._TEMP_RIGHT_BRACE, "}")
 
-    def __new__(cls, fstr, name: Optional[str] = None, args: Union[List[Any], tuple[Any, ...]] = None, **kwargs):
+    def __new__(
+        cls,
+        fstr,
+        name: Optional[str] = None,
+        args: Union[List[Any], tuple[Any, ...]] = None,
+        *,
+        cache_layout: Optional[tuple[str, str]] = None,
+        **kwargs,
+    ):
         # 如果传入的是元组，转换为列表
         if isinstance(args, tuple):
             args = list(args)
         should_register = kwargs.pop("_should_register", True)
+        internal_format_values = kwargs.pop("_prompt_internal_format_values", _INTERNAL_FORMAT_VALUES)
+        if internal_format_values is not _INTERNAL_FORMAT_VALUES:
+            kwargs = internal_format_values
+        normalized_layout = cls._normalize_cache_layout(cache_layout)
 
         # 预处理模板中的转义花括号
         processed_fstr = cls._process_escaped_braces(fstr)
@@ -193,6 +207,7 @@ class Prompt(str):
         obj.args = template_args
         obj._args = args or []
         obj._kwargs = kwargs
+        obj._cache_layout = normalized_layout
 
         # 修改自动注册逻辑
         if should_register and not global_prompt_manager._context._current_context:
@@ -201,13 +216,150 @@ class Prompt(str):
 
     @classmethod
     async def create_async(
-        cls, fstr, name: Optional[str] = None, args: Union[List[Any], tuple[Any, ...]] = None, **kwargs
+        cls,
+        fstr,
+        name: Optional[str] = None,
+        args: Union[List[Any], tuple[Any, ...]] = None,
+        *,
+        cache_layout: Optional[tuple[str, str]] = None,
+        **kwargs,
     ):
         """异步创建Prompt实例"""
-        prompt = cls(fstr, name, args, **kwargs)
+        if cache_layout is None:
+            prompt = cls(fstr, name, args, **kwargs)
+        else:
+            prompt = cls(fstr, name, args, cache_layout=cache_layout, **kwargs)
         if global_prompt_manager._context._current_context:
             await global_prompt_manager._context.register_async(prompt)
         return prompt
+
+    @staticmethod
+    def _normalize_cache_layout(cache_layout: Optional[tuple[str, str]]) -> Optional[tuple[str, str]]:
+        """Validate explicit developer metadata without treating it as a field value."""
+        if cache_layout is None:
+            return None
+        if (
+            not isinstance(cache_layout, tuple)
+            or len(cache_layout) != 2
+            or any(not isinstance(field_name, str) or not field_name for field_name in cache_layout)
+            or cache_layout[0] == cache_layout[1]
+        ):
+            raise ValueError("cache_layout must be a pair of distinct non-empty field names")
+        return cache_layout
+
+    @staticmethod
+    def _cache_layout_offsets(template: str, cache_layout: tuple[str, str]) -> Optional[tuple[int, int]]:
+        """Find unique, ordered top-level marker fields in the unformatted template."""
+        history_field, round_field = cache_layout
+        matches: dict[str, list[int]] = {history_field: [], round_field: []}
+        index = 0
+        while index < len(template):
+            if template.startswith("{{", index) or template.startswith("}}", index):
+                index += 2
+                continue
+            if template[index] != "{":
+                index += 1
+                continue
+
+            field_start = index
+            cursor = index + 1
+            nested_depth = 0
+            while cursor < len(template):
+                if template[cursor] == "{":
+                    nested_depth += 1
+                elif template[cursor] == "}":
+                    if nested_depth == 0:
+                        break
+                    nested_depth -= 1
+                cursor += 1
+            if cursor >= len(template):
+                return None
+
+            field_expression = template[field_start + 1 : cursor]
+            separators = [
+                position
+                for position in (field_expression.find("!"), field_expression.find(":"))
+                if position >= 0
+            ]
+            field_name = field_expression[: min(separators)] if separators else field_expression
+            if field_name in matches:
+                matches[field_name].append(field_start)
+            index = cursor + 1
+
+        if any(len(positions) != 1 for positions in matches.values()):
+            return None
+        history_offset = matches[history_field][0]
+        round_offset = matches[round_field][0]
+        if history_offset >= round_offset:
+            return None
+        return history_offset, round_offset
+
+    @classmethod
+    def _format_template_with_layout(
+        cls,
+        template: str,
+        args: List[Any],
+        kwargs: Dict[str, Any],
+        cache_layout: tuple[str, str],
+    ) -> str | SegmentedPrompt:
+        """Render once with legacy substitutions and retain proven source boundaries."""
+        processed_template = cls._process_escaped_braces(template)
+        template_args = []
+        result = re.findall(r"\{(.*?)}", processed_template)
+        for expr in result:
+            if expr and expr not in template_args:
+                template_args.append(expr)
+
+        formatted_args = {}
+        if args:
+            for index, arg in enumerate(args):
+                if index >= len(template_args):
+                    logger.error("构建提示词模板失败，输入的位置参数数量超过模板字段数量")
+                    raise ValueError("格式化模板失败")
+                field_name = template_args[index]
+                formatted_args[field_name] = arg.format(**kwargs) if isinstance(arg, Prompt) else arg
+
+        formatted_kwargs = {}
+        if kwargs:
+            for key, value in kwargs.items():
+                if isinstance(value, Prompt):
+                    remaining_kwargs = {name: item for name, item in kwargs.items() if name != key}
+                    formatted_kwargs[key] = value.format(**remaining_kwargs)
+                else:
+                    formatted_kwargs[key] = value
+
+        def render_part(part: str) -> str:
+            if args:
+                part = part.format(**formatted_args)
+            if kwargs:
+                part = part.format(**formatted_kwargs)
+            return cls._restore_escaped_braces(part)
+
+        try:
+            rendered = render_part(processed_template)
+        except (IndexError, KeyError) as exc:
+            raise ValueError(
+                f"格式化模板失败: {template}, args={formatted_args}, kwargs={formatted_kwargs} {str(exc)}"
+            ) from exc
+
+        offsets = cls._cache_layout_offsets(processed_template, cache_layout)
+        if offsets is None:
+            return rendered
+
+        try:
+            starts = (0, offsets[0], offsets[1], len(processed_template))
+            chunks = [
+                render_part(processed_template[start:end])
+                for start, end in zip(starts, starts[1:], strict=False)
+            ]
+        except Exception:
+            # Segmentation is an optimization annotation; the already-rendered
+            # legacy prompt remains authoritative if splitting cannot be proven.
+            return rendered
+
+        if "".join(chunks) != rendered:
+            return rendered
+        return SegmentedPrompt(tuple(chunks))
 
     @classmethod
     def _format_template(cls, template, args: List[Any] = None, kwargs: Dict[str, Any] = None) -> str:
@@ -263,17 +415,26 @@ class Prompt(str):
                 f"格式化模板失败: {template}, args={formatted_args}, kwargs={formatted_kwargs} {str(e)}"
             ) from e
 
-    def format(self, *args, **kwargs) -> "str":
+    def format(self, *args, **kwargs) -> "str | SegmentedPrompt":
         """支持位置参数和关键字参数的格式化，使用"""
-        ret = type(self)(
+        format_args = list(args) if args else self._args
+        format_kwargs = kwargs or self._kwargs
+        if self._cache_layout is None:
+            constructor_values = {"_should_register": False}
+            if "cache_layout" in format_kwargs:
+                constructor_values["_prompt_internal_format_values"] = format_kwargs
+            else:
+                constructor_values.update(format_kwargs)
+            ret = type(self)(self.template, self.name, args=format_args, **constructor_values)
+            return str(ret)
+        if not format_args and not format_kwargs:
+            return self.template
+        return self._format_template_with_layout(
             self.template,
-            self.name,
-            args=list(args) if args else self._args,
-            _should_register=False,
-            **kwargs or self._kwargs,
+            args=format_args,
+            kwargs=format_kwargs,
+            cache_layout=self._cache_layout,
         )
-        # print(f"prompt build result: {ret} name: {ret.name} ")
-        return str(ret)
 
     def __str__(self) -> str:
         return super().__str__() if self._kwargs or self._args else self.template

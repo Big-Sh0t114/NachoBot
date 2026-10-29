@@ -22,7 +22,7 @@ class AdvancedPrivateReplyer(PrivateReplyer):
                 model_set = getattr(model_config.model_task_config, "file_edit", model_set)
         from src.llm_models.request_cache import cached_replyer_request
         return cached_replyer_request(self, model_set=model_set, request_type=getattr(self, "request_type", "advanced_replyer"),
-                                      config=model_config, factory=LLMRequest)
+                                      config=model_config, factory=self._express_request_factory)
 
     def __init__(self, *args, **kwargs):
         kwargs.setdefault("request_type", "advanced_replyer")

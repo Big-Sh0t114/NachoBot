@@ -4,6 +4,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from src.chat.utils.playwright_search import PlaywrightSearchProvider
+from src.chat.utils.prompt_builder import Prompt
 from src.common.logger import get_logger
 from src.common.result_cache import ResultCacheMappingView, create_result_cache_owner
 from src.config.config import global_config, model_config
@@ -51,7 +52,7 @@ class WebSearchManager:
         model_set_decider = getattr(model_config.model_task_config, "tool_use", None)
         self._decider_enabled = bool(model_set_decider and model_set_decider.model_list)
         self._decider = (
-            LLMRequest(model_set=model_set_decider, request_type="web_search_decider")
+            LLMRequest(model_set=model_set_decider, request_type="web_search_decider", session_id=self.chat_id)
             if self._decider_enabled
             else None
         )
@@ -145,7 +146,12 @@ class WebSearchManager:
         if not self._decider:
             return None
 
-        prompt = DECISION_PROMPT.format(
+        prompt = Prompt(
+            DECISION_PROMPT,
+            "web_search_decision",
+            _should_register=False,
+            cache_layout=("chat_history", "sender"),
+        ).format(
             bot_name=bot_name,
             time_now=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
             chat_history=chat_history,

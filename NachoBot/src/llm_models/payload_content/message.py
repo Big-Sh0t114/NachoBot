@@ -1,5 +1,7 @@
 from enum import Enum
 
+from ..prompt_layout import PromptCacheScope
+
 
 # 设计这系列类的目的是为未来可能的扩展做准备
 
@@ -21,6 +23,8 @@ class Message:
         content: str | list[tuple[str, str] | str],
         tool_call_id: str | None = None,
         tool_calls: list | None = None,
+        cache_breakpoint: bool = False,
+        cache_context: PromptCacheScope | None = None,
     ):
         """
         初始化消息对象
@@ -30,6 +34,8 @@ class Message:
         self.content: str | list[tuple[str, str] | str] = content
         self.tool_call_id: str | None = tool_call_id
         self.tool_calls: list | None = tool_calls
+        self.cache_breakpoint: bool = cache_breakpoint
+        self.cache_context: PromptCacheScope | None = cache_context
 
 
 class MessageBuilder:
@@ -38,6 +44,8 @@ class MessageBuilder:
         self.__content: list[tuple[str, str] | str] = []
         self.__tool_call_id: str | None = None
         self.__tool_calls: list | None = None
+        self.__cache_breakpoint: bool = False
+        self.__cache_context: PromptCacheScope | None = None
 
     def set_tool_calls(self, tool_calls: list) -> "MessageBuilder":
         """
@@ -53,6 +61,20 @@ class MessageBuilder:
         :return: MessageBuilder对象
         """
         self.__role = role
+        return self
+
+    def set_cache_breakpoint(self, enabled: bool = True) -> "MessageBuilder":
+        """Set in-memory metadata for an explicitly stable text boundary."""
+        if type(enabled) is not bool:
+            raise TypeError("cache_breakpoint must be a boolean")
+        self.__cache_breakpoint = enabled
+        return self
+
+    def set_cache_context(self, scope: PromptCacheScope | None) -> "MessageBuilder":
+        """Attach an immutable per-request cache identity without changing content."""
+        if scope is not None and type(scope) is not PromptCacheScope:
+            raise TypeError("cache_context must be a PromptCacheScope or None")
+        self.__cache_context = scope
         return self
 
     def add_text_content(self, text: str) -> "MessageBuilder":
@@ -136,4 +158,6 @@ class MessageBuilder:
             content=content_val,
             tool_call_id=self.__tool_call_id,
             tool_calls=self.__tool_calls,
+            cache_breakpoint=self.__cache_breakpoint,
+            cache_context=self.__cache_context,
         )
