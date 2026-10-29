@@ -113,6 +113,26 @@ class _PromptManager:
         self.prompts[prompt.name] = prompt
 
 
+class _SegmentedPrompt(str):
+    """Pure test double for Prompt metadata tests; message conversion is covered separately."""
+
+    def __new__(cls, *segments):
+        if len(segments) == 1 and isinstance(segments[0], (tuple, list)):
+            segments = tuple(segments[0])
+        segments = tuple(str(segment) for segment in segments)
+        result = super().__new__(cls, "".join(segments))
+        result.segments = segments
+        return result
+
+    def __add__(self, suffix):
+        segments = list(self.segments)
+        segments[-1] += str(suffix)
+        return type(self)(tuple(segments))
+
+    def __iadd__(self, suffix):
+        return self + suffix
+
+
 def _prompt_class_namespace() -> dict[str, Any]:
     prompt_tree = ast.parse((REPO_ROOT / "src/chat/utils/prompt_builder.py").read_text(encoding="utf-8"))
     prompt_class = next(
@@ -125,6 +145,8 @@ def _prompt_class_namespace() -> dict[str, Any]:
         "Optional": Optional,
         "Union": Union,
         "re": re,
+        "SegmentedPrompt": _SegmentedPrompt,
+        "_INTERNAL_FORMAT_VALUES": object(),
         "global_prompt_manager": _PromptManager(),
     }
     module = ast.Module(body=[prompt_class], type_ignores=[])
@@ -191,13 +213,6 @@ def _render(template: str, values: dict[str, str]) -> str:
     return prompt.format(**values)
 
 
-def _common_prefix_length(left: str, right: str) -> int:
-    for index, (left_char, right_char) in enumerate(zip(left, right, strict=True)):
-        if left_char != right_char:
-            return index
-    return min(len(left), len(right))
-
-
 class PromptPrefixOrderTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -234,11 +249,8 @@ class PromptPrefixOrderTests(unittest.TestCase):
         self.assertIn('"action": "reply"', self.after["brain_integrated_prompt"])
         self.assertIn("MCP_TASK_COMPLETE", self.after["mcp_tool_executor_prompt"])
 
-    def test_actual_prompt_formatting_keeps_dynamic_fields_after_fixed_history_prefix(self):
-        dynamic_fields = {
-            "focus_handoff_block",
-            "time_block",
-            "pending_appointments",
+    def test_actual_prompt_formatting_keeps_per_turn_tail_after_history_and_variant_before_it(self):
+        variant_fields = {
             "action_options_text",
             "no_reply_action_description",
             "reply_action_description",
@@ -247,6 +259,12 @@ class PromptPrefixOrderTests(unittest.TestCase):
             "ban_user_action_text",
             "set_group_title_action_text",
             "plan_style",
+        }
+        dynamic_fields = {
+            "focus_handoff_block",
+            "interest",
+            "time_block",
+            "pending_appointments",
             "actions_before_now_block",
             "target",
             "reason",
@@ -286,12 +304,11 @@ class PromptPrefixOrderTests(unittest.TestCase):
             counts = _placeholder_counts(template)
             first_values = _values(template, revision="A")
             second_values = _values(template, revision="B")
+            for field in variant_fields.intersection(counts):
+                first_values[field] = second_values[field] = f"[[CURRENT_VARIANT_{field}]]"
             for field in dynamic_fields.intersection(counts):
                 first_values[field] = f"[[DYNAMIC_A_{field}]]"
                 second_values[field] = f"[[DYNAMIC_B_{field}]]"
-            if name == "brain_integrated_prompt":
-                first_values["reply_style"] = "[[PLAN_STYLE_A]]"
-                second_values["reply_style"] = "[[PLAN_STYLE_B]]"
             first = _render(template, first_values)
             second = _render(template, second_values)
 
@@ -306,8 +323,9 @@ class PromptPrefixOrderTests(unittest.TestCase):
             history_marker = first_values[history_field]
             history_end = first.index(history_marker) + len(history_marker)
             self.assertEqual(first[:history_end], second[:history_end], name)
-            self.assertGreaterEqual(_common_prefix_length(first, second), history_end, name)
 
+            for field in variant_fields.intersection(counts):
+                self.assertLess(first.index(first_values[field]), first.index(history_marker), (name, field))
             for field in dynamic_fields.intersection(counts):
                 self.assertGreaterEqual(first.index(first_values[field]), history_end, (name, field))
 
@@ -332,9 +350,6 @@ class PromptPrefixOrderTests(unittest.TestCase):
             appended = _render(template, appended_values)
             self.assertTrue(appended.startswith(first[:history_end]), name)
             self.assertIn("HISTORY_APPENDED", appended)
-            if name == "brain_integrated_prompt":
-                self.assertIn("[[PLAN_STYLE_A]]", first)
-                self.assertIn("[[PLAN_STYLE_B]]", second)
 
     def test_session_labels_are_per_session_and_a_b_a_renders_are_deterministic(self):
         for name, template in self.after.items():

@@ -31,6 +31,8 @@ DEFAULT_MODULES = (
     "tests.test_llm_cache_diagnostics",
     "tests.test_result_cache_lifetime",
     "tests.test_prompt_prefix_order",
+    "tests.test_prompt_message_boundaries",
+    "tests.test_planner_cache_layout",
 )
 OPTIONAL_MODULES = ("tests.test_llm_cache_aggregation",)
 CONFIG_TEMPLATE_COPIES = (

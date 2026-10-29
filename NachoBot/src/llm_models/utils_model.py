@@ -14,6 +14,7 @@ from src.common.logger import get_logger
 from src.config.config import global_config, model_config
 from src.config.api_ada_configs import APIProvider, ModelInfo, TaskConfig
 from .payload_content.message import MessageBuilder, Message, RoleType
+from .prompt_layout import PromptCacheScope, validated_segments
 from .payload_content.resp_format import RespFormat
 from .payload_content.tool_option import ToolOption, ToolCall, ToolOptionBuilder, ToolParamType
 from .model_client.base_client import BaseClient, APIResponse, client_registry
@@ -457,9 +458,7 @@ class LLMRequest:
                 messages.append(
                     MessageBuilder().set_role(RoleType.System).add_text_content(system_prompt).build()
                 )
-            message_builder = MessageBuilder()
-            message_builder.add_text_content(prompt)
-            messages.append(message_builder.build())
+            messages.extend(self._build_user_prompt_messages(prompt))
             return messages
 
         tool_built = self._build_tool_options(tools)
@@ -512,9 +511,7 @@ class LLMRequest:
         start_time = time.time()
 
         def message_factory(client: BaseClient) -> List[Message]:
-            message_builder = MessageBuilder()
-            message_builder.add_text_content(prompt)
-            return [message_builder.build()]
+            return self._build_user_prompt_messages(prompt)
 
         tool_built = self._build_tool_options(tools)
         response, model_info = await self._execute_request(
@@ -546,6 +543,72 @@ class LLMRequest:
                 time_cost=time.time() - start_time,
             )
         return content, (reasoning_content, model_info.name, tool_calls)
+
+    @staticmethod
+    def _build_user_prompt_messages(prompt: str) -> List[Message]:
+        """Build plain or explicitly segmented prompt text as user messages."""
+        segments = validated_segments(prompt)
+        if segments is None:
+            chunks = [(str(prompt), False)]
+        else:
+            chunks = [(segment, index == 0) for index, segment in enumerate(segments) if segment]
+            if not chunks:
+                # Preserve the legacy empty-user-message behavior for an empty prompt.
+                chunks = [("", False)]
+        messages = []
+        for chunk, is_stable_prefix in chunks:
+            builder = MessageBuilder().add_text_content(chunk)
+            if is_stable_prefix:
+                builder.set_cache_breakpoint()
+            messages.append(builder.build())
+        return messages
+
+    def _attach_request_cache_scope(self, messages: List[Message], request_type: RequestType) -> List[Message]:
+        """Copy response messages and attach an immutable request scope when available."""
+        if request_type != RequestType.RESPONSE or self.session_id is None:
+            return messages
+
+        scope = PromptCacheScope(session_id=self.session_id, request_type=self.request_type)
+        return [
+            Message(
+                role=message.role,
+                content=message.content,
+                tool_call_id=message.tool_call_id,
+                tool_calls=message.tool_calls,
+                cache_breakpoint=message.cache_breakpoint,
+                cache_context=scope,
+            )
+            if isinstance(message, Message)
+            else message
+            for message in messages
+        ]
+
+    @staticmethod
+    def _copy_request_cache_metadata(
+        compressed_messages: List[Message],
+        source_messages: List[Message],
+    ) -> List[Message]:
+        """Keep message identity/roles and internal metadata across image compression."""
+        sources = compressed_messages
+        if len(compressed_messages) != len(source_messages):
+            # Compression is expected to be one-to-one. If that changes, keep
+            # the original request semantics rather than guessing role alignment.
+            sources = source_messages
+
+        copied = []
+        for source, compressed in zip(source_messages, sources, strict=True):
+            content = compressed.content if compressed_messages is sources else source.content
+            copied.append(
+                Message(
+                    role=source.role,
+                    content=content,
+                    tool_call_id=source.tool_call_id,
+                    tool_calls=source.tool_calls,
+                    cache_breakpoint=source.cache_breakpoint,
+                    cache_context=source.cache_context,
+                )
+            )
+        return copied
 
     async def get_embedding(self, embedding_input: str) -> Tuple[List[float], str]:
         """
@@ -782,7 +845,8 @@ class LLMRequest:
                 if e.status_code == 413 and message_list and not compressed_messages:
                     logger.warning(f"{self.log_context} 模型 '{model_info.name}' 返回413请求体过大，尝试压缩后重试...")
                     # 压缩消息本身不消耗重试次数
-                    compressed_messages = await asyncio.to_thread(compress_messages, message_list)
+                    compressed = await asyncio.to_thread(compress_messages, message_list)
+                    compressed_messages = self._copy_request_cache_metadata(compressed, message_list)
                     continue
 
                 # 不可重试的HTTP错误
@@ -832,6 +896,7 @@ class LLMRequest:
                     selected_client: BaseClient = client,
                 ) -> APIResponse:
                     message_list = message_factory(selected_client) if message_factory else []
+                    message_list = self._attach_request_cache_scope(message_list, request_type)
                     return await self._attempt_request_on_model(
                         selected_model,
                         selected_provider,

@@ -9,6 +9,9 @@ client_type = "openai"
 max_retry = 2
 timeout = 60
 retry_interval = 10
+# Optional; set each flag only when the endpoint supports that OpenAI cache feature.
+# enable_session_cache_key = true
+# enable_prompt_cache_breakpoints = true
 
 [[api_providers]]  # 本地模型配置(FULL模式下自带，无需修改)
 name = "LocalModel"

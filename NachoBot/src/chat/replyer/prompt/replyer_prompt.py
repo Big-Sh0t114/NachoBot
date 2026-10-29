@@ -28,6 +28,7 @@ def init_replyer_prompt():
 {moderation_prompt}
 {time_block}""",
         "replyer_prompt",
+        cache_layout=("background_dialogue_prompt", "focus_handoff_block"),
     )
 
     Prompt(
@@ -49,6 +50,7 @@ def init_replyer_prompt():
 {time_block}
 """,
         "replyer_self_prompt",
+        cache_layout=("background_dialogue_prompt", "focus_handoff_block"),
     )
 
     Prompt(
@@ -69,6 +71,7 @@ def init_replyer_prompt():
 {moderation_prompt}
 {time_block}""",
         "private_replyer_prompt",
+        cache_layout=("dialogue_prompt", "focus_handoff_block"),
     )
 
     Prompt(
@@ -90,6 +93,7 @@ def init_replyer_prompt():
 {time_block}
 """,
         "private_replyer_self_prompt",
+        cache_layout=("dialogue_prompt", "focus_handoff_block"),
     )
     Prompt(
         """{identity}
@@ -112,6 +116,7 @@ def init_replyer_prompt():
 {time_block}
 """,
         "file_edit_prompt",
+        cache_layout=("dialogue_prompt", "focus_handoff_block"),
     )
 
     Prompt(
@@ -149,12 +154,12 @@ cancel_appoint
     "reason": "取消的原因"
 }}
 
-你正在和{sender_name}聊天，这是你们之前聊的内容:
-{dialogue_prompt}
-
 {no_reply_action_description}
 {action_options_text}
 {reply_style}
+
+你正在和{sender_name}聊天，这是你们之前聊的内容:
+{dialogue_prompt}
 
 {actions_before_now_block}
 
@@ -164,4 +169,5 @@ cancel_appoint
 {moderation_prompt}
 {time_block}""",
         "brain_integrated_prompt",
+        cache_layout=("dialogue_prompt", "actions_before_now_block"),
     )

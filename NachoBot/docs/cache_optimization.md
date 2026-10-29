@@ -218,3 +218,53 @@ because the public model template has an empty API key rejected by `APIProvider`
 the child runs zero tests and the runner reports failure rather than a false pass.
 No live config, credentials, database, logs, provider, or service were used. The new
 template-order suite is included in the default cache-check module list.
+
+## Explicit user-message boundaries and cache-key isolation
+
+Annotated built-in prompts may retain up to three source-defined text chunks:
+stable prefix, history-bearing middle, and turn-specific suffix. Each non-empty
+chunk is sent as a separate `user` message. Their concatenated text is byte-for-byte
+the legacy flattened prompt, and caller-supplied system instructions remain in the
+system role. Plain strings and custom prompts without the explicit annotation still
+produce one user message. Untrusted rendered values are never scanned for boundary
+markers.
+
+The supplied cloud trace showed a 2,794-character stable action catalog after
+dynamic chat, with the whole prompt still sent as one user message. That trace does
+not show that the catalog was a reusable prefix. An ordinary HTTP proxy that groups
+requests from the initial system message and the complete first user message still
+sees all content in that user message as one cache group. OpenAI documents implicit
+lookups at message endings for GPT-5.6 and newer, subject to a 1,024 visible-token
+minimum. Those boundaries can provide lookup points, but implicit writes continue
+through the last eligible message. A changing later message does not make the earlier
+stable prefix an explicit reusable write. This implementation can mark the first
+stable user chunk with `prompt_cache_breakpoint: {"mode": "explicit"}` when the
+provider's separate `enable_prompt_cache_breakpoints` flag is enabled. The marker is
+attached to that text part in both requests so subsequent dynamic history does not
+extend the write. The standard Chat Completions message schema documents this field
+for text content parts. [OpenAI prompt caching guide](https://developers.openai.com/api/docs/guides/prompt-caching),
+[Chat Completions create reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)
+
+The explicit breakpoint flag is off by default and independent of the session-key
+flag. Ordinary message boundaries alone do not write a shorter stable prefix. A
+proxy still needs to forward or correctly translate the documented marker; this
+implementation does not change or probe any deployed proxy. No padding is added.
+
+The commented provider flags are `enable_session_cache_key = true` and
+`enable_prompt_cache_breakpoints = true`; both default to false. The session key is
+generated only for response calls carrying an explicit session ID. Its 64-character
+SHA-256 digest uses the provider name, client type, session ID, and task label. It does
+not use a prompt/template version, prompt contents, model selection, time, randomness,
+or API keys, and it does not send raw session IDs. Requests for the same provider,
+session, and task reuse
+the key, while different providers and tasks get different keys. An existing
+`prompt_cache_key` in merged request parameters wins, including `None` or an empty
+string. This key scopes the provider's cache group; it does not force routing or prove
+that the provider served cached tokens. Embedding and audio requests do not receive a
+generated key, and Gemini ignores this metadata.
+
+The cloud/provider cache-read figures observed before and after prompt changes were
+3.302% and 1.743%. They came from incomparable request mixes, so they establish no
+measured improvement. Continue to use provider-reported cache usage for hit evidence;
+mocked wire tests verify message boundaries, explicit marker serialization, and key
+stability. They do not verify a live provider cache hit.

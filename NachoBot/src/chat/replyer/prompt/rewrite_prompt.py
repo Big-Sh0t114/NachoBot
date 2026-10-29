@@ -31,4 +31,5 @@ def init_rewrite_prompt():
 {time_block}
 现在，你说：""",
         "default_expressor_prompt",
+        cache_layout=("chat_info", "mood_state"),
     )

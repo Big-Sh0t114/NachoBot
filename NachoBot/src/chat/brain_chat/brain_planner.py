@@ -161,19 +161,20 @@ cancel_appoint
 
 --- 以下为本轮动态上下文 ---
 
+{no_reply_action_description}
+{action_options_text}
+
+本轮动作规划风格：
+{plan_style}
+
 {chat_context_description}，以下是具体的聊天内容
 **聊天内容**
 {chat_content_block}
 
 你的兴趣是：{interest}
-{no_reply_action_description}
-{action_options_text}
 
 当前待执行的预约列表：
 {pending_appointments}
-
-本轮动作规划风格：
-{plan_style}
 
 **动作记录**
 {actions_before_now_block}
@@ -185,6 +186,7 @@ cancel_appoint
 
 """,
         "brain_planner_prompt",
+        cache_layout=("chat_content_block", "interest"),
     )
 
     Prompt(
@@ -895,7 +897,7 @@ class BrainPlanner:
             return ""
 
         action_options_block = ""
-        for action_name, action_info in current_available_actions.items():
+        for action_name, action_info in sorted(current_available_actions.items()):
             # 构建参数文本
             param_text = ""
             if action_info.action_parameters:
