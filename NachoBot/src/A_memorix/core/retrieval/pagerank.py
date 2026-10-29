@@ -97,6 +97,7 @@ class PersonalizedPageRank:
         # 缓存 Aho-Corasick 匹配器
         self._ac_matcher: Optional[AhoCorasick] = None
         self._ac_nodes_count = 0
+        self._ac_node_revision: Optional[int] = None
 
     def compute(
         self,
@@ -410,18 +411,31 @@ class PersonalizedPageRank:
             实体列表
         """
         # 获取所有节点
+        node_revision_before = getattr(self.graph_store, "node_revision", None)
+        revision_stable_before = bool(getattr(self.graph_store, "graph_revision_stable", True))
         all_nodes = self.graph_store.get_nodes()
         if not all_nodes:
             return []
 
+        node_revision = getattr(self.graph_store, "node_revision", len(all_nodes))
+        if node_revision is None:
+            node_revision = len(all_nodes)
+        node_revision = int(node_revision)
+        revision_stable = bool(
+            revision_stable_before
+            and getattr(self.graph_store, "graph_revision_stable", True)
+            and node_revision_before == getattr(self.graph_store, "node_revision", None)
+        )
+
         # 检查是否需要更新 Aho-Corasick 匹配器
-        if self._ac_matcher is None or self._ac_nodes_count != len(all_nodes):
+        if not revision_stable or self._ac_matcher is None or self._ac_node_revision != node_revision:
             self._ac_matcher = AhoCorasick()
             for node in all_nodes:
                 # 统一转为小写进行不区分大小写匹配
                 self._ac_matcher.add_pattern(node.lower())
             self._ac_matcher.build()
             self._ac_nodes_count = len(all_nodes)
+            self._ac_node_revision = node_revision if revision_stable else None
 
         # 执行匹配
         query_lower = query.lower()

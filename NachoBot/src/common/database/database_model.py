@@ -112,6 +112,9 @@ class LLMUsage(BaseModel):
     prompt_tokens = IntegerField()
     completion_tokens = IntegerField()
     total_tokens = IntegerField()
+    prompt_cache_hit_tokens = IntegerField(default=0)
+    prompt_cache_miss_tokens = IntegerField(default=0)
+    prompt_cache_reported = BooleanField(default=False)
     cost = DoubleField()
     time_cost = DoubleField(null=True)
     status = TextField()
@@ -240,6 +243,8 @@ class Images(BaseModel):
     timestamp = FloatField()  # 时间戳
     type = TextField()  # 图像类型，例如 "emoji"
     vlm_processed = BooleanField(default=False)  # 是否已经过VLM处理
+    last_used_time = FloatField(null=True)
+    no_file_flag = BooleanField(default=False)
 
     class Meta:
         table_name = "images"
@@ -461,6 +466,9 @@ class LLMUsageHourly(BaseModel):
     prompt_tokens = IntegerField(default=0)
     completion_tokens = IntegerField(default=0)
     total_tokens = IntegerField(default=0)
+    prompt_cache_hit_tokens = IntegerField(default=0)
+    prompt_cache_miss_tokens = IntegerField(default=0)
+    prompt_cache_reported_calls = IntegerField(default=0)
     total_cost = DoubleField(default=0.0)
     time_cost_sum = DoubleField(default=0.0)      # 耗时累计（用于计算平均值）
     time_cost_sq_sum = DoubleField(default=0.0)    # 耗时平方累计（用于计算标准差）

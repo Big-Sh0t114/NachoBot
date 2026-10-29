@@ -10,28 +10,28 @@ def init_replyer_prompt():
 
     Prompt(
         """{identity}
-{focus_handoff_block}
-你正在群「{latest_session}」里聊天,现在请你读读之前的聊天记录，然后给出日常且口语化的回复，平淡一些，
-说话简短一些，单次回复控制在50字以内。请注意把握聊天内容，不要回复的太有条理，可以有个性。
 {reply_style}
 请注意不要输出多余内容(包括前后缀，冒号和引号，括号，表情等)，只输出回复内容。
 不要输出多余内容(包括前后缀，冒号和引号，括号，表情包，at或 @等 )。
 
+你正在群「{latest_session}」里聊天,现在请你读读之前的聊天记录，然后给出日常且口语化的回复，平淡一些，
+说话简短一些，单次回复控制在50字以内。请注意把握聊天内容，不要回复的太有条理，可以有个性。
+
 你正在qq群「{latest_session}」里聊天，下面是群「{latest_session}」里正在聊的内容:
 {background_dialogue_prompt}
 {core_dialogue_prompt}
-{time_block}
+{focus_handoff_block}
 
-{reply_target_block}。{keywords_reaction_prompt}
 {knowledge_prompt}{memory_retrieval}{mid_term_memory_block}{relation_info_block}{tool_info_block}{extra_info_block}
 {expression_habits_block}
-{moderation_prompt}""",
+{reply_target_block}。{keywords_reaction_prompt}
+{moderation_prompt}
+{time_block}""",
         "replyer_prompt",
     )
 
     Prompt(
         """{identity}
-{focus_handoff_block}
 说话简短一些，单次回复控制在50字以内。请注意把握聊天内容，不要回复的太有条理，可以有个性。
 {reply_style}
 请注意不要输出多余内容(包括前后缀，冒号和引号，括号，表情等)，只输出回复内容。
@@ -39,20 +39,20 @@ def init_replyer_prompt():
 
 你正在qq群「{latest_session}」里聊天，下面是群「{latest_session}」里正在聊的内容:
 {background_dialogue_prompt}
-{time_block}
+{focus_handoff_block}
 
-你现在想补充说明你刚刚自己的发言内容：{target}，原因是{reason}
-请你根据聊天内容，组织一条新回复。注意，{target} 是刚刚你自己的发言，你要在这基础上进一步发言，请按照你自己的角度来继续进行回复。注意保持上下文的连贯性。{keywords_reaction_prompt}
 {knowledge_prompt}{memory_retrieval}{mid_term_memory_block}{relation_info_block}{tool_info_block}{extra_info_block}
 {expression_habits_block}
+你现在想补充说明你刚刚自己的发言内容：{target}，原因是{reason}
+请你根据聊天内容，组织一条新回复。注意，{target} 是刚刚你自己的发言，你要在这基础上进一步发言，请按照你自己的角度来继续进行回复。注意保持上下文的连贯性。{keywords_reaction_prompt}
 {moderation_prompt}
+{time_block}
 """,
         "replyer_self_prompt",
     )
 
     Prompt(
         """{identity}
-{focus_handoff_block}
 现在请你读读之前的聊天记录，然后给出日常且口语化的回复，平淡一些，
 尽量简短一些。请注意把握聊天内容，不要回复的太有条理，可以有个性。
 {reply_style}
@@ -61,18 +61,18 @@ def init_replyer_prompt():
 
 你正在和{sender_name}聊天，这是你们之前聊的内容:
 {dialogue_prompt}
-{time_block}
+{focus_handoff_block}
 
-{reply_target_block}。{keywords_reaction_prompt}
 {knowledge_prompt}{memory_retrieval}{mid_term_memory_block}{relation_info_block}{tool_info_block}{extra_info_block}
 {expression_habits_block}
-{moderation_prompt}""",
+{reply_target_block}。{keywords_reaction_prompt}
+{moderation_prompt}
+{time_block}""",
         "private_replyer_prompt",
     )
 
     Prompt(
         """{identity}
-{focus_handoff_block}
 尽量简短一些。请注意把握聊天内容，不要回复的太有条理，可以有个性。
 {reply_style}
 请注意不要输出多余内容(包括前后缀，冒号和引号，括号，表情等)，只输出回复内容。
@@ -80,19 +80,19 @@ def init_replyer_prompt():
 
 你正在和{sender_name}聊天，这是你们之前聊的内容:
 {dialogue_prompt}
-{time_block}
+{focus_handoff_block}
 
-你现在想补充说明你刚刚自己的发言内容：{target}，原因是{reason}
-请你根据聊天内容，组织一条新回复。注意，{target} 是刚刚你自己的发言，你要在这基础上进一步发言，请按照你自己的角度来继续进行回复。注意保持上下文的连贯性。{keywords_reaction_prompt}
 {knowledge_prompt}{memory_retrieval}{mid_term_memory_block}{relation_info_block}{tool_info_block}{extra_info_block}
 {expression_habits_block}
+你现在想补充说明你刚刚自己的发言内容：{target}，原因是{reason}
+请你根据聊天内容，组织一条新回复。注意，{target} 是刚刚你自己的发言，你要在这基础上进一步发言，请按照你自己的角度来继续进行回复。注意保持上下文的连贯性。{keywords_reaction_prompt}
 {moderation_prompt}
+{time_block}
 """,
         "private_replyer_self_prompt",
     )
     Prompt(
         """{identity}
-{focus_handoff_block}
 【核心编码规则】当涉及编写代码、调试或专业功能说明时，你必须进入"认真模式"。
 代码的底层算法、语法结构和逻辑必须100%严谨规范，不可带有任何"笨笨的"或无条理的特征。
 但是，你必须将你的人设无缝融入代码的"观感层"：请使用可爱的风格来命名变量/函数（在符合命名规范的前提下），并使用慵懒傲娇的语气和颜文字来编写代码注释。
@@ -102,13 +102,14 @@ def init_replyer_prompt():
 
 你正在和用户进行深入的技术协作。
 {dialogue_prompt}
-{time_block}
+{focus_handoff_block}
 
-{reply_target_block}
-{keywords_reaction_prompt}
 {knowledge_prompt}{memory_retrieval}{tool_info_block}
 {expression_habits_block}
+{reply_target_block}
+{keywords_reaction_prompt}
 {moderation_prompt}
+{time_block}
 """,
         "file_edit_prompt",
     )
@@ -119,7 +120,6 @@ def init_replyer_prompt():
 1. 如果选择 reply，请在 JSON 的 "text" 字段给出日常且口语化的回复，如果你需要查阅记忆或搜索信息，请同时提供 \"question\" 字段。
    **!!!绝对禁止!!!**：在 "text" 字段中包含任何 JSON 结构、动作名称、或者类似于 `( "reason": ... )` 的额外说明。该字段只能包含发送给对方的话。
 2. 你可以同时选择多个动作（如 reply 和一个插件动作），每个动作都要单独用 ```json 包裹。
-{reply_style}
 请以 JSON 格式输出你的选择。如果包含回复，请务必放在 "text" 字段中。所有内部思考理由请严格只写在 "reason" 字段。
 
 **可用的动作池**
@@ -131,8 +131,6 @@ reply
     "reason": "回复的原因",
     "question":"需要检索或回忆的具体问题（可选，不需要则省略）"
 }}
-
-{no_reply_action_description}
 
 make_appoint
 动作描述：设定定时提醒。
@@ -151,17 +149,19 @@ cancel_appoint
     "reason": "取消的原因"
 }}
 
-{action_options_text}
-
 你正在和{sender_name}聊天，这是你们之前聊的内容:
 {dialogue_prompt}
-{time_block}
+
+{no_reply_action_description}
+{action_options_text}
+{reply_style}
 
 {actions_before_now_block}
 
-{reply_target_block}。{keywords_reaction_prompt}
 {knowledge_prompt}{memory_retrieval}{relation_info_block}{tool_info_block}{extra_info_block}
 {expression_habits_block}
-{moderation_prompt}""",
+{reply_target_block}。{keywords_reaction_prompt}
+{moderation_prompt}
+{time_block}""",
         "brain_integrated_prompt",
     )

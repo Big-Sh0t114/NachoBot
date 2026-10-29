@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import os
 import time
@@ -5,6 +6,7 @@ import hashlib
 from typing import Any, Optional
 
 from src.common.logger import get_logger
+from src.common.media_conversion_cache import MEDIA_FILESYSTEM_LOCK
 from src.common.database.database import db
 from src.common.database.database_model import ImageDescriptions
 from src.multimodal.contracts import (
@@ -76,8 +78,7 @@ class VideoManager:
         # 优先读取本地文件
         if path and os.path.exists(path):
             try:
-                with open(path, "rb") as f:
-                    data = f.read(MAX_VIDEO_BYTES + 1)
+                data = await asyncio.to_thread(self._read_video_file, path)
                 if len(data) > MAX_VIDEO_BYTES:
                     raise ValueError(f"video exceeds the {MAX_VIDEO_BYTES}-byte perception bound")
                 return data
@@ -98,6 +99,67 @@ class VideoManager:
             except Exception as e:
                 logger.error(f"下载视频失败: {e}")
         return None
+
+    @staticmethod
+    def _read_video_file(path: str) -> bytes:
+        with open(path, "rb") as video_file:
+            return video_file.read(MAX_VIDEO_BYTES + 1)
+
+    def _get_and_touch_cached_description(self, video_hash: str, cache_type: str) -> Optional[str]:
+        """Touch cached video descriptions and their existing MP4 artifacts."""
+        try:
+            with db.connection_context():
+                with MEDIA_FILESYSTEM_LOCK:
+                    record = ImageDescriptions.get_or_none(
+                        (ImageDescriptions.image_description_hash == video_hash)
+                        & (ImageDescriptions.type == cache_type)
+                    )
+                    if not record or not record.description:
+                        return None
+                    record.timestamp = time.time()
+                    record.save()
+                    from src.chat.emoji_system.media_cache_cleanup import touch_video_cache_files
+
+                    touch_video_cache_files(video_hash, root=self.VIDEO_DIR)
+                    return record.description
+        except Exception as error:
+            logger.error(f"读取视频描述缓存失败: {error}")
+            return None
+
+    def _save_video_cache_artifacts(
+        self,
+        video_bytes: bytes,
+        video_hash: str,
+        cache_type: str,
+        description: str,
+        timestamp: float,
+    ) -> None:
+        from src.chat.emoji_system.media_cache_cleanup import ensure_managed_directory, restore_cached_file
+
+        video_dir = os.path.join(self.VIDEO_DIR, "video")
+        file_path = os.path.join(video_dir, f"{int(timestamp)}_{video_hash[:8]}.mp4")
+        try:
+            with db.connection_context():
+                with MEDIA_FILESYSTEM_LOCK:
+                    if ensure_managed_directory(self.VIDEO_DIR, "video"):
+                        if not restore_cached_file(
+                            file_path,
+                            video_bytes,
+                            root=self.VIDEO_DIR,
+                            allowed_directories={"video"},
+                            expected_extensions={".mp4"},
+                        ):
+                            logger.error(f"保存视频文件备份失败: {file_path}")
+                    else:
+                        logger.error(f"视频缓存目录不可安全访问: {video_dir}")
+                    ImageDescriptions.create(
+                        image_description_hash=video_hash,
+                        type=cache_type,
+                        description=description,
+                        timestamp=timestamp,
+                    )
+        except Exception as error:
+            logger.error(f"保存视频文件或描述缓存失败: {error}")
 
     async def process_video(
         self,
@@ -121,12 +183,14 @@ class VideoManager:
             )
 
             # 检查是否有缓存
-            record = ImageDescriptions.get_or_none(
-                (ImageDescriptions.image_description_hash == video_hash) & (ImageDescriptions.type == policy.cache_type)
+            cached_description = await asyncio.to_thread(
+                self._get_and_touch_cached_description,
+                video_hash,
+                policy.cache_type,
             )
-            if record and record.description:
-                logger.info(f"[缓存命中] 使用ImageDescriptions表中的视频描述: {record.description[:50]}...")
-                return f"[视频：{record.description}]"
+            if cached_description:
+                logger.info(f"[缓存命中] 使用ImageDescriptions表中的视频描述: {cached_description[:50]}...")
+                return f"[视频：{cached_description}]"
 
             logger.info("向视频解析大模型请求理解视频...")
             video_base64 = base64.b64encode(video_bytes).decode("utf-8")
@@ -155,24 +219,14 @@ class VideoManager:
 
             # 保存视频文件，后续可能有其他作用，用 hash 命名
             current_timestamp = time.time()
-            video_dir = os.path.join(self.VIDEO_DIR, "video")
-            file_path = os.path.join(video_dir, f"{int(current_timestamp)}_{video_hash[:8]}.mp4")
-            try:
-                with open(file_path, "wb") as f:
-                    f.write(video_bytes)
-            except Exception as e:
-                logger.error(f"保存视频文件备份失败: {e}")
-
-            # 存入数据库留作缓存
-            try:
-                ImageDescriptions.create(
-                    image_description_hash=video_hash,
-                    type=policy.cache_type,
-                    description=description,
-                    timestamp=current_timestamp,
-                )
-            except Exception as e:
-                logger.error(f"保存视频描述数据库失败: {e}")
+            await asyncio.to_thread(
+                self._save_video_cache_artifacts,
+                video_bytes,
+                video_hash,
+                policy.cache_type,
+                description,
+                current_timestamp,
+            )
 
             logger.info(f"视频解析产生新结果: {description[:50]}...")
             return f"[视频：{description}]"

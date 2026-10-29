@@ -13,6 +13,7 @@ from typing import Optional, Tuple, List, Any
 from PIL import Image
 from rich.traceback import install
 
+from src.common.media_conversion_cache import MEDIA_FILESYSTEM_LOCK
 from src.common.database.database_model import Emoji
 from src.common.database.database import db as peewee_db
 from src.common.logger import get_logger
@@ -125,34 +126,31 @@ class NcnkEmoji:
             # 目标完整路径
             destination_full_path = os.path.join(EMOJI_REGISTERED_DIR, self.filename)
 
-            # 检查源文件是否存在
-            if not os.path.exists(source_full_path):
-                logger.error(f"[错误] 源文件不存在: {source_full_path}")
-                return False
+            with MEDIA_FILESYSTEM_LOCK:
+                if not os.path.exists(source_full_path):
+                    logger.error(f"[错误] 源文件不存在: {source_full_path}")
+                    return False
 
-            # --- 文件移动 ---
-            try:
-                # 如果目标文件已存在，先删除 (确保移动成功)
-                if os.path.exists(destination_full_path):
-                    os.remove(destination_full_path)
+                # --- 文件移动 ---
+                try:
+                    if os.path.exists(destination_full_path):
+                        os.remove(destination_full_path)
 
-                os.rename(source_full_path, destination_full_path)
-                logger.debug(f"[移动] 文件从 {source_full_path} 移动到 {destination_full_path}")
-                # 更新实例的路径属性为新路径
-                self.full_path = destination_full_path
-                self.path = EMOJI_REGISTERED_DIR
-                # self.filename 保持不变
-            except Exception as move_error:
-                logger.error(f"[错误] 移动文件失败: {str(move_error)}")
-                # 如果移动失败，尝试将实例状态恢复？暂时不处理，仅返回失败
-                return False
+                    os.rename(source_full_path, destination_full_path)
+                    logger.debug(f"[移动] 文件从 {source_full_path} 移动到 {destination_full_path}")
+                    self.full_path = destination_full_path
+                    self.path = EMOJI_REGISTERED_DIR
+                except Exception as move_error:
+                    logger.error(f"[错误] 移动文件失败: {str(move_error)}")
+                    return False
 
             # --- 数据库操作 ---
             try:
                 # 准备数据库记录 for emoji collection
                 emotion_str = ",".join(self.emotion) if self.emotion else ""
 
-                Emoji.create(
+                with MEDIA_FILESYSTEM_LOCK:
+                    Emoji.create(
                     emoji_hash=self.hash,
                     full_path=self.full_path,
                     format=self.format,
@@ -303,29 +301,35 @@ def _ensure_emoji_dir() -> None:
 
 
 async def clear_temp_emoji() -> None:
-    """清理临时表情包
-    清理/data/emoji、/data/image和/data/images目录下的所有文件
-    当目录中文件数超过100时，会全部删除
-    """
+    """按年龄清理已知媒体缓存目录，保留数据库描述记录。"""
+    cleanup_config = global_config.emoji
+    if not getattr(cleanup_config, "cache_cleanup_enabled", True):
+        return
 
-    logger.info("[清理] 开始清理缓存...")
+    try:
+        from src.chat.emoji_system.media_cache_cleanup import cleanup_media_cache
+        from src.common.database.database_model import ImageDescriptions, Images
 
-    for need_clear in (
-        os.path.join(BASE_DIR, "emoji"),
-        os.path.join(BASE_DIR, "image"),
-        os.path.join(BASE_DIR, "images"),
-        os.path.join(BASE_DIR, "video"),
-    ):
-        if os.path.exists(need_clear):
-            files = os.listdir(need_clear)
-            # 视频文件超过20个就清空，表情包及图片超过100个清空
-            limit = 20 if need_clear.endswith("video") else 100
-            if len(files) > limit:
-                for filename in files:
-                    file_path = os.path.join(need_clear, filename)
-                    if os.path.isfile(file_path):
-                        os.remove(file_path)
-                        logger.debug(f"[清理] 删除: {filename}")
+        result = await asyncio.to_thread(
+            cleanup_media_cache,
+            root=BASE_DIR,
+            images_model=Images,
+            descriptions_model=ImageDescriptions,
+            emoji_model=Emoji,
+            database=peewee_db,
+            image_file_retention_days=getattr(cleanup_config, "image_file_retention_days", 14),
+            emoji_file_retention_days=getattr(cleanup_config, "emoji_file_retention_days", 30),
+            description_retention_days=getattr(cleanup_config, "description_retention_days", 30),
+            video_file_retention_days=getattr(cleanup_config, "video_file_retention_days", 14),
+            batch_size=getattr(cleanup_config, "cleanup_batch_size", 1000),
+        )
+        if result.files_deleted or result.images_deleted or result.descriptions_deleted:
+            logger.info(
+                f"[清理] 媒体缓存按年龄清理完成: 文件={result.files_deleted}, 图片元数据={result.images_deleted}, "
+                f"描述={result.descriptions_deleted}, 缺失标记={result.missing_files_marked}"
+            )
+    except Exception as error:
+        logger.error(f"[清理] 媒体缓存清理失败: {error}")
 
 
 async def clean_unused_emojis(emoji_dir: str, emoji_objects: List["NcnkEmoji"], removed_count: int) -> int:
@@ -719,7 +723,56 @@ class EmojiManager:
                 return emoji
         return None  # 如果循环结束还没找到，则返回 None
 
-    async def get_emoji_tag_by_hash(self, emoji_hash: str) -> Optional[List[str]]:
+    def _touch_registered_emoji(
+        self,
+        emoji_hash: str,
+        *,
+        image_bytes: bytes | None = None,
+        full_path: str | None = None,
+        emoji_object: NcnkEmoji | None = None,
+    ) -> bool:
+        """Refresh registered-emoji access and optionally restore its source file."""
+        current_time = time.time()
+        restored = True
+        with MEDIA_FILESYSTEM_LOCK:
+            if image_bytes is not None and full_path:
+                if hashlib.md5(image_bytes, usedforsecurity=False).hexdigest() != emoji_hash:
+                    restored = False
+                else:
+                    from src.chat.emoji_system.media_cache_cleanup import (
+                        REGISTERED_EMOJI_DIRECTORIES,
+                        ensure_managed_directory,
+                        restore_cached_file,
+                    )
+
+                    registered_directory = os.path.basename(os.path.dirname(full_path))
+                    if not ensure_managed_directory(
+                        BASE_DIR,
+                        registered_directory,
+                        allowed_directories=REGISTERED_EMOJI_DIRECTORIES,
+                    ):
+                        restored = False
+                    else:
+                        restored = restore_cached_file(
+                            full_path,
+                            image_bytes,
+                            root=BASE_DIR,
+                            allowed_directories=REGISTERED_EMOJI_DIRECTORIES,
+                        )
+            try:
+                with peewee_db.connection_context():
+                    Emoji.update(last_used_time=current_time).where(Emoji.emoji_hash == emoji_hash).execute()
+            except Exception as error:
+                logger.debug(f"更新表情包访问时间失败: {error}")
+            if emoji_object is not None:
+                emoji_object.last_used_time = current_time
+        return restored
+
+    async def get_emoji_tag_by_hash(
+        self,
+        emoji_hash: str,
+        image_bytes: bytes | None = None,
+    ) -> Optional[List[str]]:
         """根据哈希值获取已注册表情包的情感标签列表
 
         Args:
@@ -732,6 +785,13 @@ class EmojiManager:
             # 先从内存中查找
             emoji = await self.get_emoji_from_manager(emoji_hash)
             if emoji and emoji.emotion:
+                await asyncio.to_thread(
+                    self._touch_registered_emoji,
+                    emoji_hash,
+                    image_bytes=image_bytes,
+                    full_path=emoji.full_path,
+                    emoji_object=emoji,
+                )
                 logger.info(f"[缓存命中] 从内存获取表情包情感标签: {emoji.emotion}...")
                 return emoji.emotion
 
@@ -740,6 +800,12 @@ class EmojiManager:
             try:
                 emoji_record = Emoji.get_or_none(Emoji.emoji_hash == emoji_hash)
                 if emoji_record and emoji_record.emotion:
+                    await asyncio.to_thread(
+                        self._touch_registered_emoji,
+                        emoji_hash,
+                        image_bytes=image_bytes,
+                        full_path=emoji_record.full_path,
+                    )
                     logger.info(f"[缓存命中] 从数据库获取表情包情感标签: {emoji_record.emotion[:50]}...")
                     return emoji_record.emotion.split(",")
             except Exception as e:
@@ -751,7 +817,11 @@ class EmojiManager:
             logger.error(f"获取表情包情感标签失败 (Hash: {emoji_hash}): {str(e)}")
             return None
 
-    async def get_emoji_description_by_hash(self, emoji_hash: str) -> Optional[str]:
+    async def get_emoji_description_by_hash(
+        self,
+        emoji_hash: str,
+        image_bytes: bytes | None = None,
+    ) -> Optional[str]:
         """根据哈希值获取已注册表情包的描述
 
         Args:
@@ -764,6 +834,13 @@ class EmojiManager:
             # 先从内存中查找
             emoji = await self.get_emoji_from_manager(emoji_hash)
             if emoji and emoji.description:
+                await asyncio.to_thread(
+                    self._touch_registered_emoji,
+                    emoji_hash,
+                    image_bytes=image_bytes,
+                    full_path=emoji.full_path,
+                    emoji_object=emoji,
+                )
                 logger.info(f"[缓存命中] 从内存获取表情包描述: {emoji.description[:50]}...")
                 return emoji.description
 
@@ -772,6 +849,12 @@ class EmojiManager:
             try:
                 emoji_record = Emoji.get_or_none(Emoji.emoji_hash == emoji_hash)
                 if emoji_record and emoji_record.description:
+                    await asyncio.to_thread(
+                        self._touch_registered_emoji,
+                        emoji_hash,
+                        image_bytes=image_bytes,
+                        full_path=emoji_record.full_path,
+                    )
                     logger.info(f"[缓存命中] 从数据库获取表情包描述: {emoji_record.description[:50]}...")
                     return emoji_record.description
             except Exception as e:
@@ -955,7 +1038,7 @@ class EmojiManager:
             perception_base64 = image_base64
             perception_format = image_format
             if image_format == "gif" and (not existing_description or global_config.emoji.content_filtration):
-                perception_base64 = get_image_manager().transform_gif(image_base64)  # type: ignore
+                perception_base64 = await asyncio.to_thread(get_image_manager().transform_gif, image_base64)
                 if not perception_base64:
                     raise RuntimeError("GIF表情包转换失败")
                 perception_format = "jpg"

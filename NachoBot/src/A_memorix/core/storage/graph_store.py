@@ -6,6 +6,7 @@
 
 import pickle
 from enum import Enum
+from functools import wraps
 from pathlib import Path
 from typing import Optional, Union, Tuple, List, Dict, Set, Any
 from collections import defaultdict
@@ -46,6 +47,46 @@ from ..utils.hash import compute_hash
 from ..utils.io import atomic_write
 
 logger = get_logger("A_Memorix.GraphStore")
+
+
+def _track_graph_load(method):
+    """Advance revisions if loading replaces nodes or weighted adjacency."""
+
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        nodes_before = tuple(self._nodes)
+        matrix_before = self._adjacency
+        with self._revision_lock:
+            self._graph_mutation_depth += 1
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            try:
+                if nodes_before != tuple(self._nodes):
+                    self._mark_nodes_changed()
+                elif not self._weighted_adjacency_equal(matrix_before, self._adjacency):
+                    self._mark_graph_changed()
+            finally:
+                with self._revision_lock:
+                    self._graph_mutation_depth -= 1
+
+    return wrapped
+
+
+def _track_graph_mutation(method):
+    """Expose an in-progress mutation so retrieval skips unstable caches."""
+
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._revision_lock:
+            self._graph_mutation_depth += 1
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            with self._revision_lock:
+                self._graph_mutation_depth -= 1
+
+    return wrapped
 
 
 class GraphModificationMode(Enum):
@@ -114,6 +155,15 @@ class GraphStore:
         self._adjacency_dirty: bool = True
         self._saliency_cache: Optional[Dict[str, float]] = None
 
+        # Monotonic revisions for graph-derived cache invalidation.
+        self._graph_revision = 0
+        self._node_revision = 0
+        self._batch_update_depth = 0
+        self._batch_graph_changed = False
+        self._batch_nodes_changed = False
+        self._graph_mutation_depth = 0
+        self._revision_lock = threading.RLock()
+
         # V5: 多关系映射 (src_idx, dst_idx) -> Set[relation_hash]
         self._edge_hash_map: Dict[Tuple[int, int], Set[str]] = defaultdict(set)
         # V5: 简单的异步锁 (实际上 asyncio 环境下单线程主循环可能不需要，但为了安全保留)
@@ -127,6 +177,53 @@ class GraphStore:
             return ""
         return str(node).strip().lower()
 
+    def _mark_graph_changed(self) -> None:
+        """Advance graph revision and invalidate matrix-derived caches."""
+        with self._revision_lock:
+            self._adjacency_dirty = True
+            self._saliency_cache = None
+            if self._batch_update_depth:
+                self._batch_graph_changed = True
+                return
+            self._graph_revision += 1
+
+    def _mark_nodes_changed(self) -> None:
+        """Advance node and graph revisions after a node-list mutation."""
+        with self._revision_lock:
+            if self._batch_update_depth:
+                self._batch_nodes_changed = True
+                self._mark_graph_changed()
+                return
+            self._node_revision += 1
+            self._mark_graph_changed()
+
+    @staticmethod
+    def _weighted_adjacency_equal(left, right) -> bool:
+        """Compare sparse matrices by shape and weighted entries."""
+        if left is right:
+            return True
+        if left is None or right is None or left.shape != right.shape:
+            return False
+        return (left != right).nnz == 0
+
+    @property
+    def graph_revision(self) -> int:
+        """Monotonic revision for graph structure and edge weights."""
+        with self._revision_lock:
+            return self._graph_revision
+
+    @property
+    def node_revision(self) -> int:
+        """Monotonic revision for the ordered node names."""
+        with self._revision_lock:
+            return self._node_revision
+
+    @property
+    def graph_revision_stable(self) -> bool:
+        """Whether no mutation or batch is currently changing the graph."""
+        with self._revision_lock:
+            return self._batch_update_depth == 0 and self._graph_mutation_depth == 0
+
     @contextlib.contextmanager
     def batch_update(self):
         """
@@ -135,12 +232,27 @@ class GraphStore:
         进入时切换到 LIL 格式以优化随机/增量更新
         退出时恢复到 CSR/CSC 格式以优化存储和计算
         """
-        original_mode = self._modification_mode
-        self._switch_mode(GraphModificationMode.INCREMENTAL)
+        with self._revision_lock:
+            original_mode = self._modification_mode
+            self._batch_update_depth += 1
         try:
+            self._switch_mode(GraphModificationMode.INCREMENTAL)
             yield
         finally:
-            self._switch_mode(original_mode)
+            try:
+                self._switch_mode(original_mode)
+            finally:
+                with self._revision_lock:
+                    self._batch_update_depth -= 1
+                    if self._batch_update_depth == 0:
+                        if self._batch_nodes_changed:
+                            self._node_revision += 1
+                        if self._batch_graph_changed:
+                            self._graph_revision += 1
+                            self._adjacency_dirty = True
+                            self._saliency_cache = None
+                        self._batch_nodes_changed = False
+                        self._batch_graph_changed = False
             
     def _switch_mode(self, new_mode: GraphModificationMode):
         """切换修改模式并转换矩阵格式"""
@@ -173,6 +285,7 @@ class GraphStore:
             
         self._modification_mode = new_mode
 
+    @_track_graph_mutation
     def add_nodes(
         self,
         nodes: List[str],
@@ -199,9 +312,6 @@ class GraphStore:
             idx = len(self._nodes)
             self._nodes.append(node) # 存储原始节点名
             self._node_to_idx[canon] = idx # 映射规范化节点名到索引
-            self._adjacency_dirty = True
-            self._saliency_cache = None
-
             # 添加属性
             if attributes and node in attributes:
                 self._node_attrs[canon] = attributes[node]
@@ -214,10 +324,12 @@ class GraphStore:
         # 扩展邻接矩阵
         if added > 0:
             self._expand_adjacency_matrix(added)
+            self._mark_nodes_changed()
 
         logger.debug(f"添加 {added} 个节点")
         return added
 
+    @_track_graph_mutation
     def add_edges(
         self,
         edges: List[Tuple[str, str]],
@@ -257,6 +369,22 @@ class GraphStore:
         if len(weights) != len(edges):
             raise ValueError(f"边数量与权重数量不匹配: {len(edges)} vs {len(weights)}")
 
+        affected_edges = {
+            (self._canonicalize(src), self._canonicalize(tgt))
+            for src, tgt in edges
+        }
+        weights_before = {
+            edge: self.get_edge_weight(*edge)
+            for edge in affected_edges
+        }
+
+        def mark_if_weight_changed() -> None:
+            if any(
+                self.get_edge_weight(*edge) != old_weight
+                for edge, old_weight in weights_before.items()
+            ):
+                self._mark_graph_changed()
+
         # 如果仅仅是添加边且处于增量模式 (LIL)，直接更新
         if self._modification_mode == GraphModificationMode.INCREMENTAL:
              if self._adjacency is None:
@@ -284,6 +412,8 @@ class GraphStore:
                              s_idx = self._node_to_idx[self._canonicalize(src)]
                              t_idx = self._node_to_idx[self._canonicalize(tgt)]
                              self._edge_hash_map[(s_idx, t_idx)].add(r_hash)
+
+                 mark_if_weight_changed()
 
                  logger.debug(f"增量添加 {len(edges)} 条边 (LIL)")
                  return len(edges)
@@ -325,7 +455,7 @@ class GraphStore:
             self._adjacency = self._adjacency.tocsr()
 
         self._total_edges_added += len(edges)
-        self._adjacency_dirty = True  # 标记脏位
+        mark_if_weight_changed()
         
         # V5: 更新边哈希映射 (Edge Hash Map)
         if relation_hashes:
@@ -341,6 +471,7 @@ class GraphStore:
         logger.debug(f"添加 {len(edges)} 条边")
         return len(edges)
 
+    @_track_graph_mutation
     def update_edge_weight(
         self,
         source: str,
@@ -389,6 +520,7 @@ class GraphStore:
         logger.debug(f"更新权重 {source}->{target}: {current_weight:.2f} -> {new_weight:.2f}")
         return new_weight
 
+    @_track_graph_mutation
     def delete_nodes(self, nodes: List[str]) -> int:
         """
         删除节点（及相关的边）
@@ -465,8 +597,7 @@ class GraphStore:
 
         deleted_count = len(existing_nodes)
         self._total_nodes_deleted += deleted_count
-        self._adjacency_dirty = True
-        self._saliency_cache = None
+        self._mark_nodes_changed()
 
         logger.info(f"删除 {deleted_count} 个节点")
         return deleted_count
@@ -475,6 +606,7 @@ class GraphStore:
         """兼容性别名：删除节点"""
         return self.delete_nodes(nodes)
 
+    @_track_graph_mutation
     def delete_edges(
         self,
         edges: List[Tuple[str, str]],
@@ -533,8 +665,8 @@ class GraphStore:
                 self._edge_hash_map.pop(key, None)
 
         self._total_edges_deleted += deleted
-        self._adjacency_dirty = True
-        self._saliency_cache = None
+        if deleted:
+            self._mark_graph_changed()
         logger.info(f"删除 {deleted} 条边")
         return deleted
 
@@ -721,6 +853,7 @@ class GraphStore:
             out.append((idx_to_node[s_idx], idx_to_node[t_idx], set(hashes)))
         return out
 
+    @_track_graph_mutation
     def deactivate_edges(self, edges: List[Tuple[str, str]]) -> int:
         """
         冻结边 (将权重设为0.0，使其在计算意义上消失，但保留在Map中)
@@ -732,6 +865,7 @@ class GraphStore:
             return 0
 
         deactivated_count = 0
+        weights_before: Dict[Tuple[int, int], float] = {}
         with self.batch_update():
             # 我们需要 explicit set to 0.
             # 使用增量更新模式覆盖
@@ -741,10 +875,14 @@ class GraphStore:
                 if s_canon in self._node_to_idx and t_canon in self._node_to_idx:
                     idx_s = self._node_to_idx[s_canon]
                     idx_t = self._node_to_idx[t_canon]
-                    self._adjacency[idx_s, idx_t] = 0.0
+                    weight = float(self._adjacency[idx_s, idx_t])
+                    weights_before.setdefault((idx_s, idx_t), weight)
+                    if weight != 0.0:
+                        self._adjacency[idx_s, idx_t] = 0.0
                     deactivated_count += 1
 
-        self._adjacency_dirty = True
+        if any(weight != 0.0 for weight in weights_before.values()):
+            self._mark_graph_changed()
         return deactivated_count
 
     def _ensure_adjacency_T(self):
@@ -1019,6 +1157,7 @@ class GraphStore:
     # V5 Memory System Methods (Graph Level)
     # =========================================================================
 
+    @_track_graph_mutation
     def decay(self, factor: float, min_active_weight: float = 0.0) -> None:
         """
         全图衰减 (Atomic Decay)
@@ -1028,6 +1167,18 @@ class GraphStore:
             min_active_weight: 最小活跃权重 (低于此值可能被视为无效，但在物理修剪前仍保留)
         """
         if self._adjacency is None or factor >= 1.0 or factor <= 0.0:
+            return
+
+        if self._adjacency.count_nonzero() == 0:
+            return
+
+        matrix_data = (
+            self._adjacency.tocsr().data
+            if isinstance(self._adjacency, lil_matrix)
+            else self._adjacency.data
+        )
+        scaled_data = np.asarray(matrix_data * factor, dtype=matrix_data.dtype)
+        if np.array_equal(scaled_data, matrix_data):
             return
             
         logger.debug(f"正在执行全图衰减，因子: {factor}")
@@ -1039,8 +1190,9 @@ class GraphStore:
         # if min_active_weight > 0:
         #    ... (复杂操作，暂不需要，由 prune 逻辑处理)
             
-        self._adjacency_dirty = True
+        self._mark_graph_changed()
 
+    @_track_graph_mutation
     def prune_relation_hashes(self, operations: List[Tuple[str, str, str]]) -> None:
         """
         修剪特定关系哈希 (从 _edge_hash_map 移除; 如果边变空则从矩阵移除)
@@ -1158,19 +1310,26 @@ class GraphStore:
         else:
             return list(isolated_nodes_set)
 
+    @_track_graph_mutation
     def clear(self) -> None:
         """清空所有数据"""
+        nodes_changed = bool(self._nodes)
+        matrix_changed = self._adjacency is not None and self._adjacency.nnz > 0
         self._nodes.clear()
         self._node_to_idx.clear()
         self._node_attrs.clear()
         self._adjacency = None
         self._edge_hash_map.clear()
-        self._adjacency_T = None
-        self._adjacency_dirty = True
         self._total_nodes_added = 0
         self._total_edges_added = 0
         self._total_nodes_deleted = 0
         self._total_edges_deleted = 0
+        if nodes_changed:
+            self._adjacency_T = None
+            self._mark_nodes_changed()
+        elif matrix_changed:
+            self._adjacency_T = None
+            self._mark_graph_changed()
         logger.info("图存储已清空")
 
     def save(self, data_dir: Optional[Union[str, Path]] = None) -> None:
@@ -1219,6 +1378,7 @@ class GraphStore:
 
         logger.info(f"图存储已保存到: {data_dir}")
 
+    @_track_graph_load
     def load(self, data_dir: Optional[Union[str, Path]] = None) -> None:
         """
         从磁盘加载
@@ -1315,7 +1475,6 @@ class GraphStore:
                      },
                  )
 
-        self._adjacency_dirty = True
         logger.info(
             f"图存储已加载: 节点={len(self._nodes)}, "
             f"边={self._adjacency.nnz if self._adjacency is not None else 0}"
@@ -1465,6 +1624,5 @@ class GraphStore:
                 self._edge_hash_map[(u, v)].add(h)
                 count += 1
                 
-        self._adjacency_dirty = True
         logger.info(f"已从 {count} 条哈希重建边哈希映射，覆盖 {len(self._edge_hash_map)} 条边")
         return count

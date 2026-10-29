@@ -1,5 +1,5 @@
 [inner]
-version = "1.11.3_bs"
+version = "1.12.0_bs"
 
 [[api_providers]] # SiliconFlow的API服务商配置
 name = "SiliconFlow"
@@ -43,6 +43,8 @@ name = "bge-m3/Silicon"
 api_provider = "SiliconFlow"
 price_in = 0
 price_out = 0
+# Optional per-million-token price for prompt cache hits. Omit or leave commented to use price_in.
+# cache_price_in = 0.0
 
 [[models]]  #本地模型(FULL模式下自带，无需修改)
 model_identifier = "zh-xlarge-int8-2025-06-30"

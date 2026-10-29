@@ -1,6 +1,8 @@
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
+from collections.abc import Mapping, Sequence
+import math
 from typing import Callable, Any, Optional
 
 from src.config.api_ada_configs import ModelInfo, APIProvider
@@ -11,6 +13,64 @@ from ..payload_content.tool_option import ToolOption, ToolCall
 
 _REQUEST_TASK_DRAIN_TIMEOUT_SECONDS = 0.25
 _DETACHED_REQUEST_TASKS: set[asyncio.Future[Any]] = set()
+_MISSING = object()
+
+
+def _nonnegative_token_count(value: Any) -> int | None:
+    """Return a valid nonnegative provider token count, or ``None`` if absent/bad."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        if isinstance(value, str):
+            if not value.strip() or not value.strip().isdigit():
+                return None
+            count = int(value.strip())
+        else:
+            number = float(value)
+            if not math.isfinite(number) or number < 0 or not number.is_integer():
+                return None
+            count = int(number)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return count
+
+
+def _optional_field(value: Any, name: str) -> Any:
+    """Read a mapping key or object attribute without collapsing missing to zero."""
+    if isinstance(value, Mapping):
+        return value.get(name, _MISSING)
+    return getattr(value, name, _MISSING)
+
+
+def normalize_prompt_cache_usage(
+    prompt_tokens: Any,
+    hit_values: Sequence[Any],
+    miss_value: Any = _MISSING,
+) -> tuple[int, int, bool]:
+    """Normalize provider aliases while retaining the unreported-vs-zero distinction.
+
+    The first valid hit alias wins; aliases are never added together. Missing miss
+    counts are inferred only when the provider reported a cache count and the prompt
+    total is known. An entirely absent or invalid cache count remains unreported.
+    """
+    prompt_count = _nonnegative_token_count(prompt_tokens)
+    hit_count = next(
+        (count for value in hit_values if (count := _nonnegative_token_count(value)) is not None),
+        None,
+    )
+    miss_count = _nonnegative_token_count(miss_value)
+    if hit_count is None and miss_count is None:
+        return 0, 0, False
+
+    if prompt_count is not None:
+        if hit_count is None:
+            hit_count = max(0, prompt_count - (miss_count or 0))
+        hit_count = min(hit_count, prompt_count)
+        # Prompt total is authoritative. This also normalizes inconsistent
+        # provider-reported miss aliases to the remaining prompt tokens.
+        miss_count = prompt_count - hit_count
+
+    return hit_count or 0, miss_count or 0, True
 
 
 def _consume_task_exception(task: asyncio.Future[Any]) -> None:
@@ -98,6 +158,15 @@ class UsageRecord:
     total_tokens: int
     """总token数"""
 
+    prompt_cache_hit_tokens: int = 0
+    """Provider-reported or normalized cached prompt tokens."""
+
+    prompt_cache_miss_tokens: int = 0
+    """Provider-reported or inferred uncached prompt tokens."""
+
+    prompt_cache_reported: bool = False
+    """Whether the provider supplied a valid cache count, including explicit zero."""
+
 
 @dataclass
 class APIResponse:
@@ -122,6 +191,12 @@ class APIResponse:
 
     raw_data: Any = None
     """响应原始数据"""
+
+    cache_usage: tuple[int, int, bool] | None = field(default=None, repr=False)
+    """Normalized provider cache usage attached by the response parser."""
+
+    _cache_diagnostic_messages: list[Message] | None = field(default=None, repr=False)
+    """Effective pre-provider messages correlated with this response for diagnostics."""
 
 
 @dataclass

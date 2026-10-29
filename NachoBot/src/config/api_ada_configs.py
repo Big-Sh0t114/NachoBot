@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+import math
 from typing import Optional
 
 from src.common.logger import get_logger
@@ -70,6 +71,9 @@ class ModelInfo(ConfigBase):
     extra_params: dict = field(default_factory=dict)
     """额外参数（用于API调用时的额外配置）"""
 
+    cache_price_in: Optional[float] = field(default=None)
+    """每M缓存命中输入token价格；None表示沿用price_in。"""
+
     def __post_init__(self):
         if not self.model_identifier:
             raise ValueError("模型标识符不能为空，请在配置中设置有效的模型标识符。")
@@ -77,6 +81,18 @@ class ModelInfo(ConfigBase):
             raise ValueError("模型名称不能为空，请在配置中设置有效的模型名称。")
         if not self.api_provider:
             raise ValueError("API提供商不能为空，请在配置中设置有效的API提供商。")
+        if self.cache_price_in is not None:
+            try:
+                valid_cache_price = (
+                    not isinstance(self.cache_price_in, bool)
+                    and isinstance(self.cache_price_in, (int, float))
+                    and math.isfinite(float(self.cache_price_in))
+                    and self.cache_price_in >= 0
+                )
+            except (TypeError, ValueError, OverflowError):
+                valid_cache_price = False
+            if not valid_cache_price:
+                raise ValueError("cache_price_in 必须是非负有限数值或 None。")
 
 
 @dataclass

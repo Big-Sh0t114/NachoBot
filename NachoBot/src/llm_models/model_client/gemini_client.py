@@ -32,7 +32,16 @@ from google.genai.errors import (
 from src.config.api_ada_configs import ModelInfo, APIProvider
 from src.common.logger import get_logger
 
-from .base_client import APIResponse, UsageRecord, BaseClient, _cancel_and_drain_request_task, client_registry
+from .base_client import (
+    APIResponse,
+    UsageRecord,
+    BaseClient,
+    _cancel_and_drain_request_task,
+    _optional_field,
+    _nonnegative_token_count,
+    normalize_prompt_cache_usage,
+    client_registry,
+)
 from ..exceptions import (
     RespParseException,
     NetworkConnectionError,
@@ -248,6 +257,22 @@ async def _default_stream_response_handler(
     _fc_delta_buffer = io.StringIO()  # 正式内容缓冲区，用于存储接收到的正式内容
     _tool_calls_buffer: list[tuple[str, str, dict]] = []  # 工具调用缓冲区，用于存储接收到的工具调用
     _usage_record = None  # 使用情况记录
+    _cache_usage: tuple[int, int, bool] | None = None
+
+    def _record_usage(usage_metadata: Any) -> None:
+        nonlocal _usage_record, _cache_usage
+        prompt_tokens = _optional_field(usage_metadata, "prompt_token_count")
+        candidate_tokens = _optional_field(usage_metadata, "candidates_token_count")
+        thoughts_tokens = _optional_field(usage_metadata, "thoughts_token_count")
+        total_tokens = _optional_field(usage_metadata, "total_token_count")
+        candidate_count = _nonnegative_token_count(candidate_tokens) or 0
+        thoughts_count = _nonnegative_token_count(thoughts_tokens) or 0
+        _usage_record = (
+            _nonnegative_token_count(prompt_tokens) or 0,
+            candidate_count + thoughts_count,
+            _nonnegative_token_count(total_tokens) or 0,
+        )
+        _cache_usage = _gemini_cache_usage(usage_metadata)
 
     def _insure_buffer_closed():
         if _fc_delta_buffer and not _fc_delta_buffer.closed:
@@ -267,16 +292,14 @@ async def _default_stream_response_handler(
 
         if chunk.usage_metadata:
             # 如果有使用情况，则将其存储在APIResponse对象中
-            _usage_record = (
-                chunk.usage_metadata.prompt_token_count or 0,
-                (chunk.usage_metadata.candidates_token_count or 0) + (chunk.usage_metadata.thoughts_token_count or 0),
-                chunk.usage_metadata.total_token_count or 0,
-            )
+            _record_usage(chunk.usage_metadata)
     try:
-        return _build_stream_api_resp(
+        api_response = _build_stream_api_resp(
             _fc_delta_buffer,
             _tool_calls_buffer,
-        ), _usage_record
+        )
+        api_response.cache_usage = _cache_usage
+        return api_response, _usage_record
     except Exception:
         # 确保缓冲区被关闭
         _insure_buffer_closed()
@@ -325,10 +348,12 @@ def _default_normal_response_parser(
 
     # 解析使用情况
     if usage_metadata := resp.usage_metadata:
+        api_response.cache_usage = _gemini_cache_usage(usage_metadata)
         _usage_record = (
-            usage_metadata.prompt_token_count or 0,
-            (usage_metadata.candidates_token_count or 0) + (usage_metadata.thoughts_token_count or 0),
-            usage_metadata.total_token_count or 0,
+            _nonnegative_token_count(_optional_field(usage_metadata, "prompt_token_count")) or 0,
+            (_nonnegative_token_count(_optional_field(usage_metadata, "candidates_token_count")) or 0)
+            + (_nonnegative_token_count(_optional_field(usage_metadata, "thoughts_token_count")) or 0),
+            _nonnegative_token_count(_optional_field(usage_metadata, "total_token_count")) or 0,
         )
     else:
         _usage_record = None
@@ -340,6 +365,14 @@ def _default_normal_response_parser(
         raise EmptyResponseException("响应中既无文本内容也无工具调用")
 
     return api_response, _usage_record
+
+
+def _gemini_cache_usage(usage_metadata: Any) -> tuple[int, int, bool] | None:
+    """Gemini exposes cache hits as cached_content_token_count when available."""
+    prompt_tokens = _optional_field(usage_metadata, "prompt_token_count")
+    cached_tokens = _optional_field(usage_metadata, "cached_content_token_count")
+    normalized = normalize_prompt_cache_usage(prompt_tokens, (cached_tokens,))
+    return normalized if normalized[2] else None
 
 
 @client_registry.register_client_class("gemini")
@@ -527,13 +560,18 @@ class GeminiClient(BaseClient):
         except Exception as e:
             raise NetworkConnectionError() from e
 
-        if usage_record:
+        if usage_record is not None or (resp.cache_usage is not None and resp.cache_usage[2]):
+            prompt_tokens, completion_tokens, total_tokens = usage_record or (0, 0, 0)
+            cache_hit, cache_miss, cache_reported = resp.cache_usage or (0, 0, False)
             resp.usage = UsageRecord(
                 model_name=model_info.name,
                 provider_name=model_info.api_provider,
-                prompt_tokens=usage_record[0],
-                completion_tokens=usage_record[1],
-                total_tokens=usage_record[2],
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                prompt_cache_hit_tokens=cache_hit,
+                prompt_cache_miss_tokens=cache_miss,
+                prompt_cache_reported=cache_reported,
             )
 
         return resp

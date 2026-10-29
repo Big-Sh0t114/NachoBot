@@ -350,7 +350,10 @@ class TTSModel(BaseTTSModel):
         global_cfg = self.config.tts
 
         final_text_lang = text_lang or preset_cfg.text_language or "auto"
-        final_prompt_lang = prompt_lang or final_text_lang or preset_cfg.prompt_language or "zh"
+        # Reference transcription belongs to the reference audio, independent
+        # of the requested output language (for example Japanese reference,
+        # Chinese call reply).
+        final_prompt_lang = prompt_lang or preset_cfg.prompt_language or "zh"
         resolved_ref_audio_path = self._resolve_path(ref_audio_path)
         resolved_aux_ref_paths = [
             self._resolve_path(p) for p in (aux_ref_audio_paths or preset_cfg.aux_ref_audio_paths or [])

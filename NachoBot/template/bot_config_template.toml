@@ -1,5 +1,5 @@
 [inner]
-version = "6.20.13_bs"
+version = "6.20.14_bs"
 
 #----以下是给开发人员阅读的，如果你只是部署，不需要阅读----
 #如果你想要修改配置文件，请递增version的值
@@ -108,6 +108,12 @@ check_interval = 10 # 检查表情包（注册，破损，删除）的时间间�
 steal_emoji = true # 是否偷取表情包，可以将一些表情包据为己有
 content_filtration = false  # 是否启用表情包过滤，只有符合该要求的表情包才会被保存
 filtration_prompt = "符合公序良俗" # 表情包过滤要求，只有符合该要求的表情包才会被保存
+cache_cleanup_enabled = true # 是否启用媒体缓存按年龄清理
+image_file_retention_days = 14 # 普通图片文件缓存保留天数
+emoji_file_retention_days = 30 # 表情图片文件缓存保留天数
+description_retention_days = 30 # 图片、表情和视频描述缓存保留天数
+video_file_retention_days = 14 # 视频文件缓存保留天数
+cleanup_batch_size = 1000 # 每次清理最多删除的文件或描述记录数
 
 [qqcall]
 enabled = false # 内置 QQCall 插件总开关；同时控制适配器、音频与服务，修改后重启 Core
@@ -183,6 +189,7 @@ library_log_levels = { "aiohttp" = "WARNING"} # 设置特定库的日志级别
 
 [debug]
 show_prompt = false # 是否显示prompt
+enable_llm_cache_stats = false # 是否启用LLM缓存统计调试输出
 
 [ncnk_message]
 auth_token = [] # Core HTTP/WS 共用令牌；也可用 NACHOBOT_CORE_TOKEN，均为空时仅允许回环/显式受信容器网络

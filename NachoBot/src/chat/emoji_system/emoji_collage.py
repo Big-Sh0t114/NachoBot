@@ -10,6 +10,7 @@ from typing import Sequence
 from PIL import Image, ImageDraw, ImageFont, ImageOps, UnidentifiedImageError
 
 from src.common.logger import get_logger
+from src.common.media_conversion_cache import MEDIA_FILESYSTEM_LOCK, media_conversion_cache
 from src.plugin_system.apis.emoji_api import EmojiCandidate
 
 
@@ -24,6 +25,9 @@ MAX_ROW_HEIGHT = 430
 MIN_LAYOUT_RATIO = 0.35
 MAX_LAYOUT_RATIO = 3.0
 BACKGROUND = (238, 238, 238)
+MAX_PREPROCESS_SOURCE_PIXELS = 16_000_000
+MAX_PREPROCESS_EDGE = 1_600
+MAX_PREPROCESS_SCAN_FRAMES = 256
 
 
 @dataclass
@@ -51,19 +55,71 @@ class _Layout:
 
 def _prepare_image(candidate: EmojiCandidate) -> PreparedEmoji | None:
     try:
-        with Image.open(candidate.full_path) as source:
-            frame_count = getattr(source, "n_frames", 1)
-            if frame_count > 1:
-                source.seek(frame_count // 2)
-            frame = ImageOps.exif_transpose(source).convert("RGBA")
-            frame.load()
+        with MEDIA_FILESYSTEM_LOCK:
+            image_bytes = Path(candidate.full_path).read_bytes()
 
-        if frame.width <= 0 or frame.height <= 0:
-            return None
+        def preprocess() -> bytes:
+            with Image.open(io.BytesIO(image_bytes)) as source:
+                if source.width <= 0 or source.height <= 0 or source.width * source.height > MAX_PREPROCESS_SOURCE_PIXELS:
+                    raise ValueError("emoji image dimensions exceed the preprocessing budget")
 
-        opaque = Image.new("RGBA", frame.size, (*BACKGROUND, 255))
-        opaque.alpha_composite(frame)
-        image = opaque.convert("RGB")
+                scanned_frames = 0
+                for frame_index in range(MAX_PREPROCESS_SCAN_FRAMES):
+                    try:
+                        source.seek(frame_index)
+                    except EOFError:
+                        break
+                    if (
+                        source.width <= 0
+                        or source.height <= 0
+                        or source.width * source.height > MAX_PREPROCESS_SOURCE_PIXELS
+                    ):
+                        raise ValueError("emoji animation frame exceeds the preprocessing budget")
+                    scanned_frames += 1
+
+                if scanned_frames <= 0:
+                    raise ValueError("emoji image contains no frames")
+                target_frame = scanned_frames // 2
+                source.seek(0)
+                for frame_index in range(target_frame + 1):
+                    source.seek(frame_index)
+                    if (
+                        source.width <= 0
+                        or source.height <= 0
+                        or source.width * source.height > MAX_PREPROCESS_SOURCE_PIXELS
+                    ):
+                        raise ValueError("emoji animation frame exceeds the preprocessing budget")
+                source.thumbnail((MAX_PREPROCESS_EDGE, MAX_PREPROCESS_EDGE), Image.Resampling.LANCZOS)
+                with ImageOps.exif_transpose(source) as oriented:
+                    with oriented.convert("RGBA") as frame:
+                        if frame.width <= 0 or frame.height <= 0:
+                            raise ValueError("emoji image dimensions must be positive")
+
+                        with Image.new("RGBA", frame.size, (*BACKGROUND, 255)) as opaque:
+                            opaque.alpha_composite(frame)
+                            with opaque.convert("RGB") as normalized:
+                                output = io.BytesIO()
+                                normalized.save(output, format="PNG", optimize=True)
+                                return output.getvalue()
+
+        normalized_bytes = media_conversion_cache.get_or_compute(
+            image_bytes,
+            "emoji-collage-preprocess",
+            {
+                "version": 2,
+                "frame": "middle",
+                "background": BACKGROUND,
+                "mode": "RGB",
+                "exif": "transpose",
+                "max_source_pixels": MAX_PREPROCESS_SOURCE_PIXELS,
+                "max_edge": MAX_PREPROCESS_EDGE,
+                "max_scan_frames": MAX_PREPROCESS_SCAN_FRAMES,
+            },
+            preprocess,
+        )
+        with Image.open(io.BytesIO(normalized_bytes)) as normalized_image:
+            image = normalized_image.convert("RGB")
+            image.load()
         real_ratio = image.width / image.height
         layout_ratio = min(max(real_ratio, MIN_LAYOUT_RATIO), MAX_LAYOUT_RATIO)
         return PreparedEmoji(candidate=candidate, image=image, layout_ratio=layout_ratio)

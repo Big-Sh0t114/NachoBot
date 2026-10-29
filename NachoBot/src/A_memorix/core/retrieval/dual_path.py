@@ -270,6 +270,7 @@ class DualPathRetriever:
         # 缓存 Aho-Corasick 匹配器
         self._ac_matcher: Optional[AhoCorasick] = None
         self._ac_nodes_count = 0
+        self._ac_node_revision: Optional[int] = None
         self._ac_node_map: Dict[str, str] = {}
         self._relation_intent_pattern = re.compile(
             r"(什么关系|有哪些关系|和.+关系|关联|关系网|subject|predicate|object|"
@@ -1743,30 +1744,63 @@ class DualPathRetriever:
         timeout_s: float,
     ) -> Dict[str, float]:
         """按实体集合和图规模缓存 PPR 结果，降低重复查询成本。"""
-        now = time.monotonic()
-        key = self._build_ppr_cache_key(entities)
-        cached = self._ppr_cache.get(key)
-        if cached is not None:
-            expires_at, scores = cached
-            if expires_at > now:
-                return scores
-            self._ppr_cache.pop(key, None)
+        max_attempts = 2
+        for attempt in range(max_attempts):
+            if not self._graph_revision_is_stable():
+                return {}
 
-        async with self._ppr_semaphore:
-            now = time.monotonic()
+            graph_revision = self._get_graph_revision()
+            key = self._build_ppr_cache_key(entities, graph_revision=graph_revision)
+            if graph_revision != self._get_graph_revision() or not self._graph_revision_is_stable():
+                continue
+
             cached = self._ppr_cache.get(key)
             if cached is not None:
                 expires_at, scores = cached
-                if expires_at > now:
-                    return scores
+                if expires_at > time.monotonic():
+                    if graph_revision == self._get_graph_revision() and self._graph_revision_is_stable():
+                        return scores
+                    continue
                 self._ppr_cache.pop(key, None)
 
-            scores = await asyncio.wait_for(
-                asyncio.to_thread(self._compute_ppr_scores, entities),
-                timeout=timeout_s,
-            )
-            self._store_ppr_cache_entry(key, scores)
-            return scores
+            async with self._ppr_semaphore:
+                if not self._graph_revision_is_stable():
+                    return {}
+
+                graph_revision = self._get_graph_revision()
+                key = self._build_ppr_cache_key(entities, graph_revision=graph_revision)
+                cached = self._ppr_cache.get(key)
+                if cached is not None:
+                    expires_at, scores = cached
+                    if expires_at > time.monotonic():
+                        if graph_revision == self._get_graph_revision() and self._graph_revision_is_stable():
+                            return scores
+                        continue
+                    self._ppr_cache.pop(key, None)
+
+                scores = await asyncio.wait_for(
+                    asyncio.to_thread(self._compute_ppr_scores, entities),
+                    timeout=timeout_s,
+                )
+                if (
+                    graph_revision != self._get_graph_revision()
+                    or not self._graph_revision_is_stable()
+                ):
+                    if attempt + 1 < max_attempts:
+                        continue
+                    logger.warning("PageRank计算期间图发生变化，丢弃未稳定的缓存结果")
+                    return {}
+
+                self._store_ppr_cache_entry(key, scores)
+                return scores
+
+        return {}
+
+    def _get_graph_revision(self) -> int:
+        return int(getattr(self.graph_store, "graph_revision", 0) or 0)
+
+    def _graph_revision_is_stable(self) -> bool:
+        return bool(getattr(self.graph_store, "graph_revision_stable", True))
 
     def _compute_ppr_scores(self, entities: Dict[str, float]) -> Dict[str, float]:
         if self._should_use_local_ppr():
@@ -1875,7 +1909,12 @@ class DualPathRetriever:
             scores = {node: score / total_score for node, score in scores.items()}
         return scores
 
-    def _build_ppr_cache_key(self, entities: Dict[str, float]) -> Tuple[Any, ...]:
+    def _build_ppr_cache_key(
+        self,
+        entities: Dict[str, float],
+        *,
+        graph_revision: Optional[int] = None,
+    ) -> Tuple[Any, ...]:
         entity_key = tuple(
             sorted(
                 (
@@ -1887,6 +1926,7 @@ class DualPathRetriever:
             )
         )
         return (
+            self._get_graph_revision() if graph_revision is None else int(graph_revision),
             int(getattr(self.graph_store, "num_nodes", 0) or 0),
             int(getattr(self.graph_store, "num_edges", 0) or 0),
             round(float(self.config.ppr_alpha), 6),
@@ -2164,17 +2204,30 @@ class DualPathRetriever:
             实体字典 {实体名: 权重}
         """
         # 获取所有实体
+        node_revision_before = getattr(self.graph_store, "node_revision", None)
+        revision_stable_before = self._graph_revision_is_stable()
         all_entities = self.graph_store.get_nodes()
         if not all_entities:
             return {}
 
+        node_revision = getattr(self.graph_store, "node_revision", len(all_entities))
+        if node_revision is None:
+            node_revision = len(all_entities)
+        node_revision = int(node_revision)
+        revision_stable = bool(
+            revision_stable_before
+            and self._graph_revision_is_stable()
+            and node_revision_before == getattr(self.graph_store, "node_revision", None)
+        )
+
         # 检查是否需要更新 Aho-Corasick 匹配器
-        if self._ac_matcher is None or self._ac_nodes_count != len(all_entities):
+        if not revision_stable or self._ac_matcher is None or self._ac_node_revision != node_revision:
             self._ac_matcher = AhoCorasick()
             for entity in all_entities:
                 self._ac_matcher.add_pattern(entity.lower())
             self._ac_matcher.build()
             self._ac_nodes_count = len(all_entities)
+            self._ac_node_revision = node_revision if revision_stable else None
             self._ac_node_map = {node.lower(): node for node in all_entities}
 
         # 执行匹配

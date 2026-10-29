@@ -134,7 +134,10 @@ thinking = {type = "disabled"} # 禁用思考
 请注意，`extra_params` 的配置应该构成一个合法的TOML字典结构，具体内容取决于API服务商的要求。
 
 **请注意，对于`client_type`为`gemini`的模型，此字段无效。**
+
 ### 3.3 配置参数说明
+
+`name` 是 NachoBot 配置中的模型别名，`model_identifier` 必须是服务商接受的准确模型标识符。需要让多个任务共用同一服务商模型时，可以使用不同的 `name` 并保持相同的 `model_identifier`；不要把本地别名后缀添加到服务商标识符中。
 
 | 参数 | 必填 | 说明 |
 |------|------|------|

@@ -417,11 +417,11 @@ class CapabilityRouter:
             prompt = json.dumps(
                 {
                     "bot_name": bot_name,
-                    "time_now": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
-                    "chat_history": _tail(chat_history, 6000),
                     "mcp_catalog": _tail(catalog, 6000) if route_mcp else "(none available)",
                     "sandbox_edit_available": route_sandbox,
+                    "chat_history": _tail(chat_history, 6000),
                     "current_request": {"sender": _tail(str(sender or ""), 256), "text": _tail(target, 3000)},
+                    "time_now": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
                 },
                 ensure_ascii=False,
             )

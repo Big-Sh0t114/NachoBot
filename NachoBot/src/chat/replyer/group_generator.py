@@ -4,6 +4,7 @@ import asyncio
 import random
 import re
 import threading
+from functools import partial
 
 from typing import TYPE_CHECKING, List, Optional, Dict, Any, Tuple
 from ncnk_message import get_system_event, system_event_fallback_text
@@ -109,7 +110,7 @@ class DefaultReplyer:
             model_set = getattr(model_config.model_task_config, "file_edit", model_set)
         from src.llm_models.request_cache import cached_replyer_request
         return cached_replyer_request(self, model_set=model_set, request_type=getattr(self, "request_type", "replyer"),
-                                      config=model_config, factory=LLMRequest)
+                                      config=model_config, factory=self._express_request_factory)
 
     def __init__(
         self,
@@ -119,6 +120,7 @@ class DefaultReplyer:
         _ensure_memory_retrieval_prompt_initialized()
         self.request_type = request_type
         self.chat_stream = chat_stream
+        self._express_request_factory = partial(LLMRequest, session_id=chat_stream.stream_id)
         self.is_group_chat, self.chat_target_info = get_chat_type_and_target_info(self.chat_stream.stream_id)
         self.heart_fc_sender = UniversalMessageSender()
         # self.memory_activator = MemoryActivator()
@@ -1778,7 +1780,7 @@ class AdvancedGroupReplyer(DefaultReplyer):
                 model_set = getattr(model_config.model_task_config, "file_edit", model_set)
         from src.llm_models.request_cache import cached_replyer_request
         return cached_replyer_request(self, model_set=model_set, request_type=getattr(self, "request_type", "advanced_replyer"),
-                                      config=model_config, factory=LLMRequest)
+                                      config=model_config, factory=self._express_request_factory)
 
     def __init__(self, *args, **kwargs):
         kwargs.setdefault("request_type", "advanced_replyer")
