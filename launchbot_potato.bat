@@ -1,5 +1,16 @@
 @echo off
 setlocal EnableExtensions
+
+REM ===== Download proxy: terminal environment, then current-user system proxy =====
+REM Keep terminal HTTPS_PROXY / ALL_PROXY; use HTTP_PROXY as a fallback.
+if not defined HTTPS_PROXY if not defined ALL_PROXY (
+    if defined HTTP_PROXY (
+        set "HTTPS_PROXY=%HTTP_PROXY%"
+    ) else (
+        for /f "usebackq delims=" %%P in (`powershell -NoProfile -Command "$ErrorActionPreference = 'Stop'; $target = [uri]'https://cdn.playwright.dev'; $proxy = [System.Net.WebRequest]::GetSystemWebProxy(); $resolved = $proxy.GetProxy($target); if ($resolved -and $resolved.AbsoluteUri -ne $target.AbsoluteUri) { $resolved.AbsoluteUri }" 2^>nul`) do set "HTTPS_PROXY=%%P"
+    )
+)
+
 chcp 65001 >nul
 set "PYTHONPATH="
 set "PYTHONHOME="

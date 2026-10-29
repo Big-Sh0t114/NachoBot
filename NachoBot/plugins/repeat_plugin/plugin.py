@@ -13,6 +13,8 @@ from src.plugin_system import (
     NachoMessages,
 )
 from src.common.logger import get_logger
+from src.chat.runtime_capabilities import runtime_capabilities_from_message
+from src.chat.realtime_ingress import realtime_ingress_manager
 
 logger = get_logger("repeat_plugin")
 
@@ -46,6 +48,15 @@ def _first_text(*vals) -> str:
         if s:
             return s
     return ""
+
+
+def _in_voice_call(message, stream_id: str) -> bool:
+    capabilities = runtime_capabilities_from_message(message)
+    return (
+        capabilities.voice_stream
+        or capabilities.reply_delivery == "tts_text"
+        or realtime_ingress_manager.has_active_session(stream_id)
+    )
 
 
 # ---------------- 复读处理器 ----------------
@@ -93,6 +104,14 @@ class RepeatHandler(BaseEventHandler):
             return True, True, None, None, None
 
         stream_id = _safe_str(stream_id)
+
+        # Voice turns must never seed or trigger repetition. Also suppress
+        # ordinary text arriving in a currently active realtime session.
+        if _in_voice_call(message, stream_id):
+            self.chat_history.pop(stream_id, None)
+            if debug_mode:
+                logger.info("[repeat_plugin] 当前聊天处于通话模式，跳过复读。")
+            return True, True, None, None, None
 
         # 获取群号（可选，仅日志用）
         group_id = _first_text(
@@ -159,6 +178,9 @@ class RepeatHandler(BaseEventHandler):
 
         # 执行复读
         if reply_text and reply_text != self.last_repeated_message:
+            if _in_voice_call(message, stream_id):
+                self.chat_history.pop(stream_id, None)
+                return True, True, None, None, None
             reply_text_cleaned = re.sub(r'@<([^:]+?):\d+>', r'@\1', reply_text)
 
             # ✅ 用框架的消息发送接口

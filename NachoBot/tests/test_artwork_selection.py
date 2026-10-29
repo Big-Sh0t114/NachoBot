@@ -40,6 +40,7 @@ def isolated_artwork_modules():
         "src",
         "src.common",
         "src.common.logger",
+        "src.common.media_conversion_cache",
         "src.chat",
         "src.chat.emoji_system",
         "src.chat.emoji_system.emoji_collage",
@@ -122,6 +123,10 @@ def isolated_artwork_modules():
     helper = load_module(
         "src.chat.emoji_system.image_selection",
         PROJECT_ROOT / "src" / "chat" / "emoji_system" / "image_selection.py",
+    )
+    load_module(
+        "src.common.media_conversion_cache",
+        PROJECT_ROOT / "src" / "common" / "media_conversion_cache.py",
     )
     collage_module = load_module(
         "src.chat.emoji_system.emoji_collage",

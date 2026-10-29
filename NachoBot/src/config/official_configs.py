@@ -543,6 +543,24 @@ class EmojiConfig(ConfigBase):
     check_interval: int = 120
     """表情包检查间隔（分钟）"""
 
+    cache_cleanup_enabled: bool = True
+    """是否启用图片、表情包、描述和视频缓存的按年龄清理"""
+
+    image_file_retention_days: int = 14
+    """普通图片文件缓存保留天数"""
+
+    emoji_file_retention_days: int = 30
+    """表情图片文件缓存保留天数"""
+
+    description_retention_days: int = 30
+    """图片、表情和视频描述缓存保留天数"""
+
+    video_file_retention_days: int = 14
+    """视频文件缓存保留天数"""
+
+    cleanup_batch_size: int = 1000
+    """每次缓存清理最多删除的文件或描述记录数"""
+
     steal_emoji: bool = True
     """是否偷取表情包，可以发送保存的表情包"""
 
@@ -776,6 +794,9 @@ class DebugConfig(ConfigBase):
 
     show_prompt: bool = False
     """是否显示prompt"""
+
+    enable_llm_cache_stats: bool = False
+    """是否启用LLM缓存统计调试输出"""
 
 
 @dataclass

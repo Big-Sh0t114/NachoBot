@@ -96,6 +96,9 @@ class VADProcessor:
 
     def reset(self):
         if self._vad is not None:
-            self._vad.clear()
+            # Python exposes reset(), which also discards buffered samples and
+            # recurrent state; clearing only queued segments would leak speech
+            # across an interruption or a new call.
+            self._vad.reset()
         self._is_speaking = False
         self._samples_processed = 0

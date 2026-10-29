@@ -4,7 +4,7 @@ import io
 import json
 import re
 import base64
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from ipaddress import ip_address
 from typing import Callable, Any, Coroutine, Optional
 from urllib.parse import urlparse
@@ -28,19 +28,208 @@ from openai.types.chat.chat_completion_chunk import ChoiceDelta
 
 from src.config.api_ada_configs import ModelInfo, APIProvider
 from src.common.logger import get_logger
-from .base_client import APIResponse, UsageRecord, BaseClient, _cancel_and_drain_request_task, client_registry
+from .base_client import (
+    APIResponse,
+    UsageRecord,
+    BaseClient,
+    _cancel_and_drain_request_task,
+    _optional_field,
+    _nonnegative_token_count,
+    _MISSING,
+    normalize_prompt_cache_usage,
+    client_registry,
+)
 from ..exceptions import (
     RespParseException,
     NetworkConnectionError,
     RespNotOkException,
     ReqAbortException,
     EmptyResponseException,
+    sanitize_error_text,
 )
 from ..payload_content.message import Message, RoleType
 from ..payload_content.resp_format import RespFormat
 from ..payload_content.tool_option import ToolOption, ToolParam, ToolCall
 
 logger = get_logger("OpenAI客户端")
+
+
+def _optional_mapping_or_attribute(value: Any, key: str) -> Any:
+    if isinstance(value, Mapping):
+        return value.get(key, _MISSING)
+    return getattr(value, key, _MISSING)
+
+
+def _error_field(error: Any, key: str) -> Any:
+    """Read a simple field from a parsed error mapping or SDK object."""
+    return _optional_mapping_or_attribute(error, key)
+
+
+def _error_text(value: Any) -> str | None:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return None
+
+
+def _message_sensitive_values(message_list: list[Message]) -> tuple[str, ...]:
+    """Collect exact serialized message strings only for error redaction."""
+    values: list[str] = []
+    for message in message_list:
+        content = getattr(message, "content", None)
+        if isinstance(content, str):
+            values.append(content)
+        elif isinstance(content, (list, tuple)):
+            for item in content:
+                if isinstance(item, str):
+                    values.append(item)
+                elif isinstance(item, (list, tuple)):
+                    values.extend(part for part in item if isinstance(part, str))
+    return tuple(value for value in values if value)
+
+
+def _safe_chat_request_metadata(
+    *,
+    base_url: str,
+    model_info: ModelInfo,
+    message_list: list[Message],
+    request_params: Mapping[str, Any],
+    api_key: str = "",
+) -> dict[str, Any]:
+    """Build diagnostic metadata without copying prompts, tools, or arbitrary values."""
+    try:
+        parsed = urlparse(base_url)
+        hostname = parsed.hostname or "unknown-host"
+        port = f":{parsed.port}" if parsed.port else ""
+        path = parsed.path.rstrip("/") + "/chat/completions"
+        endpoint = f"{parsed.scheme or 'https'}://{hostname}{port}{path}"
+    except (TypeError, ValueError):
+        endpoint = "openai-chat-completions"
+
+    numeric_parameters = {
+        "max_tokens",
+        "max_completion_tokens",
+        "temperature",
+        "top_p",
+        "frequency_penalty",
+        "presence_penalty",
+        "n",
+        "seed",
+    }
+    parameter_values: dict[str, Any] = {}
+    all_parameters: dict[str, Any] = {
+        key: value for key, value in request_params.items() if key not in {"messages", "tools", "extra_body"}
+    }
+    extra_body = request_params.get("extra_body")
+    if isinstance(extra_body, Mapping):
+        all_parameters.update(extra_body)
+    for name, value in all_parameters.items():
+        if not isinstance(name, str):
+            continue
+        safe_name = sanitize_error_text(name, (api_key,)) or "parameter"
+        field = {"type": type(value).__name__}
+        if name in numeric_parameters and isinstance(value, (int, float)) and not isinstance(value, bool):
+            field["value"] = value
+        parameter_values[safe_name] = field
+
+    message_metadata = []
+    for message in message_list:
+        role = getattr(getattr(message, "role", None), "value", "unknown")
+        content = getattr(message, "content", "")
+        if isinstance(content, str):
+            content_length = len(content)
+        elif isinstance(content, (list, tuple)):
+            content_length = sum(
+                len(item)
+                if isinstance(item, str)
+                else sum(len(part) for part in item if isinstance(part, str))
+                if isinstance(item, (list, tuple))
+                else 0
+                for item in content
+            )
+        else:
+            content_length = 0
+        message_metadata.append({"role": str(role), "content_length": content_length})
+
+    tools = request_params.get("tools")
+    has_tools = tools is not NOT_GIVEN and bool(tools)
+    try:
+        tool_count = len(tools) if has_tools else 0
+    except TypeError:
+        tool_count = 0
+
+    return {
+        "endpoint": sanitize_error_text(endpoint, (api_key,)),
+        "model": sanitize_error_text(str(model_info.model_identifier), (api_key,)),
+        "parameters": parameter_values,
+        "messages": message_metadata,
+        "has_tools": has_tools,
+        "tool_count": tool_count,
+    }
+
+
+def _status_error_to_exception(
+    error: APIStatusError,
+    api_key: str = "",
+    request_diagnostics: dict[str, Any] | None = None,
+    sensitive_values: Iterable[str] = (),
+) -> RespNotOkException:
+    """Extract useful response error fields without exposing request metadata."""
+    body = getattr(error, "body", None)
+    nested_error = _error_field(body, "error")
+    details = nested_error if nested_error is not _MISSING and nested_error is not None else body
+
+    message = _error_text(_error_field(details, "message"))
+    if not message and details is not body:
+        message = _error_text(_error_field(body, "message"))
+    if not message and isinstance(nested_error, str):
+        message = nested_error
+    if not message:
+        message = _error_text(body)
+    if not message and not isinstance(body, Mapping):
+        message = _error_text(getattr(error, "message", None)) or str(error)
+    if not message:
+        message = f"Provider returned HTTP {error.status_code} without an error message."
+
+    code = _error_field(details, "code")
+    if code is _MISSING or code is None:
+        code = _error_field(details, "error_code")
+    if code is _MISSING or code is None:
+        code = _error_field(body, "error_code")
+    if code is _MISSING or code is None:
+        code = getattr(error, "code", None) or getattr(error, "error_code", None)
+    param = _error_field(details, "param")
+    if param is _MISSING or param is None:
+        param = _error_field(body, "param")
+    if param is _MISSING or param is None:
+        param = getattr(error, "param", None)
+    error_type = _error_field(details, "type")
+    if error_type is _MISSING or error_type is None:
+        error_type = _error_field(body, "type")
+    if error_type is _MISSING or error_type is None:
+        error_type = getattr(error, "type", None)
+    request_id = getattr(error, "request_id", None)
+    if not request_id:
+        response = getattr(error, "response", None)
+        headers = getattr(response, "headers", None)
+        request_id = headers.get("x-request-id") if headers is not None and hasattr(headers, "get") else None
+
+    sensitive_values = tuple(value for value in sensitive_values if isinstance(value, str) and value)
+    short_echo = any(len(value) < 4 and value in message for value in sensitive_values)
+    if short_echo:
+        message = "Provider error message omitted because it echoed request content."
+    secrets = ((api_key,) if api_key else ()) + tuple(value for value in sensitive_values if len(value) >= 4)
+    wrapped = RespNotOkException(
+        error.status_code,
+        sanitize_error_text(message, secrets),
+        sanitize_error_text(code, secrets),
+        sanitize_error_text(param, secrets),
+        sanitize_error_text(error_type, secrets),
+        sanitize_error_text(request_id, secrets),
+    )
+    wrapped.request_diagnostics = request_diagnostics
+    return wrapped
 
 
 def _is_loopback_url(url: str) -> bool:
@@ -288,6 +477,19 @@ async def _default_stream_response_handler(
     _fc_delta_buffer = io.StringIO()  # 正式内容缓冲区，用于存储接收到的正式内容
     _tool_calls_buffer: list[tuple[str, str, io.StringIO]] = []  # 工具调用缓冲区，用于存储接收到的工具调用
     _usage_record = None  # 使用情况记录
+    _cache_usage: tuple[int, int, bool] | None = None
+
+    def _record_usage(usage: Any) -> None:
+        nonlocal _usage_record, _cache_usage
+        prompt_tokens = _optional_field(usage, "prompt_tokens")
+        completion_tokens = _optional_field(usage, "completion_tokens")
+        total_tokens = _optional_field(usage, "total_tokens")
+        _usage_record = (
+            _nonnegative_token_count(prompt_tokens) or 0,
+            _nonnegative_token_count(completion_tokens) or 0,
+            _nonnegative_token_count(total_tokens) or 0,
+        )
+        _cache_usage = _openai_cache_usage(usage)
 
     def _insure_buffer_closed():
         # 确保缓冲区被关闭
@@ -307,11 +509,7 @@ async def _default_stream_response_handler(
         # 空 choices / usage-only 帧的防御
         if not hasattr(event, "choices") or not event.choices:
             if hasattr(event, "usage") and event.usage:
-                _usage_record = (
-                    event.usage.prompt_tokens or 0,
-                    event.usage.completion_tokens or 0,
-                    event.usage.total_tokens or 0,
-                )
+                _record_usage(event.usage)
             continue  # 跳过本帧，避免访问 choices[0]
         delta = event.choices[0].delta  # 获取当前块的delta内容
 
@@ -330,18 +528,16 @@ async def _default_stream_response_handler(
 
         if event.usage:
             # 如果有使用情况，则将其存储在APIResponse对象中
-            _usage_record = (
-                event.usage.prompt_tokens or 0,
-                event.usage.completion_tokens or 0,
-                event.usage.total_tokens or 0,
-            )
+            _record_usage(event.usage)
 
     try:
-        return _build_stream_api_resp(
+        api_response = _build_stream_api_resp(
             _fc_delta_buffer,
             _rc_delta_buffer,
             _tool_calls_buffer,
-        ), _usage_record
+        )
+        api_response.cache_usage = _cache_usage
+        return api_response, _usage_record
     except Exception:
         # 确保缓冲区被关闭
         _insure_buffer_closed()
@@ -353,6 +549,22 @@ pattern = re.compile(
     re.DOTALL,
 )
 """用于解析推理内容的正则表达式"""
+
+
+def _openai_cache_usage(usage: Any) -> tuple[int, int, bool] | None:
+    """Read OpenAI-compatible cache fields without conflating absent and zero."""
+    prompt_tokens = _optional_field(usage, "prompt_tokens")
+    details = _optional_field(usage, "prompt_tokens_details")
+    cached_tokens = _optional_field(details, "cached_tokens") if details is not _MISSING else _MISSING
+    normalized = normalize_prompt_cache_usage(
+        prompt_tokens,
+        (
+            _optional_field(usage, "prompt_cache_hit_tokens"),
+            cached_tokens,
+        ),
+        _optional_field(usage, "prompt_cache_miss_tokens"),
+    )
+    return normalized if normalized[2] else None
 
 
 def _default_normal_response_parser(
@@ -400,10 +612,14 @@ def _default_normal_response_parser(
 
     # 提取Usage信息
     if resp.usage:
+        api_response.cache_usage = _openai_cache_usage(resp.usage)
+        prompt_tokens = _optional_field(resp.usage, "prompt_tokens")
+        completion_tokens = _optional_field(resp.usage, "completion_tokens")
+        total_tokens = _optional_field(resp.usage, "total_tokens")
         _usage_record = (
-            resp.usage.prompt_tokens or 0,
-            resp.usage.completion_tokens or 0,
-            resp.usage.total_tokens or 0,
+            _nonnegative_token_count(prompt_tokens) or 0,
+            _nonnegative_token_count(completion_tokens) or 0,
+            _nonnegative_token_count(total_tokens) or 0,
         )
     else:
         _usage_record = None
@@ -483,21 +699,23 @@ class OpenaiClient(BaseClient):
         messages: Iterable[ChatCompletionMessageParam] = _convert_messages(message_list)
         # 将tool_options转换为OpenAI API所需的格式
         tools: Iterable[ChatCompletionToolParam] = _convert_tool_options(tool_options) if tool_options else NOT_GIVEN  # type: ignore
+        # Shared kwargs feed safe error metadata; keep the legacy request values unchanged.
+        request_params = {
+            "model": model_info.model_identifier,
+            "messages": messages,
+            "tools": tools,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": model_info.force_stream_mode,
+            "response_format": NOT_GIVEN,
+            "extra_body": extra_params,
+        }
 
         req_task: asyncio.Task[Any] | None = None
         try:
             if model_info.force_stream_mode:
                 req_task = asyncio.create_task(
-                    self.client.chat.completions.create(
-                        model=model_info.model_identifier,
-                        messages=messages,
-                        tools=tools,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        stream=True,
-                        response_format=NOT_GIVEN,
-                        extra_body=extra_params,
-                    )
+                    self.client.chat.completions.create(**request_params)
                 )
                 while not req_task.done():
                     if interrupt_flag and interrupt_flag.is_set():
@@ -512,16 +730,7 @@ class OpenaiClient(BaseClient):
                 # 发送请求并获取响应
                 # start_time = time.time()
                 req_task = asyncio.create_task(
-                    self.client.chat.completions.create(
-                        model=model_info.model_identifier,
-                        messages=messages,
-                        tools=tools,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        stream=False,
-                        response_format=NOT_GIVEN,
-                        extra_body=extra_params,
-                    )
+                    self.client.chat.completions.create(**request_params)
                 )
                 while not req_task.done():
                     if interrupt_flag and interrupt_flag.is_set():
@@ -541,15 +750,42 @@ class OpenaiClient(BaseClient):
             raise NetworkConnectionError() from e
         except APIStatusError as e:
             # 重封装APIError为RespNotOkException
-            raise RespNotOkException(e.status_code, e.message) from e
+            api_key = getattr(getattr(self, "api_provider", None), "api_key", "")
+            diagnostics = _safe_chat_request_metadata(
+                base_url=getattr(getattr(self, "api_provider", None), "base_url", ""),
+                model_info=model_info,
+                message_list=message_list,
+                request_params=request_params,
+                api_key=api_key,
+            )
+            wrapped_error = _status_error_to_exception(
+                e,
+                api_key,
+                diagnostics,
+                _message_sensitive_values(message_list),
+            )
+            logger.warning(
+                "OpenAI Chat Completions request failed: %s",
+                json.dumps(
+                    {"error": str(wrapped_error), "request": diagnostics},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            )
+            raise wrapped_error from None
 
-        if usage_record:
+        if usage_record is not None or (resp.cache_usage is not None and resp.cache_usage[2]):
+            prompt_tokens, completion_tokens, total_tokens = usage_record or (0, 0, 0)
+            cache_hit, cache_miss, cache_reported = resp.cache_usage or (0, 0, False)
             resp.usage = UsageRecord(
                 model_name=model_info.name,
                 provider_name=model_info.api_provider,
-                prompt_tokens=usage_record[0],
-                completion_tokens=usage_record[1],
-                total_tokens=usage_record[2],
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                prompt_cache_hit_tokens=cache_hit,
+                prompt_cache_miss_tokens=cache_miss,
+                prompt_cache_reported=cache_reported,
             )
 
         return resp
@@ -574,14 +810,19 @@ class OpenaiClient(BaseClient):
             )
         except APIConnectionError as e:
             # 添加详细的错误信息以便调试
-            logger.error(f"OpenAI API连接错误（嵌入模型）: {str(e)}")
+            api_key = getattr(getattr(self, "api_provider", None), "api_key", "")
+            logger.error("OpenAI API连接错误（嵌入模型）: %s", sanitize_error_text(str(e), (api_key,)))
             logger.error(f"错误类型: {type(e)}")
             if hasattr(e, "__cause__") and e.__cause__:
-                logger.error(f"底层错误: {str(e.__cause__)}")
+                logger.error(
+                    "底层错误: %s",
+                    sanitize_error_text(str(e.__cause__), (api_key,)),
+                )
             raise NetworkConnectionError() from e
         except APIStatusError as e:
             # 重封装APIError为RespNotOkException
-            raise RespNotOkException(e.status_code) from e
+            api_key = getattr(getattr(self, "api_provider", None), "api_key", "")
+            raise _status_error_to_exception(e, api_key, sensitive_values=(embedding_input,)) from None
 
         response = APIResponse()
 
@@ -629,7 +870,8 @@ class OpenaiClient(BaseClient):
             raise NetworkConnectionError() from e
         except APIStatusError as e:
             # 重封装APIError为RespNotOkException
-            raise RespNotOkException(e.status_code, e.message) from e
+            api_key = getattr(getattr(self, "api_provider", None), "api_key", "")
+            raise _status_error_to_exception(e, api_key, sensitive_values=(audio_base64,)) from None
         response = APIResponse()
         # 解析转录响应
         if hasattr(raw_response, "text"):

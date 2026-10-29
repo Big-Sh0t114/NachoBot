@@ -7,6 +7,16 @@ set "NACHOBOT_DIR=%ROOT%NachoBot"
 set "WEBUI_DIR=%ROOT%webui"
 set "NACHOBOT_FFMPEG_DIR=%ROOT%.runtime\ffmpeg"
 
+REM ===== Download proxy: terminal environment, then current-user system proxy =====
+REM Keep terminal HTTPS_PROXY / ALL_PROXY; use HTTP_PROXY as a fallback.
+if not defined HTTPS_PROXY if not defined ALL_PROXY (
+    if defined HTTP_PROXY (
+        set "HTTPS_PROXY=%HTTP_PROXY%"
+    ) else (
+        for /f "usebackq delims=" %%P in (`powershell -NoProfile -Command "$ErrorActionPreference = 'Stop'; $target = [uri]'https://cdn.playwright.dev'; $proxy = [System.Net.WebRequest]::GetSystemWebProxy(); $resolved = $proxy.GetProxy($target); if ($resolved -and $resolved.AbsoluteUri -ne $target.AbsoluteUri) { $resolved.AbsoluteUri }" 2^>nul`) do set "HTTPS_PROXY=%%P"
+    )
+)
+
 REM ===== Hugging Face endpoint =====
 if not defined NACHOBOT_HF_ENDPOINT (
     set "NACHOBOT_HF_ENDPOINT=https://hf-mirror.com"

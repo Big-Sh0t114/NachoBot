@@ -19,16 +19,16 @@ def init_rewrite_prompt():
 不要输出多余内容(包括前后缀，冒号和引号，括号，表情包，emoji,at或 @等 )，只输出一条回复就好。
 
 {chat_target}
-{time_block}
 {chat_info}
 
 你现在的心情是：{mood_state}
+{expression_habits_block}
+{keywords_reaction_prompt}
 你正在{chat_target_2},{reply_target_block}
 你想要对上述的发言进行回复，回复的具体内容（原句）是：{raw_reply}
 原因是：{reason}
-{keywords_reaction_prompt}
-{expression_habits_block}
 {moderation_prompt}
+{time_block}
 现在，你说：""",
         "default_expressor_prompt",
     )

@@ -11,7 +11,7 @@ from typing import Tuple, List, Dict, Optional, Callable, Awaitable, Any, Set
 import traceback
 
 from src.common.logger import get_logger
-from src.config.config import model_config
+from src.config.config import global_config, model_config
 from src.config.api_ada_configs import APIProvider, ModelInfo, TaskConfig
 from .payload_content.message import MessageBuilder, Message, RoleType
 from .payload_content.resp_format import RespFormat
@@ -223,6 +223,26 @@ error_code_mapping = {
 }
 
 
+_CANDIDATE_PARAMETER_FIELDS = frozenset(
+    {"max_tokens", "max_completion_tokens", "temperature", "reasoning_effort"}
+)
+
+
+def _is_candidate_specific_compatibility_error(error: RespNotOkException) -> bool:
+    """Only continue after a 400 that identifies a known per-model parameter mismatch."""
+    if error.status_code != 400 or not isinstance(error.error_code, str) or not isinstance(error.param, str):
+        return False
+    error_code = error.error_code.casefold()
+    parameter = error.param.casefold()
+    return (
+        error_code == "unsupported_parameter" and parameter in _CANDIDATE_PARAMETER_FIELDS
+    ) or (
+        error_code == "unsupported_value" and parameter in _CANDIDATE_PARAMETER_FIELDS
+    ) or (
+        error_code == "model_not_found" and parameter == "model"
+    )
+
+
 class RequestType(Enum):
     """请求类型枚举"""
 
@@ -234,10 +254,17 @@ class RequestType(Enum):
 class LLMRequest:
     """LLM请求类"""
 
-    def __init__(self, model_set: TaskConfig, request_type: str = "", config: Any = None) -> None:
+    def __init__(
+        self,
+        model_set: TaskConfig,
+        request_type: str = "",
+        config: Any = None,
+        session_id: str | None = None,
+    ) -> None:
         self.task_name = request_type
         self.model_for_task = model_set
         self.request_type = request_type
+        self.session_id = session_id if isinstance(session_id, str) and session_id else None
         self._model_config = config if config is not None else model_config
         self.model_usage: Dict[str, Tuple[int, int, int, float]] = {
             model: (0, 0, 0, 0.0) for model in self.model_for_task.model_list
@@ -693,9 +720,10 @@ class LLMRequest:
                                         )
 
                         effective_stream_handler = observed_handler
-                    return await client.get_response(
+                    effective_messages = compressed_messages or message_list
+                    response = await client.get_response(
                         model_info=effective_model_info,
-                        message_list=(compressed_messages or message_list),
+                        message_list=effective_messages,
                         tool_options=tool_options,
                         max_tokens=self.model_for_task.max_tokens if max_tokens is None else max_tokens,
                         temperature=self.model_for_task.temperature if temperature is None else temperature,
@@ -705,6 +733,8 @@ class LLMRequest:
                         extra_params=merged_extra_params,
                         interrupt_flag=interrupt_flag,
                     )
+                    response._cache_diagnostic_messages = effective_messages
+                    return response
                 elif request_type == RequestType.EMBEDDING:
                     assert embedding_input is not None
                     return await client.get_embedding(
@@ -752,7 +782,7 @@ class LLMRequest:
                 if e.status_code == 413 and message_list and not compressed_messages:
                     logger.warning(f"{self.log_context} 模型 '{model_info.name}' 返回413请求体过大，尝试压缩后重试...")
                     # 压缩消息本身不消耗重试次数
-                    compressed_messages = compress_messages(message_list)
+                    compressed_messages = await asyncio.to_thread(compress_messages, message_list)
                     continue
 
                 # 不可重试的HTTP错误
@@ -827,6 +857,25 @@ class LLMRequest:
                     if candidate_executor is not None
                     else await default_attempt()
                 )
+                if request_type == RequestType.RESPONSE:
+                    messages = getattr(response, "_cache_diagnostic_messages", None)
+                    if messages is not None:
+                        try:
+                            from . import cache_diagnostics
+
+                            cache_diagnostics.record_request(
+                                messages=messages,
+                                model_info=model_info,
+                                request_type=self.request_type,
+                                session_id=self.session_id,
+                                usage=response.usage,
+                                tools=tool_options,
+                                response_format=response_format,
+                                enabled=self._cache_diagnostics_enabled(),
+                            )
+                        except Exception as exc:
+                            # Diagnostics are observational and cannot invalidate successful inference.
+                            logger.debug("Prompt cache diagnostics skipped: %s", type(exc).__name__)
                 return response, model_info
 
             except ReqAbortException:
@@ -843,8 +892,16 @@ class LLMRequest:
 
                 failed_models_this_request.add(model_info.name)
 
-                if isinstance(last_exception, RespNotOkException) and last_exception.status_code == 400:
-                    logger.error(f"{self.log_context} 收到不可恢复的客户端错误 (400)，中止所有尝试。")
+                if (
+                    isinstance(last_exception, RespNotOkException)
+                    and last_exception.status_code == 400
+                    and not _is_candidate_specific_compatibility_error(last_exception)
+                ):
+                    logger.error(
+                        "%s Request-wide HTTP 400; stopping model fallback: %s",
+                        self.log_context,
+                        str(last_exception),
+                    )
                     raise last_exception from e
 
             finally:
@@ -856,6 +913,15 @@ class LLMRequest:
         if last_exception:
             raise last_exception
         raise RuntimeError("请求失败，所有可用模型均已尝试失败。")
+
+    @staticmethod
+    def _cache_diagnostics_enabled() -> bool:
+        """Read the opt-in flag without making configuration failures affect requests."""
+        try:
+            debug_config = getattr(global_config, "debug", None)
+            return getattr(debug_config, "enable_llm_cache_stats", False) is True
+        except Exception:
+            return False
 
     def _build_tool_options(self, tools: Optional[List[Dict[str, Any]]]) -> Optional[List[ToolOption]]:
         # sourcery skip: extract-method

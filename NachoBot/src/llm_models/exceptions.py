@@ -1,4 +1,5 @@
-from typing import Any
+import re
+from typing import Any, Iterable
 
 
 # 常见Error Code Mapping (以OpenAI API为例)
@@ -13,6 +14,29 @@ error_code_mapping = {
     500: "服务器内部故障",
     503: "服务器负载过高",
 }
+
+
+_BEARER_PATTERN = re.compile(r"(?i)\bBearer\s+[^\s\"'&,;]+")
+_SK_TOKEN_PATTERN = re.compile(r"(?i)\bsk-[a-z0-9_-]+")
+_SECRET_ASSIGNMENT_PATTERN = re.compile(
+    r"(?i)[\"']?\b(api[_-]?key|authorization|access[_-]?token|refresh[_-]?token|token|secret|password|credential)"
+    r"[\"']?(\s*[=:]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s&,;}]+)"
+)
+_URL_CREDENTIAL_PATTERN = re.compile(r"(?i)(https?://)[^/@\s]+:[^/@\s]+@")
+
+
+def sanitize_error_text(value: Any, sensitive_values: Iterable[str] = ()) -> str | None:
+    """Redact common credential forms and caller-supplied exact secrets."""
+    if value is None:
+        return None
+    text = str(value)
+    for secret in sensitive_values:
+        if secret:
+            text = text.replace(secret, "[REDACTED]")
+    text = _BEARER_PATTERN.sub("Bearer [REDACTED]", text)
+    text = _URL_CREDENTIAL_PATTERN.sub(r"\1[REDACTED]@", text)
+    text = _SECRET_ASSIGNMENT_PATTERN.sub(lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]", text)
+    return _SK_TOKEN_PATTERN.sub("[REDACTED]", text)
 
 
 class NetworkConnectionError(Exception):
@@ -39,18 +63,44 @@ class ReqAbortException(Exception):
 class RespNotOkException(Exception):
     """请求响应异常，见于请求未能成功响应（非 '200 OK'）"""
 
-    def __init__(self, status_code: int, message: str | None = None):
-        super().__init__(message)
+    def __init__(
+        self,
+        status_code: int,
+        message: str | None = None,
+        error_code: str | int | None = None,
+        param: str | None = None,
+        error_type: str | None = None,
+        request_id: str | None = None,
+    ):
+        safe_message = sanitize_error_text(message)
+        safe_code = sanitize_error_text(error_code)
+        safe_param = sanitize_error_text(param)
+        safe_type = sanitize_error_text(error_type)
+        super().__init__(safe_message)
         self.status_code = status_code
-        self.message = message
+        self.message = safe_message
+        self.error_code = safe_code
+        self.param = safe_param
+        self.error_type = safe_type
+        self.request_id = sanitize_error_text(request_id)
 
     def __str__(self):
-        if self.status_code in error_code_mapping:
-            return error_code_mapping[self.status_code]
-        elif self.message:
-            return self.message
-        else:
-            return f"未知的异常响应代码：{self.status_code}"
+        summary = error_code_mapping.get(self.status_code, "未知的异常响应")
+        details = [f"HTTP {self.status_code}: {summary}"]
+        if self.message:
+            details.append(self.message)
+        metadata = []
+        if self.error_code is not None:
+            metadata.append(f"code={self.error_code}")
+        if self.param is not None:
+            metadata.append(f"param={self.param}")
+        if self.error_type is not None:
+            metadata.append(f"type={self.error_type}")
+        if self.request_id is not None:
+            metadata.append(f"request_id={self.request_id}")
+        if metadata:
+            details.append("(" + ", ".join(metadata) + ")")
+        return " ".join(details)
 
 
 class RespParseException(Exception):

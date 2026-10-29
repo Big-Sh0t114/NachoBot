@@ -4,6 +4,7 @@ import asyncio
 import random
 import re
 import threading
+from functools import partial
 
 from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime
@@ -110,7 +111,7 @@ class PrivateReplyer:
             model_set = getattr(model_config.model_task_config, "file_edit", model_set)
         from src.llm_models.request_cache import cached_replyer_request
         return cached_replyer_request(self, model_set=model_set, request_type=getattr(self, "request_type", "replyer"),
-                                      config=model_config, factory=LLMRequest)
+                                      config=model_config, factory=self._express_request_factory)
 
     def __init__(
         self,
@@ -120,6 +121,7 @@ class PrivateReplyer:
         _ensure_memory_retrieval_prompt_initialized()
         self.request_type = request_type
         self.chat_stream = chat_stream
+        self._express_request_factory = partial(LLMRequest, session_id=chat_stream.stream_id)
         
         from src.manager.local_store_manager import local_storage
         key = f"private_replyer_group_{self.chat_stream.stream_id}"

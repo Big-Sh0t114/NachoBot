@@ -99,8 +99,6 @@ def init_prompt():
     Prompt(
         """
 {name_block}
-你的兴趣是：{interest}
-
 **可用的action**
 reply
 动作描述：
@@ -112,8 +110,6 @@ reply
     "reason":"回复的原因",
     "question":"需要检索或回忆的具体问题（可选，不需要则省略）"
 }}
-
-{no_reply_action_description}
 
 make_appoint
 动作描述：
@@ -133,8 +129,6 @@ cancel_appoint
 动作描述：
 取消用户之前设定的定时提醒
 使用条件：当用户明确要求取消某个预约提醒时使用
-当前待执行的预约列表：
-{pending_appointments}
 {{
     "action": "cancel_appoint",
     "target_message_id":"触发action的消息id",
@@ -142,11 +136,8 @@ cancel_appoint
     "reason":"取消提醒的原因"
 }}
 
-{action_options_text}
-
 **动作选择要求**
 请你根据聊天内容,用户的最新消息和以下标准选择合适的动作:
-{plan_style}
 **重要**：如果用户最新消息中包含"提醒""叫我""闹钟""定时""记得叫""到时候"等词语，并且指定了时间，必须选择make_appoint动作，不要选择reply。
 回复动作若未明确指定 target_message_id，请选择最新的非机器人消息。
 
@@ -173,7 +164,16 @@ cancel_appoint
 {chat_context_description}，以下是具体的聊天内容
 **聊天内容**
 {chat_content_block}
-{time_block}
+
+你的兴趣是：{interest}
+{no_reply_action_description}
+{action_options_text}
+
+当前待执行的预约列表：
+{pending_appointments}
+
+本轮动作规划风格：
+{plan_style}
 
 **动作记录**
 {actions_before_now_block}
@@ -181,6 +181,7 @@ cancel_appoint
 请选择合适的action，并说明触发action的消息id和选择该action的原因。消息id格式:m+数字
 先输出你的选择思考理由，再输出你选择的action，理由是一段平文本，不要分点，精简。
 {moderation_prompt}
+{time_block}
 
 """,
         "brain_planner_prompt",
@@ -209,7 +210,9 @@ class BrainPlanner:
         self.action_manager = action_manager
 
         self.separated_llm = LLMRequest(
-            model_set=model_config.model_task_config.get_private_planner(), request_type="planner"
+            model_set=model_config.model_task_config.get_private_planner(),
+            request_type="planner",
+            session_id=self.chat_id,
         )  # 独立规划器使用各自的模型
 
         self.last_obs_time_mark = 0.0
@@ -245,7 +248,7 @@ class BrainPlanner:
                 model_set = model_config.model_task_config.get_private_replyer(group)
             else:
                 model_set = model_config.model_task_config.replyer
-            return LLMRequest(model_set=model_set, request_type="integrated_planner")
+            return LLMRequest(model_set=model_set, request_type="integrated_planner", session_id=self.chat_id)
         return self.separated_llm
 
     def _check_sandbox_permission(self, user_id: str) -> bool:
@@ -943,12 +946,7 @@ class BrainPlanner:
                 interrupt_flag=interrupt_flag,
             )
 
-            logger.info(f"{self.log_prefix}规划器原始提示词: {prompt}")
-            logger.info(f"{self.log_prefix}规划器原始响应: {llm_content}")
-
-            if reasoning_content:
-                logger.info(f"{self.log_prefix}规划器推理: {reasoning_content}")
-            else:
+            if global_config.debug.show_prompt:
                 logger.debug(f"{self.log_prefix}规划器原始提示词: {prompt}")
                 logger.debug(f"{self.log_prefix}规划器原始响应: {llm_content}")
                 if reasoning_content:
@@ -999,12 +997,21 @@ class BrainPlanner:
                 else:
                     # 尝试解析为直接的JSON
                     logger.warning(f"{self.log_prefix}LLM没有返回可用动作: {llm_content}")
-                    actions = self._create_no_reply(
-                        "LLM没有返回可用动作",
-                        available_actions,
-                        message_id_list=message_id_list,
-                        allow_no_reply=allow_no_reply,
-                    )
+                    plain_response = llm_content.strip()
+                    if plain_response and not plain_response.startswith(("{", "[", "```")):
+                        actions = self._parse_single_action(
+                            {"action": "reply", "reason": "规划器返回普通文本，交由回复器处理"},
+                            message_id_list,
+                            list(filtered_actions.items()),
+                            allow_no_reply=allow_no_reply,
+                        )
+                    else:
+                        actions = self._create_no_reply(
+                            "LLM没有返回可用动作",
+                            available_actions,
+                            message_id_list=message_id_list,
+                            allow_no_reply=allow_no_reply,
+                        )
 
             except Exception as json_e:
                 logger.warning(f"{self.log_prefix}解析LLM响应JSON失败 {json_e}. LLM原始输出: '{llm_content}'")

@@ -106,6 +106,9 @@ def aggregate_llm_usage(batch_size: int = BATCH_SIZE) -> int:
                     "prompt_tokens": 0,
                     "completion_tokens": 0,
                     "total_tokens": 0,
+                    "prompt_cache_hit_tokens": 0,
+                    "prompt_cache_miss_tokens": 0,
+                    "prompt_cache_reported_calls": 0,
                     "total_cost": 0.0,
                     "time_cost_sum": 0.0,
                     "time_cost_sq_sum": 0.0,
@@ -116,6 +119,11 @@ def aggregate_llm_usage(batch_size: int = BATCH_SIZE) -> int:
             b["prompt_tokens"] += r.prompt_tokens or 0
             b["completion_tokens"] += r.completion_tokens or 0
             b["total_tokens"] += r.total_tokens or 0
+            cache_reported = bool(getattr(r, "prompt_cache_reported", False))
+            if cache_reported:
+                b["prompt_cache_hit_tokens"] += getattr(r, "prompt_cache_hit_tokens", 0) or 0
+                b["prompt_cache_miss_tokens"] += getattr(r, "prompt_cache_miss_tokens", 0) or 0
+                b["prompt_cache_reported_calls"] += 1
             b["total_cost"] += r.cost or 0.0
             tc = r.time_cost or 0.0
             b["time_cost_sum"] += tc
@@ -132,6 +140,9 @@ def aggregate_llm_usage(batch_size: int = BATCH_SIZE) -> int:
                     prompt_tokens=agg["prompt_tokens"],
                     completion_tokens=agg["completion_tokens"],
                     total_tokens=agg["total_tokens"],
+                    prompt_cache_hit_tokens=agg["prompt_cache_hit_tokens"],
+                    prompt_cache_miss_tokens=agg["prompt_cache_miss_tokens"],
+                    prompt_cache_reported_calls=agg["prompt_cache_reported_calls"],
                     total_cost=agg["total_cost"],
                     time_cost_sum=agg["time_cost_sum"],
                     time_cost_sq_sum=agg["time_cost_sq_sum"],
@@ -146,6 +157,12 @@ def aggregate_llm_usage(batch_size: int = BATCH_SIZE) -> int:
                         LLMUsageHourly.prompt_tokens: LLMUsageHourly.prompt_tokens + agg["prompt_tokens"],
                         LLMUsageHourly.completion_tokens: LLMUsageHourly.completion_tokens + agg["completion_tokens"],
                         LLMUsageHourly.total_tokens: LLMUsageHourly.total_tokens + agg["total_tokens"],
+                        LLMUsageHourly.prompt_cache_hit_tokens: LLMUsageHourly.prompt_cache_hit_tokens
+                        + agg["prompt_cache_hit_tokens"],
+                        LLMUsageHourly.prompt_cache_miss_tokens: LLMUsageHourly.prompt_cache_miss_tokens
+                        + agg["prompt_cache_miss_tokens"],
+                        LLMUsageHourly.prompt_cache_reported_calls: LLMUsageHourly.prompt_cache_reported_calls
+                        + agg["prompt_cache_reported_calls"],
                         LLMUsageHourly.total_cost: LLMUsageHourly.total_cost + agg["total_cost"],
                         LLMUsageHourly.time_cost_sum: LLMUsageHourly.time_cost_sum + agg["time_cost_sum"],
                         LLMUsageHourly.time_cost_sq_sum: LLMUsageHourly.time_cost_sq_sum + agg["time_cost_sq_sum"],

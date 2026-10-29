@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 
 from src.chat.utils.playwright_search import PlaywrightSearchProvider
 from src.common.logger import get_logger
+from src.common.result_cache import ResultCacheMappingView, create_result_cache_owner
 from src.config.config import global_config, model_config
 from src.llm_models.utils_model import LLMRequest
 
@@ -12,11 +13,7 @@ logger = get_logger("web_search")
 
 
 DECISION_PROMPT = """
-You are a web search decision assistant. Your name is {bot_name}. Current time: {time_now}.
-Chat history:
-{chat_history}
-
-Now, {sender} said: {target_message}
+You are a web search decision assistant. Your name is {bot_name}.
 Decide if web search is needed to answer. Only return need_search=true when:
 1) The question needs real-time info (prices, weather, news, events, etc.)
 2) The user explicitly asks to search/check/official link/latest info
@@ -25,6 +22,12 @@ Decide if web search is needed to answer. Only return need_search=true when:
 If not needed, set need_search=false and leave query empty.
 Output JSON only:
 {{"need_search": true/false, "query": "...", "reason": "..."}}
+
+Chat history:
+{chat_history}
+
+Now, {sender} said: {target_message}
+Current time: {time_now}.
 """
 
 class WebSearchManager:
@@ -40,7 +43,8 @@ class WebSearchManager:
         self.enable_cache = enable_cache
         self.cache_ttl = cache_ttl
         self.max_results = max_results
-        self._cache: Dict[str, Dict[str, Any]] = {}
+        self._result_cache = create_result_cache_owner(f"web_search:{self.chat_id}")
+        self._cache = ResultCacheMappingView(self._result_cache, "content")
         self._warned_disabled = False
         self._warned_decider = False
 
@@ -256,18 +260,14 @@ class WebSearchManager:
         if not self.enable_cache:
             return None
 
-        cache_item = self._cache.get(query)
-        if not cache_item:
-            return None
-        if cache_item["ttl"] <= 0:
-            del self._cache[query]
+        found, content = self._result_cache.get(query)
+        if not found:
             return None
 
-        cache_item["ttl"] -= 1
-        return cache_item["content"]
+        return content
 
     def _set_cache(self, query: str, content: str) -> None:
         if not self.enable_cache:
             return
 
-        self._cache[query] = {"content": content, "ttl": self.cache_ttl, "timestamp": time.time()}
+        self._result_cache.set(query, content, uses=self.cache_ttl)
