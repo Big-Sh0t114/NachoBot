@@ -165,7 +165,7 @@ def normalize_snowluma_messages(
                 raise HistoryPageError("SnowLuma outgoing friend history target did not match the requested friend")
             raw["target_id"] = int(target.session_id)
             raw["_offline_history_outgoing"] = True
-            raw["_offline_history_skip"] = True
+            raw["_offline_history_external_self"] = True
         elif sender_id != target.session_id:
             raise HistoryPageError("SnowLuma friend history sender did not match the requested friend")
         normalized.append((timestamp, index, cursor_id, raw))

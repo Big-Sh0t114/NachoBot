@@ -15,6 +15,7 @@ from .card_handler import parse_json_card
 
 import asyncio
 import time
+import math
 import json
 import websockets as Server
 from typing import List, Tuple, Optional, Dict, Any
@@ -28,6 +29,10 @@ from ncnk_message import (
     MessageBase,
     TemplateInfo,
     FormatInfo,
+    EXTERNAL_SELF_MESSAGE_MARKER,
+    build_external_self_message_event,
+    build_system_event_route,
+    outbound_echo_registry,
 )
 from ncnk_message.offline_recovery import build_recovery_metadata
 from src.offline_history import OFFLINE_HISTORY_SOURCE_INSTANCE, get_offline_history_runtime
@@ -127,6 +132,7 @@ class MessageHandler:
         ):
             return False
         self.verified_account_id = normalized
+        outbound_echo_registry.invalidate_platform(global_config.nachobot_server.platform_name)
         self._resolve_identity_future(normalized)
         return True
 
@@ -143,6 +149,7 @@ class MessageHandler:
         ):
             return False
         self.verified_account_id = None
+        outbound_echo_registry.invalidate_platform(global_config.nachobot_server.platform_name)
         self._resolve_identity_future(None)
         return True
 
@@ -187,6 +194,7 @@ class MessageHandler:
         epoch_started_at: float | None = None,
     ) -> None:
         """设置Napcat连接"""
+        outbound_echo_registry.invalidate_platform(global_config.nachobot_server.platform_name)
         self._resolve_identity_future(None)
         self.server_connection = server_connection
         self.verified_account_id = None
@@ -340,6 +348,8 @@ class MessageHandler:
         context = recovery_context or self.capture_offline_recovery_context(raw_message)
         start_attempted = progress_started
         try:
+            if raw_message.get("post_type") == "message_sent" or raw_message.get("_offline_history_external_self") is True:
+                return await self.handle_external_self_message(raw_message, transport_context=context)
             account_id = self.verified_account_id
             captured_generation = context.get("metadata", {}).get("transport_connection_generation")
             if (
@@ -373,6 +383,193 @@ class MessageHandler:
         finally:
             if manage_progress and start_attempted:
                 await self.finish_offline_recovery_progress(context)
+
+    async def handle_external_self_message(
+        self,
+        raw_message: dict[str, Any],
+        *,
+        transport_context: dict[str, Any] | None = None,
+    ) -> str:
+        """Store a verified self-authored message as passive senderless context."""
+
+        context = transport_context or {}
+        metadata = context.get("metadata") if isinstance(context.get("metadata"), dict) else {}
+        account_id = self.verified_account_id
+        if context.get("transport_owned") is True:
+            account_id = await self.await_transport_identity(context, raw_message)
+        if not account_id:
+            return "filtered"
+        raw_self_id = raw_message.get("self_id")
+        if raw_self_id is None or str(raw_self_id).strip() != account_id:
+            logger.warning("NapCat self-message rejected reason=unverified_self_id")
+            return "filtered"
+        sender = raw_message.get("sender")
+        sender = sender if isinstance(sender, dict) else {}
+        sender_claims = [
+            value
+            for value in (sender.get("user_id"), raw_message.get("user_id"))
+            if value is not None
+        ]
+        normalized_claims: list[str] = []
+        for sender_id in sender_claims:
+            try:
+                normalized_sender = int(sender_id)
+            except (TypeError, ValueError, OverflowError):
+                return "filtered"
+            if normalized_sender <= 0:
+                return "filtered"
+            normalized_claims.append(str(normalized_sender))
+        if not normalized_claims or any(claim != account_id for claim in normalized_claims):
+            logger.warning("NapCat self-message rejected reason=sender_mismatch")
+            return "filtered"
+
+        message_type = str(raw_message.get("message_type") or "").strip().lower()
+        message_id = raw_message.get("message_id")
+        if message_type == MessageType.private:
+            peer_value = raw_message.get("target_id") or raw_message.get("user_id")
+            if str(peer_value or "").strip() == account_id:
+                peer_value = raw_message.get("target_id")
+            try:
+                peer_id = int(peer_value)
+            except (TypeError, ValueError, OverflowError):
+                return "filtered"
+            if peer_id <= 0 or str(peer_id) == account_id:
+                return "filtered"
+            route_kind = "private"
+            group_info = None
+            if not await self.check_allow_to_chat(peer_id, None):
+                return "filtered"
+        elif message_type == MessageType.group:
+            try:
+                peer_id = int(raw_message.get("group_id"))
+                self_user_id = int(account_id)
+            except (TypeError, ValueError, OverflowError):
+                return "filtered"
+            if peer_id <= 0 or not await self.check_allow_to_chat(self_user_id, peer_id, ignore_bot=True):
+                return "filtered"
+            route_kind = "group"
+            group_data = await get_group_info(self.server_connection, peer_id)
+            group_info = GroupInfo(
+                platform=global_config.nachobot_server.platform_name,
+                group_id=peer_id,
+                group_name=(group_data or {}).get("group_name") or "",
+            )
+        else:
+            logger.warning("NapCat self-message rejected reason=unsupported_route")
+            return "filtered"
+
+        platform = global_config.nachobot_server.platform_name
+        generation = str(metadata.get("transport_connection_generation") or self.connection_generation)
+        expected_connection = context.get("expected_connection")
+        if (
+            generation != self.connection_generation
+            or self.verified_account_id != account_id
+            or (expected_connection is not None and self.server_connection is not expected_connection)
+        ):
+            return "filtered"
+        classification = await outbound_echo_registry.classify_event(
+            platform,
+            generation,
+            account_id,
+            route_kind,
+            peer_id,
+            message_id,
+        )
+        if classification != "external":
+            logger.debug("NapCat self-message suppressed classification={}", classification)
+            return "filtered"
+
+        original_timestamp = metadata.get("original_timestamp", raw_message.get("time"))
+        try:
+            timestamp = float(original_timestamp)
+        except (TypeError, ValueError, OverflowError):
+            timestamp = 0.0
+        if not math.isfinite(timestamp) or timestamp <= 0:
+            outbound_echo_registry.release_event(
+                platform, generation, account_id, route_kind, peer_id, message_id
+            )
+            return "filtered"
+
+        try:
+            segments, additional_config = await self.handle_real_message(raw_message)
+            if not segments:
+                outbound_echo_registry.release_event(
+                    platform, generation, account_id, route_kind, peer_id, message_id
+                )
+                return "failed"
+            sender_name = sender.get("nickname") or sender.get("nick")
+            if route_kind == "group":
+                sender_name = sender.get("card") or sender_name
+            event = build_external_self_message_event(
+                platform,
+                self_id=account_id,
+                message_id=message_id,
+                route_kind=route_kind,
+                peer_id=peer_id,
+                original_timestamp=timestamp,
+                sender_name=sender_name,
+                source=(
+                    "offline_history"
+                    if raw_message.get("_offline_history_external_self") is True
+                    else "live"
+                ),
+            )
+            additional_config["system_event"] = event
+            if route_kind == "private":
+                additional_config["system_event_route"] = build_system_event_route(platform, peer_id)
+            if metadata:
+                additional_config["offline_recovery"] = dict(metadata)
+
+            message_info = BaseMessageInfo(
+                platform=platform,
+                message_id=str(message_id),
+                time=timestamp,
+                user_info=None,
+                group_info=group_info,
+                template_info=None,
+                format_info=FormatInfo(
+                    content_format=["text", "image", "emoji", "voice"],
+                    accept_format=get_accept_format(bool(global_config.voice.use_tts)),
+                ),
+                additional_config=additional_config,
+            )
+            message_base = MessageBase(
+                message_info=message_info,
+                message_segment=Seg(
+                    type="seglist",
+                    data=[Seg(type="text", data=EXTERNAL_SELF_MESSAGE_MARKER), *segments],
+                ),
+                raw_message=(
+                    raw_message.get("raw_message")
+                    or json.dumps(raw_message, ensure_ascii=False, default=str)
+                ),
+            )
+            if (
+                generation != self.connection_generation
+                or self.verified_account_id != account_id
+                or (expected_connection is not None and self.server_connection is not expected_connection)
+            ):
+                outbound_echo_registry.release_event(
+                    platform, generation, account_id, route_kind, peer_id, message_id
+                )
+                return "filtered"
+            if not await message_send_instance.message_send(message_base):
+                outbound_echo_registry.release_event(
+                    platform, generation, account_id, route_kind, peer_id, message_id
+                )
+                return "failed"
+            return "sent"
+        except asyncio.CancelledError:
+            outbound_echo_registry.release_event(
+                platform, generation, account_id, route_kind, peer_id, message_id
+            )
+            raise
+        except Exception as exc:
+            outbound_echo_registry.release_event(
+                platform, generation, account_id, route_kind, peer_id, message_id
+            )
+            logger.error("NapCat self-message handoff failed error={}", str(exc)[:240])
+            return "failed"
 
     async def _handle_raw_message_with_recovery(
         self, raw_message: dict, recovery_context: dict[str, Any]

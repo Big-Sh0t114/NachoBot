@@ -25,6 +25,29 @@ from bili_src.live.two_phase_search import BilibiliLiveSearchOrchestrator, Searc
 from bili_src.live2d.remote_controller import PreparedReplyResult
 
 
+def _register_echo(adapter: Any, peer_id: str) -> str | None:
+    register = getattr(adapter, "_register_external_self_send", None)
+    return register("group", peer_id) if callable(register) else None
+
+
+def _resolve_echo(
+    adapter: Any,
+    token: str | None,
+    message_id: Any = None,
+    *,
+    success: bool = False,
+) -> None:
+    resolve = getattr(adapter, "_resolve_external_self_send", None)
+    if callable(resolve):
+        resolve(token, message_id, success=success)
+
+
+def _mark_echo_uncertain(adapter: Any, token: str | None) -> None:
+    mark_uncertain = getattr(adapter, "_mark_external_self_send_uncertain", None)
+    if callable(mark_uncertain):
+        mark_uncertain(token)
+
+
 @dataclass
 class _PendingLiveReply:
     message_id: str
@@ -1080,6 +1103,7 @@ class OutgoingHandler:
         for idx, segment in enumerate(segments):
             segment_reply_mid = reply_mid if idx == 0 else None
             segment_reply_dmid = reply_dmid if idx == 0 else None
+            echo_token = _register_echo(self.adapter, str(room_id))
             try:
                 resp = await self.adapter.api.send_danmu(
                     room_id=room_id,
@@ -1087,8 +1111,21 @@ class OutgoingHandler:
                     reply_mid=segment_reply_mid or None,
                     reply_dmid=segment_reply_dmid or None,
                 )
+            except asyncio.CancelledError:
+                _mark_echo_uncertain(self.adapter, echo_token)
+                raise
+            except Exception as exc:  # noqa: BLE001 - retain a short uncertainty window for SDK/network failures
+                _mark_echo_uncertain(self.adapter, echo_token)
+                self.logger.error(
+                    f"Danmu send error: error_type={type(exc).__name__}"
+                )
+            else:
                 response_code = resp.get("code") if isinstance(resp, dict) else None
                 if response_code != 0:
+                    if response_code is None:
+                        _mark_echo_uncertain(self.adapter, echo_token)
+                    else:
+                        _resolve_echo(self.adapter, echo_token, success=False)
                     self.logger.warning("Danmu send failed: code={}", response_code)
                 else:
                     sent = True
@@ -1096,20 +1133,21 @@ class OutgoingHandler:
                     data = (resp or {}).get("data", {})
                     if isinstance(data, dict):
                         dmid = data.get("dmid") or data.get("dmid_str")
+                    if dmid not in (None, ""):
+                        _resolve_echo(
+                            self.adapter, echo_token, dmid, success=True
+                        )
+                    else:
+                        _mark_echo_uncertain(self.adapter, echo_token)
                     self._remember_self_danmu(
                         room_id, str(dmid) if dmid else "", segment
                     )
                     self.logger.info("Danmu send ok")
-            except Exception as exc:
-                self.logger.error(
-                    "Danmu send error: error_type={}",
-                    type(exc).__name__,
-                )
             if idx < len(segments) - 1:
                 await asyncio.sleep(BILIBILI_DANMU_SEND_DELAY_SECONDS)
         return sent
 
-    def _remember_self_danmu(self, room_id: int, message_id: str, text: str) -> None:
+    def _remember_self_danmu(self, room_id: int, message_id: str, _text: str) -> None:
         now = time.time()
         if message_id:
             room_cache = self.adapter._self_danmu_ids.setdefault(room_id, {})
@@ -1118,13 +1156,6 @@ class OutgoingHandler:
                 for msg_id, ts in list(room_cache.items()):
                     if now - ts > 30:
                         room_cache.pop(msg_id, None)
-        room_texts = self.adapter._self_danmu_texts.setdefault(room_id, [])
-        if text:
-            room_texts.append((text, now))
-        if len(room_texts) > 200:
-            self.adapter._self_danmu_texts[room_id] = [
-                item for item in room_texts if now - item[1] <= 30
-            ]
 
     def is_self_danmu(
         self,
@@ -1133,23 +1164,5 @@ class OutgoingHandler:
         message_id: str,
         text: str,
     ) -> bool:
-        if (
-            (not self.config.live_allow_self_danmu)
-            and self.config.dede_user_id
-            and user_id
-        ):
-            if str(user_id) == str(self.config.dede_user_id):
-                return True
-        now = time.time()
         room_cache = self.adapter._self_danmu_ids.get(room_id, {})
-        if message_id and message_id in room_cache:
-            return True
-        room_texts = self.adapter._self_danmu_texts.get(room_id, [])
-        if text:
-            window = 2.5 if len(text.strip()) <= 2 else 6.0
-            for sent_text, ts in list(room_texts):
-                if now - ts > 30:
-                    continue
-                if sent_text == text and (now - ts) <= window:
-                    return True
-        return False
+        return bool(message_id and message_id in room_cache)

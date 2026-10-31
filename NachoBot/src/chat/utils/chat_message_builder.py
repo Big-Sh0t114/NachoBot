@@ -5,6 +5,12 @@ import re
 from typing import List, Dict, Any, Tuple, Optional, Callable
 from rich.traceback import install
 from ncnk_message import get_system_event, system_event_fallback_text
+from ncnk_message.external_self_message import (
+    EXTERNAL_SELF_MESSAGE_MARKER,
+    external_self_sender_name,
+    is_external_self_message,
+    strip_external_self_message_marker,
+)
 
 from src.config.config import global_config
 from src.common.logger import get_logger
@@ -99,6 +105,10 @@ def replace_user_references(
         content = new_content
 
     return content
+
+
+def _external_self_display_name(system_event: Dict[str, Any]) -> str:
+    return external_self_sender_name(system_event)
 
 
 def get_raw_msg_by_timestamp(timestamp_start: float, timestamp_end: float, limit: int = 0, limit_mode: str = "latest"):
@@ -435,6 +445,7 @@ def _build_readable_messages_internal(
     pic_counter: int = 1,
     show_pic: bool = True,
     message_id_list: Optional[List[Tuple[str, DatabaseMessages]]] = None,
+    external_self_message_ids: Optional[set[int]] = None,
 ) -> Tuple[str, List[Tuple[float, str, str]], Dict[str, str], int]:
     # sourcery skip: use-getitem-for-re-match-groups
     """
@@ -455,7 +466,7 @@ def _build_readable_messages_internal(
     if not messages:
         return "", [], pic_id_mapping or {}, pic_counter
 
-    detailed_messages_raw: List[Tuple[float, str, str, bool, Optional[str]]] = []
+    detailed_messages_raw: List[Tuple[float, str, str, bool, Optional[str], bool]] = []
 
     # 使用传入的映射字典，如果没有则创建新的
     if pic_id_mapping is None:
@@ -489,7 +500,7 @@ def _build_readable_messages_internal(
         if message.is_action_record:
             # 对于动作记录，也处理图片ID
             content = process_pic_ids(message.display_message)
-            detailed_messages_raw.append((message.time, message.user_nickname, content, True, None))
+            detailed_messages_raw.append((message.time, message.user_nickname, content, True, None, False))
             continue
 
         platform = message.user_platform
@@ -504,6 +515,17 @@ def _build_readable_messages_internal(
         system_event = get_system_event(message)
         if system_event is not None:
             content = content or system_event_fallback_text(system_event)
+            is_external_self = bool(external_self_message_ids and id(message) in external_self_message_ids)
+            if is_external_self:
+                content = strip_external_self_message_marker(content).strip()
+                if show_pic:
+                    content = process_pic_ids(content)
+                if timestamp is not None:
+                    detailed_messages_raw.append(
+                        (timestamp, _external_self_display_name(system_event), content, False, planner_alias, True)
+                    )
+                continue
+
             actor = system_event.get("actor")
             actor_name = (
                 (actor.get("name") or actor.get("user_id"))
@@ -517,7 +539,7 @@ def _build_readable_messages_internal(
             if show_pic:
                 content = process_pic_ids(content)
             if timestamp is not None and content:
-                detailed_messages_raw.append((timestamp, "[系统事件]", content, False, planner_alias))
+                detailed_messages_raw.append((timestamp, "[系统事件]", content, False, planner_alias, False))
             continue
 
         # 将tts_text标记转换为可读提示，避免模型模仿原始占位格式
@@ -541,7 +563,7 @@ def _build_readable_messages_internal(
             if timestamp is not None and content:
                 display_name = f"匿名语音说话人（{speaker.label}）"
                 content = replace_user_references(content, platform, replace_bot_name=replace_bot_name)
-                detailed_messages_raw.append((timestamp, display_name, content, False, planner_alias))
+                detailed_messages_raw.append((timestamp, display_name, content, False, planner_alias, False))
             continue
 
         # 检查必要信息是否存在
@@ -561,7 +583,7 @@ def _build_readable_messages_internal(
 
         # 使用独立函数处理用户引用格式
         if content := replace_user_references(content, platform, replace_bot_name=replace_bot_name):
-            detailed_messages_raw.append((timestamp, person_name, content, False, planner_alias))
+            detailed_messages_raw.append((timestamp, person_name, content, False, planner_alias, False))
 
     if not detailed_messages_raw:
         return "", [], pic_id_mapping, current_pic_counter
@@ -572,10 +594,10 @@ def _build_readable_messages_internal(
     # 2. 应用消息截断逻辑
     messages_count = len(detailed_messages_raw)
     if truncate and messages_count > 0:
-        for i, (timestamp, name, content, is_action, planner_alias) in enumerate(detailed_messages_raw):
+        for i, (timestamp, name, content, is_action, planner_alias, is_external_self) in enumerate(detailed_messages_raw):
             # 对于动作记录，不进行截断
             if is_action:
-                detailed_message.append((timestamp, name, content, is_action, planner_alias))
+                detailed_message.append((timestamp, name, content, is_action, planner_alias, is_external_self))
                 continue
 
             percentile = i / messages_count  # 计算消息在列表中的位置百分比 (0 <= percentile < 1)
@@ -599,7 +621,7 @@ def _build_readable_messages_internal(
             if 0 < limit < original_len:
                 truncated_content = f"{content[:limit]}{replace_content}"  # pyright: ignore[reportPossiblyUnboundVariable]
 
-            detailed_message.append((timestamp, name, truncated_content, is_action, planner_alias))
+            detailed_message.append((timestamp, name, truncated_content, is_action, planner_alias, is_external_self))
     else:
         # 如果不截断，直接使用原始列表
         detailed_message = detailed_messages_raw
@@ -607,7 +629,7 @@ def _build_readable_messages_internal(
     # 3: 格式化为字符串
     output_lines: List[str] = []
 
-    for timestamp, name, content, is_action, planner_alias in detailed_message:
+    for timestamp, name, content, is_action, planner_alias, is_external_self in detailed_message:
         readable_time = translate_timestamp_to_human_readable(timestamp, mode=timestamp_mode)
 
         # Aliases travel with their source row so equal timestamps stay distinct.
@@ -617,6 +639,11 @@ def _build_readable_messages_internal(
         if is_action:
             # 对于动作记录，使用特殊格式
             output_lines.append(f"{id_prefix}{readable_time}, {content}")
+        elif is_external_self:
+            body = content.rstrip()
+            output_lines.append(
+                f"{id_prefix}{readable_time}, [外部消息标记] {name}: {body} {EXTERNAL_SELF_MESSAGE_MARKER}"
+            )
         elif name == "[系统事件]":
             output_lines.append(f"{id_prefix}{readable_time}, [系统事件] {content}")
         else:
@@ -628,7 +655,7 @@ def _build_readable_messages_internal(
     # 返回格式化后的字符串、消息详情列表、图片映射字典和更新后的计数器
     return (
         formatted_string,
-        [(t, n, c) for t, n, c, is_action, _planner_alias in detailed_message if not is_action],
+        [(t, n, c) for t, n, c, is_action, _planner_alias, _external_self in detailed_message if not is_action],
         pic_id_mapping,
         current_pic_counter,
     )
@@ -729,11 +756,18 @@ async def build_readable_messages_with_list(
     将消息列表转换为可读的文本格式，并返回原始(时间戳, 昵称, 内容)列表。
     允许通过参数控制格式化行为。
     """
+    copy_messages = [MessageAndActionModel.from_DatabaseMessages(msg) for msg in messages]
+    external_self_message_ids = {
+        id(copy_message)
+        for message, copy_message in zip(messages, copy_messages, strict=True)
+        if is_external_self_message(message)
+    }
     formatted_string, details_list, pic_id_mapping, _ = _build_readable_messages_internal(
-        [MessageAndActionModel.from_DatabaseMessages(msg) for msg in messages],
+        copy_messages,
         replace_bot_name,
         timestamp_mode,
         truncate,
+        external_self_message_ids=external_self_message_ids,
     )
 
     if pic_mapping_info := build_pic_mapping_info(pic_id_mapping):
@@ -803,13 +837,16 @@ def build_readable_messages(
     aliases_by_source_identity = {
         id(message): str(message_id) for message_id, message in (message_id_list or [])
     }
-    copy_messages: List[MessageAndActionModel] = [
-        MessageAndActionModel.from_DatabaseMessages(
+    copy_messages: List[MessageAndActionModel] = []
+    external_self_message_ids: set[int] = set()
+    for message in messages:
+        copy_message = MessageAndActionModel.from_DatabaseMessages(
             message,
             planner_alias=aliases_by_source_identity.get(id(message)),
         )
-        for message in messages
-    ]
+        copy_messages.append(copy_message)
+        if is_external_self_message(message):
+            external_self_message_ids.add(id(copy_message))
 
     if show_actions and copy_messages:
         # 获取所有消息的时间范围
@@ -869,6 +906,7 @@ def build_readable_messages(
             truncate,
             show_pic=show_pic,
             message_id_list=message_id_list,
+            external_self_message_ids=external_self_message_ids,
         )
 
         # 生成图片映射信息并添加到最前面
@@ -896,6 +934,7 @@ def build_readable_messages(
             pic_counter,
             show_pic=show_pic,
             message_id_list=message_id_list,
+            external_self_message_ids=external_self_message_ids,
         )
         formatted_after, _, pic_id_mapping, _ = _build_readable_messages_internal(
             messages_after_mark,
@@ -906,6 +945,7 @@ def build_readable_messages(
             pic_counter,
             show_pic=show_pic,
             message_id_list=message_id_list,
+            external_self_message_ids=external_self_message_ids,
         )
 
         read_mark_line = "\n--- 以上消息是你已经看过，请关注以下未读的新消息---\n"
@@ -992,6 +1032,15 @@ async def build_anonymous_messages(messages: List[DatabaseMessages]) -> str:
             system_event = get_system_event(msg)
             if system_event is not None:
                 content = msg.display_message or msg.processed_plain_text or system_event_fallback_text(system_event)
+                if is_external_self_message(msg):
+                    content = strip_external_self_message_marker(content).strip()
+                    content = process_pic_ids(content)
+                    sender_name = external_self_sender_name(system_event)
+                    output_lines.append(
+                        f"[外部消息标记] {sender_name}: {content.strip()} {EXTERNAL_SELF_MESSAGE_MARKER}\n"
+                    )
+                    continue
+
                 actor = system_event.get("actor")
                 actor_name = (
                     (actor.get("name") or actor.get("user_id"))

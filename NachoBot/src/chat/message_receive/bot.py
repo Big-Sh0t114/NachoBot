@@ -4,6 +4,7 @@ import re
 import time
 import asyncio
 import json
+from weakref import WeakValueDictionary
 
 from typing import Dict, Any, Optional
 from ncnk_message import (
@@ -14,6 +15,9 @@ from ncnk_message import (
     classify_system_event,
     get_system_event,
     system_event_fallback_text,
+    is_external_self_message,
+    is_external_self_message_event,
+    EXTERNAL_SELF_MESSAGE_MARKER,
 )
 
 from src.common.logger import get_logger
@@ -119,6 +123,38 @@ def _routing_user_info_for_system_event(message: MessageRecv, event: dict[str, A
         user_nickname=nickname or peer_id,
         user_cardname=cardname,
     )
+
+
+_ExternalSelfMessageScope = tuple[str, str, str, str, str]
+_external_self_message_locks: WeakValueDictionary[_ExternalSelfMessageScope, asyncio.Lock] = WeakValueDictionary()
+
+
+def _external_self_message_storage_scope(message_data: dict[str, Any]) -> _ExternalSelfMessageScope | None:
+    """Return account and exact platform route used to deduplicate a passive self row."""
+
+    info = message_data.get("message_info")
+    event = get_system_event(message_data)
+    data = event.get("data") if isinstance(event, dict) else None
+    if not isinstance(info, dict) or not isinstance(data, dict):
+        return None
+    platform = str(info.get("platform") or "").strip()
+    account_id = str(data.get("self_id") or "").strip()
+    route_kind = str(data.get("route_kind") or "").strip().lower()
+    route_id = str(data.get("peer_id") or "").strip()
+    message_id = str(info.get("message_id") or "").strip()
+    if not platform or not account_id or route_kind not in {"private", "group"} or not route_id or not message_id:
+        return None
+    return platform, account_id, route_kind, route_id, message_id
+
+
+def _external_self_message_lock(scope: _ExternalSelfMessageScope) -> asyncio.Lock:
+    """Get a per-message lock; weak values discard idle keys after callers finish."""
+
+    lock = _external_self_message_locks.get(scope)
+    if lock is None:
+        lock = asyncio.Lock()
+        _external_self_message_locks[scope] = lock
+    return lock
 
 
 def _check_ban_words(text: str, chat: ChatStream, userinfo: Optional[UserInfo]) -> bool:
@@ -720,6 +756,46 @@ class ChatBot:
         else:
             logger.warning(f"更新消息ID失败: {mmc_message_id} -> {actual_message_id}")
 
+    async def _store_external_self_message(
+        self,
+        message_data: dict[str, Any],
+    ) -> str:
+        """Persist a validated self message without changing trigger or wake state."""
+
+        info = message_data.get("message_info")
+        if not isinstance(info, dict):
+            return "filtered"
+        group_info_data = info.get("group_info")
+        if isinstance(group_info_data, dict) and group_info_data.get("group_id") is not None:
+            group_info_data["group_id"] = str(group_info_data["group_id"])
+        message = MessageRecv(message_data)
+        event_result = classify_system_event(message)
+        if event_result.state is not SystemEventState.VALID or event_result.event is None:
+            return "filtered"
+        message.system_event_state = SystemEventState.VALID
+        if message.message_info.user_info is not None or message.message_info.sender_info is not None:
+            return "filtered"
+        try:
+            routing_user_info = _routing_user_info_for_system_event(message, event_result.event)
+        except ValueError:
+            return "filtered"
+        chat = await get_chat_manager().get_or_create_stream(
+            platform=str(message.message_info.platform or ""),
+            user_info=None,
+            group_info=message.message_info.group_info,
+            message=None,
+            routing_user_info=routing_user_info,
+        )
+        message.update_chat_stream(chat)
+        await message.process()
+        if not (message.processed_plain_text or "").strip():
+            message.processed_plain_text = system_event_fallback_text(event_result.event)
+        if not (message.processed_plain_text or "").startswith(EXTERNAL_SELF_MESSAGE_MARKER):
+            return "filtered"
+
+        await MessageStorage.store_message(message, chat)
+        return "sent"
+
     async def message_process(self, message_data: Dict[str, Any]) -> None:
         """处理转化后的统一格式消息
         这个函数本质是预处理一些数据，根据配置信息和消息内容，预处理消息，并分发到合适的消息处理器中
@@ -740,6 +816,12 @@ class ChatBot:
             history_delivery_store,
         )
 
+        passive_candidate = is_external_self_message_event(message_data)
+        passive_external = is_external_self_message(message_data)
+        if passive_candidate and not passive_external:
+            logger.warning("丢弃格式无效的外部自发消息事件")
+            return
+
         recovery_progress_key = None
         delivery = delivery_from_envelope(message_data)
         delivery_claimed = False
@@ -748,30 +830,83 @@ class ChatBot:
                 claim = history_delivery_store.claim(delivery)
                 if claim == "busy":
                     return
-                if claim in {"pending", "complete", "filtered"}:
-                    if claim == "pending":
-                        root_key = history_delivery_store.root_delivery_key(delivery["delivery_key"])
-                        offline_recovery_manager.restore_pending_deliveries([root_key])
-                    await _send_history_delivery_receipt(delivery, "accepted" if claim == "pending" else claim)
-                    return
-                if claim == "new":
+                if passive_external:
+                    if claim == "filtered":
+                        await _send_history_delivery_receipt(delivery, "filtered")
+                        return
+                    if claim in {"pending", "complete"}:
+                        if claim == "pending":
+                            history_delivery_store.mark_passive_complete(delivery["delivery_key"])
+                        await _send_history_delivery_receipt(delivery, "accepted")
+                        return
+                    if claim != "new":
+                        return
                     delivery_claimed = True
-                    stored_ref = MessageStorage.find_existing_ingress(delivery)
-                    if stored_ref is not None:
-                        state = history_delivery_store.restore_existing_row(
-                            delivery,
-                            chat_id=stored_ref.chat_id,
-                            row_id=stored_ref.row_id,
-                            original_timestamp=delivery["original_timestamp"],
-                        )
-                        if state == "pending":
+                    scope = _external_self_message_storage_scope(message_data)
+                    if scope is None:
+                        history_delivery_store.mark_filtered(delivery["delivery_key"])
+                        await _send_history_delivery_receipt(delivery, "filtered")
+                        return
+                else:
+                    if claim in {"pending", "complete", "filtered"}:
+                        if claim == "pending":
                             root_key = history_delivery_store.root_delivery_key(delivery["delivery_key"])
                             offline_recovery_manager.restore_pending_deliveries([root_key])
-                        await _send_history_delivery_receipt(
-                            delivery,
-                            "accepted" if state in {"pending", "complete"} else state,
-                        )
+                        await _send_history_delivery_receipt(delivery, "accepted" if claim == "pending" else claim)
                         return
+                    if claim == "new":
+                        delivery_claimed = True
+                        stored_ref = MessageStorage.find_existing_ingress(delivery)
+                        if stored_ref is not None:
+                            state = history_delivery_store.restore_existing_row(
+                                delivery,
+                                chat_id=stored_ref.chat_id,
+                                row_id=stored_ref.row_id,
+                                original_timestamp=delivery["original_timestamp"],
+                            )
+                            if state == "pending":
+                                root_key = history_delivery_store.root_delivery_key(delivery["delivery_key"])
+                                offline_recovery_manager.restore_pending_deliveries([root_key])
+                            await _send_history_delivery_receipt(
+                                delivery,
+                                "accepted" if state in {"pending", "complete"} else state,
+                            )
+                            return
+            if passive_external:
+                scope = _external_self_message_storage_scope(message_data)
+                if scope is None:
+                    if delivery_claimed and delivery is not None:
+                        history_delivery_store.mark_filtered(delivery["delivery_key"])
+                        await _send_history_delivery_receipt(delivery, "filtered")
+                    return
+
+                # A live message_sent event and an offline-history row may be
+                # handed to separate Core tasks. Recheck the durable row only
+                # after acquiring this exact message's lock, then keep the lock
+                # through async stream/content conversion and the insert.
+                async with _external_self_message_lock(scope):
+                    existing_ref = MessageStorage.find_existing_platform_message(
+                        scope[0], scope[2], scope[3], scope[4]
+                    )
+                    if existing_ref is not None:
+                        result = "existing"
+                    else:
+                        result = await self._store_external_self_message(message_data)
+
+                # Receipts can call back into the adapter; do that after
+                # releasing the per-message lock so slow transport cannot hold
+                # up a later duplicate/retry on this route.
+                if result == "existing" and delivery_claimed and delivery is not None:
+                    history_delivery_store.mark_passive_complete(delivery["delivery_key"])
+                    await _send_history_delivery_receipt(delivery, "accepted")
+                    return
+                if result == "filtered" and delivery_claimed and delivery is not None:
+                    history_delivery_store.mark_filtered(delivery["delivery_key"])
+                    await _send_history_delivery_receipt(delivery, "filtered")
+                elif result == "sent" and delivery_claimed and delivery is not None:
+                    history_delivery_store.mark_passive_complete(delivery["delivery_key"])
+                    await _send_history_delivery_receipt(delivery, "accepted")
+                return
             # Track adapter-tagged Core work before the first asynchronous
             # startup/preprocess hook can outlive the adapter's quiet window.
             recovery_progress_key = offline_recovery_manager.message_started_from_envelope(message_data)
@@ -990,7 +1125,8 @@ class ChatBot:
         finally:
             if delivery_claimed and history_delivery_store.state(delivery["delivery_key"]) == "processing":
                 history_delivery_store.release(delivery["delivery_key"])
-            offline_recovery_manager.message_finished(recovery_progress_key)
+            if not passive_external:
+                offline_recovery_manager.message_finished(recovery_progress_key)
 
 
 # 创建全局ChatBot实例

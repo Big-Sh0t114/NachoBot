@@ -7,6 +7,7 @@ import random
 from typing import List, Optional, Dict, Any, Tuple, TYPE_CHECKING
 from rich.traceback import install
 from ncnk_message import get_system_event, system_event_fallback_text
+from ncnk_message.external_self_message import is_external_self_message
 
 from src.config.config import global_config
 from src.common.logger import get_logger
@@ -121,7 +122,8 @@ def _focus_turn_has_actionable_work(
 ) -> bool:
     """Only current routing events or loaded unread rows make a Focus wake actionable."""
 
-    return bool(focus_turn is not None and (focus_turn.events or recent_messages_list))
+    actionable_rows = any(not is_external_self_message(message) for message in recent_messages_list)
+    return bool(focus_turn is not None and (focus_turn.events or actionable_rows))
 
 
 class HeartFChatting:
@@ -523,7 +525,13 @@ class HeartFChatting:
             if verified_messages:
                 if focus_turn is not None:
                     self._focus_consumed_through_row_id = focus_turn.read_after_row_id
-                result = await self._observe(recent_messages_list=verified_messages, focus_turn=focus_turn)
+                actionable_messages = [
+                    message for message in verified_messages if not is_external_self_message(message)
+                ]
+                if actionable_messages:
+                    result = await self._observe(recent_messages_list=actionable_messages, focus_turn=focus_turn)
+                else:
+                    result = True
                 realtime_ingress_manager.complete_rows(self.stream_id, verified_row_ids)
                 return result
             realtime_ingress_manager.discard_rows(self.stream_id, realtime_row_ids)
@@ -548,8 +556,11 @@ class HeartFChatting:
             self._last_message_received_at = time.time()
             # Recovery owns this turn: bypass normal priority/Gate routing,
             # random talk throttles, and no_reply_until_call.
+            actionable_messages = [
+                message for message in recent_messages_list if not is_external_self_message(message)
+            ]
             return await self._observe(
-                recent_messages_list=recent_messages_list,
+                recent_messages_list=actionable_messages,
                 focus_turn=focus_turn,
             )
 
@@ -585,6 +596,20 @@ class HeartFChatting:
             recent_messages_list = realtime_ingress_manager.filter_ordinary_messages(
                 self.stream_id, recent_messages_list
             )
+        if (
+            focus_turn is None
+            and recent_messages_list
+            and all(is_external_self_message(message) for message in recent_messages_list)
+        ):
+            # Advance the polling cursor without starting a cycle, learning,
+            # Planner target selection, or an interruption for passive rows.
+            self.last_read_time = time.time()
+            offline_recovery_manager.commit_nonfocus_read_cursor(self.stream_id)
+            offline_recovery_manager.commit_deferred_live_rows(self.stream_id)
+            return True
+        recent_messages_list = [
+            message for message in recent_messages_list if not is_external_self_message(message)
+        ]
         focus_has_actionable_work = _focus_turn_has_actionable_work(focus_turn, recent_messages_list)
         if focus_turn is not None and not focus_has_actionable_work:
             return True
@@ -622,7 +647,10 @@ class HeartFChatting:
             # structured system_event 是环境事件；不能受 no_reply_until_call
             # 或普通消息 talk_threshold 随机节流影响。普通会话交给 Planner，
             # planner_bypass 会话则由后续 Replyer 直达分支处理。
-            has_system_event = any(self._get_system_event(msg) is not None for msg in recent_messages_list)
+            has_system_event = any(
+                self._get_system_event(msg) is not None and not is_external_self_message(msg)
+                for msg in recent_messages_list
+            )
             focus_requires_observe = focus_requires_observe or has_system_event
 
             # 过滤后无消息则跳过本轮思考
@@ -1158,9 +1186,17 @@ class HeartFChatting:
         force_reply_message: Optional["DatabaseMessages"] = None,
         focus_turn: FocusTurn | None = None,
     ) -> bool:  # sourcery skip: merge-else-if-into-elif, remove-redundant-if
-        self._ensure_offline_recovery_state()
         if recent_messages_list is None:
             recent_messages_list = []
+        passive_only = bool(recent_messages_list) and all(
+            is_external_self_message(message) for message in recent_messages_list
+        )
+        if passive_only and force_reply_message is None and (focus_turn is None or not focus_turn.events):
+            return True
+        recent_messages_list = [
+            message for message in recent_messages_list if not is_external_self_message(message)
+        ]
+        self._ensure_offline_recovery_state()
         direct_reply_actions: list[ActionPlannerInfo] = []
 
         # 刷新上下文以确保获取最新的模板信息
@@ -2158,6 +2194,11 @@ class HeartFChatting:
 
         if need_reply:
             logger.info(f"{self.log_prefix} 从思考到回复，共有{new_message_count}条新消息，使用引用回复")
+
+        if runtime_capabilities_from_message(message_data).reply_delivery == "structured_reply":
+            from src.chat.structured_reply_delivery import deliver_structured_reply
+            return await deliver_structured_reply(reply_set, message_data, self.chat_stream.stream_id,
+                                                   need_reply, selected_expressions, receipts)
 
         if send_api._should_suppress_reply_set(reply_set):
             texts = []

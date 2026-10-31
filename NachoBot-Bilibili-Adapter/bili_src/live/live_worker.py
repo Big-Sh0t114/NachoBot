@@ -23,6 +23,8 @@ from bili_src.core.config import (
 )
 from bili_src.core.utils import _normalize_text
 from bili_src.live.v2_models import InteractWordV2, SendGiftBroadcast
+from ncnk_message import Seg
+from ncnk_message.external_self_message import outbound_echo_registry
 
 if TYPE_CHECKING:
     from bili_src.api.api import BilibiliApi
@@ -917,10 +919,13 @@ class LiveRoomWorker:
         user_info = info[2] if isinstance(info[2], list) else []
         user_id = str(user_info[0] or "")
         user_name = str(user_info[1] or user_id)
+        self_id = str(self.config.dede_user_id or "").strip()
+        is_self = bool(self_id and user_id and user_id == self_id)
         if (
             self.config.live_resolve_user_nickname
             and user_id
             and (not user_name or user_name == user_id)
+            and not is_self
         ):
             user_name = await self.adapter._resolve_user_nickname(user_id)
         timestamp_ms = 0
@@ -933,6 +938,49 @@ class LiveRoomWorker:
         if extra:
             reply_mid = str(extra.get("reply_mid") or "")
             reply_dmid = str(extra.get("reply_dmid") or extra.get("reply_id") or "")
+
+        if is_self:
+            if not self._has_native_message_id(payload, info):
+                self.logger.debug(
+                    f"Self danmu ignored without a stable message id: room_id={self.room_id}"
+                )
+                return
+            if timestamp_ms <= 0:
+                self.logger.debug(
+                    f"Self danmu ignored without an original timestamp: room_id={self.room_id}"
+                )
+                return
+            event_generation = getattr(
+                self.adapter, "_external_self_generation", "bilibili-adapter"
+            )
+            classification = await outbound_echo_registry.classify_event(
+                self.config.platform,
+                event_generation,
+                self_id,
+                "group",
+                str(self.room_id),
+                message_id,
+            )
+            if classification != "external":
+                return
+            await self.adapter._forward_external_self_message(
+                self_id=self_id,
+                message_id=message_id,
+                route_kind="group",
+                peer_id=str(self.room_id),
+                original_timestamp=float(timestamp_ms) / 1000.0,
+                sender_name=(user_info[1] if len(user_info) > 1 else None),
+                generation=event_generation,
+                segments=[Seg(type="text", data=message_text)],
+                content_format=["text"],
+                additional_config={
+                    "room_id": self.room_id,
+                    "reply_mid": reply_mid,
+                    "reply_dmid": reply_dmid,
+                },
+                raw_message=json.dumps(payload, ensure_ascii=False),
+            )
+            return
 
         if self.adapter.is_self_danmu(self.room_id, user_id, message_id, message_text):
             if self.config.live_log_danmu:
@@ -1021,6 +1069,13 @@ class LiveRoomWorker:
             else:
                 packets.append((op, body))
         return packets
+
+    @staticmethod
+    def _has_native_message_id(payload: dict[str, Any], info: list) -> bool:
+        if payload.get("msg_id") not in (None, ""):
+            return True
+        extra = LiveRoomWorker._extract_extra(info)
+        return bool(extra and extra.get("id_str") not in (None, ""))
 
     @staticmethod
     def _extract_message_id(

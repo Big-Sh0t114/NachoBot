@@ -2,8 +2,10 @@ import asyncio
 import json
 import uuid
 import random
+from collections.abc import Callable, Mapping
 import websockets as Server
 from ncnk_message import MessageBase
+from ncnk_message.external_self_message import outbound_echo_registry
 
 from src.response_pool import get_response
 from src.logger import logger
@@ -15,6 +17,75 @@ class NCMessageSender:
         self.server_connection: Server.ServerConnection = None
         self._send_queue = asyncio.Queue()  # 全局消息队列
         self._worker_task = None
+        self._echo_scope_provider: Callable[[], tuple[str, str, str] | None] | None = None
+
+    def configure_outbound_echo_tracking(
+        self,
+        scope_provider: Callable[[], tuple[str, str, str] | None],
+    ) -> None:
+        """Bind the live platform/generation/verified-account identity source."""
+
+        self._echo_scope_provider = scope_provider
+
+    @staticmethod
+    def _message_action_route(action: str, params: dict) -> tuple[str, str] | None:
+        name = str(action or "").strip().lower()
+        values = params if isinstance(params, Mapping) else {}
+        private_actions = {
+            "send_private_msg",
+            "send_private_forward_msg",
+            "upload_private_file",
+            "send_private_file",
+        }
+        group_actions = {
+            "send_group_msg",
+            "send_group_forward_msg",
+            "upload_group_file",
+            "send_group_file",
+        }
+        if name in private_actions:
+            peer = values.get("user_id", values.get("target_id"))
+            kind = "private"
+        elif name in group_actions:
+            peer = values.get("group_id", values.get("target_id"))
+            kind = "group"
+        elif name in {"send_msg", "send_forward_msg"}:
+            kind = str(values.get("message_type") or "").strip().lower()
+            if kind == "group":
+                peer = values.get("group_id", values.get("target_id"))
+            elif kind == "private":
+                peer = values.get("user_id", values.get("target_id"))
+            else:
+                return None
+        else:
+            return None
+        if isinstance(peer, bool) or peer is None:
+            return None
+        peer_id = str(peer).strip()
+        return (kind, peer_id) if peer_id else None
+
+    @staticmethod
+    def _message_id_from_response(response: object) -> str | None:
+        if not isinstance(response, Mapping) or response.get("status") != "ok":
+            return None
+        data = response.get("data")
+        value = data.get("message_id") if isinstance(data, Mapping) else response.get("message_id")
+        if isinstance(value, bool) or value is None:
+            return None
+        message_id = str(value).strip()
+        return message_id or None
+
+    @staticmethod
+    def _authoritative_action_failure(response: object) -> bool:
+        if not isinstance(response, Mapping):
+            return False
+        status = str(response.get("status") or "").strip().lower()
+        if status in {"failed", "error"}:
+            return True
+        if status and status != "ok":
+            return True
+        retcode = response.get("retcode")
+        return isinstance(retcode, int) and not isinstance(retcode, bool) and retcode not in {0, 1}
 
     async def set_server_connection(self, connection: Server.ServerConnection):
         self.server_connection = connection
@@ -27,7 +98,17 @@ class NCMessageSender:
         """后台任务：不断从队列取出消息发送，强制进行安全间隔休眠"""
         while True:
             try:
-                payload, request_uuid, send_future, expected_connection, pre_send_check, identity_check = await self._send_queue.get()
+                (
+                    payload,
+                    request_uuid,
+                    send_future,
+                    expected_connection,
+                    pre_send_check,
+                    identity_check,
+                    message_route,
+                    timeout_value,
+                ) = await self._send_queue.get()
+                echo_token = None
                 try:
                     if send_future.cancelled():
                         continue
@@ -58,17 +139,37 @@ class NCMessageSender:
                                 send_future.set_result({"status": "error", "message": "stale_connection"})
                             continue
                     logger.debug(f"[Queue] 执行发送任务: {request_uuid}")
+                    if message_route is not None and self._echo_scope_provider is not None:
+                        try:
+                            scope = self._echo_scope_provider()
+                            if isinstance(scope, tuple) and len(scope) == 3:
+                                echo_token = outbound_echo_registry.register(
+                                    *scope,
+                                    *message_route,
+                                    timeout_sec=timeout_value,
+                                )
+                        except Exception as exc:
+                            logger.debug("NapCat outbound echo registration skipped error={}", str(exc)[:160])
                     await expected_connection.send(payload)
                     if not send_future.done():
-                        send_future.set_result({"status": "ok"})
+                        send_future.set_result(
+                            {"status": "ok", "_outbound_echo_token": echo_token}
+                        )
+                    elif echo_token is not None:
+                        outbound_echo_registry.mark_uncertain(echo_token)
+                        echo_token = None
                     delay = 1.5 + random.uniform(0.5, 1.5)
                     logger.debug(f"[Queue] 发送完毕，休眠 {delay:.2f} 秒以规避风控...")
                     await asyncio.sleep(delay)
                 except asyncio.CancelledError:
+                    if echo_token is not None:
+                        outbound_echo_registry.mark_uncertain(echo_token)
                     if not send_future.done():
                         send_future.set_result({"status": "error", "message": "cancelled"})
                     raise
                 except Exception as e:
+                    if echo_token is not None:
+                        outbound_echo_registry.mark_uncertain(echo_token)
                     if not send_future.done():
                         send_future.set_result({"status": "error", "message": str(e)})
                     logger.error(f"[Queue] 发送 Worker 发生异常: {e}")
@@ -91,6 +192,9 @@ class NCMessageSender:
     ) -> dict:
         request_uuid = str(uuid.uuid4())
         payload = json.dumps({"action": action, "params": params, "echo": request_uuid})
+        timeout_value = 10.0 if timeout_sec is None else max(1.0, float(timeout_sec))
+        message_route = self._message_action_route(action, params)
+        tracking_token = None
         connection = expected_connection or self.server_connection
         if connection is None:
             return {"status": "error", "message": "no_connection"}
@@ -100,9 +204,18 @@ class NCMessageSender:
         send_future = loop.create_future()
 
         # 将任务塞入队列
-        await self._send_queue.put((payload, request_uuid, send_future, connection, pre_send_check, identity_check))
-
-        timeout_value = 10.0 if timeout_sec is None else max(1.0, float(timeout_sec))
+        await self._send_queue.put(
+            (
+                payload,
+                request_uuid,
+                send_future,
+                connection,
+                pre_send_check,
+                identity_check,
+                message_route,
+                timeout_value,
+            )
+        )
 
         # 等待 get_response 的返回（由底层的 ws 接收循环触发 response_pool 里的事件）
         try:
@@ -110,7 +223,22 @@ class NCMessageSender:
             if not isinstance(send_result, dict) or send_result.get("status") != "ok":
                 return send_result if isinstance(send_result, dict) else {"status": "error", "message": "send_failed"}
             # Worker 只负责推送并卡住节奏，接收回执仍由 src.response_pool 处理。
-            response = await get_response(request_uuid, timeout=timeout_value)
+            tracking_token = send_result.get("_outbound_echo_token")
+            try:
+                response = await get_response(request_uuid, timeout=timeout_value)
+                if tracking_token is not None:
+                    message_id = self._message_id_from_response(response)
+                    if message_id is not None:
+                        outbound_echo_registry.resolve(tracking_token, message_id, success=True)
+                    elif self._authoritative_action_failure(response):
+                        outbound_echo_registry.resolve(tracking_token, success=False)
+                    else:
+                        outbound_echo_registry.mark_uncertain(tracking_token)
+                    tracking_token = None
+            finally:
+                if tracking_token is not None:
+                    outbound_echo_registry.mark_uncertain(tracking_token)
+                    tracking_token = None
         except TimeoutError:
             if not send_future.done():
                 send_future.cancel()

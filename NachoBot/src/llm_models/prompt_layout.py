@@ -62,6 +62,20 @@ class SegmentedPrompt(str):
     def __delattr__(self, name: str) -> None:
         raise AttributeError("SegmentedPrompt is immutable")
 
+    def __copy__(self) -> "SegmentedPrompt":
+        return self
+
+    def __deepcopy__(self, memo: dict[int, object]) -> "SegmentedPrompt":
+        # str and every member of the stored tuple are immutable. Plugin
+        # event containers may share this value while copying mutable fields.
+        memo[id(self)] = self
+        return self
+
+    def __reduce_ex__(self, protocol: int):
+        # Reconstruct through __new__; assigning slots would violate the
+        # immutable contract and flattening to str would lose the boundaries.
+        return type(self), (self._segments,)
+
     def __add__(self, other: object) -> "SegmentedPrompt":
         if not isinstance(other, str):
             return NotImplemented

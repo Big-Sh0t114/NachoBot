@@ -11,6 +11,7 @@ from ncnk_message import (
     Seg,
     UserInfo,
 )
+from ncnk_message.external_self_message import outbound_echo_registry
 
 from bili_src.core.config import PrivateSessionConfig
 from bili_src.core.utils import (
@@ -22,6 +23,29 @@ from bili_src.core.utils import (
 from bili_src.visual_policy import build_private_visual_policy
 
 ACCEPT_FORMAT_PRIVATE = ["text", "image", "emoji", "reply", "command"]
+
+
+def _register_echo(adapter: Any, peer_id: str) -> str | None:
+    register = getattr(adapter, "_register_external_self_send", None)
+    return register("private", peer_id) if callable(register) else None
+
+
+def _resolve_echo(
+    adapter: Any,
+    token: str | None,
+    message_id: Any = None,
+    *,
+    success: bool = False,
+) -> None:
+    resolve = getattr(adapter, "_resolve_external_self_send", None)
+    if callable(resolve):
+        resolve(token, message_id, success=success)
+
+
+def _mark_echo_uncertain(adapter: Any, token: str | None) -> None:
+    mark_uncertain = getattr(adapter, "_mark_external_self_send_uncertain", None)
+    if callable(mark_uncertain):
+        mark_uncertain(token)
 
 
 class PrivateHandler:
@@ -152,14 +176,8 @@ class PrivateHandler:
             )
         for msg in reversed(messages_list):
             sender_uid = str(msg.get("sender_uid") or "")
-            if (
-                sender_uid
-                and self.config.dede_user_id
-                and sender_uid == str(self.config.dede_user_id)
-            ):
-                continue
-            if hasattr(self.adapter, "tts_manager") and self.adapter.tts_manager:
-                self.adapter.tts_manager.reset_idle_timer()
+            self_id = str(self.config.dede_user_id or "").strip()
+            is_self = bool(sender_uid and self_id and sender_uid == self_id)
             msg_type = int(msg.get("msg_type") or 0)
             content = msg.get("content")
             content_text = ""
@@ -184,15 +202,48 @@ class PrivateHandler:
                 if not content_text:
                     continue
                 segment = Seg(type="text", data=content_text)
-            message_id = str(
-                msg.get("msg_key") or msg.get("msg_seqno") or uuid.uuid4().hex
-            )
+            native_message_id = msg.get("msg_key")
+            if is_self and native_message_id in (None, ""):
+                continue
+            if not is_self:
+                native_message_id = native_message_id or msg.get("msg_seqno")
+            message_id = str(native_message_id or uuid.uuid4().hex)
             now_ts = time.time()
-            msg_time = float(msg.get("timestamp") or now_ts)
+            try:
+                msg_time = float(msg.get("timestamp") or now_ts)
+            except (TypeError, ValueError, OverflowError):
+                msg_time = now_ts
+            if is_self:
+                try:
+                    original_timestamp = float(msg.get("timestamp"))
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if original_timestamp <= 0:
+                    continue
+                peer_id = str(session.talker_id)
+                event_generation = getattr(
+                    self.adapter, "_external_self_generation", "bilibili-adapter"
+                )
+                classification = await outbound_echo_registry.classify_event(
+                    self.config.platform,
+                    event_generation,
+                    self_id,
+                    "private",
+                    peer_id,
+                    message_id,
+                )
+                if classification != "external":
+                    continue
             group_id = f"dm:{session.session_type}:{session.talker_id}"
             self.remember_private_session(group_id, session)
-            sender_name = await self.adapter._resolve_user_nickname(
-                sender_uid or str(session.talker_id)
+            if not is_self and hasattr(self.adapter, "tts_manager") and self.adapter.tts_manager:
+                self.adapter.tts_manager.reset_idle_timer()
+            sender_name = (
+                ""
+                if is_self
+                else await self.adapter._resolve_user_nickname(
+                    sender_uid or str(session.talker_id)
+                )
             )
             additional_config = {
                 "session_type": session.session_type,
@@ -207,8 +258,34 @@ class PrivateHandler:
                 additional_config["visual_policy"] = build_private_visual_policy(
                     self.config.private_visual.image
                 )
-            if self.config.private_force_mention:
+            if self.config.private_force_mention and not is_self:
                 additional_config["is_mentioned"] = 1.0
+            if is_self:
+                content_formats = ["text"]
+                if segment.type != "text":
+                    content_formats.append(segment.type)
+                sender_name = next(
+                    (
+                        msg.get(name_key)
+                        for name_key in ("sender_name", "uname", "nickname")
+                        if msg.get(name_key)
+                    ),
+                    None,
+                )
+                await self.adapter._forward_external_self_message(
+                    self_id=self_id,
+                    message_id=message_id,
+                    route_kind="private",
+                    peer_id=str(session.talker_id),
+                    original_timestamp=original_timestamp,
+                    sender_name=sender_name,
+                    generation=event_generation,
+                    segments=[segment],
+                    content_format=content_formats,
+                    additional_config=additional_config,
+                    raw_message=json.dumps(msg, ensure_ascii=False),
+                )
+                continue
             message_info = BaseMessageInfo(
                 platform=self.config.platform,
                 message_id=message_id,
@@ -329,13 +406,18 @@ class PrivateHandler:
                 return
             max_attempts = 3
             for attempt in range(1, max_attempts + 1):
+                echo_token = _register_echo(self.adapter, str(session.talker_id))
                 try:
                     resp = await self.adapter.api.send_private_message(
                         talker_id=session.talker_id,
                         session_type=session.session_type,
                         message=safe_text,
                     )
+                except asyncio.CancelledError:
+                    _mark_echo_uncertain(self.adapter, echo_token)
+                    raise
                 except Exception as exc:
+                    _mark_echo_uncertain(self.adapter, echo_token)
                     if attempt < max_attempts:
                         self.logger.warning(
                             "Private message send failed (attempt {}/{}): {}",
@@ -346,9 +428,26 @@ class PrivateHandler:
                         await asyncio.sleep(0.6 * attempt)
                         continue
                     raise
-                if (resp or {}).get("code") != 0:
+                response_code = (resp or {}).get("code")
+                if response_code != 0:
+                    if response_code is None:
+                        _mark_echo_uncertain(self.adapter, echo_token)
+                    else:
+                        _resolve_echo(self.adapter, echo_token, success=False)
                     self.logger.warning(f"Private message failed: {resp}")
                     return
+                data = (resp or {}).get("data") or {}
+                message_key = (
+                    data.get("msg_key") or data.get("msg_key_str")
+                    if isinstance(data, dict)
+                    else None
+                )
+                if message_key not in (None, ""):
+                    _resolve_echo(
+                        self.adapter, echo_token, message_key, success=True
+                    )
+                else:
+                    _mark_echo_uncertain(self.adapter, echo_token)
                 self.logger.info("Private message ok")
                 return
         except Exception as exc:
@@ -390,6 +489,7 @@ class PrivateHandler:
             session.session_type,
             image_url,
         )
+        echo_token = _register_echo(self.adapter, str(session.talker_id))
         try:
             resp = await self.adapter.api.send_private_image_message(
                 talker_id=session.talker_id,
@@ -397,10 +497,27 @@ class PrivateHandler:
                 content=content,
             )
             if isinstance(resp, dict) and resp.get("code") not in (None, 0):
+                _resolve_echo(self.adapter, echo_token, success=False)
                 self.logger.warning(f"Private image failed: {resp}")
             else:
+                data = (resp or {}).get("data") or {}
+                message_key = (
+                    data.get("msg_key") or data.get("msg_key_str")
+                    if isinstance(data, dict)
+                    else None
+                )
+                if message_key not in (None, ""):
+                    _resolve_echo(
+                        self.adapter, echo_token, message_key, success=True
+                    )
+                else:
+                    _mark_echo_uncertain(self.adapter, echo_token)
                 self.logger.info("Private image ok")
+        except asyncio.CancelledError:
+            _mark_echo_uncertain(self.adapter, echo_token)
+            raise
         except Exception as exc:
+            _mark_echo_uncertain(self.adapter, echo_token)
             self.logger.error(f"Private image error: {exc}")
 
     @staticmethod

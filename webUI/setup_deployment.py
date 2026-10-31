@@ -1665,7 +1665,7 @@ class NapCatConfigurator:
         "enable": True,
         "name": "NachoBot",
         "url": "ws://localhost:8095",
-        "reportSelfMessage": False,
+        "reportSelfMessage": True,
         "messagePostFormat": "array",
         "token": "",
         "debug": False,

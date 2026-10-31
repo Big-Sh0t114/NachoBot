@@ -16,6 +16,7 @@ from typing import Tuple, Any, Dict, List, Optional, TYPE_CHECKING
 from rich.traceback import install
 from structlog.contextvars import bound_contextvars
 from src.common.logger import get_logger
+from src.config.config import global_config
 from src.common.data_models.message_data_model import ReplySetModel
 from src.chat.replyer.group_generator import DefaultReplyer
 from src.chat.replyer.private_generator import PrivateReplyer
@@ -168,7 +169,9 @@ async def generate_reply(
         # in flight.
         request_capabilities = (runtime_capabilities_from_message(reply_message) if reply_message is not None
                                 else runtime_capabilities_from_stream(replyer.chat_stream))
-        if request_capabilities.reply_controls:
+        if request_capabilities.prompt_profile == "desktop_companion":
+            enable_tool = global_config.tool.enable_tool and request_capabilities.tool_mode != "disabled"
+        if request_capabilities.reply_controls and request_capabilities.reply_delivery != "structured_reply":
             schema = {
                 "reply": "user-facing reply text",
                 "emotion": list(request_capabilities.control_emotions),
@@ -231,7 +234,7 @@ async def generate_reply(
                 # cannot make the delivered text diverge from that binding.
                 reply_set = ReplySetModel()
                 reply_set.add_text_content(content)
-            elif request_capabilities.reply_delivery == "tts_text":
+            elif request_capabilities.reply_delivery in {"tts_text", "structured_reply"}:
                 # Explicit TTS text is one utterance. Preserve its punctuation
                 # and avoid JSON probing, splitting, or typo post-processing.
                 reply_set = ReplySetModel()
