@@ -45,3 +45,6 @@ launch_vrchat.bat
 /NachoBot-QQCall/logs/
 /NachoBot-SnowLuma-Adapter/data/
 /NachoBot-UniversalVC-Adapter/data/
+
+# Ignore every directory named tests at any depth
+**/tests/
