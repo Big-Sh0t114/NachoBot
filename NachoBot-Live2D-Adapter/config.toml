@@ -4,18 +4,46 @@ port = 8766
 # 留空表示仅依赖本机监听地址；需要鉴权时同时配置 Bilibili 侧令牌。
 token = ""
 
+[runtime]
+# desktop_pet：透明桌宠与独立聊天窗；live：仅启动直播/推流用 Live2D 窗口与 WebSocket。
+mode = "desktop_pet"
+
 [renderer]
 # 相对于本配置文件所在目录解析。
-model_path = "resources/NachoBot/Nachobot.model3.json"
+model_path = "resources/NachoBot/NachoBot.model3.json"
 transparent = true
 antialiasing = true
-width = 1400
-height = 1200
-scale = 1.0
-track_mouse = false
-poke_cooldown_seconds = 10.0
+width = 520
+height = 760
+scale = 0.9
+track_mouse = true
+poke_cooldown_seconds = 4.0
 
-# 默认在内存中扫描模型参数、表情和动作名称，不改写用户模型文件。
+# mode = "desktop_pet" 时启用以下设置；mode = "live" 时自动忽略桌宠窗口行为。
+
+# 常用桌宠设置；位置/缩放自动保存在 state，内部行为使用默认值。
+# Core / TTS / perception 的启动开关统一在 ../NachoBot-Multimodal-Adapter/startup.toml。
+
+[desktop_pet]
+show_core_console = true
+character_name = "NachoBot" # 留空：读取模型目录中的名称
+
+# 聊天连接与语音；高级旧配置仍兼容，无需逐项填写。
+[desktop_pet.chat]
+enabled = true
+transport = "core"
+core_url = "ws://127.0.0.1:8000/ws"
+play_audio = true
+tts_language = "auto"
+proactive = false # 主动对话：用户长时间未发言时自然开启话题
+proactive_idle_seconds = 300 # 用户沉默满5分钟后按30秒/25%起步，未回应时退避；bot不重置用户计时
+
+[desktop_pet.perception]
+vision = true # 启用后周期采集活动窗口，经 Core perception 生成视觉上下文
+speech = true # 启用后输入条显示按住说话按钮，松开后识别并发送
+push_to_talk_key = "Caps_Lock"
+push_to_talk_mode = "hold" # hold：按住说话；toggle：按一下持续录音，再按一下关闭；侧栏可切换
+
 [adaptation]
 enabled = true
 
@@ -32,14 +60,14 @@ enabled = true
 # Canonical action ID -> 当前 Live2D 模型中的 Motion Group。
 # 模型的实际分组名称不一致时，只需修改此表，无需改 NachoBot 或平台适配器。
 [actions]
-NOD = "Nod"
-SHAKE_HEAD = "Shake"
-TURN_LEFT = "TurnLeft"
-TURN_RIGHT = "TurnRight"
-WINK = "Wink"
-HAPPY = "Sway"
-TILT_HEAD = "TiltHead"
-LOOK_AWAY = "LookAway"
+NOD = "FlickDown"
+SHAKE_HEAD = "Flick"
+TURN_LEFT = "Tap@Body"
+TURN_RIGHT = "Flick@Body"
+WINK = "Tap"
+HAPPY = "FlickUp"
+TILT_HEAD = "Tap"
+LOOK_AWAY = "Tap@Body"
 
 [logging]
 level = "INFO"

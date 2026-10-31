@@ -11,11 +11,16 @@ requires-python = ">=3.11"
 dependencies = [
     "live2d-py>=0.7.0.4,<0.8; sys_platform == 'win32'",
     "pygame>=2.5",
+    "pillow>=10",
+    "pystray>=0.19.5,<0.20; sys_platform == 'win32'",
     "PyOpenGL>=3.1.10,<4",
     "PyOpenGL-accelerate>=3.1.10,<4",
     "pywin32>=306; sys_platform == 'win32'",
     "websockets>=11,<17",
     "loguru",
+    "aiohttp>=3.11,<4",
+    "mss>=9,<11",
+    "sounddevice>=0.5,<0.6; sys_platform == 'win32'",
 ]
 
 [project.scripts]

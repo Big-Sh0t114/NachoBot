@@ -35,6 +35,7 @@ namespace = {
     "List": List,
     "Optional": Optional,
     "Union": Union,
+    "SegmentedPrompt": str,
     "re": re,
     "logger": SimpleNamespace(error=lambda *_args, **_kwargs: None),
     "global_prompt_manager": SimpleNamespace(
