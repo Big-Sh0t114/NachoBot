@@ -73,7 +73,7 @@ faiss-cpu==1.15.1
     # via nachobot
 fastapi==0.140.13
     # via nachobot
-filelock==3.32.7
+filelock==4.2.1
     # via static-ffmpeg
 frozenlist==1.8.0
     # via
@@ -293,7 +293,7 @@ scipy==1.18.1 ; python_full_version >= '3.12'
     # via nachobot
 secretstorage==3.5.0 ; platform_machine != 'ppc64le' and platform_machine != 's390x' and sys_platform == 'linux'
     # via keyring
-setuptools==83.0.0
+setuptools==84.1.0
     # via nachobot
 six==1.17.0
     # via python-dateutil
