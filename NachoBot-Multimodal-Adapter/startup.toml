@@ -1,0 +1,8 @@
+# 独立控制台自动启动；桌宠入口新拉起的服务随该次桌宠退出，复用的服务保留。
+[components]
+core = true # false：无核心独立桌宠，不启动 TTS/perception，也不连接后端
+tts = true
+perception = true
+
+[runtime]
+profile = "gpu" # gpu 复用 .venv；cpu 复用 .venv-cpu，不在启动时重装环境

@@ -93,6 +93,11 @@ def _existing_uid(data: dict[str, Any]) -> str | None:
     if not present:
         return None
     values = [data[key] for key in present]
+    # SnowLuma may serialize unavailable optional UID fields as empty/null.
+    # Only an entirely absent identity can use the exact-account cache path;
+    # mixed, malformed or conflicting nonempty identities still fail closed.
+    if all(value is None or (type(value) is str and value == "") for value in values):
+        return None
     if any(type(value) is not str or _UID.fullmatch(value) is None for value in values):
         raise SnowLumaIdentityError("snowluma_identity_uid_invalid")
     if len(set(values)) != 1:
@@ -239,7 +244,7 @@ class SnowLumaOneBotClient(OneBotClient):
         # compatibility, leaving ordinary OneBot identity untouched.
         runtime_path = self._current_runtime(deadline)
         uid = self._cached_uid(requested_uin, runtime_path, deadline)
-        return {**data, "uid": uid}
+        return {**{key: value for key, value in data.items() if key not in _UID_FIELDS}, "uid": uid}
 
     def get_friend_list(self, *, timeout: float | None = None) -> list[dict[str, Any]]:
         friends = super().get_friend_list(timeout=timeout)

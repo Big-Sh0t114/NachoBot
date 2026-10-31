@@ -10,6 +10,13 @@ enabled = ["GPT_Sovits"]
 stream_mode = false  # 是否启用流式输出
 post_process = false # 是否启用电话语音后处理
 
+[tts_ambient]
+enabled = false             # 为 TTS 混入日常环境底噪
+preset = "room"             # "room"（柔和室内风）或 "desk"（室内风加稀疏轻微桌面声）
+level_db = -38.0             # 环境床的参考 RMS 电平，dBFS（相对 PCM16 满幅）
+events_per_minute = 3.0     # 轻微 rustle/tap 的平均频率，0 到 30
+source_file = ""            # 可选本地 PCM16 WAV；相对路径以本配置文件目录为基准
+
 [bat_runtime]
 # 仅根目录 launchbot.bat / launchbot_lite.bat 使用，WebUI 启动不读取此配置
 # 可选值: "gpu" / "cpu"

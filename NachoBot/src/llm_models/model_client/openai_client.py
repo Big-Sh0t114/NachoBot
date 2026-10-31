@@ -736,12 +736,29 @@ class OpenaiClient(BaseClient):
         )
         # 将tool_options转换为OpenAI API所需的格式
         tools: Iterable[ChatCompletionToolParam] = _convert_tool_options(tool_options) if tool_options else NOT_GIVEN  # type: ignore
-        # Shared kwargs feed safe error metadata; keep the legacy request values unchanged.
+        # Keep configured model extras isolated before model-specific normalization.
         request_extra_params = extra_params
+        uses_modern_output_limit = model_info.max_tokens_parameter == "max_completion_tokens"
+        if uses_modern_output_limit or not model_info.supports_temperature:
+            request_extra_params = dict(extra_params or {})
+            if uses_modern_output_limit:
+                has_legacy_limit = "max_tokens" in request_extra_params
+                has_modern_limit = "max_completion_tokens" in request_extra_params
+                if has_legacy_limit and has_modern_limit:
+                    raise ValueError(
+                        "extra_params cannot contain both max_tokens and max_completion_tokens "
+                        "when max_tokens_parameter is 'max_completion_tokens'."
+                    )
+                if has_legacy_limit:
+                    request_extra_params["max_completion_tokens"] = request_extra_params.pop("max_tokens")
+            if not model_info.supports_temperature:
+                request_extra_params.pop("temperature", None)
+
         if getattr(api_provider, "enable_session_cache_key", False) is True:
             scope = _request_cache_scope(message_list)
             if scope is not None:
-                request_extra_params = dict(extra_params or {})
+                if request_extra_params is extra_params:
+                    request_extra_params = dict(extra_params or {})
                 if "prompt_cache_key" not in request_extra_params:
                     request_extra_params["prompt_cache_key"] = _prompt_cache_key(api_provider, scope)
 
@@ -749,12 +766,13 @@ class OpenaiClient(BaseClient):
             "model": model_info.model_identifier,
             "messages": messages,
             "tools": tools,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
             "stream": model_info.force_stream_mode,
             "response_format": NOT_GIVEN,
             "extra_body": request_extra_params,
         }
+        if model_info.supports_temperature:
+            request_params["temperature"] = temperature
+        request_params[model_info.max_tokens_parameter] = max_tokens
 
         req_task: asyncio.Task[Any] | None = None
         try:

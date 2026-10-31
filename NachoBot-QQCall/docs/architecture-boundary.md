@@ -121,8 +121,12 @@ shutdown operation. Startup failure cleanup uses only the exact recorded
 Popen process family and verifies those identities are gone; it never kills a
 process by port.
 
-On Windows, the WebUI grants breakaway permission only to the QQCall
-kill-on-close job. The UniversalVC CLI child explicitly requests
+On Windows, the QQCall CLI establishes its own kill-on-close job before
+launching children, including when started directly through the fixed BAT.
+Its sole handle is non-inheritable and remains open until supervisor process
+teardown, so abrupt supervisor exit also releases Host and Bridge descendants.
+This can nest inside the WebUI's QQCall job. Both jobs allow explicit
+breakaway. The UniversalVC CLI child explicitly requests
 `CREATE_BREAKAWAY_FROM_JOB`, so it can outlive QQCall's job cleanup; Host and
 Bridge remain contained in the QQCall job. If Windows rejects the breakaway
 request, startup fails closed and does not retry without the flag.

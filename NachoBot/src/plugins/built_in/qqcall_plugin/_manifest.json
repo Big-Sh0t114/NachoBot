@@ -26,6 +26,11 @@
         "type": "action",
         "name": "qqcall_accept",
         "description": "可选的、严格绑定当前来电事件的 Planner 接听动作"
+      },
+      {
+        "type": "event_handler",
+        "name": "qqcall_voice_prompt",
+        "description": "为已核验的通话回复补充当前连接状态"
       }
     ],
     "features": ["通话状态查询", "群语音加入与退出", "可选来电事件接听"]

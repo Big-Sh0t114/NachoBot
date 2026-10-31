@@ -2,6 +2,20 @@
 
 本目录维护本地 ASR、VLM 与 TTS 的具体模型路由。平台适配器直接连接 NachoBot Core 的 `8000/ws`；TTS 对 Core 暴露一个统一的 `9880` HTTP 运行时，运行时进程在内部托管所选 GPT-SoVITS 或 VoxCPM 后端。
 
+## 独立自动启动
+
+本目录 `startup.toml` 统一维护 `components.core` / `components.tts` / `components.perception` 三个开关，默认均为 `true`。
+`core = false` 时，桌宠进入无核心独立模式；本目录的 `launch_services.bat` 也直接跳过模型服务启动，不检查模型环境。
+`core = true` 时，`launch_services.bat` 根据另外两个开关为服务分别打开控制台（此入口本身不启动 Core）。
+`runtime.profile` 选择已有 `.venv`（gpu）或 `.venv-cpu`（cpu），不在启动时重装共享环境。
+也可继续双击 Live2D 的 BAT：仓库级编排器先调用这个独立入口，然后启动桌宠。
+端口、引擎和模型读取本目录既有 `configs/base.toml`、`perception.toml` 等配置。
+正在加载的服务通过锁复用，已经监听的服务验证健康接口后复用；不会接管或停止其他入口启动的服务。
+模型日志在各自控制台直接打印，关闭该控制台终止它托管的进程树。
+由桌宠 BAT 拉起的服务绑定该次桌宠启动会话，桌宠正常退出、启动失败或启动终端异常结束时同步清理。
+桌宠只复用启动前已运行的服务，不接管其退出管理；独立执行 `launch_services.bat` 拉起的服务也不随桌宠关闭。
+启动确认表示进程已创建，首次加载/准备模型继续在服务控制台进行，实际可用性以健康接口为准。
+
 ## 边界与端口
 
 | 组件 | 默认端口 | 职责 |
@@ -47,6 +61,19 @@ perception_template.toml   -> configs/perception.toml
 ```
 
 `base.toml` 的 `[enabled_tts]` 选择 GPT-SoVITS 或 Vox；具体参数分别维护在 `gpt-sovits.toml` 与 `vox.toml`。`perception.toml` 维护 9874 监听地址、Florence-2 与 Sherpa-ONNX 配置。Core 不包含这些本地模型名。
+
+可在 `[tts_ambient]` 开启 TTS 环境声。模板默认关闭；例如，可用以下设置试用 `desk` 预设：
+
+```toml
+[tts_ambient]
+enabled = true
+preset = "desk"
+level_db = -38.0
+events_per_minute = 3.0
+source_file = ""
+```
+
+`room` 与 `desk` 是合成音效，不是真实录音；`level_db` 表示连续环境床相对 PCM16 满幅的参考 RMS 电平，数值越负越轻，`-90` 表示静音。也可将 `source_file` 指向本地 PCM16 mono/stereo WAV（最多 30 秒、8 MiB，采样率 8–96 kHz）；相对路径以 `base.toml` 所在目录解析，文件会按输出采样率重采样并平滑循环。启用后 WAV 和 PCM 流都会在本次音频时长内混合；流式输出逐块处理并保留跨块状态，不会在请求间持续播放。环境声会在一次合成过程中缓慢变化音量与音色；这些变化只作用于环境声，不调制人声。配置在运行时启动时读取，改动后需重启 TTS Runtime。
 
 TTS Runtime 在进程启动时固定读取一次活动配置并选择唯一后端。切换 GPT-SoVITS/Vox 或修改模型配置后需要重启 TTS Runtime；请求期间不会重载或切换本地模型。
 

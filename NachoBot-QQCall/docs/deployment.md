@@ -8,6 +8,10 @@ QQCall 的正式服务与 PCM 包应放在同一工作区的 `NachoBot-QQCall`�
 
 当前实机核验的 QQNT 是 `9.9.26-44343`；QQ 启动程序本身的文件版本不能代替应用目录内实际构建版本。Kernel wrapper 与 AVSDK 的原有摘要检查仍生效，其他版本不能仅凭能够启动就算支持。
 
+排查“群内已邀请但机器人没有加入”时，可向本机控制服务的 `POST /v1/kernel/diagnostics` 发送 `{"accountId":"机器人QQ号"}`，认证沿用 `.runtime/service/control.token.private`。该接口读取当前 Agent 的各类回调次数、是否映射为 AVSDK 信号及参数类型，不包含回调正文、账号映射或通话内容，不领取或续期适配器租约。返回的 `hostGeneration`、`connectionGeneration` 必须对应当前绑定；进程代次变化或 Agent 不可用会返回错误，不能把旧计数作为当前邀请证据。此诊断不能证明已经入房，实际入房仍须通话状态与真实拨号验证。
+
+QQ 消息适配器临时断线时，控制服务会暂停准入并允许同一进程恢复。若绑定的适配器进程已退出，则清理当前控制连接和它拥有的 Host：音频观察器绑定的是原适配器的 PID 与创建时间，不能把新进程直接当作旧音频读取者继续使用。一次性 Shim 已消耗的 QQ 进程此时需要重新启动并登录，再运行 `start-qqcall.bat` 建立新代次；不能以旧服务的 `ready` 文件代替恢复成功。
+
 仓库已跟踪适用于这个锁定构建的 Windows x64 预编译产物，克隆后即可取得：`native/build/x64/QQCallRecoveryShim2.dll`、`native/audio_route/build/QQCallAudioRouteGuard-v2.node`、`QQCallAudioRouteGuard-v2.dll` 和 `artifact-manifest.json`。MSVC 仅在需要从源码重建原生文件时才需要；预编译文件仍受下述摘要与 manifest 校验约束。
 
 Core 的锁定 Python 环境提供 supervisor 所需的 `psutil`；所选适配器的 `qqcall-audio` extra 安装 PCM 包与 Windows PyAudioWPatch。以下命令从完整工作区根目录运行，按实际选用的适配器二选一：
@@ -80,7 +84,9 @@ powershell -ExecutionPolicy Bypass -File .\NachoBot-QQCall\native\build_audio_ro
 
 它等待当前代次、必要时申请一次 UAC、验证身份后绑定；ready 时不重复绑定。不要复用旧 `connection-N` 注入脚本。一次性 Shim 已消费并失联时，需要按正式停止流程重启机器人 QQ；保留主叫与共享模型服务，再用固定 BAT 绑定新代次。
 
-适配器暂时掉线或重启时，supervisor 保留仍健康的原生绑定，进入 `waiting_adapter`；暂停控制和音频准入，并按原通话 scope 请求退出。适配器回来后重新验证同一机器人 QQ 的 PID/FILETIME、账号/UID、身份映射与音频路由，通过后自动恢复服务能力，不重复 UAC 或注入。被中断的通话不保证继续，通话占用仍依赖原生退出证明释放。账号/QQ 进程/身份映射/路由变化和原生连接失效继续隔离；这项恢复不能复活已经退出的旧 Bridge。显式停止整个 QQCall 服务仍解绑并有界重试清理本代所属 Host 进程和启动器。
+适配器进程仍存活但连接暂时掉线时，supervisor 保留仍健康的原生绑定，进入 `waiting_adapter`；暂停控制和音频准入，并按原通话 scope 请求退出。同一适配器进程重新连接后，重新验证机器人 QQ 的 PID/FILETIME、账号/UID、身份映射与音频路由，通过后自动恢复服务能力，不重复 UAC 或注入。适配器进程退出则清理本代所属 Host，不能用新适配器进程复用旧音频观察器；一次性 Shim 已消耗时需要重启机器人 QQ。被中断的通话不保证继续，通话占用仍依赖原生退出证明释放。账号/QQ 进程/身份映射/路由变化和原生连接失效继续隔离；这项恢复不能复活已经退出的旧 Bridge。显式停止整个 QQCall 服务仍解绑并有界重试清理本代所属 Host 进程和启动器。
+
+群通话音频已停止但原生退出尚未确认时，适配器保留隔离记录。后续轮询只有在同代房间和全局占用都确认释放后才清除记录；跨代恢复还要求 supervisor 身份清单校验通过、Host 与连接代次均递增，并确认新代全局占用空闲。正在使用的音频、未完成的停止操作、查询失败或迟到的旧代响应都不能清除占用。
 
 也可在 WebUI 的 QQCall 卡片使用“注入”按钮。该按钮运行同一固定 BAT，沿用 UAC、账号/进程身份和单次 Shim 校验；已就绪时不会重新注入。外部启动的独立控制服务会被识别，WebUI 不将其接管为托管进程，通用启动请求也不会重复创建 supervisor。状态报告暂时过期时显示服务存活且等待状态更新，并禁用注入；需要重启 QQ 的状态不能直接重复注入。
 

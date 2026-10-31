@@ -69,6 +69,9 @@ name = "Qwen/Qwen3-8B/Silicon"
 api_provider = "SiliconFlow"
 price_in = 0
 price_out = 0
+# Optional per-model request settings; confirm the configured route and request mode before changing these defaults.
+# max_tokens_parameter = "max_completion_tokens"
+# supports_temperature = false
 [models.extra_params]
 enable_thinking = false
 

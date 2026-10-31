@@ -65,7 +65,14 @@ def _receipt_codes(segment, kind: str) -> tuple[frozenset[str], bool]:
             for child in item.data:
                 visit(child)
         elif item.type in {"voice", "voice_stream"}:
-            codes = frozenset({"local_endpoint_queued", "local_endpoint_drained"})
+            completed_audio = item.type == "voice" or (
+                isinstance(item.data, Mapping) and item.data.get("event") == "end"
+            )
+            # Queue admission is sufficient for intermediate packets, but it
+            # cannot confirm a buffered clip or the final stream drain.
+            codes = frozenset({"local_endpoint_drained"}) if completed_audio else frozenset({
+                "local_endpoint_queued", "local_endpoint_drained",
+            })
             buffered |= item.type == "voice"
         elif item.type not in {"text", "tts_text", "reply"}:
             suffix = "group" if kind == "qqcall_group" else "call"

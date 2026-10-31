@@ -18,6 +18,7 @@ const { createQQCallBridge } = require("./qqcall-bridge.cjs");
 const { createControlService } = require("./control-service.cjs");
 const { writePrivateJson } = require("../host/config.cjs");
 const { canonicalFiletime } = require("../shared/private-invite-scope.cjs");
+const { summarizeException } = require("./exception-diagnostics.cjs");
 const {
   createPersistentAudioRouteObserver,
   readAudioRouteConfig,
@@ -152,7 +153,7 @@ function installControllerExitObserver(reportPath) {
   pendingControllerExitEvidence = null;
   if (!controllerExitObserverInstalled) {
     try {
-      process.on("uncaughtExceptionMonitor", (_error, origin) => {
+      process.on("uncaughtExceptionMonitor", (error, origin) => {
         try {
           if (!controllerExitReportTarget || pendingControllerExitEvidence) return;
           const observedAtMs = Date.now();
@@ -163,6 +164,7 @@ function installControllerExitObserver(reportPath) {
             failureCode: "controller_uncaught_exception",
             origin: origin === "uncaughtException" || origin === "unhandledRejection" ? origin : "uncaughtException",
             observedAtMs,
+            exceptionDetails: summarizeException(error),
           };
         } catch { /* The monitor must never interfere with Node's default exception handling. */ }
       });
@@ -2055,6 +2057,7 @@ async function startCli(options, { input = process.stdin, output = process.stdou
     accountId: options.accountUin,
     port: options.controlPort,
     audioRouteObserver,
+    kernelStatusReader: () => broker.statusRequest(2000),
     officialAVObserver: {
       // QQ's native method cannot be wrapped and its debugger attachment is
       // unconfirmed on the pinned build. Service diagnostics stay passive.
@@ -2510,6 +2513,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  installControllerExitObserver,
   MODULE_PATH,
   parseArgs,
   parseCommandLine,

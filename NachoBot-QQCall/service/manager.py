@@ -56,6 +56,9 @@ from service.rpc import OneBotClient, OneBotError
 from service.snowluma import safe_auth_failure_stage
 from service.snowluma_identity import SnowLumaIdentityError, SnowLumaOneBotClient
 from service.universal_service import UniversalServiceSupervisor
+from service.status_history import StatusHistory
+from service.exception_diagnostics import validated_exception_details
+from service.process_job import ProcessJobError, ensure_process_job
 from service.windows import (
     HostLaunch,
     WindowsServiceError,
@@ -839,6 +842,7 @@ class Supervisor:
         self._discovery_config = copy.deepcopy(config)
         self._discovered_onebot_token: str | None = None
         self.runtime_dir = Path(config["runtime_dir"])
+        self._status_history = StatusHistory(self.runtime_dir / "status-history.private.json")
         self.project_root = Path(project_root).resolve(strict=False) if project_root is not None else Path(__file__).resolve().parents[1]
         self.system = system if system is not None else WindowsSystem()
         self.universal_service_factory = universal_service_factory
@@ -899,6 +903,10 @@ class Supervisor:
         if persist:
             try:
                 self._validate_private_runtime_location()
+                try:
+                    self._status_history.write(self.last_status)
+                except (PrivateFileError, OSError, ValueError):
+                    pass
                 atomic_private_json(self.status_path, self.last_status)
             except (ServiceError, PrivateFileError):
                 pass
@@ -1755,6 +1763,79 @@ class Supervisor:
             "startedAtMs": self.clock_ms(),
         }
 
+    def _recover_prior_owned_hosts(self) -> bool:
+        """Reap recorded Hosts only after the previous supervisor/controller exited.
+
+        Caller holds service.lock. Never overwrite the ownership receipt on a
+        failed cleanup, and never infer ownership from a listening port.
+        """
+        if not self.manager_path.exists():
+            return False
+        if is_reparse_point(self.manager_path):
+            raise ServiceError("manager_record_invalid", "quarantined")
+        previous = read_private_json(self.manager_path, max_bytes=32 * 1024)
+        if not self._valid_manager_record(previous):
+            raise ServiceError("manager_record_invalid", "quarantined")
+        records = previous.get("ownedHosts", [])
+        if not records:
+            return False
+        # Unlike the UI's boolean presence helper, unknown/access-denied is
+        # not proof of exit and must not authorize reclaiming a process tree.
+        if self.system.process_is_current(previous["pid"], int(previous["creationTime100ns"])) is not False:
+            raise ServiceError("prior_supervisor_still_running", "waiting_target")
+        controller_pid = previous.get("controllerPid")
+        controller_time = previous.get("controllerCreationTime100ns")
+        if (type(controller_pid) is not int or not 0 < controller_pid <= 0x7fffffff
+                or type(controller_time) is not str or not re.fullmatch(r"[1-9][0-9]{0,19}", controller_time)
+                or int(controller_time) > MAX_FILETIME):
+            raise ServiceError("manager_record_invalid", "quarantined")
+        if self.system.process_is_current(controller_pid, int(controller_time)) is not False:
+            raise ServiceError("prior_controller_still_running", "waiting_target")
+        generation = previous.get("hostGeneration")
+        if (type(generation) is not int or not 0 < generation <= MAX_SAFE_INTEGER
+                or type(records) is not list or not 1 <= len(records) <= 128):
+            raise ServiceError("manager_record_invalid", "quarantined")
+        profile = self.runtime_dir / "hosts" / f"host-{generation}" / "profile"
+        for directory in (self.runtime_dir / "hosts", profile.parent, profile):
+            if is_reparse_point(directory):
+                raise ServiceError("manager_record_invalid", "quarantined")
+        path_key = lambda value: ntpath.normcase(ntpath.normpath(value))
+        launcher_image = path_key(str(Path(self.config["paths"]["loader_root"]) / "NapCatWinBootMain.exe"))
+        qq_image = self.config["paths"]["qq_exe"]
+        seen = set()
+        for record in records:
+            if type(record) is not dict:
+                raise ServiceError("manager_record_invalid", "quarantined")
+            pid, creation = record.get("pid"), record.get("creationTime100ns")
+            image, stored_profile, role = record.get("imagePath"), record.get("profilePath"), record.get("role")
+            if (type(pid) is not int or not 0 < pid <= 0x7fffffff or pid in seen
+                    or pid in (previous["pid"], controller_pid, previous.get("kernelPid"), os.getpid())
+                    or type(creation) is not str or not re.fullmatch(r"[1-9][0-9]{0,19}", creation)
+                    or int(creation) > MAX_FILETIME
+                    or type(image) is not str or not ntpath.isabs(image)
+                    or type(stored_profile) is not str or path_key(stored_profile) != path_key(str(profile))
+                    or role not in ("launcher", "host", "host_child")):
+                raise ServiceError("manager_record_invalid", "quarantined")
+            seen.add(pid)
+            if role == "launcher":
+                valid_image = path_key(image) == launcher_image
+            else:
+                valid_image = (ntpath.basename(image).lower() == "qq.exe"
+                               and (not qq_image or path_key(image) == path_key(qq_image)))
+            if not valid_image:
+                raise ServiceError("manager_record_invalid", "quarantined")
+        if (sum(record["role"] == "host" for record in records) != 1
+                or sum(record["role"] == "launcher" for record in records) != 1):
+            raise ServiceError("manager_record_invalid", "quarantined")
+        # terminate_owned checks PID, FILETIME and image again on the opened
+        # process handle. PID reuse is left untouched. Retain all saved children
+        # even if their launcher has already exited.
+        for _attempt in range(2):
+            if self.system.terminate_owned(records):
+                atomic_private_json(self.manager_path, {**previous, "ownedHosts": []})
+                return True
+        raise ServiceError("prior_host_cleanup_unconfirmed", "quarantined")
+
     def _current_supervisor_identity(self) -> tuple[int, str]:
         method = getattr(self.system, "current_process_identity", None)
         if method:
@@ -2542,6 +2623,16 @@ if ($LASTEXITCODE -ne 0) {{ throw "The requested attach failed; inspect the inje
         raise ServiceError("adapter_gate_unconfirmed", "quarantined")
 
     def _suspend_adapter(self, active: ActiveGeneration) -> None:
+        # The audio observer pins the adapter's exact loopback-reader process.
+        # A dead adapter incarnation cannot be resumed with a replacement PID:
+        # its frozen route proof and any in-flight call belong to the old owner.
+        # Let the supervisor's existing error path tear down Bridge and owned
+        # Host processes, while retaining transient transport recovery when the
+        # original adapter is still alive (or cannot be authoritatively queried).
+        if self.system.process_is_current(
+            active.evaluation.adapter_pid, active.evaluation.adapter_filetime,
+        ) is False:
+            raise ServiceError("adapter_process_exited", "waiting_kernel_restart")
         if active.adapter_suspended:
             return
         self._clear_runtime_snapshots()
@@ -2721,7 +2812,8 @@ if ($LASTEXITCODE -ne 0) {{ throw "The requested attach failed; inspect the inje
             except (PrivateFileError, OSError, ValueError, TypeError):
                 node_report = None
             node_origin = node_report.get("origin") if isinstance(node_report, dict) else None
-            if (isinstance(node_report, dict) and set(node_report) == _CONTROLLER_EXIT_REPORT_FIELDS and
+            if (isinstance(node_report, dict) and
+                    set(node_report) in (_CONTROLLER_EXIT_REPORT_FIELDS, _CONTROLLER_EXIT_REPORT_FIELDS | {"exceptionDetails"}) and
                     type(node_report.get("schema")) is int and node_report["schema"] == 1 and
                     node_report.get("errorClass") == "uncaught_exception" and
                     node_report.get("failureCode") == "controller_uncaught_exception" and
@@ -2734,6 +2826,9 @@ if ($LASTEXITCODE -ne 0) {{ throw "The requested attach failed; inspect the inje
                 record["controllerExceptionObservedAtMs"] = node_report["observedAtMs"]
                 record["controllerExitAtMs"] = node_report["exitedAtMs"]
                 record["controllerObserverExitCode"] = node_report["exitCode"]
+                details = validated_exception_details(node_report.get("exceptionDetails"))
+                if details is not None:
+                    record["controllerExceptionDetails"] = details
 
             if host_report_path and host_pid is not None:
                 try:
@@ -2880,6 +2975,16 @@ if ($LASTEXITCODE -ne 0) {{ throw "The requested attach failed; inspect the inje
             if not self._valid_manager_record(manager):
                 return {"ok": False, "phase": "error", "code": "manager_record_invalid"}, 2
             if not self._process_current(manager["pid"], int(manager["creationTime100ns"])):
+                lock = ProcessLock(self.runtime_dir / "service.lock")
+                if not lock.acquire():
+                    return {"ok": False, "phase": "error", "code": "service_already_running"}, 2
+                try:
+                    self._recover_prior_attach_attempt()
+                    recovered = self._recover_prior_owned_hosts()
+                finally:
+                    lock.release()
+                if recovered:
+                    return {"ok": True, "phase": "stopped", "code": "prior_hosts_released"}, 0
                 return {"ok": True, "phase": "not_running"}, 0
             request = {
                 "schema": SCHEMA,
@@ -2903,7 +3008,9 @@ if ($LASTEXITCODE -ne 0) {{ throw "The requested attach failed; inspect the inje
                     return {"ok": True, "phase": "stop_requested"}, 0
                 return {"ok": False, "phase": "error", "code": "stop_request_binding_mismatch"}, 2
             return {"ok": True, "phase": "stop_requested"}, 0
-        except (PrivateFileError, ServiceError, WindowsServiceError, OSError):
+        except ServiceError as exc:
+            return {"ok": False, "phase": exc.phase, "code": exc.code}, 2
+        except (PrivateFileError, WindowsServiceError, OSError):
             return {"ok": False, "phase": "error", "code": "stop_request_unavailable"}, 2
 
     def _valid_manager_record(self, value: Any) -> bool:
@@ -2996,6 +3103,7 @@ if ($LASTEXITCODE -ne 0) {{ throw "The requested attach failed; inspect the inje
             pid, creation = self._current_supervisor_identity()
             self.supervisor_pid, self.supervisor_creation_time_100ns = pid, creation
             self._recover_prior_attach_attempt()
+            self._recover_prior_owned_hosts()
             self._write_run_identity()
             self._status("starting", "service_starting")
             try:
@@ -3057,6 +3165,14 @@ if ($LASTEXITCODE -ne 0) {{ throw "The requested attach failed; inspect the inje
                                         if oldest != failure_key:
                                             self.failures.pop(oldest, None)
                                     if failures >= maximum_failures:
+                                        # Persist the triggering cause before the summary
+                                        # replaces status.json, including a one-attempt limit.
+                                        if isinstance(exc, ServiceError):
+                                            self._status(exc.phase, exc.code)
+                                        elif isinstance(exc, WindowsServiceError):
+                                            self._status("error", exc.code)
+                                        else:
+                                            self._status("error", "service_runtime_unavailable")
                                         status = self._status("error", "generation_failure_limit")
                                     elif isinstance(exc, ServiceError):
                                         status = self._status(exc.phase, exc.code)
@@ -3159,6 +3275,7 @@ if ($LASTEXITCODE -ne 0) {{ throw "The requested attach failed; inspect the inje
                                 failures = self.failures.get(key, 0) + 1
                                 self.failures[key] = failures
                                 if failures >= maximum_failures:
+                                    self._status("waiting_target", "controller_exited")
                                     status = self._status("error", "generation_failure_limit")
                                 else:
                                     status = self._status("waiting_target", "controller_exited")
@@ -3303,11 +3420,13 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "stop":
             output, code = supervisor.request_stop()
         else:
+            if config["enabled"]:
+                ensure_process_job()
             output, code = supervisor.run(once=args.once)
     except ConfigError as exc:
         output = {"ok": False, "phase": "error", "code": exc.code}
         code = 2
-    except (ServiceError, PrivateFileError) as exc:
+    except (ServiceError, PrivateFileError, ProcessJobError) as exc:
         output = {"ok": False, "phase": getattr(exc, "phase", "error"), "code": getattr(exc, "code", "service_error")}
         code = 2
     except Exception:

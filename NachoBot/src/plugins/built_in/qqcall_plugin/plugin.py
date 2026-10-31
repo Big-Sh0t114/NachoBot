@@ -843,7 +843,7 @@ def _error_reply(exc: QQCallAPIError) -> str:
         "group_requester_mismatch": "要请最初叫我加入的那位来发退出指令喵。",
         "group_scope_stale": "群语音房间已经变啦，这次没有执行退出喵。",
         "group_audio_unavailable": "群语音的声音连接还没准备好喵，暂时不能确认已经加入。",
-        "group_audio_busy": "声音通道正在被另一通电话使用喵，稍后再试吧。",
+        "group_audio_busy": "声音通道正在使用中喵，先用 #stat_vc_qq 确认当前通话状态吧。",
         "group_audio_route_unavailable": "群语音的本机声音通道还没接好喵，暂时不能确认已经加入。",
         "group_audio_lease_lost": "群语音的声音连接失效了喵，暂时不能确认已经加入。",
         "audio_plan_unavailable": "通话音频设备还没配置好喵。",
@@ -1354,11 +1354,16 @@ class QQCallPlugin(BasePlugin):
         self._unregister_realtime_provider()
 
     def get_plugin_components(self) -> List[Tuple[ComponentInfo, Type]]:
+        from src.plugins.built_in.qqcall_plugin.voice_prompt import QQCallVoicePromptHandler
+
         if self.enable_plugin and _core_qqcall_enabled():
             self._register_realtime_provider()
         else:
             self._unregister_realtime_provider()
-        components: List[Tuple[ComponentInfo, Type]] = [(QQCallCommand.get_command_info(), QQCallCommand)]
+        components: List[Tuple[ComponentInfo, Type]] = [
+            (QQCallCommand.get_command_info(), QQCallCommand),
+            (QQCallVoicePromptHandler.get_handler_info(), QQCallVoicePromptHandler),
+        ]
         if self.get_config("qqcall.allow_planner_accept", False) is True:
             components.append((QQCallAcceptAction.get_action_info(), QQCallAcceptAction))
         return components

@@ -34,6 +34,7 @@ class VADProcessor:
     """Silero VAD wrapper providing speech segment detection."""
 
     SAMPLE_RATE = 16000
+    PCM16_QUANTUM = 1.0 / 32768.0
 
     def __init__(self, model_path: str, threshold: float = 0.5,
                  min_silence_duration: float = 0.25,
@@ -75,21 +76,51 @@ class VADProcessor:
         if self._vad is None:
             return []
 
-        self._vad.accept_waveform(samples_16k)
+        # Muted QQ capture can contain isolated +/-1 PCM16-unit samples. They
+        # are quantization residue, yet the native detector has reported them
+        # as speech. Feed silence for a frame wholly within that one-unit floor;
+        # leave every frame with a larger signal untouched, including quiet speech.
+        has_signal = bool(np.any(np.abs(samples_16k) > self.PCM16_QUANTUM))
+        self._vad.accept_waveform(samples_16k if has_signal else np.zeros_like(samples_16k))
 
         segments: List[SpeechSegment] = []
+        completed = False
         while not self._vad.empty():
             seg = self._vad.front
             samples = np.array(seg.samples, dtype=np.float32)
             start_time = seg.start / self.SAMPLE_RATE
             duration = len(samples) / self.SAMPLE_RATE
-            segments.append(SpeechSegment(samples=samples, start_time=start_time, duration=duration))
+            self.logger.info(
+                "VAD completed segment: samples=%d peak=%.9g finite=%s nonzero=%d",
+                samples.size, float(np.max(np.abs(samples))) if samples.size else 0.0,
+                bool(np.all(np.isfinite(samples))), int(np.count_nonzero(samples)),
+            )
+            completed = True
+            # A native detection flag is not sufficient evidence of speech:
+            # live calls have produced periodic segments at the PCM16 noise floor.
+            # Do not send these to ASR or speaker identification.
+            if np.any(np.abs(samples) > self.PCM16_QUANTUM):
+                segments.append(SpeechSegment(samples=samples, start_time=start_time, duration=duration))
             self._vad.pop()
 
         if hasattr(self._vad, "is_speech_detected"):
-            self._is_speaking = self._vad.is_speech_detected()
+            detected = self._vad.is_speech_detected()
         else:
-            self._is_speaking = not self._vad.empty()
+            detected = not self._vad.empty()
+
+        # Keep a real utterance active through its trailing silence, but never
+        # start a new interruption from a frame at the PCM16 noise floor.
+        # Completed segments end the previous utterance's evidence, including
+        # empty ones. No configurable speech-volume threshold is introduced.
+        continuing = self._is_speaking and not completed
+        speaking = bool(detected and (continuing or has_signal))
+        if speaking and not self._is_speaking:
+            self.logger.info(
+                "VAD speech start: input_samples=%d peak=%.9g finite=%s",
+                samples_16k.size, float(np.max(np.abs(samples_16k))) if samples_16k.size else 0.0,
+                bool(np.all(np.isfinite(samples_16k))),
+            )
+        self._is_speaking = speaking
 
         self._samples_processed += len(samples_16k)
         return segments

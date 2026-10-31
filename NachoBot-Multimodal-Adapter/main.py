@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import StreamingResponse
@@ -49,6 +49,11 @@ from nachobot_multimodal.tts.base import (  # noqa: E402
     iter_validated_pcm,
 )
 from nachobot_multimodal.utils import post_process  # noqa: E402
+from nachobot_multimodal.utils.ambient_audio import (  # noqa: E402
+    ambient_is_active,
+    mix_pcm_stream,
+    mix_wav,
+)
 from nachobot_multimodal.utils.tts_resolver import resolve_tts_model_snapshot  # noqa: E402
 
 
@@ -155,9 +160,15 @@ class TTSPipeline:
         backend_alive: bool = True,
         public_host: str | None = None,
         public_port: int | None = None,
+        ambient_rng_factory: Callable[[], Any] | None = None,
     ) -> None:
         self.config_path = Path(config_path).resolve()
         self.config = Config(str(self.config_path))
+        # The fixed public runtime snapshots its active config at startup. The
+        # frozen settings object is read per request, while each request gets a
+        # fresh mixer, source cursor, event schedule, and RNG.
+        self._ambient_config = self.config.tts_ambient
+        self._ambient_rng_factory = ambient_rng_factory or (lambda: None)
         self.selected_backend = normalize_backend(backend) if backend else None
         self.model = model
         if self.model is None:
@@ -282,6 +293,7 @@ class TTSPipeline:
             if not text:
                 raise HTTPException(status_code=400, detail="TTS text cannot be empty")
             try:
+                ambient_config = self._ambient_config
                 async with self._webui_tts_lock:
                     # The child may exit while a request is waiting for the
                     # single-client lock. Recheck before using the client.
@@ -296,6 +308,14 @@ class TTSPipeline:
                     raise HTTPException(status_code=502, detail="TTS returned empty audio")
                 if getattr(self.config.tts_base_config, "post_process", False):
                     audio_data = post_process.simulate_telephone_voice(audio_data)
+                if ambient_is_active(ambient_config):
+                    audio_data = await asyncio.to_thread(
+                        mix_wav,
+                        audio_data,
+                        ambient_config,
+                        config_dir=self.config_path.parent,
+                        rng=self._ambient_rng_factory(),
+                    )
                 return Response(
                     content=audio_data,
                     media_type="audio/wav",
@@ -328,6 +348,7 @@ class TTSPipeline:
             response_body = None
             transferred = False
             try:
+                ambient_config = self._ambient_config
                 if not self.ready:
                     raise HTTPException(status_code=503, detail="TTS runtime is not ready")
                 stream_iterator = iter_validated_pcm(
@@ -337,6 +358,13 @@ class TTSPipeline:
                         text_lang=body.text_lang,
                     )
                 )
+                if ambient_is_active(ambient_config):
+                    stream_iterator = mix_pcm_stream(
+                        stream_iterator,
+                        ambient_config,
+                        config_dir=self.config_path.parent,
+                        rng=self._ambient_rng_factory(),
+                    )
                 # Surface backend and format errors before response headers are sent.
                 first_chunk = await anext(stream_iterator)
                 response_body = _PrefetchedPCMBody(
@@ -401,6 +429,7 @@ class TTSPipeline:
         if not self.ready:
             return None
         try:
+            ambient_config = self._ambient_config
             async with self._webui_tts_lock:
                 if not self.ready:
                     return None
@@ -411,6 +440,14 @@ class TTSPipeline:
                 )
             if audio_data and getattr(self.config.tts_base_config, "post_process", False):
                 audio_data = post_process.simulate_telephone_voice(audio_data)
+            if audio_data and ambient_is_active(ambient_config):
+                audio_data = await asyncio.to_thread(
+                    mix_wav,
+                    audio_data,
+                    ambient_config,
+                    config_dir=self.config_path.parent,
+                    rng=self._ambient_rng_factory(),
+                )
             return audio_data or None
         except Exception as exc:
             logger.exception("TTS synthesis failed: {}", exc)

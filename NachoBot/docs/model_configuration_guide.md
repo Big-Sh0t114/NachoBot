@@ -148,6 +148,23 @@ thinking = {type = "disabled"} # 禁用思考
 | `price_out` | ❌ | 输出价格（元/M token），用于成本统计 |
 | `force_stream_mode` | ❌ | 是否强制使用流式输出 |
 | `extra_params` | ❌ | 额外的模型参数配置 |
+| `max_tokens_parameter` | ❌ | 输出长度字段：`max_tokens`（默认）或 `max_completion_tokens`。仅在确认服务端要求后为该模型配置 |
+| `supports_temperature` | ❌ | 是否发送 `temperature`（默认 `true`）；设为 `false` 时请求参数和 `extra_params` 中的 `temperature` 都会省略 |
+
+OpenAI 兼容端点的请求能力可能因模型或代理配置而异，应按每个模型显式配置，不根据模型名称或 URL 推断。例如，要求 `max_completion_tokens` 的模型可这样设置：
+
+```toml
+[[models]]
+model_identifier = "provider-model-id"
+name = "provider-model"
+api_provider = "Provider"
+max_tokens_parameter = "max_completion_tokens"
+supports_temperature = false
+```
+
+`max_tokens_parameter` 只接受上表中的两个字符串，`supports_temperature` 必须是布尔值。现代输出长度模式下，`extra_params` 中单独配置的 `max_tokens` 会作为 `max_completion_tokens` 覆盖值发送；单独配置 `max_completion_tokens` 时保留该覆盖值。两者同时配置会在发出请求前报错。`reasoning_effort` 和其他额外参数照常保留。
+
+`supports_temperature` 应按模型实际使用的路由和请求模式配置，其中包括 `reasoning_effort`。已观测的一条兼容路由在 `reasoning_effort = "low"` 时拒绝 `temperature`；直连请求在 `reasoning_effort = "none"` 时接受该参数。请根据部署实际发送的模式设置此开关。
 
 ## 4. 模型任务配置
 

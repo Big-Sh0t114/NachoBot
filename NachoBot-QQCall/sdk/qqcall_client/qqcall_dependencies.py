@@ -3,12 +3,35 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
 
 DEPENDENCY_NAMES = {"core": "Core", "tts": "TTS", "perception": "ASR/感知服务", "universal": "UniversalVC"}
+_LOGGER = logging.getLogger(__name__)
+
+
+class _HealthProbeError(ValueError):
+    def __init__(self, status: int):
+        self.status = status
+        super().__init__("health_unavailable")
+
+
+def _report_probe_failure(dependency: str, error: Exception) -> None:
+    # Never log exception text: transport errors can contain URLs or credentials.
+    if isinstance(error, _HealthProbeError):
+        reason = f"http_{error.status}"
+    elif isinstance(error, (TimeoutError, asyncio.TimeoutError)):
+        reason = "timeout"
+    elif isinstance(error, aiohttp.ClientError):
+        reason = "transport_error"
+    elif isinstance(error, OSError):
+        reason = "local_io_error"
+    else:
+        reason = "invalid_health_or_config"
+    _LOGGER.warning("QQCall dependency check failed dependency=%s reason=%s", dependency, reason)
 
 
 def dependency_notice(code: str) -> str | None:
@@ -26,7 +49,7 @@ async def _health_json(url: str, token: str | None) -> dict:
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=3), trust_env=False) as session:
         async with session.get(url, headers=headers, allow_redirects=False) as response:
             if response.status != 200:
-                raise ValueError("health_unavailable")
+                raise _HealthProbeError(response.status)
             raw = bytearray()
             async for chunk in response.content.iter_chunked(8192):
                 raw.extend(chunk)
@@ -64,7 +87,8 @@ def make_dependency_check(router, platform: str, universal_api):
             ):
                 missing.append("perception")
             return missing
-        except Exception:
+        except Exception as exc:
+            _report_probe_failure("core", exc)
             return ["core"]
 
     async def universal_check():
@@ -93,11 +117,15 @@ def make_dependency_check(router, platform: str, universal_api):
                    for name in ("pipeline", "vad", "speaker")):
                 return ["universal"]
             return []
-        except Exception:
+        except Exception as exc:
+            _report_probe_failure("universal", exc)
             return ["universal"]
 
     async def check():
         results = await asyncio.gather(core_check(), universal_check())
-        return tuple(item for result in results for item in result)
+        missing = tuple(item for result in results for item in result)
+        if missing:
+            _LOGGER.warning("QQCall admission dependencies unavailable missing=%s", ",".join(missing))
+        return missing
 
     return check
