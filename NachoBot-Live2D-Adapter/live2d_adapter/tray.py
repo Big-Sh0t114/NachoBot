@@ -26,6 +26,7 @@ class DesktopPetTray:
         self.logger = logger
         self._icon = None
         self._thread: threading.Thread | None = None
+        self._menu_message = 0x8000 + 63
 
     @staticmethod
     def _create_image():
@@ -39,7 +40,7 @@ class DesktopPetTray:
         draw.arc((19, 22, 45, 48), 20, 160, fill=(255, 255, 255, 255), width=4)
         return image
 
-    def start(self) -> None:
+    def start(self, *, visible: bool = True) -> None:
         try:
             import pystray
         except ImportError:
@@ -53,21 +54,11 @@ class DesktopPetTray:
             return callback
 
         menu = pystray.Menu(
-            pystray.MenuItem(
-                f"和{self.character_name}对话",
-                send("desktop_open_chat"),
-                default=True,
-            ),
             pystray.MenuItem("显示 / 隐藏", send("desktop_toggle_visibility")),
             pystray.MenuItem(
                 "鼠标穿透",
                 send("desktop_toggle_click_through"),
                 checked=lambda _item: self.get_state("click_through"),
-            ),
-            pystray.MenuItem(
-                "始终置顶",
-                send("desktop_toggle_topmost"),
-                checked=lambda _item: self.get_state("always_on_top"),
             ),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("打个招呼", send("desktop_motion", "Tap")),
@@ -81,13 +72,39 @@ class DesktopPetTray:
             self.title,
             menu,
         )
+        # Post onto pystray's own message loop: the exact same native menu and
+        # callbacks are used for the pet and the notification-area icon.
+        from pystray._util import win32
+
+        icon = self._icon
+
+        def open_menu(_wparam: Any, _lparam: Any) -> None:
+            icon.update_menu()
+            icon._on_notify(0, win32.WM_RBUTTONUP)
+
+        icon._message_handlers[self._menu_message] = open_menu
         self._thread = threading.Thread(
             target=self._icon.run,
+            kwargs={"setup": lambda current: setattr(current, "visible", visible)},
             name="nachobot-live2d-tray",
             daemon=True,
         )
         self._thread.start()
         self.logger.info("Desktop pet tray started")
+
+    def show_menu(self) -> bool:
+        icon = self._icon
+        hwnd = getattr(icon, "_hwnd", None)
+        if not hwnd:
+            return False
+        try:
+            import win32gui
+
+            win32gui.PostMessage(hwnd, self._menu_message, 0, 0)
+            return True
+        except Exception as exc:
+            self.logger.warning("Could not open desktop pet menu: {}", exc)
+            return False
 
     def refresh(self) -> None:
         if self._icon is not None:
