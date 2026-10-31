@@ -7,6 +7,18 @@ false. Core, adapters, audio, and the supervisor read the same switch; the old
 `[plugin].enabled` field is accepted for migration but cannot enable QQCall.
 Restart Core after changing the switch to refresh command/action registration.
 
+The plugin's pre-generation prompt handler rechecks the current QQ voice turn
+and native call proof before supplying current connection facts. Historical
+failure messages and learned expressions must not be treated as live status.
+It preserves expression selection, model choices and tool behavior; ordinary
+text prompts and unverified or stale voice turns receive no connected-state claim.
+
+Private and group voice proof providers reject Core's bare failed/disabled-ASR
+display markers after preprocessing. These diagnostics do not become verified
+reply turns or fall back into ordinary chat. Successful transcripts (including
+spoken quotes of error messages), native call checks and full-WAV ASR fallback
+are preserved.
+
 `qqcall.account_id` may be omitted or left empty: the shared loader inherits
 `[bot].qq_account` from `bot_config.toml` on each read, without writing it back.
 An explicit account must match the bot account. The adapter's live login is
@@ -76,6 +88,12 @@ the model must match the event scope in full.
 
 The plugin provides no audio capture or playback feature and does not enable
 automatic answering.
+
+Audio delivery waits for the adapter's scoped receipt. Buffered voice and a
+stream's final `end` packet require `local_endpoint_drained` with
+`drain_confirmed=true`; queue admission alone cannot report them as completed.
+This confirms local playback drain, not that a remote participant heard the
+audio. A rejected or uncertain receipt does not trigger automatic audio replay.
 
 The shared service resolves audio names from the active endpoint IDs already
 pinned by its private native route guard. `[qqcall.audio]` may be omitted or

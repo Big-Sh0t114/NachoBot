@@ -1,2 +1,4 @@
 __pycache__/
 resources/
+logs/
+state/

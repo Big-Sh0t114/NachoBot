@@ -550,6 +550,7 @@ class QQCallRuntime:
         self._group_audio_plan_fingerprint: str | None = None
         self._group_audio_last_failure_code: str | None = None
         self._group_audio_native_quit_unconfirmed = False
+        self._group_audio_stop_depth = 0
         self._last_emitted_signature: tuple[Any, ...] | None = None
         self._stop_event = asyncio.Event()
         self._run_task: asyncio.Task[Any] | None = None
@@ -1108,14 +1109,20 @@ class QQCallRuntime:
             ))
             or type(response.get("active")) is not bool
         ):
+            _LOGGER.warning("QQCall group current rejected stage=response_contract")
             return False
         if response["active"] is not True:
+            _LOGGER.warning("QQCall group current rejected stage=native_inactive")
             return False
         try:
             current_scope = validate_group_audio_scope(response.get("scope"))
         except (TypeError, ValueError):
+            _LOGGER.warning("QQCall group current rejected stage=scope_contract")
             return False
-        return bool(current_scope == dict(scope) and response.get("requesterUserId") == requester)
+        matched = bool(current_scope == dict(scope) and response.get("requesterUserId") == requester)
+        if not matched:
+            _LOGGER.warning("QQCall group current rejected stage=owner_mismatch")
+        return matched
 
     async def _native_group_is_absent(
         self,
@@ -1162,6 +1169,14 @@ class QQCallRuntime:
         # quarantined, and suspended drivers may still own the global slot.
         # Release the local native owner only after the independent occupancy
         # authority confirms terminal global absence under the same lease.
+        return await self._native_slot_is_absent(service_meta, client_instance)
+
+    async def _native_slot_is_absent(
+        self, service_meta: Mapping[str, Any], client_instance: str,
+    ) -> bool:
+        if (not self._lease_claimed or self._client_instance != client_instance
+                or self._service_meta != dict(service_meta) or self._closing or self._stopped):
+            return False
         try:
             occupancy = await self._post("/v1/call/occupancy", {
                 "accountId": self.config.account_id,
@@ -1186,7 +1201,66 @@ class QQCallRuntime:
             and self._lease_claimed
             and self._client_instance == client_instance
             and self._service_meta == dict(service_meta)
+            and not self._closing
+            and not self._stopped
         )
+
+    async def _reconcile_group_quarantine(self, identity: Mapping[str, Any]) -> bool:
+        """Retire a stopped local owner only after fresh native absence proof."""
+        if (not self._group_audio_native_quit_unconfirmed
+                or self._group_audio_runtime is not None or self._group_audio_binding is not None
+                or self._group_audio_stop_depth or self._closing or self._stopped
+                or not isinstance(self._group_join_scope, Mapping)
+                or not isinstance(self._group_join_meta, Mapping)
+                or not isinstance(self._service_meta, Mapping)
+                or not isinstance(self._client_instance, str) or not self._lease_claimed):
+            return False
+        scope = dict(self._group_join_scope)
+        old_meta = dict(self._group_join_meta)
+        meta = dict(self._service_meta)
+        client = self._client_instance
+        owner = (self._group_join_client_instance, self._group_join_identity, self._group_audio_requester_user_id)
+
+        def unchanged() -> bool:
+            return bool(
+                self._group_audio_native_quit_unconfirmed and not self._group_audio_stop_depth
+                and self._group_audio_runtime is None and self._group_audio_binding is None
+                and self._group_join_scope == scope and self._group_join_meta == old_meta
+                and (self._group_join_client_instance, self._group_join_identity, self._group_audio_requester_user_id) == owner
+                and self._service_meta == meta and self._client_instance == client and self._lease_claimed
+                and not self._closing and not self._stopped and self._runtime_identity_matches(identity)
+            )
+
+        try:
+            if not unchanged() or not await self._identity_unchanged(identity, require_verified=True):
+                return False
+            if old_meta == meta:
+                absent = await self._native_group_is_absent(scope, meta, client)
+            else:
+                # A verified supervisor manifest and strictly newer native
+                # generations retire the old authority. A new lease alone,
+                # an arbitrary UUID change, or a regressed generation cannot.
+                newer = (self.config.peer_map_file and meta.get("serviceInstance") != old_meta.get("serviceInstance")
+                         and all(_is_int(meta.get(k)) and _is_int(old_meta.get(k)) and meta[k] > old_meta[k]
+                                 for k in ("hostGeneration", "connectionGeneration")))
+                absent = bool(newer) and await self._native_slot_is_absent(meta, client)
+            if not absent or not unchanged() or not await self._identity_unchanged(identity, require_verified=True) or not unchanged():
+                return False
+        except Exception:  # noqa: BLE001 - failed recovery probes must preserve the quarantined owner.
+            return False
+        old_failure = self._group_audio_last_failure_code
+        self._group_join_scope = None
+        self._group_join_meta = None
+        self._group_join_client_instance = None
+        self._group_join_identity = None
+        self._group_audio_requester_user_id = None
+        self._group_audio_plan_fingerprint = None
+        self._group_audio_native_quit_unconfirmed = False
+        self._group_audio_last_failure_code = None
+        if self._last_failure_code in {old_failure, "group_audio_busy", "group_audio_unavailable"}:
+            self._last_failure_code = None
+        self._emit_status("group_terminal_reconciled")
+        return True
 
     async def _group_audio_fresh_context_current(
         self,
@@ -1197,32 +1271,54 @@ class QQCallRuntime:
         client_instance: str,
         expected_fingerprint: str,
     ) -> bool:
-        if not self._group_audio_local_context_current(scope, requester, identity, service_meta, client_instance):
+        # Keep the rejection stage local to this verification: overlapping status
+        # reads must not overwrite the cause. Never log identities or payloads.
+        stage = "local_before"
+
+        def rejected() -> bool:
+            _LOGGER.warning("QQCall group context rejected stage=%s", stage)
             return False
+
+        if not self._group_audio_local_context_current(scope, requester, identity, service_meta, client_instance):
+            return rejected()
         try:
+            stage = "identity_before"
             if not await self._identity_unchanged(identity, require_verified=True):
-                return False
+                return rejected()
+            stage = "core_before"
             if not await self._core_route_is_current(identity):
-                return False
+                return rejected()
+            stage = "admission_before"
             await self._admitted_group(requester, str(scope["groupId"]), identity)
+            stage = "local_after_admission"
             if not self._group_audio_local_context_current(scope, requester, identity, service_meta, client_instance):
-                return False
+                return rejected()
+            stage = "native_current"
             if not await self._read_native_group_current(scope, requester, service_meta, client_instance):
-                return False
+                return rejected()
+            stage = "admission_after"
             await self._admitted_group(requester, str(scope["groupId"]), identity)
-            if (
-                not await self._identity_unchanged(identity, require_verified=True)
-                or not await self._core_route_is_current(identity)
-            ):
-                return False
+            stage = "identity_after"
+            if not await self._identity_unchanged(identity, require_verified=True):
+                return rejected()
+            stage = "core_after"
+            if not await self._core_route_is_current(identity):
+                return rejected()
+            stage = "plan_read"
             _plan, current_fingerprint = self._read_current_audio_plan()
-            return bool(
-                current_fingerprint == expected_fingerprint
-                and self._group_audio_local_context_current(scope, requester, identity, service_meta, client_instance)
-            )
+            stage = "plan_changed"
+            if current_fingerprint != expected_fingerprint:
+                return rejected()
+            stage = "local_after"
+            if not self._group_audio_local_context_current(scope, requester, identity, service_meta, client_instance):
+                return rejected()
+            return True
         except (asyncio.CancelledError,):
             raise
-        except Exception:
+        except Exception as exc:
+            # Fixed classes only; exception text/codes may contain external data.
+            kind = "qqcall_error" if isinstance(exc, QQCallError) else "unexpected_error"
+            _LOGGER.warning("QQCall group context exception stage=%s kind=%s", stage, kind)
             return False
 
     async def _verify_group_audio_route(
@@ -1976,6 +2072,8 @@ class QQCallRuntime:
             self._service_meta = new_service_meta
             self._bootstrapped = True
             self._active_call = meta["currentCall"]
+            async with self._request_lock:
+                await self._reconcile_group_quarantine(identity)
             if self._active_call is not None and (
                 self._group_join_scope is not None or self._group_audio_runtime is not None
             ):
@@ -1993,6 +2091,8 @@ class QQCallRuntime:
             self._emit_status("resynced")
             return True
 
+        async with self._request_lock:
+            await self._reconcile_group_quarantine(identity)
         last_sequence = self._cursor
         for event in events:
             if self._closing or self._stopped:
@@ -3552,6 +3652,25 @@ class QQCallRuntime:
             raise QQCallError("audio_disabled")
         return QQCallAudioBackend(QQCallAudioConfig.from_mapping(audio_value))
 
+    async def _refresh_group_audio_route(self, scope: Mapping[str, Any], audio_config: Any) -> bool:
+        # One timed-out metadata reader may be retired by the controller. Give
+        # its replacement one fresh, complete verification within the existing
+        # proof lifetime, never a new deadline or a cached success. The PCM
+        # owner's independent expiry fence remains active throughout this await.
+        async with asyncio.timeout(2.0):
+            proof = await self._verify_group_audio_route(scope, audio_config)
+            if type(proof) is QQCallRouteRejection and proof.reason == "observer_timeout":
+                _LOGGER.warning("QQCall group audio route retry code=observer_timeout")
+                await asyncio.sleep(0.05)
+                proof = await self._verify_group_audio_route(scope, audio_config)
+            if type(proof) is QQCallRouteRejection:
+                _LOGGER.warning("QQCall group audio route rejected code=%s helper_status=%s helper_error=%s",
+                                proof.reason, proof._helper_http_status, proof._helper_error_code)
+            return bool(
+                isinstance(proof, QQCallRouteProof)
+                and 0 <= time.monotonic() - proof.observed_at_monotonic <= 2.0
+            )
+
     async def _activate_group_audio(
         self,
         scope: Mapping[str, Any],
@@ -3596,16 +3715,7 @@ class QQCallRuntime:
         async def fresh_lease(current_scope: dict[str, Any]) -> bool:
             if current_scope != dict(scope):
                 return False
-            current_proof = await self._verify_group_audio_route(current_scope, backend.config)
-            if type(current_proof) is QQCallRouteRejection:
-                # The immutable rejection sanitizes every field to fixed codes;
-                # no route payload, endpoint, scope, identity or exception text.
-                _LOGGER.warning("QQCall group audio route rejected code=%s helper_status=%s helper_error=%s",
-                                current_proof.reason, current_proof._helper_http_status, current_proof._helper_error_code)
-            return bool(
-                isinstance(current_proof, QQCallRouteProof)
-                and 0 <= time.monotonic() - current_proof.observed_at_monotonic <= 2.0
-            )
+            return await self._refresh_group_audio_route(current_scope, backend.config)
 
         async def owner_failed(code: str) -> None:
             owner = owner_ref.get("runtime")
@@ -3756,6 +3866,16 @@ class QQCallRuntime:
         quit_native: bool = False,
         before_native_quit: Callable[[], Awaitable[bool]] | None = None,
     ) -> bool:
+        self._group_audio_stop_depth += 1
+        try:
+            return await self._stop_group_audio_impl(reason, quit_native=quit_native, before_native_quit=before_native_quit)
+        finally:
+            self._group_audio_stop_depth -= 1
+
+    async def _stop_group_audio_impl(
+        self, reason: str = "stopped", *, quit_native: bool = False,
+        before_native_quit: Callable[[], Awaitable[bool]] | None = None,
+    ) -> bool:
         runtime, self._group_audio_runtime = self._group_audio_runtime, None
         binding, self._group_audio_binding = self._group_audio_binding, None
         scope = dict(self._group_join_scope) if isinstance(self._group_join_scope, Mapping) else None
@@ -3775,6 +3895,17 @@ class QQCallRuntime:
         )
         if safe_reason is not None:
             self._group_audio_last_failure_code = safe_reason
+        if runtime is not None or binding is not None or scope is not None:
+            # A concurrent poll/stop can invalidate an in-flight route read.
+            # Record which cleanup started first without logging scope values.
+            diagnostic_reason = reason if isinstance(reason, str) and reason in {
+                "stopped", "core_not_ready", "private_call_active", "poll_failed",
+                "platform_identity_changed", "service_generation_changed",
+                "group_audio_lease_lost", "group_audio_watch_failed", "audio_scope_stale",
+                "group_audio_start_failed", "group_join_response_invalid",
+            } else "other"
+            _LOGGER.warning("QQCall group cleanup started reason=%s quit_native=%s depth=%s",
+                            diagnostic_reason, quit_native is True, self._group_audio_stop_depth)
         local_audio_stopped = True
         if runtime is not None:
             try:

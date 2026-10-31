@@ -732,12 +732,17 @@ class UniversalServiceSupervisor:
             except (OSError, subprocess.SubprocessError, TypeError):
                 pass
         deadline = self.monotonic() + _CLEANUP_TIMEOUT_SECONDS
-        while self.monotonic() < deadline:
-            if getattr(process, "poll", lambda: 0)() is not None:
+        while True:
+            process_exited = getattr(process, "poll", lambda: 0)() is not None
+            family_gone = bool(family) and self._captured_family_gone(family)
+            # Redirectors can exit before their children finish terminating.
+            # Keep the bounded wait on every captured identity, not just Popen.
+            if process_exited and (family_gone or not family):
                 break
-            self.sleep(min(0.05, max(0.0, deadline - self.monotonic())))
-        process_exited = getattr(process, "poll", lambda: 0)() is not None
-        family_gone = bool(family) and self._captured_family_gone(family)
+            remaining = deadline - self.monotonic()
+            if remaining <= 0:
+                break
+            self.sleep(min(0.05, remaining))
         # A false terminate_owned result may mean an identity exited while the
         # bounded tree cleanup was in progress. Re-query every exact recorded
         # identity; absence or a different PID identity proves the original is

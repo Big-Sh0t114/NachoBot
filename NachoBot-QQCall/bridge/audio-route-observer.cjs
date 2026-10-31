@@ -886,6 +886,7 @@ function createPersistentAudioRouteObserver({
 
   function retire(current, code) {
     if (!current || current.closed) return;
+    if (!current.retiring) current.retirementCode = code;
     current.retiring = true;
     if (worker === current) settle({ verified: false, code });
     if (current.killTimer) return;
@@ -958,20 +959,51 @@ function createPersistentAudioRouteObserver({
     return current;
   }
 
+  function waitForRetirement(current, signal, milliseconds) {
+    return new Promise(resolve => {
+      let finished = false;
+      let timer;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", finish);
+        current.child.removeListener("close", finish);
+        resolve();
+      };
+      timer = setTimeout(finish, milliseconds);
+      signal?.addEventListener("abort", finish, { once: true });
+      current.child.once("close", finish);
+      if (signal?.aborted || current.closed) finish();
+    });
+  }
+
   const observer = async (request = {}) => {
+    const deadline = performance.now() + timeoutMs;
     if (closed) return { verified: false, code: "host_route_unverified" };
     if (!request || request.captureRenderName !== config.captureRenderName ||
         request.playbackRenderName !== config.playbackRenderName) return { verified: false, code: "endpoint_not_found" };
-    if (flight || worker?.retiring) return { verified: false, code: "observer_busy" };
+    if (flight) return { verified: false, code: "observer_busy" };
     const signal = request.signal && typeof request.signal.addEventListener === "function" ? request.signal : null;
     if (signal?.aborted) return { verified: false, code: "observer_aborted" };
+    if (worker?.retiring) {
+      if (worker.retirementCode !== "observer_timeout") return { verified: false, code: "observer_busy" };
+      // A timeout retry may arrive before the retired process emits close.
+      // Wait briefly for actual ownership release, never overlap helpers or
+      // extend this request's deadline. Other faults remain quarantined.
+      await waitForRetirement(worker, signal, Math.min(200, timeoutMs));
+      if (closed) return { verified: false, code: "host_route_unverified" };
+      if (signal?.aborted) return { verified: false, code: "observer_aborted" };
+      if (flight || worker?.retiring) return { verified: false, code: "observer_busy" };
+    }
+    if (performance.now() >= deadline) return { verified: false, code: "observer_timeout" };
     let current;
     try { current = worker || start(); }
     catch (error) { return { verified: false, code: safeFailureCode(error?.code) }; }
     return new Promise(resolve => {
       const id = crypto.randomBytes(16).toString("hex");
       const abort = () => retire(current, "observer_aborted");
-      const timer = setTimeout(() => retire(current, "observer_timeout"), timeoutMs);
+      const timer = setTimeout(() => retire(current, "observer_timeout"), Math.max(1, Math.ceil(deadline - performance.now())));
       flight = { id, resolve, signal, abort, timer };
       signal?.addEventListener("abort", abort, { once: true });
       try {

@@ -354,6 +354,7 @@ class QQCallAudioBackend:
         self._capture_channels = 0
         self._capture_resampler: _Pcm16Resampler | None = None
         self._capture_queue: queue.Queue[_CaptureItem] | None = None
+        self._capture_available: asyncio.Event | None = None
         self._capture_dispatch_task: asyncio.Task[None] | None = None
         self._capture_stop = threading.Event()
         self._run_generation = 0
@@ -481,6 +482,7 @@ class QQCallAudioBackend:
                 self._audio_api = self._load_audio_module()
                 capacity = max(2, self.config.capture_queue_ms // self.config.frame_ms)
                 self._capture_queue = queue.Queue(maxsize=capacity)
+                self._capture_available = asyncio.Event()
                 self._capture_dispatch_task = asyncio.create_task(self._capture_dispatcher(generation))
                 setup = await self._run_native(
                     self._start_capture_native,
@@ -525,6 +527,7 @@ class QQCallAudioBackend:
                 return
             self._run_generation += 1
             self._capture_stop.set()
+            self._wake_capture_dispatcher()
             self._state = "stopping"
             pending = self._cleanup_task
             if pending is not None:
@@ -949,10 +952,16 @@ class QQCallAudioBackend:
 
     async def _capture_dispatcher(self, generation: int) -> None:
         items = self._capture_queue
-        while items is not None and not self._capture_stop.is_set():
+        available = self._capture_available
+        while items is not None and available is not None and not self._capture_stop.is_set():
+            # Native capture already owns a bounded thread-safe queue. Waiting
+            # for its notification must not depend on the application's shared
+            # executor: unrelated blocking work can otherwise overflow PCM.
+            available.clear()
             try:
-                item = await asyncio.to_thread(items.get, True, 0.05)
+                item = items.get_nowait()
             except queue.Empty:
+                await available.wait()
                 continue
             if generation != self._run_generation or self._capture_stop.is_set():
                 continue
@@ -970,6 +979,14 @@ class QQCallAudioBackend:
                 del exc
                 self._signal_failure("capture_callback_failed")
                 return
+
+    def _wake_capture_dispatcher(self) -> None:
+        available, loop = self._capture_available, self._loop
+        if available is not None and loop is not None:
+            try:
+                loop.call_soon_threadsafe(available.set)
+            except RuntimeError:
+                pass  # The owning loop has already closed during cleanup.
 
     async def _forward_capture_to_universal(self, pcm: bytes, metadata: dict[str, Any]) -> None:
         """Validate and forward one canonical frame through the public SDK.
@@ -1111,6 +1128,8 @@ class QQCallAudioBackend:
                     "monotonic_ns": time.monotonic_ns(), "generation": generation, "scope": self._scope,
                 })
                 items.put_nowait(item)
+                if items.qsize() == 1:
+                    self._wake_capture_dispatcher()
             except queue.Full:
                 self._capture_overruns += 1
                 self._signal_failure("capture_queue_overrun")
@@ -1192,6 +1211,7 @@ class QQCallAudioBackend:
             self._native_errno = None
             self._run_generation += 1
             self._capture_stop.set()
+            self._wake_capture_dispatcher()
             session = self._session
             if session is not None:
                 with session.state_lock:
@@ -1226,6 +1246,7 @@ class QQCallAudioBackend:
         task = self._capture_dispatch_task
         self._capture_dispatch_task = None
         self._capture_stop.set()
+        self._wake_capture_dispatcher()
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -1294,6 +1315,7 @@ class QQCallAudioBackend:
         self._run_generation += 1
         self._playback_generation += 1
         self._capture_stop.set()
+        self._wake_capture_dispatcher()
         self._state = "cleanup_pending"
         self._last_error = code
         if self._session is not None:
@@ -1376,6 +1398,7 @@ class QQCallAudioBackend:
         self._capture_channels = 0
         self._capture_resampler = None
         self._capture_queue = None
+        self._capture_available = None
         self._session = None
         self._scope = None
         self._capture_callback = None

@@ -42,7 +42,7 @@ _LOGGER = logging.getLogger(f"ncnk_message.{__name__}")
 _STARTUP_FAILURE_CODES = frozenset({
     "audio_already_started", "audio_backend_busy", "audio_cleanup_failed", "audio_dependency_unavailable",
     "audio_device_ambiguous", "audio_endpoint_not_virtual", "audio_format_invalid", "audio_start_failed",
-    "audio_start_invalid", "audio_start_timeout", "capture_device_unavailable", "capture_failed",
+    "audio_start_invalid", "audio_start_timeout", "audio_scope_stale", "capture_device_unavailable", "capture_failed",
     "audio_fence_stale", "capture_callback_failed", "capture_device_overflow", "capture_processing_failed",
     "capture_queue_overrun", "group_audio_watch_failed", "universal_api_capture_unsupported",
     "group_audio_lease_lost", "group_audio_lease_unavailable", "group_audio_stopped",
@@ -63,6 +63,37 @@ ClientFactory = Callable[[], Any]
 MessageSender = Callable[[Any], Awaitable[Any]]
 LocalFence = Callable[[], bool]
 FailureCallback = Callable[[str], Any]
+
+
+def _bounded_await_stack(value: Any) -> list[dict[str, str | int]]:
+    """Project suspended coroutine locations only, never frame locals or values."""
+    result: list[dict[str, str | int]] = []
+    seen: set[int] = set()
+    try:
+        if isinstance(value, asyncio.Task):
+            value = value.get_coro()
+        while len(result) < 16 and id(value) not in seen:
+            seen.add(id(value))
+            if inspect.iscoroutine(value):
+                frame, following = value.cr_frame, value.cr_await
+            elif inspect.isgenerator(value):
+                frame, following = value.gi_frame, value.gi_yieldfrom
+            else:
+                break
+            if frame is None:
+                break
+            code = frame.f_code
+            filename = code.co_filename.replace("\\", "/").rsplit("/", 1)[-1]
+            function = code.co_name
+            result.append({
+                "file": filename if re.fullmatch(r"[A-Za-z0-9_.<>-]{1,128}", filename) else "unknown",
+                "function": function if re.fullmatch(r"[A-Za-z0-9_.<>-]{1,128}", function) else "unknown",
+                "line": max(0, min(frame.f_lineno, 1_000_000)),
+            })
+            value = following
+    except Exception:
+        pass  # Diagnostics cannot alter the original failure or authorization.
+    return result
 
 
 class GroupAudioRuntime:
@@ -110,6 +141,7 @@ class GroupAudioRuntime:
         self._proof_at: float | None = None
         self._refresh_elapsed_ms = 0
         self._refresh_inflight_at: float | None = None
+        self._refresh_awaitable: Any | None = None
         self._loop_tick_at: float | None = None
         self._max_loop_gap_ms = 0
         self._binding: Any | None = None
@@ -188,6 +220,8 @@ class GroupAudioRuntime:
             result = self._fresh_lease(dict(self._scope))
             if not inspect.isawaitable(result):
                 return False
+            with self._lock:
+                self._refresh_awaitable = result
             result = await asyncio.wait_for(result, timeout=_PROOF_TTL_SECONDS)
         except asyncio.CancelledError:
             raise
@@ -200,6 +234,7 @@ class GroupAudioRuntime:
         finally:
             with self._lock:
                 self._refresh_inflight_at = None
+                self._refresh_awaitable = None
         self._refresh_elapsed_ms = round((time.monotonic() - started_at) * 1000)
         context_current = self._context_current() if result is True else None
         if result is not True or not context_current:
@@ -404,10 +439,12 @@ class GroupAudioRuntime:
         with self._lock:
             proof_age_ms = -1 if self._proof_at is None else round((time.monotonic() - self._proof_at) * 1000)
             state = self._state
+            refresh_awaitable = self._refresh_awaitable
         logged_code = safe_code if safe_code in _STARTUP_FAILURE_CODES else "unclassified"
-        _LOGGER.warning("QQCall group audio backend failure code=%s state=%s proof_age_ms=%s context_current=%s refresh_elapsed_ms=%s timing=%s",
+        _LOGGER.warning("QQCall group audio backend failure code=%s state=%s proof_age_ms=%s context_current=%s refresh_elapsed_ms=%s timing=%s refresh_wait_stack=%s capture_wait_stack=%s",
                         logged_code, state, proof_age_ms, self._context_current(), self._refresh_elapsed_ms,
-                        self._timing_diagnostics())
+                        self._timing_diagnostics(), _bounded_await_stack(refresh_awaitable),
+                        _bounded_await_stack(getattr(self.backend, "_capture_dispatch_task", None)))
         await self._fail(safe_code)
 
     async def _on_speech_start(self) -> None:

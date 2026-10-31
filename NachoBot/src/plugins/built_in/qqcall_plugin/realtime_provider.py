@@ -11,6 +11,7 @@ from qqcall_client.qqcall_service import is_qqcall_enabled
 from src.chat.runtime_capabilities import additional_config_from_message, runtime_capabilities_from_message
 from src.plugins.built_in.qqcall_plugin.control_api import QQCallAPIError, request_qqcall, validate_qqcall_scope
 from src.plugin_system.apis.realtime_api import RealtimeLifecycleChange, RealtimeSession
+from src.plugins.built_in.qqcall_plugin.transcription import failed_voice_transcription
 
 _SCOPE_KEYS = (
     "serviceInstance",
@@ -165,11 +166,14 @@ async def verify_qqcall_realtime_message(
 ) -> bool:
     """Match the declared binding to the QQ scope, peer, route, and live call."""
 
+    if failed_voice_transcription(message):
+        return False
     details = _voice_details(message, chat_id, annotation)
     if details is None:
         return False
     peer_user_id, scope, platform = details
-    return await _current_call_matches(platform, peer_user_id, scope, annotation.turn_id)
+    current = await _current_call_matches(platform, peer_user_id, scope, annotation.turn_id)
+    return current and not failed_voice_transcription(message)
 
 
 def _lifecycle_details(message: Any, chat_id: str) -> tuple[str, dict[str, Any], dict[str, Any], str] | None:

@@ -15,6 +15,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import threading
 import time
 from contextlib import ExitStack
@@ -151,6 +152,7 @@ def observe_windows_routes(
     reader: _SnapshotReader | None = None,
     timeout_seconds: float = _WORKER_TIMEOUT_SECONDS,
     include_route_diagnostics: bool = False,
+    on_timeout: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Observe the two explicit Host routes and return only redacted metadata.
 
@@ -192,10 +194,16 @@ def observe_windows_routes(
         _WORKER_LOCK.release()
         return _empty_report(observed_at_ms, request, ["observer_unavailable"])
 
+    wait_started = time.monotonic()
     worker.join(timeout_seconds)
     if worker.is_alive():
         # The worker retains the lock and all COM references until its own finally
         # blocks release them; callers cannot stack additional stuck observers.
+        if on_timeout is not None:
+            try:
+                on_timeout(_timeout_diagnostics(worker, wait_started, timeout_seconds))
+            except Exception:  # noqa: BLE001, S110 - diagnostics never change the failed proof or log secrets.
+                pass
         return _empty_report(observed_at_ms, request, ["observer_timeout"])
     if not result_box:
         return _empty_report(observed_at_ms, request, ["observer_unavailable"])
@@ -318,6 +326,42 @@ def write_report_file(path: str | os.PathLike[str], report: dict[str, Any]) -> N
         raise _ObserverFailure("observer_unavailable") from None
 
 
+def _timeout_diagnostics(worker: threading.Thread, started: float, limit: float) -> dict[str, Any]:
+    """Capture code locations only, never stack locals, paths or exception text."""
+    frames: list[dict[str, Any]] = []
+    frame = sys._current_frames().get(worker.ident) if worker.ident is not None else None
+    try:
+        while frame is not None and len(frames) < 16:
+            if frame.f_code.co_filename == __file__:
+                frames.append({"function": frame.f_code.co_name, "line": frame.f_lineno})
+            frame = frame.f_back
+    finally:
+        del frame
+    return {
+        "schema": 1,
+        "observedAtMs": time.time_ns() // 1_000_000,
+        "code": "observer_timeout",
+        "waitElapsedMs": max(0, min(60_000, round((time.monotonic() - started) * 1000))),
+        "waitLimitMs": round(limit * 1000),
+        "workerAlive": worker.is_alive(),
+        "frames": frames,
+    }
+
+
+def _save_timeout_diagnostics(value: dict[str, Any]) -> None:
+    # The stdio helper runs in the controller's private runtime directory.
+    # Exclusive temporary creation avoids following an existing file/symlink;
+    # replace publishes one bounded last-failure record, never used as proof.
+    destination = Path.cwd() / "audio-route-timeout.safe.json"
+    descriptor, temporary = tempfile.mkstemp(prefix=".route-timeout-", dir=destination.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(value, stream, separators=(",", ":"))
+        os.replace(temporary, destination)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
 def serve_stdio(input_stream: Any = None, output_stream: Any = None) -> int:
     """Serial metadata observations over inherited pipes; EOF ends the worker.
 
@@ -338,7 +382,10 @@ def serve_stdio(input_stream: Any = None, output_stream: Any = None) -> int:
                     or not isinstance(envelope["id"], str)
                     or re.fullmatch(r"[0-9a-f]{32}", envelope["id"]) is None):
                 return 2
-            report = observe_windows_routes(envelope["request"], include_route_diagnostics=True)
+            report = observe_windows_routes(
+                envelope["request"], include_route_diagnostics=True,
+                on_timeout=_save_timeout_diagnostics,
+            )
             encoded = json.dumps({"id": envelope["id"], "report": report}, separators=(",", ":"))
             if len(encoded.encode("utf-8")) + 1 > _MAX_REPORT_BYTES:
                 return 2

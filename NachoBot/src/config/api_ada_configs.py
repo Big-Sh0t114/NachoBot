@@ -92,6 +92,22 @@ class ModelInfo(ConfigBase):
     cache_price_in: Optional[float] = field(default=None)
     """每M缓存命中输入token价格；None表示沿用price_in。"""
 
+    max_tokens_parameter: str = field(default="max_tokens")
+    """OpenAI兼容聊天请求使用的输出长度参数名。"""
+
+    supports_temperature: bool = field(default=True)
+    """模型端点是否接受 temperature 请求参数。"""
+
+    @classmethod
+    def from_dict(cls, data: dict):
+        """Reject raw values that ConfigBase would otherwise coerce."""
+        if isinstance(data, dict):
+            if "max_tokens_parameter" in data and not isinstance(data["max_tokens_parameter"], str):
+                raise TypeError("Field 'max_tokens_parameter' must be a string")
+            if "supports_temperature" in data and type(data["supports_temperature"]) is not bool:
+                raise TypeError("Field 'supports_temperature' must be a boolean")
+        return super().from_dict(data)
+
     def __post_init__(self):
         if not self.model_identifier:
             raise ValueError("模型标识符不能为空，请在配置中设置有效的模型标识符。")
@@ -99,6 +115,12 @@ class ModelInfo(ConfigBase):
             raise ValueError("模型名称不能为空，请在配置中设置有效的模型名称。")
         if not self.api_provider:
             raise ValueError("API提供商不能为空，请在配置中设置有效的API提供商。")
+        if not isinstance(self.max_tokens_parameter, str):
+            raise TypeError("max_tokens_parameter 必须是字符串。")
+        if self.max_tokens_parameter not in {"max_tokens", "max_completion_tokens"}:
+            raise ValueError("max_tokens_parameter 只允许 max_tokens 或 max_completion_tokens。")
+        if type(self.supports_temperature) is not bool:
+            raise TypeError("supports_temperature 必须是布尔值。")
         if self.cache_price_in is not None:
             try:
                 valid_cache_price = (

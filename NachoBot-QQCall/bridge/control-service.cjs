@@ -4,6 +4,7 @@ const crypto = require("node:crypto");
 const http = require("node:http");
 const { projectPrivateScopeProof } = require("../shared/private-invite-scope.cjs");
 const { isObserverReport } = require("../agent/official-av-observer.cjs");
+const { projectKernelDiagnostics, projectGroupTransition } = require("./kernel-diagnostics.cjs");
 
 const LOOPBACK = "127.0.0.1";
 const MAX_BODY_BYTES = 16 * 1024;
@@ -26,6 +27,7 @@ const GROUP_SCOPE_KEYS = Object.freeze([
   "kind", "serviceInstance", "hostGeneration", "connectionGeneration", "groupId", "roomId", "roomGeneration",
 ]);
 const SAFE_CODES = new Set([
+  "invalid_kernel_diagnostics_shape", "kernel_diagnostics_unavailable", "kernel_diagnostics_busy",
   "invalid_official_av_diagnostics_shape", "official_av_observer_unavailable", "official_av_observer_invalid_result",
   "official_av_observer_busy", "official_av_observer_already_started", "official_av_observer_not_started",
   "official_av_observer_operation_failed",
@@ -373,6 +375,8 @@ function normalizedCall(value, context) {
 }
 
 function statusCodeFor(code) {
+  if (code === "kernel_diagnostics_unavailable") return 503;
+  if (code === "kernel_diagnostics_busy") return 409;
   if (code === "official_av_observer_unavailable") return 503;
   if (["official_av_observer_busy", "official_av_observer_already_started", "official_av_observer_not_started"].includes(code)) return 409;
   if (["official_av_observer_invalid_result", "official_av_observer_operation_failed"].includes(code)) return 502;
@@ -415,12 +419,13 @@ function statusCodeFor(code) {
   return 500;
 }
 
-function createControlService({ bridge, token, accountId, port = 0, leaseMs = 10_000, journalLimit = 128, audioRouteObserver = null, officialAVObserver = null } = {}) {
+function createControlService({ bridge, token, accountId, port = 0, leaseMs = 10_000, journalLimit = 128, audioRouteObserver = null, officialAVObserver = null, kernelStatusReader = null } = {}) {
   if (!bridge || typeof bridge.status !== "function" || typeof bridge.subscribeStatus !== "function" ||
       typeof bridge.subscribeControlEvents !== "function" || typeof bridge.getIntegrationSnapshot !== "function" || typeof bridge.accept !== "function" ||
       typeof bridge.hangup !== "function" || typeof bridge.reject !== "function") throw codedError("invalid_bridge");
   if (!validToken(token)) throw codedError("invalid_control_token");
   if (!validAccountId(accountId)) throw codedError("invalid_account_id");
+  if (kernelStatusReader !== null && typeof kernelStatusReader !== "function") throw codedError("kernel_diagnostics_unavailable");
   if (audioRouteObserver !== null && typeof audioRouteObserver !== "function") throw codedError("audio_route_observer_invalid");
   if (officialAVObserver !== null && !["start", "drain", "stop"].every((key) => typeof officialAVObserver?.[key] === "function")) {
     throw codedError("official_av_observer_unavailable");
@@ -856,6 +861,34 @@ function createControlService({ bridge, token, accountId, port = 0, leaseMs = 10
     if (lease.inFlight > 0) throw codedError("adapter_command_in_flight");
     currentLease = null;
     return { version: 1, accountId, serviceInstance, released: true };
+  }
+
+  let kernelDiagnosticsBusy = false;
+  const groupTransitions = [];
+  async function kernelDiagnostics(body) {
+    if (!ownKeysExactly(body, ["accountId"])) throw codedError("invalid_kernel_diagnostics_shape");
+    checkAccount(body.accountId);
+    if (!kernelStatusReader) throw codedError("kernel_diagnostics_unavailable");
+    if (kernelDiagnosticsBusy) throw codedError("kernel_diagnostics_busy");
+    kernelDiagnosticsBusy = true;
+    try {
+      const before = integrationSnapshot();
+      if (!before.hostGeneration || !before.connectionGeneration) throw codedError("bridge_status_unavailable");
+      let reply;
+      try { reply = await kernelStatusReader(); }
+      catch { throw codedError("kernel_diagnostics_unavailable"); }
+      const after = integrationSnapshot();
+      if (stopped || after.hostGeneration !== before.hostGeneration || after.connectionGeneration !== before.connectionGeneration ||
+          ["stopping", "closing", "stopped", "providerInvalidated", "controllerInvalidated", "hostInvalidated"].some(key => after.status[key] === true)) {
+        throw codedError("bridge_status_unavailable");
+      }
+      const diagnostic = projectKernelDiagnostics(reply, after.connectionGeneration);
+      if (!diagnostic) throw codedError("kernel_diagnostics_unavailable");
+      return { version: 1, diagnosticOnly: true, hostGeneration: after.hostGeneration,
+        connectionGeneration: after.connectionGeneration, diagnostic,
+        groupTransitions: groupTransitions.filter(item => item.hostGeneration === after.hostGeneration &&
+          item.connectionGeneration === after.connectionGeneration).map(item => ({ ...item })) };
+    } finally { kernelDiagnosticsBusy = false; }
   }
 
   function privateDiagnostics(body) {
@@ -1295,6 +1328,7 @@ function createControlService({ bridge, token, accountId, port = 0, leaseMs = 10
         "/v1/adapter/poll", "/v1/adapter/release", "/v1/call/command", "/v1/call/occupancy", "/v1/call/diagnostics", "/v1/audio/route",
         "/v1/group/status", "/v1/group/join", "/v1/group/current", "/v1/group/quit", "/v1/group/diagnostics",
         "/v1/diagnostics/official-av/start", "/v1/diagnostics/official-av/drain", "/v1/diagnostics/official-av/stop",
+        "/v1/kernel/diagnostics",
       ].includes(url.pathname)) {
         sendJson(response, 404, { ok: false, code: "not_found" });
         request.resume();
@@ -1313,6 +1347,7 @@ function createControlService({ bridge, token, accountId, port = 0, leaseMs = 10
       else if (url.pathname === "/v1/call/command") result = await command(body);
       else if (url.pathname === "/v1/call/occupancy") result = await occupancy(body);
       else if (url.pathname === "/v1/call/diagnostics") result = privateDiagnostics(body);
+      else if (url.pathname === "/v1/kernel/diagnostics") result = await kernelDiagnostics(body);
       else if (url.pathname.startsWith("/v1/diagnostics/official-av/")) result = await officialAVDiagnostics(body, url.pathname.split("/").at(-1));
       else if (url.pathname === "/v1/audio/route") result = await audioRoute(body);
       else if (url.pathname === "/v1/group/status") result = await groupStatus(body);
@@ -1351,7 +1386,16 @@ function createControlService({ bridge, token, accountId, port = 0, leaseMs = 10
     if (started) return serviceStatus();
     if (startPromise) return startPromise;
     startPromise = (async () => {
-      unsubscribeStatus = bridge.subscribeStatus((event) => appendEvent(event?.kind));
+      unsubscribeStatus = bridge.subscribeStatus((event) => {
+        try {
+          const transition = projectGroupTransition(event, Date.now());
+          if (transition) {
+            groupTransitions.push(transition);
+            if (groupTransitions.length > 32) groupTransitions.shift();
+          }
+        } catch { /* Diagnostics cannot change call ownership or event delivery. */ }
+        appendEvent(event?.kind);
+      });
       unsubscribeControlEvents = bridge.subscribeControlEvents(appendBusyInvite);
       appendEvent("snapshot");
       server = http.createServer((request, response) => { void handleRequest(request, response); });

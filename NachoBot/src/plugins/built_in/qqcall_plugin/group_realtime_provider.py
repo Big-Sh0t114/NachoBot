@@ -1,11 +1,10 @@
 """Plugin-owned proof provider for senderless QQCall group voice turns.
 
-Native group join is not currently verified, so the production audio-status
-proof remains inactive until the QQCall runtime has a current native-owned
-binding.  Native group-end event handling is pending native-control support;
-this provider intentionally invents no lifecycle event and has no lifecycle
-verifier.  Each turn and each Core dispatch asks the read-only native proof
-endpoint again, while Core's bounded lease handles a missing end event.
+The audio-status proof requires the runtime's current native-owned group
+binding. This provider publishes no synthetic lifecycle events: each turn and
+each Core dispatch rechecks the read-only native proof endpoint, while Core's
+bounded lease handles missing lifecycle notifications. Failed ASR display
+markers never authorize a conversational turn.
 """
 
 from __future__ import annotations
@@ -23,6 +22,7 @@ from qqcall_client.qqcall_group_wire import (
 from src.plugins.built_in.qqcall_plugin.realtime_provider import qqcall_enabled
 from src.chat.runtime_capabilities import additional_config_from_message
 from src.plugins.built_in.qqcall_plugin.control_api import request_qqcall
+from src.plugins.built_in.qqcall_plugin.transcription import failed_voice_transcription
 
 
 _SCOPE_KEYS = frozenset(
@@ -315,6 +315,8 @@ async def verify_qqcall_group_realtime_message(
 ) -> bool:
     """Require an exact senderless QQ group row and a current native proof."""
 
+    if failed_voice_transcription(message):
+        return False
     details = _proof_details(message, chat_id, annotation)
     if details is None:
         return False
@@ -338,7 +340,7 @@ async def verify_qqcall_group_realtime_message(
     # Re-read every local binding field after the await.  A scope or requester
     # mutation during the API call invalidates the proof instead of authorizing
     # a row assembled from two different snapshots.
-    if not qqcall_enabled():
+    if not qqcall_enabled() or failed_voice_transcription(message):
         return False
     current = _proof_details(message, chat_id, annotation)
     if current != details:

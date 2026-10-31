@@ -989,10 +989,11 @@ class WindowsSystem:
         cwd, argv = self._snowluma_listener_state(record)
         if _path_key(cwd) != _path_key(runtime_path):
             raise WindowsServiceError("target_process_mismatch")
-        if (
-            ntpath.basename(argv[0]).casefold() not in ("node", "node.exe")
-            or argv[1].replace("\\", "/") != "./index.mjs"
-        ):
+        entry_argument = argv[1]
+        exact_entrypoint = entry_argument.replace("\\", "/") == "./index.mjs" or (
+            ntpath.isabs(entry_argument) and _path_key(entry_argument) == _path_key(str(entrypoint))
+        )
+        if ntpath.basename(argv[0]).casefold() not in ("node", "node.exe") or not exact_entrypoint:
             raise WindowsServiceError("target_process_mismatch")
         return cwd, argv
 
