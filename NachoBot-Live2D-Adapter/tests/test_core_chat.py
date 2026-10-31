@@ -11,7 +11,8 @@ from unittest.mock import patch
 from websockets.sync.server import serve
 
 from live2d_adapter.config import DesktopChatConfig
-from live2d_adapter.core_chat import CoreChatClient, extract_reply
+from live2d_adapter.core_chat import CoreChatClient, extract_reply, incoming_message
+from live2d_adapter.chat import DesktopPetBackendError
 from live2d_adapter.voice import DesktopVoice, pcm_format, speech_segments
 
 
@@ -20,17 +21,53 @@ class Logger:
         return lambda *args: None
 
 
-def response(request_id, text='{"reply":"你好。","emotion":"joy","action":"nod"}'):
+def response(request_id, text="你好。"):
     return {
         "message_info": {
             "user_info": {"user_id": "host"},
             "additional_config": {"reply_to_message_id": request_id},
         },
-        "message_segment": {"type": "text", "data": text},
+        "message_segment": {"type": "structured_reply", "data": {
+            "schema_version": 1, "request_id": request_id, "status": "ok", "text": text,
+            "controls": {"emotion": "joy", "action": "NOD"},
+        }},
     }
 
 
 class CoreChatTests(unittest.TestCase):
+    def test_private_profile_retains_core_memory_and_tool_defaults(self):
+        info = incoming_message("你好", "turn")["message_info"]
+        self.assertNotIn("group_info", info)
+        self.assertEqual(info["user_info"]["user_id"], "host")
+        caps = info["additional_config"]["runtime_capabilities"]
+        self.assertTrue(caps["planner_bypass"])
+        self.assertEqual(caps["prompt_profile"], "desktop_companion")
+        self.assertEqual(caps["reply_delivery"], "structured_reply")
+        for key in ("memory_retrieval", "mid_term_memory", "tool_mode", "mcp_enabled", "knowledge_retrieval"):
+            self.assertNotIn(key, caps)
+
+    def test_structured_version_correlation_controls_and_errors(self):
+        value = response("turn")
+        data = value["message_segment"]["data"]
+        data["request_id"] = "old"
+        self.assertIsNone(extract_reply(value, "turn"))
+        data["request_id"] = "turn"
+        for version in (2, True, "1"):
+            data["schema_version"] = version
+            with self.assertRaises(DesktopPetBackendError):
+                extract_reply(value, "turn")
+        data["schema_version"] = 1
+        data["controls"] = {"emotion": "unknown", "action": "RUN_SHELL"}
+        reply = extract_reply(value, "turn")
+        self.assertEqual(reply.text, "你好。")
+        self.assertIsNone(reply.emotion)
+        self.assertIsNone(reply.action)
+        data["status"] = "error"
+        with self.assertRaises(DesktopPetBackendError):
+            extract_reply(value, "turn")
+        value["message_segment"] = {"type": "text", "data": '{"reply":"legacy"}'}
+        self.assertIsNone(extract_reply(value, "turn"))
+
     def test_real_wire_ignores_late_and_unattributed_replies(self):
         received = []
 
@@ -101,20 +138,16 @@ class VoiceTests(unittest.TestCase):
         finished = threading.Event()
         commands = []
 
-        class SlowSpeech:
-            def __init__(self, *args, **kwargs):
+        async def slow_speech(_text, _language, epoch, _started):
+            began.set()
+            try:
+                while not released.is_set():
+                    await asyncio.sleep(0.01)
+            except asyncio.CancelledError:
+                # An external implementation may finish despite cancellation.
                 pass
-
-            async def stream(self):
-                began.set()
-                try:
-                    while not released.is_set():
-                        await asyncio.sleep(0.01)
-                except asyncio.CancelledError:
-                    # Simulate an external implementation that finishes despite cancel.
-                    pass
-                yield {"type": "audio", "data": b"late-audio"}
-                finished.set()
+            voice._send(epoch, "voice_stream", {"event": "chunk", "pcm": b"late-audio"})
+            finished.set()
 
         voice = DesktopVoice(
             DesktopChatConfig(play_audio=True),
@@ -123,13 +156,13 @@ class VoiceTests(unittest.TestCase):
             self.fail,
         )
         try:
-            with patch("live2d_adapter.voice.edge_tts.Communicate", SlowSpeech):
+            with patch.object(voice, "_multimodal", slow_speech):
                 self.assertTrue(voice.speak("你好。", "zh", voice.token()))
                 self.assertTrue(began.wait(2))
                 voice.set_enabled(False)
                 released.set()
                 self.assertTrue(finished.wait(2))
-                self.assertFalse(any(command == "queue_audio" for command, _ in commands))
+                self.assertFalse(any(command in {"queue_audio", "voice_stream"} for command, _ in commands))
         finally:
             voice.close()
 

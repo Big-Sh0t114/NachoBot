@@ -14,7 +14,7 @@ from typing import Any
 
 import pygame
 
-from .chat import DesktopPetChat
+from .chat import DesktopPetChat, _suppress_thread_window_activation
 from .config import DesktopPetConfig
 from .desktop_pet import (
     DesktopPetState,
@@ -23,6 +23,7 @@ from .desktop_pet import (
     initial_window_position,
 )
 from .model_adapter import Live2DModelAdapter
+from .parameter_controls import ParameterController
 from .tray import DesktopPetTray
 
 
@@ -213,7 +214,7 @@ class Live2DRenderer:
         self.offset_x = self._desktop_state.offset_x
         self.offset_y = self._desktop_state.offset_y
         self._constrain_model_offset()
-        self.always_on_top = (
+        self.always_on_top = True if self.desktop_pet.enabled else (
             self._desktop_state.always_on_top
             if self._desktop_state.always_on_top is not None
             else self.desktop_pet.always_on_top
@@ -229,7 +230,7 @@ class Live2DRenderer:
         self._last_state_save_at = 0.0
         self._tray: DesktopPetTray | None = None
         self._chat: DesktopPetChat | None = None
-        if self.desktop_pet.enabled and self.desktop_pet.chat.enabled:
+        if self.desktop_pet.enabled:
             self._chat = DesktopPetChat(
                 self.desktop_pet.chat,
                 self.desktop_pet.title,
@@ -243,8 +244,11 @@ class Live2DRenderer:
         self._last_desktop_interaction_at = time.monotonic()
         self._next_idle_motion_at = 0.0
         self._last_chat_sync_at = 0.0
+        self._last_parameter_panel_sync_at = 0.0
+        self._parameter_controller = ParameterController(logger=self.logger)
         self.running = False
         self.hwnd = None
+        self._passive_window = None
         self.model = None
         self.live2d = None
         self._audio_channel = None
@@ -389,7 +393,16 @@ class Live2DRenderer:
                     pygame.NOFRAME | pygame.RESIZABLE
                 )  # Add RESIZABLE to try to fix clamping
 
-            pygame.display.set_mode((self.width, self.height), flags)
+            if self.desktop_pet.enabled:
+                # Create hidden under the thread-local activation guard. SDL otherwise
+                # activates its new window before the NOACTIVATE style can be applied.
+                with _suppress_thread_window_activation():
+                    pygame.display.set_mode((self.width, self.height), flags | pygame.HIDDEN)
+                self.hwnd = pygame.display.get_wm_info().get("window")
+                from .window_behavior import PassiveWindow
+                self._passive_window = PassiveWindow(self.hwnd)
+            else:
+                pygame.display.set_mode((self.width, self.height), flags)
             try:
                 if not pygame.mixer.get_init():
                     pygame.mixer.init()
@@ -439,7 +452,7 @@ class Live2DRenderer:
                         0,
                         self.width,
                         self.height,
-                        win32con.SWP_NOMOVE,  # Allow sizing, prevent moving
+                        win32con.SWP_NOMOVE | win32con.SWP_NOACTIVATE,
                     )
                     self.logger.info(
                         f"[Live2D] Forced Window Size: {self.width}x{self.height}"
@@ -473,6 +486,12 @@ class Live2DRenderer:
 
             self.logger.error(traceback.format_exc())
             raise
+
+    def _start_desktop_chat_host(self) -> None:
+        """Start the hidden hover UI host, including model-controls-only mode."""
+
+        if self._chat is not None:
+            self._chat.start()
 
     def run(self):
         # Determine model paths early
@@ -594,6 +613,17 @@ class Live2DRenderer:
                     self.logger.info(
                         f"[Live2D] Automatic adaptation: {self.model_adapter.describe()}"
                     )
+                    try:
+                        specs = self._parameter_controller.bind_model(
+                            self.model,
+                            self.model_adapter,
+                        )
+                        if self._chat is not None:
+                            self._chat.sync_parameter_specs(specs)
+                    except Exception as exc:
+                        self.logger.warning(
+                            f"[Live2D] Parameter controls unavailable: {exc}"
+                        )
                 except Exception as e:
                     self.logger.warning(f"[Live2D] Failed to get model info: {e}")
 
@@ -656,19 +686,15 @@ class Live2DRenderer:
 
         if self.desktop_pet.enabled:
             self._schedule_next_idle_motion()
-            if self._chat is not None:
-                self._chat.start()
-                if self.window_visible:
-                    self._chat.show()
-            if self.desktop_pet.tray_icon:
-                self._tray = DesktopPetTray(
-                    self.desktop_pet.title,
-                    self._enqueue_desktop_command,
-                    self._desktop_flag,
-                    self.logger,
-                    character_name=self.desktop_pet.character_name,
-                )
-                self._tray.start()
+            self._start_desktop_chat_host()
+            self._tray = DesktopPetTray(
+                self.desktop_pet.title,
+                self._enqueue_desktop_command,
+                self._desktop_flag,
+                self.logger,
+                character_name=self.desktop_pet.character_name,
+            )
+            self._tray.start(visible=self.desktop_pet.tray_icon)
 
         while self.running:
             # Handle Window Dragging (Manual)
@@ -701,7 +727,7 @@ class Live2DRenderer:
                             win_y,
                             0,
                             0,
-                            win32con.SWP_NOSIZE | win32con.SWP_NOZORDER,
+                            win32con.SWP_NOSIZE | win32con.SWP_NOZORDER | win32con.SWP_NOACTIVATE,
                         )
                         self.last_global_mouse_pos = (cur_x, cur_y)
                         self._left_drag_distance += abs(dx) + abs(dy)
@@ -725,7 +751,7 @@ class Live2DRenderer:
                         0,
                         self.width,
                         self.height,
-                        win32con.SWP_NOMOVE,
+                        win32con.SWP_NOMOVE | win32con.SWP_NOACTIVATE,
                     )
                     rect = win32gui.GetWindowRect(self.hwnd)
                     self.logger.info(f"[Live2D] Frame 0 Force Size. Rect: {rect}")
@@ -870,6 +896,10 @@ class Live2DRenderer:
                         self.offset_y -= unit_dy  # Invert Y for OpenGL
                         self._constrain_model_offset()
                         # self.logger.debug(f"Pan: {unit_dx:.4f}, {unit_dy:.4f}")
+
+            # Process SDL releases first; finish an outside release without requiring
+            # foreground mouse capture (or treating it as a click on the model).
+            self._poll_pet_drag_release()
 
             # Interactions
             x, y = pygame.mouse.get_pos()
@@ -1121,10 +1151,7 @@ class Live2DRenderer:
                         self.active_tweens = active_tweens_next
 
                     self._return_to_standby_if_finished()
-                    self.model.Update()
-                    self._smooth_physics_outputs()
-
-                    self.model.Draw()
+                    self._update_and_draw_model()
                     frame_count += 1
                     if frame_count % 600 == 0:  # Log every 10 seconds
                         self.logger.debug(f"[Live2D] Rendered {frame_count} frames")
@@ -1140,10 +1167,22 @@ class Live2DRenderer:
             self._tray = None
         if self._chat is not None:
             self._chat.stop()
-        # live2d-py 0.7 owns native renderer and Cubism framework resources.
-        # Release them while the OpenGL context is still alive, and destroy the
-        # model before disposing the framework to avoid a Windows access
-        # violation during interpreter shutdown.
+        self._dispose_live2d()
+        if self._passive_window is not None:
+            self._passive_window.close()
+            self._passive_window = None
+        pygame.quit()
+        self.logger.info("Live2D Renderer Stopped")
+        if self.on_exit is not None:
+            self.on_exit()
+
+    def _dispose_live2d(self) -> None:
+        """Unbind Python controllers before destroying native model resources."""
+
+        # The parameter controller owns a strong reference while it is bound.
+        # Drop it before deleting the renderer's reference so the native model
+        # can be collected before live2d-py disposes the Cubism framework.
+        self._parameter_controller.unbind_model()
         model = self.model
         self.model = None
         if model is not None:
@@ -1152,10 +1191,6 @@ class Live2DRenderer:
         gc.collect()
         self.live2d.glRelease()
         self.live2d.dispose()
-        pygame.quit()
-        self.logger.info("Live2D Renderer Stopped")
-        if self.on_exit is not None:
-            self.on_exit()
 
     def _enqueue_desktop_command(self, command: str, value: Any = None) -> None:
         self.command_queue.put((command, value))
@@ -1199,6 +1234,16 @@ class Live2DRenderer:
         if name == "visible":
             return self.window_visible
         return False
+
+    def _poll_pet_drag_release(self) -> None:
+        if not self.desktop_pet.enabled or not (self.dragging_window or self.dragging_model):
+            return
+        import win32api
+        if not win32api.GetAsyncKeyState(0x01) & 0x8000:
+            self.dragging_window = self.dragging_model = False
+            self._left_drag_distance = 0
+            self._last_pet_click_at = 0.0
+            self._save_desktop_state(force=True)
 
     def _get_work_area(self) -> tuple[int, int, int, int]:
         import win32api
@@ -1250,6 +1295,12 @@ class Live2DRenderer:
             win32con.HWND_TOPMOST if self.always_on_top else win32con.HWND_NOTOPMOST
         )
         flags = win32con.SWP_FRAMECHANGED | win32con.SWP_NOACTIVATE
+        win32gui.ShowWindow(
+            self.hwnd,
+            win32con.SW_SHOWNOACTIVATE if self.window_visible else win32con.SW_HIDE,
+        )
+        # SDL's show handler may restore its own z-order. Apply topmost afterwards.
+        pygame.event.pump()
         win32gui.SetWindowPos(
             self.hwnd,
             insert_after,
@@ -1258,10 +1309,6 @@ class Live2DRenderer:
             self.width,
             self.height,
             flags,
-        )
-        win32gui.ShowWindow(
-            self.hwnd,
-            win32con.SW_SHOWNOACTIVATE if self.window_visible else win32con.SW_HIDE,
         )
         self.logger.info(
             f"[DesktopPet] window ready at ({x}, {y}), "
@@ -1305,7 +1352,8 @@ class Live2DRenderer:
         import win32con
         import win32gui
 
-        self.always_on_top = bool(enabled)
+        enabled = True if self.desktop_pet.enabled else bool(enabled)
+        self.always_on_top = enabled
         win32gui.SetWindowPos(
             self.hwnd,
             win32con.HWND_TOPMOST if enabled else win32con.HWND_NOTOPMOST,
@@ -1332,8 +1380,6 @@ class Live2DRenderer:
             win32con.SW_SHOWNA if self.window_visible else win32con.SW_HIDE,
         )
         if self.window_visible:
-            if self._chat is not None:
-                self._chat.show()
             self._set_topmost(self.always_on_top)
         else:
             self._save_desktop_state(force=True)
@@ -1383,22 +1429,84 @@ class Live2DRenderer:
         if self._chat is None or not self.hwnd:
             return
         now = time.monotonic()
-        if not force and now - self._last_chat_sync_at < 0.08:
+        if not force and now - self._last_chat_sync_at < 1 / 120:
             return
         self._last_chat_sync_at = now
         try:
             import win32gui
 
             pet_rect = tuple(int(value) for value in win32gui.GetWindowRect(self.hwnd))
+            left, top, right, bottom = pet_rect
+            width, height = right - left, bottom - top
+            center_x = (left + right) / 2 + self.offset_x * height / 2
+            center_y = (top + bottom) / 2 + self.offset_y * height / 2
+            pet_rect = (
+                round(center_x - width * self.scale / 2),
+                round(center_y - height * self.scale / 2),
+                round(center_x + width * self.scale / 2),
+                round(center_y + height * self.scale / 2),
+            )
             self._chat.sync_anchor(
                 pet_rect,
                 self._get_work_area(),
                 visible=self.window_visible,
                 topmost=self.always_on_top,
                 click_through=self.click_through,
+                hovered=self._cursor_over_pet_window(),
+                model_scale=self.scale,
             )
+            sync_output = getattr(self._chat, "set_output_speaking", None)
+            if callable(sync_output):
+                sync_output(bool(self.is_speaking))
         except Exception as exc:
             self.logger.debug(f"Desktop chat position unavailable: {exc}")
+
+    def _cursor_over_pet_window(self) -> bool:
+        """Use native hit testing so transparent pixels and other windows do not trigger chat."""
+
+        if not self.hwnd or not self.window_visible or self.click_through:
+            return False
+        try:
+            import win32api
+            import win32con
+            import win32gui
+
+            point = tuple(win32api.GetCursorPos())
+            hit = int(win32gui.WindowFromPoint(point))
+            root_hwnd = int(
+                win32gui.GetAncestor(self.hwnd, win32con.GA_ROOT) or self.hwnd
+            )
+            hit_root = int(win32gui.GetAncestor(hit, win32con.GA_ROOT) or hit)
+            return hit_root == root_hwnd or bool(win32gui.IsChild(root_hwnd, hit))
+        except Exception as exc:
+            self.logger.debug(f"Desktop chat hover hit-test unavailable: {exc}")
+            return False
+
+    def _sync_parameter_panel(self, *, force: bool = False) -> None:
+        """Send bounded, copied parameter snapshots to Tk without touching the model there."""
+
+        if self._chat is None:
+            return
+        now = time.monotonic()
+        if not force and now - self._last_parameter_panel_sync_at < 0.2:
+            return
+        self._last_parameter_panel_sync_at = now
+        try:
+            self._chat.sync_parameter_specs(self._parameter_controller.snapshot())
+        except Exception as exc:
+            self.logger.debug(f"Desktop parameter panel sync unavailable: {exc}")
+
+    def _update_and_draw_model(self) -> None:
+        """Run model automations first, then apply user overrides immediately before draw."""
+
+        model = self.model
+        if model is None:
+            return
+        model.Update()
+        self._smooth_physics_outputs()
+        self._parameter_controller.apply(model)
+        model.Draw()
+        self._sync_parameter_panel()
 
     def _save_desktop_state(self, *, force: bool = False) -> None:
         if not self.desktop_pet.enabled or not self.desktop_pet.remember_position:
@@ -1476,6 +1584,10 @@ class Live2DRenderer:
             self._schedule_next_idle_motion()
 
     def _handle_pet_click(self, button: int) -> None:
+        if button == 3:
+            if self._tray is not None:
+                self._tray.show_menu()
+            return
         now = time.monotonic()
         self._last_desktop_interaction_at = now
         if self.on_click is not None:
@@ -1490,9 +1602,13 @@ class Live2DRenderer:
                 else self.desktop_pet.left_click_motion
             )
             self._last_pet_click_at = now
-            if is_double_click and self._chat is not None:
+            if (
+                is_double_click
+                and self._chat is not None
+                and self.desktop_pet.chat.enabled
+            ):
                 self.logger.info("[DesktopPet] double-click detected; opening chat")
-                self._chat.open()
+                self._chat.open(from_pet=True)
         else:
             motion = self.desktop_pet.right_click_motion
         if motion:
@@ -1744,8 +1860,24 @@ class Live2DRenderer:
 
     def _handle_command(self, cmd_type: str, cmd_data: Any):
         if cmd_type == "desktop_open_chat":
-            if self._chat is not None:
+            if self._chat is not None and self.desktop_pet.chat.enabled:
+                # The chat itself enforces pet hover/active-session visibility.
                 self._chat.open()
+            return
+        if cmd_type == "desktop_open_parameters":
+            if self._chat is not None:
+                self._chat.open_parameters()
+            return
+        if cmd_type == "desktop_parameter_set":
+            if isinstance(cmd_data, dict):
+                self._parameter_controller.set_value(
+                    str(cmd_data.get("id", "")),
+                    cmd_data.get("value"),
+                )
+            return
+        if cmd_type == "desktop_parameters_reset":
+            group = str(cmd_data) if cmd_data is not None else None
+            self._parameter_controller.reset(group)
             return
         if cmd_type == "desktop_toggle_visibility":
             self._toggle_visibility()

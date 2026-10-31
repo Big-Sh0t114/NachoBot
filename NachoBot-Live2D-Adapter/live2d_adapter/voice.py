@@ -11,7 +11,6 @@ from concurrent.futures import Future
 from typing import Any
 
 import aiohttp
-import edge_tts
 
 from .config import DesktopChatConfig
 
@@ -33,16 +32,12 @@ def speech_segments(text: str) -> list[str]:
 
 
 def pcm_format(headers: Any) -> dict[str, Any]:
-    """Validate the upstream PCM contract, including legacy adapter headers."""
-    modern = headers.get("X-TTS-Stream-Version") is not None
-    if modern:
-        if headers.get("X-TTS-Stream-Version") != "1":
-            raise ValueError("不支持的 TTS 流版本")
-        if headers.get("X-Audio-Codec") != "pcm_s16le":
-            raise ValueError("TTS 必须返回 pcm_s16le")
-        keys = ("X-Audio-Sample-Rate", "X-Audio-Channels", "X-Audio-Sample-Width")
-    else:
-        keys = ("X-Sample-Rate", "X-Channels", "X-Sample-Width")
+    """Validate the current local Multimodal Adapter PCM contract."""
+    if headers.get("X-TTS-Stream-Version") != "1":
+        raise ValueError("不支持的 TTS 流版本")
+    if headers.get("X-Audio-Codec") != "pcm_s16le":
+        raise ValueError("TTS 必须返回 pcm_s16le")
+    keys = ("X-Audio-Sample-Rate", "X-Audio-Channels", "X-Audio-Sample-Width")
     try:
         rate, channels, width = (int(headers[key]) for key in keys)
     except (KeyError, TypeError, ValueError) as exc:
@@ -127,10 +122,7 @@ class DesktopVoice:
     async def _speak(self, text: str, language: str, epoch: int) -> None:
         started = time.monotonic()
         try:
-            if self.config.tts_provider == "neural":
-                await self._neural(text, language, epoch, started)
-            else:
-                await self._multimodal(text, language, epoch, started)
+            await self._multimodal(text, language, epoch, started)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -140,61 +132,12 @@ class DesktopVoice:
                 )
                 self.on_error(f"语音生成失败：{exc}。文字回答已保留。")
 
-    async def _neural(self, text: str, language: str, epoch: int, started: float) -> None:
-        voice = {"ja": "ja-JP-NanamiNeural", "en": "en-US-JennyNeural"}.get(
-            language, self.config.tts_voice
-        )
-        parts = speech_segments(text)
-
-        async def synthesize(part: str) -> bytes:
-            speaker = edge_tts.Communicate(
-                part, voice, rate=self.config.tts_rate, connect_timeout=5, receive_timeout=10
-            )
-            audio = bytearray()
-            async for chunk in speaker.stream():
-                if chunk["type"] == "audio":
-                    audio.extend(chunk["data"])
-                    if len(audio) > 4 * 1024 * 1024:
-                        raise ValueError("语音片段过大")
-            if not audio:
-                raise ValueError("语音服务返回了空音频")
-            return bytes(audio)
-
-        # Only one request ahead: keep memory and cloud concurrency bounded.
-        pending = asyncio.create_task(synthesize(parts[0])) if parts else None
-        try:
-            for index, _part in enumerate(parts):
-                assert pending is not None
-                audio = await pending
-                pending = (
-                    asyncio.create_task(synthesize(parts[index + 1]))
-                    if index + 1 < len(parts)
-                    else None
-                )
-                if not self._send(epoch, "queue_audio", {"audio": audio, "reset": index == 0}):
-                    return
-                if index == 0:
-                    self.logger.info(
-                        "[DesktopVoice] neural first playable segment: {:.3f}s",
-                        time.monotonic() - started,
-                    )
-        finally:
-            if pending is not None:
-                pending.cancel()
-                await asyncio.gather(pending, return_exceptions=True)
-
     async def _multimodal(self, text: str, language: str, epoch: int, started: float) -> None:
         timeout = aiohttp.ClientTimeout(total=120, sock_connect=5, sock_read=20)
         url = self.config.tts_url.rstrip("/") + "/api/tts/stream"
         payload = {"text": text, "text_lang": language, "platform": "local.live2d"}
         async with aiohttp.ClientSession(timeout=timeout) as session:
             response = await session.post(url, json=payload)
-            # Legacy compatibility only on an absent route, never on a synthesis error.
-            if response.status == 404:
-                response.release()
-                response = await session.post(
-                    self.config.tts_url.rstrip("/") + "/api/tts-stream", json=payload
-                )
             async with response:
                 response.raise_for_status()
                 fmt = pcm_format(response.headers)

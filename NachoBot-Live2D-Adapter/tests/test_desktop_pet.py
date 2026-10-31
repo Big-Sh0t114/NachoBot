@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import json
 import queue
+import sys
 import tempfile
 import unittest
+import weakref
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
-from live2d_adapter.config import ConfigError, DesktopPetConfig, load_config
+from live2d_adapter.config import ConfigError, DesktopChatConfig, DesktopPetConfig, load_config
 from live2d_adapter.desktop_pet import (
     DesktopPetState,
     DesktopPetStateStore,
@@ -91,7 +94,8 @@ class DesktopPetRendererStateTests(unittest.TestCase):
 
             self.assertFalse(renderer.window_visible)
             self.assertAlmostEqual(renderer.scale, 0.85)
-            self.assertFalse(renderer.always_on_top)
+            # Old saved/configured non-topmost choices no longer demote the pet.
+            self.assertTrue(renderer.always_on_top)
 
     def test_fit_to_window_caps_zoom_before_model_can_be_clipped(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -153,14 +157,18 @@ class DesktopPetRendererInteractionTests(unittest.TestCase):
                 StubLogger(),
                 queue.Queue(),
                 model_adapter=Live2DModelAdapter.from_model_path(model_path),
-                desktop_pet_config=DesktopPetConfig(enabled=True),
+                desktop_pet_config=DesktopPetConfig(
+                    enabled=True,
+                    chat=DesktopChatConfig(enabled=True),
+                ),
             )
 
             class StubChat:
                 def __init__(self) -> None:
                     self.open_count = 0
 
-                def open(self) -> None:
+                def open(self, *, from_pet: bool = False) -> None:
+                    self.from_pet = from_pet
                     self.open_count += 1
 
             chat = StubChat()
@@ -176,6 +184,256 @@ class DesktopPetRendererInteractionTests(unittest.TestCase):
                 renderer._handle_pet_click(1)
 
             self.assertEqual(chat.open_count, 1)
+            self.assertTrue(chat.from_pet)
+
+    def test_pet_hover_gate_rejects_hidden_and_clickthrough_pet(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model_path = root / "avatar.model3.json"
+            model_path.write_text(json.dumps({"Version": 3}), encoding="utf-8")
+            renderer = Live2DRenderer(
+                str(model_path),
+                StubLogger(),
+                queue.Queue(),
+                model_adapter=Live2DModelAdapter.from_model_path(model_path),
+                desktop_pet_config=DesktopPetConfig(enabled=True),
+            )
+
+            renderer.hwnd = 123
+            renderer.window_visible = False
+            self.assertFalse(renderer._cursor_over_pet_window())
+
+            renderer.window_visible = True
+            renderer.click_through = True
+            self.assertFalse(renderer._cursor_over_pet_window())
+
+
+class DesktopParameterRendererIntegrationTests(unittest.TestCase):
+    def _renderer(self, root: Path) -> Live2DRenderer:
+        model_path = root / "avatar.model3.json"
+        model_path.write_text(json.dumps({"Version": 3}), encoding="utf-8")
+        return Live2DRenderer(
+            str(model_path),
+            StubLogger(),
+            queue.Queue(),
+            model_adapter=Live2DModelAdapter.from_model_path(model_path),
+            desktop_pet_config=DesktopPetConfig(enabled=True),
+        )
+
+    def test_manual_parameter_override_runs_after_update_before_draw_and_reset_releases_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            renderer = self._renderer(Path(directory))
+            events: list[tuple[str, object]] = []
+            parameter = SimpleNamespace(
+                id="ParamAngleX",
+                min=-30.0,
+                max=30.0,
+                default=0.0,
+                value=0.0,
+            )
+
+            class NativeModel:
+                def SetParameterValueById(self, parameter_id: str, value: float) -> None:
+                    events.append(("set", (parameter_id, value)))
+                    parameter.value = value
+
+            class StubModel:
+                _model = NativeModel()
+
+                def GetParameterCount(self) -> int:
+                    return 1
+
+                def GetParameter(self, _index: int):
+                    return parameter
+
+                def GetParameterValue(self, _index: int) -> float:
+                    return parameter.value
+
+                def Update(self) -> None:
+                    events.append(("update", None))
+
+                def Draw(self) -> None:
+                    events.append(("draw", None))
+
+            model = StubModel()
+            renderer.model = model
+            renderer._parameter_controller.bind_model(model, renderer.model_adapter)
+            renderer._smooth_physics_outputs = lambda: events.append(("smooth", None))  # type: ignore[method-assign]
+
+            renderer._handle_command(
+                "desktop_parameter_set",
+                {"id": "ParamAngleX", "value": 12.5},
+            )
+            renderer._update_and_draw_model()
+
+            self.assertEqual(
+                events,
+                [
+                    ("update", None),
+                    ("smooth", None),
+                    ("set", ("ParamAngleX", 12.5)),
+                    ("draw", None),
+                ],
+            )
+            self.assertTrue(renderer._parameter_controller.snapshot()[0]["manual"])
+
+            events.clear()
+            renderer._handle_command("desktop_parameters_reset", None)
+            renderer._update_and_draw_model()
+
+            self.assertEqual(
+                events,
+                [
+                    ("update", None),
+                    ("smooth", None),
+                    ("set", ("ParamAngleX", 0.0)),
+                    ("draw", None),
+                ],
+            )
+            self.assertFalse(renderer._parameter_controller.snapshot()[0]["manual"])
+
+    def test_parameter_panel_open_command_is_routed_to_chat_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            renderer = self._renderer(Path(directory))
+
+            class StubChat:
+                def __init__(self) -> None:
+                    self.opened = 0
+
+                def open_parameters(self) -> None:
+                    self.opened += 1
+
+            chat = StubChat()
+            renderer._chat = chat  # type: ignore[assignment]
+            renderer._handle_command("desktop_open_parameters", None)
+
+            self.assertEqual(chat.opened, 1)
+
+    def test_disabled_chat_starts_hover_host_for_parameter_controls(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            renderer = self._renderer(Path(directory))
+
+            self.assertFalse(renderer.desktop_pet.chat.enabled)
+            self.assertIsNotNone(renderer._chat)
+            self.assertIsNone(renderer._chat._thread)
+
+            # The desktop host owns the hover toolbar even when its composer is
+            # disabled, so renderer startup must still start the hidden Tk host.
+            with patch.object(renderer._chat, "start") as start_host:
+                renderer._start_desktop_chat_host()
+                start_host.assert_called_once_with()
+            self.assertIsNone(renderer._chat._thread)
+
+            renderer._handle_command("desktop_open_chat", None)
+            self.assertIsNone(renderer._chat._thread)
+
+    def test_disabled_chat_still_receives_pet_hover_anchor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            renderer = self._renderer(Path(directory))
+            self.assertFalse(renderer.desktop_pet.chat.enabled)
+            renderer.hwnd = 123
+            renderer.window_visible = True
+            renderer.click_through = False
+            renderer.always_on_top = False
+            renderer._get_work_area = lambda: (0, 0, 1920, 1080)  # type: ignore[method-assign]
+            renderer._cursor_over_pet_window = lambda: True  # type: ignore[method-assign]
+            calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+            class StubChat:
+                def sync_anchor(self, *args: object, **kwargs: object) -> None:
+                    calls.append((args, kwargs))
+
+            renderer._chat = StubChat()  # type: ignore[assignment]
+            win32gui = SimpleNamespace(
+                GetWindowRect=lambda _hwnd: (500, 100, 720, 500)
+            )
+            with patch.dict(sys.modules, {"win32gui": win32gui}):
+                renderer._sync_chat_window(force=True)
+
+            self.assertEqual(len(calls), 1)
+            args, kwargs = calls[0]
+            self.assertEqual(args[0], (500, 100, 720, 500))
+            self.assertEqual(args[1], (0, 0, 1920, 1080))
+            self.assertEqual(
+                kwargs,
+                {
+                    "visible": True,
+                    "topmost": False,
+                    "click_through": False,
+                    "hovered": True,
+                    "model_scale": 1.0,
+                },
+            )
+
+    def test_model_controller_unbinds_before_native_framework_disposal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            renderer = self._renderer(Path(directory))
+            events: list[tuple[str, object]] = []
+            parameter = SimpleNamespace(
+                id="ParamAngleX",
+                min=-30.0,
+                max=30.0,
+                default=0.0,
+                value=0.0,
+            )
+
+            class Model:
+                def GetParameterCount(self) -> int:
+                    return 1
+
+                def GetParameter(self, _index: int):
+                    return parameter
+
+                def DestroyRenderer(self) -> None:
+                    events.append(("destroy_renderer", None))
+
+                def __del__(self) -> None:
+                    events.append(("model_finalized", None))
+
+            class Live2D:
+                def glRelease(self) -> None:
+                    events.append(("gl_release", model_ref() is None))
+
+                def dispose(self) -> None:
+                    events.append(("dispose", model_ref() is None))
+
+            model = Model()
+            model_ref = weakref.ref(model)
+            renderer.model = model
+            renderer._parameter_controller.bind_model(model)
+            renderer._parameter_controller.set_value("ParamAngleX", 12.0)
+            del model
+            self.assertIsNotNone(model_ref())
+            renderer.live2d = Live2D()
+
+            controller = renderer._parameter_controller
+            original_unbind = controller.unbind_model
+
+            def record_unbind() -> None:
+                events.append(("unbind", model_ref() is not None))
+                original_unbind()
+
+            controller.unbind_model = record_unbind  # type: ignore[method-assign]
+            with patch(
+                "live2d_adapter.renderer.gc.collect",
+                side_effect=lambda: events.append(("gc_collect", model_ref() is None)),
+            ):
+                renderer._dispose_live2d()
+
+            self.assertIsNone(renderer.model)
+            self.assertIsNone(model_ref())
+            self.assertEqual(
+                events,
+                [
+                    ("unbind", True),
+                    ("destroy_renderer", None),
+                    ("model_finalized", None),
+                    ("gc_collect", True),
+                    ("gl_release", True),
+                    ("dispose", True),
+                ],
+            )
+            self.assertEqual(renderer._parameter_controller.snapshot(), [])
 
 
 class DesktopPetConfigTests(unittest.TestCase):

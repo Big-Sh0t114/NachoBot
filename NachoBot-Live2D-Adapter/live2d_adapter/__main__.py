@@ -96,6 +96,9 @@ def main() -> int:
                     json.dumps(
                         {
                             "mode": config.runtime.mode,
+                            "standalone": not config.components.core,
+                            "components": {"core": config.components.core, "tts": config.components.tts,
+                                           "perception": config.components.perception},
                             "server_port": config.server.port,
                             "show_desktop_console": config.desktop_pet.show_desktop_console,
                             "show_core_console": config.desktop_pet.show_core_console,
