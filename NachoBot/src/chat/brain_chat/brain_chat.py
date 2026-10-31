@@ -13,6 +13,7 @@ from src.common.logger import get_logger
 from src.common.data_models.info_data_model import ActionPlannerInfo
 from src.common.data_models.message_data_model import ReplyContentType
 from ncnk_message import get_system_event
+from ncnk_message.external_self_message import is_external_self_message
 from src.chat.message_receive.chat_stream import ChatStream, get_chat_manager
 from src.chat.utils.prompt_builder import global_prompt_manager
 from src.chat.utils.timer_calculator import Timer
@@ -490,7 +491,13 @@ class BrainChatting:
             if verified_messages:
                 if focus_turn is not None:
                     self._focus_consumed_through_row_id = focus_turn.read_after_row_id
-                result = await self._observe(recent_messages_list=verified_messages, focus_turn=focus_turn)
+                actionable_messages = [
+                    message for message in verified_messages if not is_external_self_message(message)
+                ]
+                if actionable_messages:
+                    result = await self._observe(recent_messages_list=actionable_messages, focus_turn=focus_turn)
+                else:
+                    result = True
                 realtime_ingress_manager.complete_rows(self.stream_id, verified_row_ids)
                 return result
             realtime_ingress_manager.discard_rows(self.stream_id, realtime_row_ids)
@@ -507,7 +514,10 @@ class BrainChatting:
             self._offline_recovery_messages = recent_messages_list
             self._offline_recovery_prompt = format_recovery_reply_context(recent_messages_list)
             self._last_message_received_at = time.time()
-            return await self._observe(recent_messages_list=recent_messages_list, focus_turn=focus_turn)
+            actionable_messages = [
+                message for message in recent_messages_list if not is_external_self_message(message)
+            ]
+            return await self._observe(recent_messages_list=actionable_messages, focus_turn=focus_turn)
 
         if focus_turn is not None:
             batch = load_message_batch(
@@ -541,6 +551,18 @@ class BrainChatting:
             recent_messages_list = realtime_ingress_manager.filter_ordinary_messages(
                 self.stream_id, recent_messages_list
             )
+        if (
+            focus_turn is None
+            and recent_messages_list
+            and all(is_external_self_message(message) for message in recent_messages_list)
+        ):
+            self.last_read_time = time.time()
+            offline_recovery_manager.commit_nonfocus_read_cursor(self.stream_id)
+            offline_recovery_manager.commit_deferred_live_rows(self.stream_id)
+            return True
+        recent_messages_list = [
+            message for message in recent_messages_list if not is_external_self_message(message)
+        ]
         focus_has_actionable_work = _focus_turn_has_actionable_work(focus_turn, recent_messages_list)
         if focus_turn is not None and not focus_has_actionable_work:
             return True
@@ -749,9 +771,17 @@ class BrainChatting:
         recent_messages_list: Optional[List["DatabaseMessages"]] = None,
         focus_turn: FocusTurn | None = None,
     ) -> bool:  # sourcery skip: merge-else-if-into-elif, remove-redundant-if
-        self._ensure_offline_recovery_state()
         if recent_messages_list is None:
             recent_messages_list = []
+        passive_only = bool(recent_messages_list) and all(
+            is_external_self_message(message) for message in recent_messages_list
+        )
+        if passive_only and (focus_turn is None or not focus_turn.events):
+            return True
+        recent_messages_list = [
+            message for message in recent_messages_list if not is_external_self_message(message)
+        ]
+        self._ensure_offline_recovery_state()
         message_batch = classify_runtime_message_batch(
             recent_messages_list,
             bot_user_id=str(global_config.bot.qq_account),
@@ -1526,6 +1556,11 @@ class BrainChatting:
 
         if need_reply:
             logger.info(f"{self.log_prefix} 从思考到回复，共有{new_message_count}条新消息，使用引用回复")
+
+        if runtime_capabilities_from_message(message_data).reply_delivery == "structured_reply":
+            from src.chat.structured_reply_delivery import deliver_structured_reply
+            return await deliver_structured_reply(reply_set, message_data, self.chat_stream.stream_id,
+                                                   need_reply, selected_expressions, receipts)
 
         if send_api._should_suppress_reply_set(reply_set):
             texts = []

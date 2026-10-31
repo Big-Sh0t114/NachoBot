@@ -602,6 +602,17 @@ async def text_to_stream_receipt(
     )
 
 
+async def structured_reply_to_stream_receipt(
+    content: Dict, stream_id: str, reply_message: Optional["DatabaseMessages"] = None,
+    set_reply: bool = False, selected_expressions: Optional[List[int]] = None, display_message: str = "",
+) -> SendReceipt:
+    return await _send_to_target_receipt(
+        message_segment=Seg(type="structured_reply", data=content), stream_id=stream_id,
+        display_message=display_message, reply_message=reply_message, set_reply=set_reply,
+        selected_expressions=selected_expressions, storage_message=bool(display_message), typing=False,
+    )
+
+
 async def tts_text_to_stream_receipt(
     text: str,
     stream_id: str,

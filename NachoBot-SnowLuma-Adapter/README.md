@@ -131,6 +131,8 @@ echo 关联使用 `DEBUG`；只有显式打开 `debug.raw_payload` 或
 
 - SnowLuma WebSocket 自动重连与 token 验证
 - OneBot action/echo Future 池
+- 外部账号操作产生的自发消息以固定标记被动写入原私聊/群聊上下文；适配器按当前账号、socket、路由和精确消息 ID 排除 Core 自身发送回声
+- 私聊历史中的有效自发消息也走同一 senderless 被动入口，并保留离线历史投递回执
 - 群聊 / 私聊文本
 - @、reply、QQ face
 - 图片 / 动画表情下载并转 NachoBot base64 segment

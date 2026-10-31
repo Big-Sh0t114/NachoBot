@@ -1208,6 +1208,28 @@ class PrivateReplyer:
 
         time_block = f"当前时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 
+        companion_capabilities = runtime_capabilities_from_stream(chat_stream)
+        from .companion_prompt import desktop_proactive_context
+        proactive_context = desktop_proactive_context(reply_message) if chat_stream.platform == "local.live2d" else ""
+        if companion_capabilities.prompt_profile == "desktop_companion" and (not actorless_target or proactive_context):
+            from .companion_prompt import build_companion_prompt, desktop_visual_context
+            prompt = build_companion_prompt(
+                identity=personality_prompt, style=global_config.personality.reply_style,
+                history=dialogue_prompt + "\n" + focus_handoff_block,
+                current=proactive_context or f"用户本轮消息：{target}",
+                facts="\n".join(f"[{label}]\n{value}" for label, value in (
+                    ("长期记忆", memory_block), ("中期记忆", mid_term_memory_block),
+                    ("知识与人物资料", prompt_info), ("关系记忆", relation_info),
+                    ("本轮工具结果", tool_info), ("人物资料", person_profile_block),
+                    ("补充背景", extra_info_block), ("角色内部情绪，不属于用户发言", mood_prompt),
+                    ("表达习惯", expression_habits_block), ("关键词提示", keywords_reaction_prompt),
+                    ("当前视觉上下文", desktop_visual_context(reply_message)),
+                ) if value),
+                guard=build_guardrail_instruction(injection_detected), time_block=time_block,
+                emotions=companion_capabilities.control_emotions, actions=companion_capabilities.control_actions,
+            )
+            return ReplyPromptBuildResult(prompt, selected_expressions, sandbox_candidate)
+
         if advanced_on:
             # ADVANCED_PROMPT_INJECTION: 高级模式下改用自定义破甲提示词并保留注入防护
             base_prompt = global_config.advanced.prompt.strip()

@@ -18,6 +18,12 @@ from typing import Any, Dict, List, Tuple, Callable
 
 from openai import AsyncOpenAI
 from ncnk_message import get_system_event, system_event_fallback_text
+from ncnk_message.external_self_message import (
+    EXTERNAL_SELF_MESSAGE_MARKER,
+    external_self_sender_name,
+    is_external_self_message,
+    strip_external_self_message_marker,
+)
 from .utils import get_bot_personality, DiaryConstants
 from src.plugin_system.apis import config_api, llm_api, get_logger
 
@@ -90,6 +96,18 @@ class DiaryService:
 
             if system_event is not None:
                 content = getattr(msg, "processed_plain_text", "") or system_event_fallback_text(system_event)
+                if is_external_self_message(msg):
+                    content = strip_external_self_message_marker(content).strip()
+                    if len(content) > 50:
+                        content = content[:50] + "..."
+                    sender_name = external_self_sender_name(system_event)
+                    timeline_parts.append(
+                        f"[外部消息标记] {sender_name}: {content.rstrip()} {EXTERNAL_SELF_MESSAGE_MARKER}"
+                    )
+                    system_event_count += 1
+                    included_message_count += 1
+                    continue
+
                 actor = system_event.get("actor")
                 actor_name = (
                     actor.get("name") or actor.get("nickname") or actor.get("user_id")

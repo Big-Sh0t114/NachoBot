@@ -565,7 +565,7 @@ def _synchronize_onebot_document(path: Path, qq_account: str, port: int, token: 
         "enabled": True,
         "name": "NachoBot",
         "messageFormat": "array",
-        "reportSelfMessage": False,
+        "reportSelfMessage": True,
         "host": "127.0.0.1",
         "port": port,
         "path": SNOWLUMA_DEFAULT_ONEBOT_PATH,

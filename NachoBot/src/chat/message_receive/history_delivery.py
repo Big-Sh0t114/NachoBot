@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ncnk_message.external_self_message import is_external_self_message
 from ncnk_message.qq_history_identity import (
     qq_canonical_identity_key,
     qq_snow_alias_key,
@@ -79,6 +80,18 @@ def delivery_from_envelope(envelope: Any) -> dict[str, Any] | None:
         return None
     route = info.get("group_info") if kind == "group" else info.get("user_info")
     route_id = route.get("group_id" if kind == "group" else "user_id") if isinstance(route, dict) else None
+    if kind == "private" and route_id is None and is_external_self_message(
+        envelope,
+        expected_self_id=account_id,
+    ):
+        external_event = additional.get("system_event")
+        data = external_event.get("data") if isinstance(external_event, dict) else None
+        if (
+            isinstance(data, dict)
+            and data.get("route_kind") == "private"
+            and str(data.get("platform") or "") == platform
+        ):
+            route_id = data.get("peer_id")
     if route_id is None or str(route_id).strip() != session_id:
         return None
     identity = json.dumps(
@@ -985,6 +998,27 @@ class HistoryDeliveryStore:
             )
             if cursor.rowcount != 1:
                 raise RuntimeError("Core history delivery claim disappeared before completion")
+
+    def mark_passive_complete(self, delivery_key: str) -> None:
+        """Terminally acknowledge passive context without creating recovery work."""
+
+        with self._lock:
+            db = self._connection()
+            root_key = self._root_key(db, str(delivery_key or "").strip())
+            cursor = db.execute(
+                """UPDATE history_deliveries
+                   SET state='complete', recovered=0, updated_at=?
+                   WHERE delivery_key=? AND state IN ('processing', 'pending')""",
+                (time.time(), root_key),
+            )
+            if cursor.rowcount == 1:
+                return
+            row = db.execute(
+                "SELECT state FROM history_deliveries WHERE delivery_key=?",
+                (root_key,),
+            ).fetchone()
+            if row is None or str(row[0]) not in {"complete", "filtered"}:
+                raise RuntimeError("Passive history delivery claim disappeared before completion")
 
     def mark_filtered(self, delivery_key: str) -> None:
         with self._lock:

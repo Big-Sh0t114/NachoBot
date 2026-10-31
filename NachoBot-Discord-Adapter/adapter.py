@@ -15,6 +15,7 @@ import stat
 import tempfile
 import time
 import uuid
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -53,7 +54,14 @@ try:
         TargetConfig,
         TemplateInfo,
         UserInfo,
+        SYSTEM_EVENT_ROUTE_KEY,
+        build_system_event_route,
         get_core_token_from_env,
+    )
+    from ncnk_message.external_self_message import (
+        EXTERNAL_SELF_MESSAGE_MARKER,
+        build_external_self_message_event,
+        outbound_echo_registry,
     )
 except ImportError as exc:  # pragma: no cover - startup reports the actionable error
     raise RuntimeError("NachoBot ncnk_message package is unavailable") from exc
@@ -233,6 +241,7 @@ class DiscordAdapter:
         self._ingress_tasks: set[asyncio.Task] = set()
         self._outbound_tasks: set[asyncio.Task] = set()
         self._slash_interactions = SlashInteractionRegistry()
+        self._external_self_generation = uuid.uuid4().hex
 
     def is_context_allowed(self, user: Any, channel: Any) -> bool:
         native_user = str(_field(user, "id", ""))
@@ -500,25 +509,55 @@ class DiscordAdapter:
         if author is None or channel is None:
             return False
         author_id = str(_field(author, "id", ""))
-        if (
-            bool(_field(author, "bot", False))
-            or _field(message, "webhook_id")
-            or author_id in self.identity_map.bot_self_ids
-            or (self.bot.user and author_id == str(self.bot.user.id))
-        ):
+        current_self_id = _native_snowflake(_field(self.bot.user, "id"))
+        is_current_self = bool(current_self_id and author_id == current_self_id)
+        external_generation = getattr(
+            self, "_external_self_generation", "discord-adapter"
+        )
+        if _field(message, "webhook_id"):
             return False
-        if not self.is_context_allowed(author, channel):
+        if bool(_field(author, "bot", False)) and not is_current_self:
             return False
 
         guild = _field(message, "guild")
         native_channel = str(_field(channel, "id", ""))
-        logical_user = self.identity_map.logical_user(author_id)
+        native_private_peer = ""
+        if is_current_self and guild is None:
+            recipient = _field(channel, "recipient")
+            native_private_peer = str(_field(recipient, "id", ""))
+            if (
+                _native_snowflake(native_private_peer) is None
+                or native_private_peer == current_self_id
+            ):
+                return False
+            logical_user = self.identity_map.logical_user(native_private_peer)
+            if not is_chat_allowed(self.config, logical_user, None):
+                return False
+        else:
+            logical_user = self.identity_map.logical_user(author_id)
+            if not self.is_context_allowed(author, channel):
+                return False
+
+        # The exported migration list is deliberately not sufficient to
+        # authenticate a self-authored event. Only this Gateway's live user
+        # identity can pass; foreign and stale bot identities stay filtered.
+        if author_id in self.identity_map.bot_self_ids and not is_current_self:
+            return False
+
         group_info = None
         guild_id = ""
+        route_kind = "private"
+        peer_id = logical_user
         if guild is not None:
             logical_channel = self.identity_map.logical_channel(native_channel)
             guild_id = str(_field(guild, "id", ""))
             group_info = GroupInfo(platform=PLATFORM, group_id=logical_channel, group_name=str(_field(channel, "name", logical_channel)))
+            route_kind = "group"
+            peer_id = logical_channel
+
+        native_message_id = _native_snowflake(_field(message, "id"))
+        if is_current_self and native_message_id is None:
+            return False
 
         content = str(_field(message, "content", "") or "")
         rendered_content = self._render_native_mentions(content, message)
@@ -545,6 +584,8 @@ class DiscordAdapter:
         referenced_id = _field(reference, "message_id") if reference else None
         if referenced_id is not None:
             segments.append(Seg(type="reply", data={"message_id": str(referenced_id)}))
+        if is_current_self:
+            segments.insert(0, Seg(type="text", data=EXTERNAL_SELF_MESSAGE_MARKER))
         if not segments:
             return False
 
@@ -558,8 +599,23 @@ class DiscordAdapter:
         if original_timestamp is not None:
             discord_transport["created_at"] = original_timestamp
 
+        event_timestamp = None
+        if is_current_self:
+            timestamp_method = getattr(native_created_at, "timestamp", None)
+            try:
+                event_timestamp = float(timestamp_method()) if callable(timestamp_method) else None
+            except (TypeError, ValueError, OverflowError, OSError):
+                event_timestamp = None
+            if event_timestamp is None or not (event_timestamp > 0):
+                return False
+
         additional_config = {
-            "delivery_target": self._target(native_channel, author_id, guild_id, "text"),
+            "delivery_target": self._target(
+                native_channel,
+                native_private_peer if is_current_self and guild is None else author_id,
+                guild_id,
+                "text",
+            ),
             "discord_transport": discord_transport,
             "runtime_capabilities": {
                 "schema_version": 1,
@@ -585,22 +641,42 @@ class DiscordAdapter:
                 },
             },
         }
-        if self._is_mentioned_or_replied_to(message):
+        if is_current_self:
+            additional_config["system_event"] = build_external_self_message_event(
+                PLATFORM,
+                self_id=current_self_id,
+                message_id=native_message_id,
+                route_kind=route_kind,
+                peer_id=peer_id,
+                original_timestamp=event_timestamp,
+                sender_name=(
+                    _field(author, "display_name") or _field(author, "name")
+                ),
+            )
+            if route_kind == "private":
+                additional_config[SYSTEM_EVENT_ROUTE_KEY] = build_system_event_route(
+                    PLATFORM, user_id=peer_id
+                )
+        elif self._is_mentioned_or_replied_to(message):
             additional_config["is_mentioned"] = 1.0
 
         info = BaseMessageInfo(
             platform=PLATFORM,
-            message_id=str(_field(message, "id", uuid.uuid4().hex)),
+            message_id=native_message_id or str(_field(message, "id", uuid.uuid4().hex)),
             # Discord's server clock can be ahead of Core's local read cursor.
             # Stamp at forwarding time, after media processing, and keep the
             # native value separately for transport diagnostics.
-            time=time.time(),
+            time=event_timestamp if is_current_self else time.time(),
             group_info=group_info,
-            user_info=UserInfo(
-                platform=PLATFORM,
-                user_id=logical_user,
-                user_nickname=str(_field(author, "display_name", None) or _field(author, "name", logical_user)),
-                user_cardname=str(_field(author, "display_name", "") or "") if guild else None,
+            user_info=(
+                None
+                if is_current_self
+                else UserInfo(
+                    platform=PLATFORM,
+                    user_id=logical_user,
+                    user_nickname=str(_field(author, "display_name", None) or _field(author, "name", logical_user)),
+                    user_cardname=str(_field(author, "display_name", "") or "") if guild else None,
+                )
             ),
             format_info=FormatInfo(content_format=content_formats, accept_format=accept_formats(self.config)),
             additional_config=additional_config,
@@ -610,10 +686,72 @@ class DiscordAdapter:
             message_segment=Seg(type="seglist", data=segments),
             raw_message=str(_field(message, "content", "") or ""),
         )
+        if is_current_self:
+            current_generation = getattr(
+                self, "_external_self_generation", "discord-adapter"
+            )
+            if (
+                _native_snowflake(_field(self.bot.user, "id")) != current_self_id
+                or current_generation != external_generation
+            ):
+                return False
+            classification = await outbound_echo_registry.classify_event(
+                PLATFORM,
+                external_generation,
+                current_self_id,
+                route_kind,
+                peer_id,
+                native_message_id,
+            )
+            if classification != "external":
+                return False
+            if (
+                _native_snowflake(_field(self.bot.user, "id")) != current_self_id
+                or getattr(self, "_external_self_generation", "discord-adapter")
+                != external_generation
+            ):
+                outbound_echo_registry.release_event(
+                    PLATFORM,
+                    external_generation,
+                    current_self_id,
+                    route_kind,
+                    peer_id,
+                    native_message_id,
+                )
+                return False
         try:
             result = await self.router.send_message(message_base)
+            if is_current_self and result is False:
+                outbound_echo_registry.release_event(
+                    PLATFORM,
+                    external_generation,
+                    current_self_id,
+                    route_kind,
+                    peer_id,
+                    native_message_id,
+                )
             return result is not False
+        except asyncio.CancelledError:
+            if is_current_self:
+                outbound_echo_registry.release_event(
+                    PLATFORM,
+                    external_generation,
+                    current_self_id,
+                    route_kind,
+                    peer_id,
+                    native_message_id,
+                )
+            raise
         except Exception as exc:
+            if is_current_self:
+                outbound_echo_registry.release_event(
+                    PLATFORM,
+                    external_generation,
+                    current_self_id,
+                    route_kind,
+                    peer_id,
+                    native_message_id,
+                )
             self.logger.warning("Discord ingress to Core failed (%s)", type(exc).__name__)
             return False
 
@@ -782,6 +920,8 @@ class DiscordAdapter:
 
     async def run(self):
         self._stopping = False
+        outbound_echo_registry.invalidate_platform(PLATFORM)
+        self._external_self_generation = uuid.uuid4().hex
         router_task = asyncio.create_task(self.router.run(), name="discord-core-router")
         bot_task = asyncio.create_task(self.bot.start(self.config.discord.token), name="discord-gateway")
         tasks = (router_task, bot_task)
@@ -851,7 +991,10 @@ class DiscordAdapter:
             if not self.bot.is_closed():
                 await self.bot.close()
         finally:
-            await self.media.close()
+            try:
+                await self.media.close()
+            finally:
+                outbound_echo_registry.invalidate_platform(PLATFORM)
 
     @staticmethod
     def _delivery_target(message: Any) -> dict | None | object:
@@ -1020,6 +1163,53 @@ class DiscordAdapter:
             message_reference=reference_data,
         )
 
+    def _register_outbound_self_send(self, message: Any) -> str | None:
+        info = _field(message, "message_info", {})
+        self_id = _native_snowflake(_field(self.bot.user, "id"))
+        if self_id is None:
+            return None
+        group = _field(info, "group_info")
+        if group is not None:
+            route_kind = "group"
+            peer_id = str(_field(group, "group_id", "") or "")
+        else:
+            user = _field(info, "user_info")
+            route_kind = "private"
+            peer_id = str(_field(user, "user_id", "") or "")
+        return outbound_echo_registry.register(
+            PLATFORM,
+            getattr(self, "_external_self_generation", "discord-adapter"),
+            self_id,
+            route_kind,
+            peer_id,
+            timeout_sec=30.0,
+        )
+
+    async def _with_outbound_echo_tracking(self, message: Any, send):
+        token = self._register_outbound_self_send(message)
+        try:
+            result = await send()
+        except asyncio.CancelledError:
+            if token:
+                outbound_echo_registry.mark_uncertain(token)
+            raise
+        except Exception:
+            if token:
+                outbound_echo_registry.mark_uncertain(token)
+            raise
+        if token:
+            if result is False:
+                outbound_echo_registry.resolve(token, success=False)
+            else:
+                message_id = _native_snowflake(
+                    _field(result, "id", _field(result, "message_id"))
+                )
+                if message_id is not None:
+                    outbound_echo_registry.resolve(token, message_id, success=True)
+                else:
+                    outbound_echo_registry.mark_uncertain(token)
+        return result
+
     async def handle_from_nachobot(self, message: Any) -> None:
         try:
             await self._handle_from_nachobot(message)
@@ -1094,7 +1284,10 @@ class DiscordAdapter:
                         kwargs = self._native_send_kwargs(
                             text_destination, pending_reply_id
                         )
-                        sent = await text_destination.send(chunk, **kwargs)
+                        sent = await self._with_outbound_echo_tracking(
+                            message,
+                            partial(text_destination.send, chunk, **kwargs),
+                        )
                         if sent is None or getattr(sent, "id", None) is None:
                             send_ok = False
                             break
@@ -1110,7 +1303,9 @@ class DiscordAdapter:
                     kwargs = self._native_send_kwargs(
                         text_destination, pending_reply_id, file=file
                     )
-                    sent = await text_destination.send(**kwargs)
+                    sent = await self._with_outbound_echo_tracking(
+                        message, partial(text_destination.send, **kwargs)
+                    )
                     actual_ids.append(str(sent.id))
                     pending_reply_id = None
                 elif kind == "file":
@@ -1132,7 +1327,9 @@ class DiscordAdapter:
                     kwargs = self._native_send_kwargs(
                         text_destination, pending_reply_id, file=file
                     )
-                    sent = await text_destination.send(**kwargs)
+                    sent = await self._with_outbound_echo_tracking(
+                        message, partial(text_destination.send, **kwargs)
+                    )
                     actual_ids.append(str(sent.id))
                     pending_reply_id = None
                 elif kind == "video":
@@ -1147,10 +1344,14 @@ class DiscordAdapter:
                     if len(content) > min(self.config.max_attachment_bytes, MAX_LOCAL_MEDIA_UPLOAD_BYTES):
                         raise ValueError("video exceeds configured Discord upload limit")
                     file = discord.File(io.BytesIO(content), filename=_safe_filename(data.get("name"), "video.mp4"))
-                    sent = await text_destination.send(
-                        **self._native_send_kwargs(
-                            text_destination, pending_reply_id, file=file
-                        )
+                    sent = await self._with_outbound_echo_tracking(
+                        message,
+                        partial(
+                            text_destination.send,
+                            **self._native_send_kwargs(
+                                text_destination, pending_reply_id, file=file
+                            ),
+                        ),
                     )
                     actual_ids.append(str(sent.id))
                     pending_reply_id = None
@@ -1181,11 +1382,15 @@ class DiscordAdapter:
                             raise ValueError("local audio exceeds configured processing limit")
                         owned_path = await self._copy_local_media_to_temp_async(path)
                         try:
-                            sent = await self._send_audio_attachment(
-                                text_destination,
-                                Path(owned_path),
-                                reply_id=pending_reply_id,
-                                private_followup=interaction_binding is not None,
+                            sent = await self._with_outbound_echo_tracking(
+                                message,
+                                partial(
+                                    self._send_audio_attachment,
+                                    text_destination,
+                                    Path(owned_path),
+                                    reply_id=pending_reply_id,
+                                    private_followup=interaction_binding is not None,
+                                ),
                             )
                         finally:
                             try:
@@ -1204,9 +1409,13 @@ class DiscordAdapter:
                     try:
                         file = discord.File(owned_path, filename=path.name)
                         try:
-                            sent = await text_destination.send(
-                                **self._native_send_kwargs(
-                                    text_destination, pending_reply_id, file=file
+                            sent = await self._with_outbound_echo_tracking(
+                                message,
+                                partial(
+                                    text_destination.send,
+                                    **self._native_send_kwargs(
+                                        text_destination, pending_reply_id, file=file
+                                    ),
                                 ),
                             )
                         finally:
@@ -1248,12 +1457,16 @@ class DiscordAdapter:
                             payload,
                             min(MAX_WAV_BYTES, int(self.config.max_attachment_bytes)),
                         )
-                        sent = await self._send_audio_attachment(
-                            text_destination,
-                            content,
-                            reply_id=pending_reply_id,
-                            private_followup=interaction_binding is not None,
-                            require_wav=True,
+                        sent = await self._with_outbound_echo_tracking(
+                            message,
+                            partial(
+                                self._send_audio_attachment,
+                                text_destination,
+                                content,
+                                reply_id=pending_reply_id,
+                                private_followup=interaction_binding is not None,
+                                require_wav=True,
+                            ),
                         )
                         actual_ids.append(sent["message_id"])
                         pending_reply_id = None

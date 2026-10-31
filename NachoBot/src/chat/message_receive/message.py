@@ -591,6 +591,11 @@ class MessageProcessBase(Message):
                 # would duplicate the stored reply and waste a perception call.
                 # Inbound user voice is handled separately by MessageRecv.
                 return ""
+            elif segment.type == "structured_reply":
+                data = segment.data
+                if isinstance(data, dict) and data.get("schema_version") == 1 and data.get("status") == "ok":
+                    return data.get("text") if isinstance(data.get("text"), str) else ""
+                return ""
             elif segment.type == "tts_text":
                 # ``tts_text`` is an explicit outbound synthesis field.  Core
                 # materializes audio before this pass; this branch keeps the

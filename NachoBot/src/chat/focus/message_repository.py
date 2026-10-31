@@ -13,6 +13,7 @@ from typing import Iterable
 from src.common.data_models.database_data_model import DatabaseMessages
 from src.common.database.database_model import Messages
 from src.config.config import global_config
+from ncnk_message.external_self_message import is_external_self_message
 from .models import StoredMessageRef
 
 
@@ -84,6 +85,8 @@ def load_message_batch(
         if filter_command and bool(row.is_command):
             continue
         message = DatabaseMessages(**row.__data__)
+        if is_external_self_message(message):
+            continue
         message.focus_row_id = int(row.id)
         messages.append(message)
 
@@ -133,6 +136,8 @@ def load_message_rows_by_ids(
         if filter_command and bool(row.is_command):
             continue
         message = DatabaseMessages(**row.__data__)
+        if is_external_self_message(message):
+            continue
         message.focus_row_id = int(row.id)
         messages.append(message)
     return tuple(messages)
@@ -168,6 +173,8 @@ def load_message_range_summary(
         if row.message_id == "notice":
             continue
         if str(row.user_id or "") == bot_id or bool(row.is_command):
+            continue
+        if is_external_self_message(row):
             continue
         ref = StoredMessageRef(
             row_id=int(row.id),

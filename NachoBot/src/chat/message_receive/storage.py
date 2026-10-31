@@ -3,7 +3,7 @@ import json
 import hashlib
 import math
 import traceback
-from typing import Union
+from typing import Any, Union
 
 from src.common.database.database_model import Messages, Images
 from src.common.logger import get_logger
@@ -145,6 +145,37 @@ def _qq_alias_row_matches_scope(row, scope: dict, identity: dict) -> bool:
 
 
 class MessageStorage:
+    @staticmethod
+    def find_existing_platform_message(
+        platform: Any,
+        route_kind: Any,
+        route_id: Any,
+        message_id: Any,
+    ) -> StoredMessageRef | None:
+        """Find one stored message by exact platform ID and conversation route."""
+
+        platform_name = str(platform or "").strip()
+        kind = str(route_kind or "").strip().lower()
+        target_id = str(route_id or "").strip()
+        external_id = str(message_id or "").strip()
+        if not platform_name or kind not in {"private", "group"} or not target_id or not external_id:
+            return None
+        conditions = (Messages.message_id == external_id) & (Messages.chat_info_platform == platform_name)
+        if kind == "group":
+            conditions &= Messages.chat_info_group_id == target_id
+        else:
+            conditions &= Messages.chat_info_group_id.is_null(True)
+            conditions &= Messages.chat_info_user_id == target_id
+        row = Messages.select().where(conditions).order_by(Messages.id.desc()).first()
+        if row is None:
+            return None
+        return StoredMessageRef(
+            row_id=int(row.id),
+            chat_id=str(row.chat_id),
+            message_id=str(row.message_id),
+            message_time=float(row.time),
+        )
+
     @staticmethod
     def find_existing_ingress(delivery: dict) -> StoredMessageRef | None:
         """Find an exact scoped row, with compatibility for untagged legacy rows."""

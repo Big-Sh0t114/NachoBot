@@ -13,6 +13,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator, Mapping
 
+from ncnk_message.external_self_message import is_external_self_message
+
 
 RUNTIME_CAPABILITIES_KEY = "runtime_capabilities"
 PLATFORM_EVENT_KEY = "platform_event"
@@ -20,7 +22,7 @@ SUPPORTED_SCHEMA_VERSION = 1
 
 _TOOL_MODES = {"standard", "mcp_only", "disabled"}
 _WEB_SEARCH_MODES = {"standard", "disabled"}
-_REPLY_DELIVERY_MODES = {"chunked", "aggregate_tagged_text", "json_envelope", "tts_text"}
+_REPLY_DELIVERY_MODES = {"chunked", "aggregate_tagged_text", "json_envelope", "tts_text", "structured_reply"}
 _PERSON_PROFILE_MODES = {"standard", "low_latency", "disabled"}
 _TTS_LANGUAGES = {"", "ja", "zh"}
 _IDENTITY_MODES = {"standard", "external"}
@@ -58,6 +60,7 @@ class RuntimeCapabilities:
     control_emotions: tuple[str, ...] = ()
     control_actions: tuple[str, ...] = ()
     interruption_feedback_count: int = 0
+    prompt_profile: str = "standard"
 
     @classmethod
     def from_mapping(cls, value: Any) -> "RuntimeCapabilities":
@@ -101,6 +104,7 @@ class RuntimeCapabilities:
             identity_mode=_choice(value.get("identity_mode"), _IDENTITY_MODES, "standard"),
             voice_stream=_bool(value, "voice_stream", False),
             reply_controls=_bool(value, "reply_controls", False),
+            prompt_profile=_choice(value.get("prompt_profile"), {"standard", "desktop_companion"}, "standard"),
             control_emotions=_choices(value.get("control_emotions")),
             control_actions=_choices(value.get("control_actions")),
             interruption_feedback_count=_interruption_feedback_count(value.get("interruption_feedback")),
@@ -233,6 +237,8 @@ def classify_runtime_message_batch(
     planner_messages: list[Any] = []
     explicit_planner_messages: list[Any] = []
     for message in messages or ():
+        if is_external_self_message(message):
+            continue
         user_info = _message_value(message, "user_info")
         user_id = _message_value(user_info, "user_id") if user_info is not None else None
         if user_id and bot_user_id and str(user_id) == str(bot_user_id):
@@ -284,7 +290,10 @@ def classify_runtime_message_batch(
 def planner_target_eligible(message: Any) -> bool:
     """Keep direct-reply messages in context but out of Planner target maps."""
 
-    return not runtime_capabilities_from_message(message).planner_bypass
+    return (
+        not is_external_self_message(message)
+        and not runtime_capabilities_from_message(message).planner_bypass
+    )
 
 
 def _message_value(message: Any, key: str) -> Any:

@@ -9,6 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 from aiohttp import ClientSession, ClientTimeout, ClientWebSocketResponse, WSMsgType, WSServerHandshakeError
+from ncnk_message.external_self_message import outbound_echo_registry
 from ncnk_message.offline_recovery import build_recovery_metadata
 
 from .config import global_config
@@ -42,6 +43,8 @@ class SnowLumaClient:
         self._response_pool: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._event_tasks: set[asyncio.Task[None]] = set()
         self._event_recovery_contexts: dict[asyncio.Task[None], tuple[dict[str, Any], dict[str, Any]]] = {}
+        self._external_self_connections: dict[int, tuple[Any, ...] | None] = {}
+        self._event_external_self_payloads: dict[asyncio.Task[None], dict[str, Any]] = {}
         self._progress_cleanup_tasks: set[asyncio.Task[None]] = set()
         self._stop_event = asyncio.Event()
         self._connected_account_id = ""
@@ -215,6 +218,7 @@ class SnowLumaClient:
 
     async def _connect(self) -> None:
         cfg = global_config.snowluma
+        outbound_echo_registry.invalidate_platform(global_config.nachobot.platform_name)
         logger.info(
             "SnowLuma WebSocket connect attempt endpoint={} heartbeat_sec={}",
             cfg.safe_ws_url(),
@@ -237,6 +241,7 @@ class SnowLumaClient:
 
     async def _disconnect(self, *, reason: str = "manual") -> None:
         ws, session = self._ws, self._session
+        outbound_echo_registry.invalidate_platform(global_config.nachobot.platform_name)
         self._ws = None
         self._session = None
         if ws is not None and not ws.closed:
@@ -355,7 +360,7 @@ class SnowLumaClient:
             payload.get("message_id") or "-",
             len(payload.get("message")) if isinstance(payload.get("message"), list) else (1 if isinstance(payload.get("message"), str) else 0),
         )
-        if post_type in {"message", "notice", "request", "meta_event"} or "message" in payload:
+        if post_type in {"message", "message_sent", "notice", "request", "meta_event"} or "message" in payload:
             ordinary_message = post_type == "message" or (not post_type and "message" in payload)
             recovery_context = None
             if ordinary_message and self.progress_callback is not None:
@@ -377,6 +382,8 @@ class SnowLumaClient:
                     await self.finish_offline_recovery_progress(recovery_context)
                     raise
             else:
+                if post_type == "message_sent":
+                    self._external_self_connections[id(payload)] = captured_connection
                 self._track_event_callback(payload, post_type or "message")
         else:
             logger.debug("SnowLuma inbound event ignored reason=unsupported_post_type post_type={}", post_type or "missing")
@@ -421,6 +428,10 @@ class SnowLumaClient:
         """Read adapter-owned capture data without altering raw event or lifecycle state."""
         return self._recovery_contexts.get(id(payload))
 
+    def take_external_self_connection(self, payload: dict[str, Any]) -> tuple[Any, ...] | None:
+        """Return the socket identity captured when a message_sent event arrived."""
+        return self._external_self_connections.get(id(payload))
+
     async def send_offline_recovery_progress(self, context: dict[str, Any], *, active: bool) -> None:
         if self.progress_callback is None:
             return
@@ -464,6 +475,8 @@ class SnowLumaClient:
         self._event_tasks.add(task)
         if recovery_context is not None:
             self._event_recovery_contexts[task] = (payload, recovery_context)
+        if id(payload) in self._external_self_connections:
+            self._event_external_self_payloads[task] = payload
         task.add_done_callback(self._event_task_done)
         logger.debug("SnowLuma event callback scheduled post_type={} pending_callbacks={}", post_type, len(self._event_tasks))
 
@@ -475,6 +488,7 @@ class SnowLumaClient:
         try:
             await self.event_callback(payload)
         finally:
+            self._external_self_connections.pop(id(payload), None)
             if recovery_context is not None:
                 await self._complete_recovery_callback(payload, recovery_context)
 
@@ -511,6 +525,9 @@ class SnowLumaClient:
 
     def _event_task_done(self, task: asyncio.Task[None]) -> None:
         self._event_tasks.discard(task)
+        external_payload = self._event_external_self_payloads.pop(task, None)
+        if external_payload is not None:
+            self._external_self_connections.pop(id(external_payload), None)
         recovery = self._event_recovery_contexts.pop(task, None)
         if task.cancelled():
             logger.warning("SnowLuma event callback cancelled pending_callbacks={}", len(self._event_tasks))
@@ -580,6 +597,9 @@ class SnowLumaClient:
             1.0,
             float(global_config.snowluma.action_timeout_sec if timeout_sec is None else timeout_sec),
         )
+        echo_scope = self._outbound_message_scope(action, params)
+        echo_token: str | None = None
+        wire_write_started = False
         logger.debug(
             "SnowLuma action start action={} echo={} param_keys={}",
             action,
@@ -611,6 +631,23 @@ class SnowLumaClient:
                         raise RuntimeError("SnowLuma action connection changed before send")
                     if expected_account and self._connected_account_id != expected_account:
                         raise RuntimeError("SnowLuma action account identity changed before send")
+                if (
+                    echo_scope is not None
+                    and self._identity_verified
+                    and self._connected_account_id
+                    and self._ws is ws
+                    and self._connection_generation == generation
+                ):
+                    route_kind, peer_id = echo_scope
+                    echo_token = outbound_echo_registry.register(
+                        global_config.nachobot.platform_name,
+                        str(generation),
+                        self._connected_account_id,
+                        route_kind,
+                        peer_id,
+                        timeout_sec=timeout_value,
+                    )
+                wire_write_started = True
                 await ws.send_str(json.dumps(payload, ensure_ascii=False))
             response = await asyncio.wait_for(future, timeout=timeout_value)
             if self._ws is not ws or self._connection_generation != generation or ws.closed:
@@ -618,6 +655,17 @@ class SnowLumaClient:
             if expected_account and self._connected_account_id != expected_account:
                 raise RuntimeError("SnowLuma action account identity changed before response")
             error = self.action_error(response)
+            if echo_token is not None:
+                if error:
+                    outbound_echo_registry.resolve(echo_token, success=False)
+                else:
+                    response_data = response.get("data") if isinstance(response.get("data"), Mapping) else {}
+                    returned_message_id = response_data.get("message_id")
+                    if returned_message_id is None or not str(returned_message_id).strip():
+                        outbound_echo_registry.mark_uncertain(echo_token, grace_sec=5.0)
+                    else:
+                        outbound_echo_registry.resolve(echo_token, returned_message_id, success=True)
+                echo_token = None
             duration_ms = int((time.monotonic() - started) * 1000)
             if error:
                 logger.warning(
@@ -640,6 +688,12 @@ class SnowLumaClient:
                 )
             return response
         except asyncio.TimeoutError as exc:
+            if echo_token is not None:
+                if wire_write_started:
+                    outbound_echo_registry.mark_uncertain(echo_token, grace_sec=5.0)
+                else:
+                    outbound_echo_registry.resolve(echo_token, success=False)
+                echo_token = None
             logger.warning(
                 "SnowLuma action timeout action={} echo={} timeout_sec={}",
                 action,
@@ -648,9 +702,21 @@ class SnowLumaClient:
             )
             raise TimeoutError(f"SnowLuma action {action} 响应超时") from exc
         except asyncio.CancelledError:
+            if echo_token is not None:
+                if wire_write_started:
+                    outbound_echo_registry.mark_uncertain(echo_token, grace_sec=5.0)
+                else:
+                    outbound_echo_registry.resolve(echo_token, success=False)
+                echo_token = None
             logger.warning("SnowLuma action cancelled action={} echo={}", action, short_echo(echo))
             raise
         except Exception as exc:
+            if echo_token is not None:
+                if wire_write_started:
+                    outbound_echo_registry.mark_uncertain(echo_token, grace_sec=5.0)
+                else:
+                    outbound_echo_registry.resolve(echo_token, success=False)
+                echo_token = None
             logger.error(
                 "SnowLuma action failed action={} echo={} error={}",
                 action,
@@ -659,9 +725,36 @@ class SnowLumaClient:
             )
             raise
         finally:
+            if echo_token is not None:
+                if wire_write_started:
+                    outbound_echo_registry.mark_uncertain(echo_token, grace_sec=5.0)
+                else:
+                    outbound_echo_registry.resolve(echo_token, success=False)
             self._response_pool.pop(echo, None)
             if not future.done():
                 future.cancel()
+
+    @staticmethod
+    def _outbound_message_scope(action: str, params: Mapping[str, Any]) -> tuple[str, str] | None:
+        """Return the exact conversation scope for an action that emits a message."""
+        action_name = str(action or "").strip().lower()
+        if action_name.startswith("send_group_") and (action_name.endswith("_msg") or action_name == "send_group_ai_record"):
+            route_kind, route_key = "group", "group_id"
+        elif action_name == "upload_group_file":
+            route_kind, route_key = "group", "group_id"
+        elif action_name.startswith("send_private_") and action_name.endswith("_msg"):
+            route_kind, route_key = "private", "user_id"
+        elif action_name == "upload_private_file":
+            route_kind, route_key = "private", "user_id"
+        else:
+            return None
+        try:
+            peer = int(str(params.get(route_key) or "").strip())
+        except (TypeError, ValueError):
+            return None
+        if peer <= 0:
+            return None
+        return route_kind, str(peer)
 
     @staticmethod
     def action_error(response: Mapping[str, Any]) -> str:

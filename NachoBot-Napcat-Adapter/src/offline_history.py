@@ -396,8 +396,8 @@ def normalize_napcat_messages(
             raw["target_id"] = int(target.session_id)
             # Only bot-originated rows receive this routing flag. The ordinary
             # private handler still rejects temporary sub_type=group rows.
+            # Ordinary friend rows are staged as passive context by Core.
             raw["_offline_history_outgoing"] = True
-            raw["_offline_history_skip"] = True
         elif sender_id != target.session_id:
             raise HistoryPageError("NapCat friend history sender did not match the requested friend")
         normalized.append((timestamp, index, sequence, raw))
@@ -1061,8 +1061,14 @@ class NapcatOfflineHistory:
         expected_self = raw.get("self_id")
         if expected_self is not None and str(expected_self).strip() != account_id:
             raise HistoryPageError("staged NapCat row account did not match the verified login")
-        raw.pop("_offline_history_skip", None)
-        raw.pop("_offline_history_outgoing", None)
+        was_skipped = bool(raw.pop("_offline_history_skip", False))
+        outgoing_self_message = bool(raw.pop("_offline_history_outgoing", False))
+        if was_skipped:
+            # Temporary/group-shaped private rows are navigation only and must
+            # never be promoted to the ordinary private passive-context route.
+            return False
+        if outgoing_self_message:
+            raw["_offline_history_external_self"] = True
         target = item.target
         qq_identity = build_qq_private_identity(
             backend=BACKEND,

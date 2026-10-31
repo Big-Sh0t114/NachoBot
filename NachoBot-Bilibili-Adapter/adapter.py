@@ -28,8 +28,16 @@ from ncnk_message import (  # noqa: E402
     TargetConfig,
     TemplateInfo,
     UserInfo,
+    SYSTEM_EVENT_ROUTE_KEY,
+    build_system_event_route,
     build_system_event,
     get_core_token_from_env,
+)
+from ncnk_message.external_self_message import (
+    EXTERNAL_SELF_MESSAGE_MARKER,
+    build_external_self_message_event,
+    is_external_self_message_event,
+    outbound_echo_registry,
 )
 
 from bili_src.core.config import (  # noqa: E402
@@ -115,6 +123,7 @@ class BilibiliAdapter:
         self._auto_private_sessions_ts: float = 0.0
         self._user_name_cache: Dict[str, Tuple[str, float]] = {}
         self._user_name_cache_seconds = 3600
+        self._external_self_generation = uuid.uuid4().hex
 
         # Store config path for persistence
         self.config_path = config_path
@@ -169,7 +178,6 @@ class BilibiliAdapter:
                 logger,
                 stream_client=self._mic_stream_client,
             )
-        self._self_danmu_texts: Dict[int, List[Tuple[str, float]]] = {}
         self._live_status_cache: Dict[int, Tuple[int, float]] = {}
         self._live_status_cache_seconds = 20
         if self._screen_host_room_id is not None:
@@ -271,6 +279,8 @@ class BilibiliAdapter:
     # ========== Run and Control Methods ==========
 
     async def run(self) -> None:
+        outbound_echo_registry.invalidate_platform(self.config.platform)
+        self._external_self_generation = uuid.uuid4().hex
         await self.api.start()
         if self.live2d_manager:
             await self.live2d_manager.start()
@@ -307,11 +317,14 @@ class BilibiliAdapter:
         try:
             await asyncio.gather(*tasks)
         finally:
-            await self.outgoing_handler.shutdown()
-            await self.audio_player.shutdown()
-            if self.live2d_manager:
-                await self.live2d_manager.stop()
-            await self.api.close()
+            try:
+                await self.outgoing_handler.shutdown()
+                await self.audio_player.shutdown()
+                if self.live2d_manager:
+                    await self.live2d_manager.stop()
+                await self.api.close()
+            finally:
+                outbound_echo_registry.invalidate_platform(self.config.platform)
 
     async def _run_mic_worker_forever(self) -> None:
         """Keep mic worker running, restarting on failure"""
@@ -967,6 +980,13 @@ class BilibiliAdapter:
         is_mentioned: bool = False,
         guard_level: int = 0,
     ) -> None:
+        if (
+            self.config.dede_user_id
+            and str(user_id) == str(self.config.dede_user_id)
+        ):
+            # Authenticated self-account ingress is emitted by LiveRoomWorker
+            # as a passive event. It must never enter commands or Planner.
+            return
         self.tts_manager.reset_idle_timer()
         if not text:
             return
@@ -1738,14 +1758,14 @@ class BilibiliAdapter:
 
     # ========== Command Handlers ==========
 
-    async def _send_to_nachobot(self, message: MessageBase) -> None:
+    async def _send_to_nachobot(self, message: MessageBase) -> bool:
         additional_config = getattr(message.message_info, "additional_config", None)
         system_event = (
             additional_config.get("system_event")
             if isinstance(additional_config, dict)
             else None
         )
-        if isinstance(system_event, dict):
+        if isinstance(system_event, dict) and not is_external_self_message_event(message):
             event_data = system_event.get("data")
             if not isinstance(event_data, dict):
                 event_data = {}
@@ -1769,9 +1789,173 @@ class BilibiliAdapter:
             message.raw_message = None
         client = self.router.clients.get(self.config.platform)
         if client is not None:
-            await client.send_message(message.to_dict())
-            return
-        await self.router.send_message(message)
+            return await client.send_message(message.to_dict())
+        return await self.router.send_message(message)
+
+    def _register_external_self_send(
+        self, route_kind: str, peer_id: Any
+    ) -> str | None:
+        self_id = str(self.config.dede_user_id or "").strip()
+        if not self_id:
+            return None
+        return outbound_echo_registry.register(
+            self.config.platform,
+            getattr(self, "_external_self_generation", "bilibili-adapter"),
+            self_id,
+            route_kind,
+            peer_id,
+            timeout_sec=30.0,
+        )
+
+    @staticmethod
+    def _resolve_external_self_send(
+        token: str | None, message_id: Any = None, *, success: bool = False
+    ) -> None:
+        if token:
+            outbound_echo_registry.resolve(token, message_id, success=success)
+
+    @staticmethod
+    def _mark_external_self_send_uncertain(token: str | None) -> None:
+        if token:
+            outbound_echo_registry.mark_uncertain(token)
+
+    async def _forward_external_self_message(
+        self,
+        *,
+        self_id: Any,
+        message_id: Any,
+        route_kind: str,
+        peer_id: Any,
+        original_timestamp: Any,
+        sender_name: Any = None,
+        generation: str | None = None,
+        segments: list[Seg],
+        content_format: list[str],
+        additional_config: dict[str, Any] | None = None,
+        group_info: GroupInfo | None = None,
+        raw_message: str | None = None,
+    ) -> bool:
+        """Forward one authenticated self event without an actor or chat hooks."""
+
+        platform = str(self.config.platform or "").strip()
+        peer = str(peer_id or "").strip()
+        account = str(self_id or "").strip()
+        message_key = str(message_id or "").strip()
+        expected_generation = str(
+            generation or getattr(self, "_external_self_generation", "bilibili-adapter")
+        )
+        if (
+            str(self.config.dede_user_id or "").strip() != account
+            or getattr(self, "_external_self_generation", "bilibili-adapter")
+            != expected_generation
+        ):
+            outbound_echo_registry.release_event(
+                platform,
+                expected_generation,
+                account,
+                route_kind,
+                peer,
+                message_key,
+            )
+            return False
+        try:
+            event = build_external_self_message_event(
+                platform,
+                self_id=account,
+                message_id=message_key,
+                route_kind=route_kind,
+                peer_id=peer,
+                original_timestamp=original_timestamp,
+                sender_name=sender_name,
+            )
+            event_time = float(original_timestamp)
+        except (TypeError, ValueError, OverflowError):
+            outbound_echo_registry.release_event(
+                platform,
+                expected_generation,
+                account,
+                route_kind,
+                peer,
+                message_key,
+            )
+            return False
+
+        config = dict(additional_config or {})
+        config["system_event"] = event
+        if route_kind == "private":
+            try:
+                config[SYSTEM_EVENT_ROUTE_KEY] = build_system_event_route(
+                    platform, user_id=peer
+                )
+            except ValueError:
+                outbound_echo_registry.release_event(
+                    platform,
+                    expected_generation,
+                    account,
+                    route_kind,
+                    peer,
+                    message_key,
+                )
+                return False
+        elif route_kind == "group" and group_info is None:
+            group_info = GroupInfo(
+                platform=platform,
+                group_id=peer,
+                group_name=peer,
+            )
+        marked_segments = [Seg(type="text", data=EXTERNAL_SELF_MESSAGE_MARKER)]
+        marked_segments.extend(segments)
+        message = MessageBase(
+            message_info=BaseMessageInfo(
+                platform=platform,
+                message_id=message_key,
+                time=event_time,
+                user_info=None,
+                group_info=group_info,
+                format_info=FormatInfo(
+                    content_format=content_format,
+                    accept_format=ACCEPT_FORMAT_PRIVATE if route_kind == "private" else ACCEPT_FORMAT,
+                ),
+                additional_config=config,
+            ),
+            message_segment=Seg(type="seglist", data=marked_segments),
+            raw_message=raw_message,
+        )
+        try:
+            result = await self._send_to_nachobot(message)
+        except asyncio.CancelledError:
+            outbound_echo_registry.release_event(
+                platform,
+                expected_generation,
+                account,
+                route_kind,
+                peer,
+                message_key,
+            )
+            raise
+        except Exception as exc:  # noqa: BLE001 - release the reservation for any failed Core handoff
+            outbound_echo_registry.release_event(
+                platform,
+                expected_generation,
+                account,
+                route_kind,
+                peer,
+                message_key,
+            )
+            self.logger.warning(
+                f"External self message forwarding failed: error_type={type(exc).__name__}"
+            )
+            return False
+        if result is False:
+            outbound_echo_registry.release_event(
+                platform,
+                expected_generation,
+                account,
+                route_kind,
+                peer,
+                message_key,
+            )
+        return result is not False
 
     # ========== Private Message Loop ==========
 

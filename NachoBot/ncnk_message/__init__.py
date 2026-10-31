@@ -40,6 +40,15 @@ from .system_event import (
     system_event_route_result,
     validate_system_event_route,
 )
+from .external_self_message import (
+    EXTERNAL_SELF_MESSAGE_MARKER,
+    EXTERNAL_SELF_MESSAGE_SUFFIX,
+    OutboundEchoRegistry,
+    build_external_self_message_event,
+    is_external_self_message,
+    is_external_self_message_event,
+    outbound_echo_registry,
+)
 from .offline_recovery import (
     OFFLINE_RECOVERY_KEY,
     OFFLINE_RECOVERY_VERSION,
@@ -95,6 +104,13 @@ __all__ = [
     "get_system_event_route",
     "validate_system_event_route",
     "system_event_fallback_text",
+    "EXTERNAL_SELF_MESSAGE_MARKER",
+    "EXTERNAL_SELF_MESSAGE_SUFFIX",
+    "build_external_self_message_event",
+    "is_external_self_message_event",
+    "is_external_self_message",
+    "OutboundEchoRegistry",
+    "outbound_echo_registry",
     "OFFLINE_RECOVERY_KEY",
     "OFFLINE_RECOVERY_VERSION",
     "build_recovery_metadata",

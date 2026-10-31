@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import math
 import time
 import random
 import re
@@ -19,11 +20,18 @@ from ncnk_message import (
     RouteConfig,
     Router,
     Seg,
+    SYSTEM_EVENT_KEY,
+    SYSTEM_EVENT_ROUTE_KEY,
     TargetConfig,
     UserInfo,
     build_system_event,
     build_system_event_route,
     get_core_token_from_env,
+)
+from ncnk_message.external_self_message import (
+    EXTERNAL_SELF_MESSAGE_MARKER,
+    build_external_self_message_event,
+    outbound_echo_registry,
 )
 from qqcall_client.qqcall_service import QQCallPlatformBindingHeartbeat
 from ncnk_message.offline_recovery import normalize_original_timestamp
@@ -310,6 +318,12 @@ class SnowLumaBridge:
             payload.get("message_id") or "-",
         )
         try:
+            if post_type == "message_sent":
+                return await self._handle_external_self_message(
+                    payload,
+                    connection=self.client.take_external_self_connection(payload),
+                    source="live",
+                )
             if post_type == "message" or (not post_type and "message" in payload):
                 recovery_context = self.client.take_offline_recovery_context(payload)
                 return await self._handle_inbound_message(
@@ -323,7 +337,7 @@ class SnowLumaBridge:
                 logger.debug("SnowLuma event ignored reason=unsupported_post_type post_type={}", post_type or "missing")
         except Exception as exc:
             logger.error("SnowLuma inbound event failed post_type={} error={}", post_type or "missing", safe_exception(exc))
-            if post_type == "message" or (not post_type and "message" in payload):
+            if post_type in {"message", "message_sent"} or (not post_type and "message" in payload):
                 return "failed"
             return None
 
@@ -454,6 +468,13 @@ class SnowLumaBridge:
         recovery_context: dict[str, Any] | None = None,
         progress_started: bool = False,
     ) -> str:
+        if raw.get("_offline_history_external_self") is True:
+            return await self._handle_external_self_message(
+                raw,
+                connection=recovery_context.get("connection") if isinstance(recovery_context, Mapping) else None,
+                source="offline_history",
+                recovery_context=recovery_context,
+            )
         context = recovery_context or self.client.capture_offline_recovery_context(raw)
         start_attempted = False
         try:
@@ -488,6 +509,243 @@ class SnowLumaBridge:
         finally:
             if start_attempted:
                 await self.client.finish_offline_recovery_progress(context)
+
+    async def _handle_external_self_message(
+        self,
+        raw: dict[str, Any],
+        *,
+        connection: tuple[Any, ...] | None,
+        source: str,
+        recovery_context: dict[str, Any] | None = None,
+    ) -> str:
+        """Passively persist a verified SnowLuma self-message in its peer route."""
+        platform = str(global_config.nachobot.platform_name)
+        if connection is None:
+            logger.warning("SnowLuma self-message rejected reason=missing_socket_identity")
+            return "failed"
+
+        account_id = await self.client.wait_for_verified_connection(connection)
+        if account_id is None or not self.client.connection_is_current(connection):
+            logger.warning("SnowLuma self-message rejected reason=stale_or_unverified_socket")
+            return "failed"
+        account_id = str(account_id)
+        context_account = str((recovery_context or {}).get("verified_account_id") or "")
+        if context_account and context_account != account_id:
+            logger.warning("SnowLuma self-message rejected reason=history_account_mismatch")
+            return "failed"
+
+        raw_self_id = self._positive_decimal_id(raw.get("self_id"))
+        if raw_self_id != account_id:
+            logger.warning("SnowLuma self-message rejected reason=self_id_mismatch")
+            return "failed"
+        sender = raw.get("sender") if isinstance(raw.get("sender"), Mapping) else {}
+        sender_claims = [
+            value
+            for value in (sender.get("user_id"), raw.get("user_id"))
+            if value is not None
+        ]
+        normalized_claims = [self._positive_decimal_id(value) for value in sender_claims]
+        if not normalized_claims or any(value != account_id for value in normalized_claims):
+            logger.warning("SnowLuma self-message rejected reason=sender_identity_mismatch")
+            return "failed"
+
+        message_id_value = raw.get("message_id")
+        if isinstance(message_id_value, bool) or message_id_value is None:
+            logger.warning("SnowLuma self-message rejected reason=missing_message_id")
+            return "failed"
+        message_id = str(message_id_value).strip()
+        if not message_id or len(message_id) > 256 or any(ord(char) < 32 for char in message_id):
+            logger.warning("SnowLuma self-message rejected reason=invalid_message_id")
+            return "failed"
+
+        source_timestamp = raw.get("time")
+        if isinstance(source_timestamp, bool) or source_timestamp is None:
+            logger.warning("SnowLuma self-message rejected reason=missing_original_timestamp")
+            return "failed"
+        try:
+            numeric_timestamp = float(source_timestamp)
+        except (TypeError, ValueError, OverflowError):
+            numeric_timestamp = 0.0
+        if not math.isfinite(numeric_timestamp) or numeric_timestamp <= 0:
+            logger.warning("SnowLuma self-message rejected reason=invalid_original_timestamp")
+            return "failed"
+        original_timestamp, _ = normalize_original_timestamp(source_timestamp, time.time())
+
+        message_type = str(raw.get("message_type") or "").strip().lower()
+        if message_type == "group":
+            route_kind = "group"
+            peer_id = self._positive_decimal_id(raw.get("group_id"))
+            group_id = self._to_int(peer_id)
+            user_id = self._to_int(account_id)
+            if peer_id is None or group_id is None or user_id is None:
+                logger.warning("SnowLuma self-message rejected reason=invalid_group_route")
+                return "failed"
+        elif message_type == "private":
+            route_kind = "private"
+            peer_id = self._positive_decimal_id(raw.get("target_id"))
+            group_id = None
+            user_id = self._to_int(peer_id)
+            if peer_id is None or user_id is None or peer_id == account_id:
+                logger.warning("SnowLuma self-message rejected reason=invalid_private_target")
+                return "failed"
+        else:
+            logger.warning("SnowLuma self-message rejected reason=unsupported_message_type")
+            return "failed"
+
+        if source == "live":
+            classification = await outbound_echo_registry.classify_event(
+                platform,
+                str(connection[1]),
+                account_id,
+                route_kind,
+                peer_id,
+                message_id,
+            )
+            if classification in {"outbound", "duplicate", "uncertain"}:
+                logger.debug(
+                    "SnowLuma self-message suppressed reason={} route={} peer_id={} message_id={}",
+                    classification,
+                    route_kind,
+                    peer_id,
+                    message_id,
+                )
+                return classification
+
+        def release_live_reservation() -> None:
+            if source == "live":
+                outbound_echo_registry.release_event(
+                    platform,
+                    str(connection[1]),
+                    account_id,
+                    route_kind,
+                    peer_id,
+                    message_id,
+                )
+
+        if not await self._allowed(user_id, group_id, ignore_bot=route_kind == "group"):
+            return "filtered"
+
+        if route_kind == "group":
+            group_info = GroupInfo(
+                platform=platform,
+                group_id=group_id,
+                group_name=await self._get_group_name(group_id),
+            )
+            private_route = None
+        else:
+            group_info = None
+            private_route = build_system_event_route(platform, user_id=peer_id)
+
+        sender_name = sender.get("nickname") or sender.get("nick")
+        if route_kind == "group":
+            sender_name = sender.get("card") or sender_name
+        event = build_external_self_message_event(
+            platform,
+            self_id=account_id,
+            message_id=message_id,
+            route_kind=route_kind,
+            peer_id=peer_id,
+            original_timestamp=original_timestamp,
+            sender_name=sender_name,
+            source=source,
+        )
+        additional_config: dict[str, Any] = {
+            SYSTEM_EVENT_KEY: event,
+            "snowluma_sub_type": str(raw.get("sub_type") or ""),
+        }
+        if private_route is not None:
+            additional_config[SYSTEM_EVENT_ROUTE_KEY] = private_route
+        if source == "offline_history" and recovery_context is not None:
+            metadata = recovery_context.get("metadata")
+            if isinstance(metadata, Mapping):
+                additional_config["offline_recovery"] = dict(metadata)
+
+        raw_segments = raw.get("message")
+        if isinstance(raw_segments, str):
+            raw_segments = [{"type": "text", "data": {"text": raw_segments}}]
+        if not isinstance(raw_segments, list):
+            logger.warning("SnowLuma self-message rejected reason=invalid_segment_container")
+            release_live_reservation()
+            return "failed"
+
+        segments: list[Seg] = [Seg(type="text", data=EXTERNAL_SELF_MESSAGE_MARKER)]
+        for index, item in enumerate(raw_segments):
+            kind = str(item.get("type") or "unknown") if isinstance(item, Mapping) else "invalid"
+            try:
+                converted = await self._convert_inbound_segment(item, raw, additional_config)
+            except Exception as exc:
+                logger.warning(
+                    "SnowLuma self-message segment failed index={} kind={} error={}",
+                    index,
+                    kind,
+                    safe_exception(exc),
+                )
+                continue
+            if converted is None:
+                continue
+            segments.extend(converted if isinstance(converted, list) else [converted])
+
+        additional_config.pop("_offline_history_media_failed", None)
+        if len(segments) == 1:
+            logger.warning("SnowLuma self-message dropped reason=no_convertible_segments message_id={}", message_id)
+            release_live_reservation()
+            return "failed"
+        if self._contains_visual(segments):
+            additional_config["visual_policy"] = global_config.visual.to_message_policy()
+
+        if not self.client.connection_is_current(connection) or self.client.connected_account_id != account_id:
+            release_live_reservation()
+            logger.warning("SnowLuma self-message rejected reason=socket_changed_during_conversion message_id={}", message_id)
+            return "failed"
+
+        message_base = MessageBase(
+            message_info=BaseMessageInfo(
+                platform=platform,
+                message_id=message_id,
+                time=original_timestamp,
+                user_info=None,
+                group_info=group_info,
+                template_info=None,
+                format_info=FormatInfo(
+                    content_format=["text", "image", "emoji", "voice"],
+                    accept_format=get_accept_format(bool(global_config.voice.use_tts)),
+                ),
+                additional_config=additional_config,
+            ),
+            message_segment=Seg(type="seglist", data=segments),
+            raw_message=(raw.get("raw_message") if isinstance(raw.get("raw_message"), str) else json.dumps(raw, ensure_ascii=False, default=str)),
+        )
+        try:
+            handed_off = await self.router.send_message(message_base)
+        except asyncio.CancelledError:
+            release_live_reservation()
+            raise
+        except Exception as exc:
+            handed_off = False
+            logger.warning("SnowLuma self-message Core handoff raised message_id={} error={}", message_id, safe_exception(exc))
+        if not handed_off:
+            release_live_reservation()
+            logger.error("SnowLuma self-message Core handoff failed message_id={}", message_id)
+            return "failed"
+        logger.info(
+            "SnowLuma self-message Core handoff success source={} route={} peer_id={} message_id={} segment_count={}",
+            source,
+            route_kind,
+            peer_id,
+            message_id,
+            len(segments),
+        )
+        return "sent"
+
+    @staticmethod
+    def _positive_decimal_id(value: Any) -> str | None:
+        if isinstance(value, bool) or value is None:
+            return None
+        try:
+            normalized = int(str(value).strip())
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return str(normalized) if normalized > 0 else None
 
     async def _handle_inbound_message_with_recovery(
         self,

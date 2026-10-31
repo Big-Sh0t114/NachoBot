@@ -33,6 +33,14 @@ message_queue = asyncio.Queue()
 _connection_epoch_started_at = time.time()
 _active_server_connection = None
 
+nc_message_sender.configure_outbound_echo_tracking(
+    lambda: (
+        global_config.nachobot_server.platform_name,
+        message_handler.connection_generation,
+        message_handler.verified_account_id,
+    )
+)
+
 
 def _connection_is_open(connection) -> bool:
     if connection is None:
@@ -196,6 +204,19 @@ async def message_recv(server_connection: Server.ServerConnection):
     await nc_message_sender.set_server_connection(server_connection)
     asyncio.create_task(connection_watchdog(server_connection))
     asyncio.create_task(_verify_napcat_login(server_connection, connection_epoch_started_at))
+    self_message_tasks: set[asyncio.Task] = set()
+
+    def _self_message_done(task: asyncio.Task) -> None:
+        self_message_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            error = task.exception()
+        except asyncio.CancelledError:
+            return
+        if error is not None:
+            logger.error("NapCat message_sent callback failed error={}", str(error)[:240])
+
     try:
         async for raw_message in server_connection:
             last_message_time = time.time()
@@ -204,7 +225,7 @@ async def message_recv(server_connection: Server.ServerConnection):
                 logger.debug(f"{raw_message[:1500]}..." if (len(raw_message) > 1500) else raw_message)
                 decoded_raw_message: dict = json.loads(raw_message)
                 post_type = decoded_raw_message.get("post_type")
-                if post_type in ["meta_event", "message", "notice"]:
+                if post_type in ["meta_event", "message", "message_sent", "notice"]:
                     if post_type == "message":
                         recovery_context = message_handler.capture_offline_recovery_context(
                             decoded_raw_message,
@@ -218,6 +239,25 @@ async def message_recv(server_connection: Server.ServerConnection):
                         except BaseException:
                             await message_handler.finish_offline_recovery_progress(recovery_context)
                             raise
+                    elif post_type == "message_sent":
+                        context = {
+                            "transport_owned": True,
+                            "expected_connection": server_connection,
+                            "metadata": {
+                                "transport_connection_generation": transport_connection_generation,
+                            },
+                        }
+                        # Self echoes can wait for the action response to publish
+                        # its exact platform ID. Keep that wait off the websocket reader.
+                        task = asyncio.create_task(
+                            message_handler.handle_external_self_message(
+                                decoded_raw_message,
+                                transport_context=context,
+                            ),
+                            name="napcat-message-sent",
+                        )
+                        self_message_tasks.add(task)
+                        task.add_done_callback(_self_message_done)
                     else:
                         await message_queue.put(decoded_raw_message)
                 elif post_type is None:
@@ -238,6 +278,10 @@ async def message_recv(server_connection: Server.ServerConnection):
         logger.error(f"message_recv 发生严重未处理异常: {e}")
         notify_platform_status(online=False)
     finally:
+        for task in tuple(self_message_tasks):
+            task.cancel()
+        if self_message_tasks:
+            await asyncio.gather(*tuple(self_message_tasks), return_exceptions=True)
         if _active_server_connection is server_connection:
             _active_server_connection = None
             message_handler.invalidate_server_connection(

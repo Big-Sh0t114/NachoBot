@@ -12,11 +12,35 @@ from ncnk_message import (
     Seg,
     UserInfo,
 )
+from ncnk_message.external_self_message import outbound_echo_registry
 
 ACCEPT_FORMAT = ["text", "reply", "command"]
 COMMENT_REPLY_LIMIT = 10
 COMMENT_LIMIT_FALLBACK_TEXT = "NachoBot有点口渴了哦，先休息一下啦~"
 COMMENT_DELIVERY_TARGET_KIND = "bilibili.comment"
+
+
+def _register_echo(adapter: Any, peer_id: str) -> str | None:
+    register = getattr(adapter, "_register_external_self_send", None)
+    return register("group", peer_id) if callable(register) else None
+
+
+def _resolve_echo(
+    adapter: Any,
+    token: str | None,
+    message_id: Any = None,
+    *,
+    success: bool = False,
+) -> None:
+    resolve = getattr(adapter, "_resolve_external_self_send", None)
+    if callable(resolve):
+        resolve(token, message_id, success=success)
+
+
+def _mark_echo_uncertain(adapter: Any, token: str | None) -> None:
+    mark_uncertain = getattr(adapter, "_mark_external_self_send_uncertain", None)
+    if callable(mark_uncertain):
+        mark_uncertain(token)
 
 class CommentHandler:
     def __init__(self, config: Any, logger, adapter_ref: Any):
@@ -84,6 +108,15 @@ class CommentHandler:
             old = self.reply_seen.pop(0)
             self.reply_seen_set.discard(old)
         return True
+
+    def _untrack_notice_key(self, notify_key: str) -> None:
+        if not notify_key or notify_key not in self.reply_seen_set:
+            return
+        self.reply_seen_set.discard(notify_key)
+        try:
+            self.reply_seen.remove(notify_key)
+        except ValueError:
+            pass
 
     def _is_at_me(self, at_details: Any) -> bool:
         if not self.config.dede_user_id:
@@ -161,11 +194,14 @@ class CommentHandler:
             user = item.get("user") or {}
             reply_item = item.get("item") or {}
             user_id = str(user.get("mid") or "")
+            self_id = str(self.config.dede_user_id or "").strip()
+            is_self = bool(self_id and user_id and user_id == self_id)
             user_name = str(user.get("nickname") or user_id)
             if (
                 self.config.comment_resolve_user_nickname
                 and user_id
                 and (not user_name or user_name == user_id)
+                and not is_self
             ):
                 user_name = await self.adapter._resolve_user_nickname(user_id)
             business_id = reply_item.get("business_id")
@@ -182,6 +218,74 @@ class CommentHandler:
             if source == "at" and self.config.dede_user_id and not is_at_me:
                 self.logger.debug("At notice without bot mention: id={}", notify_id)
             group_id = f"comment:{business_id}:{subject_id}"
+            now_ts = time.time()
+            try:
+                reply_time = float(item.get("reply_time") or 0)
+            except (TypeError, ValueError, OverflowError):
+                reply_time = 0.0
+            if is_self:
+                if reply_time <= 0:
+                    self._untrack_notice_key(notify_key)
+                    continue
+                native_comment_id = (
+                    reply_item.get("rpid")
+                    or reply_item.get("rpid_str")
+                    or item.get("rpid")
+                    or item.get("rpid_str")
+                    or reply_item.get("id_str")
+                )
+                if native_comment_id in (None, ""):
+                    continue
+                own_message_id = str(native_comment_id)
+                event_generation = getattr(
+                    self.adapter, "_external_self_generation", "bilibili-adapter"
+                )
+                classification = await outbound_echo_registry.classify_event(
+                    self.config.platform,
+                    event_generation,
+                    self_id,
+                    "group",
+                    group_id,
+                    own_message_id,
+                )
+                if classification != "external":
+                    continue
+                passive_config = self._build_comment_notice_config(
+                    notify_id=notify_id,
+                    group_id=group_id,
+                    business_id=business_id,
+                    subject_id=subject_id,
+                    reply_item=reply_item,
+                    source=source,
+                    is_at_me=is_at_me,
+                    reply_time=reply_time,
+                )
+                passive_config.pop("delivery_target", None)
+                passive_config.pop("is_mentioned", None)
+                accepted = await self.adapter._forward_external_self_message(
+                    self_id=self_id,
+                    message_id=own_message_id,
+                    route_kind="group",
+                    peer_id=group_id,
+                    original_timestamp=reply_time,
+                    sender_name=user.get("nickname"),
+                    generation=event_generation,
+                    segments=[Seg(type="text", data=str(content))],
+                    content_format=["text"],
+                    additional_config=passive_config,
+                    group_info=GroupInfo(
+                        platform=self.config.platform,
+                        group_id=group_id,
+                        group_name=group_id,
+                    ),
+                    raw_message=json.dumps(item, ensure_ascii=True),
+                )
+                if not accepted:
+                    self._untrack_notice_key(notify_key)
+                continue
+            if reply_time <= 0:
+                reply_time = now_ts
+
             state_key = (group_id, user_id)
             state = self.comment_reply_state.get(
                 state_key, {"count": 0, "silenced": False, "fallback_sent": False}
@@ -207,8 +311,6 @@ class CommentHandler:
                 state["silenced"] = True
                 self.comment_reply_state[state_key] = state
                 continue
-            now_ts = time.time()
-            reply_time = float(item.get("reply_time") or now_ts)
             message_info = BaseMessageInfo(
                 platform=self.config.platform,
                 message_id=notify_id,
@@ -436,6 +538,9 @@ class CommentHandler:
             root_id,
             parent_id,
         )
+        echo_token = _register_echo(
+            self.adapter, f"comment:{comment_type}:{oid}"
+        )
         try:
             resp = await self.adapter.api.send_comment_reply(
                 comment_type=comment_type,
@@ -444,9 +549,33 @@ class CommentHandler:
                 root=root_id,
                 parent=parent_id,
             )
-            if (resp or {}).get("code") != 0:
+            response_code = (resp or {}).get("code")
+            if response_code != 0:
+                if response_code is None:
+                    _mark_echo_uncertain(self.adapter, echo_token)
+                else:
+                    _resolve_echo(self.adapter, echo_token, success=False)
                 self.logger.warning(f"Comment reply failed: {resp}")
             else:
+                data = (resp or {}).get("data") or {}
+                reply_id = None
+                if isinstance(data, dict):
+                    reply_id = data.get("rpid") or data.get("rpid_str")
+                    nested_reply = data.get("reply")
+                    if reply_id is None and isinstance(nested_reply, dict):
+                        reply_id = nested_reply.get("rpid") or nested_reply.get(
+                            "rpid_str"
+                        )
+                if reply_id not in (None, ""):
+                    _resolve_echo(
+                        self.adapter, echo_token, reply_id, success=True
+                    )
+                else:
+                    _mark_echo_uncertain(self.adapter, echo_token)
                 self.logger.info("Comment reply ok")
+        except asyncio.CancelledError:
+            _mark_echo_uncertain(self.adapter, echo_token)
+            raise
         except Exception as exc:
+            _mark_echo_uncertain(self.adapter, echo_token)
             self.logger.error(f"Comment reply error: {exc}")
