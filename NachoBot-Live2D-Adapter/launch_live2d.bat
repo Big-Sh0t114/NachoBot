@@ -3,54 +3,68 @@ setlocal EnableExtensions
 chcp 65001 >nul
 title NachoBot Live2D Adapter
 set "PYTHONNOUSERSITE=1"
+set "LIVE2D_DIR=%~dp0"
 
-set "ROOT=%~dp0"
-set "LIVE2D_DIR=%ROOT%"
-
-if not exist "%LIVE2D_DIR%\" (
-    echo [ERROR] Live2D Adapter directory not found: %LIVE2D_DIR%
+if not exist "%LIVE2D_DIR%config.toml" (
+    echo [ERROR] Live2D configuration not found: %LIVE2D_DIR%config.toml
     pause
     exit /b 1
 )
 
-REM ===== check and install uv =====
 where uv >nul 2>&1
 if errorlevel 1 (
-    echo [INFO] uv not found, auto installing...
-    powershell -NoProfile -ExecutionPolicy ByPass -Command "irm https://astral.sh/uv/install.ps1 | iex"
-    if errorlevel 1 (
-        echo [ERROR] uv install failed. Please install manually using: pip install uv
-        pause
-        exit /b 1
-    )
-    set "PATH=%USERPROFILE%\.local\bin;%USERPROFILE%\.cargo\bin;%PATH%"
-    where uv >nul 2>&1
-    if errorlevel 1 (
-        echo [ERROR] uv installed but not found in PATH. Please restart terminal.
-        pause
-        exit /b 1
-    )
-    echo [OK] uv installed.
-)
-
-REM ===== sync dependencies =====
-cd /d "%LIVE2D_DIR%"
-echo [SYNC] NachoBot-Live2D-Adapter ...
-uv sync
-if errorlevel 1 (
-    echo [ERROR] Live2D Adapter uv sync failed.
+    echo [ERROR] uv is required to launch the Live2D adapter.
+    echo Install uv from https://docs.astral.sh/uv/getting-started/installation/ and run this file again.
     pause
     exit /b 1
 )
 
-echo [NachoBot Live2D Adapter] Starting...
-uv run python -m live2d_adapter --config "config.toml"
-set "EXIT_CODE=%ERRORLEVEL%"
+cd /d "%LIVE2D_DIR%"
+echo [SYNC] NachoBot-Live2D-Adapter ...
+call uv sync --locked
+if errorlevel 1 (
+    echo [ERROR] Live2D Adapter dependency sync failed.
+    pause
+    exit /b 1
+)
 
+set "LAUNCH_ARGS="
+if "%~1"=="" goto launch
+if /I "%~1"=="desktop_pet" goto desktop_pet
+if /I "%~1"=="live" goto live
+if /I "%~1"=="logs" goto logs
+echo Usage: launch_live2d.bat [desktop_pet^|live^|logs ALL^|LIVE2D^|CORE]
+exit /b 2
+
+:desktop_pet
+if not "%~2"=="" goto bad_arguments
+set "LAUNCH_ARGS=--mode desktop_pet"
+goto launch
+
+:live
+if not "%~2"=="" goto bad_arguments
+set "LAUNCH_ARGS=--mode live"
+goto launch
+
+:logs
+if /I "%~2"=="ALL" set "LAUNCH_ARGS=--show-logs ALL"
+if /I "%~2"=="LIVE2D" set "LAUNCH_ARGS=--show-logs LIVE2D"
+if /I "%~2"=="CORE" set "LAUNCH_ARGS=--show-logs CORE"
+if "%LAUNCH_ARGS%"=="" goto bad_arguments
+if not "%~3"=="" goto bad_arguments
+goto launch
+
+:bad_arguments
+echo [ERROR] Invalid launcher arguments.
+echo Usage: launch_live2d.bat [desktop_pet^|live^|logs ALL^|LIVE2D^|CORE]
+exit /b 2
+
+:launch
+call uv run --locked python -u "%LIVE2D_DIR%scripts\launch_desktop_pet.py" --config "%LIVE2D_DIR%config.toml" %LAUNCH_ARGS%
+set "EXIT_CODE=%ERRORLEVEL%"
 if not "%EXIT_CODE%"=="0" (
     echo.
     echo [NachoBot Live2D Adapter] Exited with code %EXIT_CODE%.
     pause
 )
-
 exit /b %EXIT_CODE%
