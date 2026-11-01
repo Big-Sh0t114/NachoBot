@@ -378,7 +378,7 @@ uvicorn==0.54.0
     # via
     #   mcp
     #   nachobot
-websockets==16.1.1
+websockets==17.3
     # via
     #   google-genai
     #   nachobot
