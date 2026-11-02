@@ -7,7 +7,7 @@ dependencies = [
     "aiohttp>=3.14.4",
     "cryptography>=50.0.1",
     "einops>=0.8.2",
-    "fastapi>=0.135.1,<0.141.0",
+    "fastapi>=0.135.1,<0.163.0",
     "hf-xet>=1.5.2",
     "loguru>=0.7.3",
     "numpy",
