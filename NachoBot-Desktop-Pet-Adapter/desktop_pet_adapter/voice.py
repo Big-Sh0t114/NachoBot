@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import Future
 from typing import Any
+from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -32,7 +34,7 @@ def speech_segments(text: str) -> list[str]:
 
 
 def pcm_format(headers: Any) -> dict[str, Any]:
-    """Validate the current local Multimodal Adapter PCM contract."""
+    """Validate the Core multimodal PCM stream contract."""
     if headers.get("X-TTS-Stream-Version") != "1":
         raise ValueError("不支持的 TTS 流版本")
     if headers.get("X-Audio-Codec") != "pcm_s16le":
@@ -65,7 +67,6 @@ class DesktopVoice:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._future: Future | None = None
-
     def token(self) -> int:
         with self._lock:
             return self._epoch
@@ -88,36 +89,64 @@ class DesktopVoice:
                 return False
             self._cancel_locked()
             epoch = self._epoch
-            if self._loop is None:
-                ready = threading.Event()
-
-                def run() -> None:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    self._loop = loop
-                    ready.set()
-                    loop.run_forever()
-                    pending = asyncio.all_tasks(loop)
-                    for task in pending:
-                        task.cancel()
-                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-                    loop.close()
-
-                self._thread = threading.Thread(target=run, name="live2d-voice", daemon=True)
-                self._thread.start()
-                ready.wait(2)
+            self._ensure_loop_locked()
             assert self._loop is not None
             self._future = asyncio.run_coroutine_threadsafe(
                 self._speak(text, language, epoch), self._loop
             )
             return True
 
-    def _send(self, epoch: int, command: str, value: Any) -> bool:
-        with self._lock:
-            if self._closed or not self._enabled or epoch != self._epoch:
-                return False
-            self.emit(command, value)
-            return True
+    def _ensure_loop_locked(self) -> None:
+        if self._loop is not None:
+            return
+        ready = threading.Event()
+
+        def run() -> None:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            self._loop = loop
+            ready.set()
+            loop.run_forever()
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            loop.close()
+
+        self._thread = threading.Thread(target=run, name="live2d-voice", daemon=True)
+        self._thread.start()
+        if not ready.wait(2):
+            raise RuntimeError("desktop voice worker did not start")
+
+    @staticmethod
+    def _authorization_header() -> str | None:
+        token = os.environ.get("NACHOBOT_CORE_TOKEN", "").strip()
+        if not token:
+            return None
+        if token[:7].casefold() == "bearer ":
+            token = token[7:].strip()
+        return f"Bearer {token}" if token else None
+
+    def _core_http_origin(self) -> str:
+        parts = urlsplit(self.config.core_url)
+        schemes = {"ws": "http", "wss": "https"}
+        scheme = schemes.get(parts.scheme.casefold())
+        host = parts.hostname
+        if scheme is None or not host:
+            raise ValueError("core_url must contain a ws:// or wss:// origin")
+        # Build authority from hostname/port so userinfo in a URL can never be
+        # forwarded in an HTTP request or accidentally included in diagnostics.
+        authority = f"[{host}]" if ":" in host else host
+        if parts.port is not None:
+            authority = f"{authority}:{parts.port}"
+        return f"{scheme}://{authority}"
+
+    def _core_headers(self) -> dict[str, str]:
+        headers = {"Accept": "application/json"}
+        authorization = self._authorization_header()
+        if authorization:
+            headers["Authorization"] = authorization
+        return headers
 
     async def _speak(self, text: str, language: str, epoch: int) -> None:
         started = time.monotonic()
@@ -133,11 +162,15 @@ class DesktopVoice:
                 self.on_error(f"语音生成失败：{exc}。文字回答已保留。")
 
     async def _multimodal(self, text: str, language: str, epoch: int, started: float) -> None:
-        timeout = aiohttp.ClientTimeout(total=120, sock_connect=5, sock_read=20)
-        url = self.config.tts_url.rstrip("/") + "/api/tts/stream"
-        payload = {"text": text, "text_lang": language, "platform": "local.live2d"}
+        timeout = aiohttp.ClientTimeout(total=120, sock_connect=5, sock_read=90)
+        url = self._core_http_origin() + "/api/multimodal/tts/stream"
+        payload = {
+            "text": text,
+            "text_lang": language,
+            "platform": "local.live2d",
+        }
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            response = await session.post(url, json=payload)
+            response = await session.post(url, json=payload, headers=self._core_headers())
             async with response:
                 response.raise_for_status()
                 fmt = pcm_format(response.headers)

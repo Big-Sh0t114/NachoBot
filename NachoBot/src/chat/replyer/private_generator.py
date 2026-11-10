@@ -1212,9 +1212,17 @@ class PrivateReplyer:
 
         time_block = f"当前时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 
-        companion_capabilities = runtime_capabilities_from_stream(chat_stream)
-        from .companion_prompt import desktop_proactive_context
-        proactive_context = desktop_proactive_context(reply_message) if chat_stream.platform == "local.live2d" else ""
+        # Companion behavior is bound to this reply's trigger snapshot. The stream
+        # context can already point at a newer mutable message; the scoped
+        # capability snapshot remains authoritative when the generation path set it.
+        companion_capabilities = memory_capabilities
+        from .companion_prompt import desktop_proactive_context, desktop_silent_reply_allowed
+        proactive_context = desktop_proactive_context(
+            reply_message, capabilities=companion_capabilities,
+        ) if chat_stream.platform == "local.live2d" else ""
+        allow_silent_reply = bool(proactive_context) and desktop_silent_reply_allowed(
+            reply_message, capabilities=companion_capabilities,
+        )
         if companion_capabilities.prompt_profile == "desktop_companion" and (not actorless_target or proactive_context):
             from .companion_prompt import build_companion_prompt, desktop_visual_context
             prompt = build_companion_prompt(
@@ -1231,6 +1239,7 @@ class PrivateReplyer:
                 ) if value),
                 guard=build_guardrail_instruction(injection_detected), time_block=time_block,
                 emotions=companion_capabilities.control_emotions, actions=companion_capabilities.control_actions,
+                allow_silent_reply=allow_silent_reply,
             )
             return ReplyPromptBuildResult(prompt, selected_expressions, sandbox_candidate)
 

@@ -126,7 +126,7 @@ if "%LIVE2D_ENABLED%"=="0" (
     echo [OK] Existing Live2D Adapter detected at %LIVE2D_HOST%:%LIVE2D_PORT%.
   ) else (
     echo [START] NachoBot-Live2D-Adapter ...
-    start "NachoBot-Live2D" /D "%LIVE2D_DIR%" "%ComSpec%" /k call "%LIVE2D_LAUNCHER%"
+    start "NachoBot-Live2D-Adapter" /D "%LIVE2D_DIR%" "%ComSpec%" /k call "%LIVE2D_LAUNCHER%"
 
   echo [WAIT] Waiting for Live2D Adapter at %LIVE2D_HOST%:%LIVE2D_PORT% ...
   powershell -NoProfile -ExecutionPolicy Bypass -Command "$deadline=(Get-Date).AddSeconds(30); do { try { $client=New-Object System.Net.Sockets.TcpClient; $client.Connect('%LIVE2D_HOST%',%LIVE2D_PORT%); $client.Close(); exit 0 } catch { Start-Sleep -Milliseconds 500 } } while ((Get-Date) -lt $deadline); exit 1"

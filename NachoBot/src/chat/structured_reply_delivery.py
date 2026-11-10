@@ -15,6 +15,15 @@ def normalize_reply(raw: str, request_id: str, capabilities: Any) -> dict[str, A
         value = json.loads(candidate)
     except (ValueError, TypeError):
         value = {"text": candidate} if candidate and candidate[:1] not in '{[`' else None
+    if isinstance(value, dict) and "silence" in value:
+        if (
+            set(value) == {"silence"}
+            and value.get("silence") is True
+            and getattr(capabilities, "allow_silent_reply", False) is True
+        ):
+            return {"schema_version": 1, "request_id": request_id, "status": "silent"}
+        return {"schema_version": 1, "request_id": request_id, "status": "error",
+                "error": {"code": "invalid_reply", "message": "回复格式解析失败，请重试。"}}
     text = value.get("text") if isinstance(value, dict) else None
     if not isinstance(text, str) or not text.strip():
         return {"schema_version": 1, "request_id": request_id, "status": "error",
@@ -35,7 +44,8 @@ async def deliver_structured_reply(reply_set: Any, message: Any, stream_id: str,
     from src.chat.message_receive.uni_message_sender import _should_suppress_text_reply
 
     raw = "".join(str(item.content) for item in reply_set.reply_data if item.content_type == ReplyContentType.TEXT)
-    payload = normalize_reply(raw, str(message.message_id), runtime_capabilities_from_message(message))
+    payload = normalize_reply(raw, str(message.message_id),
+                              runtime_capabilities_from_message(message, stream_id=stream_id))
     text = payload.get("text", "")
     if text and _should_suppress_text_reply(text):
         text = payload["text"] = "Filtered"

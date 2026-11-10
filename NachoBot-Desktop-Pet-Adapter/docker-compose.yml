@@ -3,7 +3,8 @@ services:
     container_name: nacho-bot-live2d-adapter
     platform: windows/amd64
     build:
-      context: .
+      context: ..
+      dockerfile: NachoBot-Desktop-Pet-Adapter/Dockerfile
     environment:
       - TZ=Asia/Shanghai
       - NACHOBOT_LIVE2D_HOST=0.0.0.0
@@ -13,9 +14,9 @@ services:
     volumes:
       - type: bind
         source: ./config.toml
-        target: C:/workspace/NachoBot-Live2D-Adapter/config.toml
+        target: C:/workspace/NachoBot-Desktop-Pet-Adapter/config.toml
       - type: bind
-        source: ./resources
+        source: ../NachoBot-Live2D-Adapter/resources
         target: C:/workspace/NachoBot-Live2D-Adapter/resources
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; connection = socket.create_connection(('127.0.0.1', 8766), 3); connection.close()"]

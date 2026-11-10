@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import math
 import os
 import queue
 import random
@@ -23,6 +24,7 @@ from urllib.parse import urljoin, urlsplit
 from urllib.request import Request, urlopen
 
 from .config import DesktopChatConfig
+from .desktop_interactions import _system_idle_seconds
 from .desktop_pet import clamp_window_position
 from .ui_theme import PALETTE, ScrollThumb, popup_position, popup_shell, rounded_surface, px, scale_widgets, ui_scale
 
@@ -254,22 +256,222 @@ def docked_window_position(
     return int(x), int(y)
 
 
+@dataclass(frozen=True, slots=True)
+class ChatUILayout:
+    """Pixel-space rectangles shared by the composer and toolbar windows."""
+
+    placement: str
+    toolbar_positions: dict[str, tuple[int, int]]
+    toolbar_rect: tuple[int, int, int, int]
+    composer_rect: tuple[int, int, int, int]
+    bounds_rect: tuple[int, int, int, int]
+    fits: bool
+
+
+def _bounded_origin(value: int, start: int, end: int, extent: int) -> int:
+    """Clamp a window origin when possible, anchoring at start if it cannot fit."""
+
+    latest = end - extent
+    if latest < start:
+        return int(start)
+    return int(max(start, min(latest, value)))
+
+
+def _top_level_geometry(width: int, height: int, x: int, y: int) -> str:
+    """Format absolute Tk geometry coordinates, including negative monitors."""
+
+    # Tk uses the unusual ``+-N`` form to mean the absolute negative screen
+    # coordinate N; a normal ``-N`` means N pixels from the virtual-screen edge.
+    return f"{int(width)}x{int(height)}+{int(x)}+{int(y)}"
+
+
+def chat_ui_layout(
+    pet_rect: tuple[int, int, int, int],
+    work_area: tuple[int, int, int, int],
+    scale: float = 1.0,
+    kinds: tuple[str, ...] = ("settings", "history", "language", "speech", "proactive"),
+    *,
+    composer_size: tuple[int, int] | None = None,
+    pet_gap: int | None = None,
+    band_gap: int | None = None,
+) -> ChatUILayout:
+    """Lay out one horizontal toolbar band and one composer band around a pet.
+
+    All inputs and output rectangles use native pixel coordinates. The composer
+    row is reserved for every layout, including layouts with only a settings
+    button, so changing focus or toolbar options never changes the row spacing.
+    """
+
+    factor = float(scale)
+    if not math.isfinite(factor) or factor <= 0:
+        factor = 1.0
+    kinds = tuple(kinds)
+    pet_left, pet_top, pet_right, pet_bottom = (int(value) for value in pet_rect)
+    work_left, work_top, work_right, work_bottom = (int(value) for value in work_area)
+    composer_width, composer_height = composer_size or (
+        px(DOCK_WIDTH, factor),
+        px(DOCK_HEIGHT, factor),
+    )
+    composer_width, composer_height = max(1, int(composer_width)), max(1, int(composer_height))
+    button_width = px(TOOLBAR_BUTTON_WIDTH, factor)
+    button_height = px(TOOLBAR_BUTTON_HEIGHT, factor)
+    button_gap = px(TOOLBAR_BUTTON_GAP, factor)
+    outer_gap = max(0, int(px(TOOLBAR_PET_GAP, factor) if pet_gap is None else pet_gap))
+    row_gap = max(0, int(px(DOCK_GAP, factor) if band_gap is None else band_gap))
+
+    toolbar_width = (
+        button_width * len(kinds) + button_gap * max(0, len(kinds) - 1)
+        if kinds
+        else 0
+    )
+    toolbar_height = button_height if kinds else 0
+    block_width = max(composer_width, toolbar_width)
+    block_height = toolbar_height + (row_gap if kinds else 0) + composer_height
+
+    below_top = pet_bottom + outer_gap
+    above_bottom = pet_top - outer_gap
+    below_room = work_bottom - below_top
+    above_room = above_bottom - work_top
+    area_height = work_bottom - work_top
+    area_width = work_right - work_left
+
+    placement: str
+    if below_room >= block_height:
+        placement = "below"
+        block_y = below_top
+        block_x = _bounded_origin(
+            pet_left + (pet_right - pet_left - block_width) // 2,
+            work_left,
+            work_right,
+            block_width,
+        )
+    elif above_room >= block_height:
+        placement = "above"
+        block_y = above_bottom - block_height
+        block_x = _bounded_origin(
+            pet_left + (pet_right - pet_left - block_width) // 2,
+            work_left,
+            work_right,
+            block_width,
+        )
+    else:
+        left_room = pet_left - work_left - outer_gap
+        right_room = work_right - pet_right - outer_gap
+        side_fits_vertically = block_height <= area_height
+        side_options = []
+        if left_room >= block_width and side_fits_vertically:
+            side_options.append((left_room, "left"))
+        if right_room >= block_width and side_fits_vertically:
+            side_options.append((right_room, "right"))
+
+        if side_options:
+            # Prefer the side with more clear work area; on a tie, place the UI
+            # on the pet's right to keep a left-edge pet unobstructed.
+            _space, placement = max(side_options, key=lambda item: (item[0], item[1] == "right"))
+            block_x = (
+                pet_left - outer_gap - block_width
+                if placement == "left"
+                else pet_right + outer_gap
+            )
+            block_y = _bounded_origin(
+                pet_top + (pet_bottom - pet_top - block_height) // 2,
+                work_top,
+                work_bottom,
+                block_height,
+            )
+        else:
+            # No complete placement exists. Keep the block bounded where its
+            # dimensions permit and choose the vertical side with more room.
+            # ``fits`` below remains false so callers/tests do not mistake this
+            # constrained fallback for a disjoint placement.
+            if below_room >= above_room:
+                placement = "below-constrained"
+                block_y = _bounded_origin(below_top, work_top, work_bottom, block_height)
+            else:
+                placement = "above-constrained"
+                block_y = _bounded_origin(
+                    above_bottom - block_height,
+                    work_top,
+                    work_bottom,
+                    block_height,
+                )
+            block_x = _bounded_origin(
+                pet_left + (pet_right - pet_left - block_width) // 2,
+                work_left,
+                work_right,
+                block_width,
+            )
+
+    toolbar_x = block_x + (block_width - toolbar_width) // 2
+    composer_x = block_x + (block_width - composer_width) // 2
+    composer_y = block_y + toolbar_height + (row_gap if kinds else 0)
+    toolbar_rect = (
+        int(toolbar_x),
+        int(block_y),
+        int(toolbar_x + toolbar_width),
+        int(block_y + toolbar_height),
+    )
+    composer_rect = (
+        int(composer_x),
+        int(composer_y),
+        int(composer_x + composer_width),
+        int(composer_y + composer_height),
+    )
+    bounds_rect = (
+        int(block_x),
+        int(block_y),
+        int(block_x + block_width),
+        int(block_y + block_height),
+    )
+    toolbar_positions = {
+        kind: (int(toolbar_x + index * (button_width + button_gap)), int(block_y))
+        for index, kind in enumerate(kinds)
+    }
+
+    in_work_area = (
+        bounds_rect[0] >= work_left
+        and bounds_rect[1] >= work_top
+        and bounds_rect[2] <= work_right
+        and bounds_rect[3] <= work_bottom
+    )
+    intersects_pet = not (
+        bounds_rect[2] <= pet_left
+        or bounds_rect[0] >= pet_right
+        or bounds_rect[3] <= pet_top
+        or bounds_rect[1] >= pet_bottom
+    )
+    fits = in_work_area and not intersects_pet and not placement.endswith("-constrained")
+    # Make the work-area dimensions explicit in this calculation so malformed
+    # inverted rectangles still take the constrained path above.
+    if area_width < 0 or area_height < 0:
+        fits = False
+    return ChatUILayout(
+        placement=placement,
+        toolbar_positions=toolbar_positions,
+        toolbar_rect=toolbar_rect,
+        composer_rect=composer_rect,
+        bounds_rect=bounds_rect,
+        fits=fits,
+    )
+
+
 def composer_below_pet_position(
     pet_rect: tuple[int, int, int, int],
     work_area: tuple[int, int, int, int],
     window_size: tuple[int, int],
     gap: int = DOCK_GAP,
 ) -> tuple[int, int]:
-    """Center a floating composer below the pet, clamping it at the screen edge."""
+    """Compatibility position helper using the shared composer/toolbar bands."""
 
-    pet_left, pet_top, pet_right, pet_bottom = pet_rect
-    work_left, work_top, work_right, work_bottom = work_area
-    width, height = window_size
-    x = pet_left + (pet_right - pet_left - width) // 2
-    x = max(work_left, min(work_right - width, x))
-    y = pet_bottom + max(0, int(gap))
-    y = max(work_top, min(work_bottom - height, y))
-    return int(x), int(y)
+    layout = chat_ui_layout(
+        pet_rect,
+        work_area,
+        kinds=(),
+        composer_size=window_size,
+        pet_gap=gap,
+        band_gap=gap,
+    )
+    return layout.composer_rect[0], layout.composer_rect[1]
 
 
 def pet_side_button_positions(
@@ -279,23 +481,10 @@ def pet_side_button_positions(
     count: int = 2,
     kinds: tuple[str, ...] | None = None,
 ) -> dict[str, tuple[int, int]]:
-    """Place separate settings/history buttons by the pet's left shoulder/waist."""
+    """Compatibility helper returning the shared layout's toolbar positions."""
 
     kinds = kinds if kinds is not None else ("settings", "history", "speech", "proactive")[:count]
-    count = len(kinds)
-    pet_left, pet_top, _pet_right, pet_bottom = pet_rect
-    work_left, work_top, work_right, work_bottom = work_area
-    width = px(TOOLBAR_BUTTON_WIDTH, scale)
-    height = px(TOOLBAR_BUTTON_HEIGHT, scale)
-    group_height = height * count + px(TOOLBAR_BUTTON_GAP, scale) * (count - 1)
-    x = pet_left - width - px(TOOLBAR_PET_GAP, scale)
-    x = max(work_left, min(work_right - width, x))
-    first_y = pet_top + int((pet_bottom - pet_top) * 0.25)
-    first_y = max(work_top, min(work_bottom - group_height, first_y))
-    return {
-        kind: (int(x), int(first_y + index * (height + px(TOOLBAR_BUTTON_GAP, scale))))
-        for index, kind in enumerate(kinds)
-    }
+    return chat_ui_layout(pet_rect, work_area, scale, tuple(kinds)).toolbar_positions
 
 
 def load_chat_window_position(path: Path | None) -> tuple[int, int] | None:
@@ -589,6 +778,7 @@ class DesktopPetChat:
         *,
         character_name: str = "日和",
         chat_header: str = "桃濑日和 · NachoBot",
+        parameter_panel_factory: Callable[..., Any] | None = None,
     ) -> None:
         self.config = config
         self.title = title
@@ -596,6 +786,7 @@ class DesktopPetChat:
         self.chat_header = chat_header
         self.on_renderer_command = on_renderer_command
         self.logger = logger
+        self._parameter_panel_factory = parameter_panel_factory
         self._ui_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
         self._perception = None
         self._pending_transcript: dict | None = None
@@ -651,6 +842,9 @@ class DesktopPetChat:
         self._unanswered_proactive_count = 0
         self._proactive_interval = PROACTIVE_CHECK_SECONDS
         self._proactive_chance = PROACTIVE_CHANCE
+        self._offline_qualified = False
+        self._offline_backoff_until = 0.0
+        self._silent_reply_until = 0.0
         self._next_proactive_at = self._last_user_activity_at + config.proactive_idle_seconds
         self._last_proactive_poll = 0.0
         self._deferred_user_input: tuple[str, bool] | None = None
@@ -689,6 +883,7 @@ class DesktopPetChat:
         self._tts_language = config.tts_language
         self._voice_button = None
         self._language_button = None
+        self._language_button_window = None
         self._voice_button_items: tuple[int, int] | None = None
         self._language_button_items: tuple[int, int] | None = None
         self._history_messages = load_chat_history(
@@ -818,6 +1013,7 @@ class DesktopPetChat:
             self._history_button_window = None
             self._speech_button_window = None
             self._proactive_button_window = None
+            self._language_button_window = None
             self._history_window = None
 
     def _prepare_hidden_root(self, root: Any) -> None:
@@ -844,6 +1040,7 @@ class DesktopPetChat:
         open_parameters = False
         open_history = False
         latest_anchor = None
+        proactive_completions = []
         try:
             while True:
                 action, value = self._ui_queue.get_nowait()
@@ -885,7 +1082,7 @@ class DesktopPetChat:
                     if role == "bot":
                         self._note_bot_activity()
                 elif action == "proactive_finished":
-                    self._next_proactive_at = max(self._next_proactive_at, time.monotonic() + self._proactive_interval)
+                    proactive_completions.append(value)
                 elif action == "proactive_reply":
                     epoch, reply = value
                     last_speech, speech_active = self._perception.speech_activity() if self._perception is not None else (0, False)
@@ -911,6 +1108,30 @@ class DesktopPetChat:
             if not self._anchor.get("visible", False) and self._proactive_inflight:
                 self._note_user_activity()
             self._apply_ui_scale(float(latest_anchor.get("ui_scale", 1.0)))
+        for epoch, completed_at, quiet, eligible in proactive_completions:
+            last_speech, speech_active = (
+                self._perception.speech_activity() if self._perception is not None else (0, False)
+            )
+            if speech_active or last_speech > self._last_user_activity_at:
+                self._note_user_activity(responded=last_speech > self._last_user_activity_at)
+            visible = (latest_anchor or self._anchor or {}).get("visible", False)
+            if (eligible and self._proactive_enabled and epoch == self._user_activity_epoch
+                    and not self._stopped.is_set() and visible):
+                self._next_proactive_at = max(
+                    self._next_proactive_at,
+                    completed_at + PROACTIVE_CHECK_SECONDS,
+                )
+                self._refresh_offline_qualification(time.monotonic())
+                if self._offline_qualified:
+                    self._offline_backoff_until = max(
+                        self._offline_backoff_until,
+                        completed_at + self._proactive_interval,
+                    )
+                if quiet:
+                    self._silent_reply_until = max(
+                        self._silent_reply_until,
+                        completed_at + self.config.proactive_idle_seconds,
+                    )
         self._poll_keyboard_microphone()
         self._poll_microphone_release()
         if self._deferred_user_input is not None and not self._work_lock.locked():
@@ -943,10 +1164,16 @@ class DesktopPetChat:
         if abs(scale - self._ui_scale) < 0.001:
             return
         self._ui_scale = scale
-        for window in (self._window, self._toolbar_window, self._history_button_window, self._speech_button_window, self._proactive_button_window, self._history_window):
+        for window in (self._window, self._toolbar_window, self._history_button_window, self._speech_button_window, self._proactive_button_window, self._language_button_window, self._history_window):
             if window is not None and window.winfo_exists():
                 window._pet_scale = scale
                 scale_widgets(window, scale)
+        if self._window is not None and self._window.winfo_exists():
+            self._position_window()
+        for kind, _label, _command in self._toolbar_definitions():
+            window = self._toolbar_window_for(kind)
+            if window is not None and window.winfo_exists():
+                self._position_toolbar(kind)
         if self._parameter_panel is not None:
             self._parameter_panel.set_scale(scale, (self._anchor or {}).get("work_area"))
         if self._history_window is not None:
@@ -1001,6 +1228,7 @@ class DesktopPetChat:
             self._history_button_window,
             self._speech_button_window,
             self._proactive_button_window,
+            self._language_button_window,
             self._history_window,
         ):
             if window is not None and window.winfo_exists() and window.state() != "withdrawn":
@@ -1125,11 +1353,16 @@ class DesktopPetChat:
         if not self._hover_state.visible:
             return
         try:
-            from .parameter_controls import ParameterPanel
+            panel_factory = self._parameter_panel_factory
+            if panel_factory is None:
+                self.logger.info(
+                    "Model controls are unavailable for the selected renderer backend."
+                )
+                return
 
             newly_created = self._parameter_panel is None
             if newly_created:
-                self._parameter_panel = ParameterPanel(
+                self._parameter_panel = panel_factory(
                     self._root,
                     self._on_parameter_change,
                     self._on_parameter_reset,
@@ -1511,11 +1744,55 @@ class DesktopPetChat:
         ]
         if self.config.enabled:
             definitions.append(("history", "历史", self._show_history_window))
+            definitions.append(("language", "语言", self._cycle_language))
         if self.config.enabled and self.config.perception.speech:
             definitions.append(("speech", "语音模式", self._toggle_speech_mode))
         if self.config.enabled and self.config.transport == "core":
             definitions.append(("proactive", "主动对话", self._toggle_proactive))
         return definitions
+
+    def _chat_ui_layout(self) -> ChatUILayout | None:
+        anchor = self._anchor
+        if anchor is None:
+            return None
+        return chat_ui_layout(
+            tuple(int(value) for value in anchor["pet_rect"]),
+            tuple(int(value) for value in anchor["work_area"]),
+            self._ui_scale,
+            tuple(item[0] for item in self._toolbar_definitions()),
+        )
+
+    def _toolbar_slide_offset(self, layout: ChatUILayout) -> int:
+        """Return a shared row offset bounded by button gaps and nearby edges."""
+
+        if layout.toolbar_rect[2] <= layout.toolbar_rect[0]:
+            return 0
+        anchor = self._anchor or {}
+        work_left, _work_top, work_right, _work_bottom = tuple(
+            int(value) for value in anchor.get("work_area", (0, 0, 0, 0))
+        )
+        row_left, _row_top, row_right, _row_bottom = layout.toolbar_rect
+        minimum = work_left - row_left
+        maximum = work_right - row_right
+        if layout.placement == "left":
+            pet_left = int(anchor["pet_rect"][0])
+            pet_clearance = px(TOOLBAR_PET_GAP, self._ui_scale)
+            maximum = min(maximum, pet_left - pet_clearance - row_right)
+        elif layout.placement == "right":
+            pet_right = int(anchor["pet_rect"][2])
+            pet_clearance = px(TOOLBAR_PET_GAP, self._ui_scale)
+            minimum = max(minimum, pet_right + pet_clearance - row_left)
+
+        distance = px(TOOLBAR_BUTTON_GAP, self._ui_scale)
+        if maximum >= distance:
+            return distance
+        if minimum <= -distance:
+            return -distance
+        if maximum > 0:
+            return int(maximum)
+        if minimum < 0:
+            return int(minimum)
+        return 0
 
     def _show_toolbar(self) -> None:
         if not self._hover_state.visible or self._anchor is None:
@@ -1649,7 +1926,8 @@ class DesktopPetChat:
 
     def _toolbar_window_for(self, kind: str) -> Any:
         return {"settings": self._toolbar_window, "history": self._history_button_window,
-                "speech": self._speech_button_window, "proactive": self._proactive_button_window}[kind]
+                "speech": self._speech_button_window, "proactive": self._proactive_button_window,
+                "language": self._language_button_window}[kind]
 
     def _toggle_proactive(self) -> None:
         if not self.config.enabled or self.config.transport != "core":
@@ -1754,6 +2032,17 @@ class DesktopPetChat:
                 canvas.create_line(
                     18, y, 30, y, fill=_CHAT_COLORS["accent_dark"], width=1
                 )
+        elif kind == "language":
+            canvas.addtag_withtag("language-surface", shape)
+            canvas.create_text(
+                22,
+                21,
+                text=self._language_button_glyph(),
+                fill=_CHAT_COLORS["accent_dark"],
+                font=("Segoe UI", 9, "bold"),
+                tags="language-label",
+            )
+            window._language_canvas = canvas
         elif kind == "speech":
             canvas.create_oval(12, 8, 30, 26, outline=_CHAT_COLORS["accent_dark"], width=2, tags="mode-hold")
             canvas.create_oval(17, 13, 25, 21, fill=_CHAT_COLORS["accent_dark"], outline="", tags="mode-hold")
@@ -1774,6 +2063,9 @@ class DesktopPetChat:
             if kind == "proactive" and not active:
                 self._paint_proactive()
                 return
+            if kind == "language" and not active:
+                self._paint_language_button()
+                return
             fill = _CHAT_COLORS["accent_bg"] if active else _CHAT_COLORS["card"]
             canvas.itemconfigure(shape, fill=fill)
 
@@ -1788,6 +2080,9 @@ class DesktopPetChat:
         elif kind == "speech":
             self._speech_button_window = window
             self._paint_speech_mode()
+        elif kind == "language":
+            self._language_button_window = window
+            self._paint_language_button()
         else:
             self._proactive_button_window = window
             self._paint_proactive()
@@ -1795,26 +2090,24 @@ class DesktopPetChat:
 
     def _position_toolbar(self, kind: str, *, animate: bool = False) -> None:
         window = self._toolbar_window_for(kind)
-        anchor = self._anchor
-        if window is None or not window.winfo_exists() or anchor is None:
+        layout = self._chat_ui_layout()
+        if window is None or not window.winfo_exists() or layout is None:
             return
-        positions = pet_side_button_positions(
-            tuple(int(value) for value in anchor["pet_rect"]),
-            tuple(int(value) for value in anchor["work_area"]),
-            self._ui_scale,
-            kinds=tuple(item[0] for item in self._toolbar_definitions()),
-        )
-        x, y = positions[kind]
+        x, y = layout.toolbar_positions[kind]
         animation = self._toolbar_animations.get(kind)
         if not animate:
             if animation is not None and animation.get("after_id") is not None:
-                # Move the slide's whole trajectory with the pet, preserving
-                # its progress instead of freezing it at the old anchor.
-                animation["from_x"] += x - animation["to_x"]
+                # Rebase the bounded trajectory when the pet or UI scale moves.
+                animation["from_x"] = x + self._toolbar_slide_offset(layout)
                 animation["to_x"], animation["y"] = x, y
             if animation is None or animation.get("after_id") is None:
                 self._set_geometry_if_changed(window,
-                    f"{px(TOOLBAR_BUTTON_WIDTH, self._ui_scale)}x{px(TOOLBAR_BUTTON_HEIGHT, self._ui_scale)}+{x}+{y}"
+                    _top_level_geometry(
+                        px(TOOLBAR_BUTTON_WIDTH, self._ui_scale),
+                        px(TOOLBAR_BUTTON_HEIGHT, self._ui_scale),
+                        x,
+                        y,
+                    )
                 )
             return
         if animation is not None and animation.get("after_id") is not None:
@@ -1822,15 +2115,14 @@ class DesktopPetChat:
                 window.after_cancel(animation["after_id"])
             except self._tk.TclError:
                 pass
-        work_left, _work_top, work_right, _work_bottom = tuple(
-            int(value) for value in anchor["work_area"]
-        )
-        from_x = max(
-            work_left,
-            min(work_right - px(TOOLBAR_BUTTON_WIDTH, self._ui_scale), x + px(30, self._ui_scale)),
-        )
+        from_x = x + self._toolbar_slide_offset(layout)
         window.geometry(
-            f"{px(TOOLBAR_BUTTON_WIDTH, self._ui_scale)}x{px(TOOLBAR_BUTTON_HEIGHT, self._ui_scale)}+{from_x}+{y}"
+            _top_level_geometry(
+                px(TOOLBAR_BUTTON_WIDTH, self._ui_scale),
+                px(TOOLBAR_BUTTON_HEIGHT, self._ui_scale),
+                from_x,
+                y,
+            )
         )
         animation = {
             "started_at": time.monotonic(),
@@ -1871,8 +2163,25 @@ class DesktopPetChat:
                 + (animation["to_x"] - animation["from_x"]) * eased
             )
         )
+        anchor = self._anchor or {}
+        work_area = tuple(int(value) for value in anchor.get("work_area", (0, 0, 0, 0)))
+        button_width = px(TOOLBAR_BUTTON_WIDTH, self._ui_scale)
+        x = _bounded_origin(x, work_area[0], work_area[2], button_width)
+        layout = self._chat_ui_layout()
+        if layout is not None and layout.placement in {"left", "right"}:
+            pet_rect = tuple(int(value) for value in anchor["pet_rect"])
+            pet_gap = px(TOOLBAR_PET_GAP, self._ui_scale)
+            if layout.placement == "left":
+                x = min(x, pet_rect[0] - pet_gap - button_width)
+            else:
+                x = max(x, pet_rect[2] + pet_gap)
         window.geometry(
-            f"{px(TOOLBAR_BUTTON_WIDTH, self._ui_scale)}x{px(TOOLBAR_BUTTON_HEIGHT, self._ui_scale)}+{x}+{animation['y']}"
+            _top_level_geometry(
+                button_width,
+                px(TOOLBAR_BUTTON_HEIGHT, self._ui_scale),
+                x,
+                animation["y"],
+            )
         )
         if progress < 1.0:
             animation["after_id"] = window.after(
@@ -2029,6 +2338,7 @@ class DesktopPetChat:
             ("history", self._history_button_window),
             ("speech", self._speech_button_window),
             ("proactive", self._proactive_button_window),
+            ("language", self._language_button_window),
         ):
             if toolbar is not None and toolbar.winfo_exists():
                 animation = self._toolbar_animations.get(kind)
@@ -2067,10 +2377,7 @@ class DesktopPetChat:
         self._note_user_activity()
 
     def _note_user_activity(self, *, responded: bool = False) -> None:
-        if responded:
-            self._unanswered_proactive_count = 0
-            self._proactive_interval = PROACTIVE_CHECK_SECONDS
-            self._proactive_chance = PROACTIVE_CHANCE
+        self._reset_proactive_backoff()
         self._last_user_activity_at = time.monotonic()
         self._next_proactive_at = self._last_user_activity_at + self.config.proactive_idle_seconds
         self._user_activity_epoch += 1
@@ -2079,21 +2386,58 @@ class DesktopPetChat:
             self.backend.set_voice_enabled(self._voice_enabled)
 
     def _note_bot_activity(self, *, proactive: bool = False) -> None:
-        if proactive:
+        now = time.monotonic()
+        if proactive and self._refresh_offline_qualification(now):
             self._unanswered_proactive_count += 1
             if self._unanswered_proactive_count >= 3:
                 self._proactive_interval *= 3
                 self._proactive_chance *= 2 / 3
-        self._last_bot_activity_at = time.monotonic()
-        # Bot output has its own cooldown/backoff; only the user can restart
-        # the five-minute silence window.
-        self._next_proactive_at = max(self._next_proactive_at, self._last_bot_activity_at + self._proactive_interval)
+            self._offline_backoff_until = max(
+                self._offline_backoff_until, now + self._proactive_interval
+            )
+        self._last_bot_activity_at = now
+
+    def _reset_proactive_backoff(self) -> None:
+        self._offline_qualified = False
+        self._offline_backoff_until = 0.0
+        self._unanswered_proactive_count = 0
+        self._proactive_interval = PROACTIVE_CHECK_SECONDS
+        self._proactive_chance = PROACTIVE_CHANCE
+
+    def _refresh_offline_qualification(self, now: float) -> bool:
+        """Require both long speech silence and system-wide keyboard/mouse idle."""
+
+        if now - self._last_user_activity_at < self.config.proactive_idle_seconds:
+            self._reset_proactive_backoff()
+            return False
+        try:
+            idle_seconds = _system_idle_seconds()
+            valid_idle = (
+                isinstance(idle_seconds, (int, float))
+                and not isinstance(idle_seconds, bool)
+                and math.isfinite(idle_seconds)
+                and idle_seconds >= self.config.proactive_idle_seconds
+            )
+        except Exception:
+            valid_idle = False
+        if not valid_idle:
+            self._reset_proactive_backoff()
+            return False
+        if not self._offline_qualified:
+            # Start a fresh unanswered count only when both signals qualify.
+            self._reset_proactive_backoff()
+            self._offline_qualified = True
+        return True
 
     def _poll_proactive(self) -> None:
         now = time.monotonic()
         if now - self._last_proactive_poll < 1:
             return
         self._last_proactive_poll = now
+        # Input activity only clears the offline backoff. It does not reset
+        # speech silence or cancel a request, so normal proactive initiation
+        # remains available while the user works or plays.
+        self._refresh_offline_qualification(now)
         if not self._proactive_enabled or not self.config.enabled or self.config.transport != "core" or self._stopped.is_set():
             return
         speech_active = False
@@ -2101,12 +2445,23 @@ class DesktopPetChat:
             last_speech, speech_active = self._perception.speech_activity()
             if last_speech > self._last_user_activity_at:
                 self._note_user_activity(responded=True)
-        bot_ready_at = self._last_bot_activity_at + self._proactive_interval if self._last_bot_activity_at is not None else 0
-        if now < max(self._next_proactive_at, self._last_user_activity_at + self.config.proactive_idle_seconds, bot_ready_at):
+        bot_ready_at = (
+            self._last_bot_activity_at + PROACTIVE_CHECK_SECONDS
+            if self._last_bot_activity_at is not None else 0
+        )
+        if now < max(
+            self._next_proactive_at,
+            self._last_user_activity_at + self.config.proactive_idle_seconds,
+            bot_ready_at,
+            self._silent_reply_until,
+            self._offline_backoff_until,
+        ):
             return
         # Consume each due slot once, including blocked ones. Never catch up
         # missed slots or retry the random draw on the next UI frame.
-        self._next_proactive_at = now + self._proactive_interval
+        self._next_proactive_at = now + PROACTIVE_CHECK_SECONDS
+        if self._offline_qualified:
+            self._offline_backoff_until = now + self._proactive_interval
         if (self._proactive_inflight or self._output_speaking
                 or speech_active or self._pending_transcript is not None or self._continuous_transcripts
                 or self._deferred_user_input is not None or not (self._anchor or {}).get("visible", False)):
@@ -2124,6 +2479,7 @@ class DesktopPetChat:
                          name="desktop-proactive-chat", daemon=True).start()
 
     def _process_proactive(self, epoch: int, idle_seconds: float) -> None:
+        quiet_completion = False
         def cancelled() -> bool:
             if not self._proactive_enabled or self._stopped.is_set() or self._proactive_cancel.is_set() or epoch != self._user_activity_epoch:
                 return True
@@ -2132,15 +2488,22 @@ class DesktopPetChat:
         try:
             reply = self.backend.proactive(idle_seconds, include_audio=False,
                                            tts_language=self._tts_language, is_cancelled=cancelled)
-            if reply is not None and not cancelled():
+            if reply is None:
+                quiet_completion = not cancelled()
+            elif not cancelled():
                 self._ui_queue.put(("proactive_reply", (epoch, reply)))
         except Exception as exc:
             if not cancelled():
                 self.logger.warning("[DesktopPetChat] proactive conversation failed: {}", type(exc).__name__)
         finally:
+            eligible = not cancelled()
+            completed_at = time.monotonic()
             self._work_lock.release()
             self._proactive_inflight = False
-            self._ui_queue.put(("proactive_finished", None))
+            self._ui_queue.put((
+                "proactive_finished",
+                (epoch, completed_at, quiet_completion and eligible, eligible),
+            ))
 
     def _toggle_voice(self) -> None:
         self._set_voice_enabled(not self._voice_enabled)
@@ -2160,6 +2523,8 @@ class DesktopPetChat:
         self._ui_queue.put(("voice_state", None))
 
     def _cycle_language(self) -> None:
+        if not self._language_switch_enabled():
+            return
         current_index = self._TTS_LANGUAGE_ORDER.index(self._tts_language)
         self._tts_language = self._TTS_LANGUAGE_ORDER[
             (current_index + 1) % len(self._TTS_LANGUAGE_ORDER)
@@ -2186,18 +2551,37 @@ class DesktopPetChat:
                     else _CHAT_COLORS["secondary"]
                 ),
             )
-        if self._language_button is not None and self._language_button.winfo_exists():
-            _background_id, text_id = self._language_button_items or (0, 0)
-            self._language_button.itemconfigure(
-                text_id,
-                text=f"语言 · {self._TTS_LANGUAGE_LABELS[self._tts_language]}",
-            )
+        self._paint_language_button()
+
+    def _language_switch_enabled(self) -> bool:
+        return True
+
+    def _language_button_glyph(self) -> str:
+        return {"auto": "A", "zh": "中", "ja": "日", "en": "EN"}.get(
+            self._tts_language, "…"
+        )
+
+    def _language_button_title(self) -> str:
+        label = self._TTS_LANGUAGE_LABELS.get(self._tts_language, self._tts_language)
+        return f"语言 · {label}"
+
+    def _paint_language_button(self) -> None:
+        window = self._language_button_window
+        if window is None or not window.winfo_exists():
+            return
+        canvas = getattr(window, "_language_canvas", None)
+        if canvas is not None and canvas.winfo_exists():
+            canvas.itemconfigure("language-label", text=self._language_button_glyph())
+            canvas.itemconfigure("language-label", fill=_CHAT_COLORS["accent_dark"])
+            canvas.itemconfigure("language-surface", fill=_CHAT_COLORS["card"])
+        window.title(self._language_button_title())
 
     def _position_window(self) -> None:
         window = self._window
-        anchor = self._anchor
-        if window is None or not window.winfo_exists() or anchor is None:
+        layout = self._chat_ui_layout()
+        if window is None or not window.winfo_exists() or layout is None:
             return
+        anchor = self._anchor
         topmost = bool(anchor["topmost"])
         if getattr(window, "_pet_topmost", None) != topmost:
             try:
@@ -2205,13 +2589,16 @@ class DesktopPetChat:
                 window._pet_topmost = topmost
             except self._tk.TclError:
                 pass
-        x, y = composer_below_pet_position(
-            tuple(int(value) for value in anchor["pet_rect"]),
-            tuple(int(value) for value in anchor["work_area"]),
-            (px(DOCK_WIDTH, self._ui_scale), px(DOCK_HEIGHT, self._ui_scale)),
-            gap=px(DOCK_GAP, self._ui_scale),
+        x, y = layout.composer_rect[:2]
+        self._set_geometry_if_changed(
+            window,
+            _top_level_geometry(
+                px(DOCK_WIDTH, self._ui_scale),
+                px(DOCK_HEIGHT, self._ui_scale),
+                x,
+                y,
+            ),
         )
-        self._set_geometry_if_changed(window, f"{px(DOCK_WIDTH, self._ui_scale)}x{px(DOCK_HEIGHT, self._ui_scale)}+{x}+{y}")
 
     @staticmethod
     def _set_geometry_if_changed(window: Any, geometry: str) -> None:

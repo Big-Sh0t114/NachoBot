@@ -10,7 +10,6 @@ import os
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -52,6 +51,9 @@ class LaunchOutcome:
 
 
 def _adapter_root() -> Path:
+    configured_root = os.getenv("NACHOBOT_DESKTOP_PET_PROJECT_ROOT", "").strip()
+    if configured_root:
+        return Path(configured_root).expanduser().resolve()
     return Path(__file__).resolve().parents[1]
 
 
@@ -62,11 +64,42 @@ def _local_url_port(value: str) -> int | None:
     return None
 
 
+_WINDOWS_TRANSIENT_REPLACE_ERRORS = {5, 32, 33}
+_REPLACE_RETRY_DELAYS = (0.02, 0.04, 0.08, 0.16, 0.32)
+
+
+def _replace_json_with_retry(temporary: Path, path: Path) -> None:
+    for attempt in range(len(_REPLACE_RETRY_DELAYS) + 1):
+        try:
+            os.replace(temporary, path)
+            return
+        except OSError as exc:
+            if (
+                os.name != "nt"
+                or getattr(exc, "winerror", None) not in _WINDOWS_TRANSIENT_REPLACE_ERRORS
+                or attempt >= len(_REPLACE_RETRY_DELAYS)
+            ):
+                raise
+            time.sleep(_REPLACE_RETRY_DELAYS[attempt])
+
+
 def _write_json(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    serialized = json.dumps(value, ensure_ascii=False)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
-    os.replace(temporary, path)
+    temporary_created = False
+    try:
+        with temporary.open("x", encoding="utf-8") as stream:
+            temporary_created = True
+            stream.write(serialized)
+        _replace_json_with_retry(temporary, path)
+    finally:
+        if temporary_created:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                # Preserve a serialization/write/replace error as the primary failure.
+                pass
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -576,6 +609,13 @@ def _tail_file(path: Path, limit: int = 30) -> str:
     return "\n" + "\n".join(lines) if lines else ""
 
 
+def _renderer_backend(config: Any) -> str:
+    """Return a config backend while preserving older embedding fixtures."""
+
+    renderer = getattr(config, "renderer", None)
+    return str(getattr(renderer, "backend", "live2d") or "live2d")
+
+
 @dataclass
 class LaunchSession:
     mode: str
@@ -604,22 +644,44 @@ class SessionStarter:
         self.log_dir = self.adapter_dir / "logs"
         self.cancelled: Callable[[], bool] | None = None
 
-    def start(self, config_path: Path, mode: str) -> LaunchSession:
+    def start(
+        self,
+        config_path: Path,
+        mode: str,
+        renderer_backend: str | None = None,
+    ) -> LaunchSession:
         resolved_config = config_path.resolve()
-        config = load_config(resolved_config, runtime_mode_override=mode)
+        config = load_config(
+            resolved_config,
+            runtime_mode_override=mode,
+            renderer_backend_override=renderer_backend,
+        )
         services = OwnedServices(self.log_dir, cancelled=self.cancelled)
         try:
             if mode == "desktop_pet" and not config.components.core:
                 print("[Standalone] Rendering, tray and model controls only; no backend connection or capture.", flush=True)
             if mode == "desktop_pet":
                 self._start_chat_services(config, services)
-            python = self.adapter_dir / ".venv" / "Scripts" / "python.exe"
+            if config.renderer.backend == "live2d":
+                python = (
+                    self.adapter_dir
+                    / "renderers"
+                    / "live2d"
+                    / ".venv"
+                    / "Scripts"
+                    / "python.exe"
+                )
+            else:
+                python = self.adapter_dir / ".venv" / "Scripts" / "python.exe"
             if not python.is_file():
-                raise LauncherError(f"Live2D Python environment is missing: {python}")
+                raise LauncherError(
+                    f"Python environment for renderer backend '{config.renderer.backend}' "
+                    f"is missing: {python}"
+                )
             command = [
                 str(python),
                 "-m",
-                "live2d_adapter",
+                "desktop_pet_adapter",
                 "--config",
                 str(resolved_config),
                 "--mode",
@@ -627,6 +689,7 @@ class SessionStarter:
                 "--log-file",
                 str(self.log_dir / "live2d.log"),
             ]
+            command.extend(["--renderer-backend", config.renderer.backend])
             env = os.environ.copy()
             env.update(PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
             if mode == "desktop_pet":
@@ -782,11 +845,13 @@ class SessionSupervisor:
                     idle_since = time.monotonic()
             return 0
         finally:
-            if self.session is not None:
-                self.session.stop()
-                self.session = None
-            self._state(status="stopped", supervisor_pid=os.getpid())
-            mutex.close()
+            try:
+                if self.session is not None:
+                    self.session.stop()
+                    self.session = None
+                self._state(status="stopped", supervisor_pid=os.getpid())
+            finally:
+                mutex.close()
 
     def _stop_for_closed_console(self) -> bool:
         session = self.session
@@ -836,13 +901,27 @@ class SessionSupervisor:
             return
         config_path = Path(str(request.get("config", ""))).resolve()
         mode = str(request.get("mode", ""))
+        renderer_backend = str(request.get("renderer_backend", "")).strip().casefold() or None
         try:
             if mode not in {"desktop_pet", "live"}:
                 raise LauncherError(f"Unknown runtime mode: {mode}")
             same_backend_mode = True
-            if self.session and mode == "desktop_pet" and isinstance(self.starter, SessionStarter):
-                requested_config = load_config(config_path, runtime_mode_override=mode)
-                same_backend_mode = requested_config.components.core == self.session.config.components.core
+            # Explicit backend requests must participate in reuse decisions
+            # even when a lightweight starter is installed by an embedding
+            # host or test. The default path retains the legacy two-argument
+            # starter contract.
+            if self.session and (
+                isinstance(self.starter, SessionStarter) or renderer_backend is not None
+            ):
+                requested_config = load_config(
+                    config_path,
+                    runtime_mode_override=mode,
+                    renderer_backend_override=renderer_backend,
+                )
+                same_backend_mode = (
+                    requested_config.components.core == self.session.config.components.core
+                    and requested_config.renderer.backend == self.session.config.renderer.backend
+                )
             if self.session and self.session.pet.poll() is None and self.session.mode == mode and same_backend_mode:
                 self._remember_launch_console(self.session, request)
                 identity = self.session.identity
@@ -851,6 +930,7 @@ class SessionSupervisor:
                     request_id,
                     "reused",
                     mode=identity.mode,
+                    renderer_backend=_renderer_backend(self.session.config),
                     pet_pid=identity.pet_pid,
                     pet_created=identity.pet_created,
                 )
@@ -863,7 +943,11 @@ class SessionSupervisor:
             self._state(status="starting", mode=mode, request_id=request_id)
             startup_viewers: list[subprocess.Popen[Any]] = []
             if isinstance(self.starter, SessionStarter):
-                config = load_config(config_path, runtime_mode_override=mode)
+                config = load_config(
+                    config_path,
+                    runtime_mode_override=mode,
+                    renderer_backend_override=renderer_backend,
+                )
                 if mode == "desktop_pet":
                     startup_viewers = self._open_configured_log_windows(config, request_id)
                 pid, created = request.get("console_pid"), request.get("console_created")
@@ -872,13 +956,17 @@ class SessionSupervisor:
                     or (isinstance(pid, int) and pid > 0 and isinstance(created, int) and created > 0
                         and not _owner_alive(pid, created))
                 )
-            session = self.starter.start(config_path, mode)
+            if renderer_backend is None:
+                session = self.starter.start(config_path, mode)
+            else:
+                session = self.starter.start(config_path, mode, renderer_backend)
             session.log_viewers.extend(startup_viewers)
             self.session = session
             self._remember_launch_console(session, request)
             self._state(
                 status="ready",
                 mode=mode,
+                renderer_backend=_renderer_backend(session.config),
                 request_id=request_id,
                 pet_pid=session.pet.pid,
                 pet_created=session.pet_created,
@@ -889,6 +977,7 @@ class SessionSupervisor:
                 request_id,
                 "started",
                 mode=identity.mode,
+                renderer_backend=_renderer_backend(session.config),
                 pet_pid=identity.pet_pid,
                 pet_created=identity.pet_created,
             )
@@ -978,6 +1067,7 @@ def _enqueue_request(
     config: Path,
     mode: str,
     *,
+    renderer_backend: str | None = None,
     action: str | None = None,
     pet_pid: int | None = None,
     pet_created: int | None = None,
@@ -986,6 +1076,8 @@ def _enqueue_request(
     request_id = uuid.uuid4().hex
     request_path = requests_dir / f"{request_id}.request.json"
     request = {"id": request_id, "config": str(config.resolve()), "mode": mode}
+    if renderer_backend:
+        request["renderer_backend"] = renderer_backend
     if action is None:
         request.update(console_pid=os.getpid(), console_created=_process_creation_ticks(os.getpid()))
     if action is not None:
@@ -1045,7 +1137,7 @@ def _spawn_supervisor(adapter_dir: Path, mutex_name: str) -> subprocess.Popen[An
             [
                 str(executable),
                 "-m",
-                "live2d_adapter.launcher",
+                "desktop_pet_adapter.launcher",
                 "--_supervisor",
                 "--_adapter-dir",
                 str(adapter_dir),
@@ -1064,9 +1156,29 @@ def _spawn_supervisor(adapter_dir: Path, mutex_name: str) -> subprocess.Popen[An
         stderr.close()
 
 
-def launch(config_path: Path, mode: str) -> LaunchOutcome:
-    adapter_dir = _adapter_root()
+def launch(
+    config_path: Path,
+    mode: str,
+    adapter_dir: Path | None = None,
+    renderer_backend: str | None = None,
+) -> LaunchOutcome:
+    adapter_dir = (adapter_dir or _adapter_root()).resolve()
     config_path = config_path.resolve()
+    if renderer_backend and renderer_backend.strip():
+        effective_backend = renderer_backend.strip().casefold()
+    elif config_path.is_file():
+        # Resolve the client process's effective setting and put it in IPC.
+        # The long-lived supervisor may have inherited an older BAT-scoped
+        # NACHOBOT_RENDERER_BACKEND value from a previous launch.
+        effective_backend = load_config(
+            config_path,
+            runtime_mode_override=mode,
+        ).renderer.backend
+    else:
+        effective_backend = (
+            os.getenv("NACHOBOT_RENDERER_BACKEND", "").strip().casefold()
+            or "live2d"
+        )
     log_dir = adapter_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     mutex_name = _mutex_name(adapter_dir)
@@ -1081,7 +1193,12 @@ def launch(config_path: Path, mode: str) -> LaunchOutcome:
             if content:
                 _print_log_content(content)
 
-    request_id, requests_dir = _enqueue_request(adapter_dir, config_path, mode)
+    request_id, requests_dir = _enqueue_request(
+        adapter_dir,
+        config_path,
+        mode,
+        renderer_backend=effective_backend,
+    )
     result = _wait_for_result(
         request_id,
         requests_dir,
@@ -1099,6 +1216,7 @@ def launch(config_path: Path, mode: str) -> LaunchOutcome:
     if (
         status not in {"started", "reused"}
         or result_mode != mode
+        or result.get("renderer_backend") != effective_backend
         or not isinstance(pet_pid, int)
         or pet_pid <= 0
         or not isinstance(pet_created, int)
@@ -1106,9 +1224,11 @@ def launch(config_path: Path, mode: str) -> LaunchOutcome:
         raise LauncherError("Supervisor returned an invalid Live2D session identity")
     identity = LaunchIdentity(result_mode, pet_pid, pet_created)
     if status == "started":
-        print(f"[OK] Live2D {mode} mode is ready (PID {result.get('pet_pid')}).")
+        label = effective_backend
+        print(f"[OK] {label} {mode} mode is ready (PID {result.get('pet_pid')}).")
     else:
-        print(f"[OK] Live2D {mode} mode is already running.")
+        label = effective_backend
+        print(f"[OK] {label} {mode} mode is already running.")
     return LaunchOutcome(0, status, identity, tailers)
 
 
@@ -1262,7 +1382,7 @@ def _open_log_viewer(adapter_dir: Path, source_mode: str, owner_pid: int, owner_
             str(python),
             "-u",
             "-m",
-            "live2d_adapter.launcher",
+            "desktop_pet_adapter.launcher",
             "--_view-logs",
             source_mode,
             "--_adapter-dir",
@@ -1292,7 +1412,7 @@ def _show_logs_from_entry(adapter_dir: Path, source_mode: str) -> int:
             str(python),
             "-u",
             "-m",
-            "live2d_adapter.launcher",
+            "desktop_pet_adapter.launcher",
             "--_view-logs",
             source_mode,
             "--_adapter-dir",
@@ -1350,9 +1470,15 @@ def follow_live_session(adapter_dir: Path, identity: LaunchIdentity, *, tailers:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Start the NachoBot Live2D adapter.")
-    parser.add_argument("--config", type=Path, default=_adapter_root() / "config.toml")
+    parser = argparse.ArgumentParser(description="Start the NachoBot desktop-pet adapter.")
+    parser.add_argument("--config", type=Path)
+    parser.add_argument(
+        "--project-root",
+        type=Path,
+        help="canonical desktop-pet project directory (required for a non-editable wheel launcher)",
+    )
     parser.add_argument("--mode", choices=("desktop_pet", "live"))
+    parser.add_argument("--renderer-backend")
     parser.add_argument("--show-logs", choices=("ALL", "LIVE2D", "CORE"))
     parser.add_argument("--_supervisor", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--_adapter-dir", type=Path, help=argparse.SUPPRESS)
@@ -1367,30 +1493,49 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    adapter_dir = (args._adapter_dir or args.project_root or _adapter_root()).resolve()
+    config_path = (args.config or adapter_dir / "config.toml").expanduser().resolve()
+    os.environ["NACHOBOT_DESKTOP_PET_PROJECT_ROOT"] = str(adapter_dir)
     if args._view_logs:
         _bind_viewer_console()
         if args._session_id or args._log_cursors:
-            return show_logs(args._adapter_dir or _adapter_root(), args._view_logs, args._owner_pid, args._owner_created,
+            return show_logs(adapter_dir, args._view_logs, args._owner_pid, args._owner_created,
                              session_id=args._session_id, cursors=json.loads(args._log_cursors) if args._log_cursors else None)
-        return show_logs(args._adapter_dir or _adapter_root(), args._view_logs, args._owner_pid, args._owner_created)
+        return show_logs(adapter_dir, args._view_logs, args._owner_pid, args._owner_created)
     if args._supervisor:
         try:
-            return SessionSupervisor(args._adapter_dir or _adapter_root(), args._mutex_name).run()
+            return SessionSupervisor(adapter_dir, args._mutex_name).run()
         except Exception as exc:
             print(f"[ERROR] Live2D supervisor failed: {exc}", file=sys.stderr, flush=True)
             return 1
     if args.show_logs:
-        return _show_logs_from_entry(_adapter_root(), args.show_logs)
+        return _show_logs_from_entry(adapter_dir, args.show_logs)
     try:
-        config = load_config(args.config, runtime_mode_override=args.mode)
+        renderer_backend = (
+            args.renderer_backend
+            or os.getenv("NACHOBOT_RENDERER_BACKEND", "").strip()
+            or None
+        )
+        config = load_config(
+            config_path,
+            runtime_mode_override=args.mode,
+            renderer_backend_override=renderer_backend,
+        )
         _enable_ansi_console()
-        result = launch(args.config, config.runtime.mode)
+        if renderer_backend is None:
+            result = launch(config_path, config.runtime.mode)
+        else:
+            result = launch(
+                config_path,
+                config.runtime.mode,
+                renderer_backend=renderer_backend,
+            )
         if result.exit_code != 0:
             return result.exit_code
         if result.identity is not None:
             if result.log_tailers is not None:
-                return follow_live_session(_adapter_root(), result.identity, tailers=result.log_tailers)
-            return follow_live_session(_adapter_root(), result.identity)
+                return follow_live_session(adapter_dir, result.identity, tailers=result.log_tailers)
+            return follow_live_session(adapter_dir, result.identity)
         return result.exit_code
     except Exception as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)

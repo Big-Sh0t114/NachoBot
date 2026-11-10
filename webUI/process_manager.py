@@ -903,7 +903,7 @@ def _register_services(root_dir: Path | str | None = None):
     # 4. Parse standalone Live2D adapter config
     live2d_host = "127.0.0.1"
     live2d_port = 8766
-    live2d_config_path = base_root / "NachoBot-Live2D-Adapter" / "config.toml"
+    live2d_config_path = base_root / "NachoBot-Desktop-Pet-Adapter" / "config.toml"
     if live2d_config_path.exists():
         try:
             doc = tomlkit.parse(live2d_config_path.read_text(encoding="utf-8"))
@@ -1021,8 +1021,8 @@ def _register_services(root_dir: Path | str | None = None):
         # POTATO intentionally has no Multimodal service definition.
 
         # ── Live2D ──
-        ServiceDef("live2d", "Live2D 渲染适配器", "live2d", "NachoBot-Live2D-Adapter",
-                   ["uv", "run", "python", "-m", "live2d_adapter", "--config", "config.toml"],
+        ServiceDef("live2d", "桌宠适配器（Live2D）", "live2d", "NachoBot-Desktop-Pet-Adapter",
+                   ["uv", "run", "python", "-m", "desktop_pet_adapter", "--config", "config.toml"],
                    port=live2d_port, wait_port=True, order=1,
                    detail=f"独立渲染 WebSocket · :{live2d_port}"),
 
@@ -1903,7 +1903,10 @@ class ProcessManager:
                 module_index = lowered.index("-m")
             except ValueError:
                 return False
-            if module_index + 1 >= len(lowered) or lowered[module_index + 1] != "live2d_adapter":
+            if module_index + 1 >= len(lowered) or lowered[module_index + 1] not in {
+                "desktop_pet_adapter",
+                "live2d_adapter",
+            }:
                 return False
             if "--config" not in lowered:
                 return False

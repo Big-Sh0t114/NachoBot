@@ -9,7 +9,7 @@ from uuid import uuid4
 from websockets.exceptions import ConnectionClosed
 from websockets.legacy.server import WebSocketServerProtocol, serve
 
-from .config import AdapterConfig
+from .config import StandaloneConfig
 from .protocol import (
     AvatarCommand,
     AvatarEvent,
@@ -28,7 +28,7 @@ class AvatarWebSocketServer:
 
     def __init__(
         self,
-        config: AdapterConfig,
+        config: StandaloneConfig,
         runtime: AvatarRuntime,
         logger,
     ) -> None:
@@ -41,16 +41,19 @@ class AvatarWebSocketServer:
         self._server = None
         self._stop_requested = False
 
-    async def run(self) -> None:
+    async def run(self, *, duration: float | None = None) -> None:
+        self._stop_requested = False
         self.runtime.set_interaction_sink(self.broadcast)
         self.runtime.set_shutdown_sink(self.stop)
-        await self.runtime.start()
 
         host = self.config.server.host
         port = self.config.server.port
-        self.logger.info("Live2D WebSocket server listening on ws://{}:{}", host, port)
+        timer: asyncio.Task[None] | None = None
 
         try:
+            # Keep startup inside the cleanup boundary. Renderer initialization
+            # can fail or be cancelled before the socket is bound.
+            await self.runtime.start()
             async with serve(
                 self._handle_client,
                 host,
@@ -60,15 +63,30 @@ class AvatarWebSocketServer:
                 max_size=MAX_WEBSOCKET_MESSAGE_BYTES,
             ) as server:
                 self._server = server
+                self.logger.info(
+                    "Live2D WebSocket server listening on ws://{}:{}", host, port
+                )
                 if self._stop_requested:
                     server.close()
+                timer = (
+                    asyncio.create_task(self._stop_after(duration))
+                    if duration is not None
+                    else None
+                )
                 await server.wait_closed()
         finally:
+            if timer is not None:
+                timer.cancel()
+                await asyncio.gather(timer, return_exceptions=True)
             self._server = None
             self.runtime.set_interaction_sink(None)
             self.runtime.set_shutdown_sink(None)
             await self._close_clients()
             await self.runtime.stop()
+
+    async def _stop_after(self, duration: float) -> None:
+        await asyncio.sleep(duration)
+        await self.stop()
 
     async def stop(self) -> None:
         self._stop_requested = True
@@ -121,18 +139,7 @@ class AvatarWebSocketServer:
                 websocket,
                 InteractionEvent(
                     event=AvatarInteraction.READY,
-                    payload={
-                        "running": self.runtime.is_running,
-                        "mode": self.config.runtime.mode,
-                        "protocol_version": "1.1",
-                        "capabilities": {
-                            "prepare_reply": True,
-                            "apply_control": True,
-                            "voice_stream_pcm": bool(self.runtime.renderer and self.runtime.renderer.pcm_audio_ready),
-                            "commands": ["prepare_reply", "apply_control", "voice_stream"],
-                            "interactions": ["reply_prepared", "control_applied"],
-                        },
-                    },
+                    payload=self.runtime.ready_payload(),
                 ).to_json()
             )
 

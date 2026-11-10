@@ -59,6 +59,7 @@ class RuntimeCapabilities:
     identity_mode: str = "standard"
     voice_stream: bool = False
     reply_controls: bool = False
+    allow_silent_reply: bool = False
     control_emotions: tuple[str, ...] = ()
     control_actions: tuple[str, ...] = ()
     interruption_feedback_count: int = 0
@@ -107,6 +108,7 @@ class RuntimeCapabilities:
             identity_mode=_choice(value.get("identity_mode"), _IDENTITY_MODES, "standard"),
             voice_stream=_bool(value, "voice_stream", False),
             reply_controls=_bool(value, "reply_controls", False),
+            allow_silent_reply=_bool(value, "allow_silent_reply", False),
             prompt_profile=_choice(value.get("prompt_profile"), {"standard", "desktop_companion"}, "standard"),
             control_emotions=_choices(value.get("control_emotions")),
             control_actions=_choices(value.get("control_actions")),

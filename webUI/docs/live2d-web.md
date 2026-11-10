@@ -5,8 +5,10 @@ desktop Live2D window, pygame, or the adapter's desktop websocket. Add
 `live2d_web.router` to the WebUI FastAPI app; the existing WebUI HTTP auth
 middleware then protects the model, asset, and Core routes.
 
-The manager discovers `.model3.json` descriptors below
-`NachoBot-Live2D-Adapter/resources` and other adapter directories. It excludes
+By default, the manager discovers `.model3.json` descriptors below
+`NachoBot-Live2D-Adapter/resources`; callers may supply a different model root.
+Live2D metadata comes from the independent provider project; desktop UI code is
+not imported. It excludes
 virtual environments, caches, Git folders, and dependency directories. A
 model appears only when its descriptor is valid and every declared moc,
 texture, expression, motion, physics, pose, display-info, user-data, or motion

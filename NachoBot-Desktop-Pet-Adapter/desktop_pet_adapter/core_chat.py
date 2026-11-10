@@ -33,9 +33,11 @@ def incoming_message(text: str, message_id: str, model_group: str = "", desktop_
                 "runtime_capabilities": {
                     "schema_version": 1,
                     "planner_bypass": True,
+                    "memory_retrieval_mode": "direct",
                     "prompt_profile": "desktop_companion",
                     "reply_delivery": "structured_reply",
                     "reply_controls": True,
+                    "allow_silent_reply": False,
                     **({"reply_model_group": model_group} if model_group else {}),
                     "control_emotions": ["normal", "joy", "shy", "sorrow", "angry", "surprise"],
                     "control_actions": list(DEFAULT_ACTION_MAPPINGS),
@@ -51,6 +53,7 @@ def incoming_idle_event(message_id: str, idle_seconds: float, model_group: str =
     packet = incoming_message("", message_id, model_group, desktop_context)
     info = packet["message_info"]
     info.pop("user_info")
+    info["additional_config"]["runtime_capabilities"]["allow_silent_reply"] = True
     info["additional_config"].update({
         "system_event": {"version": 1, "type": "desktop.idle", "actor": None, "target": None,
                          "data": {"idle_seconds": max(0, min(86400, int(idle_seconds)))}},
@@ -60,7 +63,10 @@ def incoming_idle_event(message_id: str, idle_seconds: float, model_group: str =
     return packet
 
 
-def extract_reply(message: dict[str, Any], request_id: str) -> ChatReply | None:
+_SILENT_REPLY = object()
+
+
+def extract_reply(message: dict[str, Any], request_id: str) -> ChatReply | object | None:
     """Ignore expired, unattributed, and other users' replies instead of guessing."""
     if message.get("is_custom_message"):
         return None
@@ -93,6 +99,10 @@ def extract_reply(message: dict[str, Any], request_id: str) -> ChatReply | None:
             raise DesktopPetBackendError("Core 桌宠消息协议版本不兼容，请同步更新 Core。")
         if data.get("status") == "error":
             raise DesktopPetBackendError("Core 回复格式解析失败，请重试。")
+        if data.get("status") == "silent":
+            if set(data) != {"schema_version", "request_id", "status"}:
+                raise DesktopPetBackendError("Core 桌宠静默回复格式无效，请同步更新 Core。")
+            return _SILENT_REPLY
         text = data.get("text")
         if data.get("status") != "ok" or not isinstance(text, str) or not text.strip():
             continue
@@ -104,6 +114,45 @@ def extract_reply(message: dict[str, Any], request_id: str) -> ChatReply | None:
                          emotion=emotion if isinstance(emotion, str) and emotion in {"normal","joy","shy","sorrow","angry","surprise"} else None,
                          action=action if isinstance(action, str) and action in DEFAULT_ACTION_MAPPINGS else None)
     return None
+
+
+def _is_silent_reply_opted_in(packet: dict[str, Any]) -> bool:
+    info = packet.get("message_info")
+    additional = info.get("additional_config") if isinstance(info, dict) else None
+    capabilities = additional.get("runtime_capabilities") if isinstance(additional, dict) else None
+    event = additional.get("system_event") if isinstance(additional, dict) else None
+    route = additional.get("system_event_route") if isinstance(additional, dict) else None
+    if not isinstance(info, dict) or info.get("platform") != "local.live2d" or "user_info" in info:
+        return False
+    if not isinstance(capabilities, dict) or capabilities.get("allow_silent_reply") is not True:
+        return False
+    if (
+        capabilities.get("prompt_profile") != "desktop_companion"
+        or capabilities.get("reply_delivery") != "structured_reply"
+        or capabilities.get("reply_controls") is not True
+    ):
+        return False
+    if (
+        not isinstance(event, dict)
+        or type(event.get("version")) is not int
+        or event.get("version") != 1
+        or event.get("type") != "desktop.idle"
+        or event.get("actor") is not None
+        or event.get("target") is not None
+    ):
+        return False
+    data = event.get("data")
+    seconds = data.get("idle_seconds") if isinstance(data, dict) else None
+    peer = route.get("peer") if isinstance(route, dict) else None
+    return (
+        type(seconds) is int
+        and 0 <= seconds <= 86400
+        and isinstance(route, dict)
+        and route.get("platform") == "local.live2d"
+        and route.get("kind") == "private"
+        and isinstance(peer, dict)
+        and peer.get("user_id") == "host"
+    )
 
 
 class CoreChatClient:
@@ -131,6 +180,7 @@ class CoreChatClient:
                  is_cancelled=None) -> ChatReply | None:
         token = self.voice.token()
         request_id = packet["message_info"]["message_id"]
+        allow_silent = is_cancelled is not None and _is_silent_reply_opted_in(packet)
         if is_cancelled and is_cancelled():
             return None
         headers = {"platform": "local.live2d"}
@@ -165,11 +215,21 @@ class CoreChatClient:
                         raise
                     except (ValueError, UnicodeError):
                         continue
+                    if is_cancelled and is_cancelled():
+                        return None
                     reply = (
                         extract_reply(message, request_id) if isinstance(message, dict) else None
                     )
+                    if reply is _SILENT_REPLY:
+                        if is_cancelled and is_cancelled():
+                            return None
+                        if not allow_silent:
+                            raise DesktopPetBackendError("Core 在普通桌面消息中返回了静默回复。")
+                        return None
                     if reply is not None:
                         break
+        except DesktopPetBackendError:
+            raise
         except TimeoutError as exc:
             raise DesktopPetBackendError("Core 回答超时，请稍后重试。") from exc
         except Exception as exc:

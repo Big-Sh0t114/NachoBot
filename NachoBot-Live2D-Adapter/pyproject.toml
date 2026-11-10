@@ -5,22 +5,17 @@ build-backend = "hatchling.build"
 [project]
 name = "nachobot-live2d-adapter"
 version = "0.1.0"
-description = "Standalone Live2D rendering adapter for NachoBot"
+description = "Independent Live2D application and reusable model runtime for NachoBot"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "live2d-py>=0.7.0.4,<0.8; sys_platform == 'win32'",
     "pygame>=2.5",
-    "pillow>=10",
-    "pystray>=0.19.5,<0.20; sys_platform == 'win32'",
     "PyOpenGL>=3.1.10,<4",
     "PyOpenGL-accelerate>=3.1.10,<4",
-    "pywin32>=306; sys_platform == 'win32'",
     "websockets>=11,<17",
-    "loguru",
-    "aiohttp>=3.11,<4",
-    "mss>=9,<11",
-    "sounddevice>=0.5,<0.6; sys_platform == 'win32'",
+    "loguru>=0.7,<1",
+    "pywin32>=306; sys_platform == 'win32'",
 ]
 
 [project.scripts]
