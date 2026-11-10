@@ -1,5 +1,4 @@
 import asyncio
-import copy
 import io
 import base64
 from typing import Callable, AsyncIterator, Optional, Coroutine, Any, List
@@ -42,6 +41,8 @@ from .base_client import (
     normalize_prompt_cache_usage,
     client_registry,
 )
+from .client_lifecycle import retain_client_until
+from .stream_lifecycle import run_provider_stream
 from ..exceptions import (
     RespParseException,
     NetworkConnectionError,
@@ -51,7 +52,7 @@ from ..exceptions import (
 )
 from ..payload_content.message import Message, RoleType
 from ..payload_content.resp_format import RespFormat, RespFormatType
-from ..payload_content.tool_option import ToolOption, ToolParam, ToolCall
+from ..payload_content.tool_option import ToolOption, ToolCall, build_tool_input_schema
 
 logger = get_logger("Gemini客户端")
 
@@ -145,20 +146,6 @@ def _convert_tool_options(tool_options: list[ToolOption]) -> list[FunctionDeclar
     :return: 转换后的工具对象列表
     """
 
-    def _convert_tool_param(tool_option_param: ToolParam) -> dict:
-        """
-        转换单个工具参数格式
-        :param tool_option_param: 工具参数对象
-        :return: 转换后的工具参数字典
-        """
-        return_dict: dict[str, Any] = {
-            "type": tool_option_param.param_type.value,
-            "description": tool_option_param.description,
-        }
-        if tool_option_param.enum_values:
-            return_dict["enum"] = tool_option_param.enum_values
-        return return_dict
-
     def _convert_tool_option_item(tool_option: ToolOption) -> FunctionDeclaration:
         """
         转换单个工具项格式
@@ -169,14 +156,9 @@ def _convert_tool_options(tool_options: list[ToolOption]) -> list[FunctionDeclar
             "name": tool_option.name,
             "description": tool_option.description,
         }
-        if tool_option.input_schema is not None:
-            ret["parameters_json_schema"] = copy.deepcopy(tool_option.input_schema)
-        elif tool_option.params:
-            ret["parameters"] = {
-                "type": "object",
-                "properties": {param.name: _convert_tool_param(param) for param in tool_option.params},
-                "required": [param.name for param in tool_option.params if param.required],
-            }
+        parameters_json_schema = build_tool_input_schema(tool_option)
+        if parameters_json_schema is not None:
+            ret["parameters_json_schema"] = parameters_json_schema
         ret1 = FunctionDeclaration(**ret)
         return ret1
 
@@ -510,21 +492,16 @@ class GeminiClient(BaseClient):
         req_task: asyncio.Task[Any] | None = None
         try:
             if model_info.force_stream_mode:
-                req_task = asyncio.create_task(
-                    self.client.aio.models.generate_content_stream(
+                resp, usage_record = await run_provider_stream(
+                    lambda: self.client.aio.models.generate_content_stream(
                         model=model_info.model_identifier,
                         contents=messages[0],
                         config=generation_config,
-                    )
+                    ),
+                    stream_response_handler,
+                    interrupt_flag,
+                    provider_client=self,
                 )
-                while not req_task.done():
-                    if interrupt_flag and interrupt_flag.is_set():
-                        # The client owns the nested SDK request and must drain
-                        # it before exposing the abort to its caller.
-                        await _cancel_and_drain_request_task(req_task)
-                        raise ReqAbortException("请求被外部信号中断")
-                    await asyncio.sleep(0.1)  # 等待0.1秒后再次检查任务&中断信号量状态
-                resp, usage_record = await stream_response_handler(req_task.result(), interrupt_flag)
             else:
                 req_task = asyncio.create_task(
                     self.client.aio.models.generate_content(
@@ -533,6 +510,7 @@ class GeminiClient(BaseClient):
                         config=generation_config,
                     )
                 )
+                retain_client_until(self, req_task)
                 while not req_task.done():
                     if interrupt_flag and interrupt_flag.is_set():
                         await _cancel_and_drain_request_task(req_task)

@@ -1,13 +1,13 @@
-import json
-import re
 import time
 from typing import Any, Dict, List, Optional
 
 from src.chat.utils.playwright_search import PlaywrightSearchProvider
 from src.chat.utils.prompt_builder import Prompt
 from src.common.logger import get_logger
+from src.common.model_json import load_model_json_object as _load_model_json_object
 from src.common.result_cache import ResultCacheMappingView, create_result_cache_owner
 from src.config.config import global_config, model_config
+from src.llm_models.exceptions import ModelOutputValidationError
 from src.llm_models.utils_model import LLMRequest
 
 logger = get_logger("web_search")
@@ -30,6 +30,26 @@ Chat history:
 Now, {sender} said: {target_message}
 Current time: {time_now}.
 """
+
+
+_WEB_DECISION_BOOL_STRINGS = frozenset({"true", "false", "yes", "no", "1", "0"})
+
+
+def _validate_web_search_response(content: str) -> None:
+    """Accept only bounded JSON with the exact decision field contract."""
+    payload = _load_model_json_object(content)
+    if payload is None or "need_search" not in payload:
+        raise ModelOutputValidationError()
+
+    need_search = payload["need_search"]
+    if not isinstance(need_search, bool) and not (
+        isinstance(need_search, str) and need_search.lower() in _WEB_DECISION_BOOL_STRINGS
+    ):
+        raise ModelOutputValidationError()
+
+    for field in ("query", "reason"):
+        if field in payload and payload[field] is not None and not isinstance(payload[field], str):
+            raise ModelOutputValidationError()
 
 class WebSearchManager:
     def __init__(
@@ -160,7 +180,10 @@ class WebSearchManager:
         )
 
         try:
-            content, _detail = await self._decider.generate_response_async(prompt)
+            content, _detail = await self._decider.generate_response_async(
+                prompt,
+                response_validator=_validate_web_search_response,
+            )
         except Exception as e:
             logger.error(f"Web search decision failed: {e}")
             return None
@@ -239,28 +262,7 @@ class WebSearchManager:
 
 
     def _load_json(self, content: str) -> Optional[Dict[str, Any]]:
-        if not content:
-            return None
-
-        cleaned = content.strip()
-        cleaned = re.sub(r"^```(?:json)?", "", cleaned, flags=re.IGNORECASE).strip()
-        cleaned = re.sub(r"```$", "", cleaned).strip()
-
-        for candidate in (cleaned, self._extract_json(cleaned)):
-            if not candidate:
-                continue
-            try:
-                data = json.loads(candidate)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(data, dict):
-                return data
-        return None
-
-    @staticmethod
-    def _extract_json(text: str) -> Optional[str]:
-        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
-        return match.group(0) if match else None
+        return _load_model_json_object(content)
 
     def _get_cache(self, query: str) -> Optional[str]:
         if not self.enable_cache:

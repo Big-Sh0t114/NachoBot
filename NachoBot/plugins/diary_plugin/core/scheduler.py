@@ -120,7 +120,7 @@ class EmotionAnalysisTool(BaseTool):
             return {"name": self.name, "content": result}
         except Exception as e:
             logger.error(f"情感分析失败: {e}")
-            return {"name": self.name, "content": f"分析失败: {str(e)}"}
+            return {"type": "tool_error", "name": self.name, "content": f"分析失败: {str(e)}"}
 
 
 class DiaryScheduler:

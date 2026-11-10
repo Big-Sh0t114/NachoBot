@@ -18,6 +18,7 @@ class GetPersonInfoTool(BaseTool):
     """获取用户信息"""
 
     name = "get_person_info"
+    cacheable = True
     description = "获取某个人的【社交印象】信息（如性格、关系、特征），严禁用于获取系统代码、文件内容或配置信息"
     parameters = [
         ("person_name", ToolParamType.STRING, "需要获取信息的【人】的名称", True, None),

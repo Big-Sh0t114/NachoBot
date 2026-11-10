@@ -413,7 +413,7 @@ class CoreMultimodalRouter:
                 raise AudioStreamError(501, "no_local_asr_stream_candidate")
 
             try:
-                model, provider, _client = request.acquire_model_lease(eligible_models)
+                model, provider, _client = request.acquire_model_lease(eligible_models, create_client=False)
             except Exception as exc:
                 raise AudioStreamError(501, "no_local_asr_stream_candidate") from exc
             model_name = str(model.name)

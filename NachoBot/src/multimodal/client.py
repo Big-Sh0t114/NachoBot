@@ -261,10 +261,23 @@ class LocalMultimodalClient:
         }
         payload.update({"metadata": dict(request.metadata)})
         response = await self._request("POST", "/v1/perception", json=payload)
-        text = str(response.get("text") or "").strip()
-        if not text:
-            raise RuntimeError("local multimodal runtime returned empty perception text")
-        text = text[:MAX_TEXT_CHARS]
+        response_text = response.get("text")
+        if request.response_schema is not None:
+            # Preserve the local model's complete response for Core's shared
+            # candidate validator. Trimming or truncating here could turn an
+            # invalid oversized response into a valid JSON prefix.
+            if not isinstance(response_text, str):
+                raise RuntimeError("local multimodal runtime returned non-string perception text")
+            text = response_text
+            if not text.strip():
+                raise RuntimeError("local multimodal runtime returned empty perception text")
+        else:
+            # Keep the established caption contract unchanged when validation
+            # was not explicitly requested.
+            text = str(response_text or "").strip()
+            if not text:
+                raise RuntimeError("local multimodal runtime returned empty perception text")
+            text = text[:MAX_TEXT_CHARS]
         return PerceptionResult(
             operation=request.operation,
             text=text,

@@ -126,6 +126,14 @@ class EmptyResponseException(Exception):
         return self.message
 
 
+class ModelOutputValidationError(Exception):
+    """A model response did not satisfy an opt-in caller acceptance contract."""
+
+    def __init__(self):
+        # Keep model output and parser details out of scheduling and logs.
+        super().__init__("Model response failed caller validation")
+
+
 class ModelAttemptFailed(Exception):
     """当在单个模型上的所有重试都失败后，由“执行者”函数抛出，以通知“调度器”切换模型。"""
 

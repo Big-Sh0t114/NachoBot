@@ -12,6 +12,7 @@ class SearchKnowledgeFromLPMMTool(BaseTool):
     """从LPMM知识库中搜索相关信息的工具"""
 
     name = "lpmm_search_knowledge"
+    cacheable = True
     description = "从知识库中搜索相关信息，如果你需要知识，就使用这个工具"
     parameters = [
         ("query", ToolParamType.STRING, "搜索查询关键词", True, None),
@@ -34,7 +35,7 @@ class SearchKnowledgeFromLPMMTool(BaseTool):
             # 检查LPMM知识库是否启用
             if qa_manager is None:
                 logger.debug("LPMM知识库已禁用，跳过知识获取")
-                return {"type": "info", "id": query, "content": "LPMM知识库已禁用"}
+                return {"type": "tool_error", "id": query, "content": "LPMM知识库已禁用"}
 
             # 调用知识库搜索
 
@@ -52,4 +53,4 @@ class SearchKnowledgeFromLPMMTool(BaseTool):
             logger.error(f"知识库搜索工具执行失败: {str(e)}")
             # 在其他异常情况下，确保 id 仍然是 query (如果它被定义了)
             query_id = query if "query" in locals() else "unknown_query"
-            return {"type": "info", "id": query_id, "content": f"lpmm知识库搜索失败，炸了: {str(e)}"}
+            return {"type": "tool_error", "id": query_id, "content": f"lpmm知识库搜索失败，炸了: {str(e)}"}

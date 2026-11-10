@@ -120,6 +120,7 @@ class MediaInput:
     prompt: str = ""
     metadata: Mapping[str, Any] = field(default_factory=dict)
     task: str = ""
+    response_schema: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.operation not in {
