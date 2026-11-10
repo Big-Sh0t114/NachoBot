@@ -888,6 +888,7 @@ class PrivateReplyer:
         chat_stream = self.chat_stream
         chat_id = chat_stream.stream_id
         platform = chat_stream.platform
+        memory_capabilities = runtime_capabilities_from_stream(chat_stream, message=reply_message)
         advanced_on = advanced_manager.is_on(chat_stream)
         context_size = global_config.chat.get_max_context_size(is_group_chat=bool(chat_stream.group_info))
 
@@ -1056,17 +1057,25 @@ class PrivateReplyer:
             if not actorless_target
             else asyncio.sleep(0, result="")
         )
-        memory_coro = (
-            build_memory_retrieval_prompt(
+        if actorless_target:
+            memory_coro = asyncio.sleep(0, result="")
+        elif getattr(memory_capabilities, "memory_retrieval_mode", "standard") == "direct":
+            from src.memory_system.dialogue_memory import prepare_direct_dialogue_memory
+
+            memory_coro = prepare_direct_dialogue_memory(
+                current_message=reply_message,
+                history_messages=message_list_before_now_long,
+                chat_stream=chat_stream,
+                capabilities=memory_capabilities,
+            )
+        else:
+            memory_coro = build_memory_retrieval_prompt(
                 message=chat_talking_prompt_short,
                 sender=sender,
                 target=target,
                 chat_stream=chat_stream,
                 question=planner_question_text,
             )
-            if not actorless_target
-            else asyncio.sleep(0, result="")
-        )
         mid_term_memory_coro = (
             self._build_mid_term_memory_block(chat_id, message_list_before_now_long)
             if not actorless_target

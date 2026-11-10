@@ -1083,6 +1083,8 @@ class DefaultReplyer:
         latest_session = get_latest_session_name(chat_stream)
         context_size = global_config.chat.get_max_context_size(is_group_chat=is_group_chat)
         platform = chat_stream.platform
+        runtime_capabilities = runtime_capabilities_from_stream(chat_stream)
+        memory_capabilities = runtime_capabilities_from_stream(chat_stream, message=reply_message)
 
         current_user_info = chat_stream.user_info
         user_id = str(getattr(current_user_info, "user_id", "") or "用户ID")
@@ -1254,6 +1256,30 @@ class DefaultReplyer:
                         planner_question_text = action.get("question")
                     break
 
+        if getattr(memory_capabilities, "memory_retrieval_mode", "standard") == "direct":
+            if reply_message is None or reply_system_event is not None:
+                memory_coro = asyncio.sleep(0, result="")
+            elif reply_user_info is not None or actorless_anonymous:
+                from src.memory_system.dialogue_memory import prepare_direct_dialogue_memory
+
+                memory_coro = prepare_direct_dialogue_memory(
+                    current_message=reply_message,
+                    history_messages=message_list_before_now_long,
+                    chat_stream=chat_stream,
+                    capabilities=memory_capabilities,
+                    allow_anonymous_read_only=actorless_anonymous,
+                )
+            else:
+                memory_coro = asyncio.sleep(0, result="")
+        else:
+            memory_coro = build_memory_retrieval_prompt(
+                message=chat_talking_prompt_short,
+                sender=sender,
+                target=target,
+                chat_stream=chat_stream,
+                question=planner_question_text,
+            )
+
         # 并行执行五个构建任务
         task_results = await asyncio.gather(
             self._time_and_run_task(
@@ -1263,13 +1289,7 @@ class DefaultReplyer:
                 self.build_relation_info(chat_talking_prompt_short, sender, person_list_short), "relation_info"
             ),
             self._time_and_run_task(
-                build_memory_retrieval_prompt(
-                    message=chat_talking_prompt_short,
-                    sender=sender,
-                    target=target,
-                    chat_stream=chat_stream,
-                    question=planner_question_text,
-                ),
+                memory_coro,
                 "memory_block",
             ),
             self._time_and_run_task(
@@ -1343,7 +1363,7 @@ class DefaultReplyer:
         keywords_reaction_prompt = await self.build_keywords_reaction_prompt(target)
 
         tts_language_prompt = ""
-        tts_capabilities = runtime_capabilities_from_stream(chat_stream)
+        tts_capabilities = runtime_capabilities
         tts_selected = tts_capabilities.reply_delivery == "tts_text"
         try:
             from src.plugins.built_in.tts_plugin.plugin import TTSAction
