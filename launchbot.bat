@@ -419,7 +419,7 @@ set "SNOWLUMA_DIR="
 for /f "usebackq delims=" %%D in (`uv run --project "%ROOT%NachoBot" python "%ROOT%webUI\snowluma_locator.py" --root "%ROOT:~0,-1%" --field path 2^>nul`) do if not defined SNOWLUMA_DIR set "SNOWLUMA_DIR=%%D"
 if not defined SNOWLUMA_DIR (
   echo [FATAL] SnowLuma Runtime discovery failed; deploy exactly one valid SnowLuma Runtime directory.
-  echo [INFO] SnowLuma download: https://github.com/SnowLuma/SnowLuma/releases/latest
+  echo [INFO] SnowLuma download: https://web.archive.org/web/20261030125825/https://github.com/SnowLuma/SnowLuma/releases
   endlocal & exit /b 1
 )
 set "SNOWLUMA_DIR=%SNOWLUMA_DIR%"
@@ -430,12 +430,12 @@ if not exist "!SNOWLUMA_ADAPTER_DIR!\main.py" set "SNOWLUMA_MISSING=!SNOWLUMA_MI
 if not exist "!SNOWLUMA_ADAPTER_DIR!\pyproject.toml" set "SNOWLUMA_MISSING=!SNOWLUMA_MISSING! NachoBot-SnowLuma-Adapter/pyproject.toml;"
 if defined SNOWLUMA_MISSING (
   echo [FATAL] SnowLuma components are incomplete: !SNOWLUMA_MISSING!
-  echo [INFO] Redeploy from https://github.com/SnowLuma/SnowLuma/releases/latest
+  echo [INFO] Redeploy from https://web.archive.org/web/20261030125825/https://github.com/SnowLuma/SnowLuma/releases
   endlocal & exit /b 1
 )
 uv run --no-sync --project "%ROOT%NachoBot" python "%ROOT%webUI\snowluma_locator.py" --root "%ROOT:~0,-1%" --runtime-path "!SNOWLUMA_DIR!" --check-components
 if errorlevel 1 (
-  echo [FATAL] SnowLuma Runtime components are incomplete; redeploy from https://github.com/SnowLuma/SnowLuma/releases/latest
+  echo [FATAL] SnowLuma Runtime components are incomplete; redeploy from https://web.archive.org/web/20261030125825/https://github.com/SnowLuma/SnowLuma/releases
   endlocal & exit /b 1
 )
 uv run --project "%ROOT%NachoBot" python "%ROOT%webUI\snowluma_locator.py" --root "%ROOT:~0,-1%" --runtime-path "!SNOWLUMA_DIR!" --check-credentials >nul 2>&1
@@ -452,7 +452,7 @@ if not defined SNOWLUMA_DIR (
 )
 if not defined SNOWLUMA_DIR (
   echo [FATAL] SnowLuma Runtime discovery failed; adapter startup aborted.
-  echo [INFO] SnowLuma download: https://github.com/SnowLuma/SnowLuma/releases/latest
+  echo [INFO] SnowLuma download: https://web.archive.org/web/20261030125825/https://github.com/SnowLuma/SnowLuma/releases
   endlocal & exit /b 1
 )
 set "SNOWLUMA_PORT=5099"

@@ -478,13 +478,13 @@ class PathVerifier:
         "snowluma": {
             "name": "SnowLuma",
             "hint": "项目根目录下自动发现唯一有效的 SnowLuma Runtime 与适配器",
-            "download_url": "https://github.com/SnowLuma/SnowLuma/releases/latest",
+            "download_url": "https://web.archive.org/web/20261030125825/https://github.com/SnowLuma/SnowLuma/releases",
             "default_rel": None,
         },
         "snowluma_runtime": {
             "name": "SnowLuma Runtime",
             "hint": "项目根目录下自动发现唯一有效的 SnowLuma Runtime",
-            "download_url": "https://github.com/SnowLuma/SnowLuma/releases/latest",
+            "download_url": "https://web.archive.org/web/20261030125825/https://github.com/SnowLuma/SnowLuma/releases",
             "default_rel": None,
         },
         "sovits": {

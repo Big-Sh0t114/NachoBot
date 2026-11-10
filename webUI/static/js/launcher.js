@@ -1035,7 +1035,7 @@ const LauncherModule = (() => {
             installed: false,
             missing: ['状态尚未刷新'],
             download_url: adapter === 'snowluma'
-                ? 'https://github.com/SnowLuma/SnowLuma/releases/latest'
+                ? 'https://web.archive.org/web/20261030125825/https://github.com/SnowLuma/SnowLuma/releases'
                 : 'https://github.com/NapNeko/NapCatQQ/releases',
         };
     }
@@ -1115,7 +1115,7 @@ const LauncherModule = (() => {
                             : ['stopped', '已停止'];
         const downloadUrl = component.download_url || (
             adapter === 'snowluma'
-                ? 'https://github.com/SnowLuma/SnowLuma/releases/latest'
+                ? 'https://web.archive.org/web/20261030125825/https://github.com/SnowLuma/SnowLuma/releases'
                 : 'https://github.com/NapNeko/NapCatQQ/releases'
         );
         const missing = Array.isArray(component.missing) ? component.missing : [];
