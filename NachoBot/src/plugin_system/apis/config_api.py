@@ -7,6 +7,7 @@
     platform, user_id = await config_api.get_user_id_by_person_name("用户名")
 """
 
+from copy import deepcopy
 from typing import Any
 from src.common.logger import get_logger
 from src.config.config import global_config
@@ -41,9 +42,14 @@ def get_global_config(key: str, default: Any = None) -> Any:
                 current = getattr(current, k)
             else:
                 raise KeyError(f"配置中不存在子空间或键 '{k}'")
-        return current
     except Exception as e:
         logger.warning(f"[ConfigAPI] 获取全局配置 {key} 失败: {e}")
+        return default
+
+    try:
+        return deepcopy(current)
+    except Exception as e:
+        logger.warning(f"[ConfigAPI] 复制全局配置 {key} 失败: {type(e).__name__}")
         return default
 
 

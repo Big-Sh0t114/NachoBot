@@ -6,18 +6,11 @@ from typing import List, Optional, Tuple
 import aiohttp
 
 from src.common.logger import get_logger
+from src.common.browser_runtime import browser_available as _browser_runtime_available
+from src.common.browser_runtime import get_shared_browser_runtime
+from src.common.async_singleflight import AsyncSingleFlight, SingleFlightCapacityError, fingerprint_json
 
 logger = get_logger("url_fetcher")
-
-try:
-    from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
-
-    _PLAYWRIGHT_AVAILABLE = True
-except Exception:
-    async_playwright = None
-    PlaywrightTimeoutError = Exception
-    _PLAYWRIGHT_AVAILABLE = False
-
 
 _URL_PATTERN = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
 
@@ -86,11 +79,6 @@ def _truncate_for_log(text: str, max_len: int = 800) -> str:
 
 
 class UrlContentFetcher:
-    # --- Playwright 浏览器单例 ---
-    _browser = None
-    _playwright_instance = None
-    _browser_lock = asyncio.Lock()
-
     def __init__(
         self,
         timeout_seconds: int = 45,
@@ -108,11 +96,30 @@ class UrlContentFetcher:
         self.user_agent = user_agent
         self.prefer_browser = prefer_browser
         self.browser_timeout_seconds = browser_timeout_seconds
+        self._fetch_singleflight = AsyncSingleFlight()
 
     async def fetch_text(self, url: str) -> Optional[Tuple[str, Optional[str]]]:
+        key = fingerprint_json(
+            "url_content_fetcher",
+            url,
+            self.timeout_seconds,
+            self.max_bytes,
+            self.max_chars,
+            self.min_text_chars,
+            self.user_agent,
+            self.prefer_browser,
+            self.browser_timeout_seconds,
+        )
+        try:
+            return await self._fetch_singleflight.run(key, lambda: self._fetch_text_once(url))
+        except SingleFlightCapacityError as exc:
+            logger.debug("%s", type(exc).__name__)
+            return None
+
+    async def _fetch_text_once(self, url: str) -> Optional[Tuple[str, Optional[str]]]:
         html_text: Optional[str] = None
 
-        if self.prefer_browser and _PLAYWRIGHT_AVAILABLE:
+        if self.prefer_browser and self.browser_available():
             # 浏览器优先模式：先用浏览器，失败则 HTTP fallback
             html_text = await self._fetch_with_browser(url)
             if html_text is None:
@@ -128,11 +135,11 @@ class UrlContentFetcher:
                         text = text[: self.max_chars].rstrip() + "..."
                     return text, title
                 # HTTP 内容不足，尝试浏览器补充
-                if _PLAYWRIGHT_AVAILABLE:
+                if self.browser_available():
                     browser_html = await self._fetch_with_browser(url)
                     if browser_html:
                         html_text = browser_html
-            elif _PLAYWRIGHT_AVAILABLE:
+            elif self.browser_available():
                 html_text = await self._fetch_with_browser(url)
 
         if html_text is None:
@@ -174,42 +181,33 @@ class UrlContentFetcher:
     @staticmethod
     def browser_available() -> bool:
         """返回当前环境是否可以使用 Playwright。"""
-        return _PLAYWRIGHT_AVAILABLE and async_playwright is not None
+        return _browser_runtime_available()
 
     @classmethod
     async def get_shared_browser(cls):
-        """获取或创建共享的浏览器实例（单例模式）"""
+        """Compatibility facade for the shared Playwright browser instance."""
         if not cls.browser_available():
             raise RuntimeError("Playwright 不可用，无法创建浏览器实例")
-
-        async with cls._browser_lock:
-            if cls._browser is not None:
-                try:
-                    if cls._browser.is_connected():
-                        return cls._browser
-                except Exception:
-                    pass
-                # 浏览器已断连，重新创建
-                cls._browser = None
-
-            if cls._playwright_instance is None:
-                cls._playwright_instance = await async_playwright().start()
-            cls._browser = await cls._playwright_instance.chromium.launch(headless=True)
-            logger.info("已创建共享 Playwright 浏览器实例")
-            return cls._browser
+        return await get_shared_browser_runtime().get_browser()
 
     async def _fetch_with_browser(self, url: str) -> Optional[str]:
-        if not _PLAYWRIGHT_AVAILABLE or async_playwright is None:
+        if not self.browser_available():
             return None
         try:
-            browser = await self.get_shared_browser()
-            page = await browser.new_page(user_agent=self.user_agent)
-            try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=self.browser_timeout_seconds * 1000)
-                return await page.content()
-            finally:
-                await page.close()
-        except PlaywrightTimeoutError:
+            runtime = get_shared_browser_runtime()
+            async with runtime.page(self.user_agent) as page:
+                async def fetch_page() -> str:
+                    await page.goto(
+                        url,
+                        wait_until="domcontentloaded",
+                        timeout=self.browser_timeout_seconds * 1000,
+                    )
+                    return await asyncio.wait_for(page.content(), timeout=2)
+
+                return await asyncio.wait_for(fetch_page(), timeout=self.browser_timeout_seconds + 2)
+        except asyncio.CancelledError:
+            raise
+        except asyncio.TimeoutError:
             logger.debug(f"Browser fetch timeout: {url}")
             return None
         except Exception as e:
@@ -225,6 +223,8 @@ class UrlContentFetcher:
 
         lines = []
         for idx, (url, fetched) in enumerate(zip(urls, results, strict=True), 1):
+            if isinstance(fetched, asyncio.CancelledError):
+                raise fetched
             if isinstance(fetched, Exception):
                 logger.debug(f"URL抓取异常: {url}, err={fetched}")
                 continue

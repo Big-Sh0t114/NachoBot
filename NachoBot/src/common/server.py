@@ -168,7 +168,13 @@ class Server:
         """启动服务器"""
         self.validate_security()
         # 禁用 uvicorn 默认日志和访问日志
-        config = Config(app=self.app, host=self._host, port=self._port, log_config=None, access_log=False)
+        config = Config(
+            app=self.app,
+            host=self._host,
+            port=self._port,
+            log_config=None,
+            access_log=False,
+        )
         self._server = UvicornServer(config=config)
         try:
             await self._server.serve()

@@ -390,6 +390,20 @@ class PluginManager:
     async def _call_plugin_unload(self, plugin_instance: PluginBase) -> bool:
         """调用 V1/V2 插件的卸载钩子，同时兼容旧的 on_plugin_unload 命名。"""
         v2_plugin = getattr(plugin_instance, "v2_plugin", None)
+        if v2_plugin is not None:
+            try:
+                lifecycle = getattr(plugin_instance, "_sdk_lifecycle", None)
+                close = getattr(lifecycle, "close", None)
+                if callable(close):
+                    result = close()
+                    if inspect.isawaitable(result):
+                        result = await result
+                    return bool(result)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(f"插件 {plugin_instance.plugin_name} 执行卸载钩子失败: {exc}", exc_info=True)
+                return False
         if v2_plugin is not None and not getattr(v2_plugin, "_on_load_called", False):
             # SDK V2 的 on_load 是惰性调用，on_unload 只与已执行的 on_load 配对。
             return True

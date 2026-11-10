@@ -1,6 +1,7 @@
 import json
 import os
 
+from src.common.atomic_json import atomic_write_json
 from src.common.logger import get_logger
 
 LOCAL_STORE_FILE_PATH = "data/local_store.json"
@@ -54,22 +55,18 @@ class LocalStoreManager:
             except json.JSONDecodeError:
                 logger.warning("啊咧？记事本被弄脏了，正在重建记事本......")
                 self.store = {}
-                with open(self.file_path, "w", encoding="utf-8") as f:
-                    json.dump({}, f, ensure_ascii=False, indent=4)
+                atomic_write_json(self.file_path, {}, ensure_ascii=False, indent=4)
                 logger.info("记事本重建成功！")
         else:
             # 不存在本地存储文件，创建新的目录和文件
             logger.warning("啊咧？记事本不存在，正在创建新的记事本......")
-            os.makedirs(os.path.dirname(self.file_path), exist_ok=True)
-            with open(self.file_path, "w", encoding="utf-8") as f:
-                json.dump({}, f, ensure_ascii=False, indent=4)
+            atomic_write_json(self.file_path, {}, ensure_ascii=False, indent=4)
             logger.info("记事本创建成功！")
 
     def save_local_store(self):
         """保存本地存储数据"""
         logger.debug(f"保存本地存储数据: {self.file_path}")
-        with open(self.file_path, "w", encoding="utf-8") as f:
-            json.dump(self.store, f, ensure_ascii=False, indent=4)
+        atomic_write_json(self.file_path, self.store, ensure_ascii=False, indent=4)
 
 
 local_storage = LocalStoreManager("data/local_store.json")  # 全局单例化

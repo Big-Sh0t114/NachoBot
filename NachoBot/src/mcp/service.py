@@ -66,16 +66,33 @@ class _ServerConnection:
         return self._client is None and self.retry_in_seconds <= 0
 
     async def connect(self) -> bool:
-        async with self._lock:
+        deadline = asyncio.get_running_loop().time() + self._connect_timeout
+        cancellation_count = self._cancellation_count()
+        try:
+            await self._acquire_until(deadline)
+        except TimeoutError:
+            # A queued setup did not own the connection, so it must not alter
+            # the live connection or its retry state.
+            return False
+        try:
+            self._raise_if_cancelled(cancellation_count)
             if self._client is not None:
                 return True
             candidate: Any = None
             try:
-                candidate = self._client_factory(self.config, self._call_timeout)
-                if inspect.isawaitable(candidate):
-                    candidate = await candidate
-                entered = await asyncio.wait_for(candidate.__aenter__(), timeout=self._connect_timeout)
-                tools = await asyncio.wait_for(self._fetch_tools(entered), timeout=self._connect_timeout)
+                factory_result = self._client_factory(self.config, self._call_timeout)
+                if inspect.isawaitable(factory_result):
+                    candidate = await self._await_until(factory_result, deadline)
+                    self._raise_if_cancelled(cancellation_count)
+                else:
+                    candidate = factory_result
+                self._raise_if_expired(deadline)
+                entered = await self._await_until(candidate.__aenter__(), deadline)
+                self._raise_if_cancelled(cancellation_count)
+                self._raise_if_expired(deadline)
+                tools = await self._await_until(self._fetch_tools(entered), deadline)
+                self._raise_if_cancelled(cancellation_count)
+                self._raise_if_expired(deadline)
                 self._client = entered
                 self.tools = tools
                 self.last_error = ""
@@ -83,8 +100,17 @@ class _ServerConnection:
                 self.next_retry_at = 0.0
                 logger.info(f"MCP 服务器 {self.config.name} 已连接，发现 {len(tools)} 个工具")
                 return True
+            except asyncio.CancelledError:
+                # A canceled setup never publishes its partial session. When
+                # the factory has yielded a context manager, close it once.
+                self._client = None
+                self.tools = ()
+                if candidate is not None and hasattr(candidate, "__aexit__"):
+                    await _close_client(candidate)
+                raise
             except Exception as exc:
                 self.last_error = _safe_error(exc)
+                self._client = None
                 self.tools = ()
                 self.failure_count += 1
                 if self._reconnect_interval > 0:
@@ -97,26 +123,74 @@ class _ServerConnection:
                 if candidate is not None:
                     await _close_client(candidate)
                 return False
+        finally:
+            self._lock.release()
 
     async def disconnect(self) -> None:
         async with self._lock:
             await self._disconnect_unlocked()
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
-        async with self._lock:
+        deadline = asyncio.get_running_loop().time() + self._call_timeout
+        cancellation_count = self._cancellation_count()
+        await self._acquire_until(deadline)
+        try:
+            self._raise_if_cancelled(cancellation_count)
             if self._client is None:
                 raise ConnectionError(f"MCP server {self.config.name} is not connected")
+            # The deadline also covers queueing. If it expired before dispatch,
+            # this call never owned the SDK operation and must leave the client
+            # and its catalog untouched.
+            self._raise_if_expired(deadline)
             try:
-                return await asyncio.wait_for(
-                    self._client.call_tool(name, arguments),
-                    timeout=self._call_timeout,
-                )
+                result = await self._await_until(self._client.call_tool(name, arguments), deadline)
+                self._raise_if_cancelled(cancellation_count)
+                self._raise_if_expired(deadline)
+                return result
             except Exception as exc:
                 self.last_error = _safe_error(exc)
                 # Calls are never retried automatically: a lost response may
                 # still have committed a side effect on the remote system.
                 await self._disconnect_unlocked()
                 raise
+        finally:
+            self._lock.release()
+
+    async def _acquire_until(self, deadline: float) -> None:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise TimeoutError("MCP operation deadline exceeded")
+        await asyncio.wait_for(self._lock.acquire(), timeout=remaining)
+        if asyncio.get_running_loop().time() >= deadline:
+            self._lock.release()
+            raise TimeoutError("MCP operation deadline exceeded")
+
+    @staticmethod
+    async def _await_until(awaitable: Awaitable[Any], deadline: float) -> Any:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            # Avoid leaving an un-awaited coroutine when a synchronous phase
+            # (such as the SDK factory) consumed the remaining budget.
+            if inspect.iscoroutine(awaitable):
+                awaitable.close()
+            raise TimeoutError("MCP operation deadline exceeded")
+        return await asyncio.wait_for(awaitable, timeout=remaining)
+
+    @staticmethod
+    def _cancellation_count() -> int:
+        task = asyncio.current_task()
+        return task.cancelling() if task is not None else 0
+
+    @staticmethod
+    def _raise_if_cancelled(cancellation_count: int) -> None:
+        task = asyncio.current_task()
+        if task is not None and task.cancelling() > cancellation_count:
+            raise asyncio.CancelledError
+
+    @staticmethod
+    def _raise_if_expired(deadline: float) -> None:
+        if asyncio.get_running_loop().time() >= deadline:
+            raise TimeoutError("MCP operation deadline exceeded")
 
     async def _disconnect_unlocked(self) -> None:
         client, self._client = self._client, None

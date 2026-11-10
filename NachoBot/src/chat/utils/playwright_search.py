@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import re
 from typing import Dict, List, Sequence
@@ -6,6 +7,8 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from bs4 import BeautifulSoup
 
 from src.chat.utils.url_fetcher import UrlContentFetcher
+from src.common.browser_runtime import get_shared_browser_runtime
+from src.common.async_singleflight import AsyncSingleFlight, SingleFlightCapacityError, fingerprint_json
 from src.common.logger import get_logger
 
 logger = get_logger("playwright_search")
@@ -65,6 +68,7 @@ class PlaywrightSearchProvider:
         self.engines = tuple(normalized_engines) or self._SUPPORTED_ENGINES
         self.timeout_seconds = max(1, int(timeout_seconds))
         self.user_agent = user_agent
+        self._search_singleflight = AsyncSingleFlight()
 
     @staticmethod
     def is_available() -> bool:
@@ -80,6 +84,22 @@ class PlaywrightSearchProvider:
         query = query.strip()
         if not query or max_results <= 0:
             return []
+        key = fingerprint_json(
+            "playwright_search",
+            query,
+            max_results,
+            self.engines,
+            self.timeout_seconds,
+            self.user_agent,
+        )
+        try:
+            results = await self._search_singleflight.run(key, lambda: self._search_once(query, max_results))
+        except SingleFlightCapacityError as exc:
+            logger.debug("%s", type(exc).__name__)
+            return []
+        return [dict(item) for item in results]
+
+    async def _search_once(self, query: str, max_results: int) -> List[Dict[str, str]]:
         if not self.browser_available():
             logger.warning("Playwright 不可用，将使用 HTTP fallback 执行搜索")
 
@@ -102,21 +122,33 @@ class PlaywrightSearchProvider:
 
         if self.browser_available():
             try:
-                browser = await UrlContentFetcher.get_shared_browser()
-                page = await browser.new_page(user_agent=self.user_agent)
-                try:
+                runtime = get_shared_browser_runtime()
+                async with runtime.page(self.user_agent) as page:
+                    async def read_search_page() -> str:
+                        try:
+                            await page.goto(
+                                search_url,
+                                wait_until="domcontentloaded",
+                                timeout=self.timeout_seconds * 1000,
+                            )
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as e:
+                            # Navigation timeouts can leave a usable result DOM behind.
+                            logger.debug(f"搜索页导航未完整完成: engine={engine}, err={e}")
+                        return await page.content()
+
                     try:
-                        await page.goto(
-                            search_url,
-                            wait_until="domcontentloaded",
-                            timeout=self.timeout_seconds * 1000,
+                        html_text = await asyncio.wait_for(
+                            read_search_page(),
+                            timeout=self.timeout_seconds + 2,
                         )
-                    except Exception as e:
-                        # 超时时页面经常已经包含可解析的结果，因此继续读取当前 DOM。
-                        logger.debug(f"搜索页导航未完整完成: engine={engine}, err={e}")
-                    html_text = await page.content()
-                finally:
-                    await page.close()
+                    except asyncio.CancelledError:
+                        raise
+                    except asyncio.TimeoutError:
+                        logger.debug(f"搜索页获取超时: engine={engine}")
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 logger.warning(f"Playwright 搜索不可用，切换 HTTP fallback: engine={engine}, err={e}")
 

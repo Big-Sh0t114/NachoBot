@@ -1,4 +1,5 @@
 import asyncio
+from src.common.task_cancellation import cancellation_boundary, cancellation_checkpoint, cancellation_scope, check_cancellation
 from typing import List, Dict, Optional, Set, Type, Tuple, TYPE_CHECKING
 
 from src.chat.message_receive.message import MessageRecv, MessageSending
@@ -80,6 +81,7 @@ class EventsManager:
         self._handler_generations[handler_name] = self._handler_generation_counter
         return True
 
+    @cancellation_boundary
     async def handle_nacho_events(
         self,
         event_type: EventType,
@@ -109,17 +111,19 @@ class EventsManager:
             return True, None
 
         await self._after_handler_snapshot()
+        await check_cancellation()
 
         # 2. 准备消息
         transformed_message = self._prepare_message(
             event_type, message, llm_prompt, llm_response, stream_id, action_usage
         )
-        if transformed_message:
+        if transformed_message is not None:
             transformed_message = transformed_message.deepcopy()
 
-        current_stream_id = transformed_message.stream_id if transformed_message else None
+        current_stream_id = transformed_message.stream_id if transformed_message is not None else None
         modified_message: Optional[NachoMessages] = None
         for handler, generation in handlers:
+            await cancellation_checkpoint()
             if not self._handler_is_current(handler, generation):
                 continue
             # 3. 前置检查和配置加载
@@ -133,6 +137,7 @@ class EventsManager:
             # 统一加载插件配置
             plugin_config = component_registry.get_plugin_config(handler.plugin_name) or {}
             handler.set_plugin_config(plugin_config)
+            await check_cancellation()
 
             if not self._handler_is_current(handler, generation):
                 continue
@@ -141,10 +146,15 @@ class EventsManager:
             if (
                 handler.intercept_message or event_type == EventType.ON_STOP
             ):  # 让ON_STOP的所有事件处理器都发挥作用，防止还没执行即被取消
-                # 阻塞执行，并更新 continue_flag
-                should_continue, modified_message = await self._dispatch_intercepting_handler_task(
-                    handler, event_type, modified_message or transformed_message, generation
+                # Interceptors transform a committed snapshot in order. A None
+                # result means this handler made no replacement, so preserve the
+                # previous commit (or the original prepared snapshot).
+                input_message = modified_message if modified_message is not None else transformed_message
+                should_continue, replacement_message = await self._dispatch_intercepting_handler_task(
+                    handler, event_type, input_message, generation
                 )
+                if replacement_message is not None:
+                    modified_message = replacement_message
                 continue_flag = continue_flag and should_continue
             else:
                 # 异步执行，不阻塞
@@ -439,7 +449,16 @@ class EventsManager:
         if not self._handler_is_current(handler, generation):
             return
         try:
-            task = asyncio.create_task(handler.execute(message))
+            try:
+                handler_message = message.deepcopy() if message is not None else None
+            except Exception as e:
+                logger.error(
+                    f"复制事件处理器 {handler.handler_name} 的消息时发生异常 ({type(e).__name__})"
+                )
+                return
+            if not self._handler_is_current(handler, generation):
+                return
+            task = asyncio.create_task(handler.execute(handler_message))
 
             task_name = f"{handler.plugin_name}-{handler.handler_name}"
             task.set_name(task_name)
@@ -459,41 +478,95 @@ class EventsManager:
         generation: Optional[int] = None,
     ) -> Tuple[bool, Optional[NachoMessages]]:
         """分发并等待一个阻塞（同步）的事件处理器，返回是否应继续处理。"""
-        if event_type == EventType.UNKNOWN:
-            raise ValueError("未知事件类型")
-        if event_type not in self._history_enable_map:
-            raise ValueError(f"事件类型 {event_type} 未注册")
-        if generation is None:
-            generation = self._handler_generations.get(handler.handler_name)
-        if not self._handler_is_current(handler, generation):
-            return True, None
-        try:
-            task = asyncio.create_task(handler.execute(message))
-            task.set_name(f"{handler.plugin_name}-{handler.handler_name}-intercept")
-            self._handler_tasks.setdefault(handler.handler_name, set()).add(task)
+        with cancellation_scope():
+            await check_cancellation()
+            if event_type == EventType.UNKNOWN:
+                raise ValueError("未知事件类型")
+            if event_type not in self._history_enable_map:
+                raise ValueError(f"事件类型 {event_type} 未注册")
+            if generation is None:
+                generation = self._handler_generations.get(handler.handler_name)
+            if not self._handler_is_current(handler, generation):
+                await check_cancellation()
+                return True, None
             try:
-                success, continue_processing, return_message, custom_result, modified_message = await task
-            finally:
-                tasks = self._handler_tasks.get(handler.handler_name)
-                if tasks is not None:
-                    tasks.discard(task)
-                    if not tasks:
-                        self._handler_tasks.pop(handler.handler_name, None)
+                try:
+                    handler_message = message.deepcopy() if message is not None else None
+                except Exception as e:
+                    await check_cancellation()
+                    logger.error(
+                        f"复制事件处理器 {handler.handler_name} 的消息时发生异常 ({type(e).__name__})"
+                    )
+                    await check_cancellation()
+                    return True, None
+                await check_cancellation()
+                if not self._handler_is_current(handler, generation):
+                    await check_cancellation()
+                    return True, None
+                task = asyncio.create_task(handler.execute(handler_message))
+                task.set_name(f"{handler.plugin_name}-{handler.handler_name}-intercept")
+                self._handler_tasks.setdefault(handler.handler_name, set()).add(task)
+                try:
+                    raw_result = await task
+                finally:
+                    tasks = self._handler_tasks.get(handler.handler_name)
+                    if tasks is not None:
+                        tasks.discard(task)
+                        if not tasks:
+                            self._handler_tasks.pop(handler.handler_name, None)
 
-            if not success:
-                logger.error(f"EventHandler {handler.handler_name} 执行失败: {return_message}")
-            else:
-                logger.debug(f"EventHandler {handler.handler_name} 执行成功: {return_message}")
+                await check_cancellation()
+                success, continue_processing, return_message, custom_result, modified_message = raw_result
 
-            if self._history_enable_map[event_type] and custom_result:
-                self._events_result_history[event_type].append(custom_result)
-            return continue_processing, modified_message
-        except KeyError:
-            logger.error(f"事件 {event_type} 注册的历史记录启用情况与实际不符合")
-            return True, None
-        except Exception as e:
-            logger.error(f"EventHandler {handler.handler_name} 发生异常: {e}", exc_info=True)
-            return True, None  # 发生异常时默认不中断其他处理
+                if not success:
+                    logger.error(f"EventHandler {handler.handler_name} 执行失败: {return_message}")
+                else:
+                    logger.debug(f"EventHandler {handler.handler_name} 执行成功: {return_message}")
+                await check_cancellation()
+
+                committed_message: Optional[NachoMessages] = None
+                if modified_message is not None:
+                    if not isinstance(modified_message, NachoMessages):
+                        logger.error(
+                            f"EventHandler {handler.handler_name} returned modified message of type "
+                            f"{type(modified_message).__name__}"
+                        )
+                    else:
+                        try:
+                            detached_message = modified_message.deepcopy()
+                        except Exception as e:
+                            await check_cancellation()
+                            logger.error(
+                                f"EventHandler {handler.handler_name} modified message copy failed "
+                                f"({type(e).__name__})"
+                            )
+                        else:
+                            if not isinstance(detached_message, NachoMessages):
+                                logger.error(
+                                    f"EventHandler {handler.handler_name} copied modified message of type "
+                                    f"{type(detached_message).__name__}"
+                                )
+                            else:
+                                committed_message = detached_message
+                await check_cancellation()
+
+                should_record = bool(self._history_enable_map[event_type] and custom_result)
+                await check_cancellation()
+                if should_record:
+                    self._events_result_history[event_type].append(custom_result)
+
+                await check_cancellation()
+                return continue_processing, committed_message
+            except KeyError:
+                await check_cancellation()
+                logger.error(f"事件 {event_type} 注册的历史记录启用情况与实际不符合")
+                await check_cancellation()
+                return True, None
+            except Exception as e:
+                await check_cancellation()
+                logger.error(f"EventHandler {handler.handler_name} 发生异常: {e}", exc_info=True)
+                await check_cancellation()
+                return True, None
 
     def _handler_is_current(self, handler: BaseEventHandler, generation: Optional[int]) -> bool:
         """Check identity, generation, and admission before creating work."""

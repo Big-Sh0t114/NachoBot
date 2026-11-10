@@ -44,9 +44,13 @@ class BaseEventHandler(ABC):
     ) -> Tuple[bool, bool, Optional[str], Optional[CustomEventHandlerResult], Optional[NachoMessages]]:
         """执行事件处理的抽象方法，子类必须实现
         Args:
-            message (NachoMessages | None): 事件消息对象，当你注册的事件为ON_START和ON_STOP时message为None
+            message (NachoMessages | None): 事件消息对象。每个处理器收到独立的消息深拷贝；
+                ON_START和ON_STOP事件的message为None。
         Returns:
-            Tuple[bool, bool, Optional[str], Optional[CustomEventHandlerResult], Optional[NachoMessages]]: (是否执行成功, 是否需要继续处理, 可选的返回消息, 可选的自定义结果，可选的修改后消息)
+            Tuple[bool, bool, Optional[str], Optional[CustomEventHandlerResult], Optional[NachoMessages]]:
+                (是否执行成功, 是否需要继续处理, 可选的返回消息, 可选的自定义结果，可选的修改后消息)。
+                对于拦截器，非None修改后消息会作为完整快照提交；None（包括只修改输入后返回None）
+                保留此前提交的消息。非拦截观察者的输入修改和修改后消息均不进入事件流水线。
         """
         raise NotImplementedError("子类必须实现 execute 方法")
 
