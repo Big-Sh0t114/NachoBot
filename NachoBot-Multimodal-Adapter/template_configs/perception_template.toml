@@ -5,7 +5,7 @@ port = 9874
 
 [perception.device]
 # 视觉模型硬件配置
-vlm = "cuda:0"   # Florence-2 VLM 使用的设备
+vlm = "auto"     # 自动、CPU、GPU UUID；也兼容旧版 "cuda" / "cuda:N" 设置
 
 [asr]
 # 所有 Adapter 共用的 sherpa-onnx 流式 ASR

@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import time
 from collections.abc import Mapping
 from datetime import datetime
@@ -52,6 +53,13 @@ except ImportError:
 
 BACKUP_DIR = ROOT_DIR / "config-save" / "setup_backups"
 MAX_BACKUPS_PER_FILE = 5
+ADAPTER_ROOT = ROOT_DIR / "NachoBot-Multimodal-Adapter"
+if str(ADAPTER_ROOT) not in sys.path:
+    sys.path.insert(0, str(ADAPTER_ROOT))
+from nachobot_multimodal.utils.model_devices import (  # noqa: E402
+    ModelDeviceConfigError,
+    validate_device_choice,
+)
 
 # Discord has one adapter-owned config target. Its live config is preserved and
 # migrated in place when necessary; fresh installs start from this placeholder template.
@@ -66,6 +74,39 @@ DISCORD_IDENTITY_MAP = "NachoBot-Discord-Adapter/data/identity_map.json"
 BILIBILI_TARGET = "NachoBot-Bilibili-Adapter/config.toml"
 SNOWLUMA_TARGET = "NachoBot-SnowLuma-Adapter/config.toml"
 NAPCAT_TARGET = "NachoBot-Napcat-Adapter/config.toml"
+
+
+def _capture_model_device_field(target_rel: str, target_path: Path) -> tuple[str, str] | None:
+    """Capture only the adapter-owned device value before template replacement."""
+    model = {
+        "NachoBot-Multimodal-Adapter/configs/base.toml": "tts",
+        "NachoBot-Multimodal-Adapter/configs/perception.toml": "vlm",
+    }.get(target_rel)
+    if model is None or not target_path.exists():
+        return None
+    try:
+        document = tomlkit.parse(target_path.read_text(encoding="utf-8"))
+        if model == "tts":
+            section = document.get("model_devices", {})
+            if not isinstance(section, Mapping):
+                raise ValueError("[model_devices] must be a table")
+            if "tts" not in section:
+                return None
+            value = validate_device_choice("tts", section["tts"])
+        else:
+            perception = document.get("perception", {})
+            if not isinstance(perception, Mapping):
+                raise ValueError("[perception] must be a table")
+            section = perception.get("device", {})
+            if not isinstance(section, Mapping):
+                raise ValueError("[perception.device] must be a table")
+            if "vlm" not in section:
+                return None
+            value = validate_device_choice("vlm", section["vlm"])
+        return model, value
+    except (OSError, UnicodeDecodeError, tomlkit.exceptions.ParseError, ModelDeviceConfigError, ValueError) as exc:
+        label = "base.toml [model_devices].tts" if model == "tts" else "perception.toml [perception.device].vlm"
+        raise ValueError(f"现有 {label} 无法验证，已拒绝用模板覆盖") from exc
 
 
 def select_qq_adapter(
@@ -930,6 +971,26 @@ class ConfigInitializer:
                     "errors": template_errors,
                     "patched": [],
                 }
+
+        # The setup API can be called without first opening the step-two
+        # device panel. Migrate a valid old JSON selection before template
+        # generation can materialize the canonical TTS field as "auto".
+        legacy_device_path = ROOT_DIR / "webUI" / "data" / "model_devices.json"
+        if legacy_device_path.exists():
+            try:
+                try:
+                    from .gpu_devices import ModelDeviceError, load_model_assignments
+                except ImportError:  # pragma: no cover - direct script context
+                    from gpu_devices import ModelDeviceError, load_model_assignments
+                load_model_assignments(ROOT_DIR)
+            except ModelDeviceError:
+                return {
+                    "generated": [],
+                    "skipped": list(TEMPLATE_MAP.values()),
+                    "backups": [],
+                    "errors": ["旧模型设备配置无法迁移，已拒绝用模板覆盖"],
+                    "patched": [],
+                }
         for tmpl_rel, target_rel in TEMPLATE_MAP.items():
             target_path = resolve_relative_to_root(ROOT_DIR, target_rel)
 
@@ -973,6 +1034,7 @@ class ConfigInitializer:
                 preserved_snowluma: dict[str, Any] | None = None
                 seeded_snowluma_chat: dict[str, Any] | None = None
                 preserved_nachobot_server: dict[str, Any] | None = None
+                preserved_model_device = _capture_model_device_field(target_rel, target_path)
                 if (
                     target_rel == "NachoBot-Napcat-Adapter/config.toml"
                     and target_path.exists()
@@ -1029,6 +1091,29 @@ class ConfigInitializer:
                 else:
                     tmpl_path = resolve_relative_to_root(ROOT_DIR, tmpl_rel)
                     shutil.copy2(tmpl_path, target_path)
+
+                # Keep only the adapter-owned TTS/VLM selection across setup
+                # template generation; unrelated settings remain template-owned.
+                if preserved_model_device is not None:
+                    model, value = preserved_model_device
+                    generated_doc = tomlkit.parse(target_path.read_text(encoding="utf-8"))
+                    if model == "tts":
+                        device_table = generated_doc.get("model_devices")
+                        if device_table is None:
+                            device_table = tomlkit.table()
+                            generated_doc["model_devices"] = device_table
+                        device_table["tts"] = value
+                    else:
+                        perception_table = generated_doc.get("perception")
+                        if perception_table is None:
+                            perception_table = tomlkit.table()
+                            generated_doc["perception"] = perception_table
+                        device_table = perception_table.get("device")
+                        if device_table is None:
+                            device_table = tomlkit.table()
+                            perception_table["device"] = device_table
+                        device_table["vlm"] = value
+                    target_path.write_text(tomlkit.dumps(generated_doc), encoding="utf-8")
 
                 # Restore the existing NapCat inbound connection/authentication
                 # contract and its independently configured Core endpoint.

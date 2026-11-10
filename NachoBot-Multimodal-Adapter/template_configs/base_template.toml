@@ -23,6 +23,10 @@ source_file = ""            # 可选本地 PCM16 WAV；相对路径以本配置�
 full = "gpu"
 lite = "gpu"
 
+[model_devices]
+# 自动、CPU 或完整 NVIDIA GPU UUID；仅本地 TTS 使用。
+tts = "auto"
+
 [debug]
 logging_level = "DEBUG" # 日志级别
 

@@ -30,6 +30,7 @@ import psutil
 
 try:
     from .multimodal_runtime import MultimodalRuntimeManager
+    from .gpu_devices import ModelDeviceError, service_device_environment
     from .install_output import InstallSnapshot, decode_install_progress, run_install_command, uv_service_install_plan
     from .qq_adapter_selector import (
         DEFAULT_QQ_ADAPTER,
@@ -38,6 +39,7 @@ try:
     )
 except ImportError:
     from multimodal_runtime import MultimodalRuntimeManager
+    from gpu_devices import ModelDeviceError, service_device_environment
     from install_output import InstallSnapshot, decode_install_progress, run_install_command, uv_service_install_plan
     from qq_adapter_selector import (
         DEFAULT_QQ_ADAPTER,
@@ -3969,12 +3971,26 @@ class ProcessManager:
         env.pop("NACHOBOT_WEBUI_TOKEN", None)
 
         try:
+            runtime_profile = env.get("NACHOBOT_TTS_RUNTIME_PROFILE", self._launch_runtime)
+            device_env = await asyncio.to_thread(
+                service_device_environment,
+                service_id,
+                runtime_profile,
+                root_dir=self.root,
+            )
+            # Apply assignments after group/service overlays so the saved device choice
+            # cannot be shadowed by an inherited group environment.
+            env.update(device_env)
             cmd = await self._prepare_service_dependencies(service_id, cmd, full_cwd, env)
             if service_id == "nachobot":
                 await self._prepare_playwright_chromium(service_id, full_cwd, env)
         except asyncio.CancelledError:
             state.status = ServiceStatus.STOPPED
             raise
+        except ModelDeviceError as exc:
+            state.status = ServiceStatus.ERROR
+            await self._broadcast(service_id, f"[WebUI] ERROR: {exc}\n")
+            return
         except Exception as exc:
             state.status = ServiceStatus.ERROR
             await self._broadcast(service_id, f"[WebUI] ERROR: 依赖准备失败: {exc}\n")

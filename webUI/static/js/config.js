@@ -7,6 +7,7 @@ const ConfigModule = (() => {
     let configs = [];
     let activeFileId = null;
     let originalRaw = '';
+    let editorRequestId = 0;
 
     async function init() {
         await loadTree();
@@ -57,9 +58,22 @@ const ConfigModule = (() => {
                 tree.appendChild(el);
             }
         }
+
+        const deviceTitle = document.createElement('div');
+        deviceTitle.className = 'config-group-title';
+        deviceTitle.textContent = '运行设备';
+        tree.appendChild(deviceTitle);
+        const modelDevices = document.createElement('div');
+        modelDevices.className = 'config-item';
+        modelDevices.dataset.id = 'model_devices';
+        modelDevices.innerHTML = '<span>🖥️</span><span>模型运行设备</span><span class="dot-modified"></span>';
+        modelDevices.addEventListener('click', openModelDevices);
+        tree.appendChild(modelDevices);
     }
 
     async function openFile(fileId) {
+        window.ModelDevicesPanel?.unmount(document.getElementById('config-editor'));
+        const requestId = ++editorRequestId;
         // Update active state
         document.querySelectorAll('.config-item').forEach(el => el.classList.remove('active'));
         const item = document.querySelector(`.config-item[data-id="${fileId}"]`);
@@ -69,14 +83,32 @@ const ConfigModule = (() => {
 
         try {
             const res = await apiGet(`/api/configs/${fileId}`);
+            if (requestId !== editorRequestId || activeFileId !== fileId) return;
             originalRaw = res.raw;
             renderEditor(fileId, res.raw);
             if (res.data === null) {
                 toast('⚠️ 检测到配置存在语法错误，已开启纯文本安全模式', 'warning');
             }
         } catch (e) {
-            toast('加载配置失败: ' + e.message, 'error');
+            if (requestId === editorRequestId && activeFileId === fileId) {
+                toast('加载配置失败: ' + e.message, 'error');
+            }
         }
+    }
+
+    function openModelDevices() {
+        editorRequestId += 1;
+        document.querySelectorAll('.config-item').forEach(el => el.classList.remove('active'));
+        const item = document.querySelector('.config-item[data-id="model_devices"]');
+        if (item) item.classList.add('active');
+        activeFileId = 'model_devices';
+        originalRaw = '';
+        const editor = document.getElementById('config-editor');
+        if (typeof window.ModelDevicesPanel === 'undefined') {
+            editor.textContent = '模型设备面板未加载';
+            return;
+        }
+        window.ModelDevicesPanel.mount(editor);
     }
 
     function renderEditor(fileId, raw) {
@@ -235,6 +267,8 @@ const ConfigModule = (() => {
     // ---- Refresh ----
 
     function refresh() {
+        window.ModelDevicesPanel?.unmount(document.getElementById('config-editor'));
+        editorRequestId += 1;
         activeFileId = null;
         originalRaw = '';
         const editor = document.getElementById('config-editor');

@@ -22,6 +22,8 @@ ADAPTER_ROOT = Path(__file__).resolve().parents[1]
 if str(ADAPTER_ROOT) not in sys.path:
     sys.path.insert(0, str(ADAPTER_ROOT))
 
+from nachobot_multimodal.utils.model_devices import apply_device_environment  # noqa: E402
+
 from nachobot_multimodal.utils.gpt_weights import FALLBACK_GPT, FALLBACK_SOVITS, select_gpt_weights  # noqa: E402
 
 PROJECT_ROOT = ADAPTER_ROOT.parent
@@ -1597,6 +1599,14 @@ def main(argv: list[str] | None = None) -> int:
     HF_CACHE.mkdir(parents=True, exist_ok=True)
 
     engine = resolve_engine(args.config, args.engine or os.environ.get("NACHOBOT_TTS_ENGINE", ""))
+
+    if args.action in {"serve", "serve-raw"}:
+        apply_device_environment(
+            "tts",
+            config_dir=args.config.parent,
+            base_path=args.config,
+            runtime_profile=os.environ.get("NACHOBOT_TTS_RUNTIME_PROFILE", "gpu"),
+        )
 
     if engine == "voxcpm":
         if args.action == "prepare":

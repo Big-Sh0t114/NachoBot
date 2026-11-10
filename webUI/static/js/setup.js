@@ -125,9 +125,17 @@ const SetupModule = (() => {
     }
 
     function refresh() {
-        if (!envCheckData) {
-            return runEnvCheck();
+        const envCheck = envCheckData ? Promise.resolve() : runEnvCheck();
+        if (currentStep === 2) {
+            updateComponentVisuals();
+            computeGpuRecommendations(envCheckData ? envCheckData.gpu : null);
+            window.ModelDevicesPanel?.mount(document.getElementById('setup-model-devices'));
         }
+        return Promise.resolve(envCheck).then(() => {
+            if (currentStep === 2 && envCheckData) {
+                computeGpuRecommendations(envCheckData.gpu);
+            }
+        });
     }
 
     // ---- Step Navigation ----
@@ -156,6 +164,7 @@ const SetupModule = (() => {
         if (step === 2) {
             updateComponentVisuals();
             computeGpuRecommendations(envCheckData ? envCheckData.gpu : null);
+            window.ModelDevicesPanel?.mount(document.getElementById('setup-model-devices'));
         }
         if (step === 3) {
             updateFormVisibility();
@@ -352,14 +361,14 @@ const SetupModule = (() => {
         else if (vramGb > 4.0 && vramGb < 6.0) {
             // VRAM > 4GB and < 6GB
             titleEl.textContent = 'GPT LITE 方案';
-            descEl.textContent = '检测到可用显存介于 4G 到 6G 之间。推荐使用 GPT LITE 方案部署（仅启用 GPT-SoVITS 合成，不启用本地 Florence-2 VLM 视觉与 FunASR 语音识别，以节约显存）。';
+            descEl.textContent = '检测到可用显存介于 4G 到 6G 之间。推荐使用 GPT LITE 方案部署（仅启用 GPT-SoVITS 合成，不启用本地 Florence-2 VLM；ASR 使用 CPU）。';
             recommendedLaunchGroup = '语音服务 (LITE)';
             createApplyButton('一键应用此方案', () => applyScheme('gpt_lite'));
         }
         else if (vramGb >= 6.0 && vramGb <= 8.0) {
             // VRAM in [6GB, 8GB]
             titleEl.textContent = 'GPT FULL 方案';
-            descEl.textContent = '检测到可用显存介于 6G 到 8G 之间。推荐使用 GPT FULL 方案部署（启用 GPT-SoVITS 语音合成 + Florence-2 视觉大模型 + FunASR 语音识别，满足全功能交互需求）。';
+            descEl.textContent = '检测到可用显存介于 6G 到 8G 之间。推荐使用 GPT FULL 方案部署（启用 GPT-SoVITS 语音合成与 Florence-2 视觉模型；ASR 使用 CPU）。';
             recommendedLaunchGroup = '多模态服务 (FULL)';
             createApplyButton('一键应用此方案', () => applyScheme('gpt_full'));
         }
@@ -380,7 +389,7 @@ const SetupModule = (() => {
         else {
             // VRAM > 12GB
             titleEl.textContent = 'Vox Full 方案';
-            descEl.textContent = '检测到可用显存大于 12G。推荐使用极致画质和音质的 Vox Full 方案（VoxCPM 语音合成 + Florence-2 视觉大模型 + FunASR 语音识别，完美释放大显存显卡潜力）。';
+            descEl.textContent = '检测到可用显存大于 12G。推荐使用 Vox FULL 方案（VoxCPM 语音合成与 Florence-2 视觉模型；ASR 使用 CPU）。推荐按单张 NVIDIA 显卡的显存估算，不会把多卡显存相加。';
             recommendedLaunchGroup = '多模态服务 (FULL)';
             createApplyButton('一键应用此方案', () => applyScheme('vox_full'));
         }
