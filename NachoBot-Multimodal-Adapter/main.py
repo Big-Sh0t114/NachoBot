@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from dataclasses import replace
 import os
 import sys
 from pathlib import Path
@@ -46,8 +47,10 @@ from nachobot_multimodal.tts.base import (  # noqa: E402
     PCMChunk,
     PCMStreamError,
     close_async_iterator,
+    collect_pcm_stream_to_wav,
     iter_validated_pcm,
 )
+from nachobot_multimodal.tts.chunking import iter_chunked_tts_pcm, prepare_tts_segments  # noqa: E402
 from nachobot_multimodal.utils import post_process  # noqa: E402
 from nachobot_multimodal.utils.ambient_audio import (  # noqa: E402
     ambient_is_active,
@@ -85,6 +88,7 @@ class WebUITTSRequest(BaseModel):
     text: str = Field(min_length=1, max_length=10_000)
     platform: str = Field(default="webui", max_length=64)
     text_lang: str | None = Field(default=None, max_length=32)
+    ambient_noise: bool = Field(default=False, strict=True)
 
 
 class _PrefetchedPCMBody:
@@ -168,6 +172,7 @@ class TTSPipeline:
         # frozen settings object is read per request, while each request gets a
         # fresh mixer, source cursor, event schedule, and RNG.
         self._ambient_config = self.config.tts_ambient
+        self._tts_chunking_config = self.config.tts_chunking
         self._ambient_rng_factory = ambient_rng_factory or (lambda: None)
         self.selected_backend = normalize_backend(backend) if backend else None
         self.model = model
@@ -292,18 +297,30 @@ class TTSPipeline:
             text = body.text.strip()
             if not text:
                 raise HTTPException(status_code=400, detail="TTS text cannot be empty")
+            chunk_segments = self._prepare_chunk_segments(text)
             try:
-                ambient_config = self._ambient_config
+                ambient_config = replace(self._ambient_config, enabled=body.ambient_noise)
                 async with self._webui_tts_lock:
                     # The child may exit while a request is waiting for the
                     # single-client lock. Recheck before using the client.
                     if not self.ready:
                         raise HTTPException(status_code=503, detail="TTS runtime is not ready")
-                    audio_data = await self.model.tts(
-                        text=text,
-                        platform=body.platform,
-                        text_lang=body.text_lang,
-                    )
+                    if chunk_segments is None:
+                        audio_data = await self.model.tts(
+                            text=text,
+                            platform=body.platform,
+                            text_lang=body.text_lang,
+                        )
+                    else:
+                        pcm_stream = self._make_pcm_stream(
+                            text=text,
+                            platform=body.platform,
+                            text_lang=body.text_lang,
+                            segments=chunk_segments,
+                        )
+                        if pcm_stream is None:
+                            raise HTTPException(status_code=501, detail="TTS backend does not expose PCM streaming")
+                        audio_data = await collect_pcm_stream_to_wav(pcm_stream)
                 if not audio_data:
                     raise HTTPException(status_code=502, detail="TTS returned empty audio")
                 if getattr(self.config.tts_base_config, "post_process", False):
@@ -334,6 +351,7 @@ class TTSPipeline:
             text = body.text.strip()
             if not text:
                 raise HTTPException(status_code=400, detail="TTS text cannot be empty")
+            chunk_segments = self._prepare_chunk_segments(text)
             if getattr(self.config.tts_base_config, "post_process", False):
                 raise HTTPException(
                     status_code=501,
@@ -348,16 +366,17 @@ class TTSPipeline:
             response_body = None
             transferred = False
             try:
-                ambient_config = self._ambient_config
+                ambient_config = replace(self._ambient_config, enabled=body.ambient_noise)
                 if not self.ready:
                     raise HTTPException(status_code=503, detail="TTS runtime is not ready")
-                stream_iterator = iter_validated_pcm(
-                    stream_method(
-                        text=text,
-                        platform=body.platform,
-                        text_lang=body.text_lang,
-                    )
+                stream_iterator = self._make_pcm_stream(
+                    text=text,
+                    platform=body.platform,
+                    text_lang=body.text_lang,
+                    segments=chunk_segments,
                 )
+                if stream_iterator is None:
+                    raise HTTPException(status_code=501, detail="TTS backend does not expose PCM streaming")
                 if ambient_is_active(ambient_config):
                     stream_iterator = mix_pcm_stream(
                         stream_iterator,
@@ -404,6 +423,7 @@ class TTSPipeline:
 
     def _health_payload(self) -> dict[str, Any]:
         ready = self.ready
+        selected_backend = getattr(self, "selected_backend", None)
         return {
             "status": "ok" if ready else "unhealthy",
             "ready": ready,
@@ -411,33 +431,101 @@ class TTSPipeline:
             # boundary.  Keep it independent from child liveness: Core also
             # combines it with ``ready``/``backend_alive`` below.
             "model_loaded": bool(self.model_ready),
-            "backend": getattr(self, "selected_backend", None),
+            "backend": selected_backend,
+            "native_streaming": bool(getattr(getattr(self, "model", None), "native_streaming", True)),
+            "stream_capability": (
+                "chunked_pcm"
+                if self._chunking_is_active()
+                else getattr(getattr(self, "model", None), "stream_capability", "native")
+            ),
+            "chunking_enabled": self._chunking_is_active(),
             "backend_alive": self.backend_alive,
             "engine_ready": self.model_ready,
             "emotion_ready": bool(getattr(getattr(self, "model", None), "emotion_ready", True)),
             "synthesis_ready": getattr(self, "_synthesis_ready", True),
         }
 
+
+    def _chunking_is_active(self) -> bool:
+        config = getattr(self, "_tts_chunking_config", None)
+        return bool(
+            config is not None
+            and config.enabled
+            and getattr(self, "selected_backend", None) in config.backends
+        )
+
+    def _prepare_chunk_segments(self, text: str) -> tuple[str, ...] | None:
+        if not self._chunking_is_active():
+            return None
+        try:
+            return prepare_tts_segments(text, self._tts_chunking_config)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    def _make_pcm_stream(
+        self,
+        *,
+        text: str,
+        platform: str,
+        text_lang: str | None,
+        segments: tuple[str, ...] | None = None,
+    ):
+        """Build the one validated PCM source used by all public synthesis paths."""
+
+        stream_method = getattr(self.model, "tts_pcm_stream", None)
+        if not callable(stream_method):
+            return None
+        if self._chunking_is_active():
+            return iter_chunked_tts_pcm(
+                text,
+                stream_method,
+                self._tts_chunking_config,
+                segments=segments,
+                platform=platform,
+                text_lang=text_lang,
+            )
+        return iter_validated_pcm(
+            stream_method(
+                text=text,
+                platform=platform,
+                text_lang=text_lang,
+            )
+        )
+
     async def get_voice_no_stream(
         self,
         text: str,
         platform: str,
         text_lang: str | None = None,
+        *,
+        ambient_noise: bool = False,
     ) -> bytes | None:
         """Compatibility helper for local callers; uses the fixed client."""
 
         if not self.ready:
             return None
         try:
-            ambient_config = self._ambient_config
+            chunk_segments = self._prepare_chunk_segments(text)
+            ambient_config = replace(self._ambient_config, enabled=ambient_noise is True)
             async with self._webui_tts_lock:
                 if not self.ready:
                     return None
-                audio_data = await self.model.tts(
-                    text=text,
-                    platform=platform,
-                    text_lang=text_lang,
-                )
+                if chunk_segments is None:
+                    audio_data = await self.model.tts(
+                        text=text,
+                        platform=platform,
+                        text_lang=text_lang,
+                    )
+                else:
+                    pcm_stream = self._make_pcm_stream(
+                        text=text,
+                        platform=platform,
+                        text_lang=text_lang,
+                        segments=chunk_segments,
+                    )
+                    if pcm_stream is None:
+                        return None
+                    audio_data = await collect_pcm_stream_to_wav(pcm_stream)
             if audio_data and getattr(self.config.tts_base_config, "post_process", False):
                 audio_data = post_process.simulate_telephone_voice(audio_data)
             if audio_data and ambient_is_active(ambient_config):

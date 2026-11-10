@@ -11,7 +11,7 @@ stream_mode = false  # 是否启用流式输出
 post_process = false # 是否启用电话语音后处理
 
 [tts_ambient]
-enabled = false             # 为 TTS 混入日常环境底噪
+enabled = false             # 为旧配置保留；是否混音由单次请求 ambient_noise=true 控制
 preset = "room"             # "room"（柔和室内风）或 "desk"（室内风加稀疏轻微桌面声）
 level_db = -38.0             # 环境床的参考 RMS 电平，dBFS（相对 PCM16 满幅）
 events_per_minute = 3.0     # 轻微 rustle/tap 的平均频率，0 到 30
@@ -25,3 +25,10 @@ lite = "gpu"
 
 [debug]
 logging_level = "DEBUG" # 日志级别
+
+[tts_chunking]
+enabled = false # 在 Multimodal 公共 facade 中按句顺序调度合成；默认关闭
+backends = ["GPT_Sovits", "Vox"] # 仅对显式列出的现有后端启用
+min_chars = 20
+max_chars = 120 # 软上限；只在未受保护的标点处分段，不按字符数或空白强切
+first_chunk_min_chars = 8 # 首段可早于后续段落开始合成

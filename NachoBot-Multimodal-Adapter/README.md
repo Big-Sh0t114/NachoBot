@@ -60,22 +60,45 @@ vox_template.toml          -> configs/vox.toml
 perception_template.toml   -> configs/perception.toml
 ```
 
-`base.toml` 的 `[enabled_tts]` 选择 GPT-SoVITS 或 Vox；具体参数分别维护在 `gpt-sovits.toml` 与 `vox.toml`。`perception.toml` 维护 9874 监听地址、Florence-2 与 Sherpa-ONNX 配置。Core 不包含这些本地模型名。
+`base.toml` 的 `[enabled_tts]` 每次只选择一个后端：GPT-SoVITS 或 Vox。本地模型参数分别维护在 `gpt-sovits.toml` 与 `vox.toml` 文件中。`perception.toml` 维护 9874 监听地址、Florence-2 与 Sherpa-ONNX 配置。Core 不包含这些本地模型名。
 
-可在 `[tts_ambient]` 开启 TTS 环境声。模板默认关闭；例如，可用以下设置试用 `desk` 预设：
+### 共享 TTS 切句调度
+
+`[tts_chunking]` 在 Multimodal 公共 facade 按顺序切句并调用当前固定模型的 PCM 合成接口。模板和缺少此段的旧配置默认关闭；启用后只对 `backends` 白名单中的 GPT_Sovits 或 Vox 生效。
+
+```toml
+[tts_chunking]
+enabled = false
+backends = ["GPT_Sovits", "Vox"]
+min_chars = 20
+max_chars = 120
+first_chunk_min_chars = 8
+```
+
+GPT-SoVITS 与 Vox 共用 TTS 文本清理，移除颜文字、emoji、分析/控制块和常见显示标记；清理只影响合成输入，不改变展示或持久化文本。启用切句时会先清理整条请求，再进行分段。原始输入仍受 10,000 字符上限约束。句子边界会保留清理后文本的标点，并识别常见小数、版本号、缩写与 URL。切分会先达到首段 8 字阈值，再达到后续 20 字阈值；`max_chars` 只是软提示，长文本只会在未受保护的标点处分段，绝不会按字符数、空白或换行强切。标准句末标点用于切句；超长句可在逗号、分号、冒号等软标点处分段。无标点的 CJK、Latin 或 URL 文本保持整体，即使超过 `max_chars`。每段只调用一次模型，按序消费并直接把 PCM 交给下游，因此首段可以在后续合成结束前开始传输；WAV、PCM 流和本地 `get_voice_no_stream` 共用相同调度。每个请求共享 120 秒、32 MiB 和 120 秒音频预算，任一段为空、格式改变或失败都会终止整次请求。启用此 facade 调度时健康信息报告 `stream_capability = "chunked_pcm"`，同时保留模型真实的 `native_streaming` 值；它不表示模型自身具备原生流式生成能力。
+
+适配器可为单次 Core TTS 请求设置 `ambient_noise: true`，以启用 TTS 环境声；省略或传入 `false` 时始终关闭。`[tts_ambient]` 只提供请求启用时使用的混音参数，模板默认保留 `enabled = false`：
 
 ```toml
 [tts_ambient]
-enabled = true
+enabled = false # 为旧配置保留；是否混音由单次请求的 ambient_noise 字段控制
 preset = "desk"
 level_db = -38.0
 events_per_minute = 3.0
 source_file = ""
 ```
 
+Core 的 `POST /api/multimodal/tts`、`POST /api/multimodal/tts/stream`，以及适配器的 `POST /api/tts`、`POST /api/tts/stream` 均接受此请求字段。例如：
+
+```json
+{"text":"你好","ambient_noise":true}
+```
+
+旧版 `[tts_ambient].enabled` 仍会被读取以兼容配置文件，但不会自动开启处理；必须由该次请求显式传入布尔值 `true`。
+
 `room` 与 `desk` 是合成音效，不是真实录音；`level_db` 表示连续环境床相对 PCM16 满幅的参考 RMS 电平，数值越负越轻，`-90` 表示静音。也可将 `source_file` 指向本地 PCM16 mono/stereo WAV（最多 30 秒、8 MiB，采样率 8–96 kHz）；相对路径以 `base.toml` 所在目录解析，文件会按输出采样率重采样并平滑循环。启用后 WAV 和 PCM 流都会在本次音频时长内混合；流式输出逐块处理并保留跨块状态，不会在请求间持续播放。环境声会在一次合成过程中缓慢变化音量与音色；这些变化只作用于环境声，不调制人声。配置在运行时启动时读取，改动后需重启 TTS Runtime。
 
-TTS Runtime 在进程启动时固定读取一次活动配置并选择唯一后端。切换 GPT-SoVITS/Vox 或修改模型配置后需要重启 TTS Runtime；请求期间不会重载或切换本地模型。
+TTS Runtime 在进程启动时固定读取一次活动配置并选择唯一后端。切换 GPT-SoVITS 与 Vox 或修改模型配置后需要重启 TTS Runtime；请求期间不会重载或切换本地模型。
 
 ## PyTorch 运行时依赖
 

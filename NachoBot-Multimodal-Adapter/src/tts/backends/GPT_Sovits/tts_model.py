@@ -5,6 +5,7 @@ import struct
 from typing import AsyncIterable, AsyncIterator, Dict, Any, List
 from pathlib import Path
 from nachobot_multimodal.utils.gpt_weights import select_gpt_weights
+from nachobot_multimodal.utils.text_cleaner import clean_text_for_tts
 from nachobot_multimodal.tts.base import (
     BaseTTSModel,
     PCMChunk,
@@ -337,6 +338,9 @@ class TTSModel(BaseTTSModel):
         preset_name: str = None,
     ) -> Dict[str, Any]:
         """构建请求参数"""
+        cleaned_text = clean_text_for_tts(text)
+        if not cleaned_text:
+            raise ValueError("清洗后的 TTS 文本为空")
         if not self._initialized:
             self.initialize()
 
@@ -349,18 +353,19 @@ class TTSModel(BaseTTSModel):
         preset_cfg = self.config.tts.models.presets.get(preset_name)
         global_cfg = self.config.tts
 
-        final_text_lang = text_lang or preset_cfg.text_language or "auto"
+        preset_text_lang = getattr(preset_cfg, "text_language", None) or "auto"
+        final_text_lang = text_lang or preset_text_lang
         # Reference transcription belongs to the reference audio, independent
         # of the requested output language (for example Japanese reference,
         # Chinese call reply).
-        final_prompt_lang = prompt_lang or preset_cfg.prompt_language or "zh"
+        final_prompt_lang = prompt_lang or getattr(preset_cfg, "prompt_language", None) or "zh"
         resolved_ref_audio_path = self._resolve_path(ref_audio_path)
         resolved_aux_ref_paths = [
             self._resolve_path(p) for p in (aux_ref_audio_paths or preset_cfg.aux_ref_audio_paths or [])
         ]
 
         params = {
-            "text": text,
+            "text": cleaned_text,
             "text_lang": final_text_lang,
             "ref_audio_path": resolved_ref_audio_path,
             "aux_ref_audio_paths": resolved_aux_ref_paths,
@@ -489,6 +494,10 @@ class TTSModel(BaseTTSModel):
         **kwargs,
     ) -> AsyncIterator[bytes]:
         """Compatibility stream retaining the engine's original WAV bytes."""
+
+        text = clean_text_for_tts(text)
+        if not text:
+            raise ValueError("清洗后的 TTS 文本为空")
 
         selected_preset = self._resolve_preset_name(kwargs.get("platform"), preset_name)
         params = self.build_parameters(

@@ -72,6 +72,73 @@ class AmbientConfig:
         )
 
 
+_TTS_CHUNK_BACKENDS = {
+    "gpt_sovits": "GPT_Sovits",
+    "gpt-sovits": "GPT_Sovits",
+    "gptsovits": "GPT_Sovits",
+    "vox": "Vox",
+    "voxcpm": "Vox",
+}
+
+
+@dataclass(frozen=True)
+class TTSChunkingConfig:
+    """Facade-level sentence scheduling for explicitly selected TTS backends."""
+
+    enabled: bool = False
+    backends: tuple[str, ...] = ("GPT_Sovits", "Vox")
+    min_chars: int = 20
+    max_chars: int = 120
+    first_chunk_min_chars: int = 8
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "TTSChunkingConfig":
+        if not isinstance(value, dict):
+            raise ValueError("[tts_chunking] must be a table")
+
+        enabled = value.get("enabled", False)
+        if type(enabled) is not bool:
+            raise ValueError("[tts_chunking].enabled must be a boolean")
+
+        backends_value = value.get("backends", ["GPT_Sovits", "Vox"])
+        if not isinstance(backends_value, list):
+            raise ValueError("[tts_chunking].backends must be a list of TTS backend names")
+        backends: list[str] = []
+        for item in backends_value:
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError("[tts_chunking].backends entries must be non-empty strings")
+            canonical = _TTS_CHUNK_BACKENDS.get(item.strip().lower())
+            if canonical is None:
+                raise ValueError(
+                    "[tts_chunking].backends entries must name GPT_Sovits or Vox"
+                )
+            if canonical in backends:
+                raise ValueError("[tts_chunking].backends cannot contain duplicate backends")
+            backends.append(canonical)
+
+        def strict_bound(name: str, default: int) -> int:
+            result = value.get(name, default)
+            if type(result) is not int or not 1 <= result <= 10_000:
+                raise ValueError(f"[tts_chunking].{name} must be an integer from 1 to 10000")
+            return result
+
+        min_chars = strict_bound("min_chars", 20)
+        max_chars = strict_bound("max_chars", 120)
+        first_chunk_min_chars = strict_bound("first_chunk_min_chars", 8)
+        if min_chars > max_chars:
+            raise ValueError("[tts_chunking].min_chars cannot exceed max_chars")
+        if first_chunk_min_chars > max_chars:
+            raise ValueError("[tts_chunking].first_chunk_min_chars cannot exceed max_chars")
+
+        return cls(
+            enabled=enabled,
+            backends=tuple(backends),
+            min_chars=min_chars,
+            max_chars=max_chars,
+            first_chunk_min_chars=first_chunk_min_chars,
+        )
+
+
 def _finite_number(value: Any, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"[tts_ambient].{name} must be a finite number")
@@ -87,6 +154,7 @@ class BaseConfig:
     enabled_plugin: EnabledPluginClass
     tts_base_config: ttsClass
     tts_ambient: AmbientConfig = field(default_factory=AmbientConfig)
+    tts_chunking: TTSChunkingConfig = field(default_factory=TTSChunkingConfig)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "BaseConfig":
@@ -95,6 +163,7 @@ class BaseConfig:
             enabled_plugin=EnabledPluginClass(**data["enabled_tts"]),
             tts_base_config=ttsClass(**data["tts_base_config"]),
             tts_ambient=AmbientConfig.from_dict(data.get("tts_ambient", {})),
+            tts_chunking=TTSChunkingConfig.from_dict(data.get("tts_chunking", {})),
         )
 
 
@@ -141,6 +210,10 @@ class Config:
     @property
     def tts_ambient(self) -> AmbientConfig:
         return self.base_config.tts_ambient
+
+    @property
+    def tts_chunking(self) -> TTSChunkingConfig:
+        return self.base_config.tts_chunking
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
