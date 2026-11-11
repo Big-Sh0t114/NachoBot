@@ -33,6 +33,7 @@ exclude = ["desktop_pet_adapter/assets/nachobot_chibi/character-reference.png"]
 "desktop_pet_adapter/assets/nachobot_chibi/manifest.json" = "desktop_pet_adapter/assets/nachobot_chibi/manifest.json"
 "desktop_pet_adapter/assets/nachobot_chibi/sprites.png" = "desktop_pet_adapter/assets/nachobot_chibi/sprites.png"
 "desktop_pet_adapter/assets/nachobot_chibi/sprites-left.png" = "desktop_pet_adapter/assets/nachobot_chibi/sprites-left.png"
+"desktop_pet_adapter/assets/nachobot_chibi/sprites-held.png" = "desktop_pet_adapter/assets/nachobot_chibi/sprites-held.png"
 
 [tool.ruff]
 target-version = "py311"

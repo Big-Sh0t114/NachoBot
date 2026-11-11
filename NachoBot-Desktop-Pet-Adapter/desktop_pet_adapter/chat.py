@@ -27,6 +27,7 @@ from .config import DesktopChatConfig
 from .desktop_interactions import _system_idle_seconds
 from .desktop_pet import clamp_window_position
 from .ui_theme import PALETTE, ScrollThumb, popup_position, popup_shell, rounded_surface, px, scale_widgets, ui_scale
+from .windows_dpi import per_monitor_dpi_context
 
 RendererCommand = Callable[[str, Any], None]
 
@@ -986,6 +987,14 @@ class DesktopPetChat:
         return self._execute(text).text
 
     def _run_ui(self) -> None:
+        """Run the complete Tk lifetime in the UI thread's physical-pixel DPI context."""
+
+        with per_monitor_dpi_context():
+            self._run_ui_with_dpi_context()
+
+    def _run_ui_with_dpi_context(self) -> None:
+        """Create, service, and clean up Tk windows under the active thread context."""
+
         try:
             import tkinter as tk
 

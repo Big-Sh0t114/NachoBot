@@ -12,7 +12,7 @@ import random
 import time
 from collections import deque
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +55,76 @@ class SpriteStateRow:
     frame_rects: tuple[tuple[int, int, int, int], ...] | None = None
     face_rects: tuple[tuple[int, int, int, int], ...] | None = None
     robot_rects: tuple[tuple[int, int, int, int], ...] | None = None
+    atlas_path: Path | None = None
+    source_scale: float = 1.0
+    source_anchor: tuple[float, float] | None = None
+
+
+def _parse_source_metadata(
+    raw: Mapping[str, Any],
+    *,
+    state: str,
+    asset_directory: Path,
+    fallback_scale: float = 1.0,
+    fallback_anchor: tuple[float, float] | None = None,
+) -> tuple[Path | None, float, tuple[float, float] | None]:
+    atlas_path = None
+    if "atlas" in raw:
+        atlas_name = raw["atlas"]
+        if not isinstance(atlas_name, str) or not atlas_name.strip():
+            raise ValueError(
+                f"sprite manifest state {state!r} atlas must be a "
+                "non-empty relative filename"
+            )
+        atlas_path = (asset_directory / atlas_name).resolve()
+        if not atlas_path.is_relative_to(asset_directory.resolve()):
+            raise ValueError(
+                f"sprite manifest state {state!r} atlas must remain inside its asset directory"
+            )
+        if not atlas_path.is_file():
+            raise FileNotFoundError(f"sprite atlas image not found: {atlas_path}")
+
+    try:
+        raw_scale = raw.get("source_scale", fallback_scale)
+        if isinstance(raw_scale, bool):
+            raise ValueError
+        source_scale = float(raw_scale)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"sprite manifest state {state!r} source_scale must be finite and "
+            "between 0.05 and 4"
+        ) from exc
+    if not math.isfinite(source_scale) or not 0.05 <= source_scale <= 4:
+        raise ValueError(
+            f"sprite manifest state {state!r} source_scale must be finite and "
+            "between 0.05 and 4"
+        )
+
+    try:
+        raw_anchor = raw.get("source_anchor", fallback_anchor)
+        if raw_anchor is None:
+            source_anchor = None
+        elif (
+            not isinstance(raw_anchor, (list, tuple))
+            or len(raw_anchor) != 2
+            or any(isinstance(value, bool) for value in raw_anchor)
+        ):
+            raise ValueError
+        else:
+            source_anchor = (float(raw_anchor[0]), float(raw_anchor[1]))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"sprite manifest state {state!r} source_anchor must be a finite "
+            "[x, y] pair"
+        ) from exc
+    if source_anchor is not None and not all(math.isfinite(value) for value in source_anchor):
+        raise ValueError(
+            f"sprite manifest state {state!r} source_anchor must be a finite "
+            "[x, y] pair"
+        )
+    if source_anchor is not None and any(value < 0 for value in source_anchor):
+        raise ValueError(f"sprite manifest state {state!r} source_anchor must be non-negative")
+    return atlas_path, source_scale, source_anchor
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +244,23 @@ class SpriteAtlasManifest:
                 not math.isfinite(anchor_y) or not 0 <= anchor_y <= 1
             ):
                 raise ValueError(f"sprite manifest state {state!r} anchor_y must be between 0 and 1")
+            state_atlas_path, source_scale, source_anchor = _parse_source_metadata(
+                raw,
+                state=state,
+                asset_directory=manifest_path.parent,
+            )
+            frame_sizes = (
+                tuple((rect[2], rect[3]) for rect in frame_rects)
+                if frame_rects is not None
+                else ((frame_width, frame_height),)
+            )
+            if source_anchor is not None and any(
+                source_anchor[0] >= width or source_anchor[1] >= height
+                for width, height in frame_sizes
+            ):
+                raise ValueError(
+                    f"sprite manifest state {state!r} source_anchor must fit every source frame"
+                )
             states[state] = SpriteStateRow(
                 row,
                 frames,
@@ -183,85 +270,19 @@ class SpriteAtlasManifest:
                 frame_rects,
                 face_rects,
                 robot_rects,
+                state_atlas_path,
+                source_scale,
+                source_anchor,
             )
-        if not atlas_path.is_file():
-            raise FileNotFoundError(f"sprite atlas image not found: {atlas_path}")
-        try:
-            with Image.open(atlas_path) as image:
-                if image.format != "PNG" or "A" not in image.getbands():
-                    raise ValueError("sprite atlas must be a transparent PNG with an alpha channel")
-                image = image.convert("RGBA")
-                has_grid_rows = any(row.frame_rects is None for row in states.values())
-                if has_grid_rows and min(frame_width, frame_height) <= 0:
-                    raise ValueError("grid-sliced sprite states require frame_width and frame_height")
-                if has_grid_rows and (
-                    image.size[0] % frame_width
-                    or image.size[1] % frame_height
-                    or image.width != columns * frame_width
-                ):
-                    raise ValueError("sprite atlas dimensions do not match the declared grid")
-                alpha = image.getchannel("A")
-                if alpha.getextrema() == (255, 255):
-                    raise ValueError("sprite atlas has no transparent pixels")
-                thresholded_alpha = alpha.point(lambda value: 255 if value > 64 else 0)
-                for state, row in states.items():
-                    if row.frame_rects is not None:
-                        rects = row.frame_rects
-                    else:
-                        assert row.row is not None
-                        if (row.row + 1) * frame_height > image.height:
-                            raise ValueError(f"sprite atlas row for {state!r} is outside the image")
-                        rects = tuple(
-                            (
-                                column * frame_width,
-                                row.row * frame_height,
-                                frame_width,
-                                frame_height,
-                            )
-                            for column in range(row.frames)
-                        )
-                    for column, (x, y, width, height) in enumerate(rects):
-                        if (
-                            x < 0
-                            or y < 0
-                            or width <= 0
-                            or height <= 0
-                            or x + width > image.width
-                            or y + height > image.height
-                        ):
-                            raise ValueError(f"sprite atlas {state!r} frame {column} is outside the image")
-                        if row.face_rects is not None:
-                            face_x, face_y, face_width, face_height = row.face_rects[column]
-                            if (
-                                face_x < 0
-                                or face_y < 0
-                                or face_width <= 0
-                                or face_height <= 0
-                                or face_x + face_width > width
-                                or face_y + face_height > height
-                            ):
-                                raise ValueError(
-                                    f"sprite atlas {state!r} face rectangle {column} is outside its frame"
-                                )
-                        if row.robot_rects is not None:
-                            rx, ry, rw, rh = row.robot_rects[column]
-                            fx, fy, fw, fh = row.face_rects[column]
-                            if (rx < 0 or ry < 0 or rw <= 0 or rh <= 0
-                                    or rx + rw > width or ry + rh > height
-                                    or fx < rx or fy < ry or fx + fw > rx + rw or fy + fh > ry + rh):
-                                raise ValueError("robot rectangle must fit its frame and contain its face")
-                        tile = thresholded_alpha.crop((x, y, x + width, y + height))
-                        bounds = tile.getbbox()
-                        if bounds is None:
-                            raise ValueError(f"sprite atlas contains an empty {state!r} frame")
-                        left, top, right, bottom = bounds
-                        if min(left, top, width - right, height - bottom) < alpha_margin:
-                            raise ValueError(
-                                f"sprite atlas {state!r} frame {column} needs at least "
-                                f"{alpha_margin}px transparent margin"
-                            )
-        except OSError as exc:
-            raise ValueError(f"sprite atlas image could not be inspected: {exc}") from exc
+        _validate_state_atlases(
+            atlas_path,
+            states,
+            columns=columns,
+            frame_width=frame_width,
+            frame_height=frame_height,
+            alpha_margin=alpha_margin,
+            atlas_label="sprite atlas",
+        )
         left_atlas_path = None
         left_states: dict[str, SpriteStateRow] = {}
         if "left_atlas" in payload:
@@ -279,12 +300,19 @@ class SpriteAtlasManifest:
             if any(state not in REQUIRED_STATES for state in raw_left_states):
                 raise ValueError("sprite manifest left_states contains an unknown state")
             left_states = {
-                state: states[state]
+                state: replace(states[state], atlas_path=None)
                 for state in ("walk", "climb")
             }
             for state, raw in raw_left_states.items():
-                left_states[state] = _parse_left_state_row(state, raw, states[state])
-            _validate_sprite_atlas(
+                left_states[state] = _parse_left_state_row(
+                    state,
+                    raw,
+                    states[state],
+                    asset_directory=manifest_path.parent,
+                    frame_width=frame_width,
+                    frame_height=frame_height,
+                )
+            _validate_state_atlases(
                 left_atlas_path,
                 left_states,
                 columns=columns,
@@ -313,6 +341,10 @@ def _parse_left_state_row(
     state: str,
     raw: Any,
     fallback: SpriteStateRow,
+    *,
+    asset_directory: Path,
+    frame_width: int,
+    frame_height: int,
 ) -> SpriteStateRow:
     if not isinstance(raw, Mapping):
         raise ValueError(f"sprite manifest left state {state!r} must be an object")
@@ -325,6 +357,8 @@ def _parse_left_state_row(
         "frame_rects": fallback.frame_rects,
         "face_rects": fallback.face_rects,
         "robot_rects": fallback.robot_rects,
+        "source_scale": fallback.source_scale,
+        "source_anchor": fallback.source_anchor,
     }
     merged.update(raw)
     try:
@@ -372,6 +406,24 @@ def _parse_left_state_row(
         raise ValueError(f"sprite manifest left state {state!r} anchor_x must be between 0 and 1")
     if anchor_y is not None and (not math.isfinite(anchor_y) or not 0 <= anchor_y <= 1):
         raise ValueError(f"sprite manifest left state {state!r} anchor_y must be between 0 and 1")
+    atlas_path, source_scale, source_anchor = _parse_source_metadata(
+        merged,
+        state=state,
+        asset_directory=asset_directory,
+        fallback_scale=fallback.source_scale,
+        fallback_anchor=fallback.source_anchor,
+    )
+    frame_sizes = (
+        tuple((rect[2], rect[3]) for rect in frame_rects)
+        if frame_rects is not None
+        else ((frame_width, frame_height),)
+    )
+    if source_anchor is not None and any(
+        source_anchor[0] >= width or source_anchor[1] >= height for width, height in frame_sizes
+    ):
+        raise ValueError(
+            f"sprite manifest left state {state!r} source_anchor must fit every source frame"
+        )
     return SpriteStateRow(
         row,
         frames,
@@ -381,6 +433,9 @@ def _parse_left_state_row(
         frame_rects,
         face_rects,
         robot_rects,
+        atlas_path,
+        source_scale,
+        source_anchor,
     )
 
 
@@ -459,6 +514,36 @@ def _validate_sprite_atlas(
                         )
     except OSError as exc:
         raise ValueError(f"{atlas_label} image could not be inspected: {exc}") from exc
+
+
+def _validate_state_atlases(
+    default_atlas_path: Path,
+    states: Mapping[str, SpriteStateRow],
+    *,
+    columns: int,
+    frame_width: int,
+    frame_height: int,
+    alpha_margin: int,
+    atlas_label: str,
+) -> None:
+    grouped_states: dict[Path, dict[str, SpriteStateRow]] = {default_atlas_path: {}}
+    for state, row in states.items():
+        grouped_states.setdefault(row.atlas_path or default_atlas_path, {})[state] = row
+    for path, assigned_states in grouped_states.items():
+        if not path.is_file():
+            if path == default_atlas_path:
+                raise FileNotFoundError(f"{atlas_label} image not found: {path}")
+            raise FileNotFoundError(f"state sprite atlas image not found: {path}")
+        label = atlas_label if path == default_atlas_path else f"state sprite atlas {path.name!r}"
+        _validate_sprite_atlas(
+            path,
+            assigned_states,
+            columns=columns,
+            frame_width=frame_width,
+            frame_height=frame_height,
+            alpha_margin=alpha_margin,
+            atlas_label=label,
+        )
 
 
 class _LayeredAlphaWindow:
@@ -1114,14 +1199,14 @@ class SpriteRenderer:
 
     def _load_frames(self) -> None:
         pygame = self._pygame
-        image = pygame.image.load(str(self.manifest.atlas_path))
         self._clear_frame_caches()
-        image_sources: list[tuple[str, Any, Mapping[str, SpriteStateRow]]] = [
-            ("right", image, self.manifest.states)
-        ]
-        if self.manifest.left_atlas_path is not None and self.manifest.left_states:
-            left_image = pygame.image.load(str(self.manifest.left_atlas_path))
-            image_sources.append(("left", left_image, self.manifest.left_states))
+        image_cache: dict[Path, Any] = {}
+
+        def load_image(path: Path) -> Any:
+            if path not in image_cache:
+                image_cache[path] = pygame.image.load(str(path))
+            return image_cache[path]
+
         robot_template = None
         idle = self.manifest.states["idle"]
         if idle.robot_rects is not None:
@@ -1131,12 +1216,19 @@ class SpriteRenderer:
                 if idle.frame_rects
                 else (0, idle.row * self.manifest.frame_height)
             )
-            robot_template = image.subsurface(pygame.Rect(ix + rx, iy + ry, rw, rh)).copy()
+            idle_image = load_image(idle.atlas_path or self.manifest.atlas_path)
+            robot_template = idle_image.subsurface(pygame.Rect(ix + rx, iy + ry, rw, rh)).copy()
         prepared_sources: list[tuple[str, str, SpriteStateRow, list[Any]]] = []
-        maximum_visible_height = 0
-        maximum_visible_width = 0
-        for direction, source_image, source_states in image_sources:
+        maximum_visible_height = 0.0
+        maximum_visible_width = 0.0
+        image_sources: list[tuple[str, Mapping[str, SpriteStateRow], Path]] = [
+            ("right", self.manifest.states, self.manifest.atlas_path)
+        ]
+        if self.manifest.left_atlas_path is not None and self.manifest.left_states:
+            image_sources.append(("left", self.manifest.left_states, self.manifest.left_atlas_path))
+        for direction, source_states, default_atlas_path in image_sources:
             for state, row in source_states.items():
+                source_image = load_image(row.atlas_path or default_atlas_path)
                 if row.frame_rects is not None:
                     rects = row.frame_rects
                 else:
@@ -1163,8 +1255,12 @@ class SpriteRenderer:
                         visible_bounds.right - pixel_bounds.left,
                         visible_bounds.bottom - pixel_bounds.top,
                     )
-                    maximum_visible_height = max(maximum_visible_height, visible_bounds.height)
-                    maximum_visible_width = max(maximum_visible_width, visible_bounds.width)
+                    maximum_visible_height = max(
+                        maximum_visible_height, visible_bounds.height * row.source_scale
+                    )
+                    maximum_visible_width = max(
+                        maximum_visible_width, visible_bounds.width * row.source_scale
+                    )
                     face_rect = row.face_rects[index] if row.face_rects is not None else None
                     robot_rect = row.robot_rects[index] if row.robot_rects is not None else None
                     # Use the isolated right-facing idle shell in both directional assets.
@@ -1201,31 +1297,37 @@ class SpriteRenderer:
             faces_cache[state] = []
             row_anchor_bounds = prepared[0][1]
             for cropped, visible_local, pixel_bounds, face_rect, robot_rect, robot_image in prepared:
-                width = max(1, round(cropped.get_width() * scale))
-                height = max(1, round(cropped.get_height() * scale))
+                effective_scale = scale * row.source_scale
+                width = max(1, round(cropped.get_width() * effective_scale))
+                height = max(1, round(cropped.get_height() * effective_scale))
                 scaled = pygame.transform.smoothscale(cropped, (width, height))
                 content = pygame.Surface((self.width, self.height), pygame.SRCALPHA, 32)
                 visible_left, visible_top, visible_right, visible_bottom = visible_local
                 scaled_visible = pygame.Rect(
-                    round(visible_left * scale),
-                    round(visible_top * scale),
-                    max(1, round((visible_right - visible_left) * scale)),
-                    max(1, round((visible_bottom - visible_top) * scale)),
+                    round(visible_left * effective_scale),
+                    round(visible_top * effective_scale),
+                    max(1, round((visible_right - visible_left) * effective_scale)),
+                    max(1, round((visible_bottom - visible_top) * effective_scale)),
                 )
-                anchor_bounds = visible_local if state in {"idle", "walk"} else row_anchor_bounds
-                anchor_left, anchor_top, anchor_right, anchor_bottom = anchor_bounds
-                if state in {"idle", "walk"}:
-                    source_anchor_x = round((scaled_visible.left + scaled_visible.right) / 2)
-                    source_anchor_y = scaled_visible.bottom
+                if row.source_anchor is not None:
+                    crop_left, crop_top, _crop_right, _crop_bottom = pixel_bounds
+                    source_anchor_x = round((row.source_anchor[0] - crop_left) * effective_scale)
+                    source_anchor_y = round((row.source_anchor[1] - crop_top) * effective_scale)
                 else:
-                    scaled_anchor_left = round(anchor_left * scale)
-                    scaled_anchor_top = round(anchor_top * scale)
-                    scaled_anchor_right = round(anchor_right * scale)
-                    scaled_anchor_bottom = scaled_anchor_top + max(
-                        1, round((anchor_bottom - anchor_top) * scale)
-                    )
-                    source_anchor_x = round((scaled_anchor_left + scaled_anchor_right) / 2)
-                    source_anchor_y = scaled_anchor_bottom
+                    anchor_bounds = visible_local if state in {"idle", "walk"} else row_anchor_bounds
+                    anchor_left, anchor_top, anchor_right, anchor_bottom = anchor_bounds
+                    if state in {"idle", "walk"}:
+                        source_anchor_x = round((scaled_visible.left + scaled_visible.right) / 2)
+                        source_anchor_y = scaled_visible.bottom
+                    else:
+                        scaled_anchor_left = round(anchor_left * effective_scale)
+                        scaled_anchor_top = round(anchor_top * effective_scale)
+                        scaled_anchor_right = round(anchor_right * effective_scale)
+                        scaled_anchor_bottom = scaled_anchor_top + max(
+                            1, round((anchor_bottom - anchor_top) * effective_scale)
+                        )
+                        source_anchor_x = round((scaled_anchor_left + scaled_anchor_right) / 2)
+                        source_anchor_y = scaled_anchor_bottom
                 interactions = self.config.desktop_pet.interactions
                 target_anchor_x = round(
                     (row.anchor_x if row.anchor_x is not None else interactions.foot_anchor_x)
@@ -1256,31 +1358,35 @@ class SpriteRenderer:
                     crop_left, crop_top, _crop_right, _crop_bottom = pixel_bounds
                     faces_cache[state].append(
                         (
-                            dest_x + round((face_x - crop_left) * scale),
-                            dest_y + round((face_y - crop_top) * scale),
-                            dest_x + round((face_x + face_width - crop_left) * scale),
-                            dest_y + round((face_y + face_height - crop_top) * scale),
+                            dest_x + round((face_x - crop_left) * effective_scale),
+                            dest_y + round((face_y - crop_top) * effective_scale),
+                            dest_x + round((face_x + face_width - crop_left) * effective_scale),
+                            dest_y + round((face_y + face_height - crop_top) * effective_scale),
                         )
                     )
                     if robot_rect is not None and self.manifest.robot_scale > 1:
                         rx, ry, rw, rh = robot_rect
-                        factor = scale * self.manifest.robot_scale
+                        factor = effective_scale * self.manifest.robot_scale
                         robot_width = min(self.width, max(1, round(rw * factor)))
                         robot_height = min(self.height, max(1, round(rh * factor)))
                         sx, sy = robot_width / rw, robot_height / rh
-                        old_left = dest_x + (rx - crop_left) * scale
-                        old_top = dest_y + (ry - crop_top) * scale
+                        old_left = dest_x + (rx - crop_left) * effective_scale
+                        old_top = dest_y + (ry - crop_top) * effective_scale
                         robot_left = min(self.width - robot_width, max(0, round(old_left)))
                         robot_top = min(
                             self.height - robot_height,
-                            max(0, round(old_top - (robot_height - rh * scale) / 2)),
+                            max(0, round(old_top - (robot_height - rh * effective_scale) / 2)),
                         )
                         enlarged = pygame.transform.smoothscale(robot_image, (robot_width, robot_height))
                         erase = pygame.mask.from_surface(robot_image, 128).to_surface(
                             setcolor=(255, 255, 255, 0), unsetcolor=(255, 255, 255, 255)
                         )
                         erase = pygame.transform.smoothscale(
-                            erase, (max(1, round(rw * scale)), max(1, round(rh * scale)))
+                            erase,
+                            (
+                                max(1, round(rw * effective_scale)),
+                                max(1, round(rh * effective_scale)),
+                            ),
                         )
                         content.blit(
                             erase,
@@ -1333,10 +1439,12 @@ class SpriteRenderer:
         if face_rect is None:
             self._ordinary_face_epoch = None
             return
-        if counts is not None and self._counter_overlay_visible(now=now):
-            self._ordinary_face_epoch = None
+        counter_visible = counts is not None and self._counter_overlay_visible(now=now)
+        hovered = counts is not None and self._cursor_over_robot_face(face_rect)
+        if counts is not None and (counter_visible or hovered):
+            if counter_visible:
+                self._ordinary_face_epoch = None
             feedback = self._input_feedback
-            hovered = self._cursor_over_robot_face(face_rect)
             draw_counter_overlay(
                 self._surface,
                 face_rect,
@@ -1461,6 +1569,7 @@ class SpriteRenderer:
                     self._desktop_controller.note_user_input(pet_dragging=self._dragging)
             if event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 1 and self.config.desktop_pet.enabled and not self._click_through:
+                    self._roaming.cancel_walk()
                     self._dragging = True
                     self._drag_distance = 0
                     self._set_animation("drag", self._direction)
@@ -1691,7 +1800,7 @@ class SpriteRenderer:
         visible = self._visible
         user_idle = self._system_idle_seconds()
         user_active = user_idle is not None and user_idle < USER_ACTIVITY_PAUSE_SECONDS
-        can_roam = visible and not self._dragging and not interaction_active and not user_active
+        can_roam = visible and not self._dragging and not interaction_active
         if interaction_active:
             return
         if self._speaking or (
@@ -1703,7 +1812,8 @@ class SpriteRenderer:
             viewport=(self.width, self.height),
             work_area=self._work_area,
             delta_time=delta_time,
-            allowed=can_roam,
+            allowed=can_roam and not user_active,
+            continue_allowed=can_roam,
         )
         self._direction = step.direction
         if step.position != self._position:

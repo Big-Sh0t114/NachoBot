@@ -246,9 +246,12 @@ class DesktopInteractionSession:
         )
         now = self._clock()
         allow_stale = (
-            {"inspect_gui"}
-            if self._manual_inspect_pending and visible and not pet_dragging
-            else set()
+            {"snapshot"}
+            | (
+                {"inspect_gui"}
+                if self._manual_inspect_pending and visible and not pet_dragging
+                else set()
+            )
         )
         results = self.worker.poll(now=now, allow_stale_kinds=allow_stale)
         if not visible or pet_dragging:
@@ -257,7 +260,9 @@ class DesktopInteractionSession:
             self._process_result(result, now)
         if now >= self._next_snapshot_at:
             self.worker.submit(
-                "snapshot", timeout_seconds=self.config.action_timeout_seconds
+                "snapshot",
+                timeout_seconds=self.config.action_timeout_seconds,
+                survive_invalidation=True,
             )
             self._next_snapshot_at = now + self.config.scene_interval_seconds
 
@@ -301,13 +306,6 @@ class DesktopInteractionSession:
         reactive_follow = self._is_reactive_follow(scene)
 
         if self._plan is not None:
-            if user_active and not reactive_follow and not self._attached:
-                return InteractionUpdate(
-                    position=position,
-                    attached=self._attached,
-                    status="user-active",
-                    scene=scene,
-                )
             if self._scene_age(now) > self._max_scene_age():
                 return InteractionUpdate(
                     position=position,
@@ -315,9 +313,9 @@ class DesktopInteractionSession:
                     status="scene-stale",
                     scene=scene,
                 )
-            # Attached poses must keep tracking their target even during normal
-            # desktop input. This only moves the pet viewport; native actions
-            # remain behind the worker's activity/cancellation gate.
+            # Existing pet-only journeys continue during desktop input. New
+            # journeys and native actions remain behind the idle/cancellation
+            # gates below and in the worker.
             self._refresh_plan_if_scene_changed(
                 scene, position, viewport, work_area, effective_foot_anchor
             )

@@ -37,6 +37,15 @@ Sprite 桌宠会在肩侧小机器人的屏幕显示累计的物理键盘按下�
 游戏中按键未被计数时，右键 Sprite 桌宠并选择“游戏计数兼容”，再按提示确认 UAC。
 只有按需启用的游戏计数辅助进程会以管理员权限运行；关闭此项或退出桌宠会停止它。
 
+预览脚本可用包内图集离屏渲染并验证动画帧和漫游；`--native-window` 会额外
+短暂创建真实的分层 Win32 窗口并自动清理，不启动 Core、聊天或托盘，也不移动
+其他窗口或桌面图标：
+
+```bat
+.venv\Scripts\python.exe scripts\sprite_renderer_smoke.py --preview
+.venv\Scripts\python.exe scripts\sprite_renderer_smoke.py --native-window --duration 3
+```
+
 ## 架构
 
 ```text
@@ -518,6 +527,20 @@ Automation 控件模式（Invoke、Toggle、Expand）操作控件，不发送盲
 还原。只有普通、未最大化的窗口可被轻推，图标仅通过 Windows Shell 的
 `IFolderView` 接口读取或移动。桌面图标移动依赖 Windows 桌面使用传统图标视图；
 若 Shell 不提供该视图，图标互动会保持不可用而不影响渲染。
+
+独立原生检查脚本会创建临时窗口和按钮，只操作该夹具：
+
+```bat
+.venv\Scripts\python.exe scripts\desktop_interactions_smoke.py
+```
+
+要检查真实模型加载、OpenGL 渲染循环与场景采样的集成，可运行隐藏窗口的五秒
+渲染烟测。它会关闭聊天、托盘显示和所有桌面变更；若检测到常规桌宠进程正在
+运行，则会跳过：
+
+```bat
+.venv\Scripts\python.exe scripts\renderer_interaction_smoke.py
+```
 
 ## 组件边界
 
