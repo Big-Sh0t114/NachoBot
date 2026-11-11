@@ -71,7 +71,7 @@ dotenv==0.9.9
     # via nachobot
 faiss-cpu==1.15.1
     # via nachobot
-fastapi==0.140.13
+fastapi==0.162.0
     # via nachobot
 filelock==4.2.1
     # via static-ffmpeg
