@@ -1,0 +1,16 @@
+[project]
+name = "nachobot-desktop-pet-live2d-renderer"
+version = "0.1.0"
+description = "Opt-in Live2D renderer composition for NachoBot Desktop Pet Adapter"
+requires-python = ">=3.11"
+dependencies = [
+    "nachobot-desktop-pet-adapter>=0.1.0,<0.2",
+    "nachobot-live2d-adapter>=0.1.0,<0.2",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+nachobot-desktop-pet-adapter = { path = "../..", editable = true }
+nachobot-live2d-adapter = { path = "../../../NachoBot-Live2D-Adapter", editable = true }

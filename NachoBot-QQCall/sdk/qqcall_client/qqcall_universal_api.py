@@ -125,7 +125,8 @@ _ROUTE_DIAGNOSTIC_FAILURES = frozenset({
     *_ROUTE_HELPER_REJECTION_CODES,
 })
 _CAPABILITIES = {"schema_version": 1, "reply_delivery": "tts_text", "voice_stream": True,
-                 "planner_bypass": True, "mcp_enabled": False, "tts_language": "zh"}
+                 "planner_bypass": True, "memory_retrieval_mode": "direct",
+                 "mcp_enabled": False, "tts_language": "zh"}
 _PCM_BACKEND_FAILURE_CODES = frozenset({
     "audio_fence_invalid",
     "audio_scope_stale",

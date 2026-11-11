@@ -1360,3 +1360,125 @@ body {
     gap: 8px;
     margin-top: auto;
 }
+.model-device-panel {
+    padding: 20px;
+}
+
+.config-editor > .model-device-panel {
+    flex: 1;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+}
+
+.model-device-panel-header,
+.model-device-panel-actions,
+.model-device-gpu {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.model-device-panel-header {
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+    min-width: 0;
+}
+
+.model-device-panel-header > div:first-child {
+    min-width: 0;
+    flex: 1 1 240px;
+}
+
+.model-device-panel-actions {
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+}
+
+.model-device-panel-actions .btn {
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+
+.model-device-panel-header h3 {
+    margin: 0 0 6px;
+}
+
+.model-device-panel-header p,
+.model-device-muted,
+.model-device-status {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 0.88rem;
+    line-height: 1.5;
+}
+
+.model-device-assignments {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+    gap: 14px;
+    margin-bottom: 16px;
+    min-width: 0;
+}
+
+.model-device-assignments label {
+    display: grid;
+    gap: 7px;
+    font-weight: 600;
+    min-width: 0;
+}
+
+.model-device-assignments .form-select {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+}
+
+.model-device-inventory {
+    display: grid;
+    gap: 8px;
+    padding: 12px;
+    margin-bottom: 12px;
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-md);
+    background: var(--bg-base);
+}
+
+.model-device-gpu {
+    flex-wrap: wrap;
+    font-size: 0.88rem;
+}
+
+.model-device-gpu span:last-child {
+    color: var(--text-secondary);
+}
+
+.model-device-status {
+    margin-top: 10px;
+}
+
+.model-device-status.is-error {
+    color: var(--danger, #b42318);
+}
+
+.model-device-status.is-success {
+    color: var(--success, #18794e);
+}
+
+@media (max-width: 640px) {
+    .model-device-panel-header {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .model-device-panel-header > div:first-child {
+        flex: 0 1 auto;
+        width: 100%;
+    }
+
+    .model-device-panel-actions {
+        width: 100%;
+        flex-wrap: wrap;
+    }
+}

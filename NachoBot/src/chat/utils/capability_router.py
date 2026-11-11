@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Dict, Mapping, Optional, Tuple
 
 from src.chat.sandbox.sandbox_handoff import SandboxEditCandidate, sanitize_file_edit_query
+from src.common.model_json import load_model_json_object as _load_model_json_object
+from src.llm_models.exceptions import ModelOutputValidationError
 
 
 CAPABILITY_DECISION_SYSTEM_PROMPT = """
@@ -96,6 +98,52 @@ Return JSON only:
   "sandbox_reason": "..."
 }
 """
+
+
+_CAPABILITY_DECISION_FIELDS = frozenset(
+    {"need_web_search", "need_mcp", "need_sandbox_edit", "sandbox_edit"}
+)
+_CAPABILITY_TEXT_FIELDS = frozenset(
+    {
+        "web_query",
+        "query",
+        "web_reason",
+        "reason",
+        "mcp_task",
+        "mcp_reason",
+        "sandbox_task",
+        "file_edit_query",
+        "sandbox_query",
+        "sandbox_reason",
+    }
+)
+_CAPABILITY_BOOL_STRINGS = frozenset({"true", "false", "yes", "no", "1", "0"})
+
+
+def _validate_capability_response(content: str) -> None:
+    """Accept only bounded JSON with recognizable capability decisions."""
+    payload = _load_model_json_object(content)
+    if payload is None or not _CAPABILITY_DECISION_FIELDS.intersection(payload):
+        raise ModelOutputValidationError()
+
+    for field in _CAPABILITY_DECISION_FIELDS.intersection(payload):
+        value = payload[field]
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, str) and value.strip().lower() in _CAPABILITY_BOOL_STRINGS:
+            continue
+        raise ModelOutputValidationError()
+
+    for field in _CAPABILITY_TEXT_FIELDS.intersection(payload):
+        if payload[field] is not None and not isinstance(payload[field], str):
+            raise ModelOutputValidationError()
+
+    if "mcp_tool_names" in payload:
+        names = payload["mcp_tool_names"]
+        if names is not None and (
+            not isinstance(names, list) or any(not isinstance(name, str) for name in names)
+        ):
+            raise ModelOutputValidationError()
 
 
 _AUTO_DECIDER = object()
@@ -429,7 +477,9 @@ class CapabilityRouter:
             )
             try:
                 content, _detail = await self._decider.generate_response_async(
-                    prompt, system_prompt=CAPABILITY_DECISION_SYSTEM_PROMPT
+                    prompt,
+                    system_prompt=CAPABILITY_DECISION_SYSTEM_PROMPT,
+                    response_validator=_validate_capability_response,
                 )
                 payload = load_json_object(content)
                 if payload is None:
@@ -622,22 +672,7 @@ def decision_from_payload(
 
 
 def load_json_object(content: Any) -> Optional[Dict[str, Any]]:
-    if not content:
-        return None
-    cleaned = str(content).strip()
-    cleaned = re.sub(r"^```(?:json)?", "", cleaned, flags=re.IGNORECASE).strip()
-    cleaned = re.sub(r"```$", "", cleaned).strip()
-    candidates = (cleaned, _extract_json(cleaned))
-    for candidate in candidates:
-        if not candidate:
-            continue
-        try:
-            value = json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict):
-            return value
-    return None
+    return _load_model_json_object(content)
 
 
 def extract_catalog_names(catalog: str) -> set[str]:
@@ -820,8 +855,3 @@ def _limited_text(value: Any, max_chars: int) -> str:
 def _tail(value: Any, max_chars: int) -> str:
     text = str(value or "")
     return text if len(text) <= max_chars else text[-max_chars:]
-
-
-def _extract_json(text: str) -> Optional[str]:
-    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
-    return match.group(0) if match else None

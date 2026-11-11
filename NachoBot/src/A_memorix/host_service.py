@@ -331,8 +331,11 @@ class AMemorixHostService:
                 kernel = SDKMemoryKernel(plugin_root=repo_root(), config=config)
                 try:
                     await kernel.initialize()
-                except Exception:
-                    kernel.close()
+                except (Exception, asyncio.CancelledError):
+                    try:
+                        kernel.close()
+                    except Exception:
+                        logger.exception("A_Memorix 内核初始化失败后的清理也失败")
                     raise
                 self._kernel = kernel
                 set_runtime_kernel(kernel)

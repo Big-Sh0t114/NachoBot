@@ -8,6 +8,7 @@ import os
 from typing import List, Dict, Optional, Any, Tuple
 from json_repair import repair_json
 
+from src.common.atomic_json import atomic_write_json
 from src.llm_models.utils_model import LLMRequest
 from src.config.config import global_config, model_config
 from src.common.logger import get_logger
@@ -131,9 +132,7 @@ class EmbeddingCache:
         if not self._dirty:
             return
         try:
-            os.makedirs(os.path.dirname(self.cache_file), exist_ok=True)
-            with open(self.cache_file, 'w', encoding='utf-8') as f:
-                json.dump(self.cache, f, ensure_ascii=False)
+            atomic_write_json(self.cache_file, self.cache, ensure_ascii=False)
             self._dirty = False
         except Exception as e:
             logger.error(f"Failed to save embedding cache: {e}")

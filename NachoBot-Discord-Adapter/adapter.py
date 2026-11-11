@@ -857,6 +857,7 @@ class DiscordAdapter:
                 "schema_version": 1,
                 "identity_mode": "external",
                 "planner_bypass": True,
+                "memory_retrieval_mode": "direct",
                 "reply_delivery": "tts_text",
                 "tts_language": "zh",
                 "voice_stream": True,
@@ -885,8 +886,8 @@ class DiscordAdapter:
                 template_items["planner_prompt"] = self._inject_variables(
                     self.config.prompts.planner_prompt, variables
                 )
-            template_items["replyer_prompt"] = self._inject_variables(
-                voice_replyer_prompt, variables
+            template_items["replyer_prompt"] = self._ensure_memory_retrieval_placeholder(
+                self._inject_variables(voice_replyer_prompt, variables)
             )
             template_info = TemplateInfo(
                 template_items=template_items,
@@ -917,6 +918,12 @@ class DiscordAdapter:
     @staticmethod
     def _inject_variables(template: str, variables: dict) -> str:
         return normalize_prompt_template(template, variables)
+
+    @staticmethod
+    def _ensure_memory_retrieval_placeholder(prompt: str) -> str:
+        if "{memory_retrieval}" in prompt:
+            return prompt
+        return f"{prompt.rstrip()}\n{{memory_retrieval}}\n"
 
     async def run(self):
         self._stopping = False

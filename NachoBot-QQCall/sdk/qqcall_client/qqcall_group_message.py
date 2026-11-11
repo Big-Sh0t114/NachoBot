@@ -190,6 +190,7 @@ def build_qqcall_group_voice_message(
             "mcp_enabled": False,
             "schema_version": 1,
             "planner_bypass": True,
+            "memory_retrieval_mode": "direct",
             "reply_delivery": "tts_text",
             "voice_stream": True,
             "tts_language": "zh",

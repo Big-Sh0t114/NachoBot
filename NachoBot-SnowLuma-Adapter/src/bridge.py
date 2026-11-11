@@ -73,6 +73,51 @@ VISUAL_TYPES = {"image", "emoji", "video"}
 
 
 class SnowLumaBridge:
+    @staticmethod
+    def _fit_core_websocket_message(message: MessageBase) -> bool:
+        """Keep the complete JSON payload within Core's 16 MiB WebSocket limit."""
+        limit = 16 * 1024 * 1024
+        payload_bytes = len(json.dumps(message.to_dict()).encode("utf-8"))
+        if payload_bytes <= limit:
+            return True
+
+        # raw_message is optional. Preserve converted message segments first.
+        if message.raw_message is not None:
+            original_bytes = payload_bytes
+            raw_bytes = len(message.raw_message.encode("utf-8"))
+            message.raw_message = None
+            payload_bytes = len(json.dumps(message.to_dict()).encode("utf-8"))
+            logger.warning(
+                "SnowLuma Core raw_message omitted reason=websocket_payload_limit original_bytes={} raw_bytes={} remaining_bytes={} limit={}",
+                original_bytes, raw_bytes, payload_bytes, limit,
+            )
+            if payload_bytes <= limit:
+                return True
+
+        segments = message.message_segment.data
+        if not isinstance(segments, list):
+            logger.error("SnowLuma Core payload rejected reason=invalid_segments bytes={} limit={}", payload_bytes, limit)
+            return False
+
+        while payload_bytes > limit:
+            candidates = [
+                (index, len(segment.data))
+                for index, segment in enumerate(segments)
+                if isinstance(segment, Seg)
+                and segment.type in {"image", "emoji"}
+                and isinstance(segment.data, str)
+            ]
+            if not candidates:
+                logger.error("SnowLuma Core payload rejected reason=oversized_non_image_payload bytes={} limit={}", payload_bytes, limit)
+                return False
+
+            index, image_bytes = max(candidates, key=lambda entry: entry[1])
+            segments[index] = Seg(type="text", data="[图片过大，已跳过]")
+            logger.warning("SnowLuma Core image degraded reason=websocket_payload_limit image_base64_bytes={} limit={}", image_bytes, limit)
+            payload_bytes = len(json.dumps(message.to_dict()).encode("utf-8"))
+
+        return True
+
     def __init__(self) -> None:
         cfg = global_config.nachobot
         route_config = RouteConfig(
@@ -715,6 +760,9 @@ class SnowLumaBridge:
             message_segment=Seg(type="seglist", data=segments),
             raw_message=(raw.get("raw_message") if isinstance(raw.get("raw_message"), str) else json.dumps(raw, ensure_ascii=False, default=str)),
         )
+        if not self._fit_core_websocket_message(message_base):
+            release_live_reservation()
+            return "failed"
         try:
             handed_off = await self.router.send_message(message_base)
         except asyncio.CancelledError:
@@ -858,6 +906,8 @@ class SnowLumaBridge:
             message_segment=Seg(type="seglist", data=segments),
             raw_message=(raw.get("raw_message") if isinstance(raw.get("raw_message"), str) else json.dumps(raw, ensure_ascii=False, default=str)),
         )
+        if not self._fit_core_websocket_message(message_base):
+            return "failed"
         expected_connection = recovery_context.get("connection")
         expected_account = str(recovery_context.get("verified_account_id") or "")
         if expected_connection is not None and (

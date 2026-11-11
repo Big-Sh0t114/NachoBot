@@ -1,198 +1,205 @@
-"""
-TTS 文本清洗工具
+"""Conservative, shared cleanup for text sent to speech synthesis."""
 
-清除颜文字（kaomoji）、Unicode emoji、特殊符号等对语音合成有害的字符。
-在文本送入 TTS 引擎之前统一调用 clean_text_for_tts() 即可。
-"""
+from __future__ import annotations
 
 import re
 import unicodedata
 
-# ============================================================
-# 1. 颜文字（Kaomoji）模式
-#    采用列表匹配 + 括号型模式，避免过度匹配正常文本
-# ============================================================
 
-# 常见颜文字列表（精确匹配）
-_COMMON_KAOMOJI = [
-    # 哭泣类
+_CONTROL_BLOCK = re.compile(
+    r"<(think|analysis|reasoning|scratchpad|internal|control)\b[^>]*>.*?(?:</\1\s*>|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+_CONTROL_TOKEN_BLOCK = re.compile(
+    r"<\|\s*(?P<tag>think|analysis|reasoning|scratchpad|internal|control)\s*\|>"
+    r".*?(?:<\|\s*/(?P=tag)\s*\|>|(?=<\|\s*final\s*\|>)|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+_CONTROL_TAG = re.compile(
+    r"</?(?:think|analysis|reasoning|scratchpad|internal|control|final)\b[^>]*>",
+    re.IGNORECASE,
+)
+_CONTROL_TOKEN = re.compile(
+    r"<\|\s*/?\s*(?:think|analysis|reasoning|scratchpad|internal|control|final)\s*\|>",
+    re.IGNORECASE,
+)
+
+# Exact forms are checked before emoji codepoints so emoji inside a face cannot
+# leave spoken punctuation or fragments behind.
+_COMMON_KAOMOJI = (
+    # Keep the original exact forms supported by this public utility.
     "(╥_╥)", "(T_T)", "(;_;)", "(ﾉД`)", "(´;ω;`)", "(ノ_<。)",
     "(T▽T)", "(ಥ_ಥ)", "(TдT)", "(T⌓T)",
-    # 开心类
-    "(≧∇≦)", "(＾▽＾)", "(^_^)", "(＾o＾)", "(✿◡‿◡)",
-    "(◕ᴗ◕✿)", "(✧ω✧)", "(◕‿◕)", "(｡◕‿◕｡)", "(★ω★)",
-    "(≧◡≦)", "(＾∀＾)", "(*≧ω≦)", "(*^▽^*)", "(●'◡'●)",
-    # 生气/翻桌
-    "(╯°□°)╯︵ ┻━┻", "(ノಠ益ಠ)ノ", "(╬ Ò﹏Ó)", "(╬▔皿▔)╯",
-    "┬─┬ノ( º _ ºノ)",
-    # 卖萌类
-    "(・ω・)", "(・∀・)", "(=^・ω・^=)", "(●ˇ∀ˇ●)",
-    "(｡♥‿♥｡)", "(灬ºωº灬)", "(*´▽`*)", "(⁄ ⁄•⁄ω⁄•⁄ ⁄)",
-    "(✪ω✪)", "(*≧∀≦*)", "ヾ(≧▽≦*)o", "o(*≧▽≦)ツ",
-    # 无语/困惑
+    "(≧∇≦)", "(＾▽＾)", "(^_^)", "(＾o＾)", "(✿◡‿◡)", "(◕ᴗ◕✿)",
+    "(✧ω✧)", "(◕‿◕)", "(｡◕‿◕｡)", "(★ω★)", "(≧◡≦)", "(＾∀＾)",
+    "(*≧ω≦)", "(*^▽^*)", "(●'◡'●)",
+    "(╯°□°)╯︵ ┻━┻", "(ノಠ益ಠ)ノ", "(╬ Ò﹏Ó)", "(╬▔皿▔)╯", "┬─┬ノ( º _ ºノ)",
+    "(・ω・)", "(・∀・)", "(=^・ω・^=)", "(●ˇ∀ˇ●)", "(｡♥‿♥｡)",
+    "(灬ºωº灬)", "(*´▽`*)", "(⁄ ⁄•⁄ω⁄•⁄ ⁄)", "(✪ω✪)", "(*≧∀≦*)",
+    "ヾ(≧▽≦*)o", "o(*≧▽≦)ツ",
     "(⊙_⊙)", "(°ー°〃)", "( ̄▽ ̄)", "(￣▽￣)", "┌(・。・)┘",
     "(ー_ー)!!", "(¬_¬)", "(-_-;)", "(；一_一)",
-    # 其他
     "╮(╯▽╰)╭", "╰(*°▽°*)╯", "～(￣▽￣～)", "(～￣▽￣)～",
-    "ヽ(✿ﾟ▽ﾟ)ノ", "ヾ(◍°∇°◍)ﾉﾞ", "(つ﹏⊂)", "(╥﹏╥)",
-    "( ˘ω˘ )", "(｡ŏ﹏ŏ)", "(◎_◎;)", "Σ(°△°|||)",
-    "( •̀ ω •́ )✧", "(✿ヘᴥヘ)", "(ง •_•)ง", "(づ ●─● )づ",
-]
-
-# 转义列表中的特殊字符用于正则匹配
+    "ヽ(✿ﾟ▽ﾟ)ノ", "ヾ(◍°∇°◍)ﾉﾞ", "(つ﹏⊂)", "(╥﹏╥)", "( ˘ω˘ )",
+    "(｡ŏ﹏ŏ)", "(◎_◎;)", "Σ(°△°|||)", "( •̀ ω •́ )✧", "(✿ヘᴥヘ)",
+    "(ง •_•)ง", "(づ ●─● )づ",
+    # Common additions for spaced, waving-arm, and ASCII-style faces.
+    "(≧▽≦)", "(^.^)", "(^o^)", "(^-^)", "(T.T)", "(Q_Q)", "(TдT)",
+    "*^▽^*",
+    "＼(^o^)／", "ヾ(≧▽≦)ノ", "ヽ(≧▽≦)ノ", "٩(≧▽≦)۶",
+    "( ͡° ͜ʖ ͡°)", "(づ￣ ³￣)づ", "(づ｡◕‿‿◕｡)づ",
+)
 _KAOMOJI_EXACT = re.compile(
-    "|".join(re.escape(k) for k in sorted(_COMMON_KAOMOJI, key=len, reverse=True)),
+    "|".join(re.escape(face) for face in sorted(_COMMON_KAOMOJI, key=len, reverse=True)),
     re.UNICODE,
 )
 
-# 括号型颜文字通用模式：括号内只包含非文字字符（非CJK、非字母、非数字）
-# 中间的字符必须是颜文字特征字符（符号、标点等），不能是正常文字
-_KAOMOJI_BRACKET_CHARS = (
-    "\u0020-\u002f"   # 空格和ASCII标点 !"#$%&'()*+,-./
-    "\u003a-\u0040"   # :;<=>?@
-    "\u005b-\u0060"   # [\]^_`
-    "\u007b-\u007e"   # {|}~
-    "\u00a0-\u00bf"   # 拉丁补充标点
-    "\u2010-\u2bff"   # 通用标点、符号、箭头、数学运算、方框字符等
-    "\u3000-\u303f"   # CJK符号和标点（不包含假名和汉字）
-    "\uff00-\uffef"   # 全角ASCII、半角片假名、全角符号
-    "\u0300-\u036f"   # 组合变音符号
+_ASCII_FACE_BODY = (
+    r"(?:(?:[:;=][-^']?[)(DPp/\\|]|[)(][-^']?[:;=])|"
+    r"T_T|T\.T|Q_Q|Q\.Q|\^[_oO-]\^|>_<|;_;|0_0|o_O|O_o|o_o|O_O|"
+    r"u_u|v_v|-_-|\._\.|=_=|\*_\*|xD|XD|:3)"
 )
-
-_KAOMOJI_BRACKET_PATTERN = re.compile(
-    r"[╮╭┌┘ヽ～〜]?"                        # 可选前缀装饰
-    r"[(\[{<（「『【〔]"                      # 开括号
-    rf"[{_KAOMOJI_BRACKET_CHARS}]"           # 至少一个颜文字特征字符
-    rf"[{_KAOMOJI_BRACKET_CHARS}]*"          # 更多可选字符（{0,14}总计1~15）
-    r"[)\]}>）」』】〕]"                      # 闭括号
-    r"[/\\ノ丿)>╮╭┌┘～〜]*"                  # 可选后缀
-    r"[︵︶┻━┬─ノ ]*",                       # 掀桌等动作后缀（table flip debris）
-    re.UNICODE,
-)
-
-# 无括号型颜文字：OwO, QwQ, QAQ, TAT, orz, XD 等
-# 使用 [a-zA-Z0-9_] 作为边界判断，因为 \w 在 UNICODE 模式下不匹配 CJK
+_ASCII_EMOTICON = re.compile(rf"(?<![A-Za-z0-9_]){_ASCII_FACE_BODY}(?![A-Za-z0-9_])")
 _KAOMOJI_BARE_PATTERN = re.compile(
     r"(?<![a-zA-Z0-9_])"
-    r"(?:"
-    r"[OoQqTt][wWｗ_][OoQqTt]"    # OwO, QwQ, TwT 等
-    r"|[QqTt][AaBb][QqTt]"         # QAQ, TAT 等
-    r"|[Oo][Rr][Zz]"               # orz
-    r"|[Oo][Tt][Zz]"               # OTZ
-    r"|[Xx][Dd]"                    # XD
-    r"|≡ω≡"                        # bare cat face seen in voice replies
-    r"|[>＞][_\.][<＜]"              # >_< >.<
-    r")"
+    r"(?:[OoQqTt][wWｗ_][OoQqTt]|[QqTt][AaBb][QqTt]|[Oo][Rr][Zz]|"
+    r"[Oo][Tt][Zz]|[Xx][Dd]|≡ω≡|[>＞][_\.][<＜])"
     r"(?![a-zA-Z0-9_])",
     re.UNICODE,
 )
+_SHRUG_EMOTICON = re.compile(r"¯\s*\\?_?\(\s*ツ\s*\)_?/\s*¯")
+_BARE_CAT_FACE = re.compile(r"(?<![A-Za-z0-9_])≡ω≡(?![A-Za-z0-9_])")
+_EMPTY_PARENS = re.compile(r"\(\s*\)|（\s*）")
+_KEYCAP_SEQUENCE = re.compile(r"[#*0-9]\ufe0f?\u20e3")
 
-# 装饰符号（独立出现时移除）
-_DECORATION_PATTERN = re.compile(
-    r"[☆★♪♫♬♩♡♥❤✿❀❁✾✽❃❋☀☁☂☃✨✧✦♠♣♦♤♧♢]+",
-    re.UNICODE,
+_ARM_GLYPHS = "٩۶งლوﾉノ╰╯╮╭づヽヾ"
+_ARMS_FACE_GROUP = re.compile(
+    rf"(?P<left>[{_ARM_GLYPHS}]*)"
+    r"(?P<group>\([^()\n]{1,48}\)|（[^（）\n]{1,48}）)"
+    rf"(?P<right>[{_ARM_GLYPHS}]*)"
+)
+_STRONG_FACE_GLYPHS = set("ωΩдДツᴗᵕ益皿∀ಥ╥◕◡⊙ʖ‿︿▽△≧≦⌒ㅅㅜㅠ╹◔◉ಠづ")
+_STANDALONE_FACE_RUN = re.compile(r"[ωΩдДツᴗᵕ益皿∀ಥ╥◕◡⊙ʖ‿︿▽△≧≦⌒ㅅㅜㅠ・･＾^°º╹◔◉ಠづ｡´｀`*]{2,}")
+_FACE_HAN_GLYPHS = {"益", "皿"}
+
+_MARKDOWN_LINK = re.compile(r"!?\[([^\]]+)\]\((?:[^()]|\([^()]*\))*\)")
+_MARKDOWN_PREFIX = re.compile(r"(?m)^[ \t]*(?:#{1,6}[ \t]+|>[ \t]?|[-+*][ \t]+|\d+[.)][ \t]+)")
+_MARKDOWN_FENCE = re.compile(r"```[\w+-]*[ \t]*")
+_MARKDOWN_WRAPPERS = (
+    (re.compile(r"\*\*(\S(?:.*?\S)?)\*\*", re.DOTALL), r"\1"),
+    (re.compile(r"__(\S(?:.*?\S)?)__", re.DOTALL), r"\1"),
+    (re.compile(r"~~(\S(?:.*?\S)?)~~", re.DOTALL), r"\1"),
+    (re.compile(r"(?<!\w)\*(\S(?:.*?\S)?)\*(?!\w)", re.DOTALL), r"\1"),
+    (re.compile(r"(?<!\w)_(\S(?:.*?\S)?)_(?!\w)", re.DOTALL), r"\1"),
+)
+_EMPTY_MARKDOWN_WRAPPER = re.compile(
+    r"\*\*\s*\*\*|__\s*__|~~\s*~~|(?<!\w)\*\s*\*(?!\w)|(?<!\w)_\s*_(?!\w)"
 )
 
-# ============================================================
-# 2. Unicode Emoji 范围
-#    用 codepoint 判断代替超大字符类正则，避免误覆盖 CJK。
-# ============================================================
-
-_EMOJI_CODEPOINT_RANGES = (
-    (0x1F600, 0x1F64F),  # Emoticons
-    (0x1F300, 0x1F5FF),  # Misc Symbols and Pictographs
-    (0x1F680, 0x1F6FF),  # Transport and Map
-    (0x1F1E0, 0x1F1FF),  # Regional Indicator Symbols
-    (0x1F900, 0x1F9FF),  # Supplemental Symbols
-    (0x1FA00, 0x1FA6F),  # Chess Symbols
-    (0x1FA70, 0x1FAFF),  # Symbols Extended-A
-    (0x2702, 0x27B0),    # Dingbats
-    (0x2600, 0x26FF),    # Misc symbols
-    (0xFE00, 0xFE0F),    # Variation Selectors
-    (0x23F0, 0x23FA),    # Technical symbols
-    (0x24C2, 0x24FF),    # Enclosed Alphanumerics
-    (0x2500, 0x2BFF),    # Box drawing, block elements, misc symbols
-    (0x1F200, 0x1F251),  # Enclosed Ideographic Supplement
+_EMOJI_RANGES = (
+    (0x1F000, 0x1FAFF),  # pictographs, flags, modifiers, and emoji sequences
+    (0x1FC00, 0x1FFFD),
+    (0x2600, 0x27BF),    # emoji and dingbats; deliberately excludes math/box blocks
+    (0x1F200, 0x1F251),
 )
-_EMOJI_SINGLE_CODEPOINTS = {0x200D, 0x2B50, 0x203C, 0x2049}
+_EMOJI_SINGLE_CODEPOINTS = {0x203C, 0x2049, 0x2122, 0x2139, 0x2B50, 0x2B55}
+_DECORATIVE_GLYPHS = set("©®™℠‼⁉•※◕◡◔◉♡♥")
+_REPEATED_PUNCT = re.compile(r"([。！？!?~～,.，、;；：:])\1+")
+_SPACE_BEFORE_PUNCT = re.compile(r"\s+([，。！？、；：,.!?;:])")
 
 
-def _is_emoji_codepoint(codepoint: int) -> bool:
-    return (
-        codepoint in _EMOJI_SINGLE_CODEPOINTS
-        or any(start <= codepoint <= end for start, end in _EMOJI_CODEPOINT_RANGES)
+def _is_emoji(char: str) -> bool:
+    value = ord(char)
+    return value in _EMOJI_SINGLE_CODEPOINTS or any(
+        start <= value <= end for start, end in _EMOJI_RANGES
     )
 
 
-def _strip_unicode_emoji(text: str) -> str:
-    return "".join(ch for ch in text if not _is_emoji_codepoint(ord(ch)))
-
-# ============================================================
-# 3. 多余的标点/空白清理
-# ============================================================
-
-_MULTI_PUNCT = re.compile(r"([。！？!?~～…,.，、;；：:]{2,})")
-_MULTI_SPACE = re.compile(r" {2,}")
+def _is_han(char: str) -> bool:
+    return "\u3400" <= char <= "\u9fff" or "\U00020000" <= char <= "\U0003134f"
 
 
-def _collapse_punctuation(text: str) -> str:
-    """将连续重复的标点符号缩减为一个"""
-    def _pick_first(m: re.Match) -> str:
-        return m.group(0)[0]
-    return _MULTI_PUNCT.sub(_pick_first, text)
+def _is_face_body(group: str) -> bool:
+    body = group[1:-1].strip()
+    if re.fullmatch(_ASCII_FACE_BODY, body):
+        return True
+    if any(char.isascii() and char.isalnum() for char in body):
+        return False
+    han_chars = [char for char in body if _is_han(char)]
+    if any(char not in _FACE_HAN_GLYPHS for char in han_chars):
+        return False
+    return sum(char in _STRONG_FACE_GLYPHS for char in body) >= 2
+
+
+def _remove_faces(text: str) -> str:
+    """Remove supported faces in one bounded pass."""
+    text = _KAOMOJI_EXACT.sub(" ", text)
+    text = _SHRUG_EMOTICON.sub(" ", text)
+    text = _BARE_CAT_FACE.sub(" ", text)
+
+    def remove_parenthetical_face(match: re.Match[str]) -> str:
+        return " " if _is_face_body(match.group("group")) else match.group(0)
+
+    def remove_standalone_face(match: re.Match[str]) -> str:
+        return " " if sum(char in _STRONG_FACE_GLYPHS for char in match.group(0)) >= 2 else match.group(0)
+
+    text = _ARMS_FACE_GROUP.sub(remove_parenthetical_face, text)
+    text = _STANDALONE_FACE_RUN.sub(remove_standalone_face, text)
+    text = _KAOMOJI_BARE_PATTERN.sub(" ", text)
+    return _ASCII_EMOTICON.sub(" ", text)
 
 
 def clean_text_for_tts(text: str) -> str:
-    """清洗文本，移除颜文字、emoji 等对 TTS 有害的内容
+    """Remove speech-irrelevant faces, emoji, and common display markup.
 
-    处理流程:
-      1. 移除 Unicode emoji
-      2. 移除精确匹配的常见颜文字
-      3. 移除括号型颜文字
-      4. 移除无括号型颜文字 (OwO, QAQ 等)
-      5. 移除装饰符号
-      6. 移除不可见控制字符
-      7. 合并连续标点
-      8. 合并连续空格、去除首尾空白
-
-    Args:
-        text: 原始文本
-
-    Returns:
-        清洗后的纯文本，适合送入 TTS 引擎
+    Ordinary parentheticals, numeric notation, mathematical operators, paths,
+    and visible Markdown link labels are retained. The returned text is only
+    for synthesis; callers should keep the original reply for display/storage.
     """
-    if not text:
-        return text
+    if not isinstance(text, str) or not text:
+        return ""
 
-    # 1. 移除 Unicode emoji
-    text = _strip_unicode_emoji(text)
+    cleaned = _CONTROL_BLOCK.sub(" ", text)
+    cleaned = _CONTROL_TOKEN_BLOCK.sub(" ", cleaned)
+    cleaned = _CONTROL_TAG.sub(" ", cleaned)
+    cleaned = _CONTROL_TOKEN.sub(" ", cleaned)
+    cleaned = _remove_faces(cleaned)
 
-    # 2. 移除精确匹配的常见颜文字（优先处理，避免子串冲突）
-    text = _KAOMOJI_EXACT.sub("", text)
+    cleaned = _MARKDOWN_LINK.sub(r"\1", cleaned)
+    cleaned = _MARKDOWN_PREFIX.sub("", cleaned)
+    cleaned = _EMPTY_PARENS.sub(" ", cleaned)
+    cleaned = _MARKDOWN_FENCE.sub("", cleaned).replace("`", "")
+    for wrapper, replacement in _MARKDOWN_WRAPPERS:
+        cleaned = wrapper.sub(replacement, cleaned)
+    cleaned = _EMPTY_MARKDOWN_WRAPPER.sub(" ", cleaned)
+    # Markdown unwrapping can expose an identifier-bounded face (for example
+    # `_QwQ_`). A second bounded pass keeps every backend's first-pass result
+    # identical without recursively cleaning arbitrary transformations.
+    cleaned = _remove_faces(cleaned)
 
-    # 3. 移除括号型颜文字
-    text = _KAOMOJI_BRACKET_PATTERN.sub("", text)
-
-    # 4. 移除无括号型颜文字
-    text = _KAOMOJI_BARE_PATTERN.sub("", text)
-
-    # 5. 移除装饰符号
-    text = _DECORATION_PATTERN.sub("", text)
-
-    # 6. 移除不可见控制字符（保留换行和空格）
-    cleaned_chars = []
-    for ch in text:
-        cat = unicodedata.category(ch)
-        if cat.startswith("C") and ch not in ("\n", "\r", "\t"):
+    cleaned = _KEYCAP_SEQUENCE.sub("", cleaned)
+    visible: list[str] = []
+    for char in cleaned:
+        category = unicodedata.category(char)
+        value = ord(char)
+        if char in "\n\r\t":
+            visible.append(" ")
+        elif (
+            category.startswith("C")
+            or _is_emoji(char)
+            or char in _DECORATIVE_GLYPHS
+            or 0xFE00 <= value <= 0xFE0F
+            or 0xE0100 <= value <= 0xE01EF
+            or 0x1F3FB <= value <= 0x1F3FF
+            or value == 0x20E3
+        ):
             continue
-        cleaned_chars.append(ch)
-    text = "".join(cleaned_chars)
+        else:
+            visible.append(char)
 
-    # 7. 合并连续标点
-    text = _collapse_punctuation(text)
-
-    # 8. 合并连续空格、去除首尾空白
-    text = _MULTI_SPACE.sub(" ", text)
-    text = text.strip()
-
-    return text
+    cleaned = _EMPTY_PARENS.sub(" ", "".join(visible))
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    cleaned = _SPACE_BEFORE_PUNCT.sub(r"\1", cleaned)
+    cleaned = _REPEATED_PUNCT.sub(r"\1", cleaned)
+    cleaned = cleaned.strip()
+    return cleaned if any(char.isalnum() for char in cleaned) else ""

@@ -1,4 +1,5 @@
 from enum import Enum
+from copy import deepcopy
 from typing import Any
 
 
@@ -12,6 +13,16 @@ class ToolParamType(Enum):
     FLOAT = "float"  # 浮点型
     BOOLEAN = "bool"  # 布尔型
 
+    @property
+    def json_schema_type(self) -> str:
+        """Return the standard JSON Schema type for this parameter type."""
+        return {
+            ToolParamType.STRING: "string",
+            ToolParamType.INTEGER: "integer",
+            ToolParamType.FLOAT: "number",
+            ToolParamType.BOOLEAN: "boolean",
+        }[self]
+
 
 class ToolParam:
     """
@@ -24,7 +35,7 @@ class ToolParam:
         param_type: ToolParamType,
         description: str,
         required: bool,
-        enum_values: list[str] | None = None,
+        enum_values: list[str | int | float | bool] | None = None,
     ):
         """
         初始化工具调用参数
@@ -38,7 +49,7 @@ class ToolParam:
         self.param_type: ToolParamType = param_type
         self.description: str = description
         self.required: bool = required
-        self.enum_values: list[str] | None = enum_values
+        self.enum_values: list[str | int | float | bool] | None = enum_values
 
 
 class ToolOption:
@@ -64,6 +75,38 @@ class ToolOption:
         self.description: str = description
         self.params: list[ToolParam] | None = params
         self.input_schema: dict[str, Any] | None = input_schema
+
+
+def build_tool_input_schema(tool_option: ToolOption) -> dict[str, Any] | None:
+    """Build a detached standard JSON Schema for a tool's input parameters.
+
+    A provided raw schema is authoritative. Legacy parameter declarations are
+    translated here so each provider receives the same schema representation.
+    """
+    if tool_option.input_schema is not None:
+        return deepcopy(tool_option.input_schema)
+
+    if not tool_option.params:
+        return None
+
+    properties: dict[str, Any] = {}
+    required: list[str] = []
+    for param in tool_option.params:
+        property_schema: dict[str, Any] = {
+            "type": param.param_type.json_schema_type,
+            "description": param.description,
+        }
+        if param.enum_values:
+            property_schema["enum"] = deepcopy(param.enum_values)
+        properties[param.name] = property_schema
+        if param.required:
+            required.append(param.name)
+
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": required,
+    }
 
 
 class ToolOptionBuilder:
@@ -105,7 +148,7 @@ class ToolOptionBuilder:
         param_type: ToolParamType,
         description: str,
         required: bool = False,
-        enum_values: list[str] | None = None,
+        enum_values: list[str | int | float | bool] | None = None,
     ) -> "ToolOptionBuilder":
         """
         添加工具参数

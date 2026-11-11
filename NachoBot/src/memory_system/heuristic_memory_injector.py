@@ -17,6 +17,8 @@
 from __future__ import annotations
 
 import time
+import threading
+from collections import OrderedDict
 from typing import Any, List, Optional, TYPE_CHECKING
 from ncnk_message import get_system_event
 
@@ -33,11 +35,13 @@ _SOURCE_CHAT_SUMMARY_PREFIX = "chat_summary:"
 MAX_MEMORY_SNIPPETS = 5
 # 单个记忆片段最大字符数（截断保护）
 MAX_SNIPPET_LENGTH = 300
-# 注入冷却时间（秒）：同一 chat_id 两次注入之间的最小间隔
-INJECT_COOLDOWN_SECONDS = 30
-
-# 注入冷却缓存：chat_id -> last_inject_time
-_inject_cooldown: dict[str, float] = {}
+# Successful result reuse is bounded and keyed by the actual query, actor scope,
+# and current sharing policy. A different topic never inherits a prior result.
+INJECT_CACHE_TTL_SECONDS = 30.0
+INJECT_CACHE_MAX_ENTRIES = 128
+_inject_cache: OrderedDict[tuple[Any, ...], tuple[float, tuple[str, ...]]] = OrderedDict()
+_inject_cache_lock = threading.RLock()
+_inject_cache_generation: dict[str, int] = {}
 
 
 async def inject_memory_context(
@@ -66,49 +70,66 @@ async def inject_memory_context(
     except Exception:
         return chat_content_block
 
-    # 冷却检查
-    now = time.time()
-    last_time = _inject_cooldown.get(chat_id, 0.0)
-    if now - last_time < INJECT_COOLDOWN_SECONDS:
-        return chat_content_block
-
     # 从最近消息中提取查询文本
     query_text = _build_query_from_messages(messages)
     if not query_text:
         return chat_content_block
 
     try:
-        cross_chat_enabled = _is_cross_chat_memory_enabled()
+        cross_chat_enabled, shared_session_ids, access_filter = _sharing_policy(chat_id)
+        identity_scope = _identity_scope(messages)
+        user_id, group_id = _search_actor_scope(messages, identity_scope)
+        cache_key = (query_text, chat_id, identity_scope, group_id, True, cross_chat_enabled, shared_session_ids, access_filter)
+        now = time.monotonic()
+        with _inject_cache_lock:
+            cached = _inject_cache.get(cache_key)
+            if cached and cached[0] > now:
+                _inject_cache.move_to_end(cache_key)
+                snippets = list(cached[1])
+            else:
+                if cached:
+                    _inject_cache.pop(cache_key, None)
+                snippets = None
+            generation = _inject_cache_generation.get(chat_id, 0)
+
         search_limit = max_snippets * 4 if cross_chat_enabled else max_snippets
-        result = await memory_service.search(
-            query=query_text,
-            chat_id=chat_id,
-            limit=search_limit,
-            respect_filter=True,
-        )
+        if snippets is None:
+            result = await memory_service.search(
+                query=query_text,
+                chat_id=chat_id,
+                user_id=user_id,
+                group_id=group_id,
+                limit=search_limit,
+                respect_filter=True,
+            )
 
-        if not result:
-            return chat_content_block
-
-        if isinstance(result, dict):
-            if result.get("disabled", False):
+            if not result:
                 return chat_content_block
-            if result.get("success") is False:
+            if isinstance(result, dict):
+                if result.get("disabled", False) or result.get("success") is False:
+                    return chat_content_block
+            elif not getattr(result, "success", False):
                 return chat_content_block
-        elif not getattr(result, "success", False):
-            return chat_content_block
 
-        snippets = _extract_snippets(
-            result,
-            max_snippets,
-            current_chat_id=chat_id,
-            cross_chat_enabled=cross_chat_enabled,
-        )
+            snippets = _extract_snippets(
+                result,
+                max_snippets,
+                current_chat_id=chat_id,
+                cross_chat_enabled=cross_chat_enabled,
+            )
+            with _inject_cache_lock:
+                if _inject_cache_generation.get(chat_id, 0) != generation:
+                    return chat_content_block
+            if _sharing_policy(chat_id) != (cross_chat_enabled, shared_session_ids, access_filter):
+                return chat_content_block
+            with _inject_cache_lock:
+                _inject_cache[cache_key] = (time.monotonic() + INJECT_CACHE_TTL_SECONDS, tuple(snippets))
+                _inject_cache.move_to_end(cache_key)
+                while len(_inject_cache) > INJECT_CACHE_MAX_ENTRIES:
+                    _inject_cache.popitem(last=False)
+
         if not snippets:
             return chat_content_block
-
-        # 更新冷却时间
-        _inject_cooldown[chat_id] = now
 
         # 构建注入块
         memory_block = _format_memory_block(snippets)
@@ -147,14 +168,85 @@ def _build_query_from_messages(
     return " ".join(reversed(recent_texts))
 
 
-def _is_cross_chat_memory_enabled() -> bool:
-    """读取是否启用统一跨会话记忆策略。"""
+def _sharing_policy(chat_id: str) -> tuple[bool, tuple[str, ...], tuple[Any, ...]]:
     try:
-        from src.A_memorix._compat import config_manager
+        from src.A_memorix._compat import AMemorixConfigUtils, config_manager
 
-        return bool(getattr(config_manager.a_memorix.cross_chat_memory, "enabled", False))
+        enabled = bool(getattr(config_manager.a_memorix.cross_chat_memory, "enabled", False))
+        shared_ids = tuple(sorted(set(AMemorixConfigUtils.get_shared_memory_session_ids(chat_id)))) if enabled else ()
+        from src.A_memorix.host_service import a_memorix_host_service
+
+        config = a_memorix_host_service.get_config()
+        access_filter = config.get("filter", {}) if isinstance(config, dict) else {}
+        if not isinstance(access_filter, dict):
+            access_filter = {}
+        filter_signature = (
+            bool(access_filter.get("enabled", True)),
+            str(access_filter.get("mode", "blacklist") or "blacklist").strip().lower(),
+            tuple(sorted(str(item) for item in (access_filter.get("chats") or ()) if str(item).strip())),
+        )
+        return enabled, shared_ids, filter_signature
     except Exception:
-        return False
+        return False, (), ("unknown",)
+
+
+def _identity_scope(messages: Optional[List["DatabaseMessages"]]) -> tuple[tuple[str, str], ...]:
+    if not messages:
+        return ()
+    from src.memory_system.chat_history_summarizer import is_bot_self
+
+    identities: list[tuple[str, str]] = []
+    for message in messages:
+        if get_system_event(message) is not None:
+            continue
+        info = getattr(message, "user_info", None)
+        if info is None:
+            continue
+        platform = str(getattr(info, "platform", "") or "").strip()
+        user_id = str(getattr(info, "user_id", "") or "").strip()
+        if not platform or not user_id or is_bot_self(platform, user_id):
+            continue
+        identity = (platform, user_id)
+        if identity not in identities:
+            identities.append(identity)
+    return tuple(identities[-8:])
+
+
+def _search_actor_scope(
+    messages: Optional[List["DatabaseMessages"]],
+    identities: tuple[tuple[str, str], ...],
+) -> tuple[str, str]:
+    if not messages or not identities:
+        return "", ""
+    target_identity = identities[-1]
+    for message in reversed(messages):
+        info = getattr(message, "user_info", None)
+        if info is None:
+            continue
+        if (
+            str(getattr(info, "platform", "") or "").strip(),
+            str(getattr(info, "user_id", "") or "").strip(),
+        ) != target_identity:
+            continue
+        group = (
+            getattr(getattr(message, "chat_info", None), "group_info", None)
+            or getattr(message, "group_info", None)
+        )
+        return target_identity[1], str(getattr(group, "group_id", "") or "").strip()
+    return target_identity[1], ""
+
+
+def invalidate_memory_cache(chat_id: str, *, platform: str = "", user_id: str = "") -> None:
+    """Drop all cached query results for a corrected conversation or actor."""
+    with _inject_cache_lock:
+        _inject_cache_generation[chat_id] = _inject_cache_generation.get(chat_id, 0) + 1
+        for key in list(_inject_cache):
+            if len(key) < 3 or key[1] != chat_id:
+                continue
+            identities = key[2]
+            if platform and user_id and identities and (platform, user_id) not in identities:
+                continue
+            _inject_cache.pop(key, None)
 
 
 def _extract_snippets(

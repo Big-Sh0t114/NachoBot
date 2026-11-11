@@ -640,6 +640,8 @@ class LocalChatBackend:
             "schema_version": 1,
             "planner_bypass": channel == "voice",
         }
+        if channel == "voice":
+            runtime_capabilities["memory_retrieval_mode"] = "direct"
         if channel == "voice" and voice_reply_controls:
             runtime_capabilities.update(
                 {

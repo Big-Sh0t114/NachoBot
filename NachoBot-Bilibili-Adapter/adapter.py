@@ -1719,6 +1719,8 @@ class BilibiliAdapter:
                 )
             else:
                 reply_prompt += "\n{person_profile_block}"
+        if reply_prompt and "{memory_retrieval}" not in reply_prompt:
+            reply_prompt += "\n{memory_retrieval}\n"
         if reply_prompt:
             reply_prompt += "\n{moderation_prompt}"
             reply_prompt = append_live_search_protocol(

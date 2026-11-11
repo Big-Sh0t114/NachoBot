@@ -201,6 +201,10 @@ class TTSModel(BaseTTSModel):
     def _resolve_stream_request(self, text: str, kwargs: dict[str, Any]) -> tuple[dict[str, Any], str]:
         """Resolve the existing Vox preset and request parameters once."""
 
+        cleaned_text = clean_text_for_tts(text)
+        if not cleaned_text:
+            raise ValueError("清洗后的 TTS 文本为空")
+
         platform = kwargs.get("platform")
         if not platform:
             raise RuntimeError("未指定平台，请在kwargs中传入platform参数")
@@ -213,7 +217,7 @@ class TTSModel(BaseTTSModel):
         # If no explicit preset was supplied, classify locally.  The old
         # callback-to-facade path is intentionally gone.
         if not preset_name:
-            preset_name = self.resolve_emotion_preset(text)
+            preset_name = self.resolve_emotion_preset(cleaned_text)
 
         # 最终回退到平台默认预设
         if not preset_name:
@@ -227,12 +231,6 @@ class TTSModel(BaseTTSModel):
             preset = self.get_preset(preset_name)
             if not preset:
                 raise ValueError(f"预设 {preset_name} 不存在")
-
-        cleaned_text = clean_text_for_tts(text)
-        if cleaned_text != text:
-            logger.info(f"文本清洗: '{text[:60]}' -> '{cleaned_text[:60]}'")
-        if not cleaned_text:
-            raise ValueError("清洗后的 TTS 文本为空")
 
         self._current_preset = preset_name
         split_method = kwargs.get("split_method")

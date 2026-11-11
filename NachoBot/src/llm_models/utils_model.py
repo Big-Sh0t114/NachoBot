@@ -18,14 +18,18 @@ from .prompt_layout import PromptCacheScope, validated_segments
 from .payload_content.resp_format import RespFormat
 from .payload_content.tool_option import ToolOption, ToolCall, ToolOptionBuilder, ToolParamType
 from .model_client.base_client import BaseClient, APIResponse, client_registry
+from .model_client.client_lifecycle import capture_selected_client, model_client_selection
+from .model_client.stream_lifecycle import is_managed_response_stream
 from .utils import compress_messages, llm_usage_recorder
 from .exceptions import (
     NetworkConnectionError,
     RespNotOkException,
     EmptyResponseException,
+    ModelOutputValidationError,
     ModelAttemptFailed,
     ReqAbortException,
 )
+from .request_interrupt import raise_if_request_interrupted, wait_for_retry_interval
 
 install(extra_lines=3)
 
@@ -40,6 +44,24 @@ CandidateExecutor = Callable[
     [ModelInfo, APIProvider, Callable[[], Awaitable[APIResponse]]],
     Awaitable[APIResponse],
 ]
+ResponseValidator = Callable[[str], None]
+
+
+def _validate_response_validator(response_validator: Any, request_type: Any) -> None:
+    """Reject unsupported validators before selecting or dispatching a model."""
+    if response_validator is None:
+        return
+    if request_type != RequestType.RESPONSE:
+        raise TypeError("response_validator is only supported for response requests")
+    if not callable(response_validator):
+        raise TypeError("response_validator must be callable")
+
+    call_method = type(response_validator).__call__
+    if any(
+        inspect_fn(response_validator) or inspect_fn(call_method)
+        for inspect_fn in (inspect.iscoroutinefunction, inspect.isasyncgenfunction)
+    ):
+        raise TypeError("response_validator must be synchronous")
 
 
 class _ObservedAsyncIterator:
@@ -305,6 +327,8 @@ class LLMRequest:
         max_tokens: Optional[int] = None,
         extra_params: Optional[Dict[str, Any]] = None,
         candidate_executor: CandidateExecutor | None = None,
+        *,
+        response_validator: Optional[ResponseValidator] = None,
     ) -> Tuple[str, Tuple[str, str, Optional[List[ToolCall]]]]:
         """
         为图像生成响应
@@ -325,7 +349,7 @@ class LLMRequest:
             )
             return [message_builder.build()]
 
-        response, model_info = await self._execute_request(
+        execute_kwargs = dict(
             request_type=RequestType.RESPONSE,
             message_factory=message_factory,
             temperature=temperature,
@@ -333,6 +357,9 @@ class LLMRequest:
             extra_params=extra_params,
             candidate_executor=candidate_executor,
         )
+        if response_validator is not None:
+            execute_kwargs["response_validator"] = response_validator
+        response, model_info = await self._execute_request(**execute_kwargs)
         content = response.content or ""
         reasoning_content = response.reasoning_content or ""
         tool_calls = response.tool_calls
@@ -436,6 +463,8 @@ class LLMRequest:
         raise_when_empty: bool = True,
         interrupt_flag: Optional[asyncio.Event] = None,
         system_prompt: Optional[str] = None,
+        *,
+        response_validator: Optional[ResponseValidator] = None,
     ) -> Tuple[str, Tuple[str, str, Optional[List[ToolCall]]]]:
         """
         异步生成响应
@@ -463,7 +492,7 @@ class LLMRequest:
 
         tool_built = self._build_tool_options(tools)
 
-        response, model_info = await self._execute_request(
+        execute_kwargs = dict(
             request_type=RequestType.RESPONSE,
             message_factory=message_factory,
             temperature=temperature,
@@ -471,6 +500,9 @@ class LLMRequest:
             tool_options=tool_built,
             interrupt_flag=interrupt_flag,
         )
+        if response_validator is not None:
+            execute_kwargs["response_validator"] = response_validator
+        response, model_info = await self._execute_request(**execute_kwargs)
 
         logger.debug(f"{self.log_context} LLM请求总耗时: {time.time() - start_time}")
         content = response.content
@@ -641,7 +673,8 @@ class LLMRequest:
         self,
         exclude_models: Optional[Set[str]] = None,
         eligible_models: Optional[Set[str]] = None,
-    ) -> Tuple[ModelInfo, APIProvider, BaseClient]:
+        create_client: bool = True,
+    ) -> Tuple[ModelInfo, APIProvider, BaseClient | None]:
         """
         根据总tokens和惩罚值选择的模型
         """
@@ -653,6 +686,16 @@ class LLMRequest:
         }
         if not available_models:
             raise RuntimeError("没有可用的模型可供选择。所有模型均已尝试失败。")
+
+        # Clear expired failure penalties before scoring so every available
+        # candidate competes using the same time snapshot.
+        now = time.time()
+        for model, scores in available_models.items():
+            total_tokens, penalty, usage_penalty, last_penalty_time = scores
+            if penalty > 0 and now - last_penalty_time > 300:
+                recovered_scores = (total_tokens, 0, usage_penalty, last_penalty_time)
+                self.model_usage[model] = recovered_scores
+                available_models[model] = recovered_scores
 
         least_used_model_name = min(
             available_models,
@@ -670,22 +713,27 @@ class LLMRequest:
             api_provider.timeout = task_timeout
             force_new_client = True
 
-        client = client_registry.get_client_class_instance(api_provider, force_new=force_new_client)
+        client = (
+            client_registry.get_client_class_instance(api_provider, force_new=force_new_client)
+            if create_client
+            else None
+        )
+        if create_client:
+            # Record the exact force_new decision used above. Later config changes
+            # must not reclassify a borrowed cached client as request-owned.
+            capture_selected_client(self, client, owned=force_new_client)
         logger.debug(f"{self.log_context} 选择请求模型: {model_info.name}")
 
         total_tokens, penalty, usage_penalty, last_penalty_time = self.model_usage[model_info.name]
-
-        # 恢复惩罚分数：如果距离上次加罚分已经过了5分钟（300秒），则清零penalty
-        if penalty > 0 and time.time() - last_penalty_time > 300:
-            penalty = 0
-
         self.model_usage[model_info.name] = (total_tokens, penalty, usage_penalty + 1, last_penalty_time)
         return model_info, api_provider, client
 
     def acquire_model_lease(
         self,
         eligible_models: Set[str],
-    ) -> Tuple[ModelInfo, APIProvider, BaseClient]:
+        *,
+        create_client: bool = True,
+    ) -> Tuple[ModelInfo, APIProvider, BaseClient | None]:
         """Select and pin one candidate using the normal usage/penalty score.
 
         Long-lived operations such as Core-owned ASR streams retain the
@@ -696,6 +744,9 @@ class LLMRequest:
 
         if not eligible_models:
             raise RuntimeError("没有可用的模型可供选择。")
+        if not create_client:
+            return self._select_model(eligible_models=eligible_models, create_client=False)
+        # Preserve the legacy call shape for subclasses and private overrides.
         return self._select_model(eligible_models=eligible_models)
 
     def release_model_lease(self, model_name: str) -> None:
@@ -743,8 +794,13 @@ class LLMRequest:
         if extra_params:
             merged_extra_params.update(extra_params)
 
+        raise_if_request_interrupted(interrupt_flag)
         while retry_remain > 0:
             try:
+                # Check immediately before every provider dispatch. The SDK also
+                # observes this flag while active, but this boundary covers
+                # non-streaming clients and work after an earlier retry.
+                raise_if_request_interrupted(interrupt_flag)
                 if request_type == RequestType.RESPONSE:
                     effective_model_info = model_info
                     if force_stream and not model_info.force_stream_mode:
@@ -770,7 +826,11 @@ class LLMRequest:
                                 # A provider handler normally consumes the
                                 # stream.  Closing here also releases a
                                 # partially consumed generator on cancellation.
-                                if observed_interrupt_flag and observed_interrupt_flag.is_set():
+                                if (
+                                    observed_interrupt_flag
+                                    and observed_interrupt_flag.is_set()
+                                    and not is_managed_response_stream(resp_stream)
+                                ):
                                     try:
                                         await observed_stream.aclose()
                                     except Exception as close_exc:
@@ -796,25 +856,31 @@ class LLMRequest:
                         extra_params=merged_extra_params,
                         interrupt_flag=interrupt_flag,
                     )
+                    raise_if_request_interrupted(interrupt_flag)
                     response._cache_diagnostic_messages = effective_messages
                     return response
                 elif request_type == RequestType.EMBEDDING:
                     assert embedding_input is not None
-                    return await client.get_embedding(
+                    response = await client.get_embedding(
                         model_info,
                         embedding_input=embedding_input,
                         extra_params=model_info.extra_params,
                     )
+                    raise_if_request_interrupted(interrupt_flag)
+                    return response
                 elif request_type == RequestType.AUDIO:
                     assert audio_base64 is not None
-                    return await client.get_audio_transcriptions(
+                    response = await client.get_audio_transcriptions(
                         model_info=model_info,
                         audio_base64=audio_base64,
                         extra_params=model_info.extra_params,
                     )
+                    raise_if_request_interrupted(interrupt_flag)
+                    return response
             except ReqAbortException:
                 raise
             except (EmptyResponseException, NetworkConnectionError) as e:
+                raise_if_request_interrupted(interrupt_flag)
                 retry_remain -= 1
                 if retry_remain <= 0:
                     logger.error(f"{self.log_context} 模型 '{model_info.name}' 在用尽对临时错误的重试次数后仍然失败。")
@@ -823,9 +889,10 @@ class LLMRequest:
                 logger.warning(
                     f"{self.log_context} 模型 '{model_info.name}' 遇到可重试错误: {str(e)}。剩余重试次数: {retry_remain}"
                 )
-                await asyncio.sleep(api_provider.retry_interval)
+                await wait_for_retry_interval(api_provider.retry_interval, interrupt_flag)
 
             except RespNotOkException as e:
+                raise_if_request_interrupted(interrupt_flag)
                 # 可重试的HTTP错误
                 if e.status_code == 429 or e.status_code >= 500:
                     retry_remain -= 1
@@ -838,7 +905,7 @@ class LLMRequest:
                     logger.warning(
                         f"{self.log_context} 模型 '{model_info.name}' 遇到可重试的HTTP错误: {str(e)}。剩余重试次数: {retry_remain}"
                     )
-                    await asyncio.sleep(api_provider.retry_interval)
+                    await wait_for_retry_interval(api_provider.retry_interval, interrupt_flag)
                     continue
 
                 # 特殊处理413，尝试压缩
@@ -846,6 +913,7 @@ class LLMRequest:
                     logger.warning(f"{self.log_context} 模型 '{model_info.name}' 返回413请求体过大，尝试压缩后重试...")
                     # 压缩消息本身不消耗重试次数
                     compressed = await asyncio.to_thread(compress_messages, message_list)
+                    raise_if_request_interrupted(interrupt_flag)
                     compressed_messages = self._copy_request_cache_metadata(compressed, message_list)
                     continue
 
@@ -854,6 +922,7 @@ class LLMRequest:
                 raise ModelAttemptFailed(f"模型 '{model_info.name}' 遇到硬错误", original_exception=e) from e
 
             except Exception as e:
+                raise_if_request_interrupted(interrupt_flag)
                 logger.error(f"{self.log_context}\n{traceback.format_exc()}")
 
                 logger.warning(f"{self.log_context} 模型 '{model_info.name}' 遇到未知的不可重试错误: {str(e)}")
@@ -878,101 +947,261 @@ class LLMRequest:
         stream_delta_callback: Optional[Callable[[Any], None]] = None,
         force_stream: bool = False,
         candidate_executor: CandidateExecutor | None = None,
+        *,
+        response_validator: ResponseValidator | None = None,
     ) -> Tuple[APIResponse, ModelInfo]:
         """
         调度器函数，负责模型选择、故障切换。
         """
+        raise_if_request_interrupted(interrupt_flag)
+        if response_validator is not None:
+            _validate_response_validator(response_validator, request_type)
         failed_models_this_request: Set[str] = set()
         max_attempts = len(self.model_for_task.model_list)
         last_exception: Optional[Exception] = None
 
         for _ in range(max_attempts):
-            model_info, api_provider, client = self._select_model(exclude_models=failed_models_this_request)
+            raise_if_request_interrupted(interrupt_flag)
+            async with model_client_selection(
+                self,
+                lambda: self._select_model(exclude_models=failed_models_this_request),
+                interrupt_flag,
+            ) as (model_info, api_provider, client):
 
-            try:
-                async def default_attempt(
-                    selected_model: ModelInfo = model_info,
-                    selected_provider: APIProvider = api_provider,
-                    selected_client: BaseClient = client,
-                ) -> APIResponse:
-                    message_list = message_factory(selected_client) if message_factory else []
-                    message_list = self._attach_request_cache_scope(message_list, request_type)
-                    return await self._attempt_request_on_model(
-                        selected_model,
-                        selected_provider,
-                        selected_client,
-                        request_type,
-                        message_list=message_list,
-                        tool_options=tool_options,
-                        response_format=response_format,
-                        stream_response_handler=stream_response_handler,
-                        async_response_parser=async_response_parser,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        embedding_input=embedding_input,
-                        audio_base64=audio_base64,
-                        extra_params=extra_params,
-                        interrupt_flag=interrupt_flag,
-                        stream_delta_callback=stream_delta_callback,
-                        force_stream=force_stream,
-                    )
+                response = None
+                validator_control_error = None
+                validation_state = {
+                    "response": None,
+                    "candidate_started_at": time.time() if response_validator is not None else 0.0,
+                    "usage_recorded": False,
+                }
 
-                response = (
-                    await candidate_executor(model_info, api_provider, default_attempt)
-                    if candidate_executor is not None
-                    else await default_attempt()
-                )
-                if request_type == RequestType.RESPONSE:
-                    messages = getattr(response, "_cache_diagnostic_messages", None)
-                    if messages is not None:
-                        try:
-                            from . import cache_diagnostics
-
-                            cache_diagnostics.record_request(
-                                messages=messages,
-                                model_info=model_info,
-                                request_type=self.request_type,
-                                session_id=self.session_id,
-                                usage=response.usage,
-                                tools=tool_options,
-                                response_format=response_format,
-                                enabled=self._cache_diagnostics_enabled(),
+                def record_rejected_usage(
+                    _state=validation_state,
+                    _validator=response_validator,
+                    _model_info=model_info,
+                    _request_type=self.request_type,
+                ) -> None:
+                    if _validator is None or _state["response"] is None or _state["usage_recorded"]:
+                        return
+                    _state["usage_recorded"] = True
+                    try:
+                        usage = getattr(_state["response"], "usage", None)
+                        if usage:
+                            llm_usage_recorder.record_usage_to_database(
+                                model_info=_model_info,
+                                model_usage=usage,
+                                user_id="system",
+                                request_type=_request_type,
+                                endpoint="/chat/completions",
+                                time_cost=time.time() - _state["candidate_started_at"],
                             )
-                        except Exception as exc:
-                            # Diagnostics are observational and cannot invalidate successful inference.
-                            logger.debug("Prompt cache diagnostics skipped: %s", type(exc).__name__)
-                return response, model_info
+                    except Exception as exc:
+                        # A billing recorder is observational at this boundary.
+                        try:
+                            logger.debug(
+                                "Rejected response usage recording failed: %s",
+                                type(exc).__name__,
+                            )
+                        except Exception:
+                            pass
 
-            except ReqAbortException:
-                raise
-            except ModelCandidateUnavailable as e:
-                logger.info(f"{self.log_context} 模型 '{model_info.name}' 当前不可用，跳过: {e}")
-                failed_models_this_request.add(model_info.name)
-            except ModelAttemptFailed as e:
-                last_exception = e.original_exception or e
-                logger.warning(f"{self.log_context} 模型 '{model_info.name}' 尝试失败，切换到下一个模型。原因: {e}")
+                async def reject_response(exc: ModelOutputValidationError) -> None:
+                    record_rejected_usage()
+                    # Deliver a cancellation requested by the synchronous
+                    # validator before converting rejection into a penalty.
+                    await asyncio.sleep(0)
+                    raise_if_request_interrupted(interrupt_flag)
+                    raise ModelAttemptFailed(
+                        f"模型 '{model_info.name}' 返回内容未通过调用方校验",
+                        original_exception=exc,
+                    ) from exc
 
-                total_tokens, penalty, usage_penalty, _ = self.model_usage[model_info.name]
-                self.model_usage[model_info.name] = (total_tokens, penalty + 1, usage_penalty, time.time())
+                try:
+                    # Keep this inside the lease-owning try/finally: selection may
+                    # itself set the event after it increments in-flight usage.
+                    raise_if_request_interrupted(interrupt_flag)
 
-                failed_models_this_request.add(model_info.name)
+                    async def default_attempt(
+                        selected_model: ModelInfo = model_info,
+                        selected_provider: APIProvider = api_provider,
+                        selected_client: BaseClient = client,
+                    ) -> APIResponse:
+                        raise_if_request_interrupted(interrupt_flag)
+                        message_list = message_factory(selected_client) if message_factory else []
+                        message_list = self._attach_request_cache_scope(message_list, request_type)
+                        return await self._attempt_request_on_model(
+                            selected_model,
+                            selected_provider,
+                            selected_client,
+                            request_type,
+                            message_list=message_list,
+                            tool_options=tool_options,
+                            response_format=response_format,
+                            stream_response_handler=stream_response_handler,
+                            async_response_parser=async_response_parser,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                            embedding_input=embedding_input,
+                            audio_base64=audio_base64,
+                            extra_params=extra_params,
+                            interrupt_flag=interrupt_flag,
+                            stream_delta_callback=stream_delta_callback,
+                            force_stream=force_stream,
+                        )
 
-                if (
-                    isinstance(last_exception, RespNotOkException)
-                    and last_exception.status_code == 400
-                    and not _is_candidate_specific_compatibility_error(last_exception)
-                ):
-                    logger.error(
-                        "%s Request-wide HTTP 400; stopping model fallback: %s",
-                        self.log_context,
-                        str(last_exception),
+                    response = (
+                        await candidate_executor(model_info, api_provider, default_attempt)
+                        if candidate_executor is not None
+                        else await default_attempt()
                     )
-                    raise last_exception from e
+                    validation_state["response"] = response
+                    # Candidate executors may return late even when they do not
+                    # use the default attempt closure. Never publish such a result.
+                    raise_if_request_interrupted(interrupt_flag)
+                    if request_type == RequestType.RESPONSE:
+                        messages = getattr(response, "_cache_diagnostic_messages", None)
+                        if messages is not None:
+                            try:
+                                from . import cache_diagnostics
 
-            finally:
-                total_tokens, penalty, usage_penalty, last_penalty_time = self.model_usage[model_info.name]
-                if usage_penalty > 0:
-                    self.model_usage[model_info.name] = (total_tokens, penalty, usage_penalty - 1, last_penalty_time)
+                                cache_diagnostics.record_request(
+                                    messages=messages,
+                                    model_info=model_info,
+                                    request_type=self.request_type,
+                                    session_id=self.session_id,
+                                    usage=response.usage,
+                                    tools=tool_options,
+                                    response_format=response_format,
+                                    enabled=self._cache_diagnostics_enabled(),
+                                )
+                            except Exception as exc:
+                                # Diagnostics are observational and cannot invalidate successful inference.
+                                logger.debug("Prompt cache diagnostics skipped: %s", type(exc).__name__)
+                    if response_validator is not None:
+                        try:
+                            # The candidate and diagnostics may complete after an
+                            # interrupt was requested. In the opt-in path, yield
+                            # once so a pending Task.cancel() is observed too.
+                            await asyncio.sleep(0)
+                            raise_if_request_interrupted(interrupt_flag)
+
+                            raw_content = getattr(response, "content", None)
+                            if raw_content is None:
+                                validation_content = ""
+                            elif not isinstance(raw_content, str):
+                                raise ModelOutputValidationError()
+                            else:
+                                validation_content = raw_content or ""
+
+                            reasoning_content = getattr(response, "reasoning_content", None) or ""
+                            if not reasoning_content and validation_content:
+                                validation_content, _extracted_reasoning = self._extract_reasoning(
+                                    validation_content
+                                )
+
+                            try:
+                                validator_result = response_validator(validation_content)
+                            except ModelOutputValidationError as exc:
+                                await reject_response(exc)
+                            except asyncio.CancelledError:
+                                record_rejected_usage()
+                                raise
+                            except ReqAbortException:
+                                record_rejected_usage()
+                                await asyncio.sleep(0)
+                                raise_if_request_interrupted(interrupt_flag)
+                                raise
+                            except (ModelAttemptFailed, ModelCandidateUnavailable) as exc:
+                                # These are scheduler protocol exceptions outside
+                                # the validator. Preserve callback-origin errors
+                                # instead of treating them as candidate outcomes.
+                                record_rejected_usage()
+                                await asyncio.sleep(0)
+                                raise_if_request_interrupted(interrupt_flag)
+                                validator_control_error = exc
+                                raise
+                            except Exception:
+                                record_rejected_usage()
+                                await asyncio.sleep(0)
+                                raise_if_request_interrupted(interrupt_flag)
+                                raise
+
+                            if inspect.isawaitable(validator_result):
+                                if inspect.iscoroutine(validator_result):
+                                    try:
+                                        validator_result.close()
+                                    except Exception:
+                                        pass
+                                record_rejected_usage()
+                                await asyncio.sleep(0)
+                                raise_if_request_interrupted(interrupt_flag)
+                                raise TypeError("response_validator must return None synchronously")
+                            if validator_result is not None:
+                                record_rejected_usage()
+                                await asyncio.sleep(0)
+                                raise_if_request_interrupted(interrupt_flag)
+                                raise TypeError("response_validator must return None")
+
+                            # A synchronous callback can cancel its own task or
+                            # set the interrupt event while returning success.
+                            await asyncio.sleep(0)
+                            raise_if_request_interrupted(interrupt_flag)
+                        except ModelOutputValidationError as exc:
+                            await reject_response(exc)
+                        except (ReqAbortException, asyncio.CancelledError):
+                            record_rejected_usage()
+                            raise
+                        except Exception:
+                            record_rejected_usage()
+                            raise
+                    return response, model_info
+
+                except asyncio.CancelledError:
+                    record_rejected_usage()
+                    raise
+                except ReqAbortException:
+                    record_rejected_usage()
+                    raise
+                except ModelCandidateUnavailable as e:
+                    raise_if_request_interrupted(interrupt_flag)
+                    if e is validator_control_error:
+                        raise
+                    logger.info(f"{self.log_context} 模型 '{model_info.name}' 当前不可用，跳过: {e}")
+                    failed_models_this_request.add(model_info.name)
+                except ModelAttemptFailed as e:
+                    raise_if_request_interrupted(interrupt_flag)
+                    if e is validator_control_error:
+                        raise
+                    last_exception = e.original_exception or e
+                    logger.warning(f"{self.log_context} 模型 '{model_info.name}' 尝试失败，切换到下一个模型。原因: {e}")
+
+                    total_tokens, penalty, usage_penalty, _ = self.model_usage[model_info.name]
+                    self.model_usage[model_info.name] = (total_tokens, penalty + 1, usage_penalty, time.time())
+
+                    failed_models_this_request.add(model_info.name)
+
+                    if (
+                        isinstance(last_exception, RespNotOkException)
+                        and last_exception.status_code == 400
+                        and not _is_candidate_specific_compatibility_error(last_exception)
+                    ):
+                        logger.error(
+                            "%s Request-wide HTTP 400; stopping model fallback: %s",
+                            self.log_context,
+                            str(last_exception),
+                        )
+                        raise last_exception from e
+                except Exception:
+                    # A custom candidate executor can fail independently of the
+                    # SDK; an already-known request interrupt takes precedence.
+                    raise_if_request_interrupted(interrupt_flag)
+                    raise
+
+                finally:
+                    total_tokens, penalty, usage_penalty, last_penalty_time = self.model_usage[model_info.name]
+                    if usage_penalty > 0:
+                        self.model_usage[model_info.name] = (total_tokens, penalty, usage_penalty - 1, last_penalty_time)
 
         logger.error(f"{self.log_context} 所有 {max_attempts} 个模型均尝试失败。")
         if last_exception:

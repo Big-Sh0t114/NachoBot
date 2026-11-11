@@ -6,6 +6,12 @@ import hashlib
 from typing import Any, Optional
 
 from src.common.logger import get_logger
+from src.common.file_read import read_bounded_file
+from src.common.http_download import (
+    BoundedResponseTooLargeError,
+    read_bounded_response,
+    stream_with_deadline,
+)
 from src.common.media_conversion_cache import MEDIA_FILESYSTEM_LOCK
 from src.common.database.database import db
 from src.common.database.database_model import ImageDescriptions
@@ -91,19 +97,23 @@ class VideoManager:
                 import httpx
 
                 async with httpx.AsyncClient() as client:
-                    resp = await client.get(url, timeout=60)
-                    if resp.status_code == 200:
-                        if len(resp.content) > MAX_VIDEO_BYTES:
-                            raise ValueError(f"video exceeds the {MAX_VIDEO_BYTES}-byte perception bound")
-                        return resp.content
+                    async with stream_with_deadline(
+                        client, "GET", url, total_timeout=60, timeout=60
+                    ) as resp:
+                        if resp.status_code == 200:
+                            try:
+                                return await read_bounded_response(resp, max_bytes=MAX_VIDEO_BYTES)
+                            except BoundedResponseTooLargeError as exc:
+                                raise ValueError(
+                                    f"video exceeds the {MAX_VIDEO_BYTES}-byte perception bound"
+                                ) from exc
             except Exception as e:
                 logger.error(f"下载视频失败: {e}")
         return None
 
     @staticmethod
     def _read_video_file(path: str) -> bytes:
-        with open(path, "rb") as video_file:
-            return video_file.read(MAX_VIDEO_BYTES + 1)
+        return read_bounded_file(path, max_bytes=MAX_VIDEO_BYTES)
 
     def _get_and_touch_cached_description(self, video_hash: str, cache_type: str) -> Optional[str]:
         """Touch cached video descriptions and their existing MP4 artifacts."""

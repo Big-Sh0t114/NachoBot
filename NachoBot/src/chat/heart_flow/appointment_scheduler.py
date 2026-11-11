@@ -30,6 +30,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
+from src.common.atomic_json import atomic_write_json
 from src.common.logger import get_logger
 from src.plugin_system.apis import send_api
 
@@ -209,9 +210,7 @@ class AppointmentScheduler:
     def _save_cache(self):
         """保存缓存到磁盘"""
         try:
-            os.makedirs(_CACHE_DIR, exist_ok=True)
-            with open(_CACHE_FILE, "w", encoding="utf-8") as f:
-                json.dump(list(self._appointments.values()), f, ensure_ascii=False, indent=2)
+            atomic_write_json(_CACHE_FILE, list(self._appointments.values()), ensure_ascii=False, indent=2)
         except Exception as e:
             logger.error(f"保存预约缓存失败: {e}")
 

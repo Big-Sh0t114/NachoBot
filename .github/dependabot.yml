@@ -6,6 +6,7 @@ updates:
       - "NachoBot"
       - "NachoBot-Bilibili-Adapter"
       - "NachoBot-Discord-Adapter"
+      - "NachoBot-Desktop-Pet-Adapter"
       - "NachoBot-Live2D-Adapter"
       - "NachoBot-Multimodal-Adapter"
       - "NachoBot-Napcat-Adapter"

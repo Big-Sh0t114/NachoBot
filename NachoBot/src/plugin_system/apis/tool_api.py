@@ -22,13 +22,18 @@ def get_tool_instance(tool_name: str) -> Optional[BaseTool]:
     return tool_class(plugin_config) if tool_class else None
 
 
+def get_llm_available_tool_classes() -> dict[str, Type[BaseTool]]:
+    """Return a defensive snapshot of the registry's live LLM tool map."""
+    from src.plugin_system.core import component_registry
+
+    return dict(component_registry.get_llm_available_tools())
+
+
 def get_llm_available_tool_definitions():
     """获取LLM可用的工具定义列表
 
     Returns:
         List[Tuple[str, Dict[str, Any]]]: 工具定义列表，为[("tool_name", 定义)]
     """
-    from src.plugin_system.core import component_registry
-
-    llm_available_tools = component_registry.get_llm_available_tools()
+    llm_available_tools = get_llm_available_tool_classes()
     return [(name, tool_class.get_tool_definition()) for name, tool_class in llm_available_tools.items()]

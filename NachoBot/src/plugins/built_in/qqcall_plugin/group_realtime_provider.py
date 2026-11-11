@@ -41,6 +41,7 @@ _REALTIME_SESSION_KEYS = frozenset({"version", "provider", "session_id", "turn_i
 _CAPABILITY_KEYS = frozenset(
     {"schema_version", "planner_bypass", "reply_delivery", "voice_stream", "mcp_enabled", "tts_language"}
 )
+_DIRECT_CAPABILITY_KEYS = _CAPABILITY_KEYS | {"memory_retrieval_mode"}
 _SPEAKER_KEYS = frozenset({"version", "speaker_ref", "label"})
 _QQ_UIN = re.compile(r"[1-9][0-9]{0,19}\Z", re.ASCII)
 _STATUS_TIMEOUT_SECONDS = 2.5
@@ -265,7 +266,7 @@ def _proof_details(message: Any, chat_id: str, annotation: Any) -> dict[str, Any
     capabilities = config.get("runtime_capabilities")
     if (
         type(capabilities) is not dict
-        or set(capabilities) != _CAPABILITY_KEYS
+        or frozenset(capabilities) not in {_CAPABILITY_KEYS, _DIRECT_CAPABILITY_KEYS}
         or type(capabilities.get("schema_version")) is not int
         or capabilities.get("schema_version") != 1
         or capabilities.get("planner_bypass") is not True
@@ -273,6 +274,10 @@ def _proof_details(message: Any, chat_id: str, annotation: Any) -> dict[str, Any
         or capabilities.get("voice_stream") is not True
         or capabilities.get("mcp_enabled") is not False
         or capabilities.get("tts_language") != "zh"
+        or (
+            "memory_retrieval_mode" in capabilities
+            and capabilities.get("memory_retrieval_mode") != "direct"
+        )
     ):
         return None
 

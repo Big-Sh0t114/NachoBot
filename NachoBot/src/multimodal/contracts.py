@@ -35,7 +35,7 @@ ASR_STREAM_MAX_CONCURRENCY = 8
 ASR_STREAM_IDLE_TIMEOUT_SECONDS = 15
 ASR_RESULT_TTL_SECONDS = 30
 ASR_STREAM_SCOPE_MAX_CHARS = 256
-ASR_STREAM_PLATFORMS = frozenset({"universal_vc", "discord", "discord_vc", "bilibili", "webui", "qq"})
+ASR_STREAM_PLATFORMS = frozenset({"universal_vc", "discord", "discord_vc", "bilibili", "webui", "qq", "vrchat"})
 
 
 def normalize_asr_stream_platform(platform: Any) -> Optional[str]:
@@ -120,6 +120,7 @@ class MediaInput:
     prompt: str = ""
     metadata: Mapping[str, Any] = field(default_factory=dict)
     task: str = ""
+    response_schema: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.operation not in {

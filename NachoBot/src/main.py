@@ -213,6 +213,14 @@ class MainSystem:
         await focus_bootstrap.stop()
         logger.info("Focus and Heartflow runtimes stopped")
 
+        try:
+            from src.common.browser_runtime import shutdown_shared_browser_runtime
+
+            await shutdown_shared_browser_runtime()
+            logger.info("Shared Playwright browser runtime stopped")
+        except Exception as e:
+            logger.error(f"Shared Playwright browser runtime shutdown failed: {e}")
+
         if getattr(self, "_mcp_service", None):
             try:
                 await self._mcp_service.shutdown()

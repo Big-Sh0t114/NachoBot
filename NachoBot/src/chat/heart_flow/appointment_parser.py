@@ -16,14 +16,15 @@
 
 from __future__ import annotations
 
-import json
-import re
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from zoneinfo import ZoneInfo
 
 from src.common.logger import get_logger
+from src.common.model_json import load_model_json_object as _load_model_json_object
+from src.llm_models.exceptions import ModelOutputValidationError
 from src.plugin_system.apis import llm_api
 
 from src.chat.heart_flow.appointment_scheduler import parse_remind_time
@@ -89,24 +90,34 @@ planner 提取的提醒内容（仅供参考，可能不准）：{remind_content
 
 
 def _extract_json(response_text: str) -> Optional[dict]:
-    text = str(response_text or "").strip()
-    if not text:
-        return None
-    fenced = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
-    if fenced is not None:
-        text = fenced.group(1).strip()
-    if not text.startswith("{"):
-        start = text.find("{")
-        end = text.rfind("}")
-        if start < 0 or end < start:
-            return None
-        text = text[start : end + 1]
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as exc:
-        logger.warning(f"[预约解析] JSON 解析失败: {exc}")
-        return None
-    return payload if isinstance(payload, dict) else None
+    return _load_model_json_object(response_text)
+
+
+def _validate_appointment_response(content: str) -> None:
+    """Accept only bounded JSON with fields the appointment parser can consume."""
+    payload = _load_model_json_object(content)
+    if payload is None or not isinstance(payload.get("is_reminder"), bool):
+        raise ModelOutputValidationError()
+
+    if "confidence" in payload and payload["confidence"] is not None:
+        confidence = payload["confidence"]
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float, str)):
+            raise ModelOutputValidationError()
+        try:
+            normalized_confidence = float(confidence)
+        except (ValueError, TypeError, OverflowError):
+            raise ModelOutputValidationError() from None
+        if not math.isfinite(normalized_confidence):
+            raise ModelOutputValidationError()
+
+    if "ambiguities" in payload:
+        ambiguities = payload["ambiguities"]
+        if not isinstance(ambiguities, list) or any(not isinstance(item, str) for item in ambiguities):
+            raise ModelOutputValidationError()
+
+    for field_name in ("remind_at", "remind_content"):
+        if field_name in payload and payload[field_name] is not None and not isinstance(payload[field_name], str):
+            raise ModelOutputValidationError()
 
 
 def _parse_remind_at(value: object, tz_name: str) -> Optional[datetime]:
@@ -171,6 +182,7 @@ async def parse_appointment_request(
             request_type="appointment.parse",
             temperature=0.1,
             max_tokens=600,
+            response_validator=_validate_appointment_response,
         )
     except Exception as exc:
         logger.error(f"[预约解析] LLM 调用异常: {exc}")
