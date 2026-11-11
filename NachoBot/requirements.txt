@@ -233,7 +233,7 @@ pymongo==4.19.0
     # via nachobot
 pypinyin==0.55.0
     # via nachobot
-python-dateutil==2.9.0.post0
+python-dateutil==4.0.0
     # via
     #   nachobot
     #   pandas
