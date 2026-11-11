@@ -4,6 +4,7 @@ from rich.traceback import install
 
 from src.common.logger import get_logger
 from src.plugin_system.base.component_types import ComponentType, ToolInfo, ToolParamType
+from src.plugin_system.base.tool_arguments import snapshot_tool_definition, validate_tool_arguments
 
 install(extra_lines=3)
 
@@ -12,6 +13,9 @@ logger = get_logger("base_tool")
 
 class BaseTool(ABC):
     """所有工具的基类"""
+
+    cacheable: bool = False
+    """Whether the tool's complete decision and output may be reused, skipping execution."""
 
     name: str = ""
     """工具的名称"""
@@ -68,7 +72,7 @@ class BaseTool(ABC):
             function_args: 工具调用参数
 
         Returns:
-            dict: 工具执行结果
+            dict: Raw producer result. Returning the exact type ``tool_error`` opts into explicit failure status.
         """
         raise NotImplementedError("子类必须实现execute方法")
 
@@ -84,14 +88,11 @@ class BaseTool(ABC):
             **function_args: 工具调用参数
 
         Returns:
-            dict: 工具执行结果
+            dict: Raw producer result from ``execute``, returned unchanged.
         """
-        parameter_required = [param[0] for param in self.parameters if param[3]]  # 获取所有必填参数名
-        for param_name in parameter_required:
-            if param_name not in function_args:
-                raise ValueError(f"工具类 {self.__class__.__name__} 缺少必要参数: {param_name}")
-
-        return await self.execute(function_args)
+        contract = snapshot_tool_definition(self.__class__.get_tool_definition())
+        validated_args = validate_tool_arguments(contract, function_args)
+        return await self.execute(validated_args)
 
     def get_config(self, key: str, default=None):
         """获取插件配置值，使用嵌套键访问

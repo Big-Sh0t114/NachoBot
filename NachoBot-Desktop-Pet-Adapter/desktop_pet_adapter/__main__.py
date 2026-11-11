@@ -1,0 +1,152 @@
+"""Command-line entry point for the desktop-pet adapter."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+import sys
+from pathlib import Path
+
+from loguru import logger
+
+from .backend import BackendSelectionError
+from .config import ConfigError, load_config
+from .runtime import AvatarRuntime
+from .server import AvatarWebSocketServer
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="desktop-pet-adapter",
+        description="Run the standalone NachoBot desktop-pet adapter.",
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path("config.toml"),
+        help="TOML configuration path (default: ./config.toml)",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("desktop_pet", "live"),
+        help="Override [runtime].mode without editing config.toml.",
+    )
+    parser.add_argument(
+        "--renderer-backend",
+        help="Override [renderer].backend for this run without editing the config file.",
+    )
+    parser.add_argument(
+        "--print-mode",
+        action="store_true",
+        help="Print the resolved runtime mode and exit.",
+    )
+    parser.add_argument(
+        "--print-launch-config",
+        action="store_true",
+        help="Print the resolved launcher settings as JSON and exit.",
+    )
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        help="Also write structured runtime logs to this UTF-8 file.",
+    )
+    return parser
+
+
+def _configure_logging(level_name: str, log_file: Path | None = None):
+    logger.remove()
+    # The launcher forwards this console stream into its log window. Keep
+    # Loguru's ANSI colors even though stderr is redirected to a file.
+    console_color = True if os.getenv("NACHOBOT_LIVE2D_CONSOLE_COLOR") == "1" else None
+    logger.add(sys.stderr, level=level_name.upper(), colorize=console_color)
+    if log_file is not None:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        logger.add(
+            str(log_file),
+            level=level_name.upper(),
+            encoding="utf-8",
+            enqueue=True,
+            rotation="10 MB",
+            retention=3,
+            backtrace=True,
+            diagnose=False,
+        )
+    return logger
+
+
+async def _run(
+    config_path: Path,
+    mode: str | None = None,
+    log_file: Path | None = None,
+    renderer_backend: str | None = None,
+) -> None:
+    config = load_config(
+        config_path,
+        runtime_mode_override=mode,
+        renderer_backend_override=renderer_backend,
+    )
+    logger = _configure_logging(config.log_level, log_file)
+    runtime = AvatarRuntime(config, logger)
+    server = AvatarWebSocketServer(config, runtime, logger)
+    await server.run()
+
+
+def main() -> int:
+    args = _build_parser().parse_args()
+    try:
+        if args.print_mode or args.print_launch_config:
+            config = load_config(
+                args.config,
+                runtime_mode_override=args.mode,
+                renderer_backend_override=args.renderer_backend,
+            )
+            if args.print_mode:
+                print(config.runtime.mode)
+            else:
+                print(
+                    json.dumps(
+                        {
+                            "mode": config.runtime.mode,
+                            "renderer_backend": config.renderer.backend,
+                            "renderer_width": config.renderer.width,
+                            "renderer_height": config.renderer.height,
+                            "standalone": not config.components.core,
+                            "components": {"core": config.components.core, "tts": config.components.tts,
+                                           "perception": config.components.perception},
+                            "server_port": config.server.port,
+                            "show_desktop_console": config.desktop_pet.show_desktop_console,
+                            "show_core_console": config.desktop_pet.show_core_console,
+                            "chat_enabled": config.desktop_pet.chat.enabled,
+                            "chat_backend_url": config.desktop_pet.chat.backend_url,
+                            "chat_play_audio": config.desktop_pet.chat.play_audio,
+                            "chat_transport": config.desktop_pet.chat.transport,
+                            "core_url": config.desktop_pet.chat.core_url,
+                            "tts_provider": config.desktop_pet.chat.tts_provider,
+                            "tts_url": config.desktop_pet.chat.tts_url,
+                        }
+                    )
+                )
+            return 0
+        asyncio.run(
+            _run(args.config, args.mode, args.log_file, args.renderer_backend)
+        )
+    except (ConfigError, BackendSelectionError, ValueError) as exc:
+        print(f"Desktop pet adapter configuration error: {exc}", file=sys.stderr)
+        return 2
+    except FileNotFoundError as exc:
+        print(f"Desktop pet adapter startup error: {exc}", file=sys.stderr)
+        return 3
+    except KeyboardInterrupt:
+        return 0
+    except Exception:
+        logger.exception(
+            "Desktop pet adapter terminated unexpectedly"
+        )
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

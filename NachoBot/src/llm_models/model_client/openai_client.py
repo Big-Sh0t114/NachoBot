@@ -1,5 +1,4 @@
 import asyncio
-import copy
 import hashlib
 import io
 import json
@@ -40,6 +39,8 @@ from .base_client import (
     normalize_prompt_cache_usage,
     client_registry,
 )
+from .client_lifecycle import retain_client_until
+from .stream_lifecycle import run_provider_stream
 from ..exceptions import (
     RespParseException,
     NetworkConnectionError,
@@ -51,7 +52,7 @@ from ..exceptions import (
 from ..payload_content.message import Message, RoleType
 from ..prompt_layout import PromptCacheScope
 from ..payload_content.resp_format import RespFormat
-from ..payload_content.tool_option import ToolOption, ToolParam, ToolCall
+from ..payload_content.tool_option import ToolOption, ToolCall, build_tool_input_schema
 
 logger = get_logger("OpenAI客户端")
 
@@ -343,20 +344,6 @@ def _convert_tool_options(tool_options: list[ToolOption]) -> list[dict[str, Any]
     :return: 转换后的工具选项列表
     """
 
-    def _convert_tool_param(tool_option_param: ToolParam) -> dict[str, Any]:
-        """
-        转换单个工具参数格式
-        :param tool_option_param: 工具参数对象
-        :return: 转换后的工具参数字典
-        """
-        return_dict: dict[str, Any] = {
-            "type": tool_option_param.param_type.value,
-            "description": tool_option_param.description,
-        }
-        if tool_option_param.enum_values:
-            return_dict["enum"] = tool_option_param.enum_values
-        return return_dict
-
     def _convert_tool_option_item(tool_option: ToolOption) -> dict[str, Any]:
         """
         转换单个工具项格式
@@ -367,14 +354,9 @@ def _convert_tool_options(tool_options: list[ToolOption]) -> list[dict[str, Any]
             "name": tool_option.name,
             "description": tool_option.description,
         }
-        if tool_option.input_schema is not None:
-            ret["parameters"] = copy.deepcopy(tool_option.input_schema)
-        elif tool_option.params:
-            ret["parameters"] = {
-                "type": "object",
-                "properties": {param.name: _convert_tool_param(param) for param in tool_option.params},
-                "required": [param.name for param in tool_option.params if param.required],
-            }
+        parameters = build_tool_input_schema(tool_option)
+        if parameters is not None:
+            ret["parameters"] = parameters
         return ret
 
     return [
@@ -777,24 +759,19 @@ class OpenaiClient(BaseClient):
         req_task: asyncio.Task[Any] | None = None
         try:
             if model_info.force_stream_mode:
-                req_task = asyncio.create_task(
-                    self.client.chat.completions.create(**request_params)
+                resp, usage_record = await run_provider_stream(
+                    lambda: self.client.chat.completions.create(**request_params),
+                    stream_response_handler,
+                    interrupt_flag,
+                    provider_client=self,
                 )
-                while not req_task.done():
-                    if interrupt_flag and interrupt_flag.is_set():
-                        # The client owns the nested SDK request and must drain
-                        # it before exposing the abort to its caller.
-                        await _cancel_and_drain_request_task(req_task)
-                        raise ReqAbortException("请求被外部信号中断")
-                    await asyncio.sleep(0.1)  # 等待0.1秒后再次检查任务&中断信号量状态
-
-                resp, usage_record = await stream_response_handler(req_task.result(), interrupt_flag)
             else:
                 # 发送请求并获取响应
                 # start_time = time.time()
                 req_task = asyncio.create_task(
                     self.client.chat.completions.create(**request_params)
                 )
+                retain_client_until(self, req_task)
                 while not req_task.done():
                     if interrupt_flag and interrupt_flag.is_set():
                         await _cancel_and_drain_request_task(req_task)

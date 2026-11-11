@@ -24,6 +24,7 @@ _TOOL_MODES = {"standard", "mcp_only", "disabled"}
 _WEB_SEARCH_MODES = {"standard", "disabled"}
 _REPLY_DELIVERY_MODES = {"chunked", "aggregate_tagged_text", "json_envelope", "tts_text", "structured_reply"}
 _PERSON_PROFILE_MODES = {"standard", "low_latency", "disabled"}
+_MEMORY_RETRIEVAL_MODES = {"standard", "direct"}
 _TTS_LANGUAGES = {"", "ja", "zh"}
 _IDENTITY_MODES = {"standard", "external"}
 _SCOPED_CAPABILITIES: ContextVar[tuple[str, "RuntimeCapabilities"] | None] = ContextVar(
@@ -43,6 +44,7 @@ class RuntimeCapabilities:
     relation_inference: bool = True
     expression_selection: bool = True
     memory_retrieval: bool = True
+    memory_retrieval_mode: str = "standard"
     mid_term_memory: bool = True
     knowledge_retrieval: bool = True
     reply_model_group: str = ""
@@ -57,6 +59,7 @@ class RuntimeCapabilities:
     identity_mode: str = "standard"
     voice_stream: bool = False
     reply_controls: bool = False
+    allow_silent_reply: bool = False
     control_emotions: tuple[str, ...] = ()
     control_actions: tuple[str, ...] = ()
     interruption_feedback_count: int = 0
@@ -83,6 +86,7 @@ class RuntimeCapabilities:
             relation_inference=_bool(value, "relation_inference", True),
             expression_selection=_bool(value, "expression_selection", True),
             memory_retrieval=_bool(value, "memory_retrieval", True),
+            memory_retrieval_mode=_choice(value.get("memory_retrieval_mode"), _MEMORY_RETRIEVAL_MODES, "standard"),
             mid_term_memory=_bool(value, "mid_term_memory", True),
             knowledge_retrieval=_bool(value, "knowledge_retrieval", True),
             reply_model_group=_text(value.get("reply_model_group")),
@@ -104,6 +108,7 @@ class RuntimeCapabilities:
             identity_mode=_choice(value.get("identity_mode"), _IDENTITY_MODES, "standard"),
             voice_stream=_bool(value, "voice_stream", False),
             reply_controls=_bool(value, "reply_controls", False),
+            allow_silent_reply=_bool(value, "allow_silent_reply", False),
             prompt_profile=_choice(value.get("prompt_profile"), {"standard", "desktop_companion"}, "standard"),
             control_emotions=_choices(value.get("control_emotions")),
             control_actions=_choices(value.get("control_actions")),
@@ -194,15 +199,20 @@ def additional_config_from_message(message: Any) -> Mapping[str, Any]:
     return nested if nested is not None else {}
 
 
-def runtime_capabilities_from_message(message: Any) -> RuntimeCapabilities:
+def runtime_capabilities_from_message(message: Any, *, stream_id: str | None = None) -> RuntimeCapabilities:
+    scoped = _SCOPED_CAPABILITIES.get()
+    if scoped is not None and stream_id is not None and str(stream_id) == scoped[0]:
+        return scoped[1]
     additional_config = additional_config_from_message(message)
     return RuntimeCapabilities.from_mapping(additional_config.get(RUNTIME_CAPABILITIES_KEY))
 
 
-def runtime_capabilities_from_stream(chat_stream: Any) -> RuntimeCapabilities:
+def runtime_capabilities_from_stream(chat_stream: Any, *, message: Any = None) -> RuntimeCapabilities:
     scoped = _SCOPED_CAPABILITIES.get()
     if scoped is not None and str(getattr(chat_stream, "stream_id", "")) == scoped[0]:
         return scoped[1]
+    if message is not None:
+        return runtime_capabilities_from_message(message, stream_id=str(getattr(chat_stream, "stream_id", "")))
     context = getattr(chat_stream, "context", None)
     return runtime_capabilities_from_message(getattr(context, "message", None))
 

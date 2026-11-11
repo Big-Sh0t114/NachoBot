@@ -1,76 +1,19 @@
-"""Standalone Live2D adapter.
+"""Independent Live2D model rendering provider.
 
-Pure model inspection and control helpers are safe to import in headless
-processes.  The optional desktop runtime and WebSocket server are imported on
-demand so importing :mod:`live2d_adapter.control_pipeline` does not import
-pygame or initialize any rendering resources.
+Importing this package does not initialize the Live2D SDK, pygame, or a window.
+The host creates and owns the OpenGL context, then composes a
+``Live2DModelRuntime`` into its render loop.
 """
 
-import os
-
-os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
-
-from .config import AdapterConfig, ConfigError, ModelAdaptationConfig, RuntimeConfig, load_config
-from .action_adapter import ActionAdapter, ActionDecision
-from .control_pipeline import (
-    ACTION_TO_CANONICAL_ID,
-    ALLOWED_EMOTIONS,
-    ApplyOutcome,
-    ControlPipeline,
-    PreparedReply,
-)
-from .model_adapter import (
-    Live2DModelAdapter,
-    ModelAdaptationError,
-    ModelMetadata,
-    inspect_model,
-)
-from .protocol import (
-    PROTOCOL_VERSION,
-    AvatarCommand,
-    AvatarEvent,
-    AvatarInteraction,
-    InteractionEvent,
-    ProtocolError,
-)
-__version__ = "0.1.0"
-
-
-def __getattr__(name: str):
-    """Load desktop-only public classes without burdening library imports."""
-    if name == "AvatarRuntime":
-        from .runtime import AvatarRuntime
-
-        return AvatarRuntime
-    if name == "AvatarWebSocketServer":
-        from .server import AvatarWebSocketServer
-
-        return AvatarWebSocketServer
-    raise AttributeError(name)
+from .model_adapter import Live2DModelAdapter, ModelMetadata, inspect_model
+from .model_runtime import Live2DModelRuntime, ModelInfo, RuntimeFrame, RuntimeOptions
 
 __all__ = [
-    "PROTOCOL_VERSION",
-    "AdapterConfig",
-    "RuntimeConfig",
-    "ActionAdapter",
-    "ActionDecision",
-    "AvatarCommand",
-    "AvatarEvent",
-    "AvatarInteraction",
-    "AvatarRuntime",
-    "AvatarWebSocketServer",
-    "ACTION_TO_CANONICAL_ID",
-    "ALLOWED_EMOTIONS",
-    "ApplyOutcome",
-    "ConfigError",
-    "InteractionEvent",
     "Live2DModelAdapter",
-    "ModelAdaptationConfig",
-    "ModelAdaptationError",
+    "Live2DModelRuntime",
+    "ModelInfo",
     "ModelMetadata",
-    "ProtocolError",
-    "ControlPipeline",
-    "PreparedReply",
+    "RuntimeFrame",
+    "RuntimeOptions",
     "inspect_model",
-    "load_config",
 ]

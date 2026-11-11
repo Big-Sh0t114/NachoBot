@@ -77,7 +77,7 @@ except ImportError:  # pragma: no cover - direct module imports in older callers
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-SNOWLUMA_RELEASE_URL = "https://github.com/SnowLuma/SnowLuma/releases/latest"
+SNOWLUMA_RELEASE_URL = "https://web.archive.org/web/20261030125825/https://github.com/SnowLuma/SnowLuma/releases"
 # Kept as a compatibility export for older integrations.  Runtime discovery
 # must go through snowluma_locator; there is intentionally no fixed directory
 # path here.

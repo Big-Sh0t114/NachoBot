@@ -40,10 +40,13 @@ from .contracts import (
     normalize_operation_payload,
 )
 from .profile import RuntimeProfile, get_runtime_profile, normalize_runtime_profile
+from .response_schema import build_response_validator
 
 logger = logging.getLogger("core.multimodal")
 _HEALTH_PROBE_TIMEOUT_SECONDS = 2.0
-
+_ASR_STREAM_ABORT_TIMEOUT_SECONDS = 1.0
+_ASR_STREAM_CLEANUP_DRAIN_SECONDS = 0.05
+_ASR_STREAM_OPERATION_DRAIN_SECONDS = 1.0
 
 class AudioStreamError(RuntimeError):
     """An expected audio-stream API failure with its HTTP status."""
@@ -52,7 +55,6 @@ class AudioStreamError(RuntimeError):
         self.status_code = status_code
         self.code = code
         super().__init__(code)
-
 
 @dataclass
 class _ModelLease:
@@ -65,7 +67,6 @@ class _ModelLease:
             return
         self.released = True
         self.request.release_model_lease(self.model_name)
-
 
 @dataclass
 class _AudioStreamSession:
@@ -86,7 +87,10 @@ class _AudioStreamSession:
     chunk_count: int = 0
     bytes_received: int = 0
     partial_text: str = ""
-
+    retired: bool = False
+    operation_task: asyncio.Task[Any] | None = None
+    operation_retired: asyncio.Future[None] | None = None
+    cleanup_task: asyncio.Task[None] | None = None
 
 @dataclass(frozen=True)
 class _ASRReceipt:
@@ -95,7 +99,6 @@ class _ASRReceipt:
     expires_at: float
     scope: str = ""
 
-
 def _failure_text(operation: str) -> str:
     return {
         AUDIO_TRANSCRIBE_V1: "[语音识别失败，请稍后重试]",
@@ -103,14 +106,12 @@ def _failure_text(operation: str) -> str:
         VIDEO_UNDERSTAND_V1: "[视频(解析失败)]",
     }.get(operation, "[多媒体解析失败]")
 
-
 def _nonempty_tts_text(data: Any) -> str:
     if isinstance(data, Mapping):
         value = data.get("text")
     else:
         value = data
     return str(value or "").strip()[:MAX_TEXT_CHARS]
-
 
 def _tts_fallback_text(data: Any) -> str:
     if isinstance(data, Mapping):
@@ -120,7 +121,6 @@ def _tts_fallback_text(data: Any) -> str:
     else:
         value = data
     return str(value or "")[:MAX_TEXT_CHARS]
-
 
 class CoreMultimodalRouter:
     """Single Core facade for all perception and explicit reply TTS."""
@@ -155,6 +155,10 @@ class CoreMultimodalRouter:
         self._observed_health: Mapping[str, Any] | None = None
         self._audio_streams: dict[str, _AudioStreamSession] = {}
         self._asr_receipts: dict[str, _ASRReceipt] = {}
+        self._audio_stream_operation_tasks: set[asyncio.Task[Any]] = set()
+        self._audio_stream_abort_tasks: set[asyncio.Task[Any]] = set()
+        self._audio_stream_cleanup_tasks: set[asyncio.Task[None]] = set()
+        self._audio_stream_retirement_tasks: set[asyncio.Task[Any]] = set()
         self._audio_stream_lock = asyncio.Lock()
         self._audio_stream_cleanup_task: asyncio.Task | None = None
         self._pending_audio_stream_starts = 0
@@ -233,6 +237,14 @@ class CoreMultimodalRouter:
         return self._observed_health
 
     async def perceive(self, request: MediaInput) -> PerceptionResult:
+        response_validator = None
+        if request.response_schema is not None:
+            if request.operation != IMAGE_DESCRIBE_V1:
+                raise ValueError("response_schema is only supported for image.describe.v1")
+            # Compile and bound the caller-owned object before candidate selection
+            # and before the broad model-group degradation handler below.
+            response_validator = build_response_validator(request.response_schema)
+
         # Keep the semantic task before format conversion or transport.
         encoded, _ = normalize_operation_payload(request.operation, request.data)
         request = replace(request, data=encoded)
@@ -291,14 +303,19 @@ class CoreMultimodalRouter:
                         request.data, candidate_executor=execute_candidate
                     )
                 elif request.operation == IMAGE_DESCRIBE_V1:
-                    text, (_, winner, _) = await llm.generate_response_for_image(
-                        request.prompt,
-                        request.data,
-                        request.media_format or "png",
+                    image_kwargs = dict(
                         temperature=self._metadata_number(request.metadata, "temperature"),
                         max_tokens=self._metadata_int(request.metadata, "max_tokens"),
                         extra_params=self._extra_params(request.metadata),
                         candidate_executor=execute_candidate,
+                    )
+                    if response_validator is not None:
+                        image_kwargs["response_validator"] = response_validator
+                    text, (_, winner, _) = await llm.generate_response_for_image(
+                        request.prompt,
+                        request.data,
+                        request.media_format or "png",
+                        **image_kwargs,
                     )
                 else:
                     text, (_, winner, _) = await llm.generate_response_for_video(
@@ -312,9 +329,18 @@ class CoreMultimodalRouter:
                     )
                 provider = config.get_provider(config.get_model_info(winner).api_provider)
                 backend = "local" if self._is_local_perception_provider(provider) else "remote"
+                result_text = str(text or "").strip()
+                if response_validator is not None:
+                    # The shared scheduler rejects this before accepting a
+                    # candidate. Keep an explicit guard so a legacy override
+                    # cannot turn an oversized validated value into truncation.
+                    if len(result_text) > MAX_TEXT_CHARS:
+                        response_validator(result_text)
+                else:
+                    result_text = result_text[:MAX_TEXT_CHARS]
                 return PerceptionResult(
                     operation=request.operation,
-                    text=str(text or "").strip()[:MAX_TEXT_CHARS],
+                    text=result_text,
                     provider=backend,
                     attempted=tuple(attempts),
                     metadata={"model": winner, "task": task_name},
@@ -366,6 +392,29 @@ class CoreMultimodalRouter:
         code = str(getattr(exc, "reason", "runtime_unavailable"))
         return AudioStreamError(status, code)
 
+    @staticmethod
+    def _observe_owned_task(task: asyncio.Task[Any]) -> None:
+        """Retrieve detached task errors so late completions stay owned and quiet."""
+
+        if not task.cancelled():
+            try:
+                task.exception()
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    def _track_audio_stream_task(
+        self,
+        task: asyncio.Task[Any],
+        collection: set[asyncio.Task[Any]],
+    ) -> None:
+        collection.add(task)
+
+        def finished(completed: asyncio.Task[Any]) -> None:
+            collection.discard(completed)
+            self._observe_owned_task(completed)
+
+        task.add_done_callback(finished)
+
     def _local_voice_candidates(self, config: Any, request: Any) -> set[str]:
         candidates: set[str] = set()
         for model_name in tuple(request.model_for_task.model_list):
@@ -413,7 +462,7 @@ class CoreMultimodalRouter:
                 raise AudioStreamError(501, "no_local_asr_stream_candidate")
 
             try:
-                model, provider, _client = request.acquire_model_lease(eligible_models)
+                model, provider, _client = request.acquire_model_lease(eligible_models, create_client=False)
             except Exception as exc:
                 raise AudioStreamError(501, "no_local_asr_stream_candidate") from exc
             model_name = str(model.name)
@@ -535,25 +584,71 @@ class CoreMultimodalRouter:
             or now - session.last_activity >= ASR_STREAM_IDLE_TIMEOUT_SECONDS
         )
 
+    async def _cleanup_retired_audio_stream(self, session: _AudioStreamSession) -> None:
+        """Own one bounded runtime abort and release the stream's model lease."""
+
+        try:
+            abort_task = asyncio.create_task(self.local.abort_audio_stream(session.runtime_id))
+            self._track_audio_stream_task(abort_task, self._audio_stream_abort_tasks)
+            done, _ = await asyncio.wait(
+                {abort_task}, timeout=_ASR_STREAM_ABORT_TIMEOUT_SECONDS
+            )
+            if not done:
+                abort_task.cancel()
+                logger.debug("Timed out aborting local ASR stream")
+                return
+            try:
+                abort_task.result()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("Unable to abort local ASR stream")
+        finally:
+            session.lease.release()
+
+    async def _retire_audio_stream(
+        self,
+        session: _AudioStreamSession,
+    ) -> asyncio.Task[None] | None:
+        """Retire once without waiting for the session lock or runtime abort."""
+
+        async with self._audio_stream_lock:
+            if (
+                self._audio_streams.get(session.stream_id) is session
+                and not session.retired
+            ):
+                self._audio_streams.pop(session.stream_id, None)
+                session.retired = True
+                retired = session.operation_retired
+                if retired is not None and not retired.done():
+                    retired.set_result(None)
+                operation = session.operation_task
+                if operation is not None and not operation.done():
+                    operation.cancel()
+                cleanup = asyncio.create_task(self._cleanup_retired_audio_stream(session))
+                session.cleanup_task = cleanup
+                self._track_audio_stream_task(cleanup, self._audio_stream_cleanup_tasks)
+                return cleanup
+            return session.cleanup_task
+
     async def _remove_audio_stream(
         self,
         session: _AudioStreamSession,
         *,
         abort_runtime: bool,
     ) -> None:
+        """Compatibility helper for failure/limit paths that need cleanup done."""
+
+        if abort_runtime:
+            cleanup = await self._retire_audio_stream(session)
+            if cleanup is not None:
+                await asyncio.shield(cleanup)
+            return
         async with self._audio_stream_lock:
-            if self._audio_streams.get(session.stream_id) is session:
+            if self._audio_streams.get(session.stream_id) is session and not session.retired:
                 self._audio_streams.pop(session.stream_id, None)
-        try:
-            if abort_runtime:
-                try:
-                    await self.local.abort_audio_stream(session.runtime_id)
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    logger.debug("Unable to abort expired local ASR stream")
-        finally:
-            session.lease.release()
+                session.retired = True
+                session.lease.release()
 
     async def cleanup_expired_audio_streams(self, *, now: float | None = None) -> None:
         """Abort idle/overlong streams and discard expired ASR receipts."""
@@ -564,20 +659,96 @@ class CoreMultimodalRouter:
             for result_id, receipt in list(self._asr_receipts.items()):
                 if receipt.expires_at <= current:
                     self._asr_receipts.pop(result_id, None)
+        cleanups: set[asyncio.Task[None]] = set()
         for session in sessions:
-            if not self._audio_stream_expired(session, current) or session.lock.locked():
+            if not self._audio_stream_expired(session, current):
                 continue
-            # Lock.acquire completes without yielding while the lock is free.
-            # A slow request on another stream must not delay this sweep.
-            await session.lock.acquire()
+            # Preserve the legacy skip for a manually-held lock that has no
+            # registered runtime operation. A real in-flight operation can be
+            # retired without acquiring its lock.
+            if session.lock.locked() and (
+                session.operation_task is None or session.operation_task.done()
+            ):
+                continue
+            cleanup = await self._retire_audio_stream(session)
+            if cleanup is not None:
+                cleanups.add(cleanup)
+        # Abort every expired session concurrently. Allow immediate local aborts
+        # to release their leases before returning, with a small bound so one
+        # runtime lock cannot stall the sweep or another session.
+        if cleanups:
+            await asyncio.wait(cleanups, timeout=_ASR_STREAM_CLEANUP_DRAIN_SECONDS)
+
+    async def _await_audio_stream_operation(self, session: _AudioStreamSession, awaitable: Any) -> Any:
+        """Run one runtime call as an owned child that retirement can preempt."""
+
+        if session.retired or self._audio_streams.get(session.stream_id) is not session:
+            raise AudioStreamError(404, "stream_not_found")
+        operation = asyncio.create_task(awaitable)
+        retired = asyncio.get_running_loop().create_future()
+        session.operation_task = operation
+        session.operation_retired = retired
+        self._track_audio_stream_task(operation, self._audio_stream_operation_tasks)
+        try:
+            await asyncio.wait(
+                {operation, retired}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if session.retired or retired.done():
+                raise AudioStreamError(404, "stream_not_found")
             try:
-                if (
-                    self._audio_streams.get(session.stream_id) is session
-                    and self._audio_stream_expired(session, current)
-                ):
-                    await self._remove_audio_stream(session, abort_runtime=True)
-            finally:
-                session.lock.release()
+                result = operation.result()
+            except asyncio.CancelledError as exc:
+                cleanup = await self._retire_audio_stream(session)
+                if cleanup is not None:
+                    await asyncio.shield(cleanup)
+                raise AudioStreamError(503, "runtime_operation_cancelled") from exc
+            if session.retired or self._audio_streams.get(session.stream_id) is not session:
+                raise AudioStreamError(404, "stream_not_found")
+            return result
+        except asyncio.CancelledError:
+            retirement = asyncio.create_task(self._retire_audio_stream(session))
+            self._track_audio_stream_task(retirement, self._audio_stream_retirement_tasks)
+            try:
+                await asyncio.shield(retirement)
+            except BaseException:
+                # Preserve the caller's cancellation even if cleanup bookkeeping fails.
+                pass
+            raise
+        finally:
+            if session.operation_task is operation:
+                session.operation_task = None
+            if session.operation_retired is retired:
+                session.operation_retired = None
+            if not retired.done():
+                retired.cancel()
+
+    async def _complete_audio_stream(
+        self,
+        session: _AudioStreamSession,
+        *,
+        text: str,
+        result_id: str | None,
+    ) -> bool:
+        """Atomically retire a successful finish and publish its receipt."""
+
+        async with self._audio_stream_lock:
+            if (
+                self._audio_streams_closing
+                or self._audio_streams.get(session.stream_id) is not session
+                or session.retired
+            ):
+                return False
+            self._audio_streams.pop(session.stream_id, None)
+            session.retired = True
+            session.lease.release()
+            if text and result_id is not None:
+                self._asr_receipts[result_id] = _ASRReceipt(
+                    text=text,
+                    context=session.platform,
+                    expires_at=time.monotonic() + ASR_RESULT_TTL_SECONDS,
+                    scope=session.scope,
+                )
+            return True
 
     async def _audio_stream_session(self, stream_id: str) -> _AudioStreamSession:
         async with self._audio_stream_lock:
@@ -627,14 +798,17 @@ class CoreMultimodalRouter:
 
             session.last_activity = now
             try:
-                partial = await self.local.append_audio_stream_chunk(
-                    session.runtime_id,
-                    seq,
-                    pcm,
+                partial = await self._await_audio_stream_operation(
+                    session,
+                    self.local.append_audio_stream_chunk(session.runtime_id, seq, pcm),
                 )
             except asyncio.CancelledError:
                 raise
+            except AudioStreamError:
+                raise
             except Exception as exc:
+                if session.retired:
+                    raise AudioStreamError(404, "stream_not_found") from exc
                 await self._remove_audio_stream(session, abort_runtime=True)
                 raise self._stream_error(exc) from exc
             session.chunk_digests[seq] = digest
@@ -655,10 +829,17 @@ class CoreMultimodalRouter:
                 raise AudioStreamError(404, "stream_expired")
             session.last_activity = time.monotonic()
             try:
-                payload = await self.local.finish_audio_stream(session.runtime_id)
+                payload = await self._await_audio_stream_operation(
+                    session,
+                    self.local.finish_audio_stream(session.runtime_id),
+                )
             except asyncio.CancelledError:
                 raise
+            except AudioStreamError:
+                raise
             except Exception as exc:
+                if session.retired:
+                    raise AudioStreamError(404, "stream_not_found") from exc
                 await self._remove_audio_stream(session, abort_runtime=True)
                 raise self._stream_error(exc) from exc
 
@@ -686,26 +867,33 @@ class CoreMultimodalRouter:
                 await self._remove_audio_stream(session, abort_runtime=True)
                 raise AudioStreamError(503, "invalid_runtime_response")
             text = text.strip()[:MAX_TEXT_CHARS]
-            await self._remove_audio_stream(session, abort_runtime=False)
-            if not text:
-                return {"text": "", "result_id": None}
-
-            result_id = secrets.token_urlsafe(32)
-            async with self._audio_stream_lock:
-                self._asr_receipts[result_id] = _ASRReceipt(
+            result_id = secrets.token_urlsafe(32) if text else None
+            try:
+                completed = await self._complete_audio_stream(
+                    session,
                     text=text,
-                    context=session.platform,
-                    expires_at=time.monotonic() + ASR_RESULT_TTL_SECONDS,
-                    scope=session.scope,
+                    result_id=result_id,
                 )
+            except asyncio.CancelledError:
+                retirement = asyncio.create_task(self._retire_audio_stream(session))
+                self._track_audio_stream_task(retirement, self._audio_stream_retirement_tasks)
+                try:
+                    await asyncio.shield(retirement)
+                except BaseException:
+                    pass
+                raise
+            if not completed:
+                raise AudioStreamError(404, "stream_not_found")
+            if result_id is None:
+                return {"text": "", "result_id": None}
             return {"text": text, "result_id": result_id}
 
     async def abort_audio_stream(self, stream_id: str) -> Mapping[str, Any]:
         session = await self._audio_stream_session(stream_id)
-        async with session.lock:
-            if self._audio_streams.get(stream_id) is not session:
-                raise AudioStreamError(404, "stream_not_found")
-            await self._remove_audio_stream(session, abort_runtime=True)
+        cleanup = await self._retire_audio_stream(session)
+        if cleanup is None:
+            raise AudioStreamError(404, "stream_not_found")
+        await asyncio.shield(cleanup)
         return {"aborted": True}
 
     async def consume_precomputed_asr_result(
@@ -755,9 +943,33 @@ class CoreMultimodalRouter:
             sessions = list(self._audio_streams.values())
             self._asr_receipts.clear()
         for session in sessions:
-            async with session.lock:
-                if self._audio_streams.get(session.stream_id) is session:
-                    await self._remove_audio_stream(session, abort_runtime=True)
+            await self._retire_audio_stream(session)
+
+        retirements = list(self._audio_stream_retirement_tasks)
+        if retirements:
+            await asyncio.gather(*retirements, return_exceptions=True)
+        cleanups = list(self._audio_stream_cleanup_tasks)
+        if cleanups:
+            await asyncio.gather(*cleanups, return_exceptions=True)
+
+        operations = list(self._audio_stream_operation_tasks)
+        for operation in operations:
+            if not operation.done():
+                operation.cancel()
+        if operations:
+            _, pending = await asyncio.wait(
+                operations, timeout=_ASR_STREAM_OPERATION_DRAIN_SECONDS
+            )
+            if pending:
+                logger.debug("Detached %d cancellation-resistant ASR operation(s) during shutdown", len(pending))
+
+        aborts = list(self._audio_stream_abort_tasks)
+        if aborts:
+            _, pending = await asyncio.wait(
+                aborts, timeout=_ASR_STREAM_OPERATION_DRAIN_SECONDS
+            )
+            for abort in pending:
+                abort.cancel()
         close = getattr(self.local, "aclose", None)
         if close is not None:
             await close()
@@ -823,6 +1035,7 @@ class CoreMultimodalRouter:
         *,
         platform: str = "core",
         text_lang: Optional[str] = None,
+        ambient_noise: bool = False,
     ) -> TTSResult:
         text = str(text or "").strip()[:MAX_TEXT_CHARS]
         if not text:
@@ -831,7 +1044,10 @@ class CoreMultimodalRouter:
             # Potato is intentionally pure text, even if a local runtime is up.
             return TTSResult(text=text, provider="text-only")
         try:
-            return await self.local.synthesize_tts(text, platform=platform, text_lang=text_lang)
+            kwargs = {"platform": platform, "text_lang": text_lang}
+            if ambient_noise is True:
+                kwargs["ambient_noise"] = True
+            return await self.local.synthesize_tts(text, **kwargs)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -844,6 +1060,7 @@ class CoreMultimodalRouter:
         *,
         platform: str = "core",
         text_lang: Optional[str] = None,
+        ambient_noise: bool = False,
     ) -> AsyncIterator[TTSStreamChunk]:
         """Yield typed local PCM chunks while keeping Core profile policy."""
 
@@ -857,11 +1074,10 @@ class CoreMultimodalRouter:
         iterator = None
         audio_started = False
         try:
-            iterator = self.local.synthesize_tts_stream(
-                text,
-                platform=platform,
-                text_lang=text_lang,
-            )
+            kwargs = {"platform": platform, "text_lang": text_lang}
+            if ambient_noise is True:
+                kwargs["ambient_noise"] = True
+            iterator = self.local.synthesize_tts_stream(text, **kwargs)
             async for chunk in iterator:
                 if not isinstance(chunk, TTSStreamChunk):
                     raise TTSStreamError(
@@ -948,7 +1164,11 @@ class CoreMultimodalRouter:
                 return [Seg(type="seglist", data=output)]
             if current.type != "tts_text":
                 return [current]
-            text = _nonempty_tts_text(current.data)
+            if isinstance(current.data, Mapping):
+                raw_tts_text = current.data.get("text")
+            else:
+                raw_tts_text = current.data
+            text = str(raw_tts_text or "").strip()
             if self.profile is RuntimeProfile.POTATO:
                 return [Seg(type="text", data=_tts_fallback_text(current.data))]
             if not text:
@@ -959,7 +1179,11 @@ class CoreMultimodalRouter:
                 segment_lang = str(raw_lang).strip()[:32] if raw_lang else None
             if segment_lang is None:
                 segment_lang = text_lang
-            result = await self.synthesize_tts(text, platform=platform, text_lang=segment_lang)
+            result = await self.synthesize_tts(
+                text,
+                platform=platform,
+                text_lang=segment_lang,
+            )
             original = current
             if not result.audio_base64:
                 return [Seg(type="text", data=_tts_fallback_text(current.data))]
@@ -975,16 +1199,13 @@ class CoreMultimodalRouter:
             return materialized[0]
         return Seg(type="seglist", data=materialized)
 
-
 _router: CoreMultimodalRouter | None = None
-
 
 def get_multimodal_router() -> CoreMultimodalRouter:
     global _router
     if _router is None:
         _router = CoreMultimodalRouter()
     return _router
-
 
 def reset_multimodal_router() -> None:
     """Test/deployment hook; does not alter process or live configuration."""

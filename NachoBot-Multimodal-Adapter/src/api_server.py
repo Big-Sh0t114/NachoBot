@@ -12,6 +12,7 @@ import binascii
 from contextlib import asynccontextmanager
 import logging
 import os
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -23,6 +24,20 @@ from fastapi import FastAPI, Request, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field, StrictInt, StrictStr
+
+ADAPTER_ROOT = Path(__file__).resolve().parents[1]
+if str(ADAPTER_ROOT) not in sys.path:
+    sys.path.insert(0, str(ADAPTER_ROOT))
+
+from nachobot_multimodal.utils.model_devices import (  # noqa: E402
+    ModelDeviceConfigError,
+    apply_device_environment,
+)
+
+_CONFIG_DIR = Path(
+    os.environ.get("NACHOBOT_MULTIMODAL_CONFIG_DIR", ADAPTER_ROOT / "configs")
+).expanduser().resolve(strict=False)
+_CONFIG_PATH = _CONFIG_DIR / "perception.toml"
 
 from .local_runtime import (
     AudioStreamConflict,
@@ -37,13 +52,12 @@ from nachobot_multimodal.utils.uvicorn_logging import install_quiet_access_loggi
 
 logger = logging.getLogger("multimodal_api")
 
-_CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "perception.toml"
 _MAX_TEXT_CHARS = 10_000
 _MAX_VIDEO_BYTES = 64 * 1024 * 1024
 _MAX_MEDIA_BASE64_CHARS = 4 * ((_MAX_VIDEO_BYTES + 2) // 3)
 _MAX_MEDIA_REQUEST_CHARS = _MAX_MEDIA_BASE64_CHARS + 256
 _MAX_AUDIO_STREAM_CHUNK_BASE64_CHARS = 4 * ((64 * 1024 + 2) // 3)
-_runtime = LocalMultimodalRuntime(config_dir=_CONFIG_PATH.parent)
+_runtime = LocalMultimodalRuntime(config_dir=_CONFIG_DIR)
 
 
 class PerceptionBody(BaseModel):
@@ -115,6 +129,14 @@ async def lifespan(_app: FastAPI):
         if not _runtime.perception_enabled:
             logger.info("Local ASR/VLM disabled; 9874 will report not-ready capabilities")
         else:
+            try:
+                apply_device_environment(
+                    "vlm",
+                    config_dir=_CONFIG_DIR,
+                    runtime_profile=os.environ.get("NACHOBOT_TTS_RUNTIME_PROFILE", "gpu"),
+                )
+            except ModelDeviceConfigError as exc:
+                raise RuntimeError(f"Invalid VLM device configuration: {exc}") from exc
             await _runtime.preload()
             logger.info("Local ASR/VLM models preloaded before 9874 readiness")
         start_reaper = getattr(_runtime, "start_audio_stream_reaper", None)

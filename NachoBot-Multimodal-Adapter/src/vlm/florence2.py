@@ -9,10 +9,9 @@ import base64
 import logging
 import threading
 import os
+import sys
 from io import BytesIO
 from pathlib import Path
-
-import toml
 
 # Configure Hugging Face download behaviour before Transformers or
 # huggingface_hub can be imported. This is especially important on mainland
@@ -36,17 +35,29 @@ _lock = threading.Lock()
 _loaded = False
 
 # ── Config path ────────────────────────────────────────────────────────
-_CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "perception.toml"
+_CONFIG_DIR = Path(
+    os.environ.get(
+        "NACHOBOT_MULTIMODAL_CONFIG_DIR",
+        Path(__file__).resolve().parents[2] / "configs",
+    )
+).expanduser().resolve(strict=False)
+_CONFIG_PATH = _CONFIG_DIR / "perception.toml"
 
 
 def _read_device() -> str:
-    """Read VLM device setting from perception.toml."""
+    """Resolve canonical VLM settings to a safe logical torch device."""
+    adapter_root = Path(__file__).resolve().parents[2]
+    if str(adapter_root) not in sys.path:
+        sys.path.insert(0, str(adapter_root))
+    from nachobot_multimodal.utils.model_devices import (
+        ModelDeviceConfigError,
+        vlm_torch_device,
+    )
+
     try:
-        cfg = toml.load(str(_CONFIG_PATH))
-        return cfg.get("perception", {}).get("device", {}).get("vlm", "cuda:0")
-    except Exception as e:
-        logger.warning("[Florence-2] Failed to read device from config (%s), defaulting to cuda", e)
-        return "cuda"
+        return vlm_torch_device(perception_path=_CONFIG_PATH)
+    except ModelDeviceConfigError as exc:
+        raise RuntimeError(f"Invalid Florence-2 device configuration: {exc}") from exc
 
 
 def _hub_endpoints() -> list[str]:
@@ -146,6 +157,8 @@ def load_model():
         if _loaded:
             return
 
+        config_device = _read_device()
+
         import torch
         from transformers import AutoProcessor, Florence2ForConditionalGeneration
 
@@ -155,7 +168,6 @@ def load_model():
         logger.info("[Florence-2] Loading model: %s ...", model_id)
         logger.info("[Florence-2] Hugging Face cache: %s", cache_dir)
 
-        config_device = _read_device()
         if "cuda" in config_device and not torch.cuda.is_available():
             logger.warning("[Florence-2] CUDA is not available, falling back to CPU")
             _device = "cpu"

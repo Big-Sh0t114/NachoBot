@@ -2,8 +2,10 @@ import asyncio
 from typing import List, Dict, Any, Optional
 
 from src.common.logger import get_logger
+from src.common.tool_results import is_tool_error_result
 from src.config.config import global_config
 from src.chat.utils.url_fetcher import extract_urls
+from src.chat.utils.tool_context import build_reply_tool_context
 from src.chat.utils.capability_router import build_search_after_decision, execute_mcp_after_decision
 from src.person_info.person_info import Person
 from src.mcp.types import MCPAccessContext
@@ -168,22 +170,13 @@ async def build_tool_info(
                 if t_res:
                     tool_results.extend(t_res)
 
-        if tool_results or search_info or url_info:
-            tool_info_str = "以下是你获取到的实时信息：\n"
-            if url_info:
-                tool_info_str += f"【网页内容】\n{url_info}\n"
-            if search_info:
-                tool_info_str += f"【联网搜索】\n{search_info}\n"
-            if search_url_info:
-                tool_info_str += f"【搜索结果正文】\n{search_url_info}\n"
-            for tool_result in tool_results:
-                tool_name = tool_result.get("tool_name", "unknown")
-                content = tool_result.get("content", "")
-                result_type = tool_result.get("type", "tool_result")
-
-                tool_info_str += f"- 【{tool_name}】{result_type}: {content}\n"
-
-            tool_info_str += "以上是你获取到的实时信息，请在回复时参考这些信息。"
+        if tool_results or search_info or url_info or search_url_info:
+            tool_info_str = build_reply_tool_context(
+                url_info=url_info,
+                search_info=search_info,
+                search_url_info=search_url_info,
+                tool_results=tool_results,
+            )
             if tool_results:
                 logger.info(f"获取到 {len(tool_results)} 个工具结果")
             if search_info:
@@ -290,7 +283,7 @@ async def build_lpmm_knowledge_info(message: str, sender: str, target: str, tool
         if tool_calls:
             result = await tool_executor.execute_tool_call(tool_calls[0], SearchKnowledgeFromLPMMTool())
             end_time = time.time()
-            if not result or not result.get("content"):
+            if not result or is_tool_error_result(result) or not result.get("content"):
                 logger.debug("从LPMM知识库获取知识失败，返回空知识...")
                 return ""
             found_knowledge_from_lpmm = result.get("content", "")

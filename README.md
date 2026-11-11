@@ -89,6 +89,11 @@
 </tr>
 
 <tr>
+<td><code>launch_desktop_pet.bat</code></td>
+<td>启动独立桌宠与 Live2D renderer</td>
+</tr>
+
+<tr>
 <td><code>launch_discord.bat</code></td>
 <td>单一原生 Discord 适配器，处理文字、私聊、线程、Slash 命令与语音</td>
 </tr>
@@ -138,6 +143,10 @@ Discord 链路由一个 Python 适配器进程提供，不需要 Node.js、Yarn 
 <h3>🗣️ 3. 感知与表现层</h3>
 
 🎵 <b><a href="./NachoBot-Multimodal-Adapter">多模态适配器</a></b>：文本转语音、视觉理解与语音识别的本地服务启动
+
+<br>
+
+🐾 <b><a href="./NachoBot-Desktop-Pet-Adapter/README.md">桌宠适配器</a></b>：独立桌宠运行时、桌面交互与 Live2D renderer
 
 </td>
 </tr>

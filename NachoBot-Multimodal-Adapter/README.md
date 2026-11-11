@@ -60,30 +60,55 @@ vox_template.toml          -> configs/vox.toml
 perception_template.toml   -> configs/perception.toml
 ```
 
-`base.toml` 的 `[enabled_tts]` 选择 GPT-SoVITS 或 Vox；具体参数分别维护在 `gpt-sovits.toml` 与 `vox.toml`。`perception.toml` 维护 9874 监听地址、Florence-2 与 Sherpa-ONNX 配置。Core 不包含这些本地模型名。
+`base.toml` 的 `[enabled_tts]` 每次只选择一个后端：GPT-SoVITS 或 Vox。本地模型参数分别维护在 `gpt-sovits.toml` 与 `vox.toml` 文件中。`perception.toml` 维护 9874 监听地址、Florence-2 与 Sherpa-ONNX 配置。Core 不包含这些本地模型名。
 
-可在 `[tts_ambient]` 开启 TTS 环境声。模板默认关闭；例如，可用以下设置试用 `desk` 预设：
+### 共享 TTS 切句调度
+
+`[tts_chunking]` 在 Multimodal 公共 facade 按顺序切句并调用当前固定模型的 PCM 合成接口。模板和缺少此段的旧配置默认关闭；启用后只对 `backends` 白名单中的 GPT_Sovits 或 Vox 生效。
+
+```toml
+[tts_chunking]
+enabled = false
+backends = ["GPT_Sovits", "Vox"]
+min_chars = 20
+max_chars = 120
+first_chunk_min_chars = 8
+```
+
+GPT-SoVITS 与 Vox 共用 TTS 文本清理，移除颜文字、emoji、分析/控制块和常见显示标记；清理只影响合成输入，不改变展示或持久化文本。启用切句时会先清理整条请求，再进行分段。原始输入仍受 10,000 字符上限约束。句子边界会保留清理后文本的标点，并识别常见小数、版本号、缩写与 URL。切分会先达到首段 8 字阈值，再达到后续 20 字阈值；`max_chars` 只是软提示，长文本只会在未受保护的标点处分段，绝不会按字符数、空白或换行强切。标准句末标点用于切句；超长句可在逗号、分号、冒号等软标点处分段。无标点的 CJK、Latin 或 URL 文本保持整体，即使超过 `max_chars`。每段只调用一次模型，按序消费并直接把 PCM 交给下游，因此首段可以在后续合成结束前开始传输；WAV、PCM 流和本地 `get_voice_no_stream` 共用相同调度。每个请求共享 120 秒、32 MiB 和 120 秒音频预算，任一段为空、格式改变或失败都会终止整次请求。启用此 facade 调度时健康信息报告 `stream_capability = "chunked_pcm"`，同时保留模型真实的 `native_streaming` 值；它不表示模型自身具备原生流式生成能力。
+
+适配器可为单次 Core TTS 请求设置 `ambient_noise: true`，以启用 TTS 环境声；省略或传入 `false` 时始终关闭。`[tts_ambient]` 只提供请求启用时使用的混音参数，模板默认保留 `enabled = false`：
 
 ```toml
 [tts_ambient]
-enabled = true
+enabled = false # 为旧配置保留；是否混音由单次请求的 ambient_noise 字段控制
 preset = "desk"
 level_db = -38.0
 events_per_minute = 3.0
 source_file = ""
 ```
 
+Core 的 `POST /api/multimodal/tts`、`POST /api/multimodal/tts/stream`，以及适配器的 `POST /api/tts`、`POST /api/tts/stream` 均接受此请求字段。例如：
+
+```json
+{"text":"你好","ambient_noise":true}
+```
+
+旧版 `[tts_ambient].enabled` 仍会被读取以兼容配置文件，但不会自动开启处理；必须由该次请求显式传入布尔值 `true`。
+
 `room` 与 `desk` 是合成音效，不是真实录音；`level_db` 表示连续环境床相对 PCM16 满幅的参考 RMS 电平，数值越负越轻，`-90` 表示静音。也可将 `source_file` 指向本地 PCM16 mono/stereo WAV（最多 30 秒、8 MiB，采样率 8–96 kHz）；相对路径以 `base.toml` 所在目录解析，文件会按输出采样率重采样并平滑循环。启用后 WAV 和 PCM 流都会在本次音频时长内混合；流式输出逐块处理并保留跨块状态，不会在请求间持续播放。环境声会在一次合成过程中缓慢变化音量与音色；这些变化只作用于环境声，不调制人声。配置在运行时启动时读取，改动后需重启 TTS Runtime。
 
-TTS Runtime 在进程启动时固定读取一次活动配置并选择唯一后端。切换 GPT-SoVITS/Vox 或修改模型配置后需要重启 TTS Runtime；请求期间不会重载或切换本地模型。
+TTS Runtime 在进程启动时固定读取一次活动配置并选择唯一后端。切换 GPT-SoVITS 与 Vox 或修改模型配置后需要重启 TTS Runtime；请求期间不会重载或切换本地模型。
 
 ## PyTorch 运行时依赖
 
-FULL 多模态环境的 GPU manifest 固定使用 PyTorch `2.13.0+cu126`、TorchVision `0.28.0+cu126` 与 TorchAudio `2.11.0+cu126`，通过 PyTorch 官方 CUDA 12.6 wheel index 安装。GPU 环境需要支持 CUDA 12.6 的 NVIDIA 驱动；CUDA 12.6 GA 对应的驱动版本为 Windows `560.76` 或更高、Linux `560.28.03` 或更高，驱动由主机提供，不会由 Python 依赖安装。CPU-only 环境可用 `pyproject.toml.cpu` 中对应的 `+cpu` 三件套与官方 CPU wheel index。不要把 CPU 与 GPU wheel 混装。版本组合参见 [PyTorch 官方安装矩阵](https://pytorch.org/get-started/previous-versions/) 与 [NVIDIA CUDA 12.6 驱动说明](https://docs.nvidia.com/cuda/archive/12.6.0/cuda-toolkit-release-notes/index.html)。
+FULL/LITE、多模态 WebUI 与托管 TTS 的 GPU 环境统一使用 PyTorch `2.13.0+cu130`、TorchVision `0.28.0+cu130` 与 TorchAudio `2.11.0+cu130`，通过 PyTorch 官方 CUDA 13.0 wheel index 安装。CUDA 13.0 需要 NVIDIA 驱动版本 `580` 或更高，并支持 Turing 及更新架构；更早的 GPU 可使用 CPU-only 环境。驱动由主机提供，不会由 Python 依赖安装。CPU-only 环境继续使用 `pyproject.toml.cpu` 中对应的 `+cpu` 三件套与官方 CPU wheel index。不要把 CPU 与 GPU wheel 混装。版本组合参见 [PyTorch 官方安装矩阵](https://pytorch.org/get-started/previous-versions/) 与 [NVIDIA CUDA 13.0 驱动说明](https://docs.nvidia.com/cuda/archive/13.0.0/cuda-toolkit-release-notes/index.html)。
+
+WebUI 的「验证 / 补齐依赖」会用 CUDA 13.0 manifest 与 lock 检查并更新现有共享 `.venv`；更新后的 FULL/LITE BAT 启动器也会准备同一 GPU 环境。升级会在既有 GPU venv 内替换旧 cu126 依赖，不会创建额外的大型 GPU venv。直接运行适配器根目录的 `uv sync` 同样使用 cu130 manifest。CPU wheel 不变。
 
 TorchAudio `2.11.0` 使用 PyTorch stable ABI，并支持 PyTorch `2.11` 及更高版本。已对 Windows/Linux、Python 3.11/3.12 的依赖解析与 wheel 可用性做 dry-run 验证；模型加载和实时推理仍需在部署环境验证。详见 [TorchAudio 官方兼容性说明](https://docs.pytorch.org/audio/stable/installation.html)。
 
-FULL/LITE 启动器与 TTS 托管 VoxCPM/GPT-SoVITS 环境固定到 PyTorch `2.13.0` 与 TorchAudio `2.11.0`：GPU 使用官方 cu126 wheels，CPU-only 使用官方 CPU wheels；若后端 requirements 引入 TorchVision，则约束到匹配的 `0.28.0` wheel。托管运行时会将版本约束应用到后续后端 requirements 安装，并在写入或复用就绪标记前检查 PyTorch/TorchAudio 版本；旧依赖标记会触发重新安装。Windows GPU VoxCPM `torch.compile` 使用 `triton-windows==3.7.1.post27`，其 PyTorch `2.13` 支持范围见 [triton-windows 官方说明](https://github.com/triton-lang/triton-windows)。这验证的是安装约束和包元数据；后端模型加载、编译及实时推理仍需在部署环境验证。
+TTS 托管 VoxCPM/GPT-SoVITS 环境与共享 GPU 环境对齐：GPU 使用官方 cu130 wheels，CPU-only 使用官方 CPU wheels；若后端 requirements 引入 TorchVision，则约束到匹配的 `0.28.0` wheel。托管运行时会将版本约束应用到后续后端 requirements 安装，并在写入或复用就绪标记前检查 PyTorch/TorchAudio 版本；旧依赖标记会触发重新安装。Windows GPU VoxCPM `torch.compile` 使用 `triton-windows==3.7.1.post27`，其 PyTorch `2.13` 支持范围见 [triton-windows 官方说明](https://github.com/triton-lang/triton-windows)。这验证的是安装约束和包元数据；后端模型加载、编译及实时推理仍需在部署环境验证。
 
 所有本地模型都在各自服务公开就绪前加载：FULL 的 9874 会完成 ASR 与 VLM 预加载；9880 会先启动并验证所选 TTS 后端，Vox 启用情感分类时还会在公开端口监听前加载分类器。任一必需模型加载失败，所属服务启动失败并由 Core 执行既定降级。
 

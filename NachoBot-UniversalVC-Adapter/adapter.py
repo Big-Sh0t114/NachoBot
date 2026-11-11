@@ -260,7 +260,8 @@ class UniversalVCAdapter:
                 "planner_bypass": True,
                 "relation_inference": False,
                 "expression_selection": False,
-                "memory_retrieval": False,
+                "memory_retrieval": True,
+                "memory_retrieval_mode": "direct",
                 "knowledge_retrieval": False,
                 "tool_mode": "disabled",
                 "web_search_mode": "disabled",
@@ -303,8 +304,8 @@ class UniversalVCAdapter:
 
                 if self.config.prompts.replyer_prompt:
                     r_prompt = self.config.prompts.replyer_prompt
-                    template_items["replyer_prompt"] = self._inject_variables(
-                        r_prompt, variables
+                    template_items["replyer_prompt"] = self._ensure_memory_retrieval_placeholder(
+                        self._inject_variables(r_prompt, variables)
                     )
 
                 template_info = TemplateInfo(
@@ -341,6 +342,12 @@ class UniversalVCAdapter:
         )
 
         await self.router.send_message(message)
+
+    @staticmethod
+    def _ensure_memory_retrieval_placeholder(prompt: str) -> str:
+        if "{memory_retrieval}" in prompt:
+            return prompt
+        return f"{prompt.rstrip()}\n{{memory_retrieval}}\n"
 
     async def _on_speech_start(self):
         """Interrupt current Core-produced audio when a user speaks."""

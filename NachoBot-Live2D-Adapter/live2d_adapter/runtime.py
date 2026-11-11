@@ -1,4 +1,4 @@
-"""Standalone Live2D renderer runtime.
+"""Independent Live2D protocol runtime.
 
 This module has no dependency on Bilibili, NachoBot chat models, databases, or
 LLM clients. It consumes canonical AvatarCommand objects and emits canonical
@@ -13,12 +13,13 @@ import queue
 import threading
 import time
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 
 from .action_adapter import ActionAdapter
-from .config import AdapterConfig
+from .backend import Live2DBackend, Live2DRendererAPI
+from .config import StandaloneConfig
 from .control_pipeline import ControlPipeline
-from .model_adapter import Live2DModelAdapter
 from .protocol import (
     AvatarCommand,
     AvatarEvent,
@@ -26,7 +27,6 @@ from .protocol import (
     InteractionEvent,
     ProtocolError,
 )
-from .renderer import Live2DRenderer
 
 InteractionSink = Callable[[InteractionEvent], Awaitable[None]]
 ShutdownSink = Callable[[], Awaitable[None]]
@@ -42,13 +42,16 @@ MAX_QUEUED_PCM_EVENTS = 64
 class AvatarRuntime:
     """Own the renderer thread and translate protocol events into commands."""
 
-    def __init__(self, config: AdapterConfig, logger):
+    def __init__(self, config: StandaloneConfig, logger, *, backend_factory=Live2DBackend):
         self.config = config
         self.logger = logger
+        self._backend_factory = backend_factory
         self.command_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
-        self.renderer: Live2DRenderer | None = None
+        self.renderer: Live2DRendererAPI | None = None
         self.render_thread: threading.Thread | None = None
-        self.model_adapter: Live2DModelAdapter | None = None
+        self.backend: Live2DBackend | None = None
+        self.model_adapter: Any = None
+        self._backend_preparation: Any = None
         self._event_loop: asyncio.AbstractEventLoop | None = None
         self._interaction_sink: InteractionSink | None = None
         self._shutdown_sink: ShutdownSink | None = None
@@ -89,99 +92,98 @@ class AvatarRuntime:
             return
 
         renderer_config = self.config.renderer
-        if not renderer_config.model_path.is_file():
-            raise FileNotFoundError(
-                f"Live2D model file not found: {renderer_config.model_path}"
+        try:
+            self.backend = self._backend_factory(self.config, self.logger)
+            self._backend_preparation = self.backend.prepare()
+            self.model_adapter = getattr(self.backend, "model_adapter", None)
+
+            self._event_loop = asyncio.get_running_loop()
+            self._renderer_ready.clear()
+            self._renderer_start_error = None
+            self.renderer = self.backend.create_renderer(
+                command_queue=self.command_queue,
+                voice_stream_queue=self.voice_stream_queue,
+                on_click=self._on_renderer_click,
+                on_ready=self._on_renderer_ready,
+                on_exit=self._on_renderer_exit,
             )
-
-        adaptation_config = self.config.adaptation
-        self.model_adapter = Live2DModelAdapter.from_model_path(
-            renderer_config.model_path,
-            enabled=adaptation_config.enabled,
-            parameter_mappings=adaptation_config.parameter_mappings,
-            expression_mappings=adaptation_config.expression_mappings,
-            action_mappings=self.config.action_mappings,
-            logger=self.logger,
-        )
-        moc_path = self.model_adapter.metadata.moc_path
-        if moc_path is None or not moc_path.is_file():
-            raise FileNotFoundError(f"Live2D model .moc3 file not found: {moc_path}")
-
-        for warning in self.model_adapter.metadata.warnings:
-            self.logger.warning("[Live2D] model metadata warning: {}", warning)
-        adaptation_report = self.model_adapter.describe()
-        self.logger.info("Live2D automatic adaptation: {}", adaptation_report)
-
-        self._event_loop = asyncio.get_running_loop()
-        self._renderer_ready.clear()
-        self._renderer_start_error = None
-        self.renderer = Live2DRenderer(
-            model_path=str(renderer_config.model_path),
-            logger=self.logger,
-            command_queue=self.command_queue,
-            transparent=renderer_config.transparent,
-            antialiasing=renderer_config.antialiasing,
-            width=renderer_config.width,
-            height=renderer_config.height,
-            scale=renderer_config.scale,
-            track_mouse=renderer_config.track_mouse,
-            on_click=self._on_renderer_click,
-            on_ready=self._on_renderer_ready,
-            on_exit=self._on_renderer_exit,
-            model_adapter=self.model_adapter,
-            desktop_pet_config=self.config.desktop_pet,
-            voice_stream_queue=self.voice_stream_queue,
-        )
-        self.render_thread = threading.Thread(
-            target=self._run_renderer,
-            name="nachobot-live2d-renderer",
-            daemon=True,
-        )
-        self._started = True
-        self.render_thread.start()
-        renderer_ready = await asyncio.to_thread(self._renderer_ready.wait, 30.0)
-        if not renderer_ready:
-            self._started = False
-            self.renderer.running = False
-            raise RuntimeError("Live2D renderer did not become ready within 30 seconds")
-        if self._renderer_start_error is not None:
-            self._started = False
-            error = self._renderer_start_error
-            self.renderer = None
-            self.render_thread = None
-            raise RuntimeError(f"Live2D renderer failed during startup: {error}") from error
-        self.logger.info(
-            "Live2D runtime started: mode={} model={} window={}x{}",
-            self.config.runtime.mode,
-            renderer_config.model_path,
-            renderer_config.width,
-            renderer_config.height,
-        )
-
-        await self._emit(
-            InteractionEvent(
-                event=AvatarInteraction.READY,
-                payload={
-                    "model_path": str(renderer_config.model_path),
-                    "width": renderer_config.width,
-                    "height": renderer_config.height,
-                    "mode": self.config.runtime.mode,
-                    "adaptation": adaptation_report,
-                    "protocol_version": "1.1",
-                    "capabilities": {
-                        "prepare_reply": True,
-                        "apply_control": True,
-                        "voice_stream_pcm": bool(self.renderer and self.renderer.pcm_audio_ready),
-                        "commands": ["prepare_reply", "apply_control", "voice_stream"],
-                        "interactions": ["reply_prepared", "control_applied"],
-                    },
-                },
+            self.render_thread = threading.Thread(
+                target=self._run_renderer,
+                name="nachobot-live2d-renderer",
+                daemon=True,
             )
-        )
+            self._started = True
+            self.render_thread.start()
+            renderer_ready = await asyncio.to_thread(self._renderer_ready.wait, 30.0)
+            if not renderer_ready:
+                raise RuntimeError("Renderer did not become ready within 30 seconds")
+            if self._renderer_start_error is not None:
+                error = self._renderer_start_error
+                raise RuntimeError(f"Renderer failed during startup: {error}") from error
+
+            self.logger.info(
+                "Standalone Live2D runtime started: mode={} backend={} model={} window={}x{}",
+                self.config.runtime.mode,
+                self.backend.name,
+                self._active_model_path(),
+                renderer_config.width,
+                renderer_config.height,
+            )
+            await self._emit(
+                InteractionEvent(
+                    event=AvatarInteraction.READY,
+                    payload=self.ready_payload(),
+                )
+            )
+        except BaseException:
+            # The native thread may still be initializing the SDK/window. Its
+            # persistent request_stop event prevents a late initialization
+            # from starting a render loop after this task has been cancelled.
+            await self.stop()
+            raise
+
+    def ready_payload(self) -> dict[str, Any]:
+        """Build the same READY metadata for runtime events and client handshakes."""
+
+        renderer_config = self.config.renderer
+        model_path = self._active_model_path()
+        capabilities = {
+            "prepare_reply": True,
+            "apply_control": True,
+            "commands": ["prepare_reply", "apply_control", "voice_stream"],
+            "interactions": ["reply_prepared", "control_applied"],
+        }
+        if self.backend is not None:
+            capabilities.update(self.backend.capabilities(self.renderer))
+        return {
+            "running": self.is_running,
+            "model_path": str(model_path) if model_path is not None else None,
+            "width": renderer_config.width,
+            "height": renderer_config.height,
+            "mode": self.config.runtime.mode,
+            "backend": self.backend.name if self.backend is not None else "live2d",
+            "adaptation": self._preparation_adaptation(self._backend_preparation),
+            "protocol_version": "1.1",
+            "capabilities": capabilities,
+        }
+
+    def _active_model_path(self) -> Path:
+        return self.config.renderer.model_path
+
+    @staticmethod
+    def _preparation_adaptation(preparation: Any) -> Any:
+        if isinstance(preparation, dict) and "adaptation" in preparation:
+            return preparation["adaptation"]
+        return preparation
 
     async def stop(self) -> None:
-        if not self._started:
+        if (
+            not self._started
+            and self.renderer is None
+            and self.render_thread is None
+        ):
             self.control_pipeline.clear()
+            self._reset_voice_stream_state(clear_queue=True)
             return
 
         self._started = False
@@ -191,18 +193,32 @@ class AvatarRuntime:
         render_thread = self.render_thread
 
         if renderer is not None:
-            renderer.running = False
+            request_stop = getattr(renderer, "request_stop", None)
+            if callable(request_stop):
+                try:
+                    request_stop()
+                except Exception:
+                    self.logger.exception("Renderer stop request failed")
+            try:
+                renderer.running = False
+            except Exception:
+                self.logger.exception("Could not clear renderer running state")
 
         if render_thread is not None and render_thread.is_alive():
             await asyncio.to_thread(render_thread.join, 5.0)
             if render_thread.is_alive():
                 self.logger.warning(
-                    "Live2D renderer thread did not stop within 5 seconds"
+                    "Renderer thread did not stop within 5 seconds"
                 )
+                return
 
         self.renderer = None
         self.render_thread = None
-        self.logger.info("Live2D runtime stopped")
+        self.backend = None
+        self.model_adapter = None
+        self._backend_preparation = None
+        self._renderer_start_error = None
+        self.logger.info("Standalone Live2D runtime stopped")
 
     async def dispatch(
         self,
@@ -275,11 +291,7 @@ class AvatarRuntime:
 
         elif event is AvatarEvent.ACTION:
             action_id = self._required_string(payload, "action_id").upper()
-            motion_group = (
-                self.model_adapter.resolve_action(action_id)
-                if self.model_adapter is not None
-                else self.config.resolve_action(action_id)
-            )
+            motion_group = self.backend.resolve_action(action_id) if self.backend else None
             if not motion_group:
                 raise ProtocolError(f"unmapped canonical action: {action_id}")
             self._enqueue("body_action", motion_group)
@@ -320,9 +332,13 @@ class AvatarRuntime:
             )
 
         elif event is AvatarEvent.PLAY_AUDIO:
+            if not self._supports_wav_playback():
+                raise ProtocolError("Selected renderer does not support WAV audio playback")
             self._enqueue("play_audio", self._decode_wav_payload(payload))
 
         elif event is AvatarEvent.QUEUE_AUDIO:
+            if not self._supports_wav_playback():
+                raise ProtocolError("Selected renderer does not support WAV audio playback")
             self._enqueue(
                 "queue_audio",
                 {
@@ -358,11 +374,7 @@ class AvatarRuntime:
         action_id = getattr(staged, "action_id", None)
         motion_group = None
         if action_id:
-            motion_group = (
-                self.model_adapter.resolve_action(action_id)
-                if self.model_adapter is not None
-                else self.config.resolve_action(action_id)
-            )
+            motion_group = self.backend.resolve_action(action_id) if self.backend else None
             if not motion_group:
                 raise ProtocolError(f"unmapped canonical action: {action_id}")
 
@@ -379,11 +391,11 @@ class AvatarRuntime:
         except Exception as exc:
             self._renderer_start_error = exc
             self._renderer_ready.set()
-            self.logger.exception("Live2D renderer thread crashed")
+            self.logger.exception("Renderer thread crashed")
             self._emit_from_renderer_thread(
                 InteractionEvent(
                     event=AvatarInteraction.ERROR,
-                    payload={"message": "Live2D renderer thread crashed"},
+                    payload={"message": "Renderer thread crashed"},
                 )
             )
             self._on_renderer_exit()
@@ -401,7 +413,7 @@ class AvatarRuntime:
         try:
             self.command_queue.put_nowait((command_type, content))
         except queue.Full as exc:
-            raise RuntimeError("Live2D render command queue is full") from exc
+            raise RuntimeError("Renderer command queue is full") from exc
 
     @staticmethod
     def _decode_wav_payload(payload: dict[str, Any]) -> bytes:
@@ -431,8 +443,9 @@ class AvatarRuntime:
             )
         )
 
-        poke_buttons = (1, 6, 7) if self.config.desktop_pet.enabled else (6, 7)
-        if button not in poke_buttons:
+        # Standalone Live2D historically reports poke only for side buttons;
+        # primary-button clicks remain click events and do not trigger poke.
+        if button not in (6, 7):
             return
 
         cooldown = self.config.renderer.poke_cooldown_seconds
@@ -451,6 +464,18 @@ class AvatarRuntime:
                 payload={"button": int(button)},
             )
         )
+
+    def _supports_wav_playback(self) -> bool:
+        """Honor explicit capability denials without breaking legacy backends.
+
+        Older renderers predate capability negotiation and may implement WAV
+        playback without advertising it. Treat a missing field as supported;
+        only a concrete ``False`` opts a backend out of remote WAV commands.
+        """
+
+        if self.backend is None or self.renderer is None:
+            return False
+        return self.backend.capabilities(self.renderer).get("audio_playback") is not False
 
     def _on_renderer_exit(self) -> None:
         sink = self._shutdown_sink
@@ -509,7 +534,7 @@ class AvatarRuntime:
 
         if operation == "start":
             if self.renderer is None or not self.renderer.pcm_audio_ready:
-                raise ProtocolError("Live2D PCM output is not ready")
+                raise ProtocolError("Renderer PCM output is not ready")
             # A new start is an explicit barge-in. Drop queued stale chunks;
             # the renderer's start handler stops the currently audible stream.
             self._reset_voice_stream_state(clear_queue=True)

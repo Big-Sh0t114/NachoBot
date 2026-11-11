@@ -30,6 +30,7 @@ import psutil
 
 try:
     from .multimodal_runtime import MultimodalRuntimeManager
+    from .gpu_devices import ModelDeviceError, service_device_environment
     from .install_output import InstallSnapshot, decode_install_progress, run_install_command, uv_service_install_plan
     from .qq_adapter_selector import (
         DEFAULT_QQ_ADAPTER,
@@ -38,6 +39,7 @@ try:
     )
 except ImportError:
     from multimodal_runtime import MultimodalRuntimeManager
+    from gpu_devices import ModelDeviceError, service_device_environment
     from install_output import InstallSnapshot, decode_install_progress, run_install_command, uv_service_install_plan
     from qq_adapter_selector import (
         DEFAULT_QQ_ADAPTER,
@@ -903,7 +905,7 @@ def _register_services(root_dir: Path | str | None = None):
     # 4. Parse standalone Live2D adapter config
     live2d_host = "127.0.0.1"
     live2d_port = 8766
-    live2d_config_path = base_root / "NachoBot-Live2D-Adapter" / "config.toml"
+    live2d_config_path = base_root / "NachoBot-Desktop-Pet-Adapter" / "config.toml"
     if live2d_config_path.exists():
         try:
             doc = tomlkit.parse(live2d_config_path.read_text(encoding="utf-8"))
@@ -1021,8 +1023,8 @@ def _register_services(root_dir: Path | str | None = None):
         # POTATO intentionally has no Multimodal service definition.
 
         # ── Live2D ──
-        ServiceDef("live2d", "Live2D 渲染适配器", "live2d", "NachoBot-Live2D-Adapter",
-                   ["uv", "run", "python", "-m", "live2d_adapter", "--config", "config.toml"],
+        ServiceDef("live2d", "桌宠适配器（Live2D）", "live2d", "NachoBot-Desktop-Pet-Adapter",
+                   ["uv", "run", "python", "-m", "desktop_pet_adapter", "--config", "config.toml"],
                    port=live2d_port, wait_port=True, order=1,
                    detail=f"独立渲染 WebSocket · :{live2d_port}"),
 
@@ -1903,7 +1905,10 @@ class ProcessManager:
                 module_index = lowered.index("-m")
             except ValueError:
                 return False
-            if module_index + 1 >= len(lowered) or lowered[module_index + 1] != "live2d_adapter":
+            if module_index + 1 >= len(lowered) or lowered[module_index + 1] not in {
+                "desktop_pet_adapter",
+                "live2d_adapter",
+            }:
                 return False
             if "--config" not in lowered:
                 return False
@@ -3966,12 +3971,26 @@ class ProcessManager:
         env.pop("NACHOBOT_WEBUI_TOKEN", None)
 
         try:
+            runtime_profile = env.get("NACHOBOT_TTS_RUNTIME_PROFILE", self._launch_runtime)
+            device_env = await asyncio.to_thread(
+                service_device_environment,
+                service_id,
+                runtime_profile,
+                root_dir=self.root,
+            )
+            # Apply assignments after group/service overlays so the saved device choice
+            # cannot be shadowed by an inherited group environment.
+            env.update(device_env)
             cmd = await self._prepare_service_dependencies(service_id, cmd, full_cwd, env)
             if service_id == "nachobot":
                 await self._prepare_playwright_chromium(service_id, full_cwd, env)
         except asyncio.CancelledError:
             state.status = ServiceStatus.STOPPED
             raise
+        except ModelDeviceError as exc:
+            state.status = ServiceStatus.ERROR
+            await self._broadcast(service_id, f"[WebUI] ERROR: {exc}\n")
+            return
         except Exception as exc:
             state.status = ServiceStatus.ERROR
             await self._broadcast(service_id, f"[WebUI] ERROR: 依赖准备失败: {exc}\n")
@@ -5040,11 +5059,7 @@ class ProcessManager:
             "--port", str(public_port),
             "--backend-port", str(private_port),
         ]
-        torch_index = (
-            "https://download.pytorch.org/whl/cpu"
-            if runtime == "cpu"
-            else "https://download.pytorch.org/whl/cu126"
-        )
+        torch_index = MultimodalRuntimeManager.torch_index_url(runtime)
         return cmd, str(adapter_dir), {
             "NACHOBOT_TTS_TORCH_INDEX": torch_index,
             "NACHOBOT_TTS_RUNTIME_PROFILE": runtime,

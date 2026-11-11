@@ -7,6 +7,7 @@ the same /api bearer-token policy as every other Core control endpoint.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, Optional
 
@@ -25,7 +26,6 @@ from .contracts import (
 )
 from .router import AudioStreamError, CoreMultimodalRouter, TTSStreamError, get_multimodal_router
 
-
 class PerceptionBody(BaseModel):
     operation: str = Field(min_length=1, max_length=64)
     task: str = Field(default="", max_length=16)
@@ -34,13 +34,13 @@ class PerceptionBody(BaseModel):
     mime_type: str = Field(default="", max_length=96)
     prompt: str = Field(default="", max_length=MAX_TEXT_CHARS)
     metadata: dict[str, Any] = Field(default_factory=dict)
-
+    response_schema: dict[str, Any] | None = None
 
 class TTSBody(BaseModel):
     text: str = Field(min_length=1, max_length=MAX_TEXT_CHARS)
     platform: str = Field(default="core", max_length=64)
     text_lang: Optional[str] = Field(default=None, max_length=32)
-
+    ambient_noise: bool = Field(default=False, strict=True)
 
 def _perception_payload(result: Any) -> dict[str, Any]:
     return {
@@ -52,7 +52,6 @@ def _perception_payload(result: Any) -> dict[str, Any]:
         "error": result.error,
         "metadata": dict(result.metadata or {}),
     }
-
 
 async def _stream_json_object(request: Request, *, max_bytes: int = 90_000) -> dict[str, Any]:
     body_parts = []
@@ -71,10 +70,67 @@ async def _stream_json_object(request: Request, *, max_bytes: int = 90_000) -> d
         raise HTTPException(status_code=400, detail="invalid_request")
     return payload
 
+class _ClosingTTSStreamingResponse(StreamingResponse):
+    """Close the owned PCM iterator even when ASGI send fails mid-response."""
+
+    def __init__(self, content: Any, *, upstream_owner: Any, **kwargs: Any) -> None:
+        self._upstream_owner = upstream_owner
+        super().__init__(content, **kwargs)
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            try:
+                closer = getattr(self.body_iterator, "aclose", None)
+                if closer is not None:
+                    try:
+                        await closer()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        # The response is already terminating; cleanup remains best effort.
+                        pass
+            finally:
+                await self._upstream_owner.aclose()
+
+class _AsyncIteratorOwner:
+    """Idempotent, cancellation-resilient owner for one prefetched iterator."""
+
+    def __init__(self, iterator: Any) -> None:
+        self._iterator = iterator
+        self._lock = asyncio.Lock()
+        self._close_task: asyncio.Task[Any] | None = None
+
+    async def _close(self) -> None:
+        closer = getattr(self._iterator, "aclose", None)
+        if closer is None:
+            return
+        try:
+            await closer()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Iterator cleanup cannot replace the original ASGI send failure.
+            pass
+
+    async def aclose(self) -> None:
+        async with self._lock:
+            if self._close_task is None:
+                self._close_task = asyncio.create_task(self._close())
+            close_task = self._close_task
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError:
+            # Finish the close even when response cancellation arrived while
+            # the upstream async generator was releasing its own resources.
+            try:
+                await close_task
+            finally:
+                raise
 
 def _stream_http_error(exc: AudioStreamError) -> HTTPException:
     return HTTPException(status_code=exc.status_code, detail=exc.code)
-
 
 def create_multimodal_router(service: CoreMultimodalRouter | None = None) -> APIRouter:
     """Create a fresh FastAPI router for one Core facade instance."""
@@ -110,17 +166,18 @@ def create_multimodal_router(service: CoreMultimodalRouter | None = None) -> API
         try:
             from .contracts import MediaInput
 
-            result = await service.perceive(
-                MediaInput(
-                    operation=body.operation,
-                    data=body.data,
-                    task=body.task,
-                    media_format=body.media_format,
-                    mime_type=body.mime_type,
-                    prompt=body.prompt,
-                    metadata=body.metadata,
-                )
-            )
+            input_kwargs = {
+                "operation": body.operation,
+                "data": body.data,
+                "task": body.task,
+                "media_format": body.media_format,
+                "mime_type": body.mime_type,
+                "prompt": body.prompt,
+                "metadata": body.metadata,
+            }
+            if body.response_schema is not None:
+                input_kwargs["response_schema"] = body.response_schema
+            result = await service.perceive(MediaInput(**input_kwargs))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return _perception_payload(result)
@@ -245,11 +302,10 @@ def create_multimodal_router(service: CoreMultimodalRouter | None = None) -> API
     @router.post("/tts/synthesize.v1")
     @router.post("/tts/synthesize")
     async def synthesize(body: TTSBody) -> dict[str, Any]:
-        result = await service.synthesize_tts(
-            body.text,
-            platform=body.platform,
-            text_lang=body.text_lang,
-        )
+        kwargs = {"platform": body.platform, "text_lang": body.text_lang}
+        if body.ambient_noise:
+            kwargs["ambient_noise"] = True
+        result = await service.synthesize_tts(body.text, **kwargs)
         return {
             "operation": TTS_SYNTHESIZE_V1,
             "text": result.text,
@@ -264,11 +320,10 @@ def create_multimodal_router(service: CoreMultimodalRouter | None = None) -> API
     async def synthesize_stream(body: TTSBody) -> StreamingResponse:
         """Relay Core-selected TTS as frame-aligned PCM without buffering it."""
 
-        chunks = service.synthesize_tts_stream(
-            body.text,
-            platform=body.platform,
-            text_lang=body.text_lang,
-        )
+        kwargs = {"platform": body.platform, "text_lang": body.text_lang}
+        if body.ambient_noise:
+            kwargs["ambient_noise"] = True
+        chunks = service.synthesize_tts_stream(body.text, **kwargs)
         try:
             first = await anext(chunks)
         except TTSStreamError as exc:
@@ -285,6 +340,11 @@ def create_multimodal_router(service: CoreMultimodalRouter | None = None) -> API
         except StopAsyncIteration as exc:
             await chunks.aclose()
             raise HTTPException(status_code=502, detail="empty_tts_stream") from exc
+        except asyncio.CancelledError:
+            await chunks.aclose()
+            raise
+
+        upstream_owner = _AsyncIteratorOwner(chunks)
 
         async def audio():
             try:
@@ -292,11 +352,12 @@ def create_multimodal_router(service: CoreMultimodalRouter | None = None) -> API
                 async for chunk in chunks:
                     yield chunk.pcm_s16le
             finally:
-                await chunks.aclose()
+                await upstream_owner.aclose()
 
         spec = first.spec
-        return StreamingResponse(
+        return _ClosingTTSStreamingResponse(
             audio(),
+            upstream_owner=upstream_owner,
             media_type="application/octet-stream",
             headers={
                 "Cache-Control": "no-store",
@@ -309,7 +370,6 @@ def create_multimodal_router(service: CoreMultimodalRouter | None = None) -> API
         )
 
     return router
-
 
 def register_multimodal_api(server: Any, service: CoreMultimodalRouter | None = None) -> APIRouter:
     """Register the facade under /api/multimodal on a Core Server."""

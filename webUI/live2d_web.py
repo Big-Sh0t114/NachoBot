@@ -25,6 +25,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
+DESKTOP_PET_DIR = ROOT_DIR / "NachoBot-Desktop-Pet-Adapter"
 ADAPTER_DIR = ROOT_DIR / "NachoBot-Live2D-Adapter"
 RESOURCES_DIR = ADAPTER_DIR / "resources"
 CORE_FILE = ROOT_DIR / ".runtime" / "webui-live2d" / "live2dcubismcore.min.js"
@@ -251,10 +252,12 @@ class Live2DWebManager:
 
     def _scan(self) -> None:
         adapter_path = str(self.adapter_dir)
-        if adapter_path not in sys.path:
-            sys.path.insert(0, adapter_path)
+        for project_dir in (DESKTOP_PET_DIR, ADAPTER_DIR):
+            project_path = str(project_dir.resolve())
+            if project_path not in sys.path:
+                sys.path.insert(0, project_path)
         try:
-            from live2d_adapter.control_pipeline import ALLOWED_EMOTIONS, ControlPipeline
+            from desktop_pet_adapter.control_pipeline import ALLOWED_EMOTIONS, ControlPipeline
             from live2d_adapter.model_adapter import Live2DModelAdapter, inspect_model
         except ImportError:
             # Keep app startup safe when the optional adapter checkout is

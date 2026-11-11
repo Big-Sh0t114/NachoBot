@@ -19,7 +19,7 @@ from typing import Any
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictStr
 
 from config_manager import ConfigManager
 from qq_adapter_selector import (
@@ -52,6 +52,10 @@ from setup_manager import (
     bilibili_login_manager,
 )
 from setup_checks import NAPCAT_RELEASE_URL
+try:
+    from gpu_devices import ModelDeviceError, model_devices_payload, save_model_assignments
+except ImportError:  # pragma: no cover - package import context
+    from .gpu_devices import ModelDeviceError, model_devices_payload, save_model_assignments
 from security import WebUISecurity, validate_webui_config_raw
 from webui_config import CONFIG_PATH, webui_config
 from multimodal_runtime import MultimodalRuntimeManager
@@ -224,6 +228,36 @@ async def webui_info():
 @app.get("/api/configs")
 async def list_configs():
     return config_mgr.list_configs()
+
+
+class ModelDevicesUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    tts: StrictStr
+    vlm: StrictStr
+
+
+@app.get("/api/model-devices")
+async def get_model_devices():
+    """Return current GPU inventory and saved local-model device choices."""
+    try:
+        return await asyncio.to_thread(model_devices_payload)
+    except ModelDeviceError as exc:
+        raise HTTPException(500, str(exc)) from exc
+
+
+@app.put("/api/model-devices")
+async def update_model_devices(body: ModelDevicesUpdate):
+    """Persist device assignments after checking explicit GPU UUIDs live."""
+    try:
+        assignments = await asyncio.to_thread(
+            save_model_assignments,
+            {"tts": body.tts, "vlm": body.vlm},
+        )
+        payload = await asyncio.to_thread(model_devices_payload)
+        payload["assignments"] = assignments
+        return {"status": "ok", **payload}
+    except ModelDeviceError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.get("/api/configs/{file_id}")

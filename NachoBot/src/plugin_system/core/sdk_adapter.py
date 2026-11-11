@@ -1,3 +1,4 @@
+import copy
 from typing import Dict, List, Tuple, Type, Any, Union
 from src.common.logger import get_logger
 from src.plugin_system.base.base_plugin import BasePlugin
@@ -5,6 +6,7 @@ from src.plugin_system.base.base_command import BaseCommand
 from src.plugin_system.base.base_events_handler import BaseEventHandler
 from src.plugin_system.base.base_action import BaseAction
 from src.plugin_system.base.base_tool import BaseTool
+from src.plugin_system.base.sdk_lifecycle import SDKPluginLifecycle
 from src.plugin_system.base.component_types import (
     CommandInfo,
     ActionInfo,
@@ -14,6 +16,67 @@ from src.plugin_system.base.component_types import (
 from src.plugin_system.base.config_types import ConfigField
 
 logger = get_logger("sdk_adapter")
+
+_SDK_EVENT_MESSAGE_FIELDS = (
+    "message_segments",
+    "message_base_info",
+    "plain_text",
+    "raw_message",
+    "is_group_message",
+    "is_private_message",
+    "stream_id",
+    "llm_prompt",
+    "llm_response_content",
+    "llm_response_reasoning",
+    "llm_response_model",
+    "llm_response_tool_call",
+    "action_usage",
+    "additional_data",
+)
+
+
+def _sdk_event_message_payload(message):
+    if message is None:
+        return None, ""
+
+    missing = object()
+    message_base_info = getattr(message, "message_base_info", missing)
+    plain_text = getattr(message, "plain_text", missing)
+    if message_base_info is not missing and plain_text is not missing:
+        payload = {}
+        for field in _SDK_EVENT_MESSAGE_FIELDS:
+            if field == "message_base_info":
+                payload[field] = message_base_info
+            elif field == "plain_text":
+                payload[field] = plain_text
+            else:
+                payload[field] = getattr(message, field, None)
+        payload["processed_plain_text"] = plain_text
+        stream_id = payload["stream_id"]
+        if stream_id is None:
+            stream_id = ""
+        return copy.deepcopy(payload), stream_id
+
+    if not message:
+        return None, ""
+
+    processed_plain_text = message.processed_plain_text
+    payload = {
+        "raw_message": processed_plain_text,
+        "plain_text": processed_plain_text,
+        "processed_plain_text": processed_plain_text,
+    }
+    serializer = getattr(message, "to_dict", None)
+    if callable(serializer):
+        try:
+            payload.update(serializer())
+        except Exception:
+            pass
+
+    stream_id = ""
+    if hasattr(message, "chat_stream") and message.chat_stream:
+        stream_id = message.chat_stream.stream_id
+    return copy.deepcopy(payload), stream_id
 
 def create_adapter_class(plugin_dir: str, manifest: Dict[str, Any], module: Any) -> Type[BasePlugin]:
     # Extract info from manifest
@@ -56,14 +119,9 @@ def create_adapter_class(plugin_dir: str, manifest: Dict[str, Any], module: Any)
             logger.error(f"Error compiling config model schema: {e}")
             
     # 2. Closure wrappers for command / action / tool / event execution
-    def make_cmd_execute(v2_plugin, func):
+    def make_cmd_execute(v2_plugin, func, lifecycle):
         async def execute(self_cmd):
-            if not getattr(v2_plugin, "_on_load_called", False):
-                try:
-                    await v2_plugin.on_load()
-                    v2_plugin._on_load_called = True
-                except Exception as e:
-                    logger.error(f"Error calling V2 on_load: {e}")
+            await lifecycle.ensure_loaded()
             
             res = await func(
                 stream_id=self_cmd.message.chat_stream.stream_id,
@@ -83,14 +141,9 @@ def create_adapter_class(plugin_dir: str, manifest: Dict[str, Any], module: Any)
             return True, None, False
         return execute
 
-    def make_action_execute(v2_plugin, func):
+    def make_action_execute(v2_plugin, func, lifecycle):
         async def execute(self_action):
-            if not getattr(v2_plugin, "_on_load_called", False):
-                try:
-                    await v2_plugin.on_load()
-                    v2_plugin._on_load_called = True
-                except Exception as e:
-                    logger.error(f"Error calling V2 on_load: {e}")
+            await lifecycle.ensure_loaded()
             
             kwargs = {
                 "stream_id": self_action.chat_id,
@@ -102,14 +155,9 @@ def create_adapter_class(plugin_dir: str, manifest: Dict[str, Any], module: Any)
             return True, str(res) if res is not None else ""
         return execute
 
-    def make_tool_execute(v2_plugin, func):
+    def make_tool_execute(v2_plugin, func, lifecycle):
         async def execute(self_tool, function_args):
-            if not getattr(v2_plugin, "_on_load_called", False):
-                try:
-                    await v2_plugin.on_load()
-                    v2_plugin._on_load_called = True
-                except Exception as e:
-                    logger.error(f"Error calling V2 on_load: {e}")
+            await lifecycle.ensure_loaded()
             
             res = await func(**function_args)
             if isinstance(res, dict):
@@ -117,31 +165,11 @@ def create_adapter_class(plugin_dir: str, manifest: Dict[str, Any], module: Any)
             return {"result": str(res)}
         return execute
 
-    def make_ev_execute(v2_plugin, func):
+    def make_ev_execute(v2_plugin, func, lifecycle):
         async def execute(self_ev, message):
-            if not getattr(v2_plugin, "_on_load_called", False):
-                try:
-                    await v2_plugin.on_load()
-                    v2_plugin._on_load_called = True
-                except Exception as e:
-                    logger.error(f"Error calling V2 on_load: {e}")
-            
-            msg_arg = None
-            stream_id = ""
-            if message:
-                msg_arg = {
-                    "raw_message": message.processed_plain_text,
-                    "plain_text": message.processed_plain_text,
-                    "processed_plain_text": message.processed_plain_text,
-                }
-                if hasattr(message, "to_dict"):
-                    try:
-                        msg_arg.update(message.to_dict())
-                    except Exception:
-                        pass
-                if hasattr(message, "chat_stream") and message.chat_stream:
-                    stream_id = message.chat_stream.stream_id
-            
+            await lifecycle.ensure_loaded()
+
+            msg_arg, stream_id = _sdk_event_message_payload(message)
             res = await func(message=msg_arg, stream_id=stream_id)
             if isinstance(res, tuple):
                 res_list = list(res)
@@ -164,6 +192,8 @@ def create_adapter_class(plugin_dir: str, manifest: Dict[str, Any], module: Any)
             except Exception as e:
                 logger.error(f"Error configuring V2 Pydantic model: {e}")
                 self.v2_plugin.config = self.v2_plugin.config_model()
+
+        self._sdk_lifecycle = SDKPluginLifecycle(self.v2_plugin)
 
     def load_manifest_fn(self):
         super(type(self), self)._load_manifest()
@@ -207,7 +237,7 @@ def create_adapter_class(plugin_dir: str, manifest: Dict[str, Any], module: Any)
                             "command_name": deco["name"],
                             "command_description": deco["description"],
                             "command_pattern": deco["pattern"],
-                            "execute": make_cmd_execute(self.v2_plugin, attr)
+                            "execute": make_cmd_execute(self.v2_plugin, attr, self._sdk_lifecycle)
                         }
                     )
                     components.append((dyn_cmd_class.get_command_info(), dyn_cmd_class))
@@ -229,7 +259,7 @@ def create_adapter_class(plugin_dir: str, manifest: Dict[str, Any], module: Any)
                             "activation_keywords": deco.get("activation_keywords", []),
                             "keyword_case_sensitive": deco.get("keyword_case_sensitive", False),
                             "parallel_action": deco.get("parallel_action", True),
-                            "execute": make_action_execute(self.v2_plugin, attr)
+                            "execute": make_action_execute(self.v2_plugin, attr, self._sdk_lifecycle)
                         }
                     )
                     components.append((dyn_action_class.get_action_info(), dyn_action_class))
@@ -273,7 +303,7 @@ def create_adapter_class(plugin_dir: str, manifest: Dict[str, Any], module: Any)
                             "description": deco["description"],
                             "parameters": v1_params,
                             "available_for_llm": True,
-                            "execute": make_tool_execute(self.v2_plugin, attr)
+                            "execute": make_tool_execute(self.v2_plugin, attr, self._sdk_lifecycle)
                         }
                     )
                     components.append((dyn_tool_class.get_tool_info(), dyn_tool_class))
@@ -297,7 +327,7 @@ def create_adapter_class(plugin_dir: str, manifest: Dict[str, Any], module: Any)
                             "handler_name": deco["name"],
                             "handler_description": deco["description"],
                             "intercept_message": deco.get("intercept_message", False),
-                            "execute": make_ev_execute(self.v2_plugin, attr)
+                            "execute": make_ev_execute(self.v2_plugin, attr, self._sdk_lifecycle)
                         }
                     )
                     components.append((dyn_ev_class.get_handler_info(), dyn_ev_class))

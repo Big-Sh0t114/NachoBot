@@ -19,6 +19,16 @@ import os
 from pathlib import Path
 
 from src.common.logger import get_logger
+from src.common.file_read import (
+    BoundedFileTooLargeError,
+    read_bounded_file,
+    read_bounded_text_file,
+)
+from src.common.http_download import (
+    BoundedResponseTooLargeError,
+    read_bounded_response,
+    stream_with_deadline,
+)
 from src.config.config import global_config
 from src.chat.utils.utils_image import get_image_manager
 from src.chat.utils.utils_voice import (
@@ -253,37 +263,36 @@ class MessageRecv(Message):
 
             # Case 1: URL
             if file_data.startswith("http"):
+                content = None
                 async with httpx.AsyncClient() as client:
-                    # Check size first using HEAD
-                    head_resp = await client.head(file_data)
-                    if head_resp.status_code == 200:
-                        content_length = int(head_resp.headers.get("Content-Length", 0))
-                        if content_length > MAX_UPLOAD_BYTES:
-                            raise ValueError(f"File exceeds 1MB limit ({content_length} bytes)")
-
-                    resp = await client.get(file_data)
-                    if resp.status_code == 200:
-                        # Fallback size check just in case HEAD didn't give Content-Length
-                        if len(resp.content) > MAX_UPLOAD_BYTES:
-                            raise ValueError(f"File exceeds 1MB limit ({len(resp.content)} bytes)")
-                        return sandbox_manager.save_upload(
-                            resp.content,
-                            filename,
-                            stream_id=self.chat_stream.stream_id,
-                            platform=platform,
-                            group_id=str(group_id) if group_id is not None else None,
-                            actor_id=actor_id,
-                        )
+                    async with stream_with_deadline(
+                        client, "GET", file_data, total_timeout=60
+                    ) as resp:
+                        if resp.status_code == 200:
+                            try:
+                                content = await read_bounded_response(resp, max_bytes=MAX_UPLOAD_BYTES)
+                            except BoundedResponseTooLargeError as exc:
+                                raise ValueError(f"File exceeds 1MB limit ({MAX_UPLOAD_BYTES} bytes)") from exc
+                if content is not None:
+                    return sandbox_manager.save_upload(
+                        content,
+                        filename,
+                        stream_id=self.chat_stream.stream_id,
+                        platform=platform,
+                        group_id=str(group_id) if group_id is not None else None,
+                        actor_id=actor_id,
+                    )
 
             # Case 2: Local Path (already on disk, e.g. from OneBot/NapCat)
             # If the adapter saves it somewhere, we might just copy it or leave it.
             # But sandbox implies isolation. Let's copy it.
             elif os.path.exists(file_data):
-                if os.path.getsize(file_data) > MAX_UPLOAD_BYTES:
-                    raise ValueError(f"Local file exceeds 1MB limit ({os.path.getsize(file_data)} bytes)")
-
-                with open(file_data, "rb") as f:
-                    content = f.read()
+                try:
+                    content = read_bounded_file(file_data, max_bytes=MAX_UPLOAD_BYTES)
+                except BoundedFileTooLargeError as exc:
+                    raise ValueError(
+                        f"Local file exceeds 1MB limit ({MAX_UPLOAD_BYTES} bytes)"
+                    ) from exc
                 return sandbox_manager.save_upload(
                     content,
                     filename,
@@ -374,11 +383,9 @@ class MessageRecv(Message):
                             self.files.append(saved_path)
                             preview_text = ""
                             try:
-                                if os.path.exists(saved_path) and os.path.getsize(saved_path) < 3072:
-                                    with open(saved_path, "r", encoding="utf-8") as file:
-                                        content = file.read()
-                                        if content:
-                                            preview_text = f"\n[自动预览]:\n{content}"
+                                content = read_bounded_text_file(saved_path, max_bytes=3071)
+                                if content:
+                                    preview_text = f"\n[自动预览]:\n{content}"
                             except Exception:
                                 pass
                             return f"[文件: {file_name} (已保存到沙盒)]{preview_text}"
@@ -398,11 +405,9 @@ class MessageRecv(Message):
                             # Auto-preview small text files (< 3KB)
                             preview_text = ""
                             try:
-                                if os.path.exists(saved_path) and os.path.getsize(saved_path) < 3072:
-                                    with open(saved_path, "r", encoding="utf-8") as f:
-                                        content = f.read()
-                                        if content:
-                                            preview_text = f"\n[自动预览]:\n{content}"
+                                content = read_bounded_text_file(saved_path, max_bytes=3071)
+                                if content:
+                                    preview_text = f"\n[自动预览]:\n{content}"
                             except Exception:
                                 pass  # Not a text file or read error
 

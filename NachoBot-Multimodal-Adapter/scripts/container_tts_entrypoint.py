@@ -15,6 +15,7 @@ ADAPTER_ROOT = Path(__file__).resolve().parents[1]
 if str(ADAPTER_ROOT) not in sys.path:
     sys.path.insert(0, str(ADAPTER_ROOT))
 
+from nachobot_multimodal.utils.model_devices import apply_device_environment  # noqa: E402
 from scripts.tts_public_runtime import resolve_public_python
 
 
@@ -50,6 +51,12 @@ def main() -> None:
     args = parser.parse_args()
 
     engine = resolve_engine(args.config, os.environ.get("NACHOBOT_TTS_ENGINE", ""))
+    apply_device_environment(
+        "tts",
+        config_dir=args.config.parent,
+        base_path=args.config,
+        runtime_profile=os.environ.get("NACHOBOT_TTS_RUNTIME_PROFILE", "gpu"),
+    )
     manager = ADAPTER_ROOT / "scripts" / "tts_runtime_manager.py"
     public_python = resolve_public_python(engine, args.config, platform=os.name)
     command = [

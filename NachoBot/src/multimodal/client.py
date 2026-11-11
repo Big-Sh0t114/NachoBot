@@ -4,10 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import os
 from typing import Any, AsyncIterator, Mapping, Optional
 
 import httpx
+
+from src.common.http_download import (
+    BoundedResponseTooLargeError,
+    read_bounded_response,
+    stream_with_deadline,
+)
 
 from .contracts import (
     AUDIO_TRANSCRIBE_V1,
@@ -32,6 +39,10 @@ from .contracts import (
     encode_base64,
     normalize_operation_payload,
 )
+
+
+MAX_LOCAL_JSON_RESPONSE_BYTES = 1_048_576
+MAX_LOCAL_JSON_ERROR_BYTES = 64 * 1024
 
 
 def _clean_endpoint(value: str | None, default: str) -> str:
@@ -113,64 +124,103 @@ class LocalMultimodalClient:
     ) -> Mapping[str, Any]:
         try:
             client = self._get_http_client()
-            response = await client.request(method, f"{endpoint}{path}", **kwargs)
-            response.raise_for_status()
+            async with stream_with_deadline(
+                client,
+                method,
+                f"{endpoint}{path}",
+                total_timeout=self.timeout,
+                **kwargs,
+            ) as response:
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    status = int(response.status_code)
+                    try:
+                        error_body = await read_bounded_response(
+                            response,
+                            max_bytes=MAX_LOCAL_JSON_ERROR_BYTES,
+                        )
+                    except BoundedResponseTooLargeError:
+                        error_body = None
+
+                    reason = "inference_failure"
+                    if error_body is not None:
+                        try:
+                            error_payload = json.loads(error_body)
+                        except (ValueError, RecursionError):
+                            error_payload = None
+                        if isinstance(error_payload, Mapping):
+                            error = error_payload.get("error")
+                            code = error.get("code") if isinstance(error, Mapping) else None
+                            if isinstance(code, str) and code in {
+                                "busy",
+                                "unsupported",
+                                "runtime_unavailable",
+                                "inference_failure",
+                                "invalid_request",
+                                "not_found",
+                                "sequence_conflict",
+                            }:
+                                reason = code
+
+                    if reason == "inference_failure":
+                        reason = {
+                            400: "invalid_request",
+                            404: "not_found",
+                            409: "sequence_conflict",
+                            501: "unsupported",
+                            503: "runtime_unavailable",
+                        }.get(status, reason)
+                    mapped_status = {
+                        "invalid_request": 400,
+                        "not_found": 404,
+                        "sequence_conflict": 409,
+                        "unsupported": 501,
+                    }.get(reason, 503)
+                    raise LocalPerceptionError(reason, status_code=mapped_status) from exc
+
+                try:
+                    body = await read_bounded_response(
+                        response,
+                        max_bytes=MAX_LOCAL_JSON_RESPONSE_BYTES,
+                    )
+                except BoundedResponseTooLargeError as exc:
+                    raise LocalPerceptionError("inference_failure") from exc
+
+                try:
+                    payload = json.loads(body)
+                except (ValueError, RecursionError) as exc:
+                    raise LocalPerceptionError("inference_failure") from exc
+                if not isinstance(payload, Mapping):
+                    raise LocalPerceptionError("inference_failure")
+                return payload
+        except TimeoutError as exc:
+            raise LocalPerceptionError("timeout") from exc
         except httpx.TimeoutException as exc:
             raise LocalPerceptionError("timeout") from exc
         except httpx.RequestError as exc:
             raise LocalPerceptionError("runtime_unavailable") from exc
-        except httpx.HTTPStatusError as exc:
-            reason = "inference_failure"
-            try:
-                payload = exc.response.json()
-                if isinstance(payload, Mapping) and isinstance(payload.get("error"), Mapping):
-                    code = payload["error"].get("code")
-                    if code in {
-                        "busy",
-                        "unsupported",
-                        "runtime_unavailable",
-                        "inference_failure",
-                        "invalid_request",
-                        "not_found",
-                        "sequence_conflict",
-                    }:
-                        reason = code
-            except (ValueError, TypeError):
-                pass
-            status = int(exc.response.status_code)
-            if reason == "inference_failure":
-                reason = {
-                    400: "invalid_request",
-                    404: "not_found",
-                    409: "sequence_conflict",
-                    501: "unsupported",
-                    503: "runtime_unavailable",
-                }.get(status, reason)
-            mapped_status = {
-                "invalid_request": 400,
-                "not_found": 404,
-                "sequence_conflict": 409,
-                "unsupported": 501,
-            }.get(reason, 503)
-            raise LocalPerceptionError(reason, status_code=mapped_status) from exc
-        payload = response.json()
-        if not isinstance(payload, Mapping):
-            raise RuntimeError("local multimodal runtime returned a non-object response")
-        return payload
 
     async def _request_audio(self, method: str, path: str, **kwargs: Any) -> tuple[bytes, Mapping[str, Any]]:
         """Request bounded binary audio from the public 9880 TTS service."""
 
         url = f"{self.tts_endpoint}{path}"
         client = self._get_http_client()
-        response = await client.request(method, url, **kwargs)
-        response.raise_for_status()
-        content = bytes(response.content)
-        headers = getattr(response, "headers", {})
+        async with stream_with_deadline(
+            client,
+            method,
+            url,
+            total_timeout=self.timeout,
+            **kwargs,
+        ) as response:
+            response.raise_for_status()
+            try:
+                content = await read_bounded_response(response, max_bytes=MAX_AUDIO_BYTES)
+            except BoundedResponseTooLargeError as exc:
+                raise ValueError(f"TTS audio exceeds the {MAX_AUDIO_BYTES} byte bound") from exc
+            headers = getattr(response, "headers", {})
         if not content:
             raise RuntimeError("local TTS runtime returned empty audio")
-        if len(content) > MAX_AUDIO_BYTES:
-            raise ValueError(f"TTS audio exceeds the {MAX_AUDIO_BYTES} byte bound")
         return content, headers
 
     async def health(self) -> Mapping[str, Any]:
@@ -211,12 +261,26 @@ class LocalMultimodalClient:
         }
         payload.update({"metadata": dict(request.metadata)})
         response = await self._request("POST", "/v1/perception", json=payload)
-        text = str(response.get("text") or "").strip()
-        if not text:
-            raise RuntimeError("local multimodal runtime returned empty perception text")
+        response_text = response.get("text")
+        if request.response_schema is not None:
+            # Preserve the local model's complete response for Core's shared
+            # candidate validator. Trimming or truncating here could turn an
+            # invalid oversized response into a valid JSON prefix.
+            if not isinstance(response_text, str):
+                raise RuntimeError("local multimodal runtime returned non-string perception text")
+            text = response_text
+            if not text.strip():
+                raise RuntimeError("local multimodal runtime returned empty perception text")
+        else:
+            # Keep the established caption contract unchanged when validation
+            # was not explicitly requested.
+            text = str(response_text or "").strip()
+            if not text:
+                raise RuntimeError("local multimodal runtime returned empty perception text")
+            text = text[:MAX_TEXT_CHARS]
         return PerceptionResult(
             operation=request.operation,
-            text=text[:MAX_TEXT_CHARS],
+            text=text,
             provider="local",
             metadata=dict(response.get("metadata") or {}),
         )
@@ -227,14 +291,18 @@ class LocalMultimodalClient:
         *,
         platform: str = "core",
         text_lang: Optional[str] = None,
+        ambient_noise: bool = False,
     ) -> TTSResult:
         text = str(text or "").strip()[:MAX_TEXT_CHARS]
         if not text:
             raise ValueError("TTS text is empty")
+        payload = {"text": text, "platform": str(platform or "core")[:64], "text_lang": text_lang}
+        if ambient_noise is True:
+            payload["ambient_noise"] = True
         audio_bytes, headers = await self._request_audio(
             "POST",
             "/api/tts",
-            json={"text": text, "platform": str(platform or "core")[:64], "text_lang": text_lang},
+            json=payload,
         )
         content_type = str(headers.get("content-type", "")).lower()
         audio_format = "wav" if "wav" in content_type or not content_type else content_type.split("/", 1)[-1].split(";", 1)[0]
@@ -277,6 +345,7 @@ class LocalMultimodalClient:
         *,
         platform: str = "core",
         text_lang: Optional[str] = None,
+        ambient_noise: bool = False,
     ) -> AsyncIterator[TTSStreamChunk]:
         """Stream bounded, frame-aligned PCM chunks from the public 9880 API."""
 
@@ -288,6 +357,8 @@ class LocalMultimodalClient:
             "platform": str(platform or "core")[:64],
             "text_lang": text_lang,
         }
+        if ambient_noise is True:
+            payload["ambient_noise"] = True
         audio_started = False
         try:
             async with asyncio.timeout(TTS_STREAM_MAX_DURATION_SECONDS):

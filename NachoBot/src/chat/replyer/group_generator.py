@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, List, Optional, Dict, Any, Tuple
 from ncnk_message import get_system_event, system_event_fallback_text
 from datetime import datetime
 from src.common.logger import get_logger
+from src.common.tool_results import is_tool_error_result
 from src.common.data_models.database_data_model import DatabaseMessages
 from src.common.data_models.info_data_model import ActionPlannerInfo
 from src.common.data_models.llm_data_model import LLMGenerationDataModel
@@ -25,6 +26,7 @@ from src.chat.message_receive.uni_message_sender import UniversalMessageSender
 from src.chat.utils.timer_calculator import Timer  # <--- Import Timer
 from src.chat.utils.utils import get_chat_type_and_target_info
 from src.chat.utils.prompt_builder import global_prompt_manager
+from src.chat.utils.tool_context import build_reply_tool_context
 from src.chat.utils.prompt_variables import get_latest_session_name, render_dynamic_prompt_template
 from src.chat.utils.prompt_injection_guard import build_guardrail_instruction, guard_user_content
 from src.chat.focus.reply_context import ReplyPromptContext
@@ -779,20 +781,13 @@ class DefaultReplyer:
                     if t_res:
                         tool_results.extend(t_res)
 
-            if tool_results or search_info or url_info:
-                tool_info_str = "下面整理了网页和工具查询获得的信息，供你结合当前对话撰写回复时参考：\n"
-                if url_info:
-                    tool_info_str += f"网页浏览获取到的页面内容：\n{url_info}\n"
-                if search_info:
-                    tool_info_str += f"联网搜索找到的信息：\n{search_info}\n"
-                if search_url_info:
-                    tool_info_str += f"从搜索结果页面提取出的正文：\n{search_url_info}\n"
-                for tool_result in tool_results:
-                    content = tool_result.get("content", "")
-
-                    tool_info_str += f"工具查询得到的信息如下：\n{content}\n"
-
-                tool_info_str += "请结合这些实时资料和对话上下文作答。"
+            if tool_results or search_info or url_info or search_url_info:
+                tool_info_str = build_reply_tool_context(
+                    url_info=url_info,
+                    search_info=search_info,
+                    search_url_info=search_url_info,
+                    tool_results=tool_results,
+                )
                 if tool_results:
                     logger.info(f"获取到 {len(tool_results)} 个工具结果")
                 if search_info:
@@ -1088,6 +1083,8 @@ class DefaultReplyer:
         latest_session = get_latest_session_name(chat_stream)
         context_size = global_config.chat.get_max_context_size(is_group_chat=is_group_chat)
         platform = chat_stream.platform
+        runtime_capabilities = runtime_capabilities_from_stream(chat_stream)
+        memory_capabilities = runtime_capabilities_from_stream(chat_stream, message=reply_message)
 
         current_user_info = chat_stream.user_info
         user_id = str(getattr(current_user_info, "user_id", "") or "用户ID")
@@ -1259,6 +1256,30 @@ class DefaultReplyer:
                         planner_question_text = action.get("question")
                     break
 
+        if getattr(memory_capabilities, "memory_retrieval_mode", "standard") == "direct":
+            if reply_message is None or reply_system_event is not None:
+                memory_coro = asyncio.sleep(0, result="")
+            elif reply_user_info is not None or actorless_anonymous:
+                from src.memory_system.dialogue_memory import prepare_direct_dialogue_memory
+
+                memory_coro = prepare_direct_dialogue_memory(
+                    current_message=reply_message,
+                    history_messages=message_list_before_now_long,
+                    chat_stream=chat_stream,
+                    capabilities=memory_capabilities,
+                    allow_anonymous_read_only=actorless_anonymous,
+                )
+            else:
+                memory_coro = asyncio.sleep(0, result="")
+        else:
+            memory_coro = build_memory_retrieval_prompt(
+                message=chat_talking_prompt_short,
+                sender=sender,
+                target=target,
+                chat_stream=chat_stream,
+                question=planner_question_text,
+            )
+
         # 并行执行五个构建任务
         task_results = await asyncio.gather(
             self._time_and_run_task(
@@ -1268,13 +1289,7 @@ class DefaultReplyer:
                 self.build_relation_info(chat_talking_prompt_short, sender, person_list_short), "relation_info"
             ),
             self._time_and_run_task(
-                build_memory_retrieval_prompt(
-                    message=chat_talking_prompt_short,
-                    sender=sender,
-                    target=target,
-                    chat_stream=chat_stream,
-                    question=planner_question_text,
-                ),
+                memory_coro,
                 "memory_block",
             ),
             self._time_and_run_task(
@@ -1348,7 +1363,7 @@ class DefaultReplyer:
         keywords_reaction_prompt = await self.build_keywords_reaction_prompt(target)
 
         tts_language_prompt = ""
-        tts_capabilities = runtime_capabilities_from_stream(chat_stream)
+        tts_capabilities = runtime_capabilities
         tts_selected = tts_capabilities.reply_delivery == "tts_text"
         try:
             from src.plugins.built_in.tts_plugin.plugin import TTSAction
@@ -1709,7 +1724,7 @@ class DefaultReplyer:
             if tool_calls:
                 result = await self.tool_executor.execute_tool_call(tool_calls[0], SearchKnowledgeFromLPMMTool())
                 end_time = time.time()
-                if not result or not result.get("content"):
+                if not result or is_tool_error_result(result) or not result.get("content"):
                     logger.debug("从LPMM知识库获取知识失败，返回空知识...")
                     return ""
                 found_knowledge_from_lpmm = result.get("content", "")

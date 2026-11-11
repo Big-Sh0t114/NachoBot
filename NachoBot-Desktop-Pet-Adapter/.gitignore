@@ -1,0 +1,12 @@
+__pycache__/
+.venv/
+# Keep automated tests and local checks out of Git.
+tests/
+checks/
+resources/
+desktop_pet_state.json
+desktop_pet_chat_state.json
+desktop_pet_chat_history.json
+logs/
+state/
+.pytest_cache/

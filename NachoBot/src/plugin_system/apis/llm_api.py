@@ -62,6 +62,8 @@ async def generate_with_model(
     request_type: str = "plugin.generate",
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
+    *,
+    response_validator: Optional[Callable[[str], None]] = None,
 ) -> Tuple[bool, str, str, str]:
     """使用指定模型生成内容
 
@@ -80,8 +82,11 @@ async def generate_with_model(
 
         llm_request = _request_for(model_config, request_type)
 
+        request_kwargs = {"temperature": temperature, "max_tokens": max_tokens}
+        if response_validator is not None:
+            request_kwargs["response_validator"] = response_validator
         response, (reasoning_content, model_name, _) = await llm_request.generate_response_async(
-            prompt, temperature=temperature, max_tokens=max_tokens
+            prompt, **request_kwargs
         )
         return True, response, reasoning_content, model_name
 
