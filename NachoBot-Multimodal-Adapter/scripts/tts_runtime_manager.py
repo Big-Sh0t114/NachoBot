@@ -45,7 +45,7 @@ os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
 GPT_REF = os.environ.get("NACHOBOT_GPT_SOVITS_REF", "20250606v2pro")
 GPT_REPO = "https://github.com/RVC-Boss/GPT-SoVITS.git"
 PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
-PYTORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu126"
+PYTORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu130"
 TTS_TORCH_RECIPE = "torch213-audio211-triton371-v3"
 TTS_TRITON_WINDOWS_VERSION = "3.7.1.post27"
 
@@ -317,13 +317,17 @@ def torch_index_url() -> str:
         index_kind = _known_pytorch_index_kind(override)
         if index_kind == "cu128":
             raise RuntimeError(
-                "NACHOBOT_TTS_TORCH_INDEX 指向已停用的 cu128 wheel 源；"
-                "请改为官方 cu126 源或 CPU 源后重新启动 TTS Runtime"
+                "PyTorch 2.13.0 没有发布 cu128 wheel；请改用官方 cu130 源或 CPU 源"
             )
-        if profile == "cpu" and index_kind == "cu126":
-            raise RuntimeError("CPU TTS profile 不能使用 cu126 wheel 源，请选择官方 CPU 源")
+        if index_kind == "cu126":
+            raise RuntimeError(
+                "GPU TTS Runtime 已统一升级到 cu130；请移除旧的 cu126 覆盖设置，"
+                "或改用官方 cu130 wheel 源"
+            )
+        if profile == "cpu" and index_kind == "cu130":
+            raise RuntimeError("CPU TTS profile 不能使用 cu130 wheel 源，请选择官方 CPU 源")
         if profile == "gpu" and index_kind == "cpu":
-            raise RuntimeError("GPU TTS profile 不能使用 CPU wheel 源，请选择官方 cu126 源")
+            raise RuntimeError("GPU TTS profile 不能使用 CPU wheel 源，请选择官方 cu130 源")
         return override
     if profile == "cpu":
         return PYTORCH_CPU_INDEX
@@ -341,6 +345,8 @@ def _known_pytorch_index_kind(index_url: str) -> str | None:
         return "cpu"
     if path == "/whl/cu126":
         return "cu126"
+    if path == "/whl/cu130":
+        return "cu130"
     if path == "/whl/cu128":
         return "cu128"
     return None
@@ -360,13 +366,13 @@ def _tts_torch_profile(index_url: str) -> str:
         return explicit
     if _known_pytorch_index_kind(index_url) == "cpu":
         return "cpu"
-    if _known_pytorch_index_kind(index_url) == "cu126":
+    if _known_pytorch_index_kind(index_url) in {"cu126", "cu130"}:
         return "gpu"
     return "gpu" if shutil.which("nvidia-smi") else "cpu"
 
 
 def _tts_torch_versions(profile: str) -> dict[str, str]:
-    suffix = "+cpu" if profile == "cpu" else "+cu126"
+    suffix = "+cpu" if profile == "cpu" else "+cu130"
     return {
         "torch": f"2.13.0{suffix}",
         "torchaudio": f"2.11.0{suffix}",
@@ -379,7 +385,7 @@ def _tts_triton_required(profile: str, backend: str) -> bool:
 
 def _tts_dependency_constraints(runtime_dir: Path, profile: str, backend: str) -> Path:
     versions = _tts_torch_versions(profile)
-    versions["torchvision"] = f"0.28.0{'+cpu' if profile == 'cpu' else '+cu126'}"
+    versions["torchvision"] = f"0.28.0{'+cpu' if profile == 'cpu' else '+cu130'}"
     requirements = [f"{package}=={version}" for package, version in versions.items()]
     if _tts_triton_required(profile, backend):
         requirements.append(f"triton-windows=={TTS_TRITON_WINDOWS_VERSION}")

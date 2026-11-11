@@ -5059,11 +5059,7 @@ class ProcessManager:
             "--port", str(public_port),
             "--backend-port", str(private_port),
         ]
-        torch_index = (
-            "https://download.pytorch.org/whl/cpu"
-            if runtime == "cpu"
-            else "https://download.pytorch.org/whl/cu126"
-        )
+        torch_index = MultimodalRuntimeManager.torch_index_url(runtime)
         return cmd, str(adapter_dir), {
             "NACHOBOT_TTS_TORCH_INDEX": torch_index,
             "NACHOBOT_TTS_RUNTIME_PROFILE": runtime,

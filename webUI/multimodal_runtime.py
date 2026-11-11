@@ -29,6 +29,8 @@ class MultimodalRuntimeManager:
     ADAPTER_DIR = ROOT_DIR / "NachoBot-Multimodal-Adapter"
     RUNTIME_DIR = ADAPTER_DIR / ".runtime"
     VALID_PROFILES = ("gpu", "cpu")
+    CUDA_INDEX = "https://download.pytorch.org/whl/cu130"
+    CPU_INDEX = "https://download.pytorch.org/whl/cpu"
     _installing: set[str] = set()
     VALIDATION_TIMEOUT = 300
     VALIDATION_PROGRESS_INTERVAL = 10
@@ -64,6 +66,12 @@ class MultimodalRuntimeManager:
         if os.name == "nt":
             return env_dir / "Scripts" / "python.exe"
         return env_dir / "bin" / "python"
+
+    @classmethod
+    def torch_index_url(cls, profile: str) -> str:
+        """Return the unified PyTorch index used by the selected environment."""
+        profile = cls.normalize_profile(profile)
+        return cls.CPU_INDEX if profile == "cpu" else cls.CUDA_INDEX
 
     @classmethod
     def _marker_path(cls, profile: str) -> Path:
