@@ -13,7 +13,7 @@ dependencies = [
     "pygame>=2.5",
     "PyOpenGL>=3.1.10,<4",
     "PyOpenGL-accelerate>=3.1.10,<4",
-    "websockets>=11,<17",
+    "websockets>=11,<18",
     "loguru>=0.7,<1",
     "pywin32>=306; sys_platform == 'win32'",
 ]
