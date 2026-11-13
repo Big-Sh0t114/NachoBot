@@ -180,7 +180,7 @@ numpy==2.5.4 ; python_full_version >= '3.12'
     #   scipy
 openai==2.54.0
     # via nachobot
-opentelemetry-api==1.45.1
+opentelemetry-api==1.45.2
     # via mcp
 packaging==26.3
     # via
