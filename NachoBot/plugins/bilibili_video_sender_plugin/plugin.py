@@ -2617,6 +2617,26 @@ class BilibiliAutoSendHandler(BaseEventHandler):
             return self._make_return_value(True, True, "视频下载失败")
 
         self._logger.debug(f"Video download completed: {temp_path}")
+        max_video_size_mb = self.get_config("bilibili.max_video_size_mb", 100)
+        enable_compression = self.get_config("bilibili.enable_video_compression", True)
+        if not enable_compression:
+            video_size_bytes = os.path.getsize(temp_path)
+            max_video_size_bytes = max_video_size_mb * 1024 * 1024
+            if video_size_bytes > max_video_size_bytes:
+                self._logger.info(
+                    f"Video size ({video_size_bytes} bytes) exceeds configured limit "
+                    f"({max_video_size_mb} MB) while compression is disabled; discarding download."
+                )
+                try:
+                    os.remove(temp_path)
+                except Exception as exc:
+                    self._logger.warning(f"Failed to delete oversized temporary file: {exc}")
+
+                await self._send_text(
+                    f"视频太大，超过{max_video_size_mb} MB，猫猫搬不动啦(；´-ω-)", stream_id
+                )
+                return self._make_return_value(True, True, "视频过大，已丢弃")
+
         caption = f"{info.title}"
 
         # 检查视频时长，决定是否需要分块
@@ -2630,8 +2650,6 @@ class BilibiliAutoSendHandler(BaseEventHandler):
         # 从配置读取相关设置
         enable_splitting = self.get_config("bilibili.enable_video_splitting", True)
         delete_original = self.get_config("bilibili.delete_original_after_split", True)
-        max_video_size_mb = self.get_config("bilibili.max_video_size_mb", 100)
-        enable_compression = self.get_config("bilibili.enable_video_compression", True)
         compression_quality = self.get_config("bilibili.compression_quality", 23)
 
         self._logger.debug(
@@ -3040,9 +3058,15 @@ class BilibiliVideoSenderPlugin(BasePlugin):
                 type=int, default=10, description="视频时长上限（分钟）；设为0表示不限制视频时长"
             ),
             "max_video_size_mb": ConfigField(
-                type=int, default=100, description="视频文件大小限制（MB），超过此大小将进行压缩或分割"
+                type=int,
+                default=100,
+                description="视频文件大小上限（MB）；关闭压缩时超过此大小会拒绝发送，1 MB按1024×1024字节计算",
             ),
-            "enable_video_compression": ConfigField(type=bool, default=True, description="是否启用视频压缩功能"),
+            "enable_video_compression": ConfigField(
+                type=bool,
+                default=True,
+                description="启用时沿用原分片/压缩流程；关闭时超过max_video_size_mb会丢弃并提示",
+            ),
             "compression_quality": ConfigField(
                 type=int, default=23, description="视频压缩质量 (1-51，数值越小质量越高，推荐18-28)"
             ),

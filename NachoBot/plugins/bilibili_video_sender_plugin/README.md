@@ -14,8 +14,9 @@ enabled = true
 
 [bilibili]
 max_video_duration_minutes = 10 # 0 表示关闭时长预检
+max_video_size_mb = 100 # 按 1 MB = 1024×1024 字节计算
 enable_video_splitting = true
-enable_video_compression = true
+enable_video_compression = true # false 时超限丢弃并提示；true 时沿用原分片/压缩流程
 compression_quality = 28
 
 [wsl]
@@ -28,7 +29,8 @@ enable_path_conversion = false
 
 - 先解析 BV/AV/短链或平台已解析的卡片信息。
 - 在下载前按 `max_video_duration_minutes` 拒绝过长视频。
-- 优先 DASH，按账号权限选择画质；文件过大时可压缩或分片。
+- 优先 DASH，按账号权限选择画质。超过 `max_video_size_mb` 的文件在下载后按开关处理：`enable_video_compression = false` 时删除临时文件、发送过大提示并拒绝发送；设为 `true` 时沿用原分片/压缩流程。
+- 文件大小严格超过阈值时才触发；恰好等于阈值仍会进入原发送流程。这里 `1 MB = 1024 × 1024` 字节。
 - FFmpeg / FFprobe 由 `static-ffmpeg` 获取，不再随插件提交整套二进制目录。
 - 可自动检测 NVENC、QSV、AMF、VideoToolbox，失败时回退 `libx264`。
 

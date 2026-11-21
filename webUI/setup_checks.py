@@ -56,7 +56,7 @@ DEFAULT_PORTS: dict[str, int] = {
 
 # Keep official component links in one place so setup status and path cards
 # cannot drift from the launcher guidance.
-NAPCAT_RELEASE_URL = "https://github.com/NapNeko/NapCatQQ/releases"
+NAPCAT_RELEASE_URL = "https://web.archive.org/web/20260917000852/https://github.com/NapNeko/NapCatQQ/releases"
 
 
 # =========================================================================
@@ -460,6 +460,7 @@ class EnvironmentChecker:
         except ImportError:  # pragma: no cover - script context
             from gpu_devices import detect_gpu_inventory, summarize_gpu_inventory
         return summarize_gpu_inventory(detect_gpu_inventory())
+
 
 # =========================================================================
 # Backup Manager

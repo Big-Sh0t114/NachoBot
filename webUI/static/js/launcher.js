@@ -244,7 +244,7 @@ const LauncherModule = (() => {
         // request their own fresh snapshot immediately.
         pollInterval = setInterval(() => {
             if (document.getElementById('tab-launcher')?.classList.contains('active')) {
-                void refreshAdapterGroups().catch(() => {});
+                void refreshAdapterGroups().catch(() => { });
             }
         }, 60_000);
         detailsPollInterval = setInterval(() => {
@@ -255,7 +255,7 @@ const LauncherModule = (() => {
         document.addEventListener('visibilitychange', () => {
             if (!document.hidden
                 && document.getElementById('tab-launcher')?.classList.contains('active')) {
-                void refreshAdapterGroups({ requireFresh: true }).catch(() => {});
+                void refreshAdapterGroups({ requireFresh: true }).catch(() => { });
             }
         });
     }
@@ -1111,7 +1111,7 @@ const LauncherModule = (() => {
             missing: ['状态尚未刷新'],
             download_url: adapter === 'snowluma'
                 ? 'https://web.archive.org/web/20261030125825/https://github.com/SnowLuma/SnowLuma/releases'
-                : 'https://github.com/NapNeko/NapCatQQ/releases',
+                : 'https://web.archive.org/web/20260917000852/https://github.com/NapNeko/NapCatQQ/releases',
         };
     }
 
@@ -1136,13 +1136,13 @@ const LauncherModule = (() => {
         return `
             <div class="snowluma-process-list">
                 ${snowlumaProcesses.map(raw => {
-                    const process = normalizeSnowLumaProcess(raw);
-                    if (!process.pid) return '';
-                    const account = process.uin || '未登录/未知';
-                    const state = process.status || (process.loggedIn ? '已登录' : '未知');
-                    const action = process.injected ? 'unload' : 'load';
-                    const actionLabel = process.injected ? '解除注入' : '注入';
-                    return `
+            const process = normalizeSnowLumaProcess(raw);
+            if (!process.pid) return '';
+            const account = process.uin || '未登录/未知';
+            const state = process.status || (process.loggedIn ? '已登录' : '未知');
+            const action = process.injected ? 'unload' : 'load';
+            const actionLabel = process.injected ? '解除注入' : '注入';
+            return `
                         <div class="snowluma-process-row" data-snowluma-pid="${process.pid}">
                             <div class="snowluma-process-main">
                                 <strong>${escapeHtml(process.name)}</strong>
@@ -1156,7 +1156,7 @@ const LauncherModule = (() => {
                             </div>
                         </div>
                     `;
-                }).join('')}
+        }).join('')}
             </div>
         `;
     }
@@ -1178,20 +1178,20 @@ const LauncherModule = (() => {
             : control.allExternalReady
                 ? ['running', '外部运行中']
                 : errCount > 0
-            ? ['error', '错误']
-            : anyStarting
-                ? ['starting', '启动中']
-                : anyStopping
-                    ? ['partial', '停止中']
-                    : runCount === services.length && services.length
-                        ? ['running', '运行中']
-                        : runCount > 0
-                            ? ['partial', `${runCount}/${services.length}`]
-                            : ['stopped', '已停止'];
+                    ? ['error', '错误']
+                    : anyStarting
+                        ? ['starting', '启动中']
+                        : anyStopping
+                            ? ['partial', '停止中']
+                            : runCount === services.length && services.length
+                                ? ['running', '运行中']
+                                : runCount > 0
+                                    ? ['partial', `${runCount}/${services.length}`]
+                                    : ['stopped', '已停止'];
         const downloadUrl = component.download_url || (
             adapter === 'snowluma'
                 ? 'https://web.archive.org/web/20261030125825/https://github.com/SnowLuma/SnowLuma/releases'
-                : 'https://github.com/NapNeko/NapCatQQ/releases'
+                : 'https://web.archive.org/web/20260917000852/https://github.com/NapNeko/NapCatQQ/releases'
         );
         const missing = Array.isArray(component.missing) ? component.missing : [];
         const installed = component.installed === true;
@@ -1394,7 +1394,7 @@ const LauncherModule = (() => {
         refresh = refreshSnowLumaProcesses,
     ) {
         schedule(() => {
-            void refresh(card, true).catch(() => {});
+            void refresh(card, true).catch(() => { });
         }, SNOWLUMA_UNLOAD_RECONCILIATION_DELAY_MS);
     }
 
