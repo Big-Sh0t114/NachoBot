@@ -27,6 +27,8 @@ MAX_UPLOAD_BYTES = 1 * 1024 * 1024
 MAX_TEXT_BYTES = 512 * 1024
 REVISION_CHUNK_BYTES = 64 * 1024
 _SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_WINDOWS_RESERVED = re.compile(r"^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$", re.IGNORECASE)
+_INTERNAL_ROOTS = frozenset({".staging", ".transactions", ".tasks", ".outbox"})
 
 
 class SandboxPathError(ValueError):
@@ -45,7 +47,7 @@ def validate_identifier(value: object, label: str = "identifier") -> str:
 def validate_relative_path(value: object, *, allow_empty: bool = False) -> str:
     """Return a slash-normalised relative path or reject traversal/absolute paths."""
 
-    text = str(value or "").strip()
+    text = str(value or "")
     if not text:
         if allow_empty:
             return ""
@@ -63,8 +65,12 @@ def validate_relative_path(value: object, *, allow_empty: bool = False) -> str:
             return ""
         raise SandboxPathError("path is required")
     for part in parts:
-        if "\x00" in part:
-            raise SandboxPathError("NUL is forbidden")
+        if any(ord(char) < 32 or char in '<>:"|?*' for char in part):
+            raise SandboxPathError("control and reserved Windows path characters are forbidden")
+        if part.endswith((".", " ")) or _WINDOWS_RESERVED.fullmatch(part):
+            raise SandboxPathError("reserved or ambiguous path component")
+        if part.lower() in _INTERNAL_ROOTS:
+            raise SandboxPathError("internal sandbox storage is not model-visible")
     return "/".join(parts)
 
 
@@ -211,6 +217,10 @@ class SandboxManager:
         self.storage_root = Path(self.base_path)
         self._locks: Dict[str, threading.RLock] = {}
         self._manager_lock = threading.RLock()
+        # Transaction journals are owned by one application process. This
+        # lock serializes that process; the jobs runtime must enforce one
+        # storage owner across processes.
+        self._transaction_lock = threading.RLock()
 
     def _lock_for(self, key: str) -> threading.RLock:
         with self._manager_lock:
@@ -218,6 +228,12 @@ class SandboxManager:
 
     def mutation_lock(self, scope: SandboxScope) -> threading.RLock:
         return self._lock_for(scope.key)
+
+    def _assert_scope_mutable(self, scope: SandboxScope) -> None:
+        for handoff_id in self.recover_transactions():
+            record = self.transaction_record(handoff_id)
+            if record is not None and record.get("scope", {}).get("key") == scope.key:
+                raise RuntimeError("sandbox mutation blocked by unresolved transaction conflict")
 
     def get_scope(
         self,
@@ -272,31 +288,33 @@ class SandboxManager:
         actor_id: str,
     ) -> str:
         scope = self.get_scope(stream_id=stream_id, platform=platform, group_id=group_id, actor_id=actor_id)
-        with self.mutation_lock(scope):
-            if len(file_data) > MAX_UPLOAD_BYTES:
-                raise ValueError("file exceeds 1MB limit")
-            # Revalidate roots inside the mutation lock so a concurrent
-            # replacement of a group/platform/actor directory cannot redirect
-            # the upload between scope creation and the write.
-            scope.ensure()
-            safe_filename = Path(validate_relative_path(filename)).name
-            stem, suffix = Path(safe_filename).stem, Path(safe_filename).suffix
-            candidate = safe_filename
-            counter = 1
-            while True:
+        with self._transaction_lock:
+            self._assert_scope_mutable(scope)
+            with self.mutation_lock(scope):
+                if len(file_data) > MAX_UPLOAD_BYTES:
+                    raise ValueError("file exceeds 1MB limit")
+                # Revalidate roots inside the mutation lock so a concurrent
+                # replacement of a group/platform/actor directory cannot redirect
+                # the upload between scope creation and the write.
+                scope.ensure()
+                safe_filename = Path(validate_relative_path(filename)).name
+                stem, suffix = Path(safe_filename).stem, Path(safe_filename).suffix
+                candidate = safe_filename
+                counter = 1
+                while True:
+                    file_path = scope.path_for_write(candidate)
+                    if not file_path.exists():
+                        break
+                    candidate = f"{stem}_{counter}{suffix}"
+                    counter += 1
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+                self._check_storage_path(file_path.parent)
                 file_path = scope.path_for_write(candidate)
-                if not file_path.exists():
-                    break
-                candidate = f"{stem}_{counter}{suffix}"
-                counter += 1
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            self._check_storage_path(file_path.parent)
-            file_path = scope.path_for_write(candidate)
-            with file_path.open("xb") as handle:
-                handle.write(file_data)
-            absolute_path = str(file_path.absolute())
-            logger.info("已将文件“%s”保存到当前沙盒", candidate)
-            return absolute_path
+                with file_path.open("xb") as handle:
+                    handle.write(file_data)
+                absolute_path = str(file_path.absolute())
+                logger.info("已将文件“%s”保存到当前沙盒", candidate)
+                return absolute_path
 
     def make_staging_dir(self, handoff_id: str) -> Path:
         safe = validate_identifier(handoff_id, "handoff_id")
@@ -326,6 +344,34 @@ class SandboxManager:
                 shutil.rmtree(path)
         except (OSError, ValueError) as exc:
             logger.warning("sandbox staging cleanup failed: %s", exc)
+
+    def commit_staged(
+        self,
+        scope: SandboxScope,
+        handoff: object,
+        staging_dir: Path,
+        paths: object,
+        source_revision: str,
+    ) -> tuple[str, ...]:
+        """Commit a complete staged batch through a recoverable journal."""
+
+        from src.chat.sandbox.sandbox_transaction import commit_staged
+
+        return commit_staged(self, scope, handoff, staging_dir, paths, source_revision)
+
+    def recover_transactions(self) -> tuple[str, ...]:
+        """Roll back interrupted batches; return handoffs still blocked by conflicts."""
+
+        from src.chat.sandbox.sandbox_transaction import recover_transactions
+
+        return recover_transactions(self)
+
+    def transaction_record(self, handoff_id: str) -> Optional[dict[str, object]]:
+        """Return a validated durable commit record for outbox reconciliation."""
+
+        from src.chat.sandbox.sandbox_transaction import transaction_record
+
+        return transaction_record(self, handoff_id)
 
     def _iter_files(self, root: Path) -> Iterator[Path]:
         if not root.exists():
@@ -381,7 +427,7 @@ class SandboxManager:
             if (
                 not session_dir.is_dir()
                 or _is_reparse_or_symlink(session_dir)
-                or session_dir.name in {"groups", ".staging"}
+                or session_dir.name in {"groups", *_INTERNAL_ROOTS}
             ):
                 continue
             try:

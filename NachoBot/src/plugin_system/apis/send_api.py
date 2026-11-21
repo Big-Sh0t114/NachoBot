@@ -309,6 +309,7 @@ async def _send_to_target_receipt_permitted(
     wait_for_platform_ack: bool = False,
     ack_timeout: float = 300.0,
     use_scoped_reply_anchor: bool = True,
+    structured_reply_request_id: Optional[str] = None,
 ) -> SendReceipt:
     """向指定目标发送消息的内部实现
 
@@ -354,6 +355,20 @@ async def _send_to_target_receipt_permitted(
         if text_data is not None and _should_suppress_reply_by_policy(target_stream, text_data):
             logger.info("[SendAPI] 本次回复已被适配器回复策略抑制")
             return SendReceipt(SendStatus.SUPPRESSED, stream_id, detail="reply_policy")
+
+        if structured_reply_request_id is not None and message_segment.type == "text":
+            # Keep plain-text filtering and adapter suppression ahead of this
+            # sandbox-only protocol projection.
+            message_segment = Seg(
+                type="structured_reply",
+                data={
+                    "schema_version": 1,
+                    "request_id": structured_reply_request_id,
+                    "status": "ok",
+                    "text": str(message_segment.data),
+                    "controls": {},
+                },
+            )
 
         # 创建发送器
         message_sender = UniversalMessageSender()
@@ -749,6 +764,18 @@ async def background_text_to_stream_receipt(
     :func:`text_to_stream_receipt` instead.
     """
 
+    structured_reply_request_id: Optional[str] = None
+    if reply_message is not None:
+        from src.chat.runtime_capabilities import runtime_capabilities_from_message
+
+        if runtime_capabilities_from_message(reply_message).reply_delivery == "structured_reply":
+            # This is a literal background report, not model-produced protocol
+            # JSON. Only the exact source message's declared capability selects
+            # the envelope, and the request ID remains that source's ID.
+            source_message_id = getattr(reply_message, "message_id", None)
+            if source_message_id is not None and str(source_message_id):
+                structured_reply_request_id = str(source_message_id)
+
     return await _send_to_target_receipt_permitted(
         message_segment=Seg(type="text", data=text),
         stream_id=stream_id,
@@ -760,6 +787,7 @@ async def background_text_to_stream_receipt(
         # Background delivery may use only its explicit, validated DB source;
         # never substitute a task's inherited command scope when lookup failed.
         use_scoped_reply_anchor=False,
+        structured_reply_request_id=structured_reply_request_id,
     )
 
 

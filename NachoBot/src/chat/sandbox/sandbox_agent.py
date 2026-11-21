@@ -9,12 +9,12 @@ publication.
 from __future__ import annotations
 
 import asyncio
+import bisect
 import copy
 import hashlib
 import inspect
 import json
 import re
-import shutil
 import threading
 from collections import deque
 from dataclasses import dataclass
@@ -51,7 +51,7 @@ class SandboxAgentOutcome(str, Enum):
 
 _OUTCOME_LABELS = {
     SandboxAgentOutcome.FINALIZED: "已完成",
-    SandboxAgentOutcome.PUBLICATION_FAILED: "文件已修改但投递失败",
+    SandboxAgentOutcome.PUBLICATION_FAILED: "文件已修改，附件送达未确认",
     SandboxAgentOutcome.NO_FINALIZE: "未完成最终确认",
     SandboxAgentOutcome.BUDGET_EXHAUSTED: "达到处理上限",
     SandboxAgentOutcome.DUPLICATE_STALL: "重复操作导致中止",
@@ -76,6 +76,7 @@ _TOOL_LABELS = {
     "read_text": "读取文本",
     "search_text": "搜索文本",
     "write_text": "写入文本",
+    "apply_patch": "精确补丁",
     "CALL_BACK": "向用户追问",
     "finalize": "确认完成",
 }
@@ -96,6 +97,8 @@ class SandboxErrorCode(str, Enum):
     PROVIDER_REJECTION = "provider_rejection"
     NO_OBSERVATION = "no_observation"
     INVALID_RESPONSE = "invalid_response"
+    STALE_CONTENT = "stale_content"
+    AMBIGUOUS_PATCH = "ambiguous_patch"
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,7 +174,7 @@ _DEFAULT_AGENT_CONFIG = SandboxAgentConfig()
 
 _TERMINAL_FALLBACK_TEXT = {
     SandboxAgentOutcome.FINALIZED: "唔…猫猫已经把文件任务处理好啦",
-    SandboxAgentOutcome.PUBLICATION_FAILED: "唔…文件已经改好了，可是附件投递出了问题，猫猫没能送到你这里(´･ω･`)",
+    SandboxAgentOutcome.PUBLICATION_FAILED: "唔…文件已经改好了，但附件送达结果还没确认。请先检查目标聊天里的附件，再决定是否重试(´･ω･`)",
     SandboxAgentOutcome.TIMEOUT: "唔…猫猫等太久了，这次文件操作没完成(´･ω･`)",
     SandboxAgentOutcome.MODEL_ERROR: "唔…猫猫这次没能把文件操作完成，可能是模型出了点问题，摸摸",
     SandboxAgentOutcome.NO_FINALIZE: "唔…猫猫还没拿到可以交付的文件结果，这次操作没完成",
@@ -225,6 +228,18 @@ _ABSOLUTE_PATH_IN_TEXT = re.compile(
     r"(?<![A-Za-z0-9_])(?:[A-Za-z]:[\\/]|\\\\|/)(?:[^\s<>\"']+)",
 )
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_TEXT_LINE_BREAK = re.compile(rb"\r\n|\r|\n")
+_SHA256_HEX = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+def _byte_line_starts(data: bytes) -> List[int]:
+    starts = [0]
+    starts.extend(match.end() for match in _TEXT_LINE_BREAK.finditer(data))
+    return starts
+
+
+def _line_number_at(starts: Sequence[int], byte_offset: int) -> int:
+    return max(1, bisect.bisect_right(starts, byte_offset))
 
 
 def _redact_sandbox_text(value: Any, handoff: SandboxEditHandoff) -> str:
@@ -287,7 +302,7 @@ class _StreamBufferOverflow(Exception):
 class SandboxProvider:
     """Bounded list/read/search/write/finalize provider for one handoff."""
 
-    TOOL_NAMES = ("list_tree", "read_text", "search_text", "write_text", "CALL_BACK", "finalize")
+    TOOL_NAMES = ("list_tree", "read_text", "search_text", "write_text", "apply_patch", "CALL_BACK", "finalize")
 
     def __init__(
         self,
@@ -376,14 +391,21 @@ class SandboxProvider:
             {
                 "name": "read_text",
                 "description": (
-                    "Read a UTF-8 text file at a sandbox-relative path. Use an empty string only "
-                    "for a readable-root listing; never use absolute, dot, or traversal paths. "
-                    "Group reads use group-visible paths. Binary files are unsupported."
+                    "Read a UTF-8 text file page at a sandbox-relative path. Use start_line (1-based) "
+                    "and max_lines for normal paging; continue a partial long line with the returned "
+                    "byte_offset and next_line. Every page reports the exact current-byte sha256, "
+                    "complete/truncated, and next_line. Binary files are unsupported."
                 ),
                 "input_schema": {
                     "type": "object",
                     "required": ["path"],
-                    "properties": {"path": {"type": "string"}},
+                    "properties": {
+                        "path": {"type": "string"},
+                        "start_line": {"type": "integer", "minimum": 1},
+                        "max_lines": {"type": "integer", "minimum": 1},
+                        "byte_offset": {"type": "integer", "minimum": 0},
+                        "max_bytes": {"type": "integer", "minimum": 1},
+                    },
                 },
             },
             {
@@ -396,7 +418,12 @@ class SandboxProvider:
                 "input_schema": {
                     "type": "object",
                     "required": ["query"],
-                    "properties": {"query": {"type": "string"}, "path": {"type": "string"}},
+                    "properties": {
+                        "query": {"type": "string"},
+                        "path": {"type": "string"},
+                        "cursor": {"type": "integer", "minimum": 0},
+                        "max_results": {"type": "integer", "minimum": 1},
+                    },
                 },
             },
             {
@@ -411,6 +438,24 @@ class SandboxProvider:
                     "type": "object",
                     "required": ["path", "content"],
                     "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+                },
+            },
+            {
+                "name": "apply_patch",
+                "description": (
+                    "Stage a precise text replacement after reading the file. expected_sha256 is "
+                    "required and must match the exact current source or staged bytes. old_text must "
+                    "occur exactly once; untouched bytes and line endings are preserved."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "required": ["path", "old_text", "new_text", "expected_sha256"],
+                    "properties": {
+                        "path": {"type": "string"},
+                        "old_text": {"type": "string"},
+                        "new_text": {"type": "string"},
+                        "expected_sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+                    },
                 },
             },
             {
@@ -471,6 +516,27 @@ class SandboxProvider:
         if len(text.encode("utf-8")) > self.config.max_text_bytes:
             raise ValueError("text exceeds sandbox observation/write limit")
         return text
+
+    def _observation_limit(self) -> int:
+        return max(1, int(self.config.observation_max_chars))
+
+    def _staged_overlay_digest(self) -> str:
+        digest = hashlib.sha256()
+        for item in sorted(self.staging_dir.rglob("*"), key=lambda path: path.as_posix()):
+            if not item.is_file() or _is_reparse_or_symlink(item):
+                continue
+            self.manager._check_storage_path(item)
+            relative = item.relative_to(self.staging_dir).as_posix()
+            digest.update(relative.encode("utf-8", "strict"))
+            digest.update(b"\x00")
+            digest.update(item.stat().st_size.to_bytes(8, "big"))
+            with item.open("rb") as handle:
+                while True:
+                    chunk = handle.read(64 * 1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+        return digest.hexdigest()
 
     def _write_relative_path(self, path: Any) -> str:
         """Normalize a model path to actor-relative staging coordinates.
@@ -591,15 +657,25 @@ class SandboxProvider:
         self._successful_read_observation = True
         return {"ok": True, "entries": entries, "truncated": len(entries) >= self.config.max_entries}
 
-    def read_text(self, path: Any) -> Dict[str, Any]:
+    def read_text(
+        self,
+        path: Any,
+        start_line: Any = None,
+        max_lines: Any = None,
+        byte_offset: Any = None,
+        max_bytes: Any = None,
+    ) -> Dict[str, Any]:
         try:
             relative = validate_relative_path(path)
         except SandboxPathError as exc:
             return self._error_result(SandboxErrorCode.INVALID_PATH, str(exc))
-        args = {"path": relative}
-        duplicate = self._duplicate("read_text", args)
-        if duplicate:
-            return duplicate
+        args = {
+            "path": relative,
+            "start_line": start_line,
+            "max_lines": max_lines,
+            "byte_offset": byte_offset,
+            "max_bytes": max_bytes,
+        }
         # A staged actor file is the newest observation for that path.
         try:
             staged = self._staged_path_for_read(relative)
@@ -610,8 +686,9 @@ class SandboxProvider:
                     "symlink or reparse-point read unsupported",
                 )
             if source.stat().st_size > self.config.max_text_bytes:
-                return self._error_result(SandboxErrorCode.SIZE_LIMIT, "text exceeds observation limit")
-            data = source.read_bytes()
+                return self._error_result(SandboxErrorCode.SIZE_LIMIT, "text exceeds sandbox read limit", path=relative)
+            with source.open("rb") as handle:
+                data = handle.read(self.config.max_text_bytes + 1)
         except FileNotFoundError:
             return self._error_result(SandboxErrorCode.MISSING_FILE, "file not found")
         except SandboxPathError as exc:
@@ -619,18 +696,86 @@ class SandboxProvider:
         except OSError:
             return self._error_result(SandboxErrorCode.PROVIDER_REJECTION, "sandbox provider rejected read")
         if len(data) > self.config.max_text_bytes:
-            return self._error_result(SandboxErrorCode.SIZE_LIMIT, "text exceeds observation limit")
+            return self._error_result(SandboxErrorCode.SIZE_LIMIT, "text exceeds sandbox read limit", path=relative)
+        args["current_sha256"] = hashlib.sha256(data).hexdigest()
+        duplicate = self._duplicate("read_text", args, revision_sensitive=False)
+        if duplicate:
+            return duplicate
         try:
-            content = data.decode("utf-8")
-            self._successful_read_observation = True
-            return {"ok": True, "path": relative, "content": content}
+            data.decode("utf-8")
         except UnicodeDecodeError:
             return self._error_result(
                 SandboxErrorCode.UNSUPPORTED_TEXT,
                 "binary or non-UTF-8 file; text read unsupported",
             )
 
-    def search_text(self, query: Any, path: Any = "") -> Dict[str, Any]:
+        starts = _byte_line_starts(data)
+        try:
+            if start_line is not None and (isinstance(start_line, bool) or int(start_line) < 1):
+                raise ValueError("start_line must be a positive 1-based line number")
+            if byte_offset is not None and (isinstance(byte_offset, bool) or int(byte_offset) < 0):
+                raise ValueError("byte_offset must be a non-negative UTF-8 byte offset")
+            if max_lines is not None and (isinstance(max_lines, bool) or int(max_lines) < 1):
+                raise ValueError("max_lines must be positive")
+            if max_bytes is not None and (isinstance(max_bytes, bool) or int(max_bytes) < 1):
+                raise ValueError("max_bytes must be positive")
+            requested_line = int(start_line) if start_line is not None else None
+            if byte_offset is None:
+                line = requested_line or 1
+                if line > len(starts):
+                    raise ValueError("start_line is beyond end of file")
+                offset = starts[line - 1]
+            else:
+                offset = int(byte_offset)
+                if offset > len(data):
+                    raise ValueError("byte_offset is beyond end of file")
+                # A continuation offset must be a UTF-8 character boundary.
+                data[:offset].decode("utf-8")
+                line = _line_number_at(starts, offset)
+                if requested_line is not None and requested_line != line:
+                    raise ValueError("start_line does not match byte_offset")
+            lines_per_page = min(max(1, int(max_lines or 100)), max(1, self.config.max_entries))
+            line_end_index = line - 1 + lines_per_page
+            line_end = starts[line_end_index] if line_end_index < len(starts) else len(data)
+            default_bytes = max(1, (max(1, self._observation_limit() - 512)) // 6)
+            byte_limit = max(1, min(int(max_bytes or default_bytes), default_bytes, self.config.max_text_bytes))
+            end = min(len(data), line_end, offset + byte_limit)
+            # The page is at most one sixth of the observation budget in raw
+            # bytes, so even JSON-escaped control characters fit with metadata.
+            while end > offset:
+                try:
+                    content = data[offset:end].decode("utf-8")
+                    break
+                except UnicodeDecodeError as exc:
+                    if exc.start < len(data[offset:end]) - 4:
+                        raise
+                    end -= 1
+            else:
+                content = ""
+            if end == offset and offset < len(data):
+                raise ValueError("max_bytes is too small for the next UTF-8 character; increase max_bytes")
+            complete = end >= len(data)
+            result = {
+                "ok": True,
+                "path": relative,
+                "content": content,
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "start_line": line,
+                "next_line": None if complete else _line_number_at(starts, end),
+                "complete": complete,
+                "truncated": not complete,
+            }
+            if not complete:
+                result["next_byte_offset"] = end
+            serialized_size = len(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+            if serialized_size > self._observation_limit():
+                raise ValueError("observation budget is too small for a text page; increase observation_max_chars")
+        except (ValueError, UnicodeDecodeError, OverflowError) as exc:
+            return self._error_result(SandboxErrorCode.SIZE_LIMIT, str(exc), path=relative)
+        self._successful_read_observation = True
+        return result
+
+    def search_text(self, query: Any, path: Any = "", cursor: Any = 0, max_results: Any = None) -> Dict[str, Any]:
         query_text = str(query or "")
         if not query_text or len(query_text) > 512:
             return self._error_result(SandboxErrorCode.PROVIDER_REJECTION, "query is empty or too long")
@@ -639,31 +784,222 @@ class SandboxProvider:
             root = self.scope.path_for_read(safe_path)
         except SandboxPathError as exc:
             return self._error_result(self._path_error_code(exc), str(exc))
-        args = {"query": query_text, "path": safe_path}
+        try:
+            if isinstance(cursor, bool) or int(cursor) < 0:
+                raise ValueError
+            cursor_number = int(cursor)
+            requested_results = 12 if max_results is None else int(max_results)
+            if isinstance(max_results, bool) or requested_results < 1:
+                raise ValueError
+        except (TypeError, ValueError, OverflowError):
+            return self._error_result(SandboxErrorCode.PROVIDER_REJECTION, "cursor and max_results must be positive integers")
+        page_size = min(requested_results, max(1, min(40, self.config.max_entries)))
+        args = {
+            "query": query_text,
+            "path": safe_path,
+            "cursor": cursor_number,
+            "max_results": page_size,
+            "staged_overlay_sha256": self._staged_overlay_digest(),
+        }
         duplicate = self._duplicate("search_text", args)
         if duplicate:
             return duplicate
         if not root.exists():
             return self._error_result(SandboxErrorCode.MISSING_PATH, "path not found")
         matches: List[Dict[str, Any]] = []
+        snippets: List[Dict[str, Any]] = []
+        matching_files: Dict[str, int] = {}
+        match_index = 0
+        total_snippets = 0
+        truncated_files = False
+        visible_files: Dict[str, Path] = {}
         iterator = root.rglob("*") if root.is_dir() else (root,)
         for item in iterator:
-            if len(matches) >= self.config.max_entries or not item.is_file() or _is_reparse_or_symlink(item):
+            if item.is_file() and not _is_reparse_or_symlink(item):
+                try:
+                    visible_files[item.relative_to(self.scope.read_root).as_posix()] = item
+                except ValueError:
+                    continue
+        for item in self.staging_dir.rglob("*"):
+            if not item.is_file() or _is_reparse_or_symlink(item):
                 continue
             try:
-                stat_result = item.stat()
-                if stat_result.st_size > self.config.max_text_bytes:
+                self.manager._check_storage_path(item)
+                stage_relative = item.relative_to(self.staging_dir).as_posix()
+                relative = f"{self.scope.actor_id}/{stage_relative}" if self.scope.is_group else stage_relative
+                if safe_path and relative != safe_path and not relative.startswith(safe_path + "/"):
                     continue
-                relative = item.relative_to(self.scope.read_root).as_posix()
+                visible_files[relative] = item
+            except ValueError:
+                continue
+        for relative, item in sorted(visible_files.items()):
+            try:
                 self.scope.path_for_read(relative)
-                data = item.read_bytes()
+                source = item
+                if not item.is_relative_to(self.staging_dir):
+                    staged = self._staged_path_for_read(relative)
+                    source = staged if staged.is_file() and not _is_reparse_or_symlink(staged) else item
+                if source.stat().st_size > self.config.max_text_bytes:
+                    continue
+                with source.open("rb") as handle:
+                    data = handle.read(self.config.max_text_bytes + 1)
+                if len(data) > self.config.max_text_bytes:
+                    continue
                 text = data.decode("utf-8")
             except (OSError, UnicodeDecodeError, SandboxPathError):
                 continue
-            if query_text in text:
-                matches.append({"path": relative, "count": text.count(query_text)})
+            file_count = 0
+            for line_number, line_text in enumerate(text.splitlines(), 1):
+                count = line_text.count(query_text)
+                if not count:
+                    continue
+                file_count += count
+                total_snippets += 1
+                if cursor_number <= match_index < cursor_number + page_size:
+                    position = line_text.find(query_text)
+                    start = max(0, position - 80)
+                    snippet = line_text[start : start + 200]
+                    snippet = _CONTROL_CHARS.sub(" ", snippet)
+                    snippets.append(
+                        {
+                            "path": relative,
+                            "line": line_number,
+                            "text": ("…" if start else "") + snippet + ("…" if start + 200 < len(line_text) else ""),
+                            "snippet_truncated": start > 0 or start + 200 < len(line_text),
+                        }
+                    )
+                match_index += 1
+            if file_count:
+                matching_files[relative] = file_count
+            if len(matching_files) >= self.config.max_entries:
+                truncated_files = True
+                break
+        for item in snippets:
+            relative = item["path"]
+            if not any(match["path"] == relative for match in matches):
+                matches.append({"path": relative, "count": matching_files.get(relative, 0)})
+        result: Dict[str, Any] = {
+            "ok": True,
+            "matches": matches,
+            "snippets": snippets,
+            "truncated": truncated_files or total_snippets > cursor_number + len(snippets),
+        }
+        if result["truncated"] and snippets:
+            result["next_cursor"] = cursor_number + len(snippets)
+        if len(json.dumps(result, ensure_ascii=False, separators=(",", ":"))) > self._observation_limit():
+            # Reduce the page before emitting it; omitted matches remain
+            # reachable from the cursor, and no partial JSON is forwarded.
+            while snippets and len(json.dumps(result, ensure_ascii=False, separators=(",", ":"))) > self._observation_limit():
+                snippets.pop()
+                matches = []
+                for item in snippets:
+                    if not any(match["path"] == item["path"] for match in matches):
+                        matches.append({"path": item["path"], "count": matching_files.get(item["path"], 0)})
+                result["snippets"] = snippets
+                result["matches"] = matches
+                result["truncated"] = True
+                result["next_cursor"] = cursor_number + len(snippets)
+            if len(json.dumps(result, ensure_ascii=False, separators=(",", ":"))) > self._observation_limit():
+                return self._error_result(SandboxErrorCode.SIZE_LIMIT, "observation budget is too small for search results")
         self._successful_read_observation = True
-        return {"ok": True, "matches": matches, "truncated": len(matches) >= self.config.max_entries}
+        return result
+
+    def apply_patch(
+        self,
+        path: Any,
+        old_text: Any,
+        new_text: Any,
+        expected_sha256: Any,
+    ) -> Dict[str, Any]:
+        try:
+            relative = self._write_relative_path(path)
+            old_value = str(old_text)
+            new_value = self._bounded_text(new_text)
+        except (SandboxPathError, ValueError) as exc:
+            if isinstance(exc, ValueError) and "limit" in str(exc).lower():
+                code = SandboxErrorCode.SIZE_LIMIT
+            else:
+                code = self._path_error_code(exc, write=True) if isinstance(exc, SandboxPathError) else SandboxErrorCode.PROVIDER_REJECTION
+            return self._error_result(code, str(exc))
+        digest = str(expected_sha256 or "")
+        if not _SHA256_HEX.fullmatch(digest):
+            return self._error_result(SandboxErrorCode.PROVIDER_REJECTION, "expected_sha256 must be a 64-character SHA-256 digest")
+        if not old_value:
+            return self._error_result(SandboxErrorCode.PROVIDER_REJECTION, "old_text must not be empty")
+        args = {
+            "path": relative,
+            "old_text": old_value,
+            "new_text": new_value,
+            "expected_sha256": digest.lower(),
+        }
+        duplicate = self._duplicate("apply_patch", args, revision_sensitive=False)
+        if duplicate:
+            return duplicate
+        try:
+            staged = self.staging_dir / Path(relative)
+            self.manager._check_storage_path(staged)
+            # _write_relative_path has already stripped any actor prefix.
+            # Resolve source fallback under the actor's write root so a group
+            # patch can never read a same-named file from the shared root.
+            source = staged if staged.is_file() else self.scope.path_for_write(relative)
+            if _is_reparse_or_symlink(source):
+                return self._error_result(SandboxErrorCode.INVALID_PATH, "symlink or reparse-point patch unsupported")
+            if source.stat().st_size > self.config.max_text_bytes:
+                return self._error_result(SandboxErrorCode.SIZE_LIMIT, "text exceeds sandbox patch limit", path=relative)
+            with source.open("rb") as handle:
+                original_bytes = handle.read(self.config.max_text_bytes + 1)
+            if len(original_bytes) > self.config.max_text_bytes:
+                return self._error_result(SandboxErrorCode.SIZE_LIMIT, "text exceeds sandbox patch limit", path=relative)
+            actual_digest = hashlib.sha256(original_bytes).hexdigest()
+            if actual_digest != digest.lower():
+                return self._error_result(
+                    SandboxErrorCode.STALE_CONTENT,
+                    "expected_sha256 is stale; read the current staged/source page and retry",
+                    path=relative,
+                )
+            original_text = original_bytes.decode("utf-8")
+        except FileNotFoundError:
+            return self._error_result(SandboxErrorCode.MISSING_FILE, "file not found", path=relative)
+        except UnicodeDecodeError:
+            return self._error_result(SandboxErrorCode.UNSUPPORTED_TEXT, "binary or non-UTF-8 file; patch unsupported", path=relative)
+        except (OSError, SandboxPathError) as exc:
+            code = self._path_error_code(exc, write=True) if isinstance(exc, SandboxPathError) else SandboxErrorCode.PROVIDER_REJECTION
+            return self._error_result(code, str(exc), path=relative)
+
+        first_occurrence = original_text.find(old_value)
+        if first_occurrence < 0:
+            return self._error_result(SandboxErrorCode.PROVIDER_REJECTION, "old_text was not found exactly", path=relative)
+        if original_text.find(old_value, first_occurrence + 1) >= 0:
+            return self._error_result(SandboxErrorCode.AMBIGUOUS_PATCH, "old_text must match exactly one location", path=relative)
+        patched_text = original_text.replace(old_value, new_value, 1)
+        patched_bytes = patched_text.encode("utf-8")
+        if len(patched_bytes) > self.config.max_text_bytes:
+            return self._error_result(SandboxErrorCode.SIZE_LIMIT, "patched text exceeds sandbox write limit", path=relative)
+        try:
+            self.scope.path_for_write(relative)
+            staged_target = self.staging_dir / Path(relative)
+            self.manager._check_storage_path(staged_target)
+            previous_size = self._sync_staged_entry(relative, staged_target)
+            if relative not in self._staged_sizes and len(self._staged_sizes) >= self._staged_file_limit:
+                return self._error_result(SandboxErrorCode.SIZE_LIMIT, "staged file count limit exceeded", path=relative)
+            if self._staged_total_bytes - previous_size + len(patched_bytes) > self._staged_byte_limit:
+                return self._error_result(SandboxErrorCode.SIZE_LIMIT, "staged byte limit exceeded", path=relative)
+            staged_target.parent.mkdir(parents=True, exist_ok=True)
+            self.manager._check_storage_path(staged_target)
+            staged_target.write_bytes(patched_bytes)
+        except (OSError, SandboxPathError) as exc:
+            code = self._path_error_code(exc, write=True) if isinstance(exc, SandboxPathError) else SandboxErrorCode.PROVIDER_REJECTION
+            return self._error_result(code, str(exc), path=relative)
+        self._staged_sizes[relative] = len(patched_bytes)
+        self._staged_total_bytes = self._staged_total_bytes - previous_size + len(patched_bytes)
+        self._write_paths.add(relative)
+        return {
+            "ok": True,
+            "path": relative,
+            "staged": True,
+            "sha256": hashlib.sha256(patched_bytes).hexdigest(),
+            "revision": len(self._write_paths),
+        }
 
     def write_text(self, path: Any, content: Any) -> Dict[str, Any]:
         try:
@@ -791,11 +1127,29 @@ class SandboxProvider:
             if name == "list_tree":
                 return self.list_tree(arguments.get("path", ""))
             if name == "read_text":
-                return self.read_text(arguments.get("path", ""))
+                return self.read_text(
+                    arguments.get("path", ""),
+                    arguments.get("start_line"),
+                    arguments.get("max_lines"),
+                    arguments.get("byte_offset"),
+                    arguments.get("max_bytes"),
+                )
             if name == "search_text":
-                return self.search_text(arguments.get("query", ""), arguments.get("path", ""))
+                return self.search_text(
+                    arguments.get("query", ""),
+                    arguments.get("path", ""),
+                    arguments.get("cursor", 0),
+                    arguments.get("max_results"),
+                )
             if name == "write_text":
                 return self.write_text(arguments.get("path", ""), arguments.get("content", ""))
+            if name == "apply_patch":
+                return self.apply_patch(
+                    arguments.get("path", ""),
+                    arguments.get("old_text", ""),
+                    arguments.get("new_text", ""),
+                    arguments.get("expected_sha256", ""),
+                )
             if name == "finalize":
                 return self.finalize(arguments.get("paths"), arguments.get("response"))
             return self._error_result(SandboxErrorCode.UNKNOWN_TOOL, "unknown sandbox tool")
@@ -829,21 +1183,13 @@ class SandboxProvider:
 
     def commit(self, intent: FinalizeIntent) -> Tuple[str, ...]:
         self._validate_intent_binding(intent)
-        committed: List[str] = []
-        with self.manager.mutation_lock(self.scope):
-            if self.scope.revision() != intent.source_revision:
-                raise RuntimeError("sandbox revision changed before commit")
-            for relative in intent.changed_paths:
-                target = self.scope.path_for_write(relative)
-                staged = self.staging_dir / Path(relative)
-                self.manager._check_storage_path(staged)
-                if not staged.is_file() or _is_reparse_or_symlink(staged):
-                    raise RuntimeError(f"staged path missing: {relative}")
-                target.parent.mkdir(parents=True, exist_ok=True)
-                temporary = target.with_name(f".{target.name}.{self.handoff.handoff_id}.tmp")
-                shutil.copyfile(staged, temporary)
-                temporary.replace(target)
-                committed.append(relative)
+        committed = self.manager.commit_staged(
+            self.scope,
+            self.handoff,
+            self.staging_dir,
+            intent.changed_paths,
+            intent.source_revision,
+        )
         self.manager.cleanup_staging(self.staging_dir)
         return tuple(committed)
 
@@ -1039,10 +1385,58 @@ class SandboxAgent:
         return max(1, int(self.config.observation_max_chars))
 
     def _append_observation(self, observations: List[str], value: Mapping[str, Any]) -> None:
-        encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
-        observations.append(encoded[-self._observation_limit() :])
-        bounded = "\n".join(observations)[-self._observation_limit() :]
-        observations[:] = [bounded] if bounded else []
+        limit = self._observation_limit()
+
+        def encode(item: Any) -> str:
+            return json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+
+        prior: List[Any] = []
+        dropped = 0
+        if observations:
+            try:
+                previous = json.loads("\n".join(observations))
+                if isinstance(previous, dict) and isinstance(previous.get("observations"), list):
+                    prior = list(previous["observations"])
+                    dropped = max(0, int(previous.get("dropped", 0)))
+                else:
+                    prior = [previous]
+            except (json.JSONDecodeError, TypeError, ValueError):
+                prior = []
+                dropped = 1
+
+        candidate: Any = dict(value)
+        encoded_candidate = encode(candidate)
+        if len(encoded_candidate) > max(1, limit - 128):
+            # Keep the bounded identity/status fields and state clearly that
+            # payload content was omitted from this observation.
+            compact = {
+                key: item
+                for key, item in candidate.items()
+                if key not in {"content", "answer", "text", "entries", "matches", "snippets", "results"}
+                and isinstance(item, (str, int, float, bool, type(None)))
+            }
+            compact["observation_truncated"] = True
+            candidate = compact if len(encode(compact)) <= limit else {"observation_truncated": True}
+        prior.append(candidate)
+        while prior:
+            payload = {"observations": prior, "dropped": dropped}
+            encoded_payload = encode(payload)
+            if len(encoded_payload) <= limit:
+                observations[:] = [encoded_payload]
+                return
+            if len(prior) > 1:
+                prior.pop(0)
+                dropped += 1
+                continue
+            marker = {"observation_truncated": True}
+            marker_json = encode(marker)
+            if len(marker_json) <= limit:
+                observations[:] = [marker_json]
+            else:
+                # A JSON number is the smallest valid observation for the
+                # supported one-character lower bound.
+                observations[:] = ["0"]
+            return
 
     def _append_no_tool_observation(self, observations: List[str]) -> None:
         self._append_observation(
@@ -1705,7 +2099,7 @@ class SandboxAgent:
                 self._non_progress_limit(),
             )
             prompt = (
-                "You are the server-side file_edit agent. Work only through the six "
+                "You are the server-side file_edit agent. Work only through the sandbox "
                 "sandbox tools supplied by the caller. Never use shell/code execution. "
                 "If essential task details are missing and cannot be safely inferred, use "
                 "CALL_BACK with one concise query and wait for the user's answer before continuing. "
@@ -1714,6 +2108,11 @@ class SandboxAgent:
                 "root, never use absolute, dot, or traversal paths, use group-visible "
                 "paths for reads, actor-relative or group actor-prefixed paths for writes, "
                 "and remember that finalize is side-effect-free until coordinator commit. "
+                "read_text returns bounded UTF-8 pages with an exact byte sha256, complete/truncated, "
+                "next_line, and a byte offset for long-line continuation. Continue pages until complete "
+                "when the task needs the whole file. For existing-file edits, prefer apply_patch with the "
+                "sha256 from the current page and an old_text that occurs exactly once; stale digests or "
+                "ambiguous matches are rejected. write_text is appropriate for a new file or deliberate full rewrite. "
                 "Read-only requests must first inspect with list_tree, read_text, or search_text, "
                 "then call finalize with response text and no paths; never create a file merely "
                 "to answer a read-only request. For a self-contained new-file request that does not need inspection, "
@@ -1750,7 +2149,7 @@ class SandboxAgent:
                         attempt.name,
                         total_calls,
                     )
-                    observation = "\n".join(observations)[-self._observation_limit() :]
+                    observation = "\n".join(observations)
                     round_prompt = f"{prompt}\n\nObserved sandbox results:\n{observation}" if observation else prompt
                     try:
                         response, detail = await self._run_stream_with_deadlines(
@@ -2184,7 +2583,7 @@ def _completion_publication_status(outcome: str) -> str:
     if outcome == SandboxAgentOutcome.FINALIZED.value:
         return "delivered"
     if outcome == SandboxAgentOutcome.PUBLICATION_FAILED.value:
-        return "failed"
+        return "unconfirmed"
     return "not_applicable"
 
 
@@ -2207,7 +2606,10 @@ def _build_completion_extra_info(handoff: SandboxEditHandoff, result: SandboxAge
             status = "任务已完成，没有修改文件，因此不需要附件。"
             path_text = "本次没有需要附件的文件。"
     elif outcome == SandboxAgentOutcome.PUBLICATION_FAILED.value:
-        status = "文件修改已经提交，但附件投递失败、部分成功或结果未知。"
+        status = (
+            "文件修改已经提交，但附件送达结果尚未确认，可能有部分附件已经收到。"
+            "请先检查目标聊天里的附件，再决定是否重试。"
+        )
         path_text = (
             "涉及的相对文件名为" + _quote_completion_value("、".join(paths)) + "。"
             if paths
@@ -2289,40 +2691,18 @@ class SandboxAgentCoordinator:
         self._completion_report_claim_lock = _COMPLETION_REPORT_CLAIM_LOCK
 
     async def _publish_finalized(self, handoff: SandboxEditHandoff, paths: Tuple[str, ...]) -> bool:
-        """Publish committed artifacts only after a FINALIZED result."""
+        """Fail closed when committed files have no durable ACK receipt gate.
+
+        Production binds ``publish`` to ``SandboxDeliveryGate`` during startup.
+        A standalone coordinator has no task owner or outbox receipts, so it
+        must not send mutable workspace paths or treat an enqueue boolean as a
+        platform delivery receipt.
+        """
 
         if not paths:
             return True
-        try:
-            from src.plugin_system.apis import send_api
-
-            scope = self.manager.get_scope(
-                stream_id=handoff.stream_id,
-                platform=handoff.platform,
-                group_id=handoff.group_id,
-                actor_id=handoff.actor_id,
-            )
-            source_message = await self._resolve_source_message(handoff)
-            for relative in paths:
-                artifact = scope.path_for_write(relative).resolve(strict=True)
-                if not artifact.is_file():
-                    raise FileNotFoundError(f"sandbox artifact is not a regular file: {relative}")
-                published = await send_api.custom_to_stream(
-                    message_type="file",
-                    content=str(artifact),
-                    stream_id=handoff.stream_id,
-                    display_message=f"已完成文件：{Path(relative).name}",
-                    typing=False,
-                    reply_message=source_message,
-                )
-                if published is False:
-                    return False
-            return True
-        except Exception as exc:
-            # The mutation remains committed; report publication failure to the
-            # coordinator without retrying an unbounded external side effect.
-            logger.error("sandbox artifact publication failed: %s", type(exc).__name__)
-            raise
+        logger.error("sandbox artifact publication refused: durable outbox publisher is not configured")
+        return False
 
     async def _authorized(self, handoff: SandboxEditHandoff) -> bool:
         if not handoff.binding_is_valid():

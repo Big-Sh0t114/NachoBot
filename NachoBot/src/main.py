@@ -46,7 +46,13 @@ class MainSystem:
         logger.info(f"正在唤醒{global_config.bot.nickname}......")
 
         # 其他初始化任务
-        await asyncio.gather(self._init_components())
+        try:
+            await asyncio.gather(self._init_components())
+        except BaseException:
+            from src.chat.sandbox.sandbox_delivery import sandbox_delivery_gate
+
+            await sandbox_delivery_gate.shutdown(drain_timeout_seconds=0.1)
+            raise
 
         logger.info(f"""
 --------------------------------
@@ -58,6 +64,29 @@ class MainSystem:
     async def _init_components(self):
         """初始化其他组件"""
         init_start_time = time.time()
+
+        # Acquire the durable sandbox store and reconcile transaction journals
+        # before plugins, Focus hooks, uploads, or message ingress can observe a
+        # delivered sandbox acknowledgement.
+        from src.chat.sandbox.sandbox_delivery import sandbox_delivery_gate
+        from src.chat.sandbox.sandbox_manager import sandbox_manager
+        from src.chat.sandbox.sandbox_task_store import SandboxTaskStore
+
+        self._sandbox_task_store = SandboxTaskStore(manager=sandbox_manager)
+        if not self._sandbox_task_store.claim_owner():
+            raise RuntimeError("sandbox task storage is already owned by another live process")
+        sandbox_delivery_gate.attach_store(
+            self._sandbox_task_store,
+            transport_ready=self._sandbox_platform_connected,
+        )
+        try:
+            transaction_conflicts = sandbox_manager.recover_transactions()
+            if transaction_conflicts:
+                raise RuntimeError("sandbox transaction recovery found unresolved conflicts")
+            self._sandbox_task_store.recover(sandbox_manager)
+        except BaseException:
+            await sandbox_delivery_gate.shutdown(drain_timeout_seconds=0.1)
+            raise
 
         # Core owns the public multimodal boundary.  The facade is registered
         # before chat/plugin initialization so non-chat callers (for example
@@ -201,10 +230,15 @@ class MainSystem:
 
     async def shutdown(self):
         """关闭系统组件"""
+        from src.chat.sandbox.sandbox_delivery import sandbox_delivery_gate
         from src.chat.focus.bootstrap import focus_bootstrap
         from src.chat.heart_flow.heartflow import heartflow
         from src.chat.offline_recovery import offline_recovery_manager
         from src.chat.realtime_ingress import realtime_ingress_manager
+
+        # Stop sandbox admissions and settle tracked model/outbox work before
+        # other runtimes close or the durable storage owner is released.
+        await sandbox_delivery_gate.shutdown()
 
         await focus_bootstrap.begin_shutdown()
         await realtime_ingress_manager.shutdown()
@@ -246,6 +280,15 @@ class MainSystem:
     async def schedule_tasks(self):
         """调度定时任务"""
         from src.chat.sandbox.sandbox_manager import sandbox_manager
+        from src.chat.sandbox.sandbox_delivery import sandbox_delivery_gate
+
+        # The outbox worker starts alongside ingress and sends only when the
+        # original platform route is connected. Restarted QUEUED jobs wait for
+        # that route before any model work is started.
+        outbox_task = asyncio.create_task(sandbox_delivery_gate.run_outbox_pump())
+        queued_resume_task = asyncio.create_task(
+            sandbox_delivery_gate.resume_queued_when_connected()
+        )
 
         while True:
             tasks = [
@@ -253,9 +296,20 @@ class MainSystem:
                 sandbox_manager.start_periodic_cleanup(),
                 self.app.run(),
                 self.server.run(),
+                outbox_task,
+                queued_resume_task,
             ]
 
             await asyncio.gather(*tasks)
+
+    def _sandbox_platform_connected(self, handoff) -> bool:
+        """Return true only when the handoff's adapter has a live route."""
+
+        connection = getattr(self.app, "connection", None)
+        platform_connections = getattr(connection, "platform_connections", None)
+        if not isinstance(platform_connections, dict):
+            return False
+        return bool(platform_connections.get(str(handoff.platform)))
 
     # async def forget_memory_task(self):
     #     """记忆遗忘任务"""
@@ -269,8 +323,11 @@ class MainSystem:
 async def main():
     """主函数"""
     system = MainSystem()
-    await system.initialize()
-    await system.schedule_tasks()
+    try:
+        await system.initialize()
+        await system.schedule_tasks()
+    finally:
+        await system.shutdown()
 
 
 if __name__ == "__main__":
