@@ -789,6 +789,7 @@ class DesktopPetChat:
         self.logger = logger
         self._parameter_panel_factory = parameter_panel_factory
         self._ui_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
+        self._stopped = threading.Event()
         self._perception = None
         self._pending_transcript: dict | None = None
         self._continuous_transcripts: deque[dict] = deque()
@@ -827,13 +828,13 @@ class DesktopPetChat:
             self.backend = CoreChatClient(
                 config, voice_command, logger, voice_error,
                 context_provider=self._perception.context if self._perception else None,
+                on_background_reply=self._queue_background_reply,
             )
         else:
             self.backend = DesktopPetBackendClient(config)
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
         self._work_lock = threading.Lock()
-        self._stopped = threading.Event()
         self._proactive_cancel = threading.Event()
         self._proactive_inflight = False
         self._proactive_enabled = bool(config.proactive and config.enabled and config.transport == "core")
@@ -1090,6 +1091,13 @@ class DesktopPetChat:
                     self._append_message(str(role), str(text))
                     if role == "bot":
                         self._note_bot_activity()
+                elif action == "background_reply":
+                    if not self._stopped.is_set() and isinstance(value, tuple) and len(value) == 2:
+                        _request_id, text = value
+                        if isinstance(text, str):
+                            # A retained manual reply is text-only: it must not
+                            # take over the renderer or restart speech.
+                            self._append_message("bot", text)
                 elif action == "proactive_finished":
                     proactive_completions.append(value)
                 elif action == "proactive_reply":
@@ -2717,6 +2725,21 @@ class DesktopPetChat:
             progress_thread.join(timeout=0.2)
             self._work_lock.release()
         self._ui_queue.put(("message", ("bot", message)))
+        acknowledge = getattr(self.backend, "acknowledge_current_request", None)
+        if callable(acknowledge):
+            try:
+                acknowledge()
+            except Exception:
+                self.logger.exception("Could not release retained Core reply handoff")
+
+    def _queue_background_reply(self, request_id: str, text: str) -> None:
+        """Transfer a validated late manual reply to the existing Tk queue."""
+
+        if self._stopped.is_set() or not isinstance(request_id, str) or not isinstance(text, str):
+            return
+        text = text.strip()
+        if text:
+            self._ui_queue.put(("background_reply", (request_id, text)))
 
     def _execute(self, text: str) -> ChatReply:
         """Send every submitted string to the normal conversation backend."""

@@ -153,9 +153,8 @@ class DesktopChatConfig:
     remember_position: bool = True
     window_state_path: Path | None = None
     request_timeout_seconds: float = 8.0
-    # A failed Core request is expired by the local host after 45 seconds;
-    # keep a small buffer for status polling and network jitter.
-    reply_timeout_seconds: float = 60.0
+    # Keep the direct Core channel alive for long tool and model turns.
+    reply_timeout_seconds: float = 300.0
     poll_interval_seconds: float = 0.5
     play_audio: bool = True
     tts_language: str = "zh"
@@ -577,7 +576,7 @@ def load_config(
     chat_request_timeout = float(
         desktop_chat_raw.get("request_timeout_seconds", 8.0)
     )
-    chat_reply_timeout = float(desktop_chat_raw.get("reply_timeout_seconds", 60.0))
+    chat_reply_timeout = float(desktop_chat_raw.get("reply_timeout_seconds", 300.0))
     chat_poll_interval = float(desktop_chat_raw.get("poll_interval_seconds", 0.5))
     chat_max_input_chars = int(desktop_chat_raw.get("max_input_chars", 500))
     chat_max_history_messages = int(

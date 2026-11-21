@@ -31,7 +31,10 @@ from src.common.logger import get_logger
 from src.common.data_models.message_data_model import ReplyContentType
 from src.config.config import global_config
 from src.chat.message_receive.chat_stream import get_chat_manager
-from src.chat.message_receive.delivery_context import current_delivery_target_binding
+from src.chat.message_receive.delivery_context import (
+    current_delivery_reply_anchor,
+    current_delivery_target_binding,
+)
 from src.chat.message_receive.uni_message_sender import UniversalMessageSender
 from src.chat.message_receive.message import MessageSending, MessageRecv
 from src.chat.message_receive.storage import MessageStorage
@@ -305,6 +308,7 @@ async def _send_to_target_receipt_permitted(
     selected_expressions: Optional[List[int]] = None,
     wait_for_platform_ack: bool = False,
     ack_timeout: float = 300.0,
+    use_scoped_reply_anchor: bool = True,
 ) -> SendReceipt:
     """向指定目标发送消息的内部实现
 
@@ -321,7 +325,10 @@ async def _send_to_target_receipt_permitted(
         SendReceipt: 真实投递结果
     """
     try:
-        if set_reply and not reply_message:
+        reply_scope_active, logical_source_message_id = (
+            current_delivery_reply_anchor(stream_id) if use_scoped_reply_anchor else (False, None)
+        )
+        if set_reply and reply_message is None and not (reply_scope_active and logical_source_message_id):
             logger.warning("[SendAPI] 使用引用回复，但未提供回复消息")
             return SendReceipt(SendStatus.FAILED, stream_id, detail="missing_reply_message")
 
@@ -342,6 +349,8 @@ async def _send_to_target_receipt_permitted(
         if not target_stream:
             logger.error(f"[SendAPI] 未找到聊天流: {stream_id}")
             return SendReceipt(SendStatus.FAILED, stream_id, detail="stream_not_found")
+
+        delivery_scope_active, delivery_target_config = current_delivery_target_binding(stream_id)
         if text_data is not None and _should_suppress_reply_by_policy(target_stream, text_data):
             logger.info("[SendAPI] 本次回复已被适配器回复策略抑制")
             return SendReceipt(SendStatus.SUPPRESSED, stream_id, detail="reply_policy")
@@ -363,7 +372,7 @@ async def _send_to_target_receipt_permitted(
         reply_to_platform_id = ""
         anchor_message: Union["MessageRecv", None] = None
         effective_set_reply = set_reply
-        if reply_message:
+        if reply_message is not None:
             reply_chat_id = str(getattr(reply_message, "chat_id", "") or "")
             if reply_chat_id and reply_chat_id != str(stream_id):
                 logger.error(
@@ -383,8 +392,11 @@ async def _send_to_target_receipt_permitted(
             else:
                 logger.info(f"[SendAPI] 找到匹配的回复消息，发送者: {reply_user_info.user_id}")
                 reply_to_platform_id = f"{anchor_message.message_info.platform}:{reply_user_info.user_id}"
-
-        delivery_scope_active, delivery_target_config = current_delivery_target_binding(stream_id)
+        elif reply_scope_active and logical_source_message_id:
+            # Core command sends retain the exact ingress message as a logical
+            # request anchor without making a fabricated MessageRecv or a
+            # native platform quote.
+            effective_set_reply = False
 
         # 构建发送消息对象
         bot_message = MessageSending(
@@ -403,6 +415,11 @@ async def _send_to_target_receipt_permitted(
             delivery_target_scope_active=delivery_scope_active,
             delivery_target_config=delivery_target_config,
         )
+        if reply_message is None and reply_scope_active and logical_source_message_id:
+            # The exact scoped ingress ID is sufficient for Core/WebUI logical
+            # correlation. Keep ``reply`` unset so platform senders cannot turn
+            # this fallback into a native quote.
+            bot_message.reply_to_message_id = logical_source_message_id
 
         # 兼容概率转语音：写入当前TTS语种元数据，供后端TTS概率链路读取
         try:
@@ -740,6 +757,9 @@ async def background_text_to_stream_receipt(
         set_reply=set_reply,
         reply_message=reply_message,
         storage_message=storage_message,
+        # Background delivery may use only its explicit, validated DB source;
+        # never substitute a task's inherited command scope when lookup failed.
+        use_scoped_reply_anchor=False,
     )
 
 

@@ -55,7 +55,7 @@ if errorlevel 1 (
 
 cd /d "%DESKTOP_PET_DIR%"
 echo [SYNC] NachoBot-Desktop-Pet-Adapter base dependencies ...
-call uv sync --locked
+call uv sync --locked --inexact
 if errorlevel 1 (
     echo [ERROR] Desktop-pet base dependency sync failed.
     pause
@@ -77,7 +77,7 @@ goto launch
 
 :sync_live2d
 echo [SYNC] Optional Live2D renderer dependencies ...
-call uv sync --project "%DESKTOP_PET_DIR%renderers\live2d" --locked
+call uv sync --locked --extra live2d
 if errorlevel 1 (
     echo [ERROR] Optional Live2D dependency sync failed.
     pause

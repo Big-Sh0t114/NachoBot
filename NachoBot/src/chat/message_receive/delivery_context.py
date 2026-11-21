@@ -18,6 +18,7 @@ DELIVERY_TARGET_KEY = "delivery_target"
 class DeliveryTargetScope:
     source_stream_id: str
     target_additional_config: dict[str, Any] | None
+    logical_source_message_id: str | None = None
 
 
 _ACTIVE_DELIVERY_TARGET: ContextVar[DeliveryTargetScope | None] = ContextVar(
@@ -36,12 +37,18 @@ def delivery_target_additional_config(source: Any) -> dict[str, Any] | None:
 
 @contextmanager
 def scoped_delivery_target(source_message: Any) -> Iterator[None]:
-    """Snapshot and bind a command's source target until its execution settles."""
+    """Snapshot and bind a command's source target and logical anchor."""
 
     source_stream = getattr(source_message, "chat_stream", None)
+    source_message_info = getattr(source_message, "message_info", None)
+    source_message_id = getattr(source_message_info, "message_id", None)
+    logical_source_message_id = (
+        str(source_message_id) if source_message_id is not None and str(source_message_id) else None
+    )
     scope = DeliveryTargetScope(
         source_stream_id=str(getattr(source_stream, "stream_id", "") or ""),
         target_additional_config=delivery_target_additional_config(source_message),
+        logical_source_message_id=logical_source_message_id,
     )
     token = _ACTIVE_DELIVERY_TARGET.set(scope)
     try:
@@ -68,3 +75,19 @@ def current_delivery_target_binding(
     if scope.target_additional_config is None:
         return True, None
     return True, copy.deepcopy(scope.target_additional_config)
+
+
+def current_delivery_reply_anchor(stream_id: str) -> tuple[bool, str | None]:
+    """Return the active bit and source message ID for a matching stream.
+
+    An active scope with no source ID, or one aimed at another stream, returns
+    ``(True, None)``. Callers must not replace that missing scoped anchor with
+    the stream's mutable latest message.
+    """
+
+    scope = _ACTIVE_DELIVERY_TARGET.get()
+    if scope is None:
+        return False, None
+    if scope.source_stream_id != str(stream_id):
+        return True, None
+    return True, scope.logical_source_message_id

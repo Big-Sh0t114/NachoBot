@@ -108,9 +108,8 @@ def create_backend(config: AdapterConfig, logger: Any) -> Live2DBackend:
     except ImportError as exc:
         raise BackendSelectionError(
             "Live2D provider is not installed. Select backend = 'live2d' and start "
-            "through launch_desktop_pet.bat, or run `uv run --project renderers/live2d "
-            "--locked python -m desktop_pet_adapter --config <config.toml> --mode <mode>` "
-            "from the Desktop Pet Adapter directory."
+            "through launch_desktop_pet.bat, or run `uv sync --locked --extra live2d` "
+            "in the Desktop Pet Adapter directory before starting it again."
         ) from exc
 
     renderer = config.renderer

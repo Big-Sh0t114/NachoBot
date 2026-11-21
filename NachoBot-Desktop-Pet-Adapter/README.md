@@ -10,8 +10,9 @@
 `desktop_pet_adapter/assets/nachobot_chibi/manifest.json` 和透明 PNG 图集。
 从仓库根目录运行 `launch_sprite_pet.bat` 可启动 Sprite 模式；它沿用当前
 `config.toml` 的 Core、聊天和托盘设置，并通过启动请求选择 `sprite` 后端。
-常规 `launch_desktop_pet.bat` 使用配置中的后端，并仅在选择 Live2D 时安装
-Live2D 组合项目。Sprite 模式不需要 provider 或 OpenGL 依赖。两种后端共用一个
+常规 `launch_desktop_pet.bat` 使用配置中的后端，并仅在选择 Live2D 时向桌宠项目的
+同一个 `.venv` 安装 Live2D extra。Sprite wheel 和运行路径不安装或导入 provider，也不需要
+OpenGL 依赖。两种后端共用一个
 会话管理器，切换后端会重启当前桌宠会话。
 
 Sprite 专用参数可写在 `[sprite]` 中：`atlas_path`（可选）、`size_px`
@@ -69,7 +70,7 @@ Bilibili 侧通过 `bili_src/live2d/remote_controller.py` 连接本服务。旧�
 
 ## 桌宠运行时迁移
 
-`NachoBot-Desktop-Pet-Adapter` 是独立宿主项目，只打包 `desktop_pet_adapter` 通用桌宠运行时。Sprite 使用包内透明帧图集，不加载 Live2D 模型，也不需要 `NachoBot-Live2D-Adapter` 目录。Live2D 渲染实现和模型资源由独立的 `NachoBot-Live2D-Adapter` 提供；`renderers/live2d` 是可选组合项目，会把 provider 安装到自己的 `.venv`。两个后端共用桌面控制器、聊天、托盘及协议运行时。模型资源保留在 provider 项目内，不再复制进桌宠项目。
+`NachoBot-Desktop-Pet-Adapter` 是独立宿主项目，只打包 `desktop_pet_adapter` 通用桌宠运行时。Sprite 使用包内透明帧图集，不加载 Live2D 模型，也不安装 Live2D provider。Live2D 渲染实现和模型资源由独立的 `NachoBot-Live2D-Adapter` 提供；`live2d` extra 将 provider 作为可选依赖安装到桌宠项目自己的 `.venv`。两个后端共用桌面控制器、聊天、托盘及协议运行时。模型资源保留在 provider 项目内，不再复制进桌宠项目。
 
 `desktop-pet-adapter` 是安装后提供的 console script；桌宠用户入口只有仓库根目录的 `launch_desktop_pet.bat`，`launch_sprite_pet.bat` 显式选择 Sprite。`[runtime].mode` 独立控制 `desktop_pet` 或 `live`，`[renderer].backend` 选择实际绘制后端，默认值为 `live2d`。只有选择 Live2D 后端时才需要 `.model3.json`、`.moc3` 等资源；Sprite 可以省略 `model_path`。
 
@@ -85,10 +86,10 @@ Bilibili 侧通过 `bili_src/live2d/remote_controller.py` 连接本服务。旧�
 
 ```bat
 cd NachoBot-Desktop-Pet-Adapter
-uv sync --locked
+uv sync --locked --inexact
 ```
 
-基础同步安装 Sprite 和通用桌宠运行时所需依赖，不会解析或安装 Live2D provider。把配置中的 `[renderer].backend` 设为 `"sprite"` 后，即可在没有 sibling Live2D 项目的环境中使用同一个 `launch_desktop_pet.bat`。选择 `"live2d"` 时，BAT 会根据解析后的配置同步隔离的 `renderers/live2d/.venv`；主桌宠环境保持独立。手动准备 Live2D 环境时，从本项目目录运行 `uv sync --project renderers/live2d --locked`。高级 CLI 可直接在隔离环境运行 `uv run --project renderers/live2d --locked python -m desktop_pet_adapter --config config.toml --mode live`。该组合项目会接入本宿主和 sibling provider。
+基础同步安装 Sprite 和通用桌宠运行时所需依赖，不会安装 Live2D provider。Sprite wheel 和已准备好的基础 `.venv` 不需要 provider；运行 Sprite 时也不会导入 provider。BAT 使用 `--inexact` 保留已在同一环境安装的可选依赖，因此切换到 Sprite 或仅查看日志不会卸载 Live2D SDK。当前 uv 0.9.5 在执行 `uv sync --locked` 时仍会检查 universal lock 中条件性本地 source 的元数据，因此从干净环境同步桌宠项目时，相邻的 `NachoBot-Live2D-Adapter` 源码目录仍须存在。选择 `"live2d"` 时，BAT 会根据解析后的配置执行 `uv sync --locked --extra live2d`，把 provider 安装到同一个桌宠 `.venv`。手动准备 Live2D 环境时，从本项目目录运行该同步命令；之后可用 `.venv\Scripts\python.exe -m desktop_pet_adapter --config config.toml --mode live` 直接启动。独立 provider 仍拥有 Live2D 代码和模型资源。
 
 ## 配置
 
@@ -196,7 +197,7 @@ LOOK_AWAY = "LookAway"
 
 仓库根目录的 `launch_desktop_pet.bat` 是桌宠用户入口，`launch_sprite_pet.bat`
 用于显式启动 Sprite。默认配置选择 Live2D，因此启动器会同步基础依赖、检测有效后端，
-并只在选择 Live2D 时安装 provider extra。模型资源保留在
+并只在选择 Live2D 时把 provider extra 安装到桌宠自己的 `.venv`。模型资源保留在
 `NachoBot-Live2D-Adapter/resources`。
 统一启动入口按配置选择桌宠或直播模式。启动器会同步依赖、
 在后台启动透明窗口并确认 WebSocket 端口实际监听。实时日志写入本目录的 `logs`，
@@ -261,6 +262,7 @@ Core 查看器读取本适配器记录的 Core 日志；复用独立启动的 Co
 
 桌宠默认直接连接 `[desktop_pet.chat].core_url`，本机默认地址为 `ws://127.0.0.1:8000/ws`。
 启动器检查本机 Core；需要鉴权时设置环境变量 `NACHOBOT_CORE_TOKEN`。
+桌宠在 Core 聊天通道首次使用时建立一个懒连接，并由单个接收线程复用该连接处理后续聊天、工具和多模态结果。Core 回复默认等待 300 秒；可通过 `[desktop_pet.chat].reply_timeout_seconds` 覆盖。等待超时不会关闭共享通道，也不会重放可能已提交的请求；断线后，只要还有未过期的手动请求锚点，就会按有界退避自动重连以接收迟到回复。没有有效锚点时，留待下一条新请求触发重连。符合原请求锚点的手动聊天迟到回复或后续文字会追加到聊天记录，但不会重新播放语音或控制桌宠；已取消的主动聊天回复不会保留或显示。
 既有 HTTP 聊天桥仍可通过 `transport = "http"` 和 `backend_url` 使用。
 
 启动开关（`NachoBot-Multimodal-Adapter/startup.toml`）：
@@ -353,8 +355,8 @@ Live2D Adapter 不负责拉起 perception 或 TTS 服务。配置开启感知不
 
 透明 Live2D 桌面窗口和 Tk 聊天窗必须运行在 Windows 宿主机，不能把 `desktop_pet` 模式
 放进普通 Linux 容器。项目 Compose 仅运行无 GUI 的 WebSocket `live` 模式，并以仓库根目录
-为 build context，同时复制宿主、Live2D 组合项目和独立 provider；容器在组合项目自己的
-`.venv` 中安装锁定依赖，模型资源从 `NachoBot-Live2D-Adapter/resources` 挂载。启动 Compose
+为 build context，同时复制宿主和独立 provider；容器在桌宠项目自己的 `.venv` 中安装锁定
+Live2D extra，模型资源从 `NachoBot-Live2D-Adapter/resources` 挂载。启动 Compose
 的命令从仓库根目录执行：
 
 ```bat
@@ -553,7 +555,7 @@ Automation 控件模式（Invoke、Toggle、Expand）操作控件，不发送盲
 
 ### `import live2d.v3` 失败
 
-通过配置已选择 `backend = "live2d"` 的 `launch_desktop_pet.bat` 启动，或在项目目录执行 `uv run --project renderers/live2d --locked python -m desktop_pet_adapter --config config.toml --mode live`。Sprite 模式无需 sibling provider 项目。
+在项目目录执行 `uv sync --locked --extra live2d`，然后通过配置已选择 `backend = "live2d"` 的 `launch_desktop_pet.bat` 启动，或运行 `.venv\Scripts\python.exe -m desktop_pet_adapter --config config.toml --mode live`。Sprite 运行路径不导入 sibling provider。
 
 ### 模型窗口启动后立即退出
 

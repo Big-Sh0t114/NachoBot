@@ -177,6 +177,14 @@ class Live2DHost:
         self.on_click = on_click
         self.on_ready = on_ready
         self.on_exit = on_exit
+        # Window setup and on_ready run before the renderer event loop starts.
+        # Keep interaction state valid throughout that startup window.
+        self.dragging_window = False
+        self.dragging_model = False
+        self.last_mouse_pos = (0, 0)
+        self.last_global_mouse_pos = (0, 0)
+        self.btn_6_down = False
+        self.btn_7_down = False
         if runtime_factory is None:
             raise ValueError("Live2DHost requires a provider runtime factory")
         if runtime_frame_factory is None:
@@ -516,18 +524,6 @@ class Live2DHost:
 
         clock = pygame.time.Clock()
         frame_count = 0
-
-        self.dragging_model = False
-        self.last_mouse_pos = (0, 0)
-
-        # Bot Control Targets
-        self.target_x = 0.0
-        self.target_y = 0.0
-
-        self.dragging_window = False
-        self.last_global_mouse_pos = (0, 0)
-        self.btn_6_down = False
-        self.btn_7_down = False
 
         if self.desktop_pet.enabled:
             self._start_desktop_chat_host()

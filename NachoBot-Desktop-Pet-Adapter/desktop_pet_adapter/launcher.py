@@ -662,17 +662,7 @@ class SessionStarter:
                 print("[Standalone] Rendering, tray and model controls only; no backend connection or capture.", flush=True)
             if mode == "desktop_pet":
                 self._start_chat_services(config, services)
-            if config.renderer.backend == "live2d":
-                python = (
-                    self.adapter_dir
-                    / "renderers"
-                    / "live2d"
-                    / ".venv"
-                    / "Scripts"
-                    / "python.exe"
-                )
-            else:
-                python = self.adapter_dir / ".venv" / "Scripts" / "python.exe"
+            python = self.adapter_dir / ".venv" / "Scripts" / "python.exe"
             if not python.is_file():
                 raise LauncherError(
                     f"Python environment for renderer backend '{config.renderer.backend}' "
