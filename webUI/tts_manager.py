@@ -33,9 +33,12 @@ _DEFAULT_CORE_PORT = 8000
 _MAX_AUDIO_BYTES = 16 * 1024 * 1024
 _MAX_AUDIO_BASE64_CHARS = 4 * ((_MAX_AUDIO_BYTES + 2) // 3)
 _MAX_JSON_RESPONSE_BYTES = _MAX_AUDIO_BASE64_CHARS + (256 * 1024)
+_TTS_CACHE_RECIPE_VERSION = "shared-speech-preparation-v1"
 _TTS_ENGINE_CONFIG_FILES = {
     "GPT_Sovits": "gpt-sovits.toml",
     "Vox": "vox.toml",
+    "GenericHTTP": "generic-http.toml",
+    "Irodori": "irodori.toml",
 }
 
 
@@ -501,12 +504,14 @@ class TTSManager:
             self.config_path,
             config_dir / "gpt-sovits.toml",
             config_dir / "vox.toml",
+            config_dir / "generic-http.toml",
+            config_dir / "irodori.toml",
         ):
             try:
                 config_fingerprint.append(f"{path.name}:{path.stat().st_mtime_ns}")
             except OSError:
                 continue
-        payload = "\0".join([text, *config_fingerprint]).encode("utf-8")
+        payload = "\0".join([_TTS_CACHE_RECIPE_VERSION, text, *config_fingerprint]).encode("utf-8")
         return hashlib.sha256(payload).hexdigest()
 
     def _is_fresh(self, path: Path) -> bool:
@@ -542,7 +547,7 @@ class TTSManager:
     @staticmethod
     def _request_audio(url: str, text: str, token: str = "") -> bytes:
         body = json.dumps(
-            {"text": text, "platform": "webui"},
+            {"text": text, "platform": "webui", "prepare_text": True},
             ensure_ascii=False,
         ).encode("utf-8")
         request = Request(

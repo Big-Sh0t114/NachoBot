@@ -33,6 +33,7 @@ TEMPLATE_MAP: dict[str, str] = {
     "NachoBot-Multimodal-Adapter/template_configs/base_template.toml": "NachoBot-Multimodal-Adapter/configs/base.toml",
     "NachoBot-Multimodal-Adapter/template_configs/gpt-sovits_template.toml": "NachoBot-Multimodal-Adapter/configs/gpt-sovits.toml",
     "NachoBot-Multimodal-Adapter/template_configs/vox_template.toml": "NachoBot-Multimodal-Adapter/configs/vox.toml",
+    "NachoBot-Multimodal-Adapter/template_configs/irodori_template.toml": "NachoBot-Multimodal-Adapter/configs/irodori.toml",
     "NachoBot-UniversalVC-Adapter/template/config_template.toml": "NachoBot-UniversalVC-Adapter/config.toml",
     "NachoBot-Multimodal-Adapter/template_configs/perception_template.toml": "NachoBot-Multimodal-Adapter/configs/perception.toml",
     "NachoBot-Discord-Adapter/config.toml.example": "NachoBot-Discord-Adapter/config.toml",

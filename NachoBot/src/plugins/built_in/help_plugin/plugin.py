@@ -13,6 +13,58 @@ from .pattern_display import format_pattern_for_display
 logger = get_logger("help_plugin")
 
 
+def _cached_speech_policy():
+    """Read Core's policy lazily so help-plugin import does not initialize the router."""
+    try:
+        from src.multimodal import get_multimodal_router
+
+        return get_multimodal_router().tts_policy
+    except Exception:
+        return None
+
+
+async def _get_speech_policy(*, refresh: bool = False):
+    """Refresh shared runtime state when a user requests a help listing."""
+    try:
+        from src.multimodal import get_multimodal_router
+
+        router = get_multimodal_router()
+        try:
+            return await router.get_tts_policy(refresh=refresh)
+        except Exception:
+            return router.tts_policy
+    except Exception:
+        return None
+
+
+def _policy_value(policy, field: str):
+    if isinstance(policy, dict):
+        return policy.get(field)
+    return getattr(policy, field, None)
+
+
+def _language_switch_locked(policy) -> bool:
+    if policy is None:
+        return False
+    return (
+        _policy_value(policy, "fixed_language") is not None
+        or _policy_value(policy, "language_switch_allowed") is False
+    )
+
+
+def _language_switch_help_description(policy) -> Optional[str]:
+    if not _language_switch_locked(policy):
+        return None
+    language = _policy_value(policy, "fixed_language")
+    backend = str(_policy_value(policy, "backend") or "").strip()
+    if backend.casefold() == "irodori" and language == "ja":
+        return "Irodori TTS 固定使用日语，#lang_switch 当前不可用。"
+    if language:
+        display = {"ja": "日语", "zh": "中文"}.get(language, str(language))
+        return f"当前TTS后端固定使用{display}，#lang_switch 当前不可用。"
+    return "当前TTS后端不允许切换TTS语种，#lang_switch 当前不可用。"
+
+
 class HelpCommand(BaseCommand):
     """处理 #help 指令，输出当前可用的指令列表"""
 
@@ -28,6 +80,7 @@ class HelpCommand(BaseCommand):
         user_info = getattr(getattr(self.message, "message_info", None), "user_info", None)
         user_id = str(user_info.user_id) if user_info and getattr(user_info, "user_id", None) else None
 
+        await _get_speech_policy(refresh=True)
         grouped_entries = self._collect_commands(stream_id, user_id, show_admin=False, skip_names={"help", "help_all"})
 
         if not grouped_entries["public"] and not grouped_entries["whitelist"]:
@@ -74,6 +127,8 @@ class HelpCommand(BaseCommand):
             pattern_raw = getattr(info, "command_pattern", "") or ""
             pattern = self._format_pattern_for_display(pattern_raw, fallback_name=name)
             desc = info.description or "暂无描述"
+            if name == "lang_switch":
+                desc = _language_switch_help_description(_cached_speech_policy()) or desc
 
             permission = self._classify_permission(name, info, user_id)
             if permission == "admin" and not show_admin:
@@ -271,6 +326,7 @@ class HelpAllCommand(HelpCommand):
         user_info = getattr(getattr(self.message, "message_info", None), "user_info", None)
         user_id = str(user_info.user_id) if user_info and getattr(user_info, "user_id", None) else None
 
+        await _get_speech_policy(refresh=True)
         grouped_entries = self._collect_commands(stream_id, user_id, show_admin=True, skip_names={"help", "help_all"})
 
         if not any(grouped_entries.values()):

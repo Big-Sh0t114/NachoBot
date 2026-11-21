@@ -19,6 +19,8 @@ import toml
 _BACKEND_CONFIGS = {
     "GPT_Sovits": "gpt-sovits.toml",
     "Vox": "vox.toml",
+    "GenericHTTP": "generic-http.toml",
+    "Irodori": "irodori.toml",
 }
 
 

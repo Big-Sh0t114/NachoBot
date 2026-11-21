@@ -166,7 +166,9 @@ class TTSRuntime:
         if model_class is None:
             raise TTSRuntimeError(snapshot.error or "TTS model class unavailable", resolution=snapshot)
 
-        if snapshot.backend_config_path is not None and snapshot.plugin in {"GPT_Sovits", "Vox"}:
+        if snapshot.backend_config_path is not None and snapshot.plugin in {
+            "GPT_Sovits", "Vox", "GenericHTTP", "Irodori"
+        }:
             # Known backends must parse the same selected file that was hashed.
             constructor_kwargs = {"config_path": snapshot.backend_config_path}
             if snapshot.plugin == "Vox" and snapshot.base_config_path is not None:

@@ -1,0 +1,11 @@
+# Minimal inference dependencies for the managed Irodori backend.
+# The manager installs these into the selected shared GPU/CPU profile and
+# constrains every already installed distribution. Torch-family packages are
+# intentionally not listed here; the adapter profile owns those versions.
+torchao==0.16.0
+peft==0.18.1
+accelerate==1.13.0
+sentencepiece>=0.2.1,<0.3
+safetensors>=0.8,<0.9
+dacvae @ git+https://github.com/facebookresearch/dacvae@414c20785fc3a28373073ea8ef7a1316eeeaca6e
+silentcipher @ git+https://github.com/SesameAILabs/silentcipher.git@d46d7d0893a583d8968ab3a6626e2289faec9152

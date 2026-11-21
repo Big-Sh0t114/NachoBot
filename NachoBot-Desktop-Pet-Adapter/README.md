@@ -258,7 +258,7 @@ Core 查看器读取本适配器记录的 Core 日志；复用独立启动的 Co
 `model_path`；`character_name` 不填或留空时，优先读取所选模型对应的 `.vtube.json` / `.model3.json` 的 `Name`，
 再使用模型目录名（`runtime` 等通用目录回退模型文件名）。标题与历史名称同步生成；手动设置仍优先，无需改 Python 代码。
 
-输入框发送普通文字后，文字回复先显示，语音在后台合成并播放。语音语言默认中文（`tts_language = "zh"`）；悬停桌宠后可用语言按钮切换 `auto`、中文、日语或英语。Core transport 将整条原文和当前 `text_lang` 偏好发送到 Core 的多模态语音接口。文字显示和聊天历史仍保留 Core 回复原文。声音开关与默认语种由 `[desktop_pet.chat]` 中的 `play_audio` 和 `tts_language` 配置控制。
+输入框发送普通文字后，文字回复先显示，语音在后台合成并播放。语音语言默认中文（`tts_language = "zh"`）；悬停桌宠后可用语言按钮切换 `auto`、中文、日语或英语。Core transport 将整条原文和当前 `text_lang` 偏好发送到 Core 的多模态语音接口，并显式请求 Core 准备文本。Core 报告固定语种时，按钮会显示固定语种（例如“日语（固定）”），点击不会覆盖保存的语言偏好；策略恢复后会继续使用该偏好。文字显示和聊天历史仍保留 Core 回复原文。声音开关与默认语种由 `[desktop_pet.chat]` 中的 `play_audio` 和 `tts_language` 配置控制。
 
 桌宠默认直接连接 `[desktop_pet.chat].core_url`，本机默认地址为 `ws://127.0.0.1:8000/ws`。
 启动器检查本机 Core；需要鉴权时设置环境变量 `NACHOBOT_CORE_TOKEN`。

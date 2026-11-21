@@ -1,0 +1,47 @@
+# Built-in Irodori-TTS backend. Copy to configs/irodori.toml and edit the
+# source/model settings below. The managed runtime owns a private local server.
+
+[runtime]
+# Empty paths use the adapter-managed pinned source and the selected shared
+# Multimodal profile (.venv for GPU, .venv-cpu for CPU).
+# Explicit relative paths resolve from this config file's directory.
+repo_path = ""
+python_path = ""
+
+# Choose one checkpoint source. A local checkpoint takes precedence over the
+# default Hugging Face model when configured here.
+checkpoint = ""
+hf_checkpoint = "Aratako/Irodori-TTS-v4-Large"
+
+# "auto" follows [model_devices].tts and visible CUDA devices. Precision auto
+# uses bf16 on CUDA and fp32 on CPU. The codec can be placed independently.
+model_device = "auto"
+model_precision = "auto"
+codec_device = "auto"
+codec_precision = "auto"
+codec_repo = "Aratako/Semantic-DACVAE-Japanese-32dim"
+
+# Legacy extra values (auto/cpu/cu128) are accepted in existing configs but
+# ignored; the shared Multimodal profile owns Torch and CUDA selection.
+hf_home = ""
+
+[tts]
+host = "127.0.0.1"
+port = 9881
+timeout_seconds = 120
+
+[generation]
+no_ref = true
+ref_wav = ""
+lora_adapter = ""
+caption = ""
+# Omit num_steps to use the checkpoint's recommended RF/MeanFlow default.
+# seed is omitted by default for randomized generation.
+# num_steps = 4
+# seed = 530
+duration_scale = 1.0
+min_seconds = 0.5
+max_seconds = 30.0
+cfg_scale_text = 3.0
+cfg_scale_caption = 3.0
+cfg_scale_speaker = 5.0

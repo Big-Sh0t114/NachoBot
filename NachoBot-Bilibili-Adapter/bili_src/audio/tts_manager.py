@@ -4,6 +4,7 @@ import re
 import time
 import random
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any, Dict, List, Optional, Tuple, Callable
 
 from bili_src.core.multimodal_client import CoreMultimodalClient
@@ -73,6 +74,16 @@ class TTSManager:
 
         # Per-room speech language: "ja" (default) or "zh".
         self._lang_overrides: Dict[int, str] = {}
+        self._tts_policy: dict[str, Any] = {
+            "backend": None,
+            "ready": False,
+            "fixed_language": None,
+            "language_switch_allowed": False,
+        }
+        self._last_fixed_language: str | None = None
+        self._last_policy_attempt_at = 0.0
+        self._policy_refresh_lock: asyncio.Lock | None = None
+        self._policy_refresh_interval_seconds = 5.0
 
         self._last_active_time = time.time()
         self._next_idle_target = self._get_next_idle_interval()
@@ -99,10 +110,13 @@ class TTSManager:
     async def _synthesize_tts_segment(self, text: str, **kwargs) -> Any:
         """Synthesize explicit non-chat idle speech through Core."""
 
+        await self.refresh_tts_policy_if_due()
+        text_lang = kwargs.get("text_lang")
         response = await self.multimodal_client.synthesize_tts(
             text,
             platform=str(kwargs.get("platform") or self.config.platform),
-            text_lang=kwargs.get("text_lang"),
+            text_lang=text_lang,
+            prepare_text=True,
         )
         import base64
 
@@ -113,6 +127,97 @@ class TTSManager:
             return base64.b64decode(audio, validate=True)
         except Exception as exc:
             raise RuntimeError("Core TTS returned invalid audio") from exc
+
+    def _policy_snapshot(self) -> dict[str, Any]:
+        policy = getattr(self, "_tts_policy", None)
+        if not isinstance(policy, dict):
+            policy = {
+                "backend": None,
+                "ready": False,
+                "fixed_language": None,
+                "language_switch_allowed": False,
+            }
+            self._tts_policy = policy
+        if not hasattr(self, "_last_fixed_language"):
+            fixed = policy.get("fixed_language")
+            self._last_fixed_language = fixed if isinstance(fixed, str) and fixed else None
+        return dict(policy)
+
+    async def refresh_tts_policy_if_due(self, *, force: bool = False) -> dict[str, Any]:
+        """Refresh runtime policy at a bounded interval and retain known fixed locks."""
+        getter = getattr(self.multimodal_client, "get_tts_policy", None)
+        if not callable(getter):
+            return self._policy_snapshot()
+
+        if getattr(self, "_policy_refresh_lock", None) is None:
+            self._policy_refresh_lock = asyncio.Lock()
+        async with self._policy_refresh_lock:
+            now = time.monotonic()
+            last_attempt = float(getattr(self, "_last_policy_attempt_at", 0.0))
+            if not force and now - last_attempt < float(
+                getattr(self, "_policy_refresh_interval_seconds", 5.0)
+            ):
+                return self._policy_snapshot()
+            self._last_policy_attempt_at = now
+            try:
+                reported = await getter()
+            except Exception as exc:
+                self.logger.debug(
+                    "Core TTS policy refresh unavailable: {}", type(exc).__name__
+                )
+                reported = None
+
+            if isinstance(reported, Mapping):
+                backend = reported.get("backend")
+                ready = reported.get("ready")
+                fixed = reported.get("fixed_language")
+                switch_allowed = reported.get("language_switch_allowed")
+                valid = (
+                    (backend is None or isinstance(backend, str))
+                    and type(ready) is bool
+                    and (fixed is None or isinstance(fixed, str))
+                    and type(switch_allowed) is bool
+                )
+                if valid and ready:
+                    self._last_fixed_language = (
+                        fixed if fixed and not switch_allowed else None
+                    )
+                    self._tts_policy = {
+                        "backend": backend,
+                        "ready": True,
+                        "fixed_language": fixed,
+                        "language_switch_allowed": switch_allowed,
+                    }
+                elif valid:
+                    if fixed and not switch_allowed:
+                        self._last_fixed_language = fixed
+                    self._tts_policy = {
+                        "backend": backend,
+                        "ready": False,
+                        "fixed_language": self._last_fixed_language,
+                        "language_switch_allowed": False,
+                    }
+                else:
+                    reported = None
+            elif reported is not None:
+                reported = None
+
+            if reported is None:
+                previous = self._policy_snapshot()
+                self._tts_policy = {
+                    "backend": previous.get("backend"),
+                    "ready": False,
+                    "fixed_language": self._last_fixed_language,
+                    "language_switch_allowed": False,
+                }
+            return self._policy_snapshot()
+
+    def _fixed_tts_language(self) -> str | None:
+        policy = self._policy_snapshot()
+        fixed = policy.get("fixed_language")
+        if isinstance(fixed, str) and fixed and policy.get("language_switch_allowed") is False:
+            return fixed
+        return None
 
     async def _prepare_idle_reply(self, idle_item: Any) -> Any:
         """Normalize idle strings/dicts through the Live2D owner when present."""
@@ -286,18 +391,36 @@ class TTSManager:
             )
             raise
 
+    def _manual_command_allowed(self, user_id: str, allowed_user_ids: set) -> bool:
+        return (
+            str(user_id) == str(self.config.dede_user_id)
+            or bool(allowed_user_ids and str(user_id) in allowed_user_ids)
+        )
+
+    async def handle_tts_manual_command_async(
+        self,
+        room_id: int,
+        user_id: str,
+        text: str,
+        user_name: str,
+        allowed_user_ids: set,
+    ) -> bool:
+        """Async adapter entry point; only authorized language commands refresh policy."""
+        if (
+            text.strip().lower() == "#lang_switch"
+            and self._manual_command_allowed(user_id, allowed_user_ids)
+        ):
+            await self.refresh_tts_policy_if_due(force=True)
+        return self.handle_tts_manual_command(
+            room_id, user_id, text, user_name, allowed_user_ids
+        )
+
     def handle_tts_manual_command(self, room_id: int, user_id: str, text: str, user_name: str, allowed_user_ids: set) -> bool:
         command = text.strip().lower()
         if command not in ("#tts_on", "#tts_off", "#lang_switch", "#idle_on", "#idle_off"):
             return False
 
-        allowed = False
-        if str(user_id) == str(self.config.dede_user_id):
-            allowed = True
-        elif allowed_user_ids and str(user_id) in allowed_user_ids:
-            allowed = True
-
-        if not allowed:
+        if not self._manual_command_allowed(user_id, allowed_user_ids):
             self.logger.warning(
                 "TTS manual command rejected: room_id={} user_id={} user_name={}",
                 room_id, user_id, user_name,
@@ -347,6 +470,16 @@ class TTSManager:
 
     def _handle_lang_switch(self, room_id: int, user_id: str) -> bool:
         """Toggle the speech language between Japanese and Chinese for a room."""
+        fixed_language = self._fixed_tts_language()
+        if fixed_language is not None:
+            self.logger.info(
+                "Core TTS is fixed to {}; #lang_switch is disabled (user_id={}, room_id={})",
+                fixed_language,
+                user_id,
+                room_id,
+            )
+            return True
+
         current = self.get_room_language(room_id)
         new_lang = "zh" if current == "ja" else "ja"
         self._lang_overrides[room_id] = new_lang
@@ -360,6 +493,9 @@ class TTSManager:
 
     def get_room_language(self, room_id: int) -> str:
         """Get the current speech language for a room. Default is 'ja'."""
+        fixed_language = self._fixed_tts_language()
+        if fixed_language is not None:
+            return fixed_language
         return self._lang_overrides.get(room_id, "ja")
 
     def update_subtitle(self, text: str, subtitle_path: str = None) -> None:

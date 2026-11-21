@@ -38,6 +38,10 @@ from chat_backend import ChatBackendError, chat_backend
 from chat_media import ChatMediaError, chat_media_store
 from media_response import chat_media_file_response
 from tts_manager import TTSGenerationError, TTSManager, TTSUnavailableError
+try:
+    from tts_profiles import TTSProfileError, TTSProfileStore, synthesize_preview
+except ImportError:  # pragma: no cover - package import context
+    from .tts_profiles import TTSProfileError, TTSProfileStore, synthesize_preview
 from voice_calls import voice_call_store, VoiceCallError
 from voice_routes import create_voice_router
 from live2d_web import router as live2d_router, live2d_web_manager
@@ -117,6 +121,7 @@ plugin_mgr = PluginManager()
 db_mgr = DatabaseManager()
 knowledge_mgr = KnowledgeManager()
 tts_mgr = TTSManager()
+tts_profile_store = TTSProfileStore()
 webui_security = WebUISecurity(webui_config)
 
 
@@ -218,6 +223,109 @@ async def webui_info():
     from webui_config import webui_config
 
     return {"version": webui_config.version}
+
+
+async def _read_tts_profile_json(request: Request) -> dict[str, Any]:
+    """Read a small JSON request without exposing submitted fields in errors."""
+    raw_length = request.headers.get("content-length", "")
+    try:
+        if raw_length and int(raw_length) > 96 * 1024:
+            raise HTTPException(413, "HTTP TTS 请求不能超过 96 KB")
+    except ValueError:
+        raise HTTPException(400, "HTTP TTS 请求长度无效")
+    chunks = bytearray()
+    async for chunk in request.stream():
+        chunks.extend(chunk)
+        if len(chunks) > 96 * 1024:
+            raise HTTPException(413, "HTTP TTS 请求不能超过 96 KB")
+    try:
+        body = json.loads(chunks.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise HTTPException(400, "HTTP TTS 请求必须是有效的 JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "HTTP TTS 请求必须是 JSON 对象")
+    return body
+
+
+@app.get("/api/tts/profiles")
+async def list_tts_profiles():
+    try:
+        return await asyncio.to_thread(tts_profile_store.list_profiles)
+    except TTSProfileError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.put("/api/tts/profiles/{profile_id}")
+async def save_tts_profile(profile_id: str, request: Request):
+    body = await _read_tts_profile_json(request)
+    if set(body) != {"profile"}:
+        raise HTTPException(400, "请求需要且只能包含 profile 字段")
+    try:
+        saved = await asyncio.to_thread(
+            tts_profile_store.save_profile, profile_id, body["profile"]
+        )
+        return {"status": "ok", **saved}
+    except TTSProfileError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(500, "HTTP TTS 配置保存失败") from exc
+
+
+@app.delete("/api/tts/profiles/{profile_id}")
+async def delete_tts_profile(profile_id: str):
+    try:
+        return await asyncio.to_thread(tts_profile_store.delete_profile, profile_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except TTSProfileError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(500, "HTTP TTS 配置删除失败") from exc
+
+
+@app.post("/api/tts/profiles/{profile_id}/default")
+async def set_default_tts_profile(profile_id: str):
+    try:
+        result = await asyncio.to_thread(tts_profile_store.set_default, profile_id)
+        return {"status": "ok", **result}
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except TTSProfileError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(500, "默认 HTTP TTS 配置保存失败") from exc
+
+
+@app.get("/api/tts/profiles/{profile_id}/export")
+async def export_tts_profile(profile_id: str):
+    try:
+        return await asyncio.to_thread(tts_profile_store.export_profile, profile_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except TTSProfileError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/tts/profiles/test")
+async def test_tts_profile(request: Request):
+    body = await _read_tts_profile_json(request)
+    allowed = {"profile", "text", "language", "voice"}
+    if not {"profile", "text"}.issubset(body) or set(body) - allowed:
+        raise HTTPException(400, "请求需要 profile 和 text 字段，可选 language、voice")
+    try:
+        audio = await synthesize_preview(
+            body["profile"],
+            body["text"],
+            language=body.get("language", ""),
+            voice=body.get("voice", ""),
+        )
+    except TTSProfileError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return Response(
+        content=audio,
+        media_type="audio/wav",
+        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+    )
 
 
 # =========================================================================
@@ -1318,16 +1426,23 @@ async def setup_dep_tasks(
 
 @app.get("/api/setup/deps/multimodal/status")
 async def setup_multimodal_runtime_status():
-    """Return GPU/CPU readiness after read-only locked dependency checks."""
+    """Return local-model and GenericHTTP readiness after read-only lock checks."""
     gpu, runtimes = await asyncio.gather(
         asyncio.to_thread(EnvironmentChecker.check_gpu),
-        asyncio.to_thread(MultimodalRuntimeManager.get_all_statuses),
+        asyncio.to_thread(MultimodalRuntimeManager.get_all_statuses, config_mgr.root),
     )
     recommended = "gpu" if gpu.get("has_gpu") else "cpu"
+    try:
+        tts_profile = MultimodalRuntimeManager.resolve_tts_profile(root=config_mgr.root)
+    except (OSError, ValueError, RuntimeError):
+        # Keep the dependency panel available when the live TTS config is
+        # malformed. Launch and install gates still reject that config.
+        tts_profile = None
     return {
         "recommended": recommended,
         "gpu": gpu,
         "runtimes": runtimes,
+        "tts_profile": tts_profile,
     }
 
 

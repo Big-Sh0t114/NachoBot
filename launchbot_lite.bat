@@ -145,24 +145,12 @@ set "NAPCAT_SRC=%NAPCAT_DIR%\src"
 set "TTS_RUNTIME_MANAGER=%ADAPTER_DIR%\scripts\tts_runtime_manager.py"
 set "BASE_TOML=%ADAPTER_DIR%\configs\base.toml"
 
-REM -- .bat-only runtime selection. WebUI does not read [bat_runtime]. --
-set "BAT_RUNTIME=gpu"
-for /f "usebackq delims=" %%R in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$p='%BASE_TOML%'; if (Test-Path $p) { $c=Get-Content -Raw $p; if ($c -match '(?ms)^\[bat_runtime\]\s*.*?^lite\s*=\s*\x22([^\x22]+)\x22') { $Matches[1] } else { 'gpu' } } else { 'gpu' }"`) do set "BAT_RUNTIME=%%R"
-if /i "!BAT_RUNTIME!"=="cpu" (
-  set "ADAPTER_ENV_DIR=%ADAPTER_DIR%\.venv-cpu"
-  set "TTS_TORCH_INDEX=https://download.pytorch.org/whl/cpu"
-) else if /i "!BAT_RUNTIME!"=="gpu" (
-  set "ADAPTER_ENV_DIR=%ADAPTER_DIR%\.venv"
-  set "TTS_TORCH_INDEX=https://download.pytorch.org/whl/cu130"
-) else (
-  echo [FATAL] Invalid [bat_runtime].lite value: !BAT_RUNTIME! ^(expected gpu or cpu^)
-  set "TTS_RC=1"
-  goto :TTS_FAIL
-)
-set "ADAPTER_PYTHON=!ADAPTER_ENV_DIR!\Scripts\python.exe"
-set "NACHOBOT_TTS_RUNTIME_PROFILE=!BAT_RUNTIME!"
-set "NACHOBOT_TTS_TORCH_INDEX=!TTS_TORCH_INDEX!"
-echo [INFO] LITE .bat runtime: !BAT_RUNTIME! ^(!ADAPTER_ENV_DIR!^)
+REM -- Profiles are derived from enabled_tts and canonical model_devices. --
+set "BAT_TTS_PROFILE="
+set "ADAPTER_ENV_DIR="
+set "ADAPTER_PYTHON="
+set "NACHOBOT_TTS_RUNTIME_PROFILE="
+set "NACHOBOT_TTS_TORCH_INDEX="
 
 set "PORT_TTS=9880"
 set "HOST_ADAPTER=127.0.0.1"
@@ -190,36 +178,55 @@ if errorlevel 1 (
   set "PATH=%USERPROFILE%\.local\bin;%USERPROFILE%\.cargo\bin;%PATH%"
 )
 
-echo [INFO] Syncing !BAT_RUNTIME! dependencies (Locking Python 3.11~3.13)... >> "%SETUP_LOG%"
+echo [INFO] Planning and preparing model-specific runtimes (Python 3.11-3.12)... >> "%SETUP_LOG%"
 cd /d "%ADAPTER_DIR%"
-set "SYNC_RC=0"
-set "UV_PROJECT_ENVIRONMENT=!ADAPTER_ENV_DIR!"
-if /i "!BAT_RUNTIME!"=="cpu" (
-  if not exist "%ADAPTER_DIR%\pyproject.toml.cpu" (
-    echo [FATAL] CPU runtime spec not found: %ADAPTER_DIR%\pyproject.toml.cpu >> "%SETUP_LOG%"
-    set "TTS_RC=1"
-    set "UV_PROJECT_ENVIRONMENT="
-    goto :TTS_FAIL
-  )
-  set "CPU_PROJECT=%ADAPTER_DIR%\.runtime\bat-cpu"
-  if not exist "!CPU_PROJECT!" mkdir "!CPU_PROJECT!"
-  copy /y "%ADAPTER_DIR%\pyproject.toml.cpu" "!CPU_PROJECT!\pyproject.toml" >nul
-  uv sync --project "!CPU_PROJECT!" --python ">=3.11,<3.13" --no-install-project >> "%SETUP_LOG%" 2>&1
-  set "SYNC_RC=!ERRORLEVEL!"
-) else (
-  uv sync --project "%ADAPTER_DIR%" --python ">=3.11,<3.13" >> "%SETUP_LOG%" 2>&1
-  set "SYNC_RC=!ERRORLEVEL!"
-)
 set "UV_PROJECT_ENVIRONMENT="
+set "RUNTIME_PLAN_FILE=%ADAPTER_DIR%\.runtime\launch\model-runtime-lite-%RANDOM%_%RANDOM%.cmd"
+uv run --no-project --python ">=3.11,<3.13" python "%ADAPTER_DIR%\scripts\prepare_model_runtime.py" --variant lite --adapter-root "%ADAPTER_DIR%" --transport-file "!RUNTIME_PLAN_FILE!" >> "%SETUP_LOG%" 2>&1
+set "SYNC_RC=!ERRORLEVEL!"
 if not "!SYNC_RC!"=="0" (
-  echo [FATAL] !BAT_RUNTIME! runtime uv sync failed. >> "%SETUP_LOG%"
-  echo [FATAL] !BAT_RUNTIME! runtime uv sync failed.
+  echo [FATAL] Model runtime planning or dependency preparation failed. >> "%SETUP_LOG%"
+  echo [FATAL] Model runtime planning or dependency preparation failed.
   echo [INFO] uv sync log: !SETUP_LOG!
   echo [INFO] Latest 40 log lines:
   powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Content -LiteralPath $env:SETUP_LOG -Tail 40"
   set "TTS_RC=1"
   goto :TTS_FAIL
 )
+if not exist "!RUNTIME_PLAN_FILE!" (
+  echo [FATAL] Runtime bootstrap did not create its launch plan. >> "%SETUP_LOG%"
+  echo [FATAL] Runtime bootstrap did not create its launch plan.
+  set "TTS_RC=1"
+  goto :TTS_FAIL
+)
+call "!RUNTIME_PLAN_FILE!"
+set "SYNC_RC=!ERRORLEVEL!"
+del /q "!RUNTIME_PLAN_FILE!" >nul 2>&1
+if not "!SYNC_RC!"=="0" (
+  echo [FATAL] Runtime launch plan could not be loaded. >> "%SETUP_LOG%"
+  echo [FATAL] Runtime launch plan could not be loaded.
+  set "TTS_RC=1"
+  goto :TTS_FAIL
+)
+if /i "!BAT_TTS_PROFILE!"=="cpu" (
+  set "ADAPTER_ENV_DIR=%ADAPTER_DIR%\.venv-cpu"
+  set "NACHOBOT_TTS_RUNTIME_PROFILE=cpu"
+  set "NACHOBOT_TTS_TORCH_INDEX=https://download.pytorch.org/whl/cpu"
+) else if /i "!BAT_TTS_PROFILE!"=="gpu" (
+  set "ADAPTER_ENV_DIR=%ADAPTER_DIR%\.venv"
+  set "NACHOBOT_TTS_RUNTIME_PROFILE=gpu"
+  set "NACHOBOT_TTS_TORCH_INDEX=https://download.pytorch.org/whl/cu130"
+) else if /i "!BAT_TTS_PROFILE!"=="http" (
+  set "ADAPTER_ENV_DIR=%ADAPTER_DIR%\.venv-http"
+  set "NACHOBOT_TTS_RUNTIME_PROFILE=cpu"
+  set "NACHOBOT_TTS_TORCH_INDEX=https://download.pytorch.org/whl/cpu"
+) else (
+  echo [FATAL] Invalid TTS profile returned by runtime bootstrap: !BAT_TTS_PROFILE!
+  set "TTS_RC=1"
+  goto :TTS_FAIL
+)
+set "ADAPTER_PYTHON=!ADAPTER_ENV_DIR!\Scripts\python.exe"
+echo [INFO] LITE TTS profile: !BAT_TTS_PROFILE! ^(!ADAPTER_ENV_DIR!^)
 if not exist "!ADAPTER_PYTHON!" (
   echo [FATAL] Runtime Python not found: !ADAPTER_PYTHON! >> "%SETUP_LOG%"
   echo [FATAL] Runtime Python not found: !ADAPTER_PYTHON!

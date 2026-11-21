@@ -836,6 +836,14 @@ class CoreChatClient:
     def set_voice_enabled(self, enabled: bool) -> None:
         self.voice.set_enabled(enabled)
 
+    def get_tts_policy(self) -> dict[str, Any]:
+        """Return the last policy observed from Core without doing network I/O."""
+        return self.voice.get_tts_policy()
+
+    def refresh_tts_policy(self, callback) -> bool:
+        """Refresh Core-owned policy on the voice worker, never on the Tk thread."""
+        return self.voice.refresh_tts_policy(callback)
+
     def acknowledge_current_request(self) -> None:
         """Release queued follow-ups after the caller has handed off its first result."""
         request_id = getattr(self._request_context, "request_id", None)

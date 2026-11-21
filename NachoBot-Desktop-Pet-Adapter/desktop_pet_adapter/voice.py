@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import threading
@@ -15,6 +16,46 @@ from urllib.parse import urlsplit
 import aiohttp
 
 from .config import DesktopChatConfig
+
+
+_CORE_TTS_ERROR_BODY_MAX_BYTES = 4_096
+_CORE_TTS_ERROR_MESSAGES = {
+    "invalid_request": "语音请求无效",
+    "speech_policy_unavailable": "语音服务暂不可用",
+    "speech_preparation_timeout": "日语语音文本转换超时",
+    "speech_preparation_unavailable": "日语语音文本转换失败",
+    "speech_preparation_invalid_response": "日语语音文本转换结果无效",
+    "speech_preparation_wrong_language": "日语语音文本未通过语言校验",
+    "speech_preparation_invalid_request": "语音文本请求无效",
+}
+
+
+def _core_tts_error_message(status: int, body: bytes) -> str:
+    """Expose only allowlisted Core detail codes in desktop diagnostics."""
+
+    description = None
+    try:
+        payload = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
+        payload = None
+    if isinstance(payload, dict):
+        code = payload.get("detail")
+        if isinstance(code, str):
+            description = _CORE_TTS_ERROR_MESSAGES.get(code)
+
+    prefix = f"Core TTS 请求失败 (HTTP {status})"
+    return f"{prefix}: {description}" if description else prefix
+
+
+async def _read_core_error_body(content: Any) -> bytes:
+    body = bytearray()
+    while len(body) < _CORE_TTS_ERROR_BODY_MAX_BYTES:
+        remaining = _CORE_TTS_ERROR_BODY_MAX_BYTES - len(body)
+        chunk = await content.read(min(1_024, remaining))
+        if not chunk:
+            break
+        body.extend(chunk)
+    return bytes(body)
 
 
 def speech_segments(text: str) -> list[str]:
@@ -67,6 +108,32 @@ class DesktopVoice:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._future: Future | None = None
+        self._policy_future: Future | None = None
+        self._tts_policy = {
+            "backend": None,
+            "ready": False,
+            "fixed_language": None,
+            "language_switch_allowed": False,
+        }
+        self._last_fixed_language: str | None = None
+
+    def get_tts_policy(self) -> dict[str, Any]:
+        """Return a copy of the last Core policy snapshot without doing I/O."""
+        with self._lock:
+            return dict(self._tts_policy)
+
+    def refresh_tts_policy(self, callback: Callable[[dict[str, Any]], None]) -> bool:
+        """Fetch Core policy on the voice worker and deliver it to a private callback."""
+        with self._lock:
+            if self._closed or self._policy_future is not None and not self._policy_future.done():
+                return False
+            self._ensure_loop_locked()
+            assert self._loop is not None
+            self._policy_future = asyncio.run_coroutine_threadsafe(
+                self._refresh_tts_policy(callback), self._loop
+            )
+            return True
+
     def token(self) -> int:
         with self._lock:
             return self._epoch
@@ -148,6 +215,80 @@ class DesktopVoice:
             headers["Authorization"] = authorization
         return headers
 
+    async def _fetch_tts_policy(self) -> dict[str, Any]:
+        timeout = aiohttp.ClientTimeout(total=4, sock_connect=1, sock_read=3)
+        url = self._core_http_origin() + "/api/multimodal/tts/policy"
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, headers=self._core_headers()) as response:
+                response.raise_for_status()
+                policy = await response.json(content_type=None)
+        if not isinstance(policy, dict):
+            raise ValueError("Core TTS policy response must be an object")
+        backend = policy.get("backend")
+        fixed_language = policy.get("fixed_language")
+        ready = policy.get("ready")
+        switch_allowed = policy.get("language_switch_allowed")
+        if (
+            (backend is not None and not isinstance(backend, str))
+            or type(ready) is not bool
+            or (fixed_language is not None and not isinstance(fixed_language, str))
+            or type(switch_allowed) is not bool
+        ):
+            raise ValueError("Core TTS policy response has invalid fields")
+        return {
+            "backend": backend,
+            "ready": ready,
+            "fixed_language": fixed_language,
+            "language_switch_allowed": switch_allowed,
+        }
+
+    async def _refresh_tts_policy(
+        self, callback: Callable[[dict[str, Any]], None]
+    ) -> None:
+        try:
+            reported = await self._fetch_tts_policy()
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+            self.logger.debug("[DesktopVoice] Core TTS policy refresh unavailable: {}", type(exc).__name__)
+            reported = None
+
+        with self._lock:
+            if self._closed:
+                return
+            if reported is None:
+                # A transient outage must never erase a fixed-language lock
+                # learned from Core before it became unavailable.
+                self._tts_policy = {
+                    "backend": self._tts_policy.get("backend"),
+                    "ready": False,
+                    "fixed_language": self._last_fixed_language,
+                    "language_switch_allowed": False,
+                }
+            elif reported["ready"]:
+                fixed = reported["fixed_language"]
+                self._last_fixed_language = (
+                    fixed if fixed and not reported["language_switch_allowed"] else None
+                )
+                self._tts_policy = dict(reported)
+            else:
+                fixed = reported["fixed_language"]
+                if fixed and not reported["language_switch_allowed"]:
+                    self._last_fixed_language = fixed
+                self._tts_policy = {
+                    "backend": reported["backend"],
+                    "ready": False,
+                    "fixed_language": self._last_fixed_language,
+                    "language_switch_allowed": False,
+                }
+            snapshot = dict(self._tts_policy)
+            callback(snapshot)
+
+    def _send(self, epoch: int, command: str, value: Any) -> bool:
+        with self._lock:
+            if self._closed or not self._enabled or epoch != self._epoch:
+                return False
+            self.emit(command, value)
+            return True
+
     async def _speak(self, text: str, language: str, epoch: int) -> None:
         started = time.monotonic()
         try:
@@ -168,10 +309,24 @@ class DesktopVoice:
             "text": text,
             "text_lang": language,
             "platform": "local.live2d",
+            "prepare_text": True,
         }
         async with aiohttp.ClientSession(timeout=timeout) as session:
             response = await session.post(url, json=payload, headers=self._core_headers())
             async with response:
+                if response.status >= 400:
+                    try:
+                        error_body = await _read_core_error_body(response.content)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        error_body = b""
+                    raise ValueError(
+                        _core_tts_error_message(
+                            response.status,
+                            error_body,
+                        )
+                    )
                 response.raise_for_status()
                 fmt = pcm_format(response.headers)
                 identity = dict(
@@ -211,6 +366,9 @@ class DesktopVoice:
                 return
             self._closed = True
             self._cancel_locked()
+            if self._policy_future is not None:
+                self._policy_future.cancel()
+                self._policy_future = None
             if self._loop is not None:
                 self._loop.call_soon_threadsafe(self._loop.stop)
         if self._thread is not None:

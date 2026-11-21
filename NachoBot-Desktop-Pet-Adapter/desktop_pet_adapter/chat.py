@@ -883,6 +883,10 @@ class DesktopPetChat:
         self._hover_state = PetChatHoverState()
         self._voice_enabled = bool(config.play_audio)
         self._tts_language = config.tts_language
+        self._tts_policy_ready = config.transport != "core"
+        self._tts_fixed_language: str | None = None
+        self._tts_policy_refresh_pending = False
+        self._next_tts_policy_refresh = 0.0
         self._voice_button = None
         self._language_button = None
         self._language_button_window = None
@@ -1049,6 +1053,7 @@ class DesktopPetChat:
         open_from_pet = False
         open_parameters = False
         open_history = False
+        open_requested_for_policy = False
         latest_anchor = None
         proactive_completions = []
         try:
@@ -1057,6 +1062,7 @@ class DesktopPetChat:
                 if action == "open":
                     open_requested = True
                     open_from_pet = open_from_pet or bool(value)
+                    open_requested_for_policy = True
                 elif action == "parameters_open":
                     open_parameters = True
                 elif action == "history_open":
@@ -1114,6 +1120,10 @@ class DesktopPetChat:
                         self._note_bot_activity(proactive=True)
                 elif action == "voice_state":
                     self._refresh_voice_controls()
+                elif action == "tts_policy":
+                    self._tts_policy_refresh_pending = False
+                    if isinstance(value, dict):
+                        self._apply_tts_policy(value)
                 elif action == "stop":
                     self._remember_history_position()
                     root.quit()
@@ -1164,6 +1174,10 @@ class DesktopPetChat:
             if transcript:
                 self._submit_text(transcript)
         self._poll_proactive()
+        now = time.monotonic()
+        if open_requested_for_policy or now >= self._next_tts_policy_refresh:
+            self._next_tts_policy_refresh = now + 5.0
+            self._request_tts_policy_refresh()
         if open_parameters:
             self._show_parameter_panel()
         if open_history:
@@ -2571,16 +2585,25 @@ class DesktopPetChat:
         self._paint_language_button()
 
     def _language_switch_enabled(self) -> bool:
-        return True
+        if self.config.transport != "core":
+            return True
+        return self._tts_policy_ready and self._tts_fixed_language is None
 
     def _language_button_glyph(self) -> str:
-        return {"auto": "A", "zh": "中", "ja": "日", "en": "EN"}.get(
-            self._tts_language, "…"
+        if self._tts_fixed_language is not None:
+            return self._tts_fixed_language
+        language = (
+            self._tts_language if self.config.transport != "core" or self._tts_policy_ready else ""
         )
+        return {"auto": "A", "zh": "中", "ja": "日", "en": "EN"}.get(language, "…")
 
     def _language_button_title(self) -> str:
-        label = self._TTS_LANGUAGE_LABELS.get(self._tts_language, self._tts_language)
-        return f"语言 · {label}"
+        if self._tts_fixed_language is not None:
+            label = self._TTS_LANGUAGE_LABELS.get(self._tts_fixed_language, self._tts_fixed_language)
+            return f"语言 · {label}（固定 · {self._tts_fixed_language}）"
+        if self.config.transport == "core" and not self._tts_policy_ready:
+            return "语言 · Core 状态未知"
+        return f"语言 · {self._TTS_LANGUAGE_LABELS[self._tts_language]}"
 
     def _paint_language_button(self) -> None:
         window = self._language_button_window
@@ -2589,9 +2612,54 @@ class DesktopPetChat:
         canvas = getattr(window, "_language_canvas", None)
         if canvas is not None and canvas.winfo_exists():
             canvas.itemconfigure("language-label", text=self._language_button_glyph())
-            canvas.itemconfigure("language-label", fill=_CHAT_COLORS["accent_dark"])
-            canvas.itemconfigure("language-surface", fill=_CHAT_COLORS["card"])
+            color = _CHAT_COLORS["accent_dark"] if self._language_switch_enabled() else _CHAT_COLORS["muted"]
+            canvas.itemconfigure("language-label", fill=color)
+            canvas.itemconfigure(
+                "language-surface",
+                fill=_CHAT_COLORS["accent_bg"] if self._tts_fixed_language else _CHAT_COLORS["card"],
+            )
         window.title(self._language_button_title())
+
+    def _apply_tts_policy(self, policy: dict[str, Any]) -> None:
+        ready = policy.get("ready") is True
+        fixed_language = policy.get("fixed_language")
+        switch_allowed = policy.get("language_switch_allowed") is True
+        if ready:
+            self._tts_policy_ready = True
+            self._tts_fixed_language = (
+                fixed_language
+                if isinstance(fixed_language, str) and fixed_language and not switch_allowed
+                else None
+            )
+        else:
+            self._tts_policy_ready = False
+            if (
+                isinstance(fixed_language, str)
+                and fixed_language
+                and not switch_allowed
+            ):
+                self._tts_fixed_language = fixed_language
+        self._refresh_voice_controls()
+
+    def _request_tts_policy_refresh(self) -> None:
+        if (
+            self.config.transport != "core"
+            or not self.config.enabled
+            or self._stopped.is_set()
+            or self._tts_policy_refresh_pending
+        ):
+            return
+        refresh = getattr(self.backend, "refresh_tts_policy", None)
+        if not callable(refresh):
+            return
+        self._tts_policy_refresh_pending = True
+
+        def on_policy(policy: dict[str, Any]) -> None:
+            if not self._stopped.is_set():
+                self._ui_queue.put(("tts_policy", policy))
+
+        if not refresh(on_policy):
+            self._tts_policy_refresh_pending = False
 
     def _position_window(self) -> None:
         window = self._window

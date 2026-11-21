@@ -882,7 +882,11 @@ def create_voice_router(
                 "POST",
                 f"{_get_core_base_url().rstrip('/')}/api/multimodal/tts/stream",
                 headers=headers,
-                json={"text": voice_message["message"]["content"], "platform": "webui"},
+                json={
+                    "text": voice_message["message"]["content"],
+                    "platform": "webui",
+                    "prepare_text": True,
+                },
             )
             upstream = await client.send(request, stream=True)
             if upstream.status_code != 200:

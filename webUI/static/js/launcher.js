@@ -60,6 +60,12 @@ const LauncherModule = (() => {
         },
     });
 
+    const RUNTIME_META = Object.freeze({
+        gpu: { name: 'GPU / CUDA', detail: 'CUDA 版 PyTorch 与本地模型依赖' },
+        cpu: { name: 'CPU', detail: 'CPU 版 PyTorch 与本地模型依赖' },
+        http: { name: '轻量 HTTP', detail: 'HTTP 转发依赖，不需要 PyTorch / CUDA' },
+    });
+
     const HIDDEN_LAUNCH_GROUPS = new Set(['core', 'tts_full', 'tts_lite', 'potato']);
     const SNOWLUMA_PROCESS_REFRESH_FAILED = 'PROCESS_REFRESH_FAILED';
     const SNOWLUMA_PROCESS_REFRESH_MESSAGE = '操作已提交，但 SnowLuma 实例状态刷新失败，请点击“刷新实例”确认状态';
@@ -509,6 +515,75 @@ const LauncherModule = (() => {
         `;
     }
 
+    function selectedModelRuntime() {
+        // HTTP is a TTS profile, never a local perception/model runtime.
+        return selectedRuntime === 'cpu' ? 'cpu' : 'gpu';
+    }
+
+    function requiredRuntimeProfiles() {
+        if (selectedProfile === 'potato') return [];
+        const modelRuntime = selectedModelRuntime();
+        const httpTts = runtimeStatus?.tts_profile === 'http';
+        if (selectedProfile === 'lite' && httpTts) return ['http'];
+        if (selectedProfile === 'full' && httpTts) return [modelRuntime, 'http'];
+        return [modelRuntime];
+    }
+
+    function modelRuntimeMarkup(id, requiredProfiles, recommendedRuntime, busy, running) {
+        const status = runtimeStatus?.runtimes?.[id] || { installed: false };
+        const isRequired = requiredProfiles.includes(id);
+        const selected = selectedProfile !== 'potato' && selectedRuntime === id;
+        const installing = installingRuntime === id;
+        const recommendation = id === recommendedRuntime ? '<span class="launch-profile-tag">推荐</span>' : '';
+        return `
+            <div class="launch-runtime-item ${selected ? 'selected' : ''} ${isRequired ? 'required' : ''}">
+                <button type="button" class="launch-runtime-select"
+                        data-launch-runtime="${id}"
+                        ${(selectedProfile !== 'potato' && !busy && !running) ? '' : 'disabled'}>
+                    <span class="launch-profile-radio" aria-hidden="true"></span>
+                    <span class="launch-runtime-copy">
+                        <strong>${RUNTIME_META[id].name}</strong>
+                        <small>${RUNTIME_META[id].detail}</small>
+                    </span>
+                    ${recommendation}
+                </button>
+                <div class="launch-runtime-state ${status.installed ? 'installed' : 'missing'}">
+                    <span title="${escapeHtml(status.message || '')}">${status.installed ? '✓ 依赖已验证' : '需安装 / 补齐'}</span>
+                    <button type="button" class="btn btn-primary btn-sm launch-runtime-install"
+                            data-install-runtime="${id}"
+                            ${(installingRuntime || busy || running) ? 'disabled' : ''}>
+                        ${installing ? '验证 / 安装中...' : (status.installed ? '验证 / 补齐' : '安装 / 补齐')}
+                    </button>
+                </div>
+            </div>
+        `;
+    }
+
+    function httpRuntimeMarkup(busy, running) {
+        const status = runtimeStatus?.runtimes?.http || { installed: false };
+        const installing = installingRuntime === 'http';
+        const pathTitle = escapeHtml([status.path, status.message].filter(Boolean).join(' · '));
+        const labelSuffix = status.label ? ` · ${escapeHtml(status.label)}` : '';
+        return `
+            <div class="launch-runtime-item required">
+                <button type="button" class="launch-runtime-select" aria-disabled="true" disabled>
+                    <span class="launch-runtime-copy">
+                        <strong>${RUNTIME_META.http.name}</strong>
+                        <small title="${escapeHtml(status.path || '')}">${RUNTIME_META.http.detail}${labelSuffix}</small>
+                    </span>
+                </button>
+                <div class="launch-runtime-state ${status.installed ? 'installed' : 'missing'}">
+                    <span title="${pathTitle}">${status.installed ? '✓ 依赖已验证' : '需安装 / 补齐'}</span>
+                    <button type="button" class="btn btn-primary btn-sm launch-runtime-install"
+                            data-install-runtime="http"
+                            ${(installingRuntime || busy || running) ? 'disabled' : ''}>
+                        ${installing ? '验证 / 安装中...' : (status.installed ? '验证 / 补齐' : '安装 / 补齐')}
+                    </button>
+                </div>
+            </div>
+        `;
+    }
+
     function launchCardInnerHTML() {
         const state = launch || { status: 'stopped', core: { status: 'stopped' }, profiles: [] };
         const [badgeClass, badgeText] = launchBadge(state.status);
@@ -552,43 +627,30 @@ const LauncherModule = (() => {
         const selectedMeta = LAUNCH_PROFILES[selectedProfile];
         const runtimes = runtimeStatus?.runtimes || {};
         const recommendedRuntime = runtimeStatus?.recommended === 'cpu' ? 'cpu' : 'gpu';
-        const requiredRuntime = selectedProfile === 'potato' ? null : selectedRuntime;
-        const requiredInstalled = selectedProfile === 'potato'
-            || Boolean(requiredRuntime && runtimes[requiredRuntime]?.installed);
-        const runtimeMeta = {
-            gpu: { name: 'GPU / CUDA', detail: 'CUDA 版 PyTorch 与本地模型依赖' },
-            cpu: { name: 'CPU', detail: 'CPU 版 PyTorch 与本地模型依赖' },
-        };
-        const runtimeMarkup = ['gpu', 'cpu'].map(id => {
-            const status = runtimes[id] || { installed: false };
-            const isRequired = requiredRuntime === id;
-            const selectable = selectedProfile !== 'potato' && !busy && !running;
-            const selected = selectedProfile === 'potato' ? false : selectedRuntime === id;
-            const installing = installingRuntime === id;
-            const recommendation = id === recommendedRuntime ? '<span class="launch-profile-tag">推荐</span>' : '';
-            return `
-                <div class="launch-runtime-item ${selected ? 'selected' : ''} ${isRequired ? 'required' : ''}">
-                    <button type="button" class="launch-runtime-select"
-                            data-launch-runtime="${id}"
-                            ${selectable ? '' : 'disabled'}>
-                        <span class="launch-profile-radio" aria-hidden="true"></span>
-                        <span class="launch-runtime-copy">
-                            <strong>${runtimeMeta[id].name}</strong>
-                            <small>${runtimeMeta[id].detail}</small>
-                        </span>
-                        ${recommendation}
-                    </button>
-                    <div class="launch-runtime-state ${status.installed ? 'installed' : 'missing'}">
-                        <span title="${escapeHtml(status.message || '')}">${status.installed ? '✓ 依赖已验证' : '需安装 / 补齐'}</span>
-                            <button type="button" class="btn btn-primary btn-sm launch-runtime-install"
-                                    data-install-runtime="${id}"
-                                    ${(installingRuntime || busy || running) ? 'disabled' : ''}>
-                                ${installing ? '验证 / 安装中...' : (status.installed ? '验证 / 补齐' : '安装 / 补齐')}
-                            </button>
-                    </div>
-                </div>
-            `;
-        }).join('');
+        const requiredProfiles = requiredRuntimeProfiles();
+        const missingProfiles = requiredProfiles.filter(id => !runtimes[id]?.installed);
+        const requiredInstalled = missingProfiles.length === 0;
+        const httpTts = runtimeStatus?.tts_profile === 'http';
+        const hideModelRuntimeChoice = selectedProfile === 'lite' && httpTts;
+        const runtimeMarkup = [
+            ...(hideModelRuntimeChoice ? [] : ['gpu', 'cpu'].map(id =>
+                modelRuntimeMarkup(id, requiredProfiles, recommendedRuntime, busy, running),
+            )),
+            ...(requiredProfiles.includes('http') ? [httpRuntimeMarkup(busy, running)] : []),
+        ].join('');
+        const requiredRuntimeNames = requiredProfiles.map(id => RUNTIME_META[id].name);
+        const missingRuntimeNames = missingProfiles.map(id => RUNTIME_META[id].name);
+        const runtimeSummary = requiredRuntimeNames.length ? requiredRuntimeNames.join(' + ') : '不需要';
+        const runtimeHint = hideModelRuntimeChoice
+            ? '轻量模式使用 HTTP TTS 转发，不需要 GPU / CPU 多模态运行环境'
+            : selectedProfile === 'full' && httpTts
+                ? 'FULL 使用所选 GPU / CPU 运行感知能力，并通过轻量 HTTP 提供 TTS'
+                : 'FULL/LITE 可在 GPU 与 CPU 间选择；POTATO 不需要 Multimodal 运行环境';
+        const runtimeSectionTitle = hideModelRuntimeChoice
+            ? 'TTS 运行依赖'
+            : selectedProfile === 'full' && httpTts
+                ? '感知与 TTS 运行依赖'
+                : 'Multimodal 运行环境';
         return `
             <div class="group-card-header launch-card-header">
                 <div class="group-info">
@@ -614,19 +676,19 @@ const LauncherModule = (() => {
                 <div class="launch-profile-grid">${profileMarkup}</div>
                 <div class="launch-selection-summary">
                     已选择 <strong>${selectedMeta.name}</strong> · ${selectedMeta.code}
-                    · 运行环境 <strong>${requiredRuntime ? runtimeMeta[requiredRuntime].name : '不需要'}</strong>
+                    · 运行环境 <strong>${runtimeSummary}</strong>
                 </div>
                 <div class="launch-runtime-section">
                     <div class="launch-profile-heading">
                         <div>
-                            <div class="launch-profile-title">Multimodal 运行环境</div>
-                            <div class="launch-profile-hint">FULL/LITE 可在 GPU 与 CPU 间选择；POTATO 不需要 Multimodal 运行环境</div>
+                            <div class="launch-profile-title">${runtimeSectionTitle}</div>
+                            <div class="launch-profile-hint">${runtimeHint}</div>
                         </div>
                     </div>
                     <div class="launch-runtime-grid">${runtimeMarkup}</div>
                     ${(installingRuntime || runtimeInstallLogs.length) ? `<div class="deploy-log" id="launch-runtime-install-log" role="log"><div class="deploy-log-line">${escapeHtml(runtimeInstallLogs.map(item => item.line).join('\n'))}</div></div>` : ''}
                 </div>
-                ${!requiredInstalled ? `<div class="launch-runtime-warning">当前模式所需的 ${runtimeMeta[requiredRuntime].name} 依赖缺失或未通过验证，请先点击“安装 / 补齐”。</div>` : ''}
+                ${missingRuntimeNames.length ? `<div class="launch-runtime-warning">当前模式所需的 ${missingRuntimeNames.join('、')} 依赖缺失或未通过验证，请先点击“安装 / 补齐”。</div>` : ''}
                 ${launchServiceProgress(state, activeProfile)}
             </div>
             <div class="group-card-footer launch-card-footer">
@@ -709,16 +771,19 @@ const LauncherModule = (() => {
 
     async function startLaunch() {
         try {
-            const runtime = selectedProfile === 'potato' ? null : selectedRuntime;
+            const runtime = selectedProfile === 'potato' ? null : selectedModelRuntime();
             const payload = { profile: selectedProfile };
             if (runtime) payload.runtime = runtime;
             await apiPost('/api/launch/start', payload);
-            toast(
-                runtime
-                    ? `${LAUNCH_PROFILES[selectedProfile].code} 模式正在启动（${runtime.toUpperCase()}）...`
-                    : `${LAUNCH_PROFILES[selectedProfile].code} Core 文本 + QQ 模式正在启动...`,
-                'info',
-            );
+            const httpTts = runtimeStatus?.tts_profile === 'http';
+            const launchMessage = !runtime
+                ? `${LAUNCH_PROFILES[selectedProfile].code} Core 文本 + QQ 模式正在启动...`
+                : selectedProfile === 'lite' && httpTts
+                    ? 'LITE 模式正在启动（HTTP TTS）...'
+                    : selectedProfile === 'full' && httpTts
+                        ? `FULL 模式正在启动（${runtime.toUpperCase()} 感知 + HTTP TTS）...`
+                        : `${LAUNCH_PROFILES[selectedProfile].code} 模式正在启动（${runtime.toUpperCase()}）...`;
+            toast(launchMessage, 'info');
             refresh();
         } catch (e) {
             toast(`启动失败: ${e.message}`, 'error');
@@ -774,7 +839,7 @@ const LauncherModule = (() => {
     }
 
     async function installRuntime(runtime) {
-        if (!['gpu', 'cpu'].includes(runtime) || installingRuntime) return;
+        if (!['gpu', 'cpu', 'http'].includes(runtime) || installingRuntime) return;
         if (['starting', 'running', 'stopping'].includes(launch?.status)) return;
         installingRuntime = runtime;
         runtimeInstallLogs = [];
@@ -782,10 +847,20 @@ const LauncherModule = (() => {
         try {
             const tasks = await apiGet(`/api/setup/deps/tasks?components=tts&multimodal_runtime=${encodeURIComponent(runtime)}`);
             const task = tasks.find(item => item.id === 'tts');
-            if (!task) throw new Error(`未找到 ${runtime} 环境安装任务`);
-            toast(`开始安装 ${runtime.toUpperCase()} Multimodal 环境...`, 'info');
+            if (!task) throw new Error(`未找到 ${RUNTIME_META[runtime].name} 安装任务`);
+            toast(
+                runtime === 'http'
+                    ? '开始验证 / 安装轻量 HTTP TTS 依赖...'
+                    : `开始安装 ${runtime.toUpperCase()} Multimodal 环境...`,
+                'info',
+            );
             await installRuntimeTask(task);
-            toast(`${runtime.toUpperCase()} Multimodal 环境安装完成`, 'success');
+            toast(
+                runtime === 'http'
+                    ? '轻量 HTTP TTS 依赖验证完成'
+                    : `${runtime.toUpperCase()} Multimodal 环境安装完成`,
+                'success',
+            );
         } catch (e) {
             recordRuntimeInstallLog(`[Setup] ERROR: ${e.message}`);
             toast(`环境安装失败: ${e.message}`, 'error');

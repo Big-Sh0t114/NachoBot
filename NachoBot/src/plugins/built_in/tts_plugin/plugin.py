@@ -18,12 +18,52 @@ from src.chat.advanced.advanced_manager import advanced_manager
 logger = get_logger("tts")
 
 
+def _cached_speech_policy():
+    """Read Core's latest speech-policy snapshot without importing it at module load."""
+    try:
+        from src.multimodal import get_multimodal_router
+
+        return get_multimodal_router().tts_policy
+    except Exception:
+        return None
+
+
+async def _get_speech_policy(*, refresh: bool = False):
+    """Read the shared runtime policy; retain Core's cache if a refresh fails."""
+    try:
+        from src.multimodal import get_multimodal_router
+
+        router = get_multimodal_router()
+        try:
+            return await router.get_tts_policy(refresh=refresh)
+        except Exception:
+            return router.tts_policy
+    except Exception:
+        return None
+
+
+def _policy_value(policy, field: str):
+    if isinstance(policy, dict):
+        return policy.get(field)
+    return getattr(policy, field, None)
+
+
+def _language_switch_locked(policy) -> bool:
+    if policy is None:
+        return False
+    return (
+        _policy_value(policy, "fixed_language") is not None
+        or _policy_value(policy, "language_switch_allowed") is False
+    )
+
+
 class TTSAction(BaseAction):
     """TTS语音转换动作处理类"""
 
     _language_preferences: Dict[str, str] = {}
     _last_tts_time: Dict[str, float] = {}  # chat_id -> timestamp
     MIN_TTS_INTERVAL = 60  # 秒级间隔，避免短时间内连续TTS
+    LANG_SWITCH_LOCKED_MESSAGE = "Irodori TTS 固定使用日语，语言切换命令不可用。"
     DEFAULT_LANGUAGE = "ja"
     LANGUAGE_INFO: Dict[str, Dict[str, str]] = {
         "zh": {"display": "中文", "confirmation": "让我们说中文喵！"},
@@ -113,13 +153,24 @@ class TTSAction(BaseAction):
             await self._ensure_language_loaded()
             current_language = self._get_current_language()
 
+        policy = await _get_speech_policy()
+        fixed_language = _policy_value(policy, "fixed_language")
+        if fixed_language:
+            current_language = fixed_language
+
         stripped_text = text.strip()
         if self._is_lang_switch_command(stripped_text):
             return await self._handle_language_switch()
 
-        # 确保文本适合TTS使用
-        processed_text = self._process_text_for_tts(text, current_language)
-        processed_text = await self._ensure_language_consistency(processed_text, current_language)
+        # Under a fixed Core policy, leave available voice text intact. Core
+        # prepares it for the selected voice at the synthesis boundary.
+        if fixed_language:
+            processed_text = text.strip()
+        else:
+            # Keep the existing cleanup and consistency behavior for backends
+            # whose runtime policy does not fix a language.
+            processed_text = self._process_text_for_tts(text, current_language)
+            processed_text = await self._ensure_language_consistency(processed_text, current_language)
         record_data = {"tts_language": current_language}
 
         try:
@@ -361,11 +412,19 @@ class TTSAction(BaseAction):
 
     @classmethod
     def _get_language_for_key(cls, key: str) -> str:
+        fixed_language = _policy_value(_cached_speech_policy(), "fixed_language")
+        if fixed_language:
+            return fixed_language
         return cls._language_preferences.setdefault(key, cls.DEFAULT_LANGUAGE)
 
     @classmethod
     async def get_language_for_chat(cls, chat_id: Optional[str], target_id: Optional[str] = None) -> str:
         """供外部链路读取当前聊天的TTS语种。"""
+        policy = await _get_speech_policy()
+        fixed_language = _policy_value(policy, "fixed_language")
+        if fixed_language:
+            return fixed_language
+
         key = cls.build_language_key(target_id, chat_id)
         if key in cls._language_preferences:
             return cls._language_preferences[key]
@@ -383,8 +442,13 @@ class TTSAction(BaseAction):
         *, direct_reply: bool = False, text_lang: Optional[str] = None,
     ) -> str:
         """供 planner/replyer 注入的TTS语种约束提示。"""
-        language = (text_lang if direct_reply and text_lang in {"ja", "zh"}
-                    else await cls.get_language_for_chat(chat_id=chat_id, target_id=target_id))
+        policy = await _get_speech_policy()
+        fixed_language = _policy_value(policy, "fixed_language")
+        if fixed_language:
+            language = fixed_language
+        else:
+            language = (text_lang if direct_reply and text_lang in {"ja", "zh"}
+                        else await cls.get_language_for_chat(chat_id=chat_id, target_id=target_id))
         if direct_reply:
             display = cls._get_language_display_name(language)
             return (
@@ -401,6 +465,11 @@ class TTSAction(BaseAction):
 
     async def _ensure_language_loaded(self) -> str:
         """确保当前聊天的语言状态从缓存或数据库中恢复。"""
+        policy = await _get_speech_policy()
+        fixed_language = _policy_value(policy, "fixed_language")
+        if fixed_language:
+            return fixed_language
+
         key = self._get_target_language_key()
         if key in self._language_preferences:
             return self._language_preferences[key]
@@ -421,6 +490,8 @@ class TTSAction(BaseAction):
         cls, chat_id: Optional[str], key: str, log_prefix: str = ""
     ) -> Optional[str]:
         """从最近动作记录中恢复指定聊天的TTS语种。"""
+        if _policy_value(await _get_speech_policy(), "fixed_language"):
+            return None
         if not chat_id:
             return None
 
@@ -452,6 +523,11 @@ class TTSAction(BaseAction):
 
     @classmethod
     def toggle_language_for_target(cls, target_id: Optional[str], chat_id: Optional[str]) -> str:
+        policy = _cached_speech_policy()
+        if _language_switch_locked(policy):
+            return _policy_value(policy, "fixed_language") or cls._language_preferences.get(
+                cls.build_language_key(target_id, chat_id), cls.DEFAULT_LANGUAGE
+            )
         key = cls.build_language_key(target_id, chat_id)
         current = cls._language_preferences.setdefault(key, cls.DEFAULT_LANGUAGE)
         new_lang = "zh" if current == "ja" else "ja"
@@ -468,6 +544,17 @@ class TTSAction(BaseAction):
     @classmethod
     def _get_confirmation_message(cls, language: str) -> str:
         return cls.LANGUAGE_INFO.get(language, {}).get("confirmation", "")
+
+    @classmethod
+    def _get_language_switch_locked_message(cls, policy) -> str:
+        fixed_language = _policy_value(policy, "fixed_language")
+        backend = str(_policy_value(policy, "backend") or "").strip()
+        if backend.casefold() == "irodori" and fixed_language == "ja":
+            return cls.LANG_SWITCH_LOCKED_MESSAGE
+        if fixed_language:
+            display = cls._get_language_display_name(fixed_language)
+            return f"当前TTS后端固定使用{display}，语言切换命令不可用。"
+        return "当前TTS后端不允许切换TTS语种。"
 
     @classmethod
     def _get_language_expectation_prompt(cls, language: str) -> str:
@@ -488,6 +575,12 @@ class TTSAction(BaseAction):
         return text == "#lang_switch"
 
     async def _handle_language_switch(self) -> Tuple[bool, str]:
+        policy = await _get_speech_policy(refresh=True)
+        if _language_switch_locked(policy):
+            message = self._get_language_switch_locked_message(policy)
+            await self.send_text(message)
+            return True, message
+
         new_language = self._toggle_language()
         confirmation = self._get_confirmation_message(new_language)
         record_data = {"tts_language": new_language}
@@ -521,6 +614,12 @@ class TTSSwitchCommand(BaseCommand):
             return False, "无法获取聊天信息", True
 
         chat_stream = self.message.chat_stream
+        policy = await _get_speech_policy(refresh=True)
+        if _language_switch_locked(policy):
+            message = TTSAction._get_language_switch_locked_message(policy)
+            await self.send_text(message)
+            return True, message, True
+
         message_info = getattr(self.message, "message_info", None)
         group_id = None
         user_id = None

@@ -1,0 +1,14 @@
+[project]
+name = "nachobot-multimodal-http-facade"
+version = "0.1.0"
+description = "Lightweight public GenericHTTP TTS facade"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "fastapi>=0.135.1,<0.141.0",
+    "loguru>=0.7.3",
+    "numpy",
+    "pydantic>=2.12.5",
+    "scipy>=1.17.1",
+    "toml>=0.10.2",
+    "uvicorn>=0.53.0",
+]

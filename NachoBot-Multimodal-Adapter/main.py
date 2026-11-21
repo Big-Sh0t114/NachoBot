@@ -69,6 +69,12 @@ _BACKEND_ALIASES = {
     "gpt_sovits": "GPT_Sovits",
     "gpt-sovits": "GPT_Sovits",
     "gptsovits": "GPT_Sovits",
+    "generic_http": "GenericHTTP",
+    "generic-http": "GenericHTTP",
+    "generichttp": "GenericHTTP",
+    "irodori": "Irodori",
+    "irodori_tts": "Irodori",
+    "irodori-tts": "Irodori",
 }
 
 
@@ -79,7 +85,7 @@ def normalize_backend(value: object) -> str:
     try:
         return _BACKEND_ALIASES[normalized]
     except KeyError as exc:
-        raise ValueError("TTS backend must be Vox or GPT_Sovits") from exc
+        raise ValueError("TTS backend must be Vox, GPT_Sovits, GenericHTTP, or Irodori") from exc
 
 
 class WebUITTSRequest(BaseModel):
@@ -89,6 +95,7 @@ class WebUITTSRequest(BaseModel):
     platform: str = Field(default="webui", max_length=64)
     text_lang: str | None = Field(default=None, max_length=32)
     ambient_noise: bool = Field(default=False, strict=True)
+    expected_backend: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class _PrefetchedPCMBody:
@@ -214,6 +221,10 @@ class TTSPipeline:
     @staticmethod
     def _backend_from_model(model: Any) -> str:
         module = type(model).__module__.lower()
+        if ".generichttp" in module or "generic_http" in module:
+            return "GenericHTTP"
+        if module.endswith(".irodori") or ".irodori." in module:
+            return "Irodori"
         if ".vox." in module or module.endswith("vox.tts_model"):
             return "Vox"
         if ".gpt_sovits." in module or "gpt_sovits" in module:
@@ -258,6 +269,8 @@ class TTSPipeline:
         model = getattr(self, "model", None)
         if model is None or not getattr(self, "_engine_ready", True):
             return False
+        if getattr(self, "selected_backend", None) == "GenericHTTP":
+            return bool(getattr(model, "configuration_ready", True))
         emotion_ready = getattr(model, "emotion_ready", True)
         return bool(emotion_ready)
 
@@ -305,6 +318,7 @@ class TTSPipeline:
                     # single-client lock. Recheck before using the client.
                     if not self.ready:
                         raise HTTPException(status_code=503, detail="TTS runtime is not ready")
+                    self._verify_expected_backend(body.expected_backend)
                     if chunk_segments is None:
                         audio_data = await self.model.tts(
                             text=text,
@@ -341,6 +355,12 @@ class TTSPipeline:
             except HTTPException:
                 raise
             except Exception as exc:
+                if self.selected_backend == "GenericHTTP":
+                    # GenericHTTP exceptions can retain request-local data in
+                    # traceback frames. Do not log exception diagnostics or
+                    # echo transport details into the public response.
+                    logger.error("GenericHTTP TTS synthesis failed")
+                    raise HTTPException(status_code=502, detail="TTS generation failed") from None
                 logger.exception("TTS synthesis failed")
                 raise HTTPException(status_code=502, detail=f"TTS generation failed: {exc}") from exc
 
@@ -369,6 +389,7 @@ class TTSPipeline:
                 ambient_config = replace(self._ambient_config, enabled=body.ambient_noise)
                 if not self.ready:
                     raise HTTPException(status_code=503, detail="TTS runtime is not ready")
+                self._verify_expected_backend(body.expected_backend)
                 stream_iterator = self._make_pcm_stream(
                     text=text,
                     platform=body.platform,
@@ -405,11 +426,17 @@ class TTSPipeline:
             except HTTPException:
                 raise
             except TimeoutError as exc:
-                logger.exception("TTS stream timed out before the first PCM chunk")
+                if self.selected_backend == "GenericHTTP":
+                    logger.error("GenericHTTP buffered PCM request exceeded its time limit")
+                else:
+                    logger.exception("TTS stream timed out before the first PCM chunk")
                 raise HTTPException(status_code=504, detail="TTS stream timed out") from exc
             except PCMStreamError as exc:
                 raise HTTPException(status_code=502, detail=str(exc)) from exc
             except Exception as exc:
+                if self.selected_backend == "GenericHTTP":
+                    logger.error("GenericHTTP buffered PCM synthesis failed")
+                    raise HTTPException(status_code=502, detail="TTS generation failed") from None
                 logger.exception("TTS streaming synthesis failed")
                 raise HTTPException(status_code=502, detail=f"TTS generation failed: {exc}") from exc
             finally:
@@ -424,6 +451,7 @@ class TTSPipeline:
     def _health_payload(self) -> dict[str, Any]:
         ready = self.ready
         selected_backend = getattr(self, "selected_backend", None)
+        fixed_language = "ja" if selected_backend == "Irodori" else None
         return {
             "status": "ok" if ready else "unhealthy",
             "ready": ready,
@@ -432,6 +460,9 @@ class TTSPipeline:
             # combines it with ``ready``/``backend_alive`` below.
             "model_loaded": bool(self.model_ready),
             "backend": selected_backend,
+            "fixed_language": fixed_language,
+            "language_switch_allowed": fixed_language is None,
+            "supports_backend_fence": True,
             "native_streaming": bool(getattr(getattr(self, "model", None), "native_streaming", True)),
             "stream_capability": (
                 "chunked_pcm"
@@ -445,6 +476,11 @@ class TTSPipeline:
             "synthesis_ready": getattr(self, "_synthesis_ready", True),
         }
 
+    def _verify_expected_backend(self, expected_backend: str | None) -> None:
+        """Fence an utterance to the runtime selected when Core prepared it."""
+
+        if expected_backend is not None and expected_backend != getattr(self, "selected_backend", None):
+            raise HTTPException(status_code=409, detail="tts_backend_changed")
 
     def _chunking_is_active(self) -> bool:
         config = getattr(self, "_tts_chunking_config", None)
@@ -538,7 +574,10 @@ class TTSPipeline:
                 )
             return audio_data or None
         except Exception as exc:
-            logger.exception("TTS synthesis failed: {}", exc)
+            if self.selected_backend == "GenericHTTP":
+                logger.error("GenericHTTP TTS synthesis failed")
+            else:
+                logger.exception("TTS synthesis failed: {}", exc)
             return None
 
 

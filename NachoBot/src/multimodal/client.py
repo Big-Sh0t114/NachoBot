@@ -292,6 +292,7 @@ class LocalMultimodalClient:
         platform: str = "core",
         text_lang: Optional[str] = None,
         ambient_noise: bool = False,
+        expected_backend: str | None = None,
     ) -> TTSResult:
         text = str(text or "").strip()[:MAX_TEXT_CHARS]
         if not text:
@@ -299,6 +300,10 @@ class LocalMultimodalClient:
         payload = {"text": text, "platform": str(platform or "core")[:64], "text_lang": text_lang}
         if ambient_noise is True:
             payload["ambient_noise"] = True
+        if expected_backend is not None:
+            if not isinstance(expected_backend, str) or not 1 <= len(expected_backend) <= 64:
+                raise ValueError("expected TTS backend is invalid")
+            payload["expected_backend"] = expected_backend
         audio_bytes, headers = await self._request_audio(
             "POST",
             "/api/tts",
@@ -346,6 +351,7 @@ class LocalMultimodalClient:
         platform: str = "core",
         text_lang: Optional[str] = None,
         ambient_noise: bool = False,
+        expected_backend: str | None = None,
     ) -> AsyncIterator[TTSStreamChunk]:
         """Stream bounded, frame-aligned PCM chunks from the public 9880 API."""
 
@@ -359,6 +365,10 @@ class LocalMultimodalClient:
         }
         if ambient_noise is True:
             payload["ambient_noise"] = True
+        if expected_backend is not None:
+            if not isinstance(expected_backend, str) or not 1 <= len(expected_backend) <= 64:
+                raise TTSStreamError("invalid_request")
+            payload["expected_backend"] = expected_backend
         audio_started = False
         try:
             async with asyncio.timeout(TTS_STREAM_MAX_DURATION_SECONDS):

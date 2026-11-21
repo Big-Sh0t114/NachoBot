@@ -1,6 +1,6 @@
 # NachoBot 本地多模态运行时
 
-本目录维护本地 ASR、VLM 与 TTS 的具体模型路由。平台适配器直接连接 NachoBot Core 的 `8000/ws`；TTS 对 Core 暴露一个统一的 `9880` HTTP 运行时，运行时进程在内部托管所选 GPT-SoVITS 或 VoxCPM 后端。
+本目录维护本地 ASR、VLM 与 TTS 的具体模型路由。平台适配器直接连接 NachoBot Core 的 `8000/ws`；TTS 对 Core 暴露一个统一的 `9880` HTTP 运行时，运行时进程在内部托管所选 GPT-SoVITS、VoxCPM、Irodori 或 GenericHTTP 后端。
 
 ## 独立自动启动
 
@@ -57,25 +57,60 @@ docker compose --profile lite up -d
 base_template.toml         -> configs/base.toml
 gpt-sovits_template.toml   -> configs/gpt-sovits.toml
 vox_template.toml          -> configs/vox.toml
+irodori_template.toml      -> configs/irodori.toml
 perception_template.toml   -> configs/perception.toml
+generic-http_template.toml -> configs/generic-http.toml
 ```
 
-`base.toml` 的 `[enabled_tts]` 每次只选择一个后端：GPT-SoVITS 或 Vox。本地模型参数分别维护在 `gpt-sovits.toml` 与 `vox.toml` 文件中。`perception.toml` 维护 9874 监听地址、Florence-2 与 Sherpa-ONNX 配置。Core 不包含这些本地模型名。
+`base.toml` 的 `[enabled_tts]` 每次只选择一个后端：GPT-SoVITS、Vox、Irodori 或 GenericHTTP。本地模型参数分别维护在对应的 `gpt-sovits.toml`、`vox.toml`、`irodori.toml` 文件中，HTTP profiles 则维护在 `generic-http.toml`。`perception.toml` 维护 9874 监听地址、Florence-2 与 Sherpa-ONNX 配置。Core 不包含这些模型或服务名。
+
+### 内置 Irodori-TTS
+
+将 `template_configs/irodori_template.toml` 复制为 `configs/irodori.toml`，然后在 `[enabled_tts]` 中选择 `"Irodori"`。统一 TTS 管理器会把固定版本的 Irodori 源码保存在 `.runtime/tts/irodori/source`，并在已选的共享 Multimodal 环境中准备最小推理依赖：GPU 使用适配器 `.venv`，CPU 使用 `.venv-cpu`。Irodori 仍作为受 supervisor 管理的原始子进程运行；无需手动启动外部 API 服务。
+
+`[runtime]` 可指定已有 `repo_path` 复用本地源码；路径相对 `irodori.toml` 目录解析。显式设置 `python_path` 会覆盖共享环境选择并始终使用指定解释器；留空时遵循启动器的 GPU/CPU profile，直接 CLI 启动则读取 `base.toml` 的 `[model_devices].tts` 和可见设备。可设置本地 `checkpoint`，或者使用 `hf_checkpoint` 仓库 ID（默认 v4-Large）。`hf_home` 可指向已有 Hugging Face 缓存；省略时使用适配器的 `models/hf_cache`。默认设备为 `auto`；自动精度在 CUDA 上使用 bf16，在 CPU 上使用 fp32。旧配置中的 `extra = "auto"`、`"cpu"` 或 `"cu128"` 会继续读取但不再选择 Torch 环境。
+
+管理器会通过后端专属依赖清单准备 TorchAO 0.16、DACVAE、Tokenizer、LoRA、Watermark 与 PREAD 所需组件。安装会约束当前共享环境内已安装的包版本，并保留现有 protobuf 版本，不会替换 Torch/CUDA 运行时。Windows 使用 safetensors checkpoint（包括默认 Hugging Face checkpoint）时要求 `safetensors >= 0.8.0`，以通过 PREAD 后端读取 checkpoint，避免 Windows 文件映射占用额外系统提交量。本地 `.pt` checkpoint 保持 upstream loader。量化 safetensors checkpoint 按张量顺序送到目标设备，并在空参数模型中接收已加载权重，避免同时保留完整 FP32 CPU 模型。显式 `python_path` 不会自动安装或修改依赖。
+
+首次安装依赖可在本目录运行：
+
+```powershell
+uv run python scripts/tts_runtime_manager.py prepare --engine irodori
+uv run python scripts/tts_runtime_manager.py serve --engine irodori --port 9880
+```
+
+`prepare` 会准备固定版本源码、选中的共享环境与 Irodori 推理依赖；若共享环境本身缺失或损坏，则转交给现有 profile bootstrap 修复。选择 Hugging Face checkpoint 时，模型、Tokenizer 和 codec 权重会在首次 `serve` 加载时下载或复用 `hf_home` 缓存。默认 v4-Large 是日语模型；公共 `text_lang` 不会触发翻译或改变 Irodori 的语言能力，建议发送日语文本。`irodori.toml` 的运行时、checkpoint、参考音频、LoRA 与生成参数在进程启动时读取，修改后重启 TTS Runtime。
+
+`[generation]` 的参考音频、LoRA、caption、CFG 和时长均由本地配置控制，合成请求只传文本。默认 `no_ref = true`；使用参考音频时设置 `no_ref = false` 和 `ref_wav`。LoRA 适配器目录可以直接填写到 `lora_adapter`。省略 `num_steps` 和 `seed` 时保留 checkpoint 的推荐 RF/MeanFlow 推理步数并使用随机 seed。Irodori 当前不消费公共请求中的 `text_lang`；文本会原样送入模型，不会由适配器翻译。公开 PCM stream 接口会在完整合成后输出 PCM16 分块，健康状态标记 `native_streaming = false` / `buffered_pcm`。
+
+CUDA 运行时会在每次合成并编码 WAV 后释放未使用的 CUDA 分配器缓存，同时保留常驻模型；清理完成后再返回音频，以便 VLM、桌宠等共享 GPU 工作负载使用空闲显存。
+
+GenericHTTP profile 使用 `[profiles.<id>]`，并以顶层 `active_profile` 选择默认 profile。POST 会发送 JSON，GET 会把 `body` 的顶层字段追加为查询参数；请求体或查询值中的 `{{text}}`、`{{language}}`、`{{voice}}` 会递归替换。`response_type` 支持原始音频响应、JSON 中的 base64 字段或 JSON 中的 HTTP(S) 音频 URL；JSON 响应字段用 `response_path` 点路径指定。TOML 不支持 JSON `null`，保存包含 `null` 的 JSON body 时使用 `body_json` 存紧凑 JSON 字符串。URL response 会单独抓取，不会转发 profile headers；所有 HTTP redirect 都会拒绝。
+
+GenericHTTP v1 只支持未压缩 PCM16 WAV 或 raw PCM16 little-endian。PCM profile 需设置 `sample_rate` 与 `channels`；响应大小最多 32 MiB、时长最多 120 秒、profile timeout 最多 120 秒。压缩音频（如 MP3/Opus）不支持。每次合成都会重新读取当前 active profile，因此在 GenericHTTP 保持启用时切换 profile 会对下一次请求生效。通用服务没有本地模型子进程或原生模型加载；其 readiness 检查本地 profile 配置，不会在启动时请求远端服务。公开健康信息会报告 `native_streaming=false`、`stream_capability=buffered_pcm`：PCM 兼容路线会先完整合成再分块，不能视作原生流式生成。
+
+仓库 BAT 与 WebUI 的 GenericHTTP TTS 共用轻量 `.venv-http`；依赖清单为 `pyproject.toml.http`，锁项目为 `.runtime/bat-http`。这个环境不包含 Torch 或本地感知模型。FULL 模式仍单独准备所选 GPU/CPU 环境来运行 perception；LITE 模式只需 HTTP TTS 环境。
+
+## TTS 文本与语言
+
+共享 TTS 后端只在合成输入上清理常见颜文字、emoji、Markdown 显示包装和分析/控制块；原始回复的显示与存储内容不变。清理后没有可朗读文字的请求会在模型或网络调用前拒绝。
+
+生成语种由请求调用方（例如桌宠适配器）通过 `text_lang` 发起。GPT-SoVITS 按请求 `text_lang`、预设 `text_language`、最后回退 `auto` 的顺序选择语种；桌宠的语种设置应在适配器端修改，后端会尊重每次请求。`prompt_language` 和 `prompt_text` 描述参考音频，保持与生成文本语言独立，例如日语参考音频仍可配 `prompt_language = "ja"`，同时请求中文输出。
 
 ### 共享 TTS 切句调度
 
-`[tts_chunking]` 在 Multimodal 公共 facade 按顺序切句并调用当前固定模型的 PCM 合成接口。模板和缺少此段的旧配置默认关闭；启用后只对 `backends` 白名单中的 GPT_Sovits 或 Vox 生效。
+`[tts_chunking]` 在 Multimodal 公共 facade 按顺序切句并调用当前固定模型的 PCM 合成接口。模板和缺少此段的旧配置默认关闭；`configs/base.toml` 当前仅为 Irodori 显式启用。其他后端必须同时打开 `enabled` 并加入 `backends` 白名单，支持 `GPT_Sovits`、`Vox`、`Irodori` 与 `GenericHTTP`（名称大小写不敏感）。
 
 ```toml
 [tts_chunking]
 enabled = false
-backends = ["GPT_Sovits", "Vox"]
+backends = ["Irodori"]
 min_chars = 20
 max_chars = 120
 first_chunk_min_chars = 8
 ```
 
-GPT-SoVITS 与 Vox 共用 TTS 文本清理，移除颜文字、emoji、分析/控制块和常见显示标记；清理只影响合成输入，不改变展示或持久化文本。启用切句时会先清理整条请求，再进行分段。原始输入仍受 10,000 字符上限约束。句子边界会保留清理后文本的标点，并识别常见小数、版本号、缩写与 URL。切分会先达到首段 8 字阈值，再达到后续 20 字阈值；`max_chars` 只是软提示，长文本只会在未受保护的标点处分段，绝不会按字符数、空白或换行强切。标准句末标点用于切句；超长句可在逗号、分号、冒号等软标点处分段。无标点的 CJK、Latin 或 URL 文本保持整体，即使超过 `max_chars`。每段只调用一次模型，按序消费并直接把 PCM 交给下游，因此首段可以在后续合成结束前开始传输；WAV、PCM 流和本地 `get_voice_no_stream` 共用相同调度。每个请求共享 120 秒、32 MiB 和 120 秒音频预算，任一段为空、格式改变或失败都会终止整次请求。启用此 facade 调度时健康信息报告 `stream_capability = "chunked_pcm"`，同时保留模型真实的 `native_streaming` 值；它不表示模型自身具备原生流式生成能力。
+切句前会先对整条请求做一次共用 TTS 文本清理；清理只影响合成输入，不改变展示或持久化文本。原始输入仍受 10,000 字符上限约束。句子边界会保留清理后文本的标点，并识别常见小数、版本号、缩写与 URL。切分会先达到首段 8 字阈值，再达到后续 20 字阈值；`max_chars` 只是软提示，长文本只会在未受保护的标点处分段，绝不会按字符数、空白或换行强切。标准句末标点用于切句；超长句可在逗号、分号、冒号等软标点处分段。无标点的 CJK、Latin 或 URL 文本保持整体，即使超过 `max_chars`。每段只调用一次模型，按序消费并直接把 PCM 交给下游，因此首段可以在后续合成结束前开始传输；WAV、PCM 流和本地 `get_voice_no_stream` 共用相同调度。每个请求共享 120 秒、32 MiB 和 120 秒音频预算，任一段为空、格式改变或失败都会终止整次请求。启用此 facade 调度时健康信息报告 `stream_capability = "chunked_pcm"`，同时保留模型真实的 `native_streaming` 值；它不表示模型自身具备原生流式生成能力。
 
 适配器可为单次 Core TTS 请求设置 `ambient_noise: true`，以启用 TTS 环境声；省略或传入 `false` 时始终关闭。`[tts_ambient]` 只提供请求启用时使用的混音参数，模板默认保留 `enabled = false`：
 
@@ -98,13 +133,13 @@ Core 的 `POST /api/multimodal/tts`、`POST /api/multimodal/tts/stream`，以及
 
 `room` 与 `desk` 是合成音效，不是真实录音；`level_db` 表示连续环境床相对 PCM16 满幅的参考 RMS 电平，数值越负越轻，`-90` 表示静音。也可将 `source_file` 指向本地 PCM16 mono/stereo WAV（最多 30 秒、8 MiB，采样率 8–96 kHz）；相对路径以 `base.toml` 所在目录解析，文件会按输出采样率重采样并平滑循环。启用后 WAV 和 PCM 流都会在本次音频时长内混合；流式输出逐块处理并保留跨块状态，不会在请求间持续播放。环境声会在一次合成过程中缓慢变化音量与音色；这些变化只作用于环境声，不调制人声。配置在运行时启动时读取，改动后需重启 TTS Runtime。
 
-TTS Runtime 在进程启动时固定读取一次活动配置并选择唯一后端。切换 GPT-SoVITS 与 Vox 或修改模型配置后需要重启 TTS Runtime；请求期间不会重载或切换本地模型。
+TTS Runtime 在进程启动时固定选择唯一后端。切换 GPT-SoVITS、Vox、Irodori 与 GenericHTTP 之间的引擎后需要重启 TTS Runtime；切换 GenericHTTP active profile 会在下一次请求生效。本地 GPT-SoVITS、Vox 与 Irodori 模型配置仍需重启后端服务。
 
 ## PyTorch 运行时依赖
 
 FULL/LITE、多模态 WebUI 与托管 TTS 的 GPU 环境统一使用 PyTorch `2.13.0+cu130`、TorchVision `0.28.0+cu130` 与 TorchAudio `2.11.0+cu130`，通过 PyTorch 官方 CUDA 13.0 wheel index 安装。CUDA 13.0 需要 NVIDIA 驱动版本 `580` 或更高，并支持 Turing 及更新架构；更早的 GPU 可使用 CPU-only 环境。驱动由主机提供，不会由 Python 依赖安装。CPU-only 环境继续使用 `pyproject.toml.cpu` 中对应的 `+cpu` 三件套与官方 CPU wheel index。不要把 CPU 与 GPU wheel 混装。版本组合参见 [PyTorch 官方安装矩阵](https://pytorch.org/get-started/previous-versions/) 与 [NVIDIA CUDA 13.0 驱动说明](https://docs.nvidia.com/cuda/archive/13.0.0/cuda-toolkit-release-notes/index.html)。
 
-WebUI 的「验证 / 补齐依赖」会用 CUDA 13.0 manifest 与 lock 检查并更新现有共享 `.venv`；更新后的 FULL/LITE BAT 启动器也会准备同一 GPU 环境。升级会在既有 GPU venv 内替换旧 cu126 依赖，不会创建额外的大型 GPU venv。直接运行适配器根目录的 `uv sync` 同样使用 cu130 manifest。CPU wheel 不变。
+WebUI 的「验证 / 补齐依赖」会用 CUDA 13.0 manifest 与 lock 检查并更新现有共享 `.venv`；更新后的 FULL/LITE BAT 启动器也会准备同一 GPU 环境。升级会在既有 GPU venv 内替换旧 cu126 依赖，不会创建额外的大型 GPU venv。直接运行适配器根目录的 `uv sync` 同样使用 cu130 manifest。Irodori 使用启动器选定的 GPU/CPU 共享环境，并在后端准备时按约束补齐推理依赖。共享 GPU/CPU 的安装和完整性检查使用 `uv sync --inexact`：manifest 与 lock 仍约束核心依赖，Irodori 等后端添加的推理包会保留；轻量 HTTP profile 继续精确同步。
 
 TorchAudio `2.11.0` 使用 PyTorch stable ABI，并支持 PyTorch `2.11` 及更高版本。已对 Windows/Linux、Python 3.11/3.12 的依赖解析与 wheel 可用性做 dry-run 验证；模型加载和实时推理仍需在部署环境验证。详见 [TorchAudio 官方兼容性说明](https://docs.pytorch.org/audio/stable/installation.html)。
 

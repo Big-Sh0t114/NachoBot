@@ -1,0 +1,24 @@
+# Example-only configuration. Copy to configs/generic-http.toml and replace
+# example.invalid URLs and any sample credentials before selecting GenericHTTP.
+active_profile = "example-post"
+
+[profiles.example-post]
+name = "Example POST service"
+url = "https://tts.example.invalid/v1/speech"
+method = "POST"
+headers = { Authorization = "Bearer REPLACE_WITH_YOUR_TOKEN" }
+body = { text = "{{text}}", language = "{{language}}", voice = "{{voice}}", format = "wav" }
+response_type = "audio"
+timeout_seconds = 60
+audio_format = "wav"
+
+[profiles.example-get-base64]
+name = "Example GET service returning JSON base64"
+url = "https://tts.example.invalid/v1/synthesize"
+method = "GET"
+headers = {}
+body = { text = "{{text}}", lang = "{{language}}", speaker = "{{voice}}" }
+response_type = "base64"
+response_path = "data.audio"
+timeout_seconds = 60
+audio_format = "wav"

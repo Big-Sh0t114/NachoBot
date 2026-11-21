@@ -180,7 +180,7 @@ window.ModelDevicesPanel = (() => {
                     </label>
                 </div>
                 <div class="model-device-inventory" data-gpu-inventory></div>
-                <p class="model-device-muted">设备列表对应 WebUI 服务所在电脑。ASR 当前使用 CPU；设备选择仅适用于本地模型。</p>
+                <p class="model-device-muted">设备列表对应 WebUI 服务所在电脑。ASR 当前使用 CPU；远程 HTTP TTS 不受本地设备选择影响。</p>
                 <p class="model-device-status" data-model-device-status role="status" aria-live="polite">正在读取已保存的设备选择…</p>
             </div>`;
         const scope = container.querySelector('[data-model-device-scope]');

@@ -43,6 +43,7 @@ CONFIG_REGISTRY: list[dict[str, str]] = [
     # 多模态适配器
     {"id": "tts_base",      "group": "多模态适配器", "path": "NachoBot-Multimodal-Adapter/configs/base.toml",       "label": "TTS 基础配置"},
     {"id": "tts_vox",       "group": "多模态适配器", "path": "NachoBot-Multimodal-Adapter/configs/vox.toml",        "label": "VoxCPM 配置"},
+    {"id": "tts_irodori",   "group": "多模态适配器", "path": "NachoBot-Multimodal-Adapter/configs/irodori.toml",    "label": "Irodori 配置"},
     {"id": "tts_sovits",    "group": "多模态适配器", "path": "NachoBot-Multimodal-Adapter/configs/gpt-sovits.toml", "label": "GPT-SoVITS 配置"},
     {"id": "tts_perception","group": "多模态适配器", "path": "NachoBot-Multimodal-Adapter/configs/perception.toml", "label": "VLM / ASR 配置"},
     # 各平台适配器

@@ -451,6 +451,7 @@ def _read_tts_runtime_settings(root_dir: Path) -> tuple[str, int, int]:
         backend_config_name = {
             "vox": "vox.toml",
             "voxcpm": "vox.toml",
+            "irodori": "irodori.toml",
             "gpt_sovits": "gpt-sovits.toml",
             "gpt-sovits": "gpt-sovits.toml",
             "gptsovits": "gpt-sovits.toml",
@@ -1006,7 +1007,7 @@ def _register_services(root_dir: Path | str | None = None):
         ServiceDef("tts_runtime_full", "统一 TTS Runtime", "tts_full",
                    "NachoBot-Multimodal-Adapter", [],
                    port=tts_port, wait_port=True, order=1,
-                   detail=f"GPT-SoVITS / VoxCPM supervised runtime · :{tts_port}"),
+                   detail=f"GPT-SoVITS / VoxCPM / Irodori supervised runtime · :{tts_port}"),
         ServiceDef("perception", "多模态感知运行时（FULL）", "tts_full",
                    "NachoBot-Multimodal-Adapter",
                    ["uv", "run", "python", "-m", "nachobot_multimodal.api_server"],
@@ -1018,7 +1019,7 @@ def _register_services(root_dir: Path | str | None = None):
         ServiceDef("tts_runtime_lite", "统一 TTS Runtime", "tts_lite",
                    "NachoBot-Multimodal-Adapter", [],
                    port=tts_port, wait_port=True, order=1,
-                   detail=f"GPT-SoVITS / VoxCPM supervised runtime · :{tts_port}"),
+                   detail=f"GPT-SoVITS / VoxCPM / Irodori supervised runtime · :{tts_port}"),
 
         # POTATO intentionally has no Multimodal service definition.
 
@@ -2438,6 +2439,18 @@ class ProcessManager:
             return state.status == ServiceStatus.RUNNING
         return self.core_observation is not None
 
+    def _require_multimodal_launch_profiles(self, profile_id: str, runtime: str) -> str:
+        """Validate the model device choice and every env needed by this launch."""
+        local_profile = MultimodalRuntimeManager.normalize_local_profile(runtime)
+        required = MultimodalRuntimeManager.resolve_required_profiles(
+            local_profile,
+            root=self.root,
+            lite=profile_id == "lite",
+        )
+        for required_profile in required:
+            MultimodalRuntimeManager.require_python(required_profile, root=self.root)
+        return local_profile
+
     async def prepare_start_launch(self, profile_id: str, runtime: str | None = None) -> None:
         """Force a fresh Core probe before a launch request is scheduled."""
         _register_services(self.root)
@@ -2446,8 +2459,7 @@ class ProcessManager:
         if group_id is None:
             raise ValueError(f"Unknown launch profile: {profile_id}")
         if profile_id != "potato":
-            resolved = MultimodalRuntimeManager.normalize_profile(runtime or self._launch_runtime)
-            MultimodalRuntimeManager.require_python(resolved)
+            self._require_multimodal_launch_profiles(profile_id, runtime or self._launch_runtime)
         previous = self._external_core_observation()
         observation = await self._fresh_external_core_observation()
         if previous is not None and observation is None and not self._manager_core_takes_precedence():
@@ -3368,8 +3380,7 @@ class ProcessManager:
 
         resolved_runtime: str | None = None
         if profile_id != "potato":
-            resolved_runtime = MultimodalRuntimeManager.normalize_profile(runtime or "gpu")
-            MultimodalRuntimeManager.require_python(resolved_runtime)
+            resolved_runtime = self._require_multimodal_launch_profiles(profile_id, runtime or "gpu")
             self._launch_runtime = resolved_runtime
 
         observation = self._external_core_observation()
@@ -3434,8 +3445,9 @@ class ProcessManager:
 
         resolved_runtime: str | None = None
         if profile_id != "potato":
-            resolved_runtime = MultimodalRuntimeManager.normalize_profile(runtime or self._launch_runtime)
-            MultimodalRuntimeManager.require_python(resolved_runtime)
+            resolved_runtime = self._require_multimodal_launch_profiles(
+                profile_id, runtime or self._launch_runtime
+            )
             self._launch_runtime = resolved_runtime
 
         core_state = self.states.get("nachobot")
@@ -3972,14 +3984,23 @@ class ProcessManager:
 
         try:
             runtime_profile = env.get("NACHOBOT_TTS_RUNTIME_PROFILE", self._launch_runtime)
-            device_env = await asyncio.to_thread(
-                service_device_environment,
-                service_id,
-                runtime_profile,
-                root_dir=self.root,
-            )
-            # Apply assignments after group/service overlays so the saved device choice
-            # cannot be shadowed by an inherited group environment.
+            if (
+                service_id in {"tts_runtime_full", "tts_runtime_lite"}
+                and MultimodalRuntimeManager.resolve_tts_profile(root=self.root) == "http"
+            ):
+                # This covers GenericHTTP selected through the supervisor's
+                # NACHOBOT_TTS_ENGINE override as well as base.toml. Its local
+                # device assignment is inactive regardless of either source.
+                device_env = {}
+            else:
+                device_env = await asyncio.to_thread(
+                    service_device_environment,
+                    service_id,
+                    runtime_profile,
+                    root_dir=self.root,
+                )
+            # Apply assignments after group/service overlays so the user's
+            # saved device choice cannot be shadowed by an inherited group env.
             env.update(device_env)
             cmd = await self._prepare_service_dependencies(service_id, cmd, full_cwd, env)
             if service_id == "nachobot":
@@ -4981,7 +5002,7 @@ class ProcessManager:
         cmd: list[str],
         env_extra: dict[str, str],
     ) -> tuple[list[str], dict[str, str]]:
-        """Replace local multimodal `uv run` commands with selected Python."""
+        """Replace local multimodal `uv run` commands with the selected model Python."""
         adapter_services = {
             "perception": ["-m", "nachobot_multimodal.api_server"],
         }
@@ -4989,8 +5010,8 @@ class ProcessManager:
         if args is None:
             return cmd, env_extra
 
-        runtime = self._launch_runtime
-        python = MultimodalRuntimeManager.require_python(runtime)
+        runtime = MultimodalRuntimeManager.normalize_local_profile(self._launch_runtime)
+        python = MultimodalRuntimeManager.require_python(runtime, root=self.root)
         return [str(python), *args], dict(env_extra)
 
     def _resolve_cmd(self, sdef: ServiceDef) -> tuple[list[str], str, dict[str, str]]:
@@ -5050,19 +5071,26 @@ class ProcessManager:
         if not entrypoint.is_file():
             raise FileNotFoundError(f"统一 TTS Runtime entrypoint 不存在: {entrypoint}")
 
-        runtime = MultimodalRuntimeManager.normalize_profile(self._launch_runtime)
-        python = MultimodalRuntimeManager.require_python(runtime)
+        tts_profile = MultimodalRuntimeManager.resolve_tts_profile(root=self.root)
+        runtime = (
+            "http" if tts_profile == "http"
+            else MultimodalRuntimeManager.normalize_local_profile(self._launch_runtime)
+        )
+        python = MultimodalRuntimeManager.require_python(runtime, root=self.root)
         public_host, public_port, private_port = _read_tts_runtime_settings(self.root)
         cmd = [
             str(python), str(entrypoint),
             "--host", public_host,
             "--port", str(public_port),
             "--backend-port", str(private_port),
+            "--config", str(adapter_dir / "configs" / "base.toml"),
         ]
         torch_index = MultimodalRuntimeManager.torch_index_url(runtime)
         return cmd, str(adapter_dir), {
             "NACHOBOT_TTS_TORCH_INDEX": torch_index,
-            "NACHOBOT_TTS_RUNTIME_PROFILE": runtime,
+            # The HTTP facade uses the adapter's CPU runtime mode for its
+            # public dependencies, while its environment remains torch-free.
+            "NACHOBOT_TTS_RUNTIME_PROFILE": "cpu" if runtime == "http" else runtime,
             "NACHOBOT_INSTALL_PROGRESS_PYTHON": sys.executable,
             "NACHOBOT_INSTALL_PROGRESS_HELPER": str(Path(__file__).resolve().with_name("install_output.py")),
         }

@@ -2287,7 +2287,7 @@ class DependencyInstaller:
                     runtime = MultimodalRuntimeManager.normalize_profile(task.get("runtime"))
                 except ValueError as e:
                     return {"status": "error", "message": str(e)}
-                return await MultimodalRuntimeManager.install(runtime, callback)
+                return await MultimodalRuntimeManager.install(runtime, callback, root=ROOT_DIR)
             return await DependencyInstaller._run_uv_sync(
                 project_dir,
                 callback,

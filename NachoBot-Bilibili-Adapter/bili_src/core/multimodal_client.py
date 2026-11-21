@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
 from typing import Any, Mapping, Optional
 
 import aiohttp
@@ -54,8 +55,12 @@ class CoreMultimodalClient:
     @property
     def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
+        token = self.token or os.environ.get("NACHOBOT_CORE_TOKEN", "")
+        token = token.strip()
+        if token[:7].casefold() == "bearer ":
+            token = token[7:].strip()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
         return headers
 
     async def _post(self, path: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -70,6 +75,29 @@ class CoreMultimodalClient:
                     if response.status >= 400:
                         # Do not copy response bodies into logs or exceptions:
                         # Core responses can contain provider-specific content.
+                        raise CoreMultimodalError(
+                            f"Core multimodal request failed with status {response.status}"
+                        )
+                    body = await response.json(content_type=None)
+        except CoreMultimodalError:
+            raise
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            raise CoreMultimodalError(
+                f"Core multimodal request unavailable: {type(exc).__name__}"
+            ) from exc
+        if not isinstance(body, Mapping):
+            raise CoreMultimodalError("Core multimodal response was not an object")
+        return body
+
+    async def _get(self, path: str, *, timeout_seconds: float = 5.0) -> Mapping[str, Any]:
+        timeout = aiohttp.ClientTimeout(total=min(self.timeout, max(0.1, timeout_seconds)))
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(
+                    f"{self.base_url}{path}",
+                    headers=self._headers,
+                ) as response:
+                    if response.status >= 400:
                         raise CoreMultimodalError(
                             f"Core multimodal request failed with status {response.status}"
                         )
@@ -141,18 +169,28 @@ class CoreMultimodalClient:
         *,
         platform: str = "bilibili.live",
         text_lang: Optional[str] = None,
+        ambient_noise: bool = False,
+        prepare_text: bool = False,
     ) -> Mapping[str, Any]:
         text = str(text or "").strip()[:MAX_TEXT_CHARS]
         if not text:
             raise ValueError("TTS text is empty")
-        return await self._post(
-            "/api/multimodal/tts",
-            {
-                "text": text,
-                "platform": str(platform or "bilibili.live")[:64],
-                "text_lang": text_lang,
-            },
-        )
+        payload = {
+            "text": text,
+            "platform": str(platform or "bilibili.live")[:64],
+            "text_lang": text_lang,
+        }
+        if ambient_noise is True:
+            payload["ambient_noise"] = True
+        if type(prepare_text) is not bool:
+            raise ValueError("prepare_text must be a bool")
+        if prepare_text:
+            payload["prepare_text"] = True
+        return await self._post("/api/multimodal/tts", payload)
+
+    async def get_tts_policy(self) -> Mapping[str, Any]:
+        """Read Core's active TTS backend policy with a short bounded request."""
+        return await self._get("/api/multimodal/tts/policy", timeout_seconds=5.0)
 
 
 __all__ = ["CoreMultimodalClient", "CoreMultimodalError"]

@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import hashlib
 import importlib.util
 import json
 import os
+import platform
+import re
 import shutil
 import signal
 import subprocess
 import sys
+import sysconfig
+import tempfile
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 from urllib.request import Request, urlopen
@@ -22,9 +28,15 @@ ADAPTER_ROOT = Path(__file__).resolve().parents[1]
 if str(ADAPTER_ROOT) not in sys.path:
     sys.path.insert(0, str(ADAPTER_ROOT))
 
-from nachobot_multimodal.utils.model_devices import apply_device_environment  # noqa: E402
-
 from nachobot_multimodal.utils.gpt_weights import FALLBACK_GPT, FALLBACK_SOVITS, select_gpt_weights  # noqa: E402
+from nachobot_multimodal.utils.model_devices import (  # noqa: E402
+    apply_device_environment,
+    auto_cuda_available,
+    detected_nvidia_gpu_uuids,
+    GPU_UUID_PATTERN,
+    read_device_choice,
+)
+from nachobot_multimodal.tts.backends.Irodori.config import load_irodori_config  # noqa: E402
 
 PROJECT_ROOT = ADAPTER_ROOT.parent
 RUNTIME_ROOT = ADAPTER_ROOT / ".runtime" / "tts"
@@ -48,6 +60,15 @@ PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
 PYTORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu130"
 TTS_TORCH_RECIPE = "torch213-audio211-triton371-v3"
 TTS_TRITON_WINDOWS_VERSION = "3.7.1.post27"
+TTS_GPT_ORT_GPU_VERSION = "1.20.2"
+IRODORI_REPO_URL = "https://github.com/Aratako/Irodori-TTS.git"
+IRODORI_SOURCE_COMMIT = "59be938c99d48b5653ca5aa3fdd0cddaa56940e5"
+IRODORI_RUNTIME_DIR = RUNTIME_ROOT / "irodori"
+IRODORI_SAFETENSORS_REQUIREMENT = "safetensors>=0.8,<0.9"
+IRODORI_REQUIREMENTS_FILE = ADAPTER_ROOT / "src" / "tts" / "backends" / "Irodori" / "requirements-runtime.txt"
+IRODORI_TORCHAO_VERSION = "0.16.0"
+IRODORI_DACVAE_COMMIT = "414c20785fc3a28373073ea8ef7a1316eeeaca6e"
+IRODORI_SILENTCIPHER_COMMIT = "d46d7d0893a583d8968ab3a6626e2289faec9152"
 
 PUBLIC_DEFAULT_HOST = "127.0.0.1"
 PUBLIC_DEFAULT_PORT = 9880
@@ -60,6 +81,12 @@ _ENGINE_ALIASES = {
     "gpt_sovits": "gpt-sovits",
     "gpt-sovits": "gpt-sovits",
     "gptsovits": "gpt-sovits",
+    "generic_http": "generic-http",
+    "generic-http": "generic-http",
+    "generichttp": "generic-http",
+    "irodori": "irodori",
+    "irodori_tts": "irodori",
+    "irodori-tts": "irodori",
 }
 
 
@@ -70,7 +97,7 @@ def normalize_engine(value: object) -> str:
     try:
         return _ENGINE_ALIASES[normalized]
     except KeyError as exc:
-        raise ValueError("TTS backend must be gpt-sovits or voxcpm") from exc
+        raise ValueError("TTS backend must be gpt-sovits, voxcpm, generic-http, or irodori") from exc
 
 
 def resolve_engine(config_path: Path, override: str | None = None) -> str:
@@ -98,10 +125,17 @@ def resolve_private_port(
 ) -> int:
     """Read one private backend port and reject a public-port collision."""
 
+    normalized_engine = normalize_engine(engine)
+    if normalized_engine == "generic-http":
+        raise ValueError("GenericHTTP has no private backend port")
     if explicit_port is not None:
         port = int(explicit_port)
     else:
-        filename = "vox.toml" if normalize_engine(engine) == "voxcpm" else "gpt-sovits.toml"
+        filename = {
+            "voxcpm": "vox.toml",
+            "gpt-sovits": "gpt-sovits.toml",
+            "irodori": "irodori.toml",
+        }[normalized_engine]
         data = read_toml(Path(config_path).parent / filename)
         port = int(data.get("tts", {}).get("port", PRIVATE_DEFAULT_PORT))
     if not 1 <= port <= 65535:
@@ -151,13 +185,13 @@ def runtime_python(venv_dir: Path) -> Path:
 
 
 def explicit_tts_runtime_profile() -> str | None:
-    """Return the .bat-selected TTS profile, if one was explicitly provided."""
+    """Return the launcher-computed TTS profile, if one was provided."""
     explicit = os.environ.get("NACHOBOT_TTS_RUNTIME_PROFILE", "").strip().lower()
     return explicit if explicit in {"gpu", "cpu"} else None
 
 
 def managed_venv_dir(runtime_dir: Path) -> Path:
-    # Only .bat launchers set NACHOBOT_TTS_RUNTIME_PROFILE. Without it (e.g.
+    # Root .bat launchers set a computed NACHOBOT_TTS_RUNTIME_PROFILE. Without it (e.g.
     # WebUI), preserve the historical shared .venv behavior exactly.
     return runtime_dir / (".venv-cpu" if explicit_tts_runtime_profile() == "cpu" else ".venv")
 
@@ -383,13 +417,36 @@ def _tts_triton_required(profile: str, backend: str) -> bool:
     return os.name == "nt" and profile == "gpu" and backend == "voxcpm-2.0.3"
 
 
+def _tts_onnxruntime_gpu_required(profile: str, backend: str) -> bool:
+    if profile != "gpu" or backend != GPT_REF:
+        return False
+
+    machine = platform.machine().strip().lower()
+    if machine:
+        return machine in {"x86_64", "amd64"}
+
+    # Match GPT-SoVITS' upstream wheel markers while tolerating hosts where
+    # platform.machine() is empty (for example, sanitized Windows launches).
+    build_arch = sysconfig.get_platform().lower().rsplit("-", 1)[-1]
+    return build_arch in {"x86_64", "amd64"}
+
+
+def _tts_recipe(profile: str, backend: str) -> str:
+    if _tts_onnxruntime_gpu_required(profile, backend):
+        version_tag = TTS_GPT_ORT_GPU_VERSION.replace(".", "")
+        return f"{TTS_TORCH_RECIPE}-gpt-ortgpu{version_tag}-v1"
+    return TTS_TORCH_RECIPE
+
+
 def _tts_dependency_constraints(runtime_dir: Path, profile: str, backend: str) -> Path:
     versions = _tts_torch_versions(profile)
     versions["torchvision"] = f"0.28.0{'+cpu' if profile == 'cpu' else '+cu130'}"
     requirements = [f"{package}=={version}" for package, version in versions.items()]
     if _tts_triton_required(profile, backend):
         requirements.append(f"triton-windows=={TTS_TRITON_WINDOWS_VERSION}")
-    path = runtime_dir / f"constraints-{TTS_TORCH_RECIPE}-{profile}.txt"
+    if _tts_onnxruntime_gpu_required(profile, backend):
+        requirements.append(f"onnxruntime-gpu=={TTS_GPT_ORT_GPU_VERSION}")
+    path = runtime_dir / f"constraints-{_tts_recipe(profile, backend)}-{profile}.txt"
     runtime_dir.mkdir(parents=True, exist_ok=True)
     content = "\n".join(requirements) + "\n"
     if not path.is_file() or path.read_text(encoding="utf-8") != content:
@@ -399,7 +456,7 @@ def _tts_dependency_constraints(runtime_dir: Path, profile: str, backend: str) -
 
 def _tts_marker_path(runtime_dir: Path, backend: str, python_version: str, profile: str) -> Path:
     return runtime_dir / (
-        f".deps-{profile}-{backend}-py{python_version}-{TTS_TORCH_RECIPE}.ready"
+        f".deps-{profile}-{backend}-py{python_version}-{_tts_recipe(profile, backend)}.ready"
     )
 
 
@@ -420,21 +477,29 @@ def _tts_marker_values(
     backend: str,
 ) -> dict[str, str]:
     values = {
-        "recipe": TTS_TORCH_RECIPE,
+        "recipe": _tts_recipe(profile, backend),
         "profile": profile,
         "python": python_version,
         "index_sha256": hashlib.sha256(index_url.encode("utf-8")).hexdigest(),
         **_tts_torch_versions(profile),
     }
+    if _tts_onnxruntime_gpu_required(profile, backend):
+        values["onnxruntime-gpu"] = TTS_GPT_ORT_GPU_VERSION
     if _tts_triton_required(profile, backend):
         values["triton-windows"] = TTS_TRITON_WINDOWS_VERSION
     return values
 
 
-def _read_tts_installed_versions(python: Path, include_triton: bool) -> dict[str, str] | None:
+def _read_tts_installed_versions(
+    python: Path,
+    include_triton: bool,
+    include_onnxruntime_gpu: bool = False,
+) -> dict[str, str] | None:
     packages = ["torch", "torchaudio"]
     if include_triton:
         packages.append("triton-windows")
+    if include_onnxruntime_gpu:
+        packages.append("onnxruntime-gpu")
     script = (
         "from importlib.metadata import PackageNotFoundError, version; import json; "
         f"names={packages!r}; result={{}}; "
@@ -465,9 +530,16 @@ def _read_tts_installed_versions(python: Path, include_triton: bool) -> dict[str
 def _tts_stack_matches(python: Path, profile: str, backend: str) -> bool:
     expected = _tts_torch_versions(profile)
     include_triton = _tts_triton_required(profile, backend)
+    include_onnxruntime_gpu = _tts_onnxruntime_gpu_required(profile, backend)
     if include_triton:
         expected["triton-windows"] = TTS_TRITON_WINDOWS_VERSION
-    return _read_tts_installed_versions(python, include_triton) == expected
+    if include_onnxruntime_gpu:
+        expected["onnxruntime-gpu"] = TTS_GPT_ORT_GPU_VERSION
+    return _read_tts_installed_versions(
+        python,
+        include_triton,
+        include_onnxruntime_gpu,
+    ) == expected
 
 
 def _tts_marker_is_valid(
@@ -502,10 +574,16 @@ def _write_tts_marker(
     backend: str,
 ) -> None:
     if not _tts_stack_matches(python, profile, backend):
-        actual = _read_tts_installed_versions(python, _tts_triton_required(profile, backend))
+        actual = _read_tts_installed_versions(
+            python,
+            _tts_triton_required(profile, backend),
+            _tts_onnxruntime_gpu_required(profile, backend),
+        )
         expected = _tts_torch_versions(profile)
         if _tts_triton_required(profile, backend):
             expected["triton-windows"] = TTS_TRITON_WINDOWS_VERSION
+        if _tts_onnxruntime_gpu_required(profile, backend):
+            expected["onnxruntime-gpu"] = TTS_GPT_ORT_GPU_VERSION
         raise RuntimeError(
             "TTS 安全依赖版本不匹配，拒绝写入就绪标记: "
             f"expected={expected}, installed={actual}"
@@ -580,6 +658,539 @@ def base_env() -> dict[str, str]:
                 env["PATH"] = str(executable.parent) + os.pathsep + env.get("PATH", "")
                 break
     return env
+
+
+def _irodori_config_path(config_path: Path | None = None) -> Path:
+    return (config_path or (ADAPTER_ROOT / "configs" / "irodori.toml")).expanduser().resolve(strict=False)
+
+
+def _irodori_paths(config_path: Path | None = None) -> tuple[dict[str, Any], Path, Path | None, bool]:
+    """Return parsed config, source, configured Python, and managed-source flag."""
+
+    selected_config = _irodori_config_path(config_path)
+    parsed = load_irodori_config(selected_config)
+    runtime = parsed["runtime"]
+    managed_source = runtime["repo_path"] is None
+    source = runtime["repo_path"] or (IRODORI_RUNTIME_DIR / "source")
+    return parsed, Path(source).expanduser().resolve(strict=False), runtime["python_path"], managed_source
+
+
+def _ensure_pinned_irodori_source(source_dir: Path) -> None:
+    """Create or validate the adapter-owned immutable Irodori source checkout."""
+
+    newly_cloned = False
+    if not source_dir.exists():
+        source_dir.parent.mkdir(parents=True, exist_ok=True)
+        run(["git", "clone", "--no-checkout", IRODORI_REPO_URL, str(source_dir)])
+        newly_cloned = True
+    if not (source_dir / ".git").exists():
+        raise RuntimeError(f"managed Irodori source is not a Git checkout: {source_dir}")
+
+    if newly_cloned:
+        subprocess.run(
+            ["git", "-C", str(source_dir), "fetch", "--depth", "1", "origin", IRODORI_SOURCE_COMMIT],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(source_dir), "checkout", "--detach", IRODORI_SOURCE_COMMIT],
+            check=True,
+        )
+        return
+
+    head = subprocess.run(
+        ["git", "-C", str(source_dir), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    if head == IRODORI_SOURCE_COMMIT:
+        if (source_dir / "pyproject.toml").is_file() and (source_dir / "irodori_tts" / "inference_runtime.py").is_file():
+            return
+        subprocess.run(
+            ["git", "-C", str(source_dir), "checkout", "--detach", IRODORI_SOURCE_COMMIT],
+            check=True,
+        )
+        return
+    dirty = subprocess.run(
+        ["git", "-C", str(source_dir), "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    if dirty:
+        raise RuntimeError(
+            f"managed Irodori source has local changes at {source_dir}; preserve them and set [runtime].repo_path"
+        )
+    subprocess.run(
+        ["git", "-C", str(source_dir), "fetch", "--depth", "1", "origin", IRODORI_SOURCE_COMMIT],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(source_dir), "checkout", "--detach", IRODORI_SOURCE_COMMIT],
+        check=True,
+    )
+
+
+def _irodori_import_ready(
+    python: Path,
+    source_dir: Path,
+    env: dict[str, str],
+    *,
+    require_recipe: bool = False,
+    require_lora: bool = False,
+) -> bool:
+    if not python.is_file():
+        return False
+    probe_lines = [
+        "import importlib.metadata as metadata",
+        "import re",
+        "import sys",
+        "assert sys.version_info >= (3, 11)",
+        "import sentencepiece, torch, torchaudio, torchao",
+        "torchao_version = tuple(map(int, metadata.version('torchao').split('.')[:2]))",
+        "assert torchao_version == (0, 16)",
+        "from torchao.dtypes import AffineQuantizedTensor",
+        "from torchao.prototype.safetensors.safetensors_support import unflatten_tensor_state_dict",
+        "from dacvae import DACVAE",
+        "assert callable(DACVAE.load)",
+        "from transformers import AutoTokenizer",
+        "from irodori_tts.codec import DACVAECodec",
+        "from irodori_tts.inference_runtime import InferenceRuntime",
+        "from irodori_tts.quantization import _require_torchao_safetensors",
+        "_require_torchao_safetensors()",
+    ]
+    if require_lora:
+        probe_lines.extend(("from peft import PeftModel", "from irodori_tts.lora import load_lora_adapter"))
+    if os.name == "nt":
+        probe_lines.append("from accelerate import init_empty_weights")
+    if require_recipe:
+        probe_lines.extend(
+            (
+                f"assert metadata.version('torchao') == {IRODORI_TORCHAO_VERSION!r}",
+                "assert metadata.version('peft') == '0.18.1'",
+                "assert metadata.version('accelerate') == '1.13.0'",
+                "sp = re.fullmatch(r'(\\d+)\\.(\\d+)\\.(\\d+)(?:[+.-].*)?', metadata.version('sentencepiece'))",
+                "assert sp and (0, 2, 1) <= tuple(map(int, sp.groups())) < (0, 3, 0)",
+                "st = re.fullmatch(r'(\\d+)\\.(\\d+)\\.(\\d+)(?:[+.-].*)?', metadata.version('safetensors'))",
+                "assert st and (0, 8, 0) <= tuple(map(int, st.groups())) < (0, 9, 0)",
+                "import json, silentcipher",
+                "assert callable(getattr(silentcipher, 'get_model', None))",
+                "def vcs_commit(name):",
+                "    raw = metadata.distribution(name).read_text('direct_url.json') or '{}'",
+                "    return json.loads(raw).get('vcs_info', {}).get('commit_id', '')",
+                f"assert vcs_commit('dacvae').startswith({IRODORI_DACVAE_COMMIT!r})",
+                f"assert vcs_commit('silentcipher').startswith({IRODORI_SILENTCIPHER_COMMIT!r})",
+            )
+        )
+    elif require_lora:
+        probe_lines.append("from peft import PeftModel")
+    probe_lines.extend(("from irodori_tts.tokenizer import PretrainedTextTokenizer", "from irodori_tts.watermark import SilentCipherWatermarker"))
+    import_probe = "\n".join(probe_lines)
+    probe_env = env.copy()
+    # TorchAO 0.16's pure-Python quantized tensor path supports the shared
+    # Torch build used here; skip its optional, version-coupled extension only
+    # in this probe process and the eventual Irodori child.
+    probe_env["TORCHAO_FORCE_SKIP_LOADING_SO_FILES"] = "1"
+    try:
+        result = subprocess.run(
+            [
+                str(python),
+                "-c",
+                import_probe,
+            ],
+            cwd=str(source_dir),
+            env=probe_env,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def _irodori_runtime_profile(parsed: dict[str, Any]) -> str:
+    """Resolve Irodori to the adapter's already selected GPU or CPU profile."""
+
+    runtime = parsed["runtime"]
+    selected_profile = explicit_tts_runtime_profile()
+    configured_devices = tuple(
+        str(device).strip().lower()
+        for device in (runtime["model_device"], runtime["codec_device"])
+    )
+    if selected_profile is not None:
+        if selected_profile == "cpu" and any(device.startswith("cuda") for device in configured_devices):
+            raise RuntimeError(
+                "the selected CPU TTS profile conflicts with an explicit CUDA device in irodori.toml"
+            )
+        return selected_profile
+    if any(device.startswith("cuda") for device in configured_devices):
+        return "gpu"
+    if runtime["model_device"].strip().lower() == "cpu":
+        return "cpu"
+
+    config_dir = _irodori_config_path(parsed["config_path"]).parent
+    choice = read_device_choice("tts", config_dir=config_dir)
+    if choice == "cpu":
+        return "cpu"
+    if GPU_UUID_PATTERN.fullmatch(choice):
+        if choice not in detected_nvidia_gpu_uuids():
+            raise RuntimeError(
+                f"configured NVIDIA GPU {choice} is unavailable; choose another GPU or set TTS to auto/CPU"
+            )
+        return "gpu"
+
+    return "gpu" if auto_cuda_available(gpu_uuids=detected_nvidia_gpu_uuids()) else "cpu"
+
+
+def _irodori_shared_runtime_ready(python: Path, profile: str) -> bool:
+    """Match the existing WebUI shared-profile import and Torch-flavor checks."""
+
+    if not python.is_file():
+        return False
+    expected_cuda = "True" if profile == "gpu" else "False"
+    check = (
+        "import importlib; "
+        "[(importlib.import_module(name)) for name in ('torch', 'torchvision', 'torchaudio', 'transformers', 'timm', 'sherpa_onnx')]; "
+        "import torch, torchaudio, torchvision; "
+        "assert torch.__version__.split('+', 1)[0].startswith('2.13.'); "
+        "assert torchaudio.__version__ and torchvision.__version__; "
+        f"assert (torch.version.cuda is not None) is {expected_cuda}"
+    )
+    try:
+        result = subprocess.run(
+            [str(python), "-I", "-c", check],
+            cwd=str(ADAPTER_ROOT),
+            env={**os.environ, "PYTHONNOUSERSITE": "1"},
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def _prepare_irodori_shared_profile(profile: str) -> None:
+    """Use the established profile bootstrap if the selected shared env is absent or damaged."""
+
+    from scripts import prepare_model_runtime
+
+    environ = os.environ.copy()
+    environ["NACHOBOT_TTS_ENGINE"] = "irodori"
+    environ["NACHOBOT_TTS_RUNTIME_PROFILE"] = profile
+    if profile == "cpu":
+        environ["CUDA_VISIBLE_DEVICES"] = ""
+    plan = prepare_model_runtime.build_runtime_plan(
+        "lite",
+        adapter_root=ADAPTER_ROOT,
+        environ=environ,
+        detected_uuids=detected_nvidia_gpu_uuids(),
+    )
+    # The direct WebUI profile selection is authoritative when TTS is set to
+    # auto; all paths still use prepare_model_runtime's existing manifest sync.
+    plan = replace(plan, tts_profile=profile)
+    launch_dir = ADAPTER_ROOT / ".runtime" / "launch"
+    transport = launch_dir / f"model-runtime-irodori-{uuid.uuid4().hex}.cmd"
+    try:
+        prepare_model_runtime.prepare_runtime(plan, transport)
+    finally:
+        transport.unlink(missing_ok=True)
+
+
+def _irodori_installed_constraints(python: Path, source_dir: Path, env: dict[str, str]) -> tuple[str, str | None]:
+    """Capture exact installed package versions and the narrow protobuf override."""
+
+    inventory_script = (
+        "import importlib.metadata as metadata, json; "
+        "items = {}; "
+        "normalize = lambda value: value.lower().replace('_', '-').replace('.', '-'); "
+        "[items.setdefault(normalize(dist.metadata['Name']), (dist.metadata['Name'], dist.version)) "
+        "for dist in metadata.distributions() if dist.metadata.get('Name')]; "
+        "print(json.dumps([items[key] for key in sorted(items)]))"
+    )
+    protobuf_script = (
+        "import importlib.metadata as metadata; "
+        "\ntry: print(metadata.version('protobuf'))\n"
+        "except metadata.PackageNotFoundError: print('')"
+    )
+    try:
+        inventory = subprocess.run(
+            [str(python), "-c", inventory_script],
+            cwd=str(source_dir),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        protobuf = subprocess.run(
+            [str(python), "-c", protobuf_script],
+            cwd=str(source_dir),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"cannot inspect installed shared runtime packages: {python}") from exc
+    if inventory.returncode != 0 or protobuf.returncode != 0:
+        raise RuntimeError(f"cannot inspect installed shared runtime packages: {python}")
+    try:
+        installed = json.loads(inventory.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("shared runtime returned invalid package metadata") from exc
+    constraints = "\n".join(f"{name}=={version}" for name, version in installed) + "\n"
+    protobuf_version = protobuf.stdout.strip()
+    override = f"protobuf=={protobuf_version}\n" if protobuf_version else None
+    return constraints, override
+
+
+def _install_irodori_inference_requirements(
+    python: Path,
+    source_dir: Path,
+    env: dict[str, str],
+) -> None:
+    if not IRODORI_REQUIREMENTS_FILE.is_file():
+        raise FileNotFoundError(f"Irodori inference requirements are missing: {IRODORI_REQUIREMENTS_FILE}")
+    constraints, override = _irodori_installed_constraints(python, source_dir, env)
+    constraint_path: Path | None = None
+    override_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix="-irodori-constraints.txt", delete=False
+        ) as handle:
+            handle.write(constraints)
+            constraint_path = Path(handle.name)
+        command = [
+            require_uv(),
+            "pip",
+            "install",
+            "--python",
+            str(python),
+            "--constraint",
+            str(constraint_path),
+        ]
+        if override:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", suffix="-irodori-overrides.txt", delete=False
+            ) as handle:
+                handle.write(override)
+                override_path = Path(handle.name)
+            command.extend(["--override", str(override_path)])
+        command.extend(["--requirement", str(IRODORI_REQUIREMENTS_FILE)])
+        log("Preparing Irodori inference packages in the selected shared Multimodal runtime")
+        run(command, cwd=source_dir, env=env)
+    finally:
+        if constraint_path is not None:
+            constraint_path.unlink(missing_ok=True)
+        if override_path is not None:
+            override_path.unlink(missing_ok=True)
+
+
+def _irodori_requires_pread(checkpoint: Path | None) -> bool:
+    if os.name != "nt":
+        return False
+    return checkpoint is None or checkpoint.suffix.lower() == ".safetensors"
+
+
+def _irodori_safetensors_version(python: Path, source_dir: Path, env: dict[str, str]) -> str | None:
+    """Read package metadata with the selected interpreter without importing Torch."""
+
+    try:
+        result = subprocess.run(
+            [
+                str(python),
+                "-c",
+                "from importlib.metadata import PackageNotFoundError, version; "
+                "\ntry: print(version('safetensors'))\n"
+                "except PackageNotFoundError: print('')",
+            ],
+            cwd=str(source_dir),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _irodori_safetensors_is_pread_compatible(installed: str | None) -> bool:
+    if not installed:
+        return False
+    match = re.fullmatch(r"\s*(\d+)\.(\d+)\.(\d+)([0-9A-Za-z.+-]*)\s*", installed)
+    if match is None:
+        return False
+    parts = tuple(int(match.group(index)) for index in (1, 2, 3))
+    suffix = match.group(4).lower()
+    if parts == (0, 8, 0) and suffix and not suffix.startswith(("+", ".post")):
+        return False
+    return parts >= (0, 8, 0)
+
+
+def _ensure_irodori_safetensors(
+    python: Path,
+    source_dir: Path,
+    env: dict[str, str],
+    *,
+    checkpoint: Path | None,
+    managed_environment: bool,
+) -> None:
+    if not _irodori_requires_pread(checkpoint):
+        return
+    installed = _irodori_safetensors_version(python, source_dir, env)
+    if _irodori_safetensors_is_pread_compatible(installed):
+        return
+    actual = installed or "missing or unreadable"
+    if not managed_environment:
+        raise RuntimeError(
+            f"configured Irodori Python {python} has safetensors {actual}; Windows requires "
+            f"{IRODORI_SAFETENSORS_REQUIREMENT} for PREAD checkpoint loading. "
+            "Upgrade this explicit environment manually; the TTS manager will not install or sync it."
+        )
+    log(f"Updating managed Irodori runtime dependency: {IRODORI_SAFETENSORS_REQUIREMENT}")
+    run(
+        [
+            require_uv(),
+            "pip",
+            "install",
+            "--python",
+            str(python),
+            "--no-deps",
+            IRODORI_SAFETENSORS_REQUIREMENT,
+        ],
+        cwd=source_dir,
+        env=env,
+    )
+    installed = _irodori_safetensors_version(python, source_dir, env)
+    if not _irodori_safetensors_is_pread_compatible(installed):
+        raise RuntimeError(
+            f"managed Irodori runtime still has safetensors {installed or 'missing or unreadable'} "
+            f"after installing {IRODORI_SAFETENSORS_REQUIREMENT}; expected PREAD support."
+        )
+
+
+def prepare_irodori(config_path: Path | None = None) -> tuple[Path, Path]:
+    """Prepare pinned Irodori source and inference deps in the selected shared profile."""
+
+    parsed, source_dir, configured_python, managed_source = _irodori_paths(config_path)
+    runtime = parsed["runtime"]
+    if managed_source:
+        _ensure_pinned_irodori_source(source_dir)
+    if not (source_dir / "pyproject.toml").is_file() or not (source_dir / "irodori_tts" / "inference_runtime.py").is_file():
+        raise RuntimeError(f"configured Irodori source is incomplete: {source_dir}")
+
+    checkpoint = runtime["checkpoint"]
+    generation = parsed["generation"]
+    if checkpoint is not None and not checkpoint.is_file():
+        raise FileNotFoundError(f"configured Irodori checkpoint does not exist: {checkpoint}")
+    if generation["ref_wav"] is not None and not generation["ref_wav"].is_file():
+        raise FileNotFoundError(f"configured Irodori reference audio does not exist: {generation['ref_wav']}")
+    if generation["lora_adapter"] is not None and not generation["lora_adapter"].is_dir():
+        raise FileNotFoundError(f"configured Irodori LoRA adapter does not exist: {generation['lora_adapter']}")
+
+    if configured_python is not None:
+        python = Path(configured_python)
+        if not python.is_file():
+            raise FileNotFoundError(f"configured Irodori Python does not exist: {python}")
+        env = base_env()
+        _ensure_irodori_safetensors(
+            python,
+            source_dir,
+            env,
+            checkpoint=runtime["checkpoint"],
+            managed_environment=False,
+        )
+        if not _irodori_import_ready(
+            python,
+            source_dir,
+            env,
+            require_lora=generation["lora_adapter"] is not None,
+        ):
+            raise RuntimeError(
+                "configured Irodori Python does not satisfy the pinned inference imports; "
+                "prepare that explicit environment manually"
+            )
+    else:
+        profile = _irodori_runtime_profile(parsed)
+        venv_dir = ADAPTER_ROOT / (".venv-cpu" if profile == "cpu" else ".venv")
+        python = runtime_python(venv_dir)
+        env = base_env()
+        if runtime["hf_home"] is not None:
+            hf_home = Path(runtime["hf_home"])
+            hf_home.mkdir(parents=True, exist_ok=True)
+            env["HF_HOME"] = str(hf_home)
+        if not _irodori_shared_runtime_ready(python, profile):
+            log(f"Selected shared {profile.upper()} runtime is absent or damaged; preparing its standard profile")
+            _prepare_irodori_shared_profile(profile)
+        if not _irodori_shared_runtime_ready(python, profile):
+            raise RuntimeError(
+                f"the standard shared {profile.upper()} runtime preparation did not produce a valid profile: {python}"
+            )
+
+        if not _irodori_import_ready(python, source_dir, env, require_recipe=True, require_lora=True):
+            _install_irodori_inference_requirements(python, source_dir, env)
+        if not _irodori_import_ready(python, source_dir, env, require_recipe=True, require_lora=True):
+            raise RuntimeError(
+                f"the shared {profile.upper()} runtime still lacks the pinned Irodori inference imports: {python}"
+            )
+
+    log(f"Irodori runtime ready: source={source_dir}, python={python}")
+    return python, source_dir
+
+
+def build_irodori_command(
+    port: int = PRIVATE_DEFAULT_PORT,
+    host: str = PRIVATE_DEFAULT_HOST,
+    config_path: Path | None = None,
+) -> tuple[list[str], Path, dict[str, str]]:
+    if host not in {"127.0.0.1", "localhost"}:
+        raise ValueError("Irodori raw API must bind to loopback")
+    if int(port) == PUBLIC_DEFAULT_PORT or not 1 <= int(port) <= 65535:
+        raise ValueError("Irodori raw API must use a valid private port")
+    selected_config = _irodori_config_path(config_path)
+    python, source_dir = prepare_irodori(selected_config)
+    env = base_env()
+    parsed = load_irodori_config(selected_config)
+    if parsed["runtime"]["hf_home"] is not None:
+        hf_home = Path(parsed["runtime"]["hf_home"])
+        hf_home.mkdir(parents=True, exist_ok=True)
+        env["HF_HOME"] = str(hf_home)
+    env.pop("NACHOBOT_TTS_ENGINE_HOST", None)
+    env.pop("NACHOBOT_TTS_ENGINE_PORT", None)
+    env["TORCHAO_FORCE_SKIP_LOADING_SO_FILES"] = "1"
+    server = ADAPTER_ROOT / "src" / "tts" / "backends" / "Irodori" / "irodori_api_server.py"
+    cmd = [
+        str(python),
+        str(server),
+        "--config",
+        str(selected_config),
+        "--repo-path",
+        str(source_dir),
+        "--host",
+        host,
+        "--port",
+        str(port),
+    ]
+    log(f"启动 Irodori raw API: {host}:{port}，source={source_dir}")
+    return cmd, source_dir, env
+
+
+def serve_irodori(
+    port: int = PRIVATE_DEFAULT_PORT,
+    host: str = PRIVATE_DEFAULT_HOST,
+    config_path: Path | None = None,
+) -> int:
+    cmd, cwd, env = build_irodori_command(port, host, config_path)
+    return subprocess.call(cmd, cwd=str(cwd), env=env)
 
 
 def hf_endpoint() -> str:
@@ -1126,6 +1737,15 @@ def prepare_gpt_sovits() -> tuple[Path, Path]:
         require_uv(), "pip", "install", "--python", str(python),
         "--constraint", str(constraints), "-r", str(requirements),
     ])
+    if _tts_onnxruntime_gpu_required(profile, GPT_REF):
+        # The upstream requirements guard this wheel with a platform_machine
+        # marker. Install it explicitly as well so an empty marker environment
+        # cannot leave a CUDA-ready marker with the wrong ORT distribution.
+        run([
+            require_uv(), "pip", "install", "--python", str(python),
+            "--constraint", str(constraints),
+            f"onnxruntime-gpu=={TTS_GPT_ORT_GPU_VERSION}",
+        ])
     # requirements 安装后 g2p_en 才存在于托管 venv，因此再次应用源码兼容补丁。
     patch_gpt_runtime_compat(source_dir, runtime_dir)
     _write_tts_marker(marker, python, index_url, python_version, profile, GPT_REF)
@@ -1278,7 +1898,7 @@ def serve_gpt_sovits(
 
 
 class TTSRuntimeSupervisor:
-    """Own public 9880 and exactly one private raw TTS child."""
+    """Own public 9880 and optionally one private local TTS child."""
 
     def __init__(
         self,
@@ -1300,17 +1920,20 @@ class TTSRuntimeSupervisor:
         self.public_host = str(public_host or configured_public_host or PUBLIC_DEFAULT_HOST)
         self.public_port = int(public_port)
         self.private_host = str(private_host)
-        if self.private_host not in {"127.0.0.1", "localhost", "::1"}:
+        if self.engine != "generic-http" and self.private_host not in {"127.0.0.1", "localhost", "::1"}:
             raise ValueError("raw TTS backend must bind to loopback")
-        env_private_port = os.environ.get("NACHOBOT_TTS_PRIVATE_PORT", "").strip()
-        if private_port is None and env_private_port:
-            private_port = int(env_private_port)
-        self.private_port = resolve_private_port(
-            self.config_path,
-            self.engine,
-            explicit_port=private_port,
-            public_port=self.public_port,
-        )
+        if self.engine == "generic-http":
+            self.private_port = None
+        else:
+            env_private_port = os.environ.get("NACHOBOT_TTS_PRIVATE_PORT", "").strip()
+            if private_port is None and env_private_port:
+                private_port = int(env_private_port)
+            self.private_port = resolve_private_port(
+                self.config_path,
+                self.engine,
+                explicit_port=private_port,
+                public_port=self.public_port,
+            )
         self.startup_timeout = float(startup_timeout)
         self._popen = popen_factory or subprocess.Popen
         self._pipeline_factory = pipeline_factory
@@ -1324,6 +1947,8 @@ class TTSRuntimeSupervisor:
 
     @property
     def backend_url(self) -> str:
+        if self.private_port is None:
+            raise RuntimeError("GenericHTTP does not have a local backend URL")
         return f"http://{self.private_host}:{self.private_port}"
 
     def child_command(self) -> list[str]:
@@ -1334,11 +1959,21 @@ class TTSRuntimeSupervisor:
         ``serve-raw`` Python wrapper that could outlive this supervisor.
         """
 
+        if self.engine == "generic-http":
+            raise RuntimeError("GenericHTTP does not start a managed child process")
         if self._raw_spec is None:
             self._raw_spec = self._build_raw_spec()
         return list(self._raw_spec[0])
 
     def _build_raw_spec(self) -> tuple[list[str], Path, dict[str, str]]:
+        if self.engine == "generic-http":
+            raise RuntimeError("GenericHTTP does not have a raw child process")
+        if self.engine == "irodori":
+            return build_irodori_command(
+                self.private_port,
+                self.private_host,
+                self.config_path.parent / "irodori.toml",
+            )
         if self.engine == "voxcpm":
             return build_voxcpm_command(
                 self.private_port,
@@ -1352,11 +1987,20 @@ class TTSRuntimeSupervisor:
         )
 
     def _spawn_child(self) -> Any:
+        if self.engine == "generic-http":
+            raise RuntimeError("GenericHTTP does not start a managed child process")
         if self._raw_spec is None:
             self._raw_spec = self._build_raw_spec()
         command, cwd, env = self._raw_spec
-        env["NACHOBOT_TTS_ENGINE_HOST"] = self.private_host
-        env["NACHOBOT_TTS_ENGINE_PORT"] = str(self.private_port)
+        if self.engine == "irodori":
+            # Irodori receives its private bind endpoint explicitly on argv.
+            # Do not let a stale inherited client override redirect its own
+            # managed endpoint or leak into the isolated child environment.
+            env.pop("NACHOBOT_TTS_ENGINE_HOST", None)
+            env.pop("NACHOBOT_TTS_ENGINE_PORT", None)
+        else:
+            env["NACHOBOT_TTS_ENGINE_HOST"] = self.private_host
+            env["NACHOBOT_TTS_ENGINE_PORT"] = str(self.private_port)
         log(
             f"启动单一 TTS raw child: engine={self.engine} "
             f"bind={self.private_host}:{self.private_port} command={command[0]}"
@@ -1416,10 +2060,16 @@ class TTSRuntimeSupervisor:
         if self.engine == "voxcpm":
             status, payload = self._fetch_json(f"{self.backend_url}/health")
             return bool(status == 200 and isinstance(payload, dict) and payload.get("model_loaded") is True)
+        if self.engine == "irodori":
+            status, payload = self._fetch_json(f"{self.backend_url}/health")
+            return bool(status == 200 and isinstance(payload, dict) and payload.get("model_loaded") is True)
         return self._raw_socket_ready()
 
     def wait_for_backend(self) -> None:
         """Wait for raw model readiness, not merely a listening process."""
+
+        if self.engine == "generic-http":
+            return
 
         deadline = time.monotonic() + self.startup_timeout
         last_error = "backend did not report ready"
@@ -1441,7 +2091,7 @@ class TTSRuntimeSupervisor:
             return self._pipeline_factory(
                 self.config_path,
                 backend=self.engine,
-                engine_host=self.private_host,
+                engine_host=self.private_host if self.private_port is not None else None,
                 engine_port=self.private_port,
                 backend_alive=True,
             )
@@ -1452,10 +2102,16 @@ class TTSRuntimeSupervisor:
         # reuse an unrelated preloaded ``main`` module.
         public_main = _load_public_main()
 
+        selected_backend = {
+            "voxcpm": "Vox",
+            "gpt-sovits": "GPT_Sovits",
+            "generic-http": "GenericHTTP",
+            "irodori": "Irodori",
+        }[self.engine]
         return public_main.TTSPipeline(
             self.config_path,
-            backend="Vox" if self.engine == "voxcpm" else "GPT_Sovits",
-            engine_host=self.private_host,
+            backend=selected_backend,
+            engine_host=self.private_host if self.private_port is not None else None,
             engine_port=self.private_port,
             backend_alive=True,
             public_host=self.public_host,
@@ -1474,6 +2130,10 @@ class TTSRuntimeSupervisor:
         try:
             return self._build_pipeline()
         except Exception as exc:
+            if self.engine == "generic-http":
+                raise RuntimeError(
+                    "public pipeline initialization failed for generic-http; check the selected profile"
+                ) from None
             raise RuntimeError(
                 f"public pipeline initialization failed for {self.engine}: {exc}"
             ) from exc
@@ -1523,10 +2183,21 @@ class TTSRuntimeSupervisor:
             process.wait(timeout=5)
 
     def start(self) -> Any:
-        """Start child, prove readiness, then publish the fixed public pipeline."""
+        """Start an optional local child, then publish the fixed public pipeline."""
 
         if self._started:
             return self.pipeline
+        if self.engine == "generic-http":
+            try:
+                # GenericHTTP validates local profile configuration at startup
+                # but performs no external request until synthesis.
+                self.pipeline = self._validate_fixed_client()
+                self._started = True
+                return self.pipeline
+            except Exception:
+                self.stop()
+                raise
+
         self.child = self._spawn_child()
         try:
             self.wait_for_backend()
@@ -1601,9 +2272,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--startup-timeout", type=float, default=900.0)
     args = parser.parse_args(argv)
 
-    RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
-    HF_CACHE.mkdir(parents=True, exist_ok=True)
-
     engine = resolve_engine(args.config, args.engine or os.environ.get("NACHOBOT_TTS_ENGINE", ""))
 
     if args.action in {"serve", "serve-raw"}:
@@ -1612,7 +2280,47 @@ def main(argv: list[str] | None = None) -> int:
             config_dir=args.config.parent,
             base_path=args.config,
             runtime_profile=os.environ.get("NACHOBOT_TTS_RUNTIME_PROFILE", "gpu"),
+            engine=engine,
         )
+
+    if engine != "generic-http":
+        RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
+        HF_CACHE.mkdir(parents=True, exist_ok=True)
+
+    if engine == "generic-http":
+        if args.action == "prepare":
+            log("GenericHTTP uses the selected external service; no model installation is required")
+            return 0
+        if args.action == "serve-raw":
+            raise ValueError("GenericHTTP has no managed raw server")
+        supervisor = TTSRuntimeSupervisor(
+            args.config,
+            engine=engine,
+            public_host=args.host,
+            public_port=args.port if args.port is not None else PUBLIC_DEFAULT_PORT,
+            startup_timeout=args.startup_timeout,
+        )
+        return supervisor.run()
+
+    if engine == "irodori":
+        if args.action == "prepare":
+            prepare_irodori(args.config.parent / "irodori.toml")
+            return 0
+        if args.action == "serve-raw":
+            return serve_irodori(
+                args.port if args.port is not None else PRIVATE_DEFAULT_PORT,
+                args.host or PRIVATE_DEFAULT_HOST,
+                args.config.parent / "irodori.toml",
+            )
+        supervisor = TTSRuntimeSupervisor(
+            args.config,
+            engine=engine,
+            public_host=args.host,
+            public_port=args.port if args.port is not None else PUBLIC_DEFAULT_PORT,
+            private_port=args.backend_port,
+            startup_timeout=args.startup_timeout,
+        )
+        return supervisor.run()
 
     if engine == "voxcpm":
         if args.action == "prepare":

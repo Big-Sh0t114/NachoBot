@@ -78,6 +78,12 @@ _TTS_CHUNK_BACKENDS = {
     "gptsovits": "GPT_Sovits",
     "vox": "Vox",
     "voxcpm": "Vox",
+    "irodori": "Irodori",
+    "irodori_tts": "Irodori",
+    "irodori-tts": "Irodori",
+    "generichttp": "GenericHTTP",
+    "generic_http": "GenericHTTP",
+    "generic-http": "GenericHTTP",
 }
 
 
@@ -86,7 +92,7 @@ class TTSChunkingConfig:
     """Facade-level sentence scheduling for explicitly selected TTS backends."""
 
     enabled: bool = False
-    backends: tuple[str, ...] = ("GPT_Sovits", "Vox")
+    backends: tuple[str, ...] = ("Irodori",)
     min_chars: int = 20
     max_chars: int = 120
     first_chunk_min_chars: int = 8
@@ -100,7 +106,7 @@ class TTSChunkingConfig:
         if type(enabled) is not bool:
             raise ValueError("[tts_chunking].enabled must be a boolean")
 
-        backends_value = value.get("backends", ["GPT_Sovits", "Vox"])
+        backends_value = value.get("backends", ["Irodori"])
         if not isinstance(backends_value, list):
             raise ValueError("[tts_chunking].backends must be a list of TTS backend names")
         backends: list[str] = []
@@ -110,7 +116,7 @@ class TTSChunkingConfig:
             canonical = _TTS_CHUNK_BACKENDS.get(item.strip().lower())
             if canonical is None:
                 raise ValueError(
-                    "[tts_chunking].backends entries must name GPT_Sovits or Vox"
+                    "[tts_chunking].backends entries must name GPT_Sovits, Vox, Irodori, or GenericHTTP"
                 )
             if canonical in backends:
                 raise ValueError("[tts_chunking].backends cannot contain duplicate backends")

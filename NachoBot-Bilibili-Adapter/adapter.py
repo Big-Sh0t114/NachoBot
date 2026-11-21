@@ -597,12 +597,35 @@ class BilibiliAdapter:
         self.logger.info("Mic capture {} by user_id={}", action, user_id)
         return True
 
+    async def _refresh_live_tts_policy_if_due(self, room_id: int) -> None:
+        if not self.tts_manager.is_tts_enabled(room_id):
+            return
+        refresh = getattr(self.tts_manager, "refresh_tts_policy_if_due", None)
+        if callable(refresh):
+            await refresh()
+
+    async def _handle_tts_manual_command_async(
+        self,
+        room_id: int,
+        user_id: str,
+        text: str,
+        user_name: str,
+        allowed_user_ids: set,
+    ) -> bool:
+        handle_async = getattr(self.tts_manager, "handle_tts_manual_command_async", None)
+        if callable(handle_async):
+            return await handle_async(room_id, user_id, text, user_name, allowed_user_ids)
+        return self.tts_manager.handle_tts_manual_command(
+            room_id, user_id, text, user_name, allowed_user_ids
+        )
+
     async def _get_template_info(
         self, room_id: int, user_id: str, prompt_text: str
     ) -> Optional[TemplateInfo]:
         """
         Helper to resolve template info for live events (Gift/SC/Guard).
         """
+        await self._refresh_live_tts_policy_if_due(room_id)
         screen_summary = self._get_cached_screen_summary(room_id)
         reply_prompt, _ = self._resolve_live_prompts(room_id)
 
@@ -992,7 +1015,7 @@ class BilibiliAdapter:
             return
         if self._handle_mic_manual_command(room_id, user_id, text, user_name):
             return
-        if self.tts_manager.handle_tts_manual_command(
+        if await self._handle_tts_manual_command_async(
             room_id,
             user_id,
             text,
@@ -1318,6 +1341,7 @@ class BilibiliAdapter:
     ) -> None:
         """Send a captured utterance to Core; ASR never runs in this adapter."""
         self.tts_manager.reset_idle_timer()
+        await self._refresh_live_tts_policy_if_due(room_id)
         additional_config = self._build_live_additional_config(
             room_id,
             {
@@ -1978,6 +2002,7 @@ class BilibiliAdapter:
         additional_config: Optional[Dict[str, Any]] = None,
     ) -> BaseMessageInfo:
         live_platform = self.config.platform
+        await self._refresh_live_tts_policy_if_due(room_id)
         additional_config = self._build_live_additional_config(
             room_id,
             additional_config,

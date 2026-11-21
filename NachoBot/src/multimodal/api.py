@@ -26,6 +26,7 @@ from .contracts import (
 )
 from .router import AudioStreamError, CoreMultimodalRouter, TTSStreamError, get_multimodal_router
 
+
 class PerceptionBody(BaseModel):
     operation: str = Field(min_length=1, max_length=64)
     task: str = Field(default="", max_length=16)
@@ -36,11 +37,14 @@ class PerceptionBody(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     response_schema: dict[str, Any] | None = None
 
+
 class TTSBody(BaseModel):
     text: str = Field(min_length=1, max_length=MAX_TEXT_CHARS)
     platform: str = Field(default="core", max_length=64)
     text_lang: Optional[str] = Field(default=None, max_length=32)
     ambient_noise: bool = Field(default=False, strict=True)
+    prepare_text: bool = Field(default=False, strict=True)
+
 
 def _perception_payload(result: Any) -> dict[str, Any]:
     return {
@@ -52,6 +56,7 @@ def _perception_payload(result: Any) -> dict[str, Any]:
         "error": result.error,
         "metadata": dict(result.metadata or {}),
     }
+
 
 async def _stream_json_object(request: Request, *, max_bytes: int = 90_000) -> dict[str, Any]:
     body_parts = []
@@ -69,6 +74,50 @@ async def _stream_json_object(request: Request, *, max_bytes: int = 90_000) -> d
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="invalid_request")
     return payload
+
+
+async def _wait_for_client_disconnect(request: Request) -> None:
+    """Wait for the server's explicit ASGI disconnect event."""
+
+    while True:
+        message = await request.receive()
+        if message.get("type") == "http.disconnect":
+            return
+
+
+async def _drain_task(task: Any) -> None:
+    if not task.done():
+        task.cancel()
+    try:
+        await task
+    except BaseException:
+        pass
+
+
+async def _await_before_disconnect(request: Request, awaitable: Any) -> Any:
+    """Cancel and drain one pre-audio operation as soon as the client leaves."""
+
+    operation = asyncio.ensure_future(awaitable)
+    monitor = asyncio.create_task(_wait_for_client_disconnect(request))
+    try:
+        done, _pending = await asyncio.wait(
+            {operation, monitor},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if operation in done:
+            return await operation
+        # The monitor returns only after an explicit http.disconnect event.
+        await monitor
+        await _drain_task(operation)
+        raise asyncio.CancelledError
+    except BaseException:
+        if not operation.done():
+            await _drain_task(operation)
+        raise
+    finally:
+        if not monitor.done():
+            await _drain_task(monitor)
+
 
 class _ClosingTTSStreamingResponse(StreamingResponse):
     """Close the owned PCM iterator even when ASGI send fails mid-response."""
@@ -93,6 +142,7 @@ class _ClosingTTSStreamingResponse(StreamingResponse):
                         pass
             finally:
                 await self._upstream_owner.aclose()
+
 
 class _AsyncIteratorOwner:
     """Idempotent, cancellation-resilient owner for one prefetched iterator."""
@@ -129,8 +179,10 @@ class _AsyncIteratorOwner:
             finally:
                 raise
 
+
 def _stream_http_error(exc: AudioStreamError) -> HTTPException:
     return HTTPException(status_code=exc.status_code, detail=exc.code)
+
 
 def create_multimodal_router(service: CoreMultimodalRouter | None = None) -> APIRouter:
     """Create a fresh FastAPI router for one Core facade instance."""
@@ -150,6 +202,11 @@ def create_multimodal_router(service: CoreMultimodalRouter | None = None) -> API
                 "tts": service.profile.allows_tts,
             },
         }
+
+    @router.get("/tts/policy")
+    async def tts_policy() -> dict[str, Any]:
+        policy = await service.get_tts_policy()
+        return policy.to_dict()
 
     @router.get("/capabilities")
     async def capabilities() -> dict[str, Any]:
@@ -301,11 +358,17 @@ def create_multimodal_router(service: CoreMultimodalRouter | None = None) -> API
     @router.post("/tts/synthesize/v1")
     @router.post("/tts/synthesize.v1")
     @router.post("/tts/synthesize")
-    async def synthesize(body: TTSBody) -> dict[str, Any]:
+    async def synthesize(body: TTSBody, request: Request = None) -> dict[str, Any]:
         kwargs = {"platform": body.platform, "text_lang": body.text_lang}
         if body.ambient_noise:
             kwargs["ambient_noise"] = True
-        result = await service.synthesize_tts(body.text, **kwargs)
+        if body.prepare_text:
+            kwargs["prepare_text"] = True
+        operation = service.synthesize_tts(body.text, **kwargs)
+        if body.prepare_text and request is not None:
+            result = await _await_before_disconnect(request, operation)
+        else:
+            result = await operation
         return {
             "operation": TTS_SYNTHESIZE_V1,
             "text": result.text,
@@ -317,15 +380,21 @@ def create_multimodal_router(service: CoreMultimodalRouter | None = None) -> API
         }
 
     @router.post("/tts/stream")
-    async def synthesize_stream(body: TTSBody) -> StreamingResponse:
+    async def synthesize_stream(body: TTSBody, request: Request = None) -> StreamingResponse:
         """Relay Core-selected TTS as frame-aligned PCM without buffering it."""
 
         kwargs = {"platform": body.platform, "text_lang": body.text_lang}
         if body.ambient_noise:
             kwargs["ambient_noise"] = True
+        if body.prepare_text:
+            kwargs["prepare_text"] = True
         chunks = service.synthesize_tts_stream(body.text, **kwargs)
         try:
-            first = await anext(chunks)
+            first_chunk = anext(chunks)
+            if body.prepare_text and request is not None:
+                first = await _await_before_disconnect(request, first_chunk)
+            else:
+                first = await first_chunk
         except TTSStreamError as exc:
             await chunks.aclose()
             status = exc.status_code or {
@@ -370,6 +439,7 @@ def create_multimodal_router(service: CoreMultimodalRouter | None = None) -> API
         )
 
     return router
+
 
 def register_multimodal_api(server: Any, service: CoreMultimodalRouter | None = None) -> APIRouter:
     """Register the facade under /api/multimodal on a Core Server."""

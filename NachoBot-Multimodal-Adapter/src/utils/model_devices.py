@@ -243,10 +243,16 @@ def device_environment(
     choice: str,
     *,
     runtime_profile: str = "gpu",
+    engine: str | None = None,
     verify_gpu: bool = True,
 ) -> dict[str, str]:
     """Map a validated choice to process environment overrides."""
     value = validate_device_choice(model, choice)
+    if model == "tts" and str(engine or "").strip().casefold().replace("_", "-") in {
+        "generic-http",
+        "generichttp",
+    }:
+        return {}
     if value == "auto" or (model == "vlm" and CUDA_DEVICE_PATTERN.fullmatch(value)):
         return {}
 
@@ -283,8 +289,14 @@ def apply_device_environment(
     base_path: Path | str | None = None,
     perception_path: Path | str | None = None,
     runtime_profile: str = "gpu",
+    engine: str | None = None,
 ) -> dict[str, str]:
     """Apply the canonical choice to this process and return the overrides."""
+    if model == "tts" and str(engine or "").strip().casefold().replace("_", "-") in {
+        "generic-http",
+        "generichttp",
+    }:
+        return {}
     choice = read_device_choice(
         model,
         root_dir=root_dir,
@@ -296,6 +308,7 @@ def apply_device_environment(
         model,
         choice,
         runtime_profile=runtime_profile,
+        engine=engine,
     )
     os.environ.update(overrides)
     return overrides

@@ -59,6 +59,17 @@ const ConfigModule = (() => {
             }
         }
 
+        const customTitle = document.createElement('div');
+        customTitle.className = 'config-group-title';
+        customTitle.textContent = '自定义 TTS';
+        tree.appendChild(customTitle);
+        const customTts = document.createElement('div');
+        customTts.className = 'config-item';
+        customTts.dataset.id = 'tts_profiles';
+        customTts.innerHTML = '<span>🔊</span><span>自定义 HTTP TTS</span><span class="dot-modified"></span>';
+        customTts.addEventListener('click', openTTSProfiles);
+        tree.appendChild(customTts);
+
         const deviceTitle = document.createElement('div');
         deviceTitle.className = 'config-group-title';
         deviceTitle.textContent = '运行设备';
@@ -72,6 +83,7 @@ const ConfigModule = (() => {
     }
 
     async function openFile(fileId) {
+        if (typeof TTSProfilesModule !== 'undefined') TTSProfilesModule.close();
         window.ModelDevicesPanel?.unmount(document.getElementById('config-editor'));
         const requestId = ++editorRequestId;
         // Update active state
@@ -96,7 +108,23 @@ const ConfigModule = (() => {
         }
     }
 
+    function openTTSProfiles() {
+        window.ModelDevicesPanel?.unmount(document.getElementById('config-editor'));
+        editorRequestId += 1;
+        document.querySelectorAll('.config-item').forEach(el => el.classList.remove('active'));
+        const item = document.querySelector('.config-item[data-id="tts_profiles"]');
+        if (item) item.classList.add('active');
+        activeFileId = 'tts_profiles';
+        originalRaw = '';
+        if (typeof TTSProfilesModule === 'undefined') {
+            toast('HTTP TTS 配置页面未加载', 'error');
+            return;
+        }
+        TTSProfilesModule.open();
+    }
+
     function openModelDevices() {
+        if (typeof TTSProfilesModule !== 'undefined') TTSProfilesModule.close();
         editorRequestId += 1;
         document.querySelectorAll('.config-item').forEach(el => el.classList.remove('active'));
         const item = document.querySelector('.config-item[data-id="model_devices"]');
@@ -267,6 +295,7 @@ const ConfigModule = (() => {
     // ---- Refresh ----
 
     function refresh() {
+        if (typeof TTSProfilesModule !== 'undefined') TTSProfilesModule.close();
         window.ModelDevicesPanel?.unmount(document.getElementById('config-editor'));
         editorRequestId += 1;
         activeFileId = null;

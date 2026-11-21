@@ -8,47 +8,26 @@ from pathlib import Path
 import subprocess
 import sys
 
-import toml
-
-
 ADAPTER_ROOT = Path(__file__).resolve().parents[1]
 if str(ADAPTER_ROOT) not in sys.path:
     sys.path.insert(0, str(ADAPTER_ROOT))
 
 from nachobot_multimodal.utils.model_devices import apply_device_environment  # noqa: E402
-from scripts.tts_public_runtime import resolve_public_python
+from scripts.tts_runtime_manager import resolve_engine as resolve_managed_engine  # noqa: E402
+from scripts.tts_public_runtime import resolve_public_python  # noqa: E402
 
 
 def resolve_engine(config_path: Path, override: str = "") -> str:
-    normalized_override = str(override or "").strip().lower()
-    aliases = {
-        "gpt-sovits": "gpt-sovits",
-        "gpt_sovits": "gpt-sovits",
-        "voxcpm": "voxcpm",
-        "vox": "voxcpm",
-    }
-    if normalized_override:
-        if normalized_override not in aliases:
-            raise ValueError("NACHOBOT_TTS_ENGINE must be gpt-sovits or voxcpm")
-        return aliases[normalized_override]
-
-    config = toml.load(str(config_path))
-    enabled = config.get("enabled_tts", {}).get("enabled", [])
-    if not isinstance(enabled, list) or len(enabled) != 1:
-        raise ValueError("base.toml must enable exactly one TTS backend")
-    selected = str(enabled[0]).strip().lower()
-    if selected not in aliases:
-        raise ValueError(f"unsupported TTS backend in base.toml: {enabled[0]}")
-    return aliases[selected]
+    return resolve_managed_engine(config_path, override)
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="NachoBot container TTS selector")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=9880)
     parser.add_argument("--backend-port", type=int, default=None)
     parser.add_argument("--config", type=Path, default=ADAPTER_ROOT / "configs" / "base.toml")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     engine = resolve_engine(args.config, os.environ.get("NACHOBOT_TTS_ENGINE", ""))
     apply_device_environment(
@@ -56,6 +35,7 @@ def main() -> None:
         config_dir=args.config.parent,
         base_path=args.config,
         runtime_profile=os.environ.get("NACHOBOT_TTS_RUNTIME_PROFILE", "gpu"),
+        engine=engine,
     )
     manager = ADAPTER_ROOT / "scripts" / "tts_runtime_manager.py"
     public_python = resolve_public_python(engine, args.config, platform=os.name)

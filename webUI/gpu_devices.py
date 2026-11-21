@@ -453,8 +453,20 @@ def model_devices_payload(root_dir: Path | None = None) -> dict[str, Any]:
         "assignments": assignments,
         "gpus": gpus,
         "restart_note": "保存后会在对应托管服务下次启动或重启时生效；当前运行中的服务不会自动重启。",
-        "scope_note": "设备分配仅适用于本地 TTS 与 Florence-2 VLM；ASR 当前使用 CPU 运行。",
+        "scope_note": "设备分配仅适用于本地 TTS 与 Florence-2 VLM；ASR 当前使用 CPU 运行，远程 HTTP TTS 不受影响。",
     }
+
+
+def _configured_tts_backend(root_dir: Path) -> str:
+    try:
+        config_path, _ = adapter_config_paths(root_dir=root_dir)
+        document = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        enabled = document.get("enabled_tts", {}).get("enabled", [])
+        if isinstance(enabled, list) and len(enabled) == 1:
+            return str(enabled[0]).strip().casefold().replace("_", "-")
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, AttributeError):
+        return ""
+    return ""
 
 
 def service_device_environment(
@@ -468,6 +480,9 @@ def service_device_environment(
         return {}
     root = Path(root_dir) if root_dir is not None else ROOT_DIR
     model = "vlm" if service_id == "perception" else "tts"
+    engine = _configured_tts_backend(root) if model == "tts" else None
+    if model == "tts" and engine in {"generic-http", "generichttp"}:
+        return {}
     base_path, perception_path = adapter_config_paths(root_dir=root)
     try:
         # Managed starts can be the first WebUI access after an older install.
@@ -483,6 +498,7 @@ def service_device_environment(
             model,
             choice,
             runtime_profile=runtime,
+            engine=engine,
             verify_gpu=False,
         )
         if _GPU_UUID.fullmatch(choice):

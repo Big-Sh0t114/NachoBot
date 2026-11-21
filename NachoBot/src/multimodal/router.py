@@ -41,12 +41,17 @@ from .contracts import (
 )
 from .profile import RuntimeProfile, get_runtime_profile, normalize_runtime_profile
 from .response_schema import build_response_validator
+from .speech_policy import SpeechPolicy
+from .speech_preparation import SpeechPreparationError, prepare_japanese_speech_text
 
 logger = logging.getLogger("core.multimodal")
 _HEALTH_PROBE_TIMEOUT_SECONDS = 2.0
 _ASR_STREAM_ABORT_TIMEOUT_SECONDS = 1.0
 _ASR_STREAM_CLEANUP_DRAIN_SECONDS = 0.05
 _ASR_STREAM_OPERATION_DRAIN_SECONDS = 1.0
+_TTS_POLICY_CACHE_SECONDS = 2.0
+_TTS_PREPARATION_TIMEOUT_SECONDS = 45.0
+
 
 class AudioStreamError(RuntimeError):
     """An expected audio-stream API failure with its HTTP status."""
@@ -55,6 +60,7 @@ class AudioStreamError(RuntimeError):
         self.status_code = status_code
         self.code = code
         super().__init__(code)
+
 
 @dataclass
 class _ModelLease:
@@ -67,6 +73,7 @@ class _ModelLease:
             return
         self.released = True
         self.request.release_model_lease(self.model_name)
+
 
 @dataclass
 class _AudioStreamSession:
@@ -92,12 +99,14 @@ class _AudioStreamSession:
     operation_retired: asyncio.Future[None] | None = None
     cleanup_task: asyncio.Task[None] | None = None
 
+
 @dataclass(frozen=True)
 class _ASRReceipt:
     text: str
     context: str
     expires_at: float
     scope: str = ""
+
 
 def _failure_text(operation: str) -> str:
     return {
@@ -106,12 +115,14 @@ def _failure_text(operation: str) -> str:
         VIDEO_UNDERSTAND_V1: "[视频(解析失败)]",
     }.get(operation, "[多媒体解析失败]")
 
+
 def _nonempty_tts_text(data: Any) -> str:
     if isinstance(data, Mapping):
         value = data.get("text")
     else:
         value = data
     return str(value or "").strip()[:MAX_TEXT_CHARS]
+
 
 def _tts_fallback_text(data: Any) -> str:
     if isinstance(data, Mapping):
@@ -120,7 +131,8 @@ def _tts_fallback_text(data: Any) -> str:
             value = data.get("text")
     else:
         value = data
-    return str(value or "")[:MAX_TEXT_CHARS]
+    return str(value or "")
+
 
 class CoreMultimodalRouter:
     """Single Core facade for all perception and explicit reply TTS."""
@@ -135,6 +147,7 @@ class CoreMultimodalRouter:
         local_endpoint: str | None = None,
         tts_endpoint: str | None = None,
         local_timeout: float = 30.0,
+        speech_preparer: Any = None,
     ):
         self.profile = normalize_runtime_profile(profile) if profile is not None else get_runtime_profile()
         self.local = (
@@ -153,6 +166,20 @@ class CoreMultimodalRouter:
         self._model_config = model_config
         self._model_requests: dict[str, tuple[Any, tuple[str, ...], Any]] = {}
         self._observed_health: Mapping[str, Any] | None = None
+        self._tts_policy = SpeechPolicy(
+            backend=None,
+            ready=False,
+            fixed_language=None,
+            language_switch_allowed=True,
+        )
+        self._tts_policy_updated_at = 0.0
+        self._tts_policy_probe_lock = asyncio.Lock()
+        self._speech_preparer = speech_preparer or (
+            lambda source_text: prepare_japanese_speech_text(
+                source_text,
+                model_config=self._model_config,
+            )
+        )
         self._audio_streams: dict[str, _AudioStreamSession] = {}
         self._asr_receipts: dict[str, _ASRReceipt] = {}
         self._audio_stream_operation_tasks: set[asyncio.Task[Any]] = set()
@@ -173,6 +200,162 @@ class CoreMultimodalRouter:
     @property
     def observed_health(self) -> Mapping[str, Any] | None:
         return self._observed_health
+
+    @property
+    def tts_policy(self) -> SpeechPolicy:
+        """Return the latest observed speech policy without triggering I/O."""
+
+        return self._tts_policy
+
+    def _record_tts_policy(self, observed: Any) -> SpeechPolicy:
+        """Cache policy facts from a health response owned by the runtime."""
+
+        backend_value = None
+        if isinstance(observed, Mapping):
+            backend_value = observed.get("backend", observed.get("selected_backend"))
+        backend = backend_value.strip() if isinstance(backend_value, str) else ""
+        if not backend:
+            self._tts_policy = replace(self._tts_policy, ready=False)
+            self._tts_policy_updated_at = time.monotonic()
+            return self._tts_policy
+
+        if isinstance(observed, Mapping):
+            supports_fence = observed.get("supports_backend_fence") is True
+            has_fixed_language = "fixed_language" in observed
+            has_switch_policy = "language_switch_allowed" in observed
+            if has_fixed_language != has_switch_policy:
+                self._tts_policy = replace(self._tts_policy, ready=False)
+                self._tts_policy_updated_at = time.monotonic()
+                return self._tts_policy
+            if has_fixed_language:
+                fixed_value = observed.get("fixed_language")
+                switch_value = observed.get("language_switch_allowed")
+                if fixed_value is not None and (
+                    not isinstance(fixed_value, str)
+                    or not fixed_value.strip()
+                    or len(fixed_value) > 32
+                ):
+                    self._tts_policy = replace(self._tts_policy, ready=False)
+                    self._tts_policy_updated_at = time.monotonic()
+                    return self._tts_policy
+                if not isinstance(switch_value, bool):
+                    self._tts_policy = replace(self._tts_policy, ready=False)
+                    self._tts_policy_updated_at = time.monotonic()
+                    return self._tts_policy
+                fixed_language = fixed_value.strip() if isinstance(fixed_value, str) else None
+                language_switch_allowed = switch_value
+                if (fixed_language is None) != language_switch_allowed:
+                    self._tts_policy = replace(self._tts_policy, ready=False)
+                    self._tts_policy_updated_at = time.monotonic()
+                    return self._tts_policy
+                expected_fixed_language = "ja" if backend.casefold() == "irodori" else None
+                if (
+                    fixed_language != expected_fixed_language
+                    or language_switch_allowed is not (expected_fixed_language is None)
+                ):
+                    self._tts_policy = replace(self._tts_policy, ready=False)
+                    self._tts_policy_updated_at = time.monotonic()
+                    return self._tts_policy
+            else:
+                # Legacy health can describe the backend but cannot fence an
+                # utterance to it. Preserve the known lock while marking it
+                # unready; only the runtime's verified fence may admit prep.
+                fixed_language = "ja" if backend.casefold() == "irodori" else None
+                language_switch_allowed = fixed_language is None
+        else:
+            fixed_language = None
+            language_switch_allowed = True
+        ready = bool(
+            isinstance(observed, Mapping)
+            and observed.get("ready") is True
+            and observed.get("supports_backend_fence") is True
+        )
+        self._tts_policy = SpeechPolicy(
+            backend=backend,
+            ready=ready,
+            fixed_language=fixed_language,
+            language_switch_allowed=language_switch_allowed,
+        )
+        self._tts_policy_updated_at = time.monotonic()
+        return self._tts_policy
+
+    def _retain_tts_policy_after_failure(self) -> SpeechPolicy:
+        """Fail closed while retaining any last observed backend language lock."""
+
+        self._tts_policy = replace(self._tts_policy, ready=False)
+        self._tts_policy_updated_at = time.monotonic()
+        return self._tts_policy
+
+    async def get_tts_policy(self, *, refresh: bool = False) -> SpeechPolicy:
+        """Return cached runtime policy, or perform one bounded 9880 health probe.
+
+        POTATO is text-only and deliberately avoids health probing and model
+        initialization altogether.
+        """
+
+        if self.profile is RuntimeProfile.POTATO:
+            return self._tts_policy
+        now = time.monotonic()
+        if not refresh and now - self._tts_policy_updated_at < _TTS_POLICY_CACHE_SECONDS:
+            return self._tts_policy
+
+        async def probe() -> SpeechPolicy:
+            async with self._tts_policy_probe_lock:
+                if not refresh and time.monotonic() - self._tts_policy_updated_at < _TTS_POLICY_CACHE_SECONDS:
+                    return self._tts_policy
+                observed = await self.local.tts_health()
+                return self._record_tts_policy(observed)
+
+        try:
+            return await asyncio.wait_for(probe(), timeout=_HEALTH_PROBE_TIMEOUT_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return self._retain_tts_policy_after_failure()
+
+    async def _speech_request_text(
+        self,
+        text: str,
+        *,
+        prepare_text: bool,
+        text_lang: Optional[str],
+    ) -> tuple[str, str, Optional[str], str | None]:
+        """Return source, synthesis text, effective language, and backend fence."""
+
+        raw_text = str(text or "")
+        source_text = raw_text.strip()
+        if not source_text:
+            raise SpeechPreparationError("invalid_request")
+        if not prepare_text:
+            return source_text[:MAX_TEXT_CHARS], source_text[:MAX_TEXT_CHARS], text_lang, None
+        if len(raw_text) > MAX_TEXT_CHARS:
+            raise SpeechPreparationError("invalid_request")
+
+        policy = await self.get_tts_policy(refresh=True)
+        if not policy.ready or not policy.backend:
+            raise SpeechPreparationError("speech_policy_unavailable")
+
+        synthesis_text = source_text
+        effective_text_lang = text_lang
+        if policy.fixed_language == "ja":
+            effective_text_lang = "ja"
+            try:
+                async with asyncio.timeout(_TTS_PREPARATION_TIMEOUT_SECONDS):
+                    synthesis_text = await self._speech_preparer(source_text)
+            except asyncio.CancelledError:
+                raise
+            except TimeoutError as exc:
+                raise SpeechPreparationError("speech_preparation_timeout") from exc
+            except SpeechPreparationError:
+                raise
+            except Exception as exc:
+                raise SpeechPreparationError("speech_preparation_unavailable") from exc
+            if not isinstance(synthesis_text, str) or not synthesis_text.strip():
+                raise SpeechPreparationError("speech_preparation_invalid_response")
+            if len(synthesis_text) > MAX_TEXT_CHARS:
+                raise SpeechPreparationError("speech_preparation_invalid_response")
+            synthesis_text = synthesis_text.strip()
+        return raw_text, synthesis_text, effective_text_lang, policy.backend
 
     @staticmethod
     def _component_ready(observed: Mapping[str, Any]) -> bool:
@@ -227,6 +410,12 @@ class CoreMultimodalRouter:
                     perception = result
                 else:
                     tts = result
+
+        if tts_required:
+            if isinstance(tts.get("observed"), Mapping):
+                self._record_tts_policy(tts["observed"])
+            else:
+                self._retain_tts_policy_after_failure()
 
         self._observed_health = {
             "ready": bool(perception["ready"] and tts["ready"]),
@@ -1036,23 +1225,39 @@ class CoreMultimodalRouter:
         platform: str = "core",
         text_lang: Optional[str] = None,
         ambient_noise: bool = False,
+        prepare_text: bool = False,
     ) -> TTSResult:
-        text = str(text or "").strip()[:MAX_TEXT_CHARS]
-        if not text:
-            return TTSResult(text="", error="tts text is empty")
+        if not isinstance(prepare_text, bool):
+            return TTSResult(text=str(text or "")[:MAX_TEXT_CHARS], error="invalid_request")
         if not self.profile.allows_tts:
             # Potato is intentionally pure text, even if a local runtime is up.
-            return TTSResult(text=text, provider="text-only")
+            return TTSResult(text=str(text or "").strip()[:MAX_TEXT_CHARS], provider="text-only")
         try:
-            kwargs = {"platform": platform, "text_lang": text_lang}
+            source_text, synthesis_text, effective_text_lang, expected_backend = await self._speech_request_text(
+                text,
+                prepare_text=prepare_text,
+                text_lang=text_lang,
+            )
+        except asyncio.CancelledError:
+            raise
+        except SpeechPreparationError as exc:
+            failure_text = str(text or "") if prepare_text else str(text or "").strip()[:MAX_TEXT_CHARS]
+            return TTSResult(text=failure_text, error=exc.args[0])
+        try:
+            kwargs = {"platform": platform, "text_lang": effective_text_lang}
             if ambient_noise is True:
                 kwargs["ambient_noise"] = True
-            return await self.local.synthesize_tts(text, **kwargs)
+            if expected_backend is not None:
+                kwargs["expected_backend"] = expected_backend
+            result = await self.local.synthesize_tts(synthesis_text, **kwargs)
+            if prepare_text:
+                return replace(result, text=source_text)
+            return result
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.warning("TTS synthesis failed: %s", type(exc).__name__)
-            return TTSResult(text=text, provider="text-only", error="tts unavailable")
+            return TTSResult(text=source_text, provider="text-only", error="tts unavailable")
 
     async def synthesize_tts_stream(
         self,
@@ -1061,23 +1266,38 @@ class CoreMultimodalRouter:
         platform: str = "core",
         text_lang: Optional[str] = None,
         ambient_noise: bool = False,
+        prepare_text: bool = False,
     ) -> AsyncIterator[TTSStreamChunk]:
         """Yield typed local PCM chunks while keeping Core profile policy."""
 
-        text = str(text or "").strip()[:MAX_TEXT_CHARS]
-        if not text:
+        if not isinstance(prepare_text, bool):
             raise TTSStreamError("invalid_request")
         if not self.profile.allows_tts:
             # Potato is intentionally text-only, even if a local runtime is up.
             raise TTSStreamError("text_only")
 
+        try:
+            source_text, synthesis_text, effective_text_lang, expected_backend = await self._speech_request_text(
+                text,
+                prepare_text=prepare_text,
+                text_lang=text_lang,
+            )
+        except asyncio.CancelledError:
+            raise
+        except SpeechPreparationError as exc:
+            code = str(exc.args[0]) if exc.args else "speech_preparation_failed"
+            status_code = 504 if code == "speech_preparation_timeout" else 503
+            raise TTSStreamError(code, status_code=status_code) from exc
+
         iterator = None
         audio_started = False
         try:
-            kwargs = {"platform": platform, "text_lang": text_lang}
+            kwargs = {"platform": platform, "text_lang": effective_text_lang}
             if ambient_noise is True:
                 kwargs["ambient_noise"] = True
-            iterator = self.local.synthesize_tts_stream(text, **kwargs)
+            if expected_backend is not None:
+                kwargs["expected_backend"] = expected_backend
+            iterator = self.local.synthesize_tts_stream(synthesis_text, **kwargs)
             async for chunk in iterator:
                 if not isinstance(chunk, TTSStreamChunk):
                     raise TTSStreamError(
@@ -1183,6 +1403,7 @@ class CoreMultimodalRouter:
                 text,
                 platform=platform,
                 text_lang=segment_lang,
+                prepare_text=True,
             )
             original = current
             if not result.audio_base64:
@@ -1199,13 +1420,16 @@ class CoreMultimodalRouter:
             return materialized[0]
         return Seg(type="seglist", data=materialized)
 
+
 _router: CoreMultimodalRouter | None = None
+
 
 def get_multimodal_router() -> CoreMultimodalRouter:
     global _router
     if _router is None:
         _router = CoreMultimodalRouter()
     return _router
+
 
 def reset_multimodal_router() -> None:
     """Test/deployment hook; does not alter process or live configuration."""
