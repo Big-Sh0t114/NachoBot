@@ -1,3 +1,6 @@
+11/24
+    修复上次更新引入的sandbox投递问题
+    修复snowluma适配器私聊戳一戳无效参数
 11/23
     添加response_keyword字段
 11/22

@@ -306,10 +306,34 @@ class MainSystem:
         """Return true only when the handoff's adapter has a live route."""
 
         connection = getattr(self.app, "connection", None)
-        platform_connections = getattr(connection, "platform_connections", None)
-        if not isinstance(platform_connections, dict):
+        platform = getattr(handoff, "platform", None)
+        if connection is None or not isinstance(platform, str) or not platform:
             return False
-        return bool(platform_connections.get(str(handoff.platform)))
+
+        if getattr(self.app, "mode", None) == "ws":
+            from starlette.websockets import WebSocketState
+
+            platform_websockets = getattr(connection, "platform_websockets", None)
+            if not isinstance(platform_websockets, dict):
+                return False
+            websocket = platform_websockets.get(platform)
+            return getattr(websocket, "client_state", None) is WebSocketState.CONNECTED
+
+        if getattr(self.app, "mode", None) == "tcp":
+            platform_connections = getattr(connection, "platform_connections", None)
+            if not isinstance(platform_connections, dict):
+                return False
+            tcp_connection = platform_connections.get(platform)
+            writer = getattr(tcp_connection, "writer", None)
+            is_closing = getattr(writer, "is_closing", None)
+            if not callable(is_closing):
+                return False
+            try:
+                return not is_closing()
+            except Exception:
+                return False
+
+        return False
 
     # async def forget_memory_task(self):
     #     """记忆遗忘任务"""

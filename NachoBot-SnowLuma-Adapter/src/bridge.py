@@ -1586,7 +1586,10 @@ class SnowLumaBridge:
         if name == "GROUP_KICK":
             return "set_group_kick", {"group_id": gid, "user_id": int(args["qq_id"]), "reject_add_request": False}
         if name == "SEND_POKE":
-            return "send_poke", {"group_id": gid, "user_id": int(args["qq_id"])}
+            params = {"user_id": int(args["qq_id"])}
+            if group_info is not None:
+                params["group_id"] = gid
+            return "send_poke", params
         if name == "DELETE_MSG":
             return "delete_msg", {"message_id": int(args["message_id"])}
         if name == "AI_VOICE_SEND":
