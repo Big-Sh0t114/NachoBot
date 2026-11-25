@@ -1,5 +1,5 @@
 import asyncio
-from collections import deque
+from collections import OrderedDict, deque
 import json
 import time
 import traceback
@@ -72,6 +72,7 @@ from src.chat.offline_recovery import (
     format_recovery_reply_context,
     merge_recovery_context_rows,
     recovery_row_id,
+    offline_metadata_from_message,
 )
 from src.chat.realtime_ingress import realtime_ingress_manager
 from src.chat.reply_generation_interrupt import interrupt_reply_generation, run_reply_generation
@@ -114,6 +115,9 @@ install(extra_lines=3)
 # 注释：原来的动作修改超时常量已移除，因为改为顺序执行
 
 logger = get_logger("hfc")  # Logger Name Changed
+
+_HFC_ROW_STATE_TTL_SECONDS = 24 * 60 * 60
+_HFC_ROW_STATE_MAX_ENTRIES = 4096
 
 
 def _focus_turn_has_actionable_work(
@@ -199,6 +203,7 @@ class HeartFChatting:
         self._offline_recovery_prompt = ""
         self._offline_recovery_delivered = False
         self._offline_recovery_dropped = False
+        self._ensure_hfc_idempotency_state()
 
     def _ensure_offline_recovery_state(self) -> None:
         """Provide safe defaults for older/test-created runtime instances."""
@@ -213,6 +218,272 @@ class HeartFChatting:
             self._offline_recovery_delivered = False
         if not hasattr(self, "_offline_recovery_dropped"):
             self._offline_recovery_dropped = False
+
+    def _ensure_hfc_idempotency_state(self) -> None:
+        """Initialize bounded, per-runtime row state for HFC deduplication."""
+
+        if not hasattr(self, "_hfc_consumed_rows"):
+            self._hfc_consumed_rows: OrderedDict[tuple[str, int], float] = OrderedDict()
+        if not hasattr(self, "_hfc_replied_rows"):
+            self._hfc_replied_rows: OrderedDict[tuple[str, int], float] = OrderedDict()
+        if not hasattr(self, "_hfc_row_ingress"):
+            self._hfc_row_ingress: OrderedDict[tuple[str, int], tuple[float, str]] = OrderedDict()
+        if not hasattr(self, "_hfc_reply_inflight"):
+            self._hfc_reply_inflight: set[tuple[str, int]] = set()
+        if not hasattr(self, "_hfc_focus_consumption_pending"):
+            self._hfc_focus_consumption_pending: OrderedDict[tuple[str, int], Any] = OrderedDict()
+        if not hasattr(self, "_hfc_focus_consumption_active"):
+            self._hfc_focus_consumption_active = False
+
+    def _begin_hfc_focus_consumption(self) -> None:
+        self._ensure_hfc_idempotency_state()
+        self._hfc_focus_consumption_pending.clear()
+        self._hfc_focus_consumption_active = True
+
+    def _finish_hfc_focus_consumption(self, *, commit: bool) -> None:
+        self._ensure_hfc_idempotency_state()
+        pending = self._hfc_focus_consumption_pending
+        for key, message in tuple(pending.items()):
+            replied = self._hfc_cache_contains(self._hfc_replied_rows, key)
+            if commit:
+                if not self._hfc_cache_contains(self._hfc_consumed_rows, key):
+                    self._hfc_consumed_rows[key] = time.monotonic()
+                    self._hfc_consumed_rows.move_to_end(key)
+                outcome = "focus_consumption_committed"
+            else:
+                if not replied:
+                    self._hfc_row_ingress.pop(key, None)
+                outcome = "focus_consumption_rolled_back"
+            self._log_hfc_row_state(
+                message,
+                ingress=self._hfc_ingress_for(key, "focus"),
+                consumed=commit or self._hfc_cache_contains(self._hfc_consumed_rows, key),
+                replied=replied,
+                outcome=outcome,
+            )
+        pending.clear()
+        self._hfc_focus_consumption_active = False
+        self._prune_hfc_row_state()
+
+    def _hfc_row_key(self, message: Any) -> tuple[str, int] | None:
+        row_id = recovery_row_id(message)
+        chat_id = getattr(self, "stream_id", None)
+        if row_id is None or chat_id is None or not str(chat_id).strip():
+            return None
+        return str(chat_id), row_id
+
+    def _prune_hfc_row_state(self) -> None:
+        self._ensure_hfc_idempotency_state()
+        now = time.monotonic()
+        caches = (self._hfc_consumed_rows, self._hfc_replied_rows)
+        for cache in caches:
+            while cache:
+                _, touched_at = next(iter(cache.items()))
+                if now - touched_at <= _HFC_ROW_STATE_TTL_SECONDS:
+                    break
+                cache.popitem(last=False)
+            while len(cache) > _HFC_ROW_STATE_MAX_ENTRIES:
+                cache.popitem(last=False)
+        ingress_cache = self._hfc_row_ingress
+        while ingress_cache:
+            _, (touched_at, _) = next(iter(ingress_cache.items()))
+            if now - touched_at <= _HFC_ROW_STATE_TTL_SECONDS:
+                break
+            ingress_cache.popitem(last=False)
+        while len(ingress_cache) > _HFC_ROW_STATE_MAX_ENTRIES:
+            ingress_cache.popitem(last=False)
+
+    def _hfc_cache_contains(self, cache: OrderedDict, key: tuple[str, int] | None) -> bool:
+        if key is None:
+            return False
+        self._prune_hfc_row_state()
+        touched_at = cache.get(key)
+        if touched_at is None:
+            return False
+        cache[key] = time.monotonic()
+        cache.move_to_end(key)
+        return True
+
+    def _hfc_row_progress_id(self, message: Any) -> str | None:
+        progress_id = offline_metadata_from_message(message).get("progress_id")
+        if progress_id is None or not str(progress_id).strip():
+            return None
+        return str(progress_id).strip()[:160]
+
+    def _hfc_remember_ingress(self, key: tuple[str, int] | None, ingress: str) -> None:
+        if key is None:
+            return
+        self._prune_hfc_row_state()
+        if key not in self._hfc_row_ingress:
+            self._hfc_row_ingress[key] = (time.monotonic(), ingress)
+            self._hfc_row_ingress.move_to_end(key)
+
+    def _hfc_ingress_for(self, key: tuple[str, int] | None, fallback: str) -> str:
+        if key is None:
+            return fallback
+        self._prune_hfc_row_state()
+        entry = self._hfc_row_ingress.get(key)
+        if entry is None:
+            return fallback
+        self._hfc_row_ingress[key] = (time.monotonic(), entry[1])
+        self._hfc_row_ingress.move_to_end(key)
+        return entry[1]
+
+    def _log_hfc_row_state(
+        self,
+        message: Any,
+        *,
+        ingress: str,
+        consumed: bool,
+        replied: bool,
+        outcome: str,
+    ) -> None:
+        key = self._hfc_row_key(message)
+        row_id = key[1] if key is not None else None
+        progress_id = self._hfc_row_progress_id(message)
+        logger.info(
+            f"{self.log_prefix} [HFC-IDEMPOTENCY] row_id={row_id} progress_id={progress_id or '-'} "
+            f"ingress={ingress} consumed={consumed} replied={replied} outcome={outcome}"
+        )
+
+    def _filter_hfc_consumed_messages(
+        self,
+        messages: List[Any],
+        *,
+        ingress: str,
+        ingress_by_object_id: Dict[int, str] | None = None,
+        provisional: bool = False,
+    ) -> List[Any]:
+        """Consume each persisted row once for ordinary HFC input only."""
+
+        self._prune_hfc_row_state()
+        filtered: List[Any] = []
+        for message in messages:
+            key = self._hfc_row_key(message)
+            row_ingress = (ingress_by_object_id or {}).get(id(message), ingress)
+            already_consumed = self._hfc_cache_contains(self._hfc_consumed_rows, key)
+            already_replied = self._hfc_cache_contains(self._hfc_replied_rows, key)
+            already_pending = (
+                key is not None
+                and self._hfc_focus_consumption_active
+                and key in self._hfc_focus_consumption_pending
+            )
+            if key is not None and (already_consumed or already_pending):
+                self._log_hfc_row_state(
+                    message,
+                    ingress=row_ingress,
+                    consumed=True,
+                    replied=already_replied,
+                    outcome="duplicate_skipped",
+                )
+                continue
+            if key is not None:
+                if provisional and self._hfc_focus_consumption_active:
+                    self._hfc_focus_consumption_pending[key] = message
+                    self._hfc_focus_consumption_pending.move_to_end(key)
+                else:
+                    self._hfc_consumed_rows[key] = time.monotonic()
+                    self._hfc_consumed_rows.move_to_end(key)
+                self._hfc_remember_ingress(key, row_ingress)
+            self._log_hfc_row_state(
+                message,
+                ingress=row_ingress,
+                consumed=key is not None and not (provisional and self._hfc_focus_consumption_active),
+                replied=already_replied,
+                outcome=(
+                    "accepted_provisional"
+                    if key is not None and provisional and self._hfc_focus_consumption_active
+                    else "accepted" if key is not None else "untracked_missing_id"
+                ),
+            )
+            filtered.append(message)
+        self._prune_hfc_row_state()
+        return filtered
+
+    def _log_hfc_cursor_change(self, cursor: str, before: Any, after: Any, ingress: str) -> None:
+        if before != after:
+            logger.info(
+                f"{self.log_prefix} [HFC-IDEMPOTENCY] cursor={cursor} ingress={ingress} "
+                f"from={before} to={after}"
+            )
+
+    def _claim_hfc_reply(self, message: Any) -> tuple[tuple[str, int] | None, str]:
+        self._prune_hfc_row_state()
+        key = self._hfc_row_key(message)
+        consumed = self._hfc_cache_contains(self._hfc_consumed_rows, key)
+        replied = self._hfc_cache_contains(self._hfc_replied_rows, key)
+        ingress = self._hfc_ingress_for(
+            key,
+            "offline_recovery" if self._hfc_row_progress_id(message) else "reply_action",
+        )
+        if key is not None and replied:
+            recovery_rows = set(getattr(self._offline_recovery_batch, "row_ids", ()) or ())
+            if self._offline_recovery_batch is not None and key[0] == self.stream_id and key[1] in recovery_rows:
+                # This exact persisted target was delivered before this recovery
+                # attempt, so the frozen batch has already achieved delivery.
+                self._offline_recovery_delivered = True
+            self._log_hfc_row_state(
+                message,
+                ingress=ingress,
+                consumed=consumed,
+                replied=True,
+                outcome="already_replied",
+            )
+            return key, "already_replied"
+        if key is not None and key in self._hfc_reply_inflight:
+            self._log_hfc_row_state(
+                message,
+                ingress=ingress,
+                consumed=consumed,
+                replied=False,
+                outcome="reply_in_flight",
+            )
+            return key, "reply_in_flight"
+        if key is not None:
+            self._hfc_reply_inflight.add(key)
+        self._log_hfc_row_state(
+            message,
+            ingress=ingress,
+            consumed=consumed,
+            replied=replied,
+            outcome="reply_claimed" if key is not None else "reply_untracked_missing_id",
+        )
+        return key, "claimed"
+
+    def _release_hfc_reply(self, key: tuple[str, int] | None, message: Any) -> None:
+        if key is None:
+            return
+        self._hfc_reply_inflight.discard(key)
+        self._log_hfc_row_state(
+            message,
+            ingress=self._hfc_ingress_for(key, "reply_action"),
+            consumed=self._hfc_cache_contains(self._hfc_consumed_rows, key),
+            replied=self._hfc_cache_contains(self._hfc_replied_rows, key),
+            outcome="reply_claim_released",
+        )
+
+    def _record_hfc_reply_receipts(self, message: Any, receipts: List[Any], *, source: str) -> bool:
+        delivered = any(bool(getattr(receipt, "delivered", False)) for receipt in receipts)
+        key = self._hfc_row_key(message)
+        if delivered and key is not None:
+            self._prune_hfc_row_state()
+            self._hfc_replied_rows[key] = time.monotonic()
+            self._hfc_replied_rows.move_to_end(key)
+            self._hfc_remember_ingress(key, "offline_recovery" if self._offline_recovery_batch is not None
+                                       else self._hfc_ingress_for(key, "reply_action"))
+        if delivered and self._offline_recovery_batch is not None:
+            self._offline_recovery_delivered = True
+        self._log_hfc_row_state(
+            message,
+            ingress=self._hfc_ingress_for(
+                key,
+                "offline_recovery" if self._offline_recovery_batch is not None else "reply_action",
+            ),
+            consumed=self._hfc_cache_contains(self._hfc_consumed_rows, key),
+            replied=self._hfc_cache_contains(self._hfc_replied_rows, key),
+            outcome=f"delivery_{'delivered' if delivered else 'not_delivered'} source={source}",
+        )
+        return delivered
 
     def _is_user_blocked(self, user_id: str) -> bool:
         """检查用户是否在屏蔽列表中且未过期"""
@@ -500,6 +771,7 @@ class HeartFChatting:
 
     async def _loopbody(self, focus_turn: FocusTurn | None = None):  # sourcery skip: hoist-if-from-if
         self._ensure_offline_recovery_state()
+        self._ensure_hfc_idempotency_state()
         realtime_row_ids = realtime_ingress_manager.pending_row_ids(self.stream_id)
         if realtime_row_ids and self._offline_recovery_batch is not None:
             # A claimed history batch already owns this Focus/non-Focus turn.
@@ -524,11 +796,23 @@ class HeartFChatting:
                         verified_row_ids.append(row_id)
             if verified_messages:
                 if focus_turn is not None:
+                    previous_focus_cursor = getattr(self, "_focus_consumed_through_row_id", None)
                     self._focus_consumed_through_row_id = focus_turn.read_after_row_id
+                    self._log_hfc_cursor_change(
+                        "focus_consumed_through_row_id",
+                        previous_focus_cursor,
+                        self._focus_consumed_through_row_id,
+                        "realtime",
+                    )
+                verified_messages = self._filter_hfc_consumed_messages(
+                    verified_messages,
+                    ingress="realtime",
+                    provisional=focus_turn is not None,
+                )
                 actionable_messages = [
                     message for message in verified_messages if not is_external_self_message(message)
                 ]
-                if actionable_messages:
+                if actionable_messages or (focus_turn is not None and focus_turn.events):
                     result = await self._observe(recent_messages_list=actionable_messages, focus_turn=focus_turn)
                 else:
                     result = True
@@ -542,8 +826,29 @@ class HeartFChatting:
                 load_message_rows_by_ids(self.stream_id, recovery_batch.row_ids)
             )
             if focus_turn is not None:
+                previous_focus_cursor = getattr(self, "_focus_consumed_through_row_id", None)
                 self._focus_consumed_through_row_id = focus_turn.read_after_row_id
+                self._log_hfc_cursor_change(
+                    "focus_consumed_through_row_id",
+                    previous_focus_cursor,
+                    self._focus_consumed_through_row_id,
+                    "offline_recovery",
+                )
             recent_messages_list = self._filter_blocked_users(recent_messages_list, caller="offline_recovery")
+            for message in recent_messages_list:
+                self._log_hfc_row_state(
+                    message,
+                    ingress="offline_recovery",
+                    consumed=self._hfc_cache_contains(
+                        self._hfc_consumed_rows,
+                        self._hfc_row_key(message),
+                    ),
+                    replied=self._hfc_cache_contains(
+                        self._hfc_replied_rows,
+                        self._hfc_row_key(message),
+                    ),
+                    outcome="recovery_retry_bypasses_consumption",
+                )
             if not recent_messages_list:
                 self._offline_recovery_dropped = True
                 return True
@@ -573,7 +878,14 @@ class HeartFChatting:
                 skip_row_ids=offline_recovery_manager.excluded_row_ids_for_chat(self.stream_id),
             )
             recent_messages_list = list(batch.messages)
+            previous_focus_cursor = getattr(self, "_focus_consumed_through_row_id", None)
             self._focus_consumed_through_row_id = batch.consumed_through_row_id
+            self._log_hfc_cursor_change(
+                "focus_consumed_through_row_id",
+                previous_focus_cursor,
+                self._focus_consumed_through_row_id,
+                "focus",
+            )
         else:
             recent_messages_list = message_api.get_messages_by_time_in_chat(
                 chat_id=self.stream_id,
@@ -584,6 +896,7 @@ class HeartFChatting:
                 filter_mai=True,
                 filter_command=True,
             )
+            timestamp_message_object_ids = {id(message) for message in recent_messages_list}
             recent_messages_list = offline_recovery_manager.include_deferred_live_messages(
                 self.stream_id, recent_messages_list
             )
@@ -596,6 +909,12 @@ class HeartFChatting:
             recent_messages_list = realtime_ingress_manager.filter_ordinary_messages(
                 self.stream_id, recent_messages_list
             )
+            ingress_by_object_id = {
+                id(message): (
+                    "timestamp" if id(message) in timestamp_message_object_ids else "deferred"
+                )
+                for message in recent_messages_list
+            }
         if (
             focus_turn is None
             and recent_messages_list
@@ -603,7 +922,14 @@ class HeartFChatting:
         ):
             # Advance the polling cursor without starting a cycle, learning,
             # Planner target selection, or an interruption for passive rows.
+            previous_timestamp_cursor = self.last_read_time
             self.last_read_time = time.time()
+            self._log_hfc_cursor_change(
+                "last_read_time",
+                previous_timestamp_cursor,
+                self.last_read_time,
+                "timestamp/deferred",
+            )
             offline_recovery_manager.commit_nonfocus_read_cursor(self.stream_id)
             offline_recovery_manager.commit_deferred_live_rows(self.stream_id)
             return True
@@ -629,11 +955,26 @@ class HeartFChatting:
 
         if len(recent_messages_list) >= 1:
             # 先推进读取时间戳，防止被屏蔽用户的消息不断累积占用循环
+            previous_timestamp_cursor = self.last_read_time
             self.last_read_time = time.time()
+            ingress_path = "focus" if focus_turn is not None else "timestamp/deferred"
+            self._log_hfc_cursor_change(
+                "last_read_time",
+                previous_timestamp_cursor,
+                self.last_read_time,
+                ingress_path,
+            )
             if focus_turn is None:
                 offline_recovery_manager.commit_nonfocus_read_cursor(self.stream_id)
                 offline_recovery_manager.commit_deferred_live_rows(self.stream_id)
             self._last_message_received_at = time.time()
+
+            recent_messages_list = self._filter_hfc_consumed_messages(
+                recent_messages_list,
+                ingress=ingress_path,
+                ingress_by_object_id=ingress_by_object_id if focus_turn is None else None,
+                provisional=focus_turn is not None,
+            )
 
             # 再过滤被屏蔽用户的消息
             recent_messages_list = self._filter_blocked_users(recent_messages_list, caller="loopbody")
@@ -1205,6 +1546,7 @@ class HeartFChatting:
             message for message in recent_messages_list if not is_external_self_message(message)
         ]
         self._ensure_offline_recovery_state()
+        self._ensure_hfc_idempotency_state()
         direct_reply_actions: list[ActionPlannerInfo] = []
 
         # 刷新上下文以确保获取最新的模板信息
@@ -1736,15 +2078,35 @@ class HeartFChatting:
                 and force_reply_message
                 and planner_target_eligible(force_reply_message)
             ):
-                action_to_use_info.append(
-                    ActionPlannerInfo(
-                        action_type="reply",
-                        reasoning="有人提到了你，进行回复",
-                        action_data={},
-                        action_message=force_reply_message,
-                        available_actions=available_actions,
+                force_key = self._hfc_row_key(force_reply_message)
+                force_replied = self._hfc_cache_contains(self._hfc_replied_rows, force_key)
+                force_inflight = force_key is not None and force_key in self._hfc_reply_inflight
+                if force_replied or force_inflight:
+                    self._log_hfc_row_state(
+                        force_reply_message,
+                        ingress=self._hfc_ingress_for(force_key, "forced_mention"),
+                        consumed=self._hfc_cache_contains(self._hfc_consumed_rows, force_key),
+                        replied=force_replied,
+                        outcome="force_reply_skipped_already_replied" if force_replied else "force_reply_skipped_in_flight",
                     )
-                )
+                else:
+                    self._hfc_remember_ingress(force_key, "forced_mention")
+                    self._log_hfc_row_state(
+                        force_reply_message,
+                        ingress="forced_mention",
+                        consumed=self._hfc_cache_contains(self._hfc_consumed_rows, force_key),
+                        replied=False,
+                        outcome="force_reply_appended",
+                    )
+                    action_to_use_info.append(
+                        ActionPlannerInfo(
+                            action_type="reply",
+                            reasoning="有人提到了你，进行回复",
+                            action_data={},
+                            action_message=force_reply_message,
+                            available_actions=available_actions,
+                        )
+                    )
 
             # 3. 按并行标记执行动作，避免非并行动作互相抢占
             serial_actions = []
@@ -1861,6 +2223,7 @@ class HeartFChatting:
 
     async def _run_focus_turn(self) -> bool:
         turn = await focus_coordinator.wait_for_turn(self.stream_id)
+        self._begin_hfc_focus_consumption()
         self._focus_consumed_through_row_id = turn.read_after_row_id
         self._focus_delivered_event_revisions = None
         self._offline_recovery_batch = turn.recovery_batch
@@ -1932,11 +2295,37 @@ class HeartFChatting:
             )
             raise
         finally:
-            if outcome is not None:
-                try:
-                    await asyncio.shield(focus_coordinator.finish_turn(turn, outcome))
-                except Exception as exc:
-                    logger.error(f"{self.log_prefix} Failed to finish Focus turn: {exc}")
+            finish_result = False
+            finish_lease_current = False
+            try:
+                if outcome is not None:
+                    try:
+                        finish_result = await asyncio.shield(
+                            focus_coordinator.finish_turn(turn, outcome)
+                        ) is True
+                        if (
+                            finish_result
+                            and outcome.status
+                            in {TurnStatus.COMPLETED, TurnStatus.NOOP, TurnStatus.DROPPED_BY_POLICY}
+                        ):
+                            finish_lease_current = await focus_coordinator.is_current(turn.lease)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        logger.error(f"{self.log_prefix} Failed to finalize Focus turn: {exc}")
+            finally:
+                commit_statuses = {
+                    TurnStatus.COMPLETED,
+                    TurnStatus.NOOP,
+                    TurnStatus.DROPPED_BY_POLICY,
+                }
+                should_commit_consumption = bool(
+                    finish_result
+                    and finish_lease_current
+                    and outcome is not None
+                    and outcome.status in commit_statuses
+                )
+                self._finish_hfc_focus_consumption(commit=should_commit_consumption)
         self._offline_recovery_batch = None
         self._offline_recovery_prompt = ""
         return True
@@ -2109,6 +2498,7 @@ class HeartFChatting:
         sandbox_handoff: Any = None,
     ) -> str:
         self._ensure_offline_recovery_state()
+        self._ensure_hfc_idempotency_state()
         receipts: List[send_api.SendReceipt] = []
         refs = tuple(context_refs or ())
         try:
@@ -2126,6 +2516,7 @@ class HeartFChatting:
                     receipts=receipts,
                 )
         except StaleFocusLeaseError as exc:
+            self._record_hfc_reply_receipts(message_data, receipts, source="stale_focus_lease")
             if self._offline_recovery_batch is not None:
                 self._offline_recovery_delivered = self._offline_recovery_delivered or any(
                     receipt.delivered for receipt in receipts
@@ -2134,6 +2525,7 @@ class HeartFChatting:
             logger.info(f"{self.log_prefix} Focus lease became stale; dropping reply send: {exc}")
             return ""
         except asyncio.CancelledError:
+            self._record_hfc_reply_receipts(message_data, receipts, source="send_cancelled")
             if self._offline_recovery_batch is not None:
                 self._offline_recovery_delivered = self._offline_recovery_delivered or any(
                     receipt.delivered for receipt in receipts
@@ -2141,6 +2533,7 @@ class HeartFChatting:
             await self._settle_interrupted_reply_context(refs, receipts, "send_cancelled")
             raise
         except Exception:
+            self._record_hfc_reply_receipts(message_data, receipts, source="send_error")
             if self._offline_recovery_batch is not None:
                 self._offline_recovery_delivered = self._offline_recovery_delivered or any(
                     receipt.delivered for receipt in receipts
@@ -2148,6 +2541,7 @@ class HeartFChatting:
             await self._settle_interrupted_reply_context(refs, receipts, "send_error")
             raise
 
+        self._record_hfc_reply_receipts(message_data, receipts, source="send_complete")
         if self._offline_recovery_batch is not None:
             self._offline_recovery_delivered = self._offline_recovery_delivered or any(
                 receipt.delivered for receipt in receipts
@@ -2379,7 +2773,20 @@ class HeartFChatting:
     ):
         """执行单个动作的通用函数"""
         self._ensure_offline_recovery_state()
+        self._ensure_hfc_idempotency_state()
+        hfc_reply_key: tuple[str, int] | None = None
         try:
+            if action_planner_info.action_type == "reply":
+                claimed_key, claim_status = self._claim_hfc_reply(action_planner_info.action_message)
+                if claim_status in {"already_replied", "reply_in_flight"}:
+                    return {
+                        "action_type": "reply",
+                        "success": False,
+                        "reply_text": "",
+                        "loop_info": None,
+                        "duplicate": True,
+                    }
+                hfc_reply_key = claimed_key
             with Timer(f"动作{action_planner_info.action_type}", cycle_timers):
                 if action_planner_info.action_type == SWITCH_CHAT_ACTION:
                     lease = current_context_lease()
@@ -2635,6 +3042,9 @@ class HeartFChatting:
                 "loop_info": None,
                 "error": str(e),
             }
+        finally:
+            if hfc_reply_key is not None and action_planner_info.action_type == "reply":
+                self._release_hfc_reply(hfc_reply_key, action_planner_info.action_message)
 
     async def _handle_make_appoint(
         self,

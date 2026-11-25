@@ -2,7 +2,7 @@
 核心模块
 """
 
-from .analysis_utils import ChatAnalysisUtils
+from .analysis_utils import AnalysisGenerationError, ChatAnalysisUtils
 from .summary_image_generator import SummaryImageGenerator
 from .constants import (
     FontConfig,
@@ -14,6 +14,7 @@ from .constants import (
 
 __all__ = [
     'ChatAnalysisUtils',
+    'AnalysisGenerationError',
     'SummaryImageGenerator',
     'FontConfig',
     'ColorScheme',

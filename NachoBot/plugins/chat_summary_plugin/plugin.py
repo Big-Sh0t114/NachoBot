@@ -136,48 +136,57 @@ class ChatSummaryCommand(BaseCommand):
                     hourly_distribution = {}
                     user_profile = None
 
-                    if not target_user:
-                        participants = set()
-                        for msg in messages:
-                            nickname = msg.get("user_nickname", "")
-                            if nickname:
-                                participants.add(nickname)
-                        participant_count = len(participants)
+                    try:
+                        if not target_user:
+                            participants = set()
+                            for msg in messages:
+                                nickname = msg.get("user_nickname", "")
+                                if nickname:
+                                    participants.add(nickname)
+                            participant_count = len(participants)
 
-                        # 分析用户统计（仅群聊总结时）
-                        user_stats = ChatAnalysisUtils.analyze_user_stats(messages)
+                            # 分析用户统计（仅群聊总结时）
+                            user_stats = ChatAnalysisUtils.analyze_user_stats(messages)
 
-                        # 计算24小时发言分布
-                        from collections import Counter
+                            # 计算24小时发言分布
+                            from collections import Counter
 
-                        hourly_distribution = Counter()
-                        for msg in messages:
-                            timestamp = msg.get("time", 0)
-                            hour = datetime.fromtimestamp(timestamp).hour
-                            hourly_distribution[hour] += 1
-                        # 转换为普通字典
-                        hourly_distribution = dict(hourly_distribution)
+                            hourly_distribution = Counter()
+                            for msg in messages:
+                                timestamp = msg.get("time", 0)
+                                hour = datetime.fromtimestamp(timestamp).hour
+                                hourly_distribution[hour] += 1
+                            # 转换为普通字典
+                            hourly_distribution = dict(hourly_distribution)
 
-                        # 分析群友称号（如果启用）
-                        if self.get_config("summary.enable_user_titles", True):
-                            user_titles = await ChatAnalysisUtils.analyze_user_titles(messages, user_stats) or []
+                            # 分析群友称号（如果启用）
+                            if self.get_config("summary.enable_user_titles", True):
+                                user_titles = await ChatAnalysisUtils.analyze_user_titles(messages, user_stats)
 
-                        # 分析金句（如果启用）
-                        if self.get_config("summary.enable_golden_quotes", True):
-                            golden_quotes = await ChatAnalysisUtils.analyze_golden_quotes(messages) or []
+                            # 分析金句（如果启用）
+                            if self.get_config("summary.enable_golden_quotes", True):
+                                golden_quotes = await ChatAnalysisUtils.analyze_golden_quotes(messages)
 
-                        # 分析炫压抑指数（如果启用）
-                        depression_index = []
-                        if self.get_config("summary.enable_depression_index", True):
-                            depression_index = (
-                                await ChatAnalysisUtils.analyze_depression_index(messages, user_stats) or []
-                            )
-                    else:
-                        # 单个用户模式：分析用户画像
-                        if self.get_config("summary.enable_user_summary", True):
-                            user_profile = (
-                                await ChatAnalysisUtils.analyze_user_profile(messages, user_display_name) or None
-                            )
+                            # 分析炫压抑指数（如果启用）
+                            depression_index = []
+                            if self.get_config("summary.enable_depression_index", True):
+                                depression_index = (
+                                    await ChatAnalysisUtils.analyze_depression_index(messages, user_stats)
+                                )
+                        else:
+                            # 单个用户模式：分析用户画像
+                            if self.get_config("summary.enable_user_summary", True):
+                                user_profile = (
+                                    await ChatAnalysisUtils.analyze_user_profile(messages, user_display_name)
+                                )
+
+                    except Exception as e:
+                        logger.error(f"总结分析失败，跳过图片和文本输出: {e}", exc_info=True)
+                        try:
+                            await self.send_text("总结分析失败了，请稍后再试")
+                        except Exception as notification_error:
+                            logger.error(f"发送总结分析失败通知时出错: {notification_error}", exc_info=True)
+                        return False, "总结分析失败", False
 
                     # 生成图片并获取临时文件路径
                     img_path = await SummaryImageGenerator.generate_summary_image(
@@ -745,43 +754,48 @@ class DailySummaryEventHandler(BaseEventHandler):
                     if summary:
                         # 生成并发送图片
                         try:
-                            # 统计参与用户
-                            participants = set()
-                            for msg in messages:
-                                nickname = msg.get("user_nickname", "")
-                                if nickname:
-                                    participants.add(nickname)
+                            try:
+                                # 统计参与用户
+                                participants = set()
+                                for msg in messages:
+                                    nickname = msg.get("user_nickname", "")
+                                    if nickname:
+                                        participants.add(nickname)
 
-                            # 分析用户统计
-                            user_stats = ChatAnalysisUtils.analyze_user_stats(messages)
-                            user_titles = []
-                            golden_quotes = []
+                                # 分析用户统计
+                                user_stats = ChatAnalysisUtils.analyze_user_stats(messages)
+                                user_titles = []
+                                golden_quotes = []
 
-                            # 计算24小时发言分布
-                            from collections import Counter
+                                # 计算24小时发言分布
+                                from collections import Counter
 
-                            hourly_distribution = Counter()
-                            for msg in messages:
-                                timestamp = msg.get("time", 0)
-                                hour = datetime.fromtimestamp(timestamp).hour
-                                hourly_distribution[hour] += 1
-                            # 转换为普通字典
-                            hourly_distribution = dict(hourly_distribution)
+                                hourly_distribution = Counter()
+                                for msg in messages:
+                                    timestamp = msg.get("time", 0)
+                                    hour = datetime.fromtimestamp(timestamp).hour
+                                    hourly_distribution[hour] += 1
+                                # 转换为普通字典
+                                hourly_distribution = dict(hourly_distribution)
 
-                            # 分析群友称号（如果启用）
-                            if self.get_config("summary.enable_user_titles", True):
-                                user_titles = await ChatAnalysisUtils.analyze_user_titles(messages, user_stats) or []
+                                # 分析群友称号（如果启用）
+                                if self.get_config("summary.enable_user_titles", True):
+                                    user_titles = await ChatAnalysisUtils.analyze_user_titles(messages, user_stats)
 
-                            # 分析金句（如果启用）
-                            if self.get_config("summary.enable_golden_quotes", True):
-                                golden_quotes = await ChatAnalysisUtils.analyze_golden_quotes(messages) or []
+                                # 分析金句（如果启用）
+                                if self.get_config("summary.enable_golden_quotes", True):
+                                    golden_quotes = await ChatAnalysisUtils.analyze_golden_quotes(messages)
 
-                            # 分析炫压抑指数（如果启用）
-                            depression_index = []
-                            if self.get_config("summary.enable_depression_index", True):
-                                depression_index = (
-                                    await ChatAnalysisUtils.analyze_depression_index(messages, user_stats) or []
-                                )
+                                # 分析炫压抑指数（如果启用）
+                                depression_index = []
+                                if self.get_config("summary.enable_depression_index", True):
+                                    depression_index = (
+                                        await ChatAnalysisUtils.analyze_depression_index(messages, user_stats)
+                                    )
+
+                            except Exception as e:
+                                logger.error(f"群聊 {group_id} 总结分析失败，跳过发送: {e}", exc_info=True)
+                                continue
 
                             # 生成图片并获取临时文件路径
                             img_path = await SummaryImageGenerator.generate_summary_image(

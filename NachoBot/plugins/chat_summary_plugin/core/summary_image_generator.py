@@ -14,6 +14,11 @@ from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 from .constants import FontConfig, ColorScheme, LayoutConfig, DecorationConfig
+from .text_renderer import (
+    draw_text as _draw_text_fallback,
+    grapheme_clusters,
+    text_width as _text_width,
+)
 
 # 导入logger
 try:
@@ -240,17 +245,16 @@ class SummaryImageGenerator:
                 continue
 
             current_line = ''
-            for char in paragraph:
-                test_line = current_line + char
-                bbox = font.getbbox(test_line)
-                w = bbox[2] - bbox[0]
+            for cluster in grapheme_clusters(paragraph):
+                test_line = current_line + cluster
+                w = _text_width(test_line, font)
 
                 if w <= max_width:
                     current_line = test_line
                 else:
                     if current_line:
                         lines.append(current_line)
-                    current_line = char
+                    current_line = cluster
 
             if current_line:
                 lines.append(current_line)
@@ -491,10 +495,12 @@ class SummaryImageGenerator:
         x, y = position
 
         # 绘制阴影
-        draw.text((x + shadow_offset, y + shadow_offset), text, fill=shadow_color, font=font)
+        _draw_text_fallback(
+            draw, (x + shadow_offset, y + shadow_offset), text, font, shadow_color
+        )
 
         # 绘制主文字
-        draw.text((x, y), text, fill=text_color, font=font)
+        _draw_text_fallback(draw, (x, y), text, font, text_color, embedded_color=True)
 
     @staticmethod
     def _draw_colorful_text(
@@ -519,11 +525,12 @@ class SummaryImageGenerator:
                 for dx in range(-offset, offset + 1):
                     for dy in range(-offset, offset + 1):
                         if dx*dx + dy*dy <= offset*offset:
-                            shadow_draw.text(
+                            _draw_text_fallback(
+                                shadow_draw,
                                 (position[0] + dx, position[1] + dy),
                                 text,
-                                fill=outline_col,
-                                font=font
+                                font,
+                                outline_col,
                             )
 
             # 应用轻微模糊
@@ -536,7 +543,9 @@ class SummaryImageGenerator:
         # 绘制主文字
         text_layer = Image.new('RGBA', img.size, (0, 0, 0, 0))
         text_draw = ImageDraw.Draw(text_layer)
-        text_draw.text(position, text, fill=text_color, font=font)
+        _draw_text_fallback(
+            text_draw, position, text, font, text_color, embedded_color=True
+        )
         img = Image.alpha_composite(img, text_layer)
 
         return img
@@ -648,14 +657,16 @@ class SummaryImageGenerator:
         text_layer = Image.new('RGBA', img.size, (0, 0, 0, 0))
         text_draw = ImageDraw.Draw(text_layer)
         text_bbox = font.getbbox(text)
-        text_w = text_bbox[2] - text_bbox[0]
+        text_w = _text_width(text, font)
         text_h = text_bbox[3] - text_bbox[1]
         text_x = x + (w - text_w) // 2
         text_y = y + (h - text_h) // 2 - 2
 
         # 文字阴影
-        text_draw.text((text_x + 2, text_y + 2), text, fill=(0, 0, 0, 200), font=font)
-        text_draw.text((text_x, text_y), text, fill=(255, 255, 255, 255), font=font)
+        _draw_text_fallback(text_draw, (text_x + 2, text_y + 2), text, font, (0, 0, 0, 200))
+        _draw_text_fallback(
+            text_draw, (text_x, text_y), text, font, (255, 255, 255, 255), embedded_color=True
+        )
 
         img = Image.alpha_composite(img, text_layer)
 
@@ -1188,10 +1199,11 @@ class SummaryImageGenerator:
         y = 0
 
         # ===== 标题区域 =====
-        title_clean = title.replace('📊', '').strip()
+        # Preserve the full supplied title; the previous blanket chart-emoji
+        # removal also deleted valid emoji at the start of a user's nickname.
+        title_clean = title.strip()
 
-        title_bbox = font_title.getbbox(title_clean)
-        title_width = title_bbox[2] - title_bbox[0]
+        title_width = _text_width(title_clean, font_title)
         title_x = (width - title_width) // 2
         title_y = 80
 
@@ -1550,8 +1562,7 @@ class SummaryImageGenerator:
                 user_id = title_item.get("user_id", "")  # 获取 user_id
 
                 # 计算称号徽章的实际宽度
-                title_bbox = font_subtitle.getbbox(title_text)
-                title_w = title_bbox[2] - title_bbox[0]
+                title_w = _text_width(title_text, font_subtitle)
                 badge_w = title_w + 30
 
                 # 计算理由区域的可用宽度
@@ -1653,11 +1664,13 @@ class SummaryImageGenerator:
                 # 群友名称（加粗效果）
                 for offset_x in [0, 1]:
                     for offset_y in [0, 1]:
-                        text_draw.text(
+                        _draw_text_fallback(
+                            text_draw,
                             (name_x + offset_x, name_y + offset_y),
                             name,
-                            fill=SummaryImageGenerator.TITLE_COLOR,
-                            font=font_subtitle
+                            font_subtitle,
+                            SummaryImageGenerator.TITLE_COLOR,
+                            embedded_color=True,
                         )
 
                 # 3. 右侧：理由（垂直居中对齐）

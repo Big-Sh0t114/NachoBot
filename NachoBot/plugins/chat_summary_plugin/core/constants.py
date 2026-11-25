@@ -21,6 +21,25 @@ class FontConfig:
         "C:/Windows/Fonts/msyh.ttc",  # Windows
     ]
 
+    # Supplemental glyph fonts. The primary CJK order above stays unchanged so
+    # existing Latin/CJK typography keeps its current appearance.
+    EMOJI_FONT_PATHS: List[str] = [
+        "C:/Windows/Fonts/seguiemj.ttf",  # Windows
+        "/System/Library/Fonts/Apple Color Emoji.ttc",  # macOS
+        "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",  # Linux
+        "/usr/share/fonts/truetype/emoji/NotoColorEmoji.ttf",
+    ]
+    SYMBOL_FONT_PATHS: List[str] = [
+        "C:/Windows/Fonts/seguisym.ttf",  # Windows
+        "C:/Windows/Fonts/segoeui.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",  # macOS
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",  # Linux
+        "/usr/share/fonts/truetype/noto/NotoSansSymbols-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+    FALLBACK_FONT_PATHS: List[str] = EMOJI_FONT_PATHS + SYMBOL_FONT_PATHS
+
 
 class ColorScheme:
     """配色方案 - 梦幻渐变风格"""

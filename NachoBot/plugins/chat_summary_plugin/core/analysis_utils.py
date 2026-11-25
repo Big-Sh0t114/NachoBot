@@ -6,19 +6,112 @@
 
 import re
 import json
+import math
 from datetime import datetime
 from typing import List, Dict, Optional, Callable, Any
 from collections import Counter
 
 from src.config.config import model_config
+from src.llm_models.exceptions import ModelOutputValidationError
 from src.plugin_system import llm_api, get_logger
 from .constants import AnalysisConfig
 
 logger = get_logger("chat_analysis_utils")
 
 
+class AnalysisGenerationError(RuntimeError):
+    """A structured chat analysis could not be generated and validated."""
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"Non-standard JSON constant: {value}")
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def _decode_json_envelope(response: str) -> Any:
+    """Decode one complete bounded JSON value, either raw or in one code fence."""
+    if not isinstance(response, str) or not response.strip() or len(response) > 100_000:
+        raise ModelOutputValidationError()
+
+    text = response.strip()
+    if text.startswith("```"):
+        fence = re.fullmatch(r"```(?:json)?[ \t]*\r?\n(.*?)\r?\n```", text, re.IGNORECASE | re.DOTALL)
+        if fence is None:
+            raise ModelOutputValidationError()
+        text = fence.group(1).strip()
+
+    try:
+        value = json.loads(
+            text,
+            parse_constant=_reject_json_constant,
+            object_pairs_hook=_unique_json_object,
+        )
+    except (json.JSONDecodeError, ValueError, RecursionError):
+        raise ModelOutputValidationError()
+
+    pending = [(value, 0)]
+    while pending:
+        item, depth = pending.pop()
+        if depth > 64:
+            raise ModelOutputValidationError()
+        if isinstance(item, float) and not math.isfinite(item):
+            raise ModelOutputValidationError()
+        if isinstance(item, dict):
+            pending.extend((child, depth + 1) for child in item.values())
+        elif isinstance(item, list):
+            pending.extend((child, depth + 1) for child in item)
+    return value
+
+
 class ChatAnalysisUtils:
     """聊天记录分析工具类"""
+
+    @staticmethod
+    async def _generate_validated_analysis(
+        prompt: str,
+        request_type: str,
+        validator: Callable[[str], Any],
+    ) -> Any:
+        """Generate one structured result, using Core's candidate fallback validation."""
+        accepted: list[Any] = []
+
+        def response_validator(response: str) -> None:
+            accepted.clear()
+            validated = validator(response)
+            accepted[:] = [validated]
+            return None
+
+        try:
+            success, result, _reasoning, _model_name = await llm_api.generate_with_model(
+                prompt=prompt,
+                model_config=model_config.model_task_config.replyer,
+                request_type=request_type,
+                response_validator=response_validator,
+            )
+        except ModelOutputValidationError as exc:
+            # Defensive support for test doubles or alternate API wrappers. The real
+            # scheduler consumes this exception while trying the next replyer model.
+            raise AnalysisGenerationError(f"Structured analysis failed: {request_type}") from exc
+
+        if not success:
+            raise AnalysisGenerationError(f"Structured analysis failed: {request_type}")
+
+        if not accepted:
+            # Defensive validation for adapters that report success without invoking
+            # the optional callback. This also avoids trusting an unvalidated success.
+            try:
+                response_validator(result)
+            except ModelOutputValidationError as exc:
+                raise AnalysisGenerationError(f"Structured analysis failed: {request_type}") from exc
+        return accepted[0]
 
     EMOJI_CODEPOINT_RANGES = (
         (0x1F600, 0x1F64F),
@@ -176,7 +269,7 @@ class ChatAnalysisUtils:
 
 参考分类：活跃度（龙王、潜水员）、时间特征（夜猫子）、内容风格（段子手）、表情/情绪（表情帝）、互动特征（接梗高手）
 
-返回JSON（不要markdown代码块，不要emoji）：
+返回纯JSON，不要markdown代码块。不要在新写的称号或理由中额外添加emoji；name必须原样返回用户名，完整保留已有emoji和特殊符号，不要改写或删除：
 [
   {{
     "name": "用户名",
@@ -185,25 +278,17 @@ class ChatAnalysisUtils:
   }}
 ]"""
 
-            # 使用 LLM 生成
-            model_task_config = model_config.model_task_config.replyer
-            success, result, reasoning, model_name = await llm_api.generate_with_model(
-                prompt=prompt,
-                model_config=model_task_config,
-                request_type="plugin.chat_summary.titles",
+            return await ChatAnalysisUtils._generate_validated_analysis(
+                prompt,
+                "plugin.chat_summary.titles",
+                lambda response: ChatAnalysisUtils._validate_titles(_decode_json_envelope(response), user_stats),
             )
 
-            if not success:
-                logger.error(f"LLM生成称号失败: {result}")
-                return []
-
-            # 解析并验证 JSON
-            data = ChatAnalysisUtils._parse_llm_json(result)
-            return ChatAnalysisUtils._validate_titles(data, user_stats)
-
+        except AnalysisGenerationError:
+            raise
         except Exception as e:
             logger.error(f"分析群友称号失败: {e}", exc_info=True)
-            return []
+            raise
 
     @staticmethod
     async def analyze_golden_quotes(messages: List[dict], get_config: Callable = None) -> Optional[List[Dict]]:
@@ -263,7 +348,7 @@ class ChatAnalysisUtils:
 群聊记录：
 {messages_text}
 
-返回JSON（不要markdown代码块，不要emoji）：
+返回纯JSON，不要markdown代码块。不要在新写的content或reason中额外添加emoji；content应忠实照抄金句原文，保留原有emoji和特殊符号；sender昵称必须原样返回，保留已有emoji和特殊符号：
 [
   {{
     "content": "金句原文",
@@ -272,25 +357,17 @@ class ChatAnalysisUtils:
   }}
 ]"""
 
-            # 使用 LLM 生成
-            model_task_config = model_config.model_task_config.replyer
-            success, result, reasoning, model_name = await llm_api.generate_with_model(
-                prompt=prompt,
-                model_config=model_task_config,
-                request_type="plugin.chat_summary.quotes",
+            return await ChatAnalysisUtils._generate_validated_analysis(
+                prompt,
+                "plugin.chat_summary.quotes",
+                lambda response: ChatAnalysisUtils._validate_quotes(_decode_json_envelope(response)),
             )
 
-            if not success:
-                logger.error(f"LLM生成金句失败: {result}")
-                return []
-
-            # 解析并验证 JSON
-            data = ChatAnalysisUtils._parse_llm_json(result)
-            return ChatAnalysisUtils._validate_quotes(data)
-
+        except AnalysisGenerationError:
+            raise
         except Exception as e:
             logger.error(f"分析金句失败: {e}", exc_info=True)
-            return []
+            raise
 
     @staticmethod
     async def analyze_depression_index(
@@ -364,7 +441,7 @@ class ChatAnalysisUtils:
 
 要求：只返回前4名,评价25-30字,采用文言文风格,文雅而有趣。
 
-返回JSON（不要markdown代码块，不要emoji）：
+返回纯JSON，不要markdown代码块。不要在新写的comment中额外添加emoji；name必须原样返回用户名，完整保留已有emoji和特殊符号，不要改写或删除：
 [
   {{
     "name": "用户名",
@@ -373,157 +450,19 @@ class ChatAnalysisUtils:
   }}
 ]"""
 
-            # 使用 LLM 生成
-            model_task_config = model_config.model_task_config.replyer
-            success, result, reasoning, model_name = await llm_api.generate_with_model(
-                prompt=prompt,
-                model_config=model_task_config,
-                request_type="plugin.chat_summary.depression",
+            return await ChatAnalysisUtils._generate_validated_analysis(
+                prompt,
+                "plugin.chat_summary.depression",
+                lambda response: ChatAnalysisUtils._validate_depression_index(
+                    _decode_json_envelope(response), user_stats
+                ),
             )
 
-            if not success:
-                logger.error(f"LLM生成炫压抑指数失败: {result}")
-                return []
-
-            # 解析并验证 JSON
-            data = ChatAnalysisUtils._parse_llm_json(result)
-            return ChatAnalysisUtils._validate_depression_index(data, user_stats)
-
+        except AnalysisGenerationError:
+            raise
         except Exception as e:
             logger.error(f"分析炫压抑指数失败: {e}", exc_info=True)
-            return []
-
-    @staticmethod
-    def _validate_titles(data: List[Dict[str, Any]], user_stats: Dict[str, Dict] = None) -> List[Dict[str, Any]]:
-        """验证并清理群友称号数据
-
-        Args:
-            data: 原始数据列表
-            user_stats: 用户统计数据（用于匹配 user_id）
-
-        Returns:
-            验证后的数据列表
-        """
-        validated = []
-        for item in data:
-            if not isinstance(item, dict):
-                continue
-
-            # 必需字段
-            if not all(key in item for key in ["name", "title", "reason"]):
-                logger.warning(f"群友称号数据缺少必需字段: {item}")
-                continue
-
-            # 验证数据类型和长度
-            name = str(item["name"])[:50]  # 限制长度
-            title = str(item["title"])[: AnalysisConfig.MAX_TITLE_LENGTH]
-            reason = str(item["reason"])[: AnalysisConfig.MAX_REASON_LENGTH]
-
-            if not name or not title or not reason:
-                continue
-
-            # 尝试从 user_stats 中查找匹配的 user_id
-            user_id = ""
-            if user_stats:
-                for uid, stats in user_stats.items():
-                    if stats.get("nickname") == name:
-                        user_id = uid
-                        break
-
-            validated.append(
-                {
-                    "name": name,
-                    "title": title,
-                    "reason": reason,
-                    "user_id": user_id,  # 添加 user_id 字段
-                }
-            )
-
-        return validated
-
-    @staticmethod
-    def _validate_quotes(data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """验证并清理金句数据
-
-        Args:
-            data: 原始数据列表
-
-        Returns:
-            验证后的数据列表
-        """
-        validated = []
-        for item in data:
-            if not isinstance(item, dict):
-                continue
-
-            # 必需字段
-            if not all(key in item for key in ["content", "sender", "reason"]):
-                logger.warning(f"金句数据缺少必需字段: {item}")
-                continue
-
-            # 验证数据类型和长度
-            content = str(item["content"])[:200]  # 限制长度
-            sender = str(item["sender"])[:50]
-            reason = str(item["reason"])[: AnalysisConfig.MAX_REASON_LENGTH]
-
-            # 清理 @ 提及格式（如 @理理<123456> → 去掉整个提及部分）
-            content = re.sub(r"@[^<\s]+<\d+>\s*", "", content)
-            content = content.strip()
-
-            if not content or not sender or not reason:
-                continue
-
-            validated.append({"content": content, "sender": sender, "reason": reason})
-
-        return validated
-
-    @staticmethod
-    def _validate_depression_index(
-        data: List[Dict[str, Any]], user_stats: Dict[str, Dict] = None
-    ) -> List[Dict[str, Any]]:
-        """验证并清理炫压抑指数数据
-
-        Args:
-            data: 原始数据列表
-            user_stats: 用户统计数据（用于匹配 user_id）
-
-        Returns:
-            验证后的数据列表
-        """
-        validated = []
-        for item in data:
-            if not isinstance(item, dict):
-                continue
-
-            # 必需字段
-            if not all(key in item for key in ["name", "rank", "comment"]):
-                logger.warning(f"炫压抑指数数据缺少必需字段: {item}")
-                continue
-
-            # 验证数据类型和长度
-            name = str(item["name"])[:50]
-            rank = str(item["rank"]).upper().strip()
-            comment = str(item["comment"])[:60]  # 限制评价长度（30字约60字符）
-
-            # 验证rank是否在S/A/B/C/D中
-            if rank not in ["S", "A", "B", "C", "D"]:
-                logger.warning(f"无效的rank值: {rank}")
-                continue
-
-            if not name or not rank or not comment:
-                continue
-
-            # 尝试从 user_stats 中查找匹配的 user_id
-            user_id = ""
-            if user_stats:
-                for uid, stats in user_stats.items():
-                    if stats.get("nickname") == name:
-                        user_id = uid
-                        break
-
-            validated.append({"name": name, "rank": rank, "comment": comment, "user_id": user_id})
-
-        return validated[:4]  # 只返回前4个
+            raise
 
     @staticmethod
     async def analyze_user_profile(
@@ -694,198 +633,154 @@ class ChatAnalysisUtils:
   "mood_reason": "基于表情使用、用词倾向等的评估理由"
 }}"""
 
-            # 使用 LLM 生成
-            model_task_config = model_config.model_task_config.replyer
-            success, result, reasoning, model_name = await llm_api.generate_with_model(
-                prompt=prompt,
-                model_config=model_task_config,
-                request_type="plugin.chat_summary.user_profile",
+            validated_data = await ChatAnalysisUtils._generate_validated_analysis(
+                prompt,
+                "plugin.chat_summary.user_profile",
+                lambda response: ChatAnalysisUtils._validate_user_profile(_decode_json_envelope(response)),
             )
-
-            if not success:
-                logger.error(f"LLM生成用户画像失败: {result}")
-                return None
-
-            # 解析 JSON
-            data = ChatAnalysisUtils._parse_llm_json_object(result)
-            if not data:
-                return None
-
-            # 验证并返回（添加 user_id）
-            validated_data = ChatAnalysisUtils._validate_user_profile(data)
-            if validated_data:
-                validated_data["user_id"] = user_id
+            validated_data["user_id"] = user_id
             return validated_data
 
+        except AnalysisGenerationError:
+            raise
         except Exception as e:
             logger.error(f"分析用户画像失败: {e}", exc_info=True)
-            return None
+            raise
 
     @staticmethod
-    def _validate_user_profile(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """验证用户画像数据
-
-        Args:
-            data: 原始数据字典
-
-        Returns:
-            验证后的数据，失败返回 None
-        """
-        try:
-            if not isinstance(data, dict):
-                return None
-
-            # 验证必需字段
-            required_fields = [
-                "tags",
-                "active_time",
-                "fun_score",
-                "fun_comment",
-                "topic_leadership",
-                "topic_comment",
-                "rank_title",
-                "rank_desc",
-                "mood",
-                "mood_score",
-                "mood_reason",
-            ]
-            if not all(key in data for key in required_fields):
-                logger.warning(f"用户画像数据缺少必需字段: {data}")
-                return None
-
-            # 验证并清理 tags
-            tags = data.get("tags", [])
-            if not isinstance(tags, list):
-                tags = []
-            # 最多3个标签，每个3-6个汉字（9-18字节）
-            tags = [str(tag)[:18] for tag in tags[:3] if len(str(tag).strip()) >= 3]
-
-            # 验证其他字段
-            active_time = str(data.get("active_time", ""))[:30]
-
-            # 验证整活质量评分
-            try:
-                fun_score = int(data.get("fun_score", 50))
-                fun_score = max(0, min(100, fun_score))
-            except (ValueError, TypeError):
-                fun_score = 50
-
-            fun_comment = str(data.get("fun_comment", ""))[:60]  # 约30字
-
-            # 验证话题引导力
-            try:
-                topic_leadership = int(data.get("topic_leadership", 50))
-                topic_leadership = max(0, min(100, topic_leadership))
-            except (ValueError, TypeError):
-                topic_leadership = 50
-
-            topic_comment = str(data.get("topic_comment", ""))[:60]  # 约30字
-
-            # 验证段位信息
-            rank_title = str(data.get("rank_title", ""))[:30]
-            rank_desc = str(data.get("rank_desc", ""))[:70]  # 约35字
-
-            mood = str(data.get("mood", "中性"))
-
-            # 验证 mood 值
-            if mood not in ["积极", "中性", "消极"]:
-                mood = "中性"
-
-            # 验证 mood_score
-            try:
-                mood_score = int(data.get("mood_score", 50))
-                mood_score = max(0, min(100, mood_score))  # 限制在 0-100
-            except (ValueError, TypeError):
-                mood_score = 50
-
-            mood_reason = str(data.get("mood_reason", ""))[:50]  # 限制为50字符（约25汉字）
-
-            if (
-                not tags
-                or not active_time
-                or not fun_comment
-                or not topic_comment
-                or not rank_title
-                or not rank_desc
-                or not mood_reason
-            ):
-                logger.warning("用户画像数据字段为空")
-                return None
-
-            return {
-                "tags": tags,
-                "active_time": active_time,
-                "fun_score": fun_score,
-                "fun_comment": fun_comment,
-                "topic_leadership": topic_leadership,
-                "topic_comment": topic_comment,
-                "rank_title": rank_title,
-                "rank_desc": rank_desc,
-                "mood": mood,
-                "mood_score": mood_score,
-                "mood_reason": mood_reason,
-            }
-
-        except Exception as e:
-            logger.error(f"验证用户画像数据失败: {e}")
-            return None
+    def _require_text(item: Dict[str, Any], key: str, max_length: int) -> str:
+        value = item.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise ModelOutputValidationError()
+        bounded = value[:max_length]
+        if not bounded.strip():
+            raise ModelOutputValidationError()
+        return bounded
 
     @staticmethod
-    def _parse_llm_json_object(result: str) -> Optional[Dict[str, Any]]:
-        """解析 LLM 返回的 JSON 对象（非数组）"""
-        try:
-            import json_repair
-
-            data = json_repair.loads(result)
-            if isinstance(data, dict):
-                return data
-            if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
-                return data[0]
-        except Exception as e:
-            logger.warning(f"json_repair 解析对象失败: {e}")
-
-        # Fallback to standard json parsing
-        try:
-            start_idx = result.find("{")
-            end_idx = result.rfind("}")
-            if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-                result_cleaned = result[start_idx : end_idx + 1]
-            else:
-                result_cleaned = result
-            data = json.loads(result_cleaned)
-            if isinstance(data, dict):
-                return data
-        except json.JSONDecodeError as e:
-            logger.error(f"解析 JSON 对象失败: {e}")
-            logger.debug(f"原始LLM输出: {result[:500]}")
-        return None
+    def _require_score(value: Any) -> int:
+        if isinstance(value, bool):
+            raise ModelOutputValidationError()
+        if isinstance(value, str):
+            normalized = value.strip()
+            if not re.fullmatch(r"\d+(?:\.\d+)?", normalized):
+                raise ModelOutputValidationError()
+            try:
+                score = float(normalized)
+            except ValueError as exc:
+                raise ModelOutputValidationError() from exc
+        elif isinstance(value, (int, float)):
+            score = value
+        else:
+            raise ModelOutputValidationError()
+        if isinstance(score, int):
+            if not 0 <= score <= 100:
+                raise ModelOutputValidationError()
+        elif not math.isfinite(score) or not 0 <= score <= 100:
+            raise ModelOutputValidationError()
+        return int(score)
 
     @staticmethod
-    def _parse_llm_json(result: str) -> List[Dict[str, Any]]:
-        """解析 LLM 返回的 JSON 列表"""
-        try:
-            import json_repair
+    def _validate_titles(data: Any, user_stats: Dict[str, Dict] = None) -> List[Dict[str, Any]]:
+        if not isinstance(data, list):
+            raise ModelOutputValidationError()
 
-            data = json_repair.loads(result)
-            if isinstance(data, list) and all(isinstance(item, dict) for item in data):
-                return data
-            elif isinstance(data, dict):
-                return [data]
-        except Exception as e:
-            logger.warning(f"json_repair 解析列表失败: {e}")
+        validated = []
+        for item in data:
+            if not isinstance(item, dict):
+                raise ModelOutputValidationError()
+            name = ChatAnalysisUtils._require_text(item, "name", 50)
+            title = ChatAnalysisUtils._require_text(item, "title", AnalysisConfig.MAX_TITLE_LENGTH)
+            reason = ChatAnalysisUtils._require_text(item, "reason", AnalysisConfig.MAX_REASON_LENGTH)
+            user_id = ""
+            if user_stats:
+                for uid, stats in user_stats.items():
+                    if stats.get("nickname") == name:
+                        user_id = uid
+                        break
+            validated.append({"name": name, "title": title, "reason": reason, "user_id": user_id})
+        return validated
 
-        # Fallback to standard json parsing
-        try:
-            start_idx = result.find("[")
-            end_idx = result.rfind("]")
-            if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-                result_cleaned = result[start_idx : end_idx + 1]
-            else:
-                result_cleaned = result
-            data = json.loads(result_cleaned)
-            if isinstance(data, list) and all(isinstance(item, dict) for item in data):
-                return data
-        except json.JSONDecodeError as e:
-            logger.error(f"解析 JSON 列表失败: {e}")
-            logger.debug(f"原始LLM输出: {result[:500]}")
-        return []
+    @staticmethod
+    def _validate_quotes(data: Any) -> List[Dict[str, Any]]:
+        if not isinstance(data, list):
+            raise ModelOutputValidationError()
+
+        validated = []
+        for item in data:
+            if not isinstance(item, dict):
+                raise ModelOutputValidationError()
+            content = ChatAnalysisUtils._require_text(item, "content", 200)
+            sender = ChatAnalysisUtils._require_text(item, "sender", 50)
+            reason = ChatAnalysisUtils._require_text(item, "reason", AnalysisConfig.MAX_REASON_LENGTH)
+            content = re.sub(r"@[^<\s]+<\d+>\s*", "", content).strip()
+            if not content:
+                raise ModelOutputValidationError()
+            validated.append({"content": content, "sender": sender, "reason": reason})
+        return validated
+
+    @staticmethod
+    def _validate_depression_index(
+        data: Any, user_stats: Dict[str, Dict] = None
+    ) -> List[Dict[str, Any]]:
+        if not isinstance(data, list):
+            raise ModelOutputValidationError()
+
+        validated = []
+        for item in data:
+            if not isinstance(item, dict):
+                raise ModelOutputValidationError()
+            name = ChatAnalysisUtils._require_text(item, "name", 50)
+            rank_value = item.get("rank")
+            if not isinstance(rank_value, str):
+                raise ModelOutputValidationError()
+            rank = rank_value.strip().upper()
+            if rank not in {"S", "A", "B", "C", "D"}:
+                raise ModelOutputValidationError()
+            comment = ChatAnalysisUtils._require_text(item, "comment", 60)
+            user_id = ""
+            if user_stats:
+                for uid, stats in user_stats.items():
+                    if stats.get("nickname") == name:
+                        user_id = uid
+                        break
+            validated.append({"name": name, "rank": rank, "comment": comment, "user_id": user_id})
+        return validated[:4]
+
+    @staticmethod
+    def _validate_user_profile(data: Any) -> Dict[str, Any]:
+        if not isinstance(data, dict):
+            raise ModelOutputValidationError()
+
+        tags_value = data.get("tags")
+        if not isinstance(tags_value, list) or not tags_value:
+            raise ModelOutputValidationError()
+        tags = []
+        for tag in tags_value:
+            if not isinstance(tag, str) or not tag.strip():
+                raise ModelOutputValidationError()
+            bounded_tag = tag[:18]
+            if not bounded_tag.strip():
+                raise ModelOutputValidationError()
+            tags.append(bounded_tag)
+
+        text_fields = {
+            "active_time": 30,
+            "fun_comment": 60,
+            "topic_comment": 60,
+            "rank_title": 30,
+            "rank_desc": 70,
+            "mood_reason": 50,
+        }
+        validated = {key: ChatAnalysisUtils._require_text(data, key, limit) for key, limit in text_fields.items()}
+        for key in ("fun_score", "topic_leadership", "mood_score"):
+            if key not in data:
+                raise ModelOutputValidationError()
+            validated[key] = ChatAnalysisUtils._require_score(data[key])
+
+        mood = data.get("mood")
+        if not isinstance(mood, str) or mood.strip() not in {"积极", "中性", "消极"}:
+            raise ModelOutputValidationError()
+        validated["mood"] = mood.strip()
+        validated["tags"] = tags[:3]
+        return validated
