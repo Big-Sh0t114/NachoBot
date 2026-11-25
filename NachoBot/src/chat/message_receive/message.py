@@ -476,7 +476,13 @@ class MessageRecv(Message):
                         else ""
                     )
                     receipt_scope = normalize_asr_receipt_scope(raw_scope)
-                    voice_kwargs = {
+                    webui_text_voice = bool(
+                        getattr(self.message_info, "platform", None) == "local"
+                        and isinstance(additional_config, dict)
+                        and additional_config.get("source") == "webui-chat"
+                        and additional_config.get("webui_channel") == "text"
+                    )
+                    voice_kwargs: dict[str, Any] = {
                         "precomputed_asr_result_id": (
                             precomputed_asr_result_id
                             if isinstance(precomputed_asr_result_id, str)
@@ -484,6 +490,8 @@ class MessageRecv(Message):
                         ) if receipt_scope is not None else None,
                         "precomputed_asr_context": platform,
                     }
+                    if webui_text_voice:
+                        voice_kwargs["webui_text_voice"] = True
                     if platform is not None and receipt_scope:
                         voice_kwargs["precomputed_asr_scope"] = receipt_scope
                     return await get_voice_text(segment.data, **voice_kwargs)

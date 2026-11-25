@@ -11,13 +11,18 @@ from pathlib import Path
 from typing import Any
 
 
-MEDIA_TYPES = frozenset({"image", "emoji", "video", "file"})
+MEDIA_TYPES = frozenset({"image", "emoji", "video", "file", "voice"})
+# Leave headroom for base64 and NCNK JSON under Core's 16 MiB WS ceiling.
+VOICE_MAX_BYTES = 10 * 1024 * 1024
+# Core-produced audio travels outside the WebSocket frame and can reach the worker's file limit.
+OUTGOING_VOICE_MAX_BYTES = 512 * 1024 * 1024
 MEDIA_LIMITS = {
     "image": 16 * 1024 * 1024,
     "emoji": 16 * 1024 * 1024,
     "video": 64 * 1024 * 1024,
     # Core 的 file sandbox 当前硬限制为 1 MiB。
     "file": 1 * 1024 * 1024,
+    "voice": VOICE_MAX_BYTES,
 }
 
 
@@ -28,9 +33,9 @@ class ChatMediaError(ValueError):
 class ChatMediaStore:
     """Persistent media store shared by WebUI Chat ingress and egress.
 
-    Browser uploads are stored as files first.  Core receives image/emoji as
-    base64 (the existing NCNK convention), while video/file receive a local
-    path object.  Voice is intentionally not part of this store/protocol.
+    Browser uploads are stored as files first. Core receives image/emoji/voice
+    as base64 (the existing NCNK convention), while video/file receive a local
+    path object.
     """
 
     def __init__(self, root: Path | None = None) -> None:
@@ -41,7 +46,7 @@ class ChatMediaStore:
     def normalize_type(media_type: str) -> str:
         kind = str(media_type or "").strip().lower()
         if kind not in MEDIA_TYPES:
-            raise ChatMediaError("仅支持图片、表情包、视频和文件附件")
+            raise ChatMediaError("仅支持图片、表情包、视频、文件和语音附件")
         return kind
 
     @staticmethod
@@ -59,6 +64,36 @@ class ChatMediaStore:
         if guessed and len(guessed) <= 12 and guessed[1:].isalnum():
             return guessed.lower()
         return ""
+
+    @staticmethod
+    def _audio_format(data: bytes) -> tuple[str, str] | None:
+        """Return the canonical extension and MIME for a passive audio header."""
+        if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WAVE":
+            return ".wav", "audio/wav"
+        if data.startswith(b"OggS"):
+            return ".ogg", "audio/ogg"
+        if data.startswith(b"fLaC"):
+            return ".flac", "audio/flac"
+        if data.startswith(b"\x1a\x45\xdf\xa3"):
+            # .weba keeps the response MIME unambiguously audio/webm.
+            return ".weba", "audio/webm"
+        if len(data) >= 12 and data[4:8] == b"ftyp":
+            brand = data[8:12]
+            if (
+                brand in {b"M4A ", b"M4B ", b"M4P ", b"mp41", b"mp42"}
+                or brand.startswith(b"iso")
+            ):
+                return ".m4a", "audio/mp4"
+        if data.startswith(b"ID3") or (
+            len(data) >= 2
+            and data[0] == 0xFF
+            and data[1] & 0xE0 == 0xE0
+            and data[1] & 0x06 != 0
+        ):
+            return ".mp3", "audio/mpeg"
+        if len(data) >= 7 and data[0] == 0xFF and data[1] & 0xF6 == 0xF0:
+            return ".aac", "audio/aac"
+        return None
 
     @staticmethod
     def _safe_display_name(name: str, fallback: str) -> str:
@@ -82,7 +117,14 @@ class ChatMediaStore:
         if size > limit:
             raise ChatMediaError(f"{kind} 附件超过大小限制（最大 {limit // (1024 * 1024)} MiB）")
 
-        suffix = self._safe_suffix(name, mime_type)
+        canonical_audio = self._audio_format(data[:64]) if kind == "voice" else None
+        if kind == "voice" and canonical_audio is None:
+            raise ChatMediaError("不支持的语音格式")
+        if canonical_audio:
+            suffix, stored_mime_type = canonical_audio
+        else:
+            suffix = self._safe_suffix(name, mime_type)
+            stored_mime_type = str(mime_type or "application/octet-stream")[:120]
         media_id = f"{uuid.uuid4().hex}{suffix}"
         path = self.root / media_id
         path.write_bytes(data)
@@ -91,18 +133,30 @@ class ChatMediaStore:
             "media_id": media_id,
             "type": kind,
             "name": display_name,
-            "mime_type": str(mime_type or "application/octet-stream")[:120],
+            "mime_type": stored_mime_type,
             "size": size,
             "url": f"/api/chat/media/{media_id}",
         }
 
-    def resolve(self, media_id: str) -> Path:
+    def resolve(self, media_id: str, media_type: str | None = None) -> Path:
         value = str(media_id or "").strip()
         if not self._is_generated_media_id(value):
             raise ChatMediaError("无效的附件标识")
         path = (self.root / value).resolve()
         if path.parent != self.root or not path.is_file():
             raise ChatMediaError("附件不存在或已失效")
+
+        kind = self.normalize_type(media_type) if media_type else None
+        if kind == "voice":
+            if path.stat().st_size > VOICE_MAX_BYTES:
+                limit_mib = VOICE_MAX_BYTES // (1024 * 1024)
+                raise ChatMediaError(
+                    f"voice 附件超过大小限制（最大 {limit_mib} MiB）"
+                )
+            with path.open("rb") as source:
+                audio_format = self._audio_format(source.read(64))
+            if audio_format is None or audio_format[0] != path.suffix.lower():
+                raise ChatMediaError("不支持的语音格式或扩展名")
         return path
 
     @staticmethod
@@ -121,10 +175,10 @@ class ChatMediaStore:
 
     def to_core_segment(self, attachment: dict[str, Any]) -> dict[str, Any]:
         kind = self.normalize_type(str(attachment.get("type") or ""))
-        path = self.resolve(str(attachment.get("media_id") or ""))
+        path = self.resolve(str(attachment.get("media_id") or ""), kind)
         name = self._safe_display_name(str(attachment.get("name") or ""), path.name)
 
-        if kind in {"image", "emoji"}:
+        if kind in {"image", "emoji", "voice"}:
             data: Any = base64.b64encode(path.read_bytes()).decode("ascii")
         else:
             data = {
@@ -185,6 +239,21 @@ class ChatMediaStore:
                     return stored
             return None
 
+        if kind == "voice":
+            # NCNK voice payloads are base64 strings. Never interpret Core data
+            # as a local path or read a Core-selected filesystem location.
+            if not isinstance(data, str):
+                return None
+            decoded = self._decode_base64(data)
+            if not decoded:
+                return None
+            return self.save_bytes(
+                "voice",
+                decoded,
+                name="voice",
+                mime_type="application/octet-stream",
+            )
+
         source = data
         name = ""
         url = ""
@@ -209,21 +278,49 @@ class ChatMediaStore:
                 return self._copy_local(kind, path, name or path.name)
         return None
 
-    def _copy_local(self, media_type: str, source: Path, name: str) -> dict[str, Any] | None:
+    def capture_core_voicefile(self, data: Any, *, trusted_root: Path) -> dict[str, Any] | None:
+        if not isinstance(data, str):
+            return None
+        source = Path(data)
+        if not source.is_absolute() or not source.is_relative_to(trusted_root) or ".." in source.parts:
+            return None
+        source = source.resolve(strict=True)
+        if not source.is_relative_to(trusted_root.resolve()) or not source.is_file():
+            return None
+        with source.open("rb") as audio:
+            audio_format = self._audio_format(audio.read(64))
+        if audio_format is None or audio_format[0] != source.suffix.lower():
+            return None
+        stored = self._copy_local("voice", source, source.name, max_bytes=OUTGOING_VOICE_MAX_BYTES)
+        if stored:
+            stored["mime_type"] = audio_format[1]
+        return stored
+
+    def _copy_local(
+        self, media_type: str, source: Path, name: str, *, max_bytes: int | None = None
+    ) -> dict[str, Any] | None:
         kind = self.normalize_type(media_type)
         try:
-            size = source.stat().st_size
+            source_stat = source.stat()
         except OSError:
             return None
-        if size <= 0 or size > MEDIA_LIMITS[kind]:
+        size = source_stat.st_size
+        if size <= 0 or size > (max_bytes if max_bytes is not None else MEDIA_LIMITS[kind]):
             return None
 
         suffix = self._safe_suffix(name or source.name)
-        digest = hashlib.sha256(f"{source.resolve()}:{source.stat().st_mtime_ns}:{size}".encode()).hexdigest()[:20]
+        digest = hashlib.sha256(f"{source.resolve()}:{source_stat.st_mtime_ns}:{size}".encode()).hexdigest()[:20]
         media_id = f"core-{digest}{suffix}"
         target = self.root / media_id
         if not target.exists():
-            shutil.copyfile(source, target)
+            partial = self.root / f"{uuid.uuid4().hex}.part"
+            try:
+                shutil.copyfile(source, partial)
+                if partial.stat().st_size != size:
+                    return None
+                partial.replace(target)
+            finally:
+                partial.unlink(missing_ok=True)
         display_name = self._safe_display_name(name, source.name)
         return {
             "media_id": media_id,

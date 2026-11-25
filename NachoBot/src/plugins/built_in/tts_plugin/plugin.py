@@ -131,7 +131,9 @@ class TTSAction(BaseAction):
             try:
                 stream_id = self.chat_stream.stream_id if self.chat_stream else ""
                 if stream_id:
-                    await send_api.text_to_stream(fallback_text, stream_id)
+                    await send_api.text_to_stream(
+                        fallback_text, stream_id, **self._local_reply_kwargs()
+                    )
                     logger.info(f"{self.log_prefix} 高级模式禁用TTS，已改为文本发送")
                     return True, "高级模式禁用TTS，已文本发送"
             except Exception as e:
@@ -175,7 +177,14 @@ class TTSAction(BaseAction):
 
         try:
             # 发送TTS消息，携带语种元数据
-            await self.send_custom(message_type="tts_text", content={"text": processed_text, "lang": current_language})
+            tts_content = {"text": processed_text, "lang": current_language}
+            if self._is_local_webui():
+                tts_content["webui_voice_message"] = True
+            await self.send_custom(
+                message_type="tts_text",
+                content=tts_content,
+                **self._local_reply_kwargs(),
+            )
 
             # 记录动作信息
             await database_api.store_action_info(
@@ -194,6 +203,18 @@ class TTSAction(BaseAction):
         except Exception as e:
             logger.error(f"{self.log_prefix} 执行TTS动作时出错: {e}")
             return False, f"执行TTS动作时出错: {e}"
+
+    def _is_local_webui(self) -> bool:
+        platform = getattr(getattr(self, "chat_stream", None), "platform", None)
+        return platform == "local"
+
+    def _local_reply_kwargs(self) -> dict:
+        if (
+            self._is_local_webui()
+            and getattr(self, "action_message", None) is not None
+        ):
+            return {"reply_message": self.action_message}
+        return {}
 
     def _process_text_for_tts(self, text: str, language: str) -> str:
         """

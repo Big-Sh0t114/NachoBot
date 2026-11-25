@@ -36,6 +36,8 @@ MAX_SUBSCRIBER_QUEUE_SIZE = 100
 MAX_PENDING_REPLY_COUNT = 100
 PENDING_REPLY_TTL_SECONDS = 180.0
 MAX_REPLY_CHARS = 10_000
+# The normal Core server runs a shared Uvicorn app with its 16 MiB WS default.
+MAX_NCNK_FRAME_BYTES = 16 * 1024 * 1024
 
 _NACHOBOT_ROOT = Path(__file__).resolve().parent.parent / "NachoBot"
 _BOT_CONFIG_PATH = _NACHOBOT_ROOT / "config" / "bot_config.toml"
@@ -99,7 +101,7 @@ class LocalChatBackend:
         if not subscribers:
             self._subscribers.pop(conversation_id, None)
 
-    def acknowledge_live_delivery(self, conversation_id: str, message_id: str) -> None:
+    async def acknowledge_live_delivery(self, conversation_id: str, message_id: str) -> None:
         """Remove one reply from replay storage after WebSocket delivery succeeds."""
         message_id = str(message_id or "")
         if not message_id:
@@ -107,15 +109,34 @@ class LocalChatBackend:
         pending = self._pending_replies.get(conversation_id)
         if not pending:
             return
-        remaining = [
-            item
-            for item in pending
-            if str(item[1].get("message_id") or "") != message_id
-        ]
+        remaining = []
+        echo_to_core = False
+        for item in pending:
+            if item[1].get("message_id") == message_id:
+                echo_to_core |= bool(item[1].get("_echo_to_core"))
+            else:
+                remaining.append(item)
         if remaining:
             self._pending_replies[conversation_id] = remaining
         else:
             self._pending_replies.pop(conversation_id, None)
+        if echo_to_core:
+            await self._echo_media_delivery(message_id)
+
+    async def _echo_media_delivery(self, message_id: str) -> None:
+        echo = {
+            "platform": LOCAL_PLATFORM,
+            "message_type_name": "message_id_echo",
+            "content": {"type": "echo", "echo": message_id, "actual_id": message_id},
+            "timestamp": time.monotonic(),
+            "is_custom_message": True,
+        }
+        try:
+            async with self._send_lock:
+                if self._is_connected():
+                    await self._websocket.send(json.dumps(echo))
+        except (ConnectionClosed, OSError):
+            logger.warning("Could not return the WebUI media delivery receipt")
 
     def resolve_webui_user_id(self, conversation_id: str) -> str:
         """Return the stable Core-side user ID owned by a WebUI conversation."""
@@ -229,10 +250,24 @@ class LocalChatBackend:
                 interrupt_feedback=interrupt_feedback,
                 attachments=attachment_list,
             )
+            serialized_payload = json.dumps(payload, ensure_ascii=False)
+            content_format = (
+                payload.get("message_info", {})
+                .get("format_info", {})
+                .get("content_format", [])
+            )
+            if (
+                "voice" in content_format
+                and len(serialized_payload.encode("utf-8")) > MAX_NCNK_FRAME_BYTES
+            ):
+                raise ChatBackendError(
+                    "语音消息（含文本和附件）超过 NCNK WebSocket 16 MiB 限制",
+                    status_code=413,
+                )
 
             async with self._send_lock:
                 websocket = await self._ensure_connection(endpoint, token)
-                await websocket.send(json.dumps(payload, ensure_ascii=False))
+                await websocket.send(serialized_payload)
             self.voice_store.finish_request(message_id, "accepted")
 
             # POST 只负责可靠地把用户消息送入 Core。助手回复统一通过
@@ -355,11 +390,13 @@ class LocalChatBackend:
                 conversation_id = self._conversation_by_user.get(user_id)
             route = {"channel": "unattributed", "call_id": None, "generation": 0}
 
-        plain_text, structured_reply, media = self._extract_reply_text(
-            message.get("message_segment")
-        )
         if not conversation_id:
             return None
+
+        plain_text, structured_reply, media, has_voicefile = self._extract_reply_text(
+            message.get("message_segment"),
+            capture_voice=route.get("channel") != "voice",
+        )
 
         control_id = None
         voice_message_id = None
@@ -426,6 +463,7 @@ class LocalChatBackend:
             "generation": int(route.get("generation", 0)),
             **({"control_id": control_id} if control_id else {}),
             **({"voice_message_id": voice_message_id} if voice_message_id else {}),
+            **({"_echo_to_core": True} if has_voicefile else {}),
             "message": {
                 "role": "assistant",
                 "content": plain_text,
@@ -434,10 +472,14 @@ class LocalChatBackend:
         }
 
     @staticmethod
-    def _extract_reply_text(segment: Any) -> tuple[str, str, list[dict[str, Any]]]:
+    def _extract_reply_text(
+        segment: Any, *, capture_voice: bool = True
+    ) -> tuple[str, str, list[dict[str, Any]], bool]:
         texts: list[str] = []
         structured = ""
         media: list[dict[str, Any]] = []
+        pending_tts: tuple[str, bool] | None = None
+        has_voicefile = False
 
         try:
             from chat_media import ChatMediaError, chat_media_store
@@ -445,34 +487,71 @@ class LocalChatBackend:
             from .chat_media import ChatMediaError, chat_media_store
 
         def visit(value: Any) -> None:
-            nonlocal structured
+            nonlocal structured, pending_tts, has_voicefile
             if isinstance(value, list):
                 for child in value:
                     visit(child)
                 return
             if not isinstance(value, dict):
+                flush_pending_tts()
                 return
 
             kind = str(value.get("type") or "")
             data = value.get("data")
             if kind == "seglist":
                 visit(data)
+            elif kind == "voice":
+                captured = None
+                if capture_voice and pending_tts and pending_tts[1]:
+                    try:
+                        captured = chat_media_store.capture_core_media(kind, data)
+                    except (ChatMediaError, OSError, ValueError) as exc:
+                        logger.warning(
+                            "Failed to capture Core %s reply media: %s",
+                            kind,
+                            type(exc).__name__,
+                        )
+                if captured:
+                    media.append(captured)
+                    pending_tts = None
+                else:
+                    flush_pending_tts()
             elif kind == "text":
+                flush_pending_tts()
                 if data is not None:
                     texts.append(str(data))
             elif kind == "tts_text":
+                flush_pending_tts()
                 if isinstance(data, dict):
                     display_text = data.get("display_text")
                     if isinstance(display_text, str) and display_text.strip():
                         structured = display_text
                     tts_text = data.get("text")
-                    if isinstance(tts_text, str) and tts_text.strip():
-                        texts.append(tts_text)
+                    fallback_text = (
+                        display_text
+                        if capture_voice and isinstance(display_text, str) and display_text.strip()
+                        else tts_text
+                    )
+                    text = (
+                        fallback_text.strip()
+                        if isinstance(fallback_text, str) and fallback_text.strip()
+                        else ""
+                    )
+                    marked_for_voice = data.get("webui_voice_message") is True
+                    pending_tts = (text, marked_for_voice)
                 elif isinstance(data, str):
-                    texts.append(data)
-            elif kind in {"image", "emoji", "video", "file"}:
+                    pending_tts = (data.strip(), False)
+            elif kind in {"image", "emoji", "video", "file", "voicefile"}:
+                flush_pending_tts()
+                if kind == "voicefile" and not capture_voice:
+                    return
                 try:
-                    captured = chat_media_store.capture_core_media(kind, data)
+                    if kind == "voicefile":
+                        captured = chat_media_store.capture_core_voicefile(
+                            data, trusted_root=_NACHOBOT_ROOT / "data" / "media-tmp"
+                        )
+                    else:
+                        captured = chat_media_store.capture_core_media(kind, data)
                 except (ChatMediaError, OSError, ValueError) as exc:
                     logger.warning(
                         "Failed to capture Core %s reply media: %s",
@@ -482,13 +561,22 @@ class LocalChatBackend:
                     captured = None
                 if captured:
                     media.append(captured)
-            # voice / voice_stream stay disabled in text WebUI Chat.
+                    has_voicefile |= kind == "voicefile"
+            else:
+                flush_pending_tts()
+
+        def flush_pending_tts() -> None:
+            nonlocal pending_tts
+            if pending_tts and pending_tts[0]:
+                texts.append(pending_tts[0])
+            pending_tts = None
 
         visit(segment)
+        flush_pending_tts()
         plain_text = "\n".join(
             text.strip() for text in texts if text.strip()
         )[:MAX_REPLY_CHARS]
-        return plain_text, structured[:MAX_REPLY_CHARS], media
+        return plain_text, structured[:MAX_REPLY_CHARS], media, has_voicefile
 
     @staticmethod
     def _fallback_json_reply(structured: str, plain_text: str) -> str:
@@ -642,6 +730,8 @@ class LocalChatBackend:
         }
         if channel == "voice":
             runtime_capabilities["memory_retrieval_mode"] = "direct"
+        else:
+            runtime_capabilities["voice_payload_formats"] = ["voicefile"]
         if channel == "voice" and voice_reply_controls:
             runtime_capabilities.update(
                 {
@@ -698,7 +788,7 @@ class LocalChatBackend:
         accept_format = (
             ["text"]
             if channel == "voice"
-            else ["text", "image", "emoji", "video", "file"]
+            else ["text", "image", "emoji", "video", "file", "voice", "voicefile", "tts_text"]
         )
 
         return {

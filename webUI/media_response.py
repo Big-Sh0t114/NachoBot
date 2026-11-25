@@ -19,6 +19,7 @@ _INLINE_MEDIA_TYPES = {
     ".ogv": "video/ogg",
     ".mov": "video/quicktime",
     ".mp3": "audio/mpeg",
+    ".weba": "audio/webm",
     ".wav": "audio/wav",
     ".ogg": "audio/ogg",
     ".oga": "audio/ogg",

@@ -1,3 +1,7 @@
+11/23
+    添加response_keyword字段
+11/22
+    WebUI Chat增加语音信息格式
 11/21
     补齐 Windows CUDA 13.0 的 torchvision wheel 校验哈希，并将 NapCat 发布页的备用链接改为存档地址
 11/17

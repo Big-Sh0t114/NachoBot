@@ -93,6 +93,18 @@ class RelationshipConfig(ConfigBase):
 class ChatConfig(ConfigBase):
     """聊天配置类"""
 
+    response_keyword: list[str] = field(default_factory=list)
+    """命中时触发思考但不强制回复；使用大小写敏感的字面子串匹配，与 bot.alias_names 独立"""
+
+    def matches_response_keyword(self, processed_plain_text: Optional[str]) -> bool:
+        """Return whether text contains a configured non-blank response keyword."""
+        if not isinstance(processed_plain_text, str) or not processed_plain_text:
+            return False
+        return any(
+            isinstance(keyword, str) and keyword.strip() and keyword in processed_plain_text
+            for keyword in self.response_keyword
+        )
+
     max_context_size: int = 18
     """上下文长度"""
 

@@ -759,8 +759,8 @@ async def ws_chat(ws: WebSocket, conversation_id: str):
                     break
             if event_task in done:
                 event = event_task.result()
-                await ws.send_json(event)
-                chat_backend.acknowledge_live_delivery(
+                await ws.send_json({key: value for key, value in event.items() if key != "_echo_to_core"})
+                await chat_backend.acknowledge_live_delivery(
                     conversation_id,
                     str(event.get("message_id") or ""),
                 )

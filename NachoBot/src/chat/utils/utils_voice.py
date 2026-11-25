@@ -1,3 +1,5 @@
+import asyncio
+
 from src.config.config import global_config
 
 from src.common.logger import get_logger
@@ -6,6 +8,8 @@ from rich.traceback import install
 install(extra_lines=3)
 
 logger = get_logger("chat_voice")
+
+WEBUI_TEXT_VOICE_ASR_TIMEOUT_SECONDS = 30.0
 
 
 def normalize_asr_receipt_platform(platform: object) -> str | None:
@@ -30,6 +34,7 @@ async def get_voice_text(
     precomputed_asr_result_id: str | None = None,
     precomputed_asr_context: str | None = "universal_vc",
     precomputed_asr_scope: str = "",
+    webui_text_voice: bool = False,
 ) -> str:
     """获取音频文件转录文本"""
     if not global_config.voice.enable_asr:
@@ -53,18 +58,32 @@ async def get_voice_text(
         }
         if receipt_context is not None and receipt_scope:
             transcribe_kwargs["precomputed_asr_scope"] = receipt_scope
-        result = await get_multimodal_router().transcribe(voice_base64, **transcribe_kwargs)
+        router = get_multimodal_router()
+        timeout_seconds = WEBUI_TEXT_VOICE_ASR_TIMEOUT_SECONDS if webui_text_voice else None
+        async with asyncio.timeout(timeout_seconds):
+            result = await router.transcribe(voice_base64, **transcribe_kwargs)
         text = result.text.strip()
         if not text:
             logger.warning("未能生成语音文本")
-            return "[语音(文本生成失败)]"
+            return "[语音]" if webui_text_voice else "[语音(文本生成失败)]"
 
         logger.debug(f"描述是{text}")
         if result.degraded:
             # A voice-only failure must become one visible text outcome, not a
             # fabricated transcript and not a second Planner turn.
-            return text
+            return "[语音]" if webui_text_voice else text
         return f"[语音：{text}]"
+    except asyncio.CancelledError:
+        raise
+    except TimeoutError as exc:
+        if webui_text_voice:
+            logger.warning(
+                "WebUI 文本 Chat 语音识别超过 %.1f 秒",
+                WEBUI_TEXT_VOICE_ASR_TIMEOUT_SECONDS,
+            )
+        else:
+            logger.error(f"语音转文字失败: {str(exc)}")
+        return "[语音]" if webui_text_voice else "[语音识别失败，请稍后重试]"
     except Exception as e:
         logger.error(f"语音转文字失败: {str(e)}")
-        return "[语音识别失败，请稍后重试]"
+        return "[语音]" if webui_text_voice else "[语音识别失败，请稍后重试]"

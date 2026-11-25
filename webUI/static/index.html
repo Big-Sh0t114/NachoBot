@@ -16,7 +16,7 @@
     <link rel="stylesheet" href="/static/css/style.css">
     <link rel="stylesheet" href="/static/css/style-data.css">
     <link rel="stylesheet" href="/static/css/style-setup.css">
-    <link rel="stylesheet" href="/static/css/chat.css">
+    <link rel="stylesheet" href="/static/css/chat.css?v=20261123-voice-ui-v4">
     <link rel="stylesheet" href="/static/css/chat-layout.css">
     <link rel="stylesheet" href="/static/css/doodle-background.css">
     <link rel="stylesheet" href="/static/css/chat-effects.css">
@@ -324,8 +324,24 @@
                                 <div class="chat-composer-left">
                                     <div class="chat-attachment-picker">
                                         <button type="button" class="chat-attachment-button" id="chat-attachment-button"
-                                            aria-label="添加附件" title="添加附件">＋</button>
+                                            aria-label="添加附件" title="添加附件">
+                                            <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24">
+                                                <path d="M12 5v14M5 12h14"></path>
+                                            </svg>
+                                        </button>
                                     </div>
+                                    <button type="button" class="chat-voice-record-button" id="chat-voice-record-button"
+                                        aria-label="录制语音消息" title="录制语音消息" aria-pressed="false">
+                                        <svg class="chat-voice-mic-icon" aria-hidden="true" focusable="false" viewBox="0 0 24 24">
+                                            <rect class="chat-voice-mic-head" x="9" y="3" width="6" height="11" rx="3"></rect>
+                                            <path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3m-3.2 0h6.4"></path>
+                                        </svg>
+                                        <svg class="chat-voice-stop-icon" aria-hidden="true" focusable="false" viewBox="0 0 24 24">
+                                            <rect x="5" y="5" width="14" height="14" rx="3.5"></rect>
+                                        </svg>
+                                    </button>
+                                    <span class="chat-voice-record-status" id="chat-voice-record-status"
+                                        role="status" aria-live="polite" hidden></span>
                                     <div class="chat-composer-hint">
                                         <span>Enter 发送 · Shift + Enter 换行</span>
                                         <button type="button" class="chat-rename-button" id="chat-rename-button"
@@ -334,7 +350,9 @@
                                 </div>
                                 <button type="submit" class="chat-send-button" id="chat-send-button" disabled
                                     aria-label="发送消息">
-                                    <span>↑</span>
+                                    <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24">
+                                        <path d="M12 19V5M6.5 10.5 12 5l5.5 5.5"></path>
+                                    </svg>
                                 </button>
                             </div>
                         </form>

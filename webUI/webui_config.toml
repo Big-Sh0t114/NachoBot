@@ -1,6 +1,6 @@
 [webui]
 # WebUI semantic version displayed in the sidebar
-version = "1.4.2"
+version = "1.4.3"
 
 [server]
 # FastAPI/Uvicorn server hosting configuration

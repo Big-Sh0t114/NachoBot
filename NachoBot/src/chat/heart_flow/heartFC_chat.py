@@ -643,6 +643,14 @@ class HeartFChatting:
                 is_system_event=self._get_system_event,
             )
             has_direct_reply_input = bool(runtime_batch.direct_messages)
+            has_response_keyword = any(
+                planner_target_eligible(message)
+                and self._get_system_event(message) is None
+                and global_config.chat.matches_response_keyword(
+                    getattr(message, "processed_plain_text", None)
+                )
+                for message in runtime_batch.planner_messages
+            )
 
             # structured system_event 是环境事件；不能受 no_reply_until_call
             # 或普通消息 talk_threshold 随机节流影响。普通会话交给 Planner，
@@ -695,7 +703,7 @@ class HeartFChatting:
                         self.no_reply_until_call = False
                         break
                 # 没有提到，继续保持沉默
-                if self.no_reply_until_call:
+                if self.no_reply_until_call and not has_response_keyword:
                     # logger.info(f"{self.log_prefix} 没有提到，继续保持沉默")
                     await asyncio.sleep(1)
                     return True
@@ -719,7 +727,7 @@ class HeartFChatting:
                     force_reply_message=mentioned_message,
                     focus_turn=focus_turn,
                 )
-            elif (
+            elif has_response_keyword or (
                 random.random()
                 < self.talk_threshold
                 * frequency_control_manager.get_or_create_frequency_control(self.stream_id).get_talk_frequency_adjust()
