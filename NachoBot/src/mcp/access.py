@@ -19,9 +19,9 @@ def access_context_from_stream(chat_stream: Any, user_id: str = "") -> MCPAccess
     chat_id = group_id or resolved_user_id or str(getattr(chat_stream, "stream_id", "") or "")
 
     try:
-        from src.config.config import global_config
+        from src.chat.advanced.advanced_manager import advanced_manager
 
-        is_admin = resolved_user_id in {str(value) for value in global_config.advanced.admins}
+        is_admin = advanced_manager.is_admin(resolved_user_id)
     except Exception:
         is_admin = False
 

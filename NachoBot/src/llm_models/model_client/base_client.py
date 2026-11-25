@@ -338,6 +338,7 @@ class ClientRegistry:
         """APIProvider.type -> BaseClient的映射表"""
         self.client_instance_cache: dict[str, BaseClient] = {}
         """APIProvider.name -> BaseClient的映射表"""
+        self._configured_providers: dict[str, APIProvider] | None = None
 
     def register_client_class(self, client_type: str):
         """
@@ -370,13 +371,49 @@ class ClientRegistry:
             else:
                 raise KeyError(f"'{api_provider.client_type}' 类型的 Client 未注册")
 
+        if self.is_current_provider(api_provider) is False:
+            raise RuntimeError(
+                f"提供商 '{api_provider.name}' 已在配置重载后变更；旧配置请求必须使用独立客户端"
+            )
+
         # 正常的缓存逻辑
-        if api_provider.name not in self.client_instance_cache:
+        cached_client = self.client_instance_cache.get(api_provider.name)
+        if cached_client is not None and cached_client.api_provider != api_provider:
+            self.client_instance_cache.pop(api_provider.name, None)
+            self._retire_cached_client(cached_client)
+            cached_client = None
+        if cached_client is None:
             if client_class := self.client_registry.get(api_provider.client_type):
-                self.client_instance_cache[api_provider.name] = client_class(api_provider)
+                cached_client = client_class(api_provider)
+                self.client_instance_cache[api_provider.name] = cached_client
             else:
                 raise KeyError(f"'{api_provider.client_type}' 类型的 Client 未注册")
-        return self.client_instance_cache[api_provider.name]
+        return cached_client
+
+    def is_current_provider(self, api_provider: APIProvider) -> bool | None:
+        """Check whether a provider belongs to the latest synchronized config.
+
+        ``None`` means this registry has not received a config snapshot yet.
+        """
+        if self._configured_providers is None:
+            return None
+        return self._configured_providers.get(api_provider.name) == api_provider
+
+    def synchronize_providers(self, providers: list[APIProvider]) -> None:
+        """Publish the active provider set and retire stale cached instances."""
+        configured = {provider.name: provider for provider in providers}
+        self._configured_providers = configured
+        for provider_name, client in tuple(self.client_instance_cache.items()):
+            latest_provider = configured.get(provider_name)
+            if latest_provider is None or client.api_provider != latest_provider:
+                self.client_instance_cache.pop(provider_name, None)
+                self._retire_cached_client(client)
+
+    @staticmethod
+    def _retire_cached_client(client: BaseClient) -> None:
+        from .client_lifecycle import retire_cached_client
+
+        retire_cached_client(client)
 
 
 client_registry = ClientRegistry()

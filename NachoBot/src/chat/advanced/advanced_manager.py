@@ -34,13 +34,13 @@ class AdvancedManager:
             return False
         uid = str(user_id)
         wl = set(global_config.advanced.whitelist or [])
-        admins = set(getattr(global_config.advanced, "admins", []) or [])
+        admins = set(getattr(global_config.bot, "admins", []) or [])
         return uid in wl or uid in admins
 
     def is_admin(self, user_id: Optional[str]) -> bool:
         if not user_id:
             return False
-        return str(user_id) in set(getattr(global_config.advanced, "admins", []) or [])
+        return str(user_id) in set(getattr(global_config.bot, "admins", []) or [])
 
     def is_on(self, chat_stream: Optional["ChatStream"]) -> bool:
         """私聊需白名单用户；群聊仅在强制启用时生效。"""
@@ -100,7 +100,7 @@ class AdvancedManager:
         规则：显式开关优先，否则取 default_enabled。
         """
         wl = set(global_config.advanced.whitelist or [])
-        admins = set(getattr(global_config.advanced, "admins", []) or [])
+        admins = set(getattr(global_config.bot, "admins", []) or [])
         candidates = wl | admins
         enabled: list[str] = []
         for uid in candidates:

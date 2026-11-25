@@ -14,6 +14,61 @@ from .base_client import _consume_task_exception, _track_detached_request_task
 
 
 _CLIENT_CLEANUP_TIMEOUT_SECONDS = 0.25
+_CACHED_CLIENT_LIFETIMES: dict[int, dict[str, Any]] = {}
+
+
+def _schedule_cached_client_close(client: Any) -> None:
+    async def close_client() -> None:
+        close = getattr(client, "close", None)
+        if not callable(close):
+            return
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+
+    close_coroutine = close_client()
+    try:
+        task = asyncio.create_task(close_coroutine)
+    except RuntimeError:
+        close_coroutine.close()
+        return
+    _track_detached_request_task(task)
+
+
+def retain_cached_client(client: Any) -> None:
+    """Keep a cached client alive while a candidate request is using it."""
+    entry = _CACHED_CLIENT_LIFETIMES.setdefault(
+        id(client), {"client": client, "users": 0, "retired": False}
+    )
+    entry["users"] += 1
+
+
+def release_cached_client(client: Any) -> None:
+    """Release one request's cached-client lease and close retired clients at zero."""
+    entry = _CACHED_CLIENT_LIFETIMES.get(id(client))
+    if entry is None or entry["client"] is not client:
+        return
+    entry["users"] = max(0, entry["users"] - 1)
+    if entry["users"]:
+        return
+    if entry["retired"]:
+        _CACHED_CLIENT_LIFETIMES.pop(id(client), None)
+        _schedule_cached_client_close(client)
+    else:
+        _CACHED_CLIENT_LIFETIMES.pop(id(client), None)
+
+
+def retire_cached_client(client: Any) -> None:
+    """Close a removed/replaced cache entry once all captured requests finish."""
+    entry = _CACHED_CLIENT_LIFETIMES.setdefault(
+        id(client), {"client": client, "users": 0, "retired": False}
+    )
+    if entry["client"] is not client:
+        return
+    entry["retired"] = True
+    if not entry["users"]:
+        _CACHED_CLIENT_LIFETIMES.pop(id(client), None)
+        _schedule_cached_client_close(client)
 
 
 class _ClientSelectionScope:
@@ -28,6 +83,7 @@ class _ClientSelectionScope:
         self.retired = False
         self.dependencies: set[asyncio.Future[Any]] = set()
         self.close_task: asyncio.Task[None] | None = None
+        self.shared_client_retained = False
 
     def capture(self, selector: object, client: Any, owned: bool) -> None:
         if self.retired or self.captured or selector is not self.selector:
@@ -35,9 +91,12 @@ class _ClientSelectionScope:
         self.captured = True
         self.client = client
         self.owned = owned
+        if not owned:
+            retain_cached_client(client)
+            self.shared_client_retained = True
 
     def retain_until(self, client: Any, completion: asyncio.Future[Any]) -> None:
-        if self.retired or not self.owned or client is not self.client or completion.done():
+        if self.retired or client is not self.client or completion.done():
             return
         self.dependencies.add(completion)
 
@@ -56,10 +115,19 @@ class _ClientSelectionScope:
             self.dependencies.difference_update(
                 dependency for dependency in tuple(self.dependencies) if dependency.done()
             )
-        if not self.retired or not self.owned or self.client is None or self.dependencies or self.close_task is not None:
+        if not self.retired or self.client is None or self.dependencies:
             return
 
         client = self.client
+        if not self.owned:
+            if self.shared_client_retained:
+                release_cached_client(client)
+                self.shared_client_retained = False
+            self.client = None
+            return
+        if self.close_task is not None:
+            return
+
         async def close_client() -> None:
             # Keep client hooks inside detached cleanup so a faulty descriptor
             # cannot replace the request's primary result or failure.

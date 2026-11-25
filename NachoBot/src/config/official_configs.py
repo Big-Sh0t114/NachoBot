@@ -30,6 +30,9 @@ class BotConfig(ConfigBase):
     owner_name: str = ""
     """主人名，可用于 {owner_name} 动态模板字段"""
 
+    admins: list[str] = field(default_factory=list)
+    """管理员用户ID列表，用于管理员命令和管理权限校验"""
+
     alias_names: list[str] = field(default_factory=lambda: [])
     """别名列表"""
 
@@ -131,7 +134,7 @@ class ChatConfig(ConfigBase):
     """副规划器大小，越小，动作执行能力越精细，但是消耗更多token，调大可以缓解429类错误"""
 
     mentioned_bot_reply: bool = True
-    """是否启用提及必回复"""
+    """普通群聊循环中，开启时提及必回复。关闭时提及仍触发思考，由 Planner 决定是否回复。"""
 
     title_enabled_groups: list[str] = field(default_factory=lambda: [])
     """启用头衔设置功能的群号列表，仅列表中的群可使用 set_group_title 动作"""
@@ -1022,9 +1025,6 @@ class AdvancedConfig(ConfigBase):
 
     whitelist: list[str] = field(default_factory=list)
     """允许开启高级模式的用户ID（QQ号）"""
-
-    admins: list[str] = field(default_factory=list)
-    """高级模式管理员ID（QQ号），可查看/管理高级用户"""
 
     default_enabled: bool = False
     """默认是否开启高级模式（仅白名单用户生效）"""

@@ -3,6 +3,8 @@ import asyncio
 import importlib
 import inspect
 import time
+import copy
+import contextvars
 
 from collections.abc import Mapping
 from enum import Enum
@@ -35,9 +37,28 @@ install(extra_lines=3)
 
 logger = get_logger("model_utils")
 
+_request_runtime_snapshot: contextvars.ContextVar[tuple[object, TaskConfig, Any] | None] = (
+    contextvars.ContextVar("llm_request_runtime_snapshot", default=None)
+)
+
 
 class ModelCandidateUnavailable(Exception):
     """A selected model cannot serve this request; skip without penalizing it."""
+
+
+def _begin_request_runtime_snapshot(request):
+    """Pin task parameters and provider/model lookups for one request."""
+    if not getattr(request, "_uses_default_model_config", False):
+        return None
+
+    config_snapshot = copy.copy(model_config)
+
+    task_snapshot = copy.copy(request.model_for_task)
+    if hasattr(task_snapshot, "model_list"):
+        task_snapshot.model_list = list(task_snapshot.model_list)
+        request._ensure_model_usage(task_snapshot.model_list)
+
+    return _request_runtime_snapshot.set((request, task_snapshot, config_snapshot))
 
 
 CandidateExecutor = Callable[
@@ -289,10 +310,31 @@ class LLMRequest:
         self.request_type = request_type
         self.session_id = session_id if isinstance(session_id, str) and session_id else None
         self._model_config = config if config is not None else model_config
+        self._uses_default_model_config = config is None
         self.model_usage: Dict[str, Tuple[int, int, int, float]] = {
             model: (0, 0, 0, 0.0) for model in self.model_for_task.model_list
         }
         """模型使用量记录，用于进行负载均衡，对应为(total_tokens, penalty, usage_penalty, last_penalty_time)"""
+
+    def _runtime_snapshot(self) -> tuple[TaskConfig, Any] | None:
+        snapshot = _request_runtime_snapshot.get()
+        if snapshot is not None and snapshot[0] is self:
+            return snapshot[1], snapshot[2]
+        return None
+
+    def _effective_task_config(self) -> TaskConfig:
+        if snapshot := self._runtime_snapshot():
+            return snapshot[0]
+        return self.model_for_task
+
+    def _effective_model_config(self):
+        if snapshot := self._runtime_snapshot():
+            return snapshot[1]
+        return self._model_config
+
+    def _ensure_model_usage(self, model_names) -> None:
+        for model_name in model_names:
+            self.model_usage.setdefault(model_name, (0, 0, 0, 0.0))
 
     @staticmethod
     def _resolve_model_group_name(model_set: TaskConfig) -> str:
@@ -316,7 +358,8 @@ class LLMRequest:
     def log_context(self) -> str:
         """返回用于共享 LLMRequest 日志的任务与模型组上下文。"""
         request_type = self.request_type or "unknown"
-        return f"[{request_type}/{self._resolve_model_group_name(self.model_for_task)}]"
+        group_name = self._resolve_model_group_name(self.model_for_task)
+        return f"[{request_type}/{group_name}]"
 
     async def generate_response_for_image(
         self,
@@ -678,9 +721,20 @@ class LLMRequest:
         """
         根据总tokens和惩罚值选择的模型
         """
+        task_config = (
+            self._effective_task_config()
+            if callable(getattr(self, "_effective_task_config", None))
+            else self.model_for_task
+        )
+        configured_models = getattr(task_config, "model_list", None)
+        ensure_usage = getattr(self, "_ensure_model_usage", None)
+        if configured_models is not None and callable(ensure_usage):
+            ensure_usage(configured_models)
+        model_names = self.model_usage.keys() if configured_models is None else configured_models
         available_models = {
-            model: scores
-            for model, scores in self.model_usage.items()
+            model: self.model_usage[model]
+            for model in model_names
+            if model in self.model_usage
             if not exclude_models or model not in exclude_models
             if eligible_models is None or model in eligible_models
         }
@@ -703,14 +757,25 @@ class LLMRequest:
         )
         import copy
 
-        model_info = self._model_config.get_model_info(least_used_model_name)
-        api_provider = self._model_config.get_provider(model_info.api_provider)
+        model_config_for_request = (
+            self._effective_model_config()
+            if callable(getattr(self, "_effective_model_config", None))
+            else self._model_config
+        )
+        model_info = model_config_for_request.get_model_info(least_used_model_name)
+        api_provider = model_config_for_request.get_provider(model_info.api_provider)
 
         force_new_client = self.request_type == "embedding"
-        task_timeout = getattr(self.model_for_task, "timeout", None)
+        task_timeout = getattr(task_config, "timeout", None)
         if task_timeout is not None:
             api_provider = copy.deepcopy(api_provider)
             api_provider.timeout = task_timeout
+            force_new_client = True
+
+        provider_is_current = getattr(client_registry, "is_current_provider", None)
+        if not force_new_client and callable(provider_is_current) and provider_is_current(api_provider) is False:
+            # A request pinned before reload must not replace the newer cached
+            # provider instance when it falls back after an await.
             force_new_client = True
 
         client = (
@@ -791,6 +856,11 @@ class LLMRequest:
         retry_remain = api_provider.max_retry
         compressed_messages: Optional[List[Message]] = None
         merged_extra_params = dict(model_info.extra_params)
+        task_config = (
+            self._effective_task_config()
+            if callable(getattr(self, "_effective_task_config", None))
+            else self.model_for_task
+        )
         if extra_params:
             merged_extra_params.update(extra_params)
 
@@ -848,8 +918,16 @@ class LLMRequest:
                         model_info=effective_model_info,
                         message_list=effective_messages,
                         tool_options=tool_options,
-                        max_tokens=self.model_for_task.max_tokens if max_tokens is None else max_tokens,
-                        temperature=self.model_for_task.temperature if temperature is None else temperature,
+                        max_tokens=(
+                            task_config.max_tokens
+                            if max_tokens is None
+                            else max_tokens
+                        ),
+                        temperature=(
+                            task_config.temperature
+                            if temperature is None
+                            else temperature
+                        ),
                         response_format=response_format,
                         stream_response_handler=effective_stream_handler,
                         async_response_parser=async_response_parser,
@@ -953,260 +1031,276 @@ class LLMRequest:
         """
         调度器函数，负责模型选择、故障切换。
         """
-        raise_if_request_interrupted(interrupt_flag)
-        if response_validator is not None:
-            _validate_response_validator(response_validator, request_type)
-        failed_models_this_request: Set[str] = set()
-        max_attempts = len(self.model_for_task.model_list)
-        last_exception: Optional[Exception] = None
-
-        for _ in range(max_attempts):
+        runtime_snapshot_token = None
+        begin_snapshot = globals().get("_begin_request_runtime_snapshot")
+        if callable(begin_snapshot):
+            runtime_snapshot_token = begin_snapshot(self)
+        try:
             raise_if_request_interrupted(interrupt_flag)
-            async with model_client_selection(
-                self,
-                lambda: self._select_model(exclude_models=failed_models_this_request),
-                interrupt_flag,
-            ) as (model_info, api_provider, client):
+            if response_validator is not None:
+                _validate_response_validator(response_validator, request_type)
+            failed_models_this_request: Set[str] = set()
+            task_config = (
+                self._effective_task_config()
+                if callable(getattr(self, "_effective_task_config", None))
+                else self.model_for_task
+            )
+            if callable(getattr(self, "_ensure_model_usage", None)):
+                self._ensure_model_usage(task_config.model_list)
+            max_attempts = len(task_config.model_list)
+            last_exception: Optional[Exception] = None
 
-                response = None
-                validator_control_error = None
-                validation_state = {
-                    "response": None,
-                    "candidate_started_at": time.time() if response_validator is not None else 0.0,
-                    "usage_recorded": False,
-                }
+            for _ in range(max_attempts):
+                raise_if_request_interrupted(interrupt_flag)
+                async with model_client_selection(
+                    self,
+                    lambda: self._select_model(exclude_models=failed_models_this_request),
+                    interrupt_flag,
+                ) as (model_info, api_provider, client):
 
-                def record_rejected_usage(
-                    _state=validation_state,
-                    _validator=response_validator,
-                    _model_info=model_info,
-                    _request_type=self.request_type,
-                ) -> None:
-                    if _validator is None or _state["response"] is None or _state["usage_recorded"]:
-                        return
-                    _state["usage_recorded"] = True
-                    try:
-                        usage = getattr(_state["response"], "usage", None)
-                        if usage:
-                            llm_usage_recorder.record_usage_to_database(
-                                model_info=_model_info,
-                                model_usage=usage,
-                                user_id="system",
-                                request_type=_request_type,
-                                endpoint="/chat/completions",
-                                time_cost=time.time() - _state["candidate_started_at"],
-                            )
-                    except Exception as exc:
-                        # A billing recorder is observational at this boundary.
+                    response = None
+                    validator_control_error = None
+                    validation_state = {
+                        "response": None,
+                        "candidate_started_at": time.time() if response_validator is not None else 0.0,
+                        "usage_recorded": False,
+                    }
+
+                    def record_rejected_usage(
+                        _state=validation_state,
+                        _validator=response_validator,
+                        _model_info=model_info,
+                        _request_type=self.request_type,
+                    ) -> None:
+                        if _validator is None or _state["response"] is None or _state["usage_recorded"]:
+                            return
+                        _state["usage_recorded"] = True
                         try:
-                            logger.debug(
-                                "Rejected response usage recording failed: %s",
-                                type(exc).__name__,
-                            )
-                        except Exception:
-                            pass
+                            usage = getattr(_state["response"], "usage", None)
+                            if usage:
+                                llm_usage_recorder.record_usage_to_database(
+                                    model_info=_model_info,
+                                    model_usage=usage,
+                                    user_id="system",
+                                    request_type=_request_type,
+                                    endpoint="/chat/completions",
+                                    time_cost=time.time() - _state["candidate_started_at"],
+                                )
+                        except Exception as exc:
+                            # A billing recorder is observational at this boundary.
+                            try:
+                                logger.debug(
+                                    "Rejected response usage recording failed: %s",
+                                    type(exc).__name__,
+                                )
+                            except Exception:
+                                pass
 
-                async def reject_response(exc: ModelOutputValidationError) -> None:
-                    record_rejected_usage()
-                    # Deliver a cancellation requested by the synchronous
-                    # validator before converting rejection into a penalty.
-                    await asyncio.sleep(0)
-                    raise_if_request_interrupted(interrupt_flag)
-                    raise ModelAttemptFailed(
-                        f"模型 '{model_info.name}' 返回内容未通过调用方校验",
-                        original_exception=exc,
-                    ) from exc
-
-                try:
-                    # Keep this inside the lease-owning try/finally: selection may
-                    # itself set the event after it increments in-flight usage.
-                    raise_if_request_interrupted(interrupt_flag)
-
-                    async def default_attempt(
-                        selected_model: ModelInfo = model_info,
-                        selected_provider: APIProvider = api_provider,
-                        selected_client: BaseClient = client,
-                    ) -> APIResponse:
+                    async def reject_response(exc: ModelOutputValidationError) -> None:
+                        record_rejected_usage()
+                        # Deliver a cancellation requested by the synchronous
+                        # validator before converting rejection into a penalty.
+                        await asyncio.sleep(0)
                         raise_if_request_interrupted(interrupt_flag)
-                        message_list = message_factory(selected_client) if message_factory else []
-                        message_list = self._attach_request_cache_scope(message_list, request_type)
-                        return await self._attempt_request_on_model(
-                            selected_model,
-                            selected_provider,
-                            selected_client,
-                            request_type,
-                            message_list=message_list,
-                            tool_options=tool_options,
-                            response_format=response_format,
-                            stream_response_handler=stream_response_handler,
-                            async_response_parser=async_response_parser,
-                            temperature=temperature,
-                            max_tokens=max_tokens,
-                            embedding_input=embedding_input,
-                            audio_base64=audio_base64,
-                            extra_params=extra_params,
-                            interrupt_flag=interrupt_flag,
-                            stream_delta_callback=stream_delta_callback,
-                            force_stream=force_stream,
-                        )
+                        raise ModelAttemptFailed(
+                            f"模型 '{model_info.name}' 返回内容未通过调用方校验",
+                            original_exception=exc,
+                        ) from exc
 
-                    response = (
-                        await candidate_executor(model_info, api_provider, default_attempt)
-                        if candidate_executor is not None
-                        else await default_attempt()
-                    )
-                    validation_state["response"] = response
-                    # Candidate executors may return late even when they do not
-                    # use the default attempt closure. Never publish such a result.
-                    raise_if_request_interrupted(interrupt_flag)
-                    if request_type == RequestType.RESPONSE:
-                        messages = getattr(response, "_cache_diagnostic_messages", None)
-                        if messages is not None:
-                            try:
-                                from . import cache_diagnostics
+                    try:
+                        # Keep this inside the lease-owning try/finally: selection may
+                        # itself set the event after it increments in-flight usage.
+                        raise_if_request_interrupted(interrupt_flag)
 
-                                cache_diagnostics.record_request(
-                                    messages=messages,
-                                    model_info=model_info,
-                                    request_type=self.request_type,
-                                    session_id=self.session_id,
-                                    usage=response.usage,
-                                    tools=tool_options,
-                                    response_format=response_format,
-                                    enabled=self._cache_diagnostics_enabled(),
-                                )
-                            except Exception as exc:
-                                # Diagnostics are observational and cannot invalidate successful inference.
-                                logger.debug("Prompt cache diagnostics skipped: %s", type(exc).__name__)
-                    if response_validator is not None:
-                        try:
-                            # The candidate and diagnostics may complete after an
-                            # interrupt was requested. In the opt-in path, yield
-                            # once so a pending Task.cancel() is observed too.
-                            await asyncio.sleep(0)
+                        async def default_attempt(
+                            selected_model: ModelInfo = model_info,
+                            selected_provider: APIProvider = api_provider,
+                            selected_client: BaseClient = client,
+                        ) -> APIResponse:
                             raise_if_request_interrupted(interrupt_flag)
+                            message_list = message_factory(selected_client) if message_factory else []
+                            message_list = self._attach_request_cache_scope(message_list, request_type)
+                            return await self._attempt_request_on_model(
+                                selected_model,
+                                selected_provider,
+                                selected_client,
+                                request_type,
+                                message_list=message_list,
+                                tool_options=tool_options,
+                                response_format=response_format,
+                                stream_response_handler=stream_response_handler,
+                                async_response_parser=async_response_parser,
+                                temperature=temperature,
+                                max_tokens=max_tokens,
+                                embedding_input=embedding_input,
+                                audio_base64=audio_base64,
+                                extra_params=extra_params,
+                                interrupt_flag=interrupt_flag,
+                                stream_delta_callback=stream_delta_callback,
+                                force_stream=force_stream,
+                            )
 
-                            raw_content = getattr(response, "content", None)
-                            if raw_content is None:
-                                validation_content = ""
-                            elif not isinstance(raw_content, str):
-                                raise ModelOutputValidationError()
-                            else:
-                                validation_content = raw_content or ""
+                        response = (
+                            await candidate_executor(model_info, api_provider, default_attempt)
+                            if candidate_executor is not None
+                            else await default_attempt()
+                        )
+                        validation_state["response"] = response
+                        # Candidate executors may return late even when they do not
+                        # use the default attempt closure. Never publish such a result.
+                        raise_if_request_interrupted(interrupt_flag)
+                        if request_type == RequestType.RESPONSE:
+                            messages = getattr(response, "_cache_diagnostic_messages", None)
+                            if messages is not None:
+                                try:
+                                    from . import cache_diagnostics
 
-                            reasoning_content = getattr(response, "reasoning_content", None) or ""
-                            if not reasoning_content and validation_content:
-                                validation_content, _extracted_reasoning = self._extract_reasoning(
-                                    validation_content
-                                )
-
+                                    cache_diagnostics.record_request(
+                                        messages=messages,
+                                        model_info=model_info,
+                                        request_type=self.request_type,
+                                        session_id=self.session_id,
+                                        usage=response.usage,
+                                        tools=tool_options,
+                                        response_format=response_format,
+                                        enabled=self._cache_diagnostics_enabled(),
+                                    )
+                                except Exception as exc:
+                                    # Diagnostics are observational and cannot invalidate successful inference.
+                                    logger.debug("Prompt cache diagnostics skipped: %s", type(exc).__name__)
+                        if response_validator is not None:
                             try:
-                                validator_result = response_validator(validation_content)
+                                # The candidate and diagnostics may complete after an
+                                # interrupt was requested. In the opt-in path, yield
+                                # once so a pending Task.cancel() is observed too.
+                                await asyncio.sleep(0)
+                                raise_if_request_interrupted(interrupt_flag)
+
+                                raw_content = getattr(response, "content", None)
+                                if raw_content is None:
+                                    validation_content = ""
+                                elif not isinstance(raw_content, str):
+                                    raise ModelOutputValidationError()
+                                else:
+                                    validation_content = raw_content or ""
+
+                                reasoning_content = getattr(response, "reasoning_content", None) or ""
+                                if not reasoning_content and validation_content:
+                                    validation_content, _extracted_reasoning = self._extract_reasoning(
+                                        validation_content
+                                    )
+
+                                try:
+                                    validator_result = response_validator(validation_content)
+                                except ModelOutputValidationError as exc:
+                                    await reject_response(exc)
+                                except asyncio.CancelledError:
+                                    record_rejected_usage()
+                                    raise
+                                except ReqAbortException:
+                                    record_rejected_usage()
+                                    await asyncio.sleep(0)
+                                    raise_if_request_interrupted(interrupt_flag)
+                                    raise
+                                except (ModelAttemptFailed, ModelCandidateUnavailable) as exc:
+                                    # These are scheduler protocol exceptions outside
+                                    # the validator. Preserve callback-origin errors
+                                    # instead of treating them as candidate outcomes.
+                                    record_rejected_usage()
+                                    await asyncio.sleep(0)
+                                    raise_if_request_interrupted(interrupt_flag)
+                                    validator_control_error = exc
+                                    raise
+                                except Exception:
+                                    record_rejected_usage()
+                                    await asyncio.sleep(0)
+                                    raise_if_request_interrupted(interrupt_flag)
+                                    raise
+
+                                if inspect.isawaitable(validator_result):
+                                    if inspect.iscoroutine(validator_result):
+                                        try:
+                                            validator_result.close()
+                                        except Exception:
+                                            pass
+                                    record_rejected_usage()
+                                    await asyncio.sleep(0)
+                                    raise_if_request_interrupted(interrupt_flag)
+                                    raise TypeError("response_validator must return None synchronously")
+                                if validator_result is not None:
+                                    record_rejected_usage()
+                                    await asyncio.sleep(0)
+                                    raise_if_request_interrupted(interrupt_flag)
+                                    raise TypeError("response_validator must return None")
+
+                                # A synchronous callback can cancel its own task or
+                                # set the interrupt event while returning success.
+                                await asyncio.sleep(0)
+                                raise_if_request_interrupted(interrupt_flag)
                             except ModelOutputValidationError as exc:
                                 await reject_response(exc)
-                            except asyncio.CancelledError:
+                            except (ReqAbortException, asyncio.CancelledError):
                                 record_rejected_usage()
-                                raise
-                            except ReqAbortException:
-                                record_rejected_usage()
-                                await asyncio.sleep(0)
-                                raise_if_request_interrupted(interrupt_flag)
-                                raise
-                            except (ModelAttemptFailed, ModelCandidateUnavailable) as exc:
-                                # These are scheduler protocol exceptions outside
-                                # the validator. Preserve callback-origin errors
-                                # instead of treating them as candidate outcomes.
-                                record_rejected_usage()
-                                await asyncio.sleep(0)
-                                raise_if_request_interrupted(interrupt_flag)
-                                validator_control_error = exc
                                 raise
                             except Exception:
                                 record_rejected_usage()
-                                await asyncio.sleep(0)
-                                raise_if_request_interrupted(interrupt_flag)
                                 raise
+                        return response, model_info
 
-                            if inspect.isawaitable(validator_result):
-                                if inspect.iscoroutine(validator_result):
-                                    try:
-                                        validator_result.close()
-                                    except Exception:
-                                        pass
-                                record_rejected_usage()
-                                await asyncio.sleep(0)
-                                raise_if_request_interrupted(interrupt_flag)
-                                raise TypeError("response_validator must return None synchronously")
-                            if validator_result is not None:
-                                record_rejected_usage()
-                                await asyncio.sleep(0)
-                                raise_if_request_interrupted(interrupt_flag)
-                                raise TypeError("response_validator must return None")
-
-                            # A synchronous callback can cancel its own task or
-                            # set the interrupt event while returning success.
-                            await asyncio.sleep(0)
-                            raise_if_request_interrupted(interrupt_flag)
-                        except ModelOutputValidationError as exc:
-                            await reject_response(exc)
-                        except (ReqAbortException, asyncio.CancelledError):
-                            record_rejected_usage()
-                            raise
-                        except Exception:
-                            record_rejected_usage()
-                            raise
-                    return response, model_info
-
-                except asyncio.CancelledError:
-                    record_rejected_usage()
-                    raise
-                except ReqAbortException:
-                    record_rejected_usage()
-                    raise
-                except ModelCandidateUnavailable as e:
-                    raise_if_request_interrupted(interrupt_flag)
-                    if e is validator_control_error:
+                    except asyncio.CancelledError:
+                        record_rejected_usage()
                         raise
-                    logger.info(f"{self.log_context} 模型 '{model_info.name}' 当前不可用，跳过: {e}")
-                    failed_models_this_request.add(model_info.name)
-                except ModelAttemptFailed as e:
-                    raise_if_request_interrupted(interrupt_flag)
-                    if e is validator_control_error:
+                    except ReqAbortException:
+                        record_rejected_usage()
                         raise
-                    last_exception = e.original_exception or e
-                    logger.warning(f"{self.log_context} 模型 '{model_info.name}' 尝试失败，切换到下一个模型。原因: {e}")
+                    except ModelCandidateUnavailable as e:
+                        raise_if_request_interrupted(interrupt_flag)
+                        if e is validator_control_error:
+                            raise
+                        logger.info(f"{self.log_context} 模型 '{model_info.name}' 当前不可用，跳过: {e}")
+                        failed_models_this_request.add(model_info.name)
+                    except ModelAttemptFailed as e:
+                        raise_if_request_interrupted(interrupt_flag)
+                        if e is validator_control_error:
+                            raise
+                        last_exception = e.original_exception or e
+                        logger.warning(f"{self.log_context} 模型 '{model_info.name}' 尝试失败，切换到下一个模型。原因: {e}")
 
-                    total_tokens, penalty, usage_penalty, _ = self.model_usage[model_info.name]
-                    self.model_usage[model_info.name] = (total_tokens, penalty + 1, usage_penalty, time.time())
+                        total_tokens, penalty, usage_penalty, _ = self.model_usage[model_info.name]
+                        self.model_usage[model_info.name] = (total_tokens, penalty + 1, usage_penalty, time.time())
 
-                    failed_models_this_request.add(model_info.name)
+                        failed_models_this_request.add(model_info.name)
 
-                    if (
-                        isinstance(last_exception, RespNotOkException)
-                        and last_exception.status_code == 400
-                        and not _is_candidate_specific_compatibility_error(last_exception)
-                    ):
-                        logger.error(
-                            "%s Request-wide HTTP 400; stopping model fallback: %s",
-                            self.log_context,
-                            str(last_exception),
-                        )
-                        raise last_exception from e
-                except Exception:
-                    # A custom candidate executor can fail independently of the
-                    # SDK; an already-known request interrupt takes precedence.
-                    raise_if_request_interrupted(interrupt_flag)
-                    raise
+                        if (
+                            isinstance(last_exception, RespNotOkException)
+                            and last_exception.status_code == 400
+                            and not _is_candidate_specific_compatibility_error(last_exception)
+                        ):
+                            logger.error(
+                                "%s Request-wide HTTP 400; stopping model fallback: %s",
+                                self.log_context,
+                                str(last_exception),
+                            )
+                            raise last_exception from e
+                    except Exception:
+                        # A custom candidate executor can fail independently of the
+                        # SDK; an already-known request interrupt takes precedence.
+                        raise_if_request_interrupted(interrupt_flag)
+                        raise
 
-                finally:
-                    total_tokens, penalty, usage_penalty, last_penalty_time = self.model_usage[model_info.name]
-                    if usage_penalty > 0:
-                        self.model_usage[model_info.name] = (total_tokens, penalty, usage_penalty - 1, last_penalty_time)
+                    finally:
+                        total_tokens, penalty, usage_penalty, last_penalty_time = self.model_usage[model_info.name]
+                        if usage_penalty > 0:
+                            self.model_usage[model_info.name] = (total_tokens, penalty, usage_penalty - 1, last_penalty_time)
 
-        logger.error(f"{self.log_context} 所有 {max_attempts} 个模型均尝试失败。")
-        if last_exception:
-            raise last_exception
-        raise RuntimeError("请求失败，所有可用模型均已尝试失败。")
+            logger.error(f"{self.log_context} 所有 {max_attempts} 个模型均尝试失败。")
+            if last_exception:
+                raise last_exception
+            raise RuntimeError("请求失败，所有可用模型均已尝试失败。")
+
+        finally:
+            if runtime_snapshot_token is not None:
+                globals()["_request_runtime_snapshot"].reset(runtime_snapshot_token)
 
     @staticmethod
     def _cache_diagnostics_enabled() -> bool:

@@ -26,6 +26,7 @@ from src.chat.utils.chat_message_builder import (
     get_stepped_limit,
 )
 from src.chat.utils.planner_context import merge_planner_context_messages
+from src.chat.utils.short_term_context import filter_short_term_context_rows
 from src.chat.utils.prompt_injection_guard import guard_user_content
 from src.chat.utils.display_name import resolve_sender_name
 from src.chat.utils.context_builder import build_relation_info, build_lpmm_knowledge_info
@@ -447,17 +448,18 @@ class BrainPlanner:
         trigger_messages = offline_recovery_manager.filter_pending_recovery_messages(
             self.chat_id, trigger_messages or []
         )
-        latest_context_message = (
-            trigger_messages[-1]
-            if trigger_messages
-            else (message_list_before_now[-1] if message_list_before_now else None)
-        )
+        trigger_messages = filter_short_term_context_rows(self.chat_id, trigger_messages)
         message_list_before_now = merge_planner_context_messages(
             message_list_before_now,
             trigger_messages,
             chat_id=self.chat_id,
             limit=limit,
             history_before=history_before,
+        )
+        latest_context_message = (
+            trigger_messages[-1]
+            if trigger_messages
+            else (message_list_before_now[-1] if message_list_before_now else None)
         )
         if allow_no_reply and message_list_before_now:
             target_messages = [
@@ -605,6 +607,7 @@ class BrainPlanner:
                 timestamp_end=time.time(),
                 limit=6,
             )
+            actions_before_now = filter_short_term_context_rows(self.chat_id, actions_before_now)
             actions_before_now_block = build_readable_actions(actions=actions_before_now)
             if actions_before_now_block:
                 actions_before_now_block = f"你刚刚选择并执行过的action是：\n{actions_before_now_block}"
@@ -695,6 +698,7 @@ class BrainPlanner:
                 timestamp_end=time.time(),
                 limit=6,
             )
+            actions_before_now = filter_short_term_context_rows(self.chat_id, actions_before_now)
             actions_before_now_block = build_readable_actions(actions=actions_before_now)
             if actions_before_now_block:
                 actions_before_now_block = f"你刚刚选择并执行过的action是：\n{actions_before_now_block}"

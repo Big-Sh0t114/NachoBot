@@ -41,6 +41,10 @@ from src.chat.utils.chat_message_builder import (
     get_stepped_limit,
 )
 from src.chat.utils.planner_context import merge_planner_context_messages
+from src.chat.utils.short_term_context import (
+    filter_short_term_context_rows,
+    get_short_term_context_cutoff,
+)
 from src.memory_system.chat_history_summarizer import ChatHistorySummarizer
 from src.chat.heart_flow.relation_scanner import RelationScanner
 from src.llm_models.exceptions import ReqAbortException
@@ -171,7 +175,6 @@ class HeartFChatting:
 
         self.last_read_time = time.time() - 2
 
-        self.talk_threshold = global_config.chat.get_talk_value_for_chat(self.stream_id)
         # 跟踪连续 no_reply 次数，用于动态调整阈值
         self.consecutive_no_reply_count = 0
 
@@ -218,6 +221,20 @@ class HeartFChatting:
             self._offline_recovery_delivered = False
         if not hasattr(self, "_offline_recovery_dropped"):
             self._offline_recovery_dropped = False
+
+    def _short_term_recovery_messages(self) -> list[Any]:
+        """Read the frozen recovery rows through the current short-term cutoff."""
+
+        return filter_short_term_context_rows(
+            self.stream_id,
+            getattr(self, "_offline_recovery_messages", ()),
+        )
+
+    def _short_term_recovery_prompt(self) -> str:
+        """Render recovery context at use time so a later reset takes effect."""
+
+        messages = self._short_term_recovery_messages()
+        return format_recovery_reply_context(messages) if messages else ""
 
     def _ensure_hfc_idempotency_state(self) -> None:
         """Initialize bounded, per-runtime row state for HFC deduplication."""
@@ -857,7 +874,7 @@ class HeartFChatting:
                 self._offline_recovery_dropped = True
                 return True
             self._offline_recovery_messages = recent_messages_list
-            self._offline_recovery_prompt = format_recovery_reply_context(recent_messages_list)
+            self._offline_recovery_prompt = self._short_term_recovery_prompt()
             self._last_message_received_at = time.time()
             # Recovery owns this turn: bypass normal priority/Gate routing,
             # random talk throttles, and no_reply_until_call.
@@ -984,11 +1001,17 @@ class HeartFChatting:
                 is_system_event=self._get_system_event,
             )
             has_direct_reply_input = bool(runtime_batch.direct_messages)
-            has_response_keyword = any(
+            has_thinking_trigger = any(
                 planner_target_eligible(message)
                 and self._get_system_event(message) is None
-                and global_config.chat.matches_response_keyword(
-                    getattr(message, "processed_plain_text", None)
+                and (
+                    global_config.chat.matches_response_keyword(
+                        getattr(message, "processed_plain_text", None)
+                    )
+                    or (
+                        not global_config.chat.mentioned_bot_reply
+                        and (getattr(message, "is_mentioned", False) or getattr(message, "is_at", False))
+                    )
                 )
                 for message in runtime_batch.planner_messages
             )
@@ -1044,7 +1067,7 @@ class HeartFChatting:
                         self.no_reply_until_call = False
                         break
                 # 没有提到，继续保持沉默
-                if self.no_reply_until_call and not has_response_keyword:
+                if self.no_reply_until_call and not has_thinking_trigger:
                     # logger.info(f"{self.log_prefix} 没有提到，继续保持沉默")
                     await asyncio.sleep(1)
                     return True
@@ -1068,9 +1091,9 @@ class HeartFChatting:
                     force_reply_message=mentioned_message,
                     focus_turn=focus_turn,
                 )
-            elif has_response_keyword or (
+            elif has_thinking_trigger or (
                 random.random()
-                < self.talk_threshold
+                < global_config.chat.get_talk_value_for_chat(self.stream_id)
                 * frequency_control_manager.get_or_create_frequency_control(self.stream_id).get_talk_frequency_adjust()
             ):
                 await self._observe(recent_messages_list=recent_messages_list, focus_turn=focus_turn)
@@ -1297,7 +1320,11 @@ class HeartFChatting:
             action_data = {"event_id": event.event_id}
             if not metadata_only:
                 if not recent_results:
-                    recent_results = HeartFChatting._focus_handoff_recent_results(recent_messages)
+                    source_context_messages = filter_short_term_context_rows(
+                        source_chat_id,
+                        recent_messages or (),
+                    )
+                    recent_results = HeartFChatting._focus_handoff_recent_results(source_context_messages)
                 handoff = {
                     "task_summary": (
                         f"按 Focus 会话优先级从「{source.display_name or source.chat_id}」切换到"
@@ -1547,6 +1574,11 @@ class HeartFChatting:
         ]
         self._ensure_offline_recovery_state()
         self._ensure_hfc_idempotency_state()
+        if force_reply_message is not None and not filter_short_term_context_rows(
+            self.stream_id,
+            [force_reply_message],
+        ):
+            force_reply_message = None
         direct_reply_actions: list[ActionPlannerInfo] = []
 
         # 刷新上下文以确保获取最新的模板信息
@@ -1686,6 +1718,10 @@ class HeartFChatting:
                     timestamp=history_before,
                     limit=_stepped_limit_hf,
                 )
+                message_list_before_now = filter_short_term_context_rows(
+                    self.stream_id,
+                    message_list_before_now,
+                )
                 message_list_before_now = offline_recovery_manager.filter_recovery_rows_from_context(
                     self.stream_id,
                     message_list_before_now,
@@ -1694,10 +1730,11 @@ class HeartFChatting:
                     self.stream_id,
                     message_list_before_now,
                 )
+                short_term_recovery_messages = self._short_term_recovery_messages()
                 if self._offline_recovery_batch is not None:
                     message_list_before_now = merge_recovery_context_rows(
                         message_list_before_now,
-                        self._offline_recovery_messages,
+                        short_term_recovery_messages,
                     )
                 else:
                     trigger_context_messages = offline_recovery_manager.filter_pending_recovery_messages(
@@ -1727,10 +1764,12 @@ class HeartFChatting:
                         row_id = recovery_row_id(message)
                         if row_id in recovery_row_ids:
                             recovery_aliases[row_id] = str(message_id)
-                    chat_content_block = (
-                        f"{chat_content_block}\n\n"
-                        f"{format_recovery_batch_context(self._offline_recovery_messages, planner_aliases=recovery_aliases)}"
+                    recovery_batch_context = format_recovery_batch_context(
+                        short_term_recovery_messages,
+                        planner_aliases=recovery_aliases,
                     )
+                    if recovery_batch_context:
+                        chat_content_block = f"{chat_content_block}\n\n{recovery_batch_context}"
                 message_id_list = [
                     (message_id, message)
                     for message_id, message in message_id_list
@@ -1864,29 +1903,46 @@ class HeartFChatting:
                 cycle_timers["Planner前准备"] = time.perf_counter() - pre_planner_started_at
 
                 direct_reply_actions = self._capability_direct_reply_actions(
-                    runtime_batch.direct_messages,
+                    tuple(
+                        filter_short_term_context_rows(
+                            self.stream_id,
+                            runtime_batch.direct_messages,
+                        )
+                    ),
                     available_actions,
                 )
                 if self._offline_recovery_batch is not None and not has_system_event:
                     eligible_recovery_messages = [
-                        message for message in recent_messages_list if planner_target_eligible(message)
+                        message
+                        for message in self._short_term_recovery_messages()
+                        if planner_target_eligible(message)
                     ]
-                    if eligible_recovery_messages:
-                        direct_reply_actions = self._capability_direct_reply_actions(
+                    direct_reply_actions = (
+                        self._capability_direct_reply_actions(
                             (eligible_recovery_messages[-1],),
                             available_actions,
-                            {"bypass_extra_info": self._offline_recovery_prompt},
+                            {"bypass_extra_info": self._short_term_recovery_prompt()},
                         )
+                        if eligible_recovery_messages
+                        else []
+                    )
                 if bypass_planner:
                     logger.info(f"{self.log_prefix} [HFC] Bypassing Planner for declared trigger messages")
                     bot_id = str(global_config.bot.qq_account)
 
                     # Preserve the existing backlog summary while keeping every
                     # direct action bound to its exact trigger message.
-                    bypass_extra_info = self._offline_recovery_prompt
+                    bypass_extra_info = self._short_term_recovery_prompt()
+                    bypass_extra_is_short_term_summary = False
+                    bypass_extra_cutoff = None
                     if self._offline_recovery_batch is None and recent_messages_list and len(recent_messages_list) > 1:
+                        bypass_extra_cutoff = get_short_term_context_cutoff(self.stream_id)
                         pending_lines = []
-                        for msg in recent_messages_list:
+                        for msg in filter_short_term_context_rows(
+                            self.stream_id,
+                            recent_messages_list,
+                            cutoff=bypass_extra_cutoff,
+                        ):
                             user_info = getattr(msg, "user_info", None)
                             text = getattr(msg, "processed_plain_text", "") or ""
                             event = self._get_system_event(msg)
@@ -1911,12 +1967,21 @@ class HeartFChatting:
                                 "引述内容是原始消息或系统事件描述：\n"
                                 f"{summary}"
                             )
+                            bypass_extra_is_short_term_summary = True
                             logger.info(
                                 f"{self.log_prefix} [HFC] Bypass: {len(pending_lines)} pending messages detected"
                             )
                     action_data = {"bypass_extra_info": bypass_extra_info} if bypass_extra_info else {}
+                    if bypass_extra_is_short_term_summary:
+                        action_data["_short_term_context_summary"] = True
+                        action_data["_short_term_context_cutoff"] = bypass_extra_cutoff
                     action_to_use_info = self._capability_direct_reply_actions(
-                        runtime_batch.direct_messages,
+                        tuple(
+                            filter_short_term_context_rows(
+                                self.stream_id,
+                                runtime_batch.direct_messages,
+                            )
+                        ),
                         available_actions,
                         action_data,
                     )
@@ -2024,7 +2089,7 @@ class HeartFChatting:
                 latest_recovery_message = next(
                     (
                         message
-                        for message in reversed(self._offline_recovery_messages)
+                        for message in reversed(self._short_term_recovery_messages())
                         if planner_target_eligible(message)
                     ),
                     None,
@@ -2914,11 +2979,12 @@ class HeartFChatting:
                         injection_text = injection_manager.build_injection_text(
                             chat_id=self.chat_stream.stream_id, message_text=message_text_for_injection
                         )
-                        if self._offline_recovery_prompt:
+                        recovery_prompt = self._short_term_recovery_prompt()
+                        if recovery_prompt:
                             injection_text = (
-                                f"{self._offline_recovery_prompt}\n{injection_text}"
+                                f"{recovery_prompt}\n{injection_text}"
                                 if injection_text
-                                else self._offline_recovery_prompt
+                                else recovery_prompt
                             )
 
                         capabilities = runtime_capabilities_from_message(
@@ -2929,8 +2995,21 @@ class HeartFChatting:
                         )
 
                         # Inject pending-message summary from direct-reply sessions.
-                        bypass_extra = (action_planner_info.action_data or {}).get("bypass_extra_info", "")
-                        if bypass_extra and bypass_extra != self._offline_recovery_prompt:
+                        action_data = action_planner_info.action_data or {}
+                        bypass_extra = action_data.get("bypass_extra_info", "")
+                        cutoff_matches_summary = (
+                            not action_data.get("_short_term_context_summary")
+                            or action_data.get("_short_term_context_cutoff")
+                            == get_short_term_context_cutoff(self.stream_id)
+                        )
+                        # Recovery prose is rendered above from the current
+                        # frozen rows. Never re-inject an action's cached copy,
+                        # which may have been captured before a reset.
+                        if (
+                            bypass_extra
+                            and self._offline_recovery_batch is None
+                            and cutoff_matches_summary
+                        ):
                             injection_text = f"{bypass_extra}\n{injection_text}" if injection_text else bypass_extra
 
                         current_enable_tool = global_config.tool.enable_tool and capabilities.tool_mode != "disabled"

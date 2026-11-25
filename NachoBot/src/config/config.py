@@ -6,7 +6,7 @@ import sys
 from datetime import datetime
 from tomlkit import TOMLDocument
 from tomlkit.items import Table, KeyType
-from dataclasses import field, dataclass
+from dataclasses import field, dataclass, fields, is_dataclass
 from rich.traceback import install
 from typing import List, Optional
 
@@ -247,7 +247,6 @@ def _legacy_mcp_fields_present() -> bool:
     bot_config_path = os.path.join(CONFIG_DIR, "bot_config.toml")
     if not os.path.exists(bot_config_path):
         return False
-
     try:
         with open(bot_config_path, "r", encoding="utf-8") as f:
             config = tomlkit.load(f)
@@ -258,6 +257,27 @@ def _legacy_mcp_fields_present() -> bool:
     except Exception as e:
         logger.warning(f"检查旧版 bot_config MCP 配置失败: {e}")
         return False
+
+
+def _copy_legacy_bot_admins(config_data: dict | TOMLDocument | Table) -> bool:
+    """Copy legacy [advanced].admins when [bot].admins is absent.
+
+    This mutates only the parsed config object. In particular, startup migration
+    keeps the user's original backup file intact and explicit empty bot admins
+    always take precedence over the legacy value.
+    """
+    bot_config = config_data.get("bot")
+    advanced_config = config_data.get("advanced")
+    if (
+        not isinstance(bot_config, (dict, Table))
+        or "admins" in bot_config
+        or not isinstance(advanced_config, (dict, Table))
+        or "admins" not in advanced_config
+    ):
+        return False
+
+    bot_config["admins"] = advanced_config["admins"]
+    return True
 
 
 def _unwrap_toml_value(value):
@@ -405,6 +425,10 @@ def _update_config_generic(config_name: str, template_name: str, *, force_update
             old_config = tomlkit.load(f)
     # new_config 已经读取
 
+    legacy_bot_admins_migrated = (
+        config_name == "bot_config" and _copy_legacy_bot_admins(old_config)
+    )
+
     renamed_model_groups_migrated = (
         config_name == "model_config"
         and _migrate_renamed_model_task_groups(new_config, old_config)
@@ -415,11 +439,13 @@ def _update_config_generic(config_name: str, template_name: str, *, force_update
         old_version = old_config["inner"].get("version")  # type: ignore
         new_version = new_config["inner"].get("version")  # type: ignore
         if old_version and new_version and old_version == new_version:
-            if not renamed_model_groups_migrated and not force_update:
+            if not renamed_model_groups_migrated and not legacy_bot_admins_migrated and not force_update:
                 logger.info(f"检测到{config_name}配置文件版本号相同 (v{old_version})，跳过更新")
                 return
             if renamed_model_groups_migrated:
                 logger.info(f"检测到{config_name}存在待迁移的旧模型组，将重新生成配置")
+            elif legacy_bot_admins_migrated:
+                logger.info("检测到旧版管理员配置，将迁移 [advanced].admins 到 [bot].admins")
             else:
                 logger.info(f"检测到{config_name}存在待迁移的旧配置项，将重新生成配置")
         else:
@@ -585,6 +611,8 @@ def load_config(config_path: str, topics_config_path: Optional[str] = None) -> C
     with open(config_path, "r", encoding="utf-8") as f:
         config_data = dict(tomlkit.load(f))
 
+    _copy_legacy_bot_admins(config_data)
+
     # 如果有分离的topics配置文件，则合并进来
     if topics_config_path and os.path.exists(topics_config_path):
         with open(topics_config_path, "r", encoding="utf-8") as f:
@@ -637,6 +665,65 @@ def mcp_load_config(config_path: str) -> MCPConfig:
     except Exception as e:
         logger.critical("MCP配置文件解析失败")
         raise e
+
+
+def _apply_config_in_place(target, source) -> None:
+    """Apply a validated dataclass tree while retaining existing object identities."""
+    if not (is_dataclass(target) and is_dataclass(source) and type(target) is type(source)):
+        raise TypeError("配置对象类型不匹配，无法热重载")
+
+    for config_field in fields(source):
+        name = config_field.name
+        incoming = getattr(source, name)
+        current = getattr(target, name)
+        if is_dataclass(current) and is_dataclass(incoming) and type(current) is type(incoming):
+            _apply_config_in_place(current, incoming)
+        elif isinstance(current, list) and isinstance(incoming, list):
+            current[:] = incoming
+        elif isinstance(current, dict) and isinstance(incoming, dict):
+            current.clear()
+            current.update(incoming)
+        else:
+            setattr(target, name, incoming)
+
+    # ModelTaskConfig.replyer is a runtime alias, not a dataclass field.
+    # Keep it pointing at the candidate's selected group after its fields land.
+    if hasattr(source, "replyer") and hasattr(target, "_active_replyer_group"):
+        selected_group = getattr(source, "_active_replyer_group", 0)
+        target.replyer = getattr(target, f"replyer{selected_group}", target.replyer0)
+
+    # These lookup tables are derived in APIAdapterConfig.__post_init__.
+    if hasattr(source, "models") and hasattr(source, "api_providers"):
+        target.models_dict = {model.name: model for model in target.models}
+        target.api_providers_dict = {provider.name: provider for provider in target.api_providers}
+
+
+def reload_bot_and_model_config() -> None:
+    """Validate then hot-reload bot and model config without rewriting files.
+
+    Call on the Core event loop. Existing top-level and nested dataclass
+    identities are retained so modules that imported config objects continue to
+    observe the new values.
+    """
+    new_global_config = load_config(
+        config_path=os.path.join(CONFIG_DIR, "bot_config.toml"),
+        topics_config_path=os.path.join(CONFIG_DIR, "topics_config.toml"),
+    )
+    new_model_config = api_ada_load_config(config_path=os.path.join(CONFIG_DIR, "model_config.toml"))
+
+    # Import provider implementations before applying either config, so an
+    # unsupported newly configured provider cannot leave a partial reload.
+    from src.llm_models.model_client import ensure_provider_client_types
+
+    ensure_provider_client_types(new_model_config.api_providers)
+
+    _apply_config_in_place(global_config, new_global_config)
+    _apply_config_in_place(model_config, new_model_config)
+
+    # Retire cached clients only after the new model config is installed.
+    from src.llm_models.model_client.base_client import client_registry
+
+    client_registry.synchronize_providers(model_config.api_providers)
 
 
 # 获取配置文件路径

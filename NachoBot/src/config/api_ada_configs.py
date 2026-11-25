@@ -234,13 +234,16 @@ class ModelTaskConfig(ConfigBase):
             from src.manager.local_store_manager import local_storage
             saved_group = local_storage["global_active_replyer_group"]
             if isinstance(saved_group, int) and saved_group in [0, 1, 2]:
-                success = self.switch_replyer_group(saved_group)
-                if not success:
-                    self.replyer = self.replyer0
-            else:
-                self.replyer = self.replyer0
+                configured_group = getattr(self, f"replyer{saved_group}")
+                if saved_group == 0 or configured_group.model_list:
+                    self._active_replyer_group = saved_group
+                    self.replyer = configured_group
+                    return
+            self._active_replyer_group = 0
+            self.replyer = self.replyer0
         except Exception as e:
             logger.warning(f"加载全局模型组状态失败: {e}")
+            self._active_replyer_group = 0
             self.replyer = self.replyer0
 
     def switch_replyer_group(self, group: int) -> bool:

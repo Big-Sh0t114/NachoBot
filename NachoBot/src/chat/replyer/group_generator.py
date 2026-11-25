@@ -47,6 +47,7 @@ from src.chat.utils.chat_message_builder import (
     get_stepped_limit,
 )
 from src.chat.utils.planner_context import merge_planner_context_messages
+from src.chat.utils.short_term_context import filter_short_term_context_rows
 from src.chat.utils.display_name import resolve_sender_name
 from src.chat.express.expression_selector import expression_selector
 
@@ -1079,6 +1080,9 @@ class DefaultReplyer:
             available_actions = {}
         chat_stream = self.chat_stream
         chat_id = chat_stream.stream_id
+        if reply_message is not None and not filter_short_term_context_rows(chat_id, [reply_message]):
+            logger.info("Skipping Replyer target from before the short-term context reset")
+            return ReplyPromptBuildResult("")
         is_group_chat = bool(chat_stream.group_info)
         latest_session = get_latest_session_name(chat_stream)
         context_size = global_config.chat.get_max_context_size(is_group_chat=is_group_chat)
@@ -1533,6 +1537,7 @@ class DefaultReplyer:
         message_list_before_now_half = offline_recovery_manager.filter_pending_recovery_messages(
             chat_id, message_list_before_now_half
         )
+        message_list_before_now_half = filter_short_term_context_rows(chat_id, message_list_before_now_half)
         chat_talking_prompt_half = build_readable_messages(
             message_list_before_now_half,
             replace_bot_name=True,

@@ -8,6 +8,7 @@ from enum import Enum
 from typing import Any
 
 from src.chat.utils.chat_message_builder import get_raw_msg_before_timestamp_with_chat
+from src.chat.utils.short_term_context import filter_short_term_context_rows
 from src.config.config import global_config
 
 from .coordinator import FocusCoordinator
@@ -200,6 +201,7 @@ def _load_recent_source_results(chat_id: str) -> tuple[str, ...]:
         )
     except Exception:
         return ()
+    messages = filter_short_term_context_rows(chat_id, messages)
     return format_recent_source_messages(messages)
 
 

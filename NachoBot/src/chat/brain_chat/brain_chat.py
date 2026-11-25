@@ -78,6 +78,7 @@ from src.chat.utils.chat_message_builder import (
     get_stepped_limit,
 )
 from src.chat.utils.planner_context import merge_planner_context_messages
+from src.chat.utils.short_term_context import filter_short_term_context_rows
 from src.chat.heart_flow.relation_scanner import RelationScanner
 from src.chat.heart_flow.heartFC_chat import _focus_turn_has_actionable_work
 from src.chat.memory_system.memory_activator import MemoryActivator
@@ -184,6 +185,20 @@ class BrainChatting:
             self._offline_recovery_delivered = False
         if not hasattr(self, "_offline_recovery_dropped"):
             self._offline_recovery_dropped = False
+
+    def _short_term_recovery_messages(self) -> list[Any]:
+        """Read the frozen recovery rows through the current short-term cutoff."""
+
+        return filter_short_term_context_rows(
+            self.stream_id,
+            getattr(self, "_offline_recovery_messages", ()),
+        )
+
+    def _short_term_recovery_prompt(self) -> str:
+        """Render recovery context at use time so a later reset takes effect."""
+
+        messages = self._short_term_recovery_messages()
+        return format_recovery_reply_context(messages) if messages else ""
 
     async def start(self):
         """检查是否需要启动主循环，如果未激活则启动。"""
@@ -334,6 +349,7 @@ class BrainChatting:
             timestamp=time.time(),
             limit=int(context_size * 0.6),
         )
+        messages = filter_short_term_context_rows(self.stream_id, messages)
         context, _ = build_readable_messages_with_id(
             messages=messages,
             timestamp_mode="normal_no_YMD",
@@ -512,7 +528,7 @@ class BrainChatting:
                 self._offline_recovery_dropped = True
                 return True
             self._offline_recovery_messages = recent_messages_list
-            self._offline_recovery_prompt = format_recovery_reply_context(recent_messages_list)
+            self._offline_recovery_prompt = self._short_term_recovery_prompt()
             self._last_message_received_at = time.time()
             actionable_messages = [
                 message for message in recent_messages_list if not is_external_self_message(message)
@@ -852,6 +868,10 @@ class BrainChatting:
                 timestamp=history_before,
                 limit=planner_history_limit,
             )
+            message_list_before_now = filter_short_term_context_rows(
+                self.stream_id,
+                message_list_before_now,
+            )
             message_list_before_now = offline_recovery_manager.filter_recovery_rows_from_context(
                 self.stream_id,
                 message_list_before_now,
@@ -861,9 +881,10 @@ class BrainChatting:
                 message_list_before_now,
             )
             if recovery_active:
+                short_term_recovery_messages = self._short_term_recovery_messages()
                 message_list_before_now = merge_recovery_context_rows(
                     message_list_before_now,
-                    self._offline_recovery_messages,
+                    short_term_recovery_messages,
                 )
             else:
                 trigger_context_messages = offline_recovery_manager.filter_pending_recovery_messages(
@@ -891,10 +912,12 @@ class BrainChatting:
                     row_id = recovery_row_id(message)
                     if row_id in recovery_row_ids:
                         recovery_aliases[row_id] = str(message_id)
-                chat_content_block = (
-                    f"{chat_content_block}\n\n"
-                    f"{format_recovery_batch_context(self._offline_recovery_messages, planner_aliases=recovery_aliases)}"
+                recovery_batch_context = format_recovery_batch_context(
+                    self._short_term_recovery_messages(),
+                    planner_aliases=recovery_aliases,
                 )
+                if recovery_batch_context:
+                    chat_content_block = f"{chat_content_block}\n\n{recovery_batch_context}"
             planner_message_id_list = [
                 (message_id, message)
                 for message_id, message in message_id_list
@@ -922,18 +945,23 @@ class BrainChatting:
                     action_message=message,
                     available_actions=available_actions,
                 )
-                for message in message_batch.direct_messages
+                for message in filter_short_term_context_rows(
+                    self.stream_id,
+                    message_batch.direct_messages,
+                )
             ]
             if recovery_active and message_batch.planner_bypass:
                 eligible_recovery_messages = [
-                    message for message in recent_messages_list if planner_target_eligible(message)
+                    message
+                    for message in self._short_term_recovery_messages()
+                    if planner_target_eligible(message)
                 ]
                 direct_reply_actions = (
                     [
                         ActionPlannerInfo(
                             action_type="reply",
                             reasoning="Adapter capability: direct recovery Replyer response",
-                            action_data={"bypass_extra_info": self._offline_recovery_prompt},
+                            action_data={"bypass_extra_info": self._short_term_recovery_prompt()},
                             action_message=eligible_recovery_messages[-1],
                             available_actions=available_actions,
                         )
@@ -1071,7 +1099,7 @@ class BrainChatting:
                 latest_recovery_message = next(
                     (
                         message
-                        for message in reversed(self._offline_recovery_messages)
+                        for message in reversed(self._short_term_recovery_messages())
                         if planner_target_eligible(message)
                     ),
                     None,
@@ -1784,11 +1812,12 @@ class BrainChatting:
                         injection_text = injection_manager.build_injection_text(
                             chat_id=self.chat_stream.stream_id, message_text=message_text_for_injection
                         )
-                        if self._offline_recovery_prompt:
+                        recovery_prompt = self._short_term_recovery_prompt()
+                        if recovery_prompt:
                             injection_text = (
-                                f"{self._offline_recovery_prompt}\n{injection_text}"
+                                f"{recovery_prompt}\n{injection_text}"
                                 if injection_text
-                                else self._offline_recovery_prompt
+                                else recovery_prompt
                             )
 
                         # 高级模式路由：禁用工具/联网并移除TTS动作

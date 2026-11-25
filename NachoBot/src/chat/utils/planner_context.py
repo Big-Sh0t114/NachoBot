@@ -6,6 +6,11 @@ import math
 from collections.abc import Iterable
 from typing import Any
 
+from src.chat.utils.short_term_context import (
+    filter_short_term_context_rows,
+    get_short_term_context_cutoff,
+)
+
 
 def merge_planner_context_messages(
     history_messages: Iterable[Any],
@@ -33,6 +38,10 @@ def merge_planner_context_messages(
             merged.append((message, is_explicit))
         elif is_explicit:
             merged[index] = (message, True)
+
+    cutoff = get_short_term_context_cutoff(chat_id)
+    history_messages = filter_short_term_context_rows(chat_id, history_messages, cutoff=cutoff)
+    trigger_messages = filter_short_term_context_rows(chat_id, trigger_messages or (), cutoff=cutoff)
 
     for message in history_messages:
         if history_before is not None:

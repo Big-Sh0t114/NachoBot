@@ -1,0 +1,30 @@
+{
+  "manifest_version": 1,
+  "name": "会话管理命令",
+  "version": "1.0.0",
+  "description": "提供仅限管理员使用的会话上下文清理和配置热重载命令。",
+  "author": {
+    "name": "NachoBot"
+  },
+  "license": "GPL-v3.0-or-later",
+  "host_application": {
+    "min_version": "0.10.1"
+  },
+  "keywords": ["admin", "context", "configuration", "built-in"],
+  "categories": ["Utility", "Administration"],
+  "plugin_info": {
+    "is_built_in": true,
+    "components": [
+      {
+        "type": "command",
+        "name": "clear_context",
+        "description": "清除当前会话的短期上下文（管理员）"
+      },
+      {
+        "type": "command",
+        "name": "config_reload",
+        "description": "热重载 bot_config 和 model_config（管理员）"
+      }
+    ]
+  }
+}
